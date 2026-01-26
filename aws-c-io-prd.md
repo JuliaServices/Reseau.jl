@@ -231,7 +231,7 @@ src/
 3. [x] **Channel + socket**: channel pipeline, socket handler, message pool.
 4. [x] **TLS handler**: TLS channel handler using MbedTLS.
 5. [x] **Host resolver**: full resolver with cache + TTL.
-6. [ ] **Async stream**: async read/write streams.
+6. [x] **Async stream**: async read/write streams.
 7. [ ] **Tests + docs**: port/author tests, add usage docs.
 
 ## 21. Open Questions (None)
