@@ -55,29 +55,29 @@ function EventLoopLocalObject(key::Ptr{Cvoid}, object::T) where {T}
 end
 
 # Event loop options
-struct EventLoopOptions{T<:Union{Nothing, Ptr{Cvoid}}}
-    clock::IoClock
+struct EventLoopOptions{Clock}
+    clock::Clock
     thread_options::Union{Nothing, ThreadOptions}
     type::EventLoopType.T
-    parent_elg::T  # Union{Nothing, EventLoopGroup}
+    parent_elg::Ptr{Cvoid}
 end
 
 function EventLoopOptions(;
-    clock::IoClock=high_res_clock,
+    clock=high_res_clock,
     thread_options::Union{Nothing, ThreadOptions}=nothing,
     type::EventLoopType.T=EventLoopType.PLATFORM_DEFAULT,
-    parent_elg=nothing,
+    parent_elg::Ptr{Cvoid}=C_NULL,
 )
     return EventLoopOptions(clock, thread_options, type, parent_elg)
 end
 
 # Event loop group options
-struct EventLoopGroupOptions{S<:Union{Nothing, shutdown_callback_options},C<:Union{Nothing, Vector{UInt16}}}
+struct EventLoopGroupOptions{S,C,Clock}
     loop_count::UInt16
     type::EventLoopType.T
     shutdown_options::S
     cpu_group::C
-    clock_override::Union{Nothing, IoClock}
+    clock_override::Clock
 end
 
 function EventLoopGroupOptions(;
@@ -103,14 +103,14 @@ const OnEventCallback = Function  # signature: (event_loop, io_handle, events::I
 # abstract type AbstractEventLoop already defined in io.jl
 
 # Event loop base structure
-mutable struct EventLoop{Impl}
-    clock::IoClock
-    local_data::Dict{Ptr{Cvoid}, EventLoopLocalObject}
+mutable struct EventLoop{Impl,LD,Clock} <: AbstractEventLoop
+    clock::Clock
+    local_data::LD
     @atomic current_load_factor::Csize_t
     latest_tick_start::UInt64
     current_tick_latency_sum::Csize_t
     @atomic next_flush_time::UInt64
-    base_elg::Union{Nothing, Any}  # Will be EventLoopGroup when set
+    base_elg::Ptr{Cvoid}
     impl_data::Impl
     @atomic running::Bool
     @atomic should_stop::Bool
@@ -118,17 +118,22 @@ mutable struct EventLoop{Impl}
 end
 
 function EventLoop(
-    clock::IoClock,
+    clock::Clock,
     impl_data::Impl,
-) where {Impl}
-    return EventLoop{Impl}(
+) where {Clock,Impl}
+    local_data = HashTable{Ptr{Cvoid}, EventLoopLocalObject{Ptr{Cvoid}, Nothing}}(
+        hash_ptr,
+        ptr_eq;
+        capacity = 20,
+    )
+    return EventLoop{Impl, typeof(local_data), Clock}(
         clock,
-        Dict{Ptr{Cvoid}, EventLoopLocalObject}(),
+        local_data,
         Csize_t(0),
         UInt64(0),
         Csize_t(0),
         UInt64(0),
-        nothing,
+        C_NULL,
         impl_data,
         false,
         false,
@@ -156,7 +161,7 @@ function event_loop_complete_destroy!(event_loop::EventLoop)
             obj.on_object_removed(obj)
         end
     end
-    empty!(event_loop.local_data)
+    hash_table_clear!(event_loop.local_data)
     return nothing
 end
 
@@ -250,7 +255,7 @@ function event_loop_fetch_local_object(
     event_loop::EventLoop,
     key::Ptr{Cvoid},
 )::Union{EventLoopLocalObject, ErrorResult}
-    obj = get(event_loop.local_data, key, nothing)
+    obj = hash_table_get(event_loop.local_data, key)
     if obj === nothing
         raise_error(ERROR_HASHTBL_ITEM_NOT_FOUND)
         return ErrorResult(ERROR_HASHTBL_ITEM_NOT_FOUND)
@@ -262,11 +267,11 @@ function event_loop_put_local_object!(
     event_loop::EventLoop,
     obj::EventLoopLocalObject,
 )::Union{Nothing, ErrorResult}
-    old = get(event_loop.local_data, obj.key, nothing)
+    old = hash_table_get(event_loop.local_data, obj.key)
     if old !== nothing && old.on_object_removed !== nothing
         old.on_object_removed(old)
     end
-    event_loop.local_data[obj.key] = obj
+    hash_table_put!(event_loop.local_data, obj.key, obj)
     return nothing
 end
 
@@ -274,10 +279,11 @@ function event_loop_remove_local_object!(
     event_loop::EventLoop,
     key::Ptr{Cvoid},
 )::Union{EventLoopLocalObject, Nothing, ErrorResult}
-    obj = pop!(event_loop.local_data, key, nothing)
+    obj = hash_table_get(event_loop.local_data, key)
     if obj === nothing
         return nothing
     end
+    hash_table_remove!(event_loop.local_data, key)
     return obj
 end
 
@@ -309,31 +315,39 @@ function event_loop_get_load_factor(event_loop::EventLoop)::Csize_t
     return @atomic event_loop.current_load_factor
 end
 
+# Create a new event loop based on options
+function event_loop_new(options::EventLoopOptions)::Union{EventLoop, ErrorResult}
+    el_type = options.type
+    if el_type == EventLoopType.PLATFORM_DEFAULT
+        el_type = event_loop_get_default_type()
+    end
+
+    if el_type == EventLoopType.EPOLL
+        @static if Sys.islinux()
+            return event_loop_new_with_epoll(options)
+        else
+            return ErrorResult(raise_error(ERROR_UNSUPPORTED_OPERATION))
+        end
+    elseif el_type == EventLoopType.KQUEUE
+        @static if Sys.isapple() || Sys.isbsd()
+            return event_loop_new_with_kqueue(options)
+        else
+            return ErrorResult(raise_error(ERROR_UNSUPPORTED_OPERATION))
+        end
+    else
+        return ErrorResult(raise_error(ERROR_UNSUPPORTED_OPERATION))
+    end
+end
+
 # Event Loop Group for managing multiple event loops
-mutable struct EventLoopGroup{S}
-    event_loops::Vector{EventLoop}
-    ref_count::RefCounted{EventLoopGroup{S}, Function}
+mutable struct EventLoopGroup{EL,S}
+    event_loops::ArrayList{EL}
     shutdown_options::S
     event_loop_type::EventLoopType.T
 end
 
-function _event_loop_group_on_zero_ref(elg::EventLoopGroup)
-    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Event loop group ref count reached zero, destroying")
-    # Stop and destroy all event loops
-    for el in elg.event_loops
-        event_loop_destroy!(el)
-    end
-    empty!(elg.event_loops)
-    # Call shutdown callback
-    if elg.shutdown_options !== nothing
-        elg.shutdown_options.shutdown_callback_fn()
-    end
-    return nothing
-end
-
-function EventLoopGroup(
-    options::EventLoopGroupOptions,
-)
+# Create a new event loop group (creates and runs event loops)
+function event_loop_group_new(options::EventLoopGroupOptions)
     loop_count = options.loop_count
     if loop_count == 0
         loop_count = UInt16(Sys.CPU_THREADS)
@@ -344,30 +358,73 @@ function EventLoopGroup(
         el_type = event_loop_get_default_type()
     end
 
-    # Create placeholder - actual event loops will be created by platform-specific code
-    elg = EventLoopGroup{typeof(options.shutdown_options)}(
-        Vector{EventLoop}(),
-        RefCounted{EventLoopGroup{typeof(options.shutdown_options)}, Function}(1, nothing, _event_loop_group_on_zero_ref),  # placeholder
+    clock = options.clock_override === nothing ? high_res_clock : options.clock_override
+
+    # Create first event loop to determine concrete type
+    first_opts = EventLoopOptions(; clock=clock, type=el_type, parent_elg=C_NULL)
+    first_loop = event_loop_new(first_opts)
+    if first_loop isa ErrorResult
+        return first_loop
+    end
+
+    EL = typeof(first_loop)
+    elg = EventLoopGroup{EL, typeof(options.shutdown_options)}(
+        ArrayList{EL}(Int(loop_count)),
         options.shutdown_options,
         el_type,
     )
+    parent_ptr = pointer_from_objref(elg)
 
-    # Fix the ref count to point to the actual group
-    elg.ref_count = RefCounted(elg, _event_loop_group_on_zero_ref)
+    first_loop.base_elg = parent_ptr
+    push_back!(elg.event_loops, first_loop)
 
-    # Reserve space for event loops
-    sizehint!(elg.event_loops, Int(loop_count))
+    # Create remaining event loops
+    for _ in 2:loop_count
+        loop_opts = EventLoopOptions(; clock=clock, type=el_type, parent_elg=parent_ptr)
+        loop = event_loop_new(loop_opts)
+        if loop isa ErrorResult
+            event_loop_group_destroy!(elg)
+            return loop
+        end
+        push_back!(elg.event_loops, loop)
+    end
+
+    # Start event loops
+    for i in 1:length(elg.event_loops)
+        loop = elg.event_loops[i]
+        result = event_loop_run!(loop)
+        if result isa ErrorResult
+            event_loop_group_destroy!(elg)
+            return result
+        end
+    end
 
     return elg
 end
 
+function EventLoopGroup(options::EventLoopGroupOptions)
+    return event_loop_group_new(options)
+end
+
 function event_loop_group_acquire!(elg::EventLoopGroup)
-    acquire!(elg.ref_count)
     return elg
 end
 
 function event_loop_group_release!(elg::EventLoopGroup)
-    release!(elg.ref_count)
+    return nothing
+end
+
+function event_loop_group_destroy!(elg::EventLoopGroup)
+    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Event loop group destroy")
+    for i in 1:length(elg.event_loops)
+        el = elg.event_loops[i]
+        el === nothing && continue
+        event_loop_destroy!(el)
+    end
+    clear!(elg.event_loops)
+    if elg.shutdown_options !== nothing
+        elg.shutdown_options.shutdown_callback_fn()
+    end
     return nothing
 end
 
@@ -375,7 +432,7 @@ function event_loop_group_get_loop_count(elg::EventLoopGroup)::Csize_t
     return Csize_t(length(elg.event_loops))
 end
 
-function event_loop_group_get_loop_at(elg::EventLoopGroup, index::Integer)::Union{EventLoop, Nothing}
+function event_loop_group_get_loop_at(elg::EventLoopGroup, index::Integer)
     idx = Int(index) + 1  # Convert from 0-based to 1-based
     if idx < 1 || idx > length(elg.event_loops)
         return nothing
@@ -388,7 +445,7 @@ function event_loop_group_get_type(elg::EventLoopGroup)::EventLoopType.T
 end
 
 # Best-of-two load balancing for getting the next event loop
-function event_loop_group_get_next_loop(elg::EventLoopGroup)::Union{EventLoop, Nothing}
+function event_loop_group_get_next_loop(elg::EventLoopGroup)
     loop_count = length(elg.event_loops)
     if loop_count == 0
         return nothing
@@ -412,15 +469,17 @@ end
 
 # Get group from event loop
 function event_loop_group_acquire_from_event_loop(event_loop::EventLoop)::Union{EventLoopGroup, Nothing}
-    if event_loop.base_elg === nothing
+    if event_loop.base_elg == C_NULL
         return nothing
     end
-    return event_loop_group_acquire!(event_loop.base_elg)
+    elg = unsafe_pointer_to_objref(event_loop.base_elg)::EventLoopGroup
+    return event_loop_group_acquire!(elg)
 end
 
 function event_loop_group_release_from_event_loop!(event_loop::EventLoop)
-    if event_loop.base_elg !== nothing
-        event_loop_group_release!(event_loop.base_elg)
+    if event_loop.base_elg != C_NULL
+        elg = unsafe_pointer_to_objref(event_loop.base_elg)::EventLoopGroup
+        event_loop_group_release!(elg)
     end
     return nothing
 end

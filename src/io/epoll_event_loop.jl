@@ -106,7 +106,7 @@ function EpollLoopImpl()
 end
 
 # Epoll event loop concrete type
-const EpollEventLoop = EventLoop{EpollLoopImpl}
+const EpollEventLoop = EventLoop{EpollLoopImpl, LD, Clock} where {LD,Clock}
 
 # Helper to check if eventfd is available and create one
 function try_create_eventfd()::Union{Int32, Nothing}
@@ -506,8 +506,7 @@ function process_task_pre_queue(event_loop::EpollEventLoop)
     mutex_lock(impl.task_pre_queue_mutex)
 
     # Drain the eventfd/pipe
-    while @ccall(read(impl.read_task_handle.fd::Cint, count_ignore::Ptr{UInt64}, sizeof(UInt64)::Csize_t)::Cssize_t) > 0
-    end
+    @ccall read(impl.read_task_handle.fd::Cint, count_ignore::Ptr{UInt64}, sizeof(UInt64)::Csize_t)::Cssize_t
 
     # Move tasks from pre-queue
     while !isempty(impl.task_pre_queue)
@@ -733,7 +732,7 @@ function event_loop_complete_destroy!(event_loop::EpollEventLoop)
             obj.on_object_removed(obj)
         end
     end
-    empty!(event_loop.local_data)
+    hash_table_clear!(event_loop.local_data)
 
     return nothing
 end

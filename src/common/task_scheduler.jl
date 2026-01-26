@@ -15,7 +15,7 @@ struct TaskFn{F,Ctx}
     ctx::Ctx
 end
 
-(task::TaskFn)(status::TaskStatus.T) = task.f(task.ctx, status)
+(task::TaskFn)(status::TaskStatus.T) = Base.invokelatest(task.f, task.ctx, status)
 
 mutable struct ScheduledTask{F,Ctx}
     fn::TaskFn{F,Ctx}

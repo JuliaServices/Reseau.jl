@@ -148,7 +148,7 @@ function KqueueLoopImpl()
 end
 
 # KQueue event loop concrete type
-const KqueueEventLoop = EventLoop{KqueueLoopImpl}
+const KqueueEventLoop = EventLoop{KqueueLoopImpl, LD, Clock} where {LD,Clock}
 
 # Helper to open a non-blocking pipe
 function open_nonblocking_posix_pipe()::Union{NTuple{2, Int32}, ErrorResult}
@@ -735,14 +735,12 @@ function kqueue_event_loop_thread(event_loop::KqueueEventLoop)
         # Process kevents
         for i in 1:num_kevents
             kevent = kevents[i]
-
             # Check if this is the cross-thread signal pipe
             if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
                 should_process_cross_thread_data = true
                 # Drain the pipe
                 drain_buf = Ref(UInt32(0))
-                while @ccall(read(Int(kevent.ident)::Cint, drain_buf::Ptr{UInt32}, sizeof(UInt32)::Csize_t)::Cssize_t) > 0
-                end
+                @ccall read(Int(kevent.ident)::Cint, drain_buf::Ptr{UInt32}, sizeof(UInt32)::Csize_t)::Cssize_t
                 continue
             end
 
@@ -880,7 +878,7 @@ function event_loop_complete_destroy!(event_loop::KqueueEventLoop)
             obj.on_object_removed(obj)
         end
     end
-    empty!(event_loop.local_data)
+    hash_table_clear!(event_loop.local_data)
 
     return nothing
 end

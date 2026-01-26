@@ -226,7 +226,7 @@ src/
 
 ## 20. Milestones
 1. [x] **Foundation**: port common + io core types; set module layout.
-2. [ ] **Event loops**: epoll + kqueue loops, cross-thread scheduling.
+2. [x] **Event loops**: epoll + kqueue loops, cross-thread scheduling.
 3. [ ] **Channel + socket**: channel pipeline, socket handler, message pool.
 4. [ ] **TLS handler**: TLS channel handler using LibAwsCal.
 5. [ ] **Host resolver**: full resolver with cache + TTL.
