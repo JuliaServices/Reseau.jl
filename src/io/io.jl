@@ -230,14 +230,14 @@ abstract type AbstractChannelHandler end
 abstract type AbstractEventLoop end
 
 # IO Message - data unit flowing through channel pipeline
-mutable struct IoMessage{C <: Union{AbstractChannel, Nothing}, F, U}
+mutable struct IoMessage
     message_data::ByteBuffer
     message_type::IoMessageType.T
     message_tag::Int32
     copy_mark::Csize_t
-    owning_channel::C  # nullable
-    on_completion::F
-    user_data::U
+    owning_channel::Union{AbstractChannel, Nothing}  # nullable
+    on_completion::Any
+    user_data::Any
     # Intrusive list node for queueing
     queueing_handle_next::Union{IoMessage, Nothing}  # nullable
     queueing_handle_prev::Union{IoMessage, Nothing}  # nullable
@@ -245,7 +245,7 @@ end
 
 function IoMessage(capacity::Integer)
     buf = ByteBuffer(capacity)
-    return IoMessage{Nothing, Nothing, Nothing}(
+    return IoMessage(
         buf,
         IoMessageType.APPLICATION_DATA,
         Int32(0),
@@ -440,7 +440,8 @@ const _io_error_definitions = [
 
 const _io_error_entries = let
     count = ERROR_IO_DNS_QUERY_AGAIN - ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT + 1
-    entries = Memory{error_info}(undef, count)
+    # Use Vector here to keep stable pointers for the error registry.
+    entries = Vector{error_info}(undef, count)
     for (name, code, msg) in _io_error_definitions
         idx = code - ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT + 1
         entries[idx] = _define_error_info(code, name, msg, "aws-c-io")
@@ -448,9 +449,15 @@ const _io_error_entries = let
     entries
 end
 
-const _io_error_list_ref = Ref{error_info_list}(
-    error_info_list(pointer(_io_error_entries), UInt16(length(_io_error_entries))),
-)
+const _io_error_list_ref = Ref{error_info_list}()
+
+function _init_io_error_list!()
+    _io_error_list_ref[] = error_info_list(
+        pointer(_io_error_entries),
+        UInt16(length(_io_error_entries)),
+    )
+    return nothing
+end
 
 const _io_log_subject_infos = let infos = Memory{LogSubjectInfo}(undef, 16)
     infos[1] = LogSubjectInfo(LS_IO_GENERAL, "IO", "Subject for general IO logging")
@@ -484,6 +491,7 @@ function _io_init()
     end
     _common_init()
     _cal_init()
+    _init_io_error_list!()
     register_error_info(Base.unsafe_convert(Ptr{error_info_list}, _io_error_list_ref))
     register_log_subject_info_list(_io_log_subject_list)
     return nothing

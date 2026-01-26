@@ -67,7 +67,8 @@ const _common_error_definitions = [
 
 const _common_error_entries = let
     count = ERROR_CBOR_UNEXPECTED_TYPE - ERROR_SUCCESS + 1
-    entries = Memory{error_info}(undef, count)
+    # Use Vector here to keep stable pointers for the error registry.
+    entries = Vector{error_info}(undef, count)
     for (name, code, msg) in _common_error_definitions
         idx = code - ERROR_SUCCESS + 1
         entries[idx] = _define_error_info(code, name, msg, "aws-c-common")
@@ -75,9 +76,15 @@ const _common_error_entries = let
     entries
 end
 
-const _common_error_list_ref = Ref{error_info_list}(
-    error_info_list(pointer(_common_error_entries), UInt16(length(_common_error_entries))),
-)
+const _common_error_list_ref = Ref{error_info_list}()
+
+function _init_common_error_list!()
+    _common_error_list_ref[] = error_info_list(
+        pointer(_common_error_entries),
+        UInt16(length(_common_error_entries)),
+    )
+    return nothing
+end
 
 const _common_log_subject_infos = let infos = Memory{LogSubjectInfo}(undef, 10)
     infos[1] = LogSubjectInfo(
@@ -137,6 +144,7 @@ const _common_log_subject_list = LogSubjectInfoList(_common_log_subject_infos)
 
 function _common_init()
     _common_library_initialized[] && return nothing
+    _init_common_error_list!()
     register_error_info(Base.unsafe_convert(Ptr{error_info_list}, _common_error_list_ref))
     register_log_subject_info_list(_common_log_subject_list)
     thread_initialize_thread_management()

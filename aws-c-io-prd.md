@@ -3,7 +3,7 @@
 Date: 2026-01-26
 
 ## 1. Summary
-Build a pure-Julia implementation of the aws-c-io library (macOS + Linux only) that avoids libuv and its global I/O lock. The implementation will run on Julia-managed threads and use direct OS syscalls for sockets and event loops. The public API will be a "hybrid" C-like surface that closely matches aws-c-io names and behavior, but **without the `aws_` prefix**. TLS support is in MVP using `LibAwsCal`. ALPN is deferred. Full host resolver behavior (cache + TTL + background refresh) is included. `async_stream` is included in MVP.
+Build a pure-Julia implementation of the aws-c-io library (macOS + Linux only) that avoids libuv and its global I/O lock. The implementation will run on Julia-managed threads and use direct OS syscalls for sockets and event loops. The public API will be a "hybrid" C-like surface that closely matches aws-c-io names and behavior, but **without the `aws_` prefix**. TLS support is in MVP using `MbedTLS`. ALPN is deferred. Full host resolver behavior (cache + TTL + background refresh) is included. `async_stream` is included in MVP.
 
 This repo (`AwsIO/`) is fully under our control, no backwards compatibility constraints.
 
@@ -12,7 +12,7 @@ This repo (`AwsIO/`) is fully under our control, no backwards compatibility cons
 - Avoid libuv and Base I/O paths to bypass the global I/O lock.
 - Use Julia-managed threads (no `pthread_create`, no `jl_adopt_thread`).
 - API names and shapes match aws-c-io closely, but without the `aws_` prefix.
-- Support TLS channel handler in MVP via `LibAwsCal`.
+- Support TLS channel handler in MVP via `MbedTLS`.
 - Implement `async_stream` in MVP.
 - Full host resolver (cache, TTL, background refresh) in MVP.
 - Minimize dependency on `LibAwsCommon`; reimplement data structures in Julia where feasible.
@@ -53,7 +53,7 @@ Naming follows aws-c-io but without the `aws_` prefix. All functions are Julia f
 - `Future`, `Promise`
 - `MessagePool`
 - `AsyncStream` (with `AsyncInputStream`, `AsyncOutputStream`)
-- `TlsConnectionOptions`, `TlsContext` (thin wrappers around LibAwsCal)
+- `TlsConnectionOptions`, `TlsContext` (thin wrappers around MbedTLS)
 
 ### 6.2 Function Naming Examples
 - `event_loop_new`, `event_loop_run!`, `event_loop_stop!`, `event_loop_schedule_task_now!`
@@ -171,7 +171,7 @@ src/
 
 ## 12. TLS Channel Handler (MVP)
 - Implement `TlsChannelHandler` in Julia.
-- Use `LibAwsCal` for TLS configuration and I/O operations.
+- Use `MbedTLS` for TLS configuration and I/O operations.
 - Provide `TlsConnectionOptions` and `TlsContext` wrappers.
 - Flow:
   - TLS handler wraps the socket handler in the channel pipeline.
@@ -203,8 +203,9 @@ src/
 - Minimal statistics in MVP; expand only as needed by TLS/channel/socket paths.
 
 ## 17. Dependencies
-- `LibAwsCommon`: keep as dependency, but prefer pure-Julia equivalents. Use only when required for TLS or crypto interop.
-- `LibAwsCal`: used for TLS operations.
+- `LibAwsCommon`: keep as dependency, but prefer pure-Julia equivalents. Use only when required for CRT interop.
+- `LibAwsCal`: optional for future CRT parity; not used in MVP.
+- `MbedTLS`: used for TLS operations.
 - `EnumX`: scoped enums.
 - `ScopedValues`: scoped global context (logger, etc.).
 
@@ -228,7 +229,7 @@ src/
 1. [x] **Foundation**: port common + io core types; set module layout.
 2. [x] **Event loops**: epoll + kqueue loops, cross-thread scheduling.
 3. [x] **Channel + socket**: channel pipeline, socket handler, message pool.
-4. [ ] **TLS handler**: TLS channel handler using LibAwsCal.
+4. [x] **TLS handler**: TLS channel handler using MbedTLS.
 5. [ ] **Host resolver**: full resolver with cache + TTL.
 6. [ ] **Async stream**: async read/write streams.
 7. [ ] **Tests + docs**: port/author tests, add usage docs.

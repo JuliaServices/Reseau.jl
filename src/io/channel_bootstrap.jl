@@ -9,10 +9,11 @@ const OnIncomingChannelSetupFn = Function  # (server_bootstrap, error_code, chan
 const OnIncomingChannelShutdownFn = Function  # (server_bootstrap, error_code, channel, user_data) -> nothing
 
 # Client bootstrap options
-struct ClientBootstrapOptions{ELG, HR, SO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+struct ClientBootstrapOptions{ELG, HR, SO, TO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SO
+    tls_connection_options::TO
     on_setup_callback::FS  # nullable
     on_shutdown_callback::FD  # nullable
     user_data::U
@@ -22,6 +23,7 @@ function ClientBootstrapOptions(;
         event_loop_group,
         host_resolver,
         socket_options::SocketOptions = SocketOptions(),
+        tls_connection_options = nothing,
         on_setup_callback = nothing,
         on_shutdown_callback = nothing,
         user_data = nothing,
@@ -30,6 +32,7 @@ function ClientBootstrapOptions(;
         event_loop_group,
         host_resolver,
         socket_options,
+        tls_connection_options,
         on_setup_callback,
         on_shutdown_callback,
         user_data,
@@ -37,15 +40,16 @@ function ClientBootstrapOptions(;
 end
 
 # Client bootstrap - for creating outgoing connections
-mutable struct ClientBootstrap{ELG, HR, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+mutable struct ClientBootstrap{ELG, HR, TO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SocketOptions
+    tls_connection_options::TO
     on_setup_callback::FS  # nullable
     on_shutdown_callback::FD  # nullable
     user_data::U
     @atomic shutdown::Bool
-    ref_count::RefCounted{ClientBootstrap{ELG, HR, FS, FD, U}, Function}
+    ref_count::RefCounted{ClientBootstrap{ELG, HR, TO, FS, FD, U}, Function}
 end
 
 function _client_bootstrap_on_zero_ref(bootstrap::ClientBootstrap)
@@ -54,13 +58,14 @@ function _client_bootstrap_on_zero_ref(bootstrap::ClientBootstrap)
 end
 
 function ClientBootstrap(
-        options::ClientBootstrapOptions{ELG, HR, SO, FS, FD, U},
-    ) where {ELG, HR, SO, FS, FD, U}
-    CBT = ClientBootstrap{ELG, HR, FS, FD, U}
+        options::ClientBootstrapOptions{ELG, HR, SO, TO, FS, FD, U},
+    ) where {ELG, HR, SO, TO, FS, FD, U}
+    CBT = ClientBootstrap{ELG, HR, TO, FS, FD, U}
     bootstrap = CBT(
         options.event_loop_group,
         options.host_resolver,
         options.socket_options,
+        options.tls_connection_options,
         options.on_setup_callback,
         options.on_shutdown_callback,
         options.user_data,
@@ -87,12 +92,13 @@ function client_bootstrap_release!(bootstrap::ClientBootstrap)
 end
 
 # Connection request tracking
-mutable struct SocketConnectionRequest{CB, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+mutable struct SocketConnectionRequest{CB, TO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     bootstrap::CB
     host::String
     port::UInt32
     socket::Union{Socket, Nothing}  # nullable
     channel::Union{Channel, Nothing}  # nullable
+    tls_connection_options::TO
     on_setup::FS  # nullable
     on_shutdown::FD  # nullable
     user_data::U
@@ -104,6 +110,7 @@ function client_bootstrap_connect!(
         host::AbstractString,
         port::Integer;
         socket_options::SocketOptions = bootstrap.socket_options,
+        tls_connection_options = bootstrap.tls_connection_options,
         on_setup::Union{OnBootstrapChannelSetupFn, Nothing} = bootstrap.on_setup_callback,
         on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing} = bootstrap.on_shutdown_callback,
         user_data = bootstrap.user_data,
@@ -127,6 +134,7 @@ function client_bootstrap_connect!(
         UInt32(port),
         nothing,
         nothing,
+        tls_connection_options,
         on_setup,
         on_shutdown,
         user_data,
@@ -303,6 +311,46 @@ function _setup_client_channel(request::SocketConnectionRequest)
         )
         socket_close!(socket)
         _connection_request_complete(request, handler_result.code, nothing)
+        return nothing
+    end
+
+    # If TLS requested, insert TLS handler and defer setup completion
+    if request.tls_connection_options !== nothing
+        tls_options = request.tls_connection_options
+
+        on_negotiation = (handler, slot, err, ud) -> begin
+            if tls_options.on_negotiation_result !== nothing
+                Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
+            end
+
+            if err == AWS_OP_SUCCESS
+                setup_result = channel_setup_complete!(channel)
+                if setup_result isa ErrorResult
+                    socket_close!(socket)
+                    _connection_request_complete(request, setup_result.code, nothing)
+                    return nothing
+                end
+                _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+            else
+                channel_shutdown!(channel, ChannelDirection.READ, err)
+                socket_close!(socket)
+                _connection_request_complete(request, err, nothing)
+            end
+
+            return nothing
+        end
+
+        wrapped = TlsConnectionOptions(
+            tls_options.ctx;
+            server_name = tls_options.server_name,
+            on_negotiation_result = on_negotiation,
+            on_data_read = tls_options.on_data_read,
+            on_error = tls_options.on_error,
+            user_data = tls_options.user_data,
+            timeout_ms = tls_options.timeout_ms,
+        )
+
+        tls_channel_handler_new!(channel, wrapped)
         return nothing
     end
 

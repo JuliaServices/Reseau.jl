@@ -8,6 +8,7 @@ LibAwsCal = "ef519ef6-af43-41a0-8ac4-eb81328190af"
 EnumX = "4e289a0a-7415-4d19-859d-a7e5c4648b56"
 ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+MbedTLS = "739be429-bea8-5141-9913-cc70e7f3736d"
 
 [compat]
 julia = "1.9"
@@ -15,9 +16,11 @@ LibAwsCal = "1.1.12"
 LibAwsCommon = "1.3.1"
 EnumX = "1"
 ScopedValues = "1"
+MbedTLS = "1"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 
 [targets]
-test = ["Test"]
+test = ["Test", "Sockets"]

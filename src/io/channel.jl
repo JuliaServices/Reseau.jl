@@ -33,7 +33,7 @@ mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Uni
 end
 
 function ChannelSlot()
-    return ChannelSlot{Nothing, Nothing}(
+    return ChannelSlot{Union{AbstractChannelHandler, Nothing}, Union{AbstractChannel, Nothing}}(
         nothing,
         nothing,
         nothing,
@@ -147,7 +147,7 @@ end
 end
 
 # Channel - a bidirectional pipeline of handlers
-mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, US, UD}
+mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, US, UD} <: AbstractChannel
     event_loop::EL
     first::Union{ChannelSlot, Nothing}  # nullable - Application side (leftmost)
     last::Union{ChannelSlot, Nothing}   # nullable - Socket side (rightmost)
