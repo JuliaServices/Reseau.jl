@@ -232,7 +232,7 @@ src/
 4. [x] **TLS handler**: TLS channel handler using MbedTLS.
 5. [x] **Host resolver**: full resolver with cache + TTL.
 6. [x] **Async stream**: async read/write streams.
-7. [ ] **Tests + docs**: port/author tests, add usage docs.
+7. [x] **Tests + docs**: port/author tests, add usage docs.
 
 ## 21. Open Questions (None)
 All user choices are finalized:

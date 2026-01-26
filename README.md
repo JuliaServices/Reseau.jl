@@ -1,12 +1,9 @@
 # AwsIO.jl
 
-Wrapper library for functionality in the https://github.com/awslabs/aws-c-io library.
-
-The `LibAwsIO` package aims to directly wrap and expose aws-c-io functionality (matching
-data structures and api functions exactly).
-
-The functions and structures in `AwsIO` are more Julia-like and are intended to be more user-friendly,
-while using `LibAwsIO` under the hood.
+Pure-Julia implementation of aws-c-io style primitives (macOS + Linux).
+The API mirrors aws-c-io naming and behavior, but drops the `aws_` prefix.
+Event loops, sockets, channels, TLS, host resolver, and async input streams
+use direct OS syscalls and Julia-managed threads (no libuv).
 
 GitHub Actions : [![Build Status](https://github.com/JuliaServices/AwsIO.jl/workflows/CI/badge.svg)](https://github.com/JuliaServices/AwsIO.jl/actions?query=workflow%3ACI+branch%3Amaster)
 
@@ -21,16 +18,62 @@ Pkg.add("AwsIO")
 
 ## Usage
 
-Currently only client sockets are supported with a variety of options for configuration.
-
+### Event loop group + resolver
 ```julia
 using AwsIO
 
-# connect a plain socket to `host` on `port`
-socket = AwsIO.Sockets.Client(host, port)
+elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
+resolver = DefaultHostResolver(elg)
 
-# connect a socket with TLS encryption to `host` on `port`
-tls = AwsIO.Sockets.Client(host, port; tls=true)
+host_resolver_resolve!(resolver, "localhost") do res, host, err, addrs
+    @show err addrs
+end
 ```
 
-Otherwise, the returned `AwsIO.Sockets.Client` object behaves like a standard `IO` object.
+### Socket + channel (plain)
+```julia
+using AwsIO
+
+elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
+el = event_loop_group_get_next_loop(elg)
+sock = socket_init_posix(SocketOptions(; type = SocketType.STREAM, domain = SocketDomain.IPV4))
+
+connect_opts = SocketConnectOptions(
+    SocketEndpoint("127.0.0.1", 8080);
+    event_loop = el,
+    on_connection_result = (sock_obj, err, ud) -> @show err,
+)
+
+socket_connect(sock, connect_opts)
+```
+
+### TLS channel handler
+```julia
+using AwsIO
+
+# Assumes an established socket and event loop (see socket example).
+channel = Channel(el, nothing)
+socket_channel_handler_new!(channel, sock)
+
+ctx = tls_context_new_client(; verify_peer = false)
+tls_opts = TlsConnectionOptions(ctx; server_name = "localhost")
+tls_channel_handler_new!(channel, tls_opts)
+
+channel_setup_complete!(channel)
+```
+
+### Async input stream
+```julia
+using AwsIO
+
+data = ByteBuffer(5)
+stream = AsyncInputStream((s, dest) -> begin
+    fut = Future{Bool}()
+    dest.len += 5
+    future_complete!(fut, true)
+    fut
+end, s -> nothing, nothing)
+
+future = async_input_stream_read_to_fill(stream, data)
+future_wait(future)
+```
