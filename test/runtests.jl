@@ -1,6 +1,4 @@
-using Test, AwsIO
+using Test
+using AwsIO
 
-@testset "AwsIO" begin
-
-
-end
+include("common_tests.jl")
