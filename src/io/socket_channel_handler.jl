@@ -27,9 +27,9 @@ SocketHandlerStatistics() = SocketHandlerStatistics(Csize_t(0), Csize_t(0), Csiz
 end
 
 # Socket channel handler structure
-mutable struct SocketChannelHandler{S} <: AbstractChannelHandler
+mutable struct SocketChannelHandler{S, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
     socket::S
-    slot::Union{ChannelSlot, Nothing}
+    slot::SlotRef
     initial_window_size::Csize_t
     max_read_size::Csize_t
     read_window::Csize_t
@@ -48,7 +48,7 @@ function SocketChannelHandler(
         initial_window_size::Integer = SIZE_MAX,
         max_read_size::Integer = 16384,  # 16KB default
     ) where {S}
-    return SocketChannelHandler{S}(
+    return SocketChannelHandler{S, Union{ChannelSlot, Nothing}}(
         socket,
         nothing,
         Csize_t(initial_window_size),

@@ -36,6 +36,7 @@ Base.@kwdef struct ThreadOptions
     cpu_id::Int = -1
     join_strategy::ThreadJoinStrategy.T = ThreadJoinStrategy.MANUAL
     name::String = ""
+    pool::Symbol = :default
 end
 
 mutable struct ThreadHandle{F}
@@ -118,6 +119,17 @@ function default_thread_options()
     return ThreadOptions()
 end
 
+function thread_options_with_defaults(opts::ThreadOptions; name::AbstractString = "", pool::Symbol = opts.pool)
+    resolved_name = isempty(opts.name) ? String(name) : opts.name
+    return ThreadOptions(;
+        stack_size = opts.stack_size,
+        cpu_id = opts.cpu_id,
+        join_strategy = opts.join_strategy,
+        name = resolved_name,
+        pool = pool,
+    )
+end
+
 function thread_init(handle::ThreadHandle)
     handle.id = thread_id_t(0)
     handle.detach_state = ThreadDetachState.NOT_CREATED
@@ -135,6 +147,15 @@ end
 
 function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptions, Nothing} = nothing)
     opts = options === nothing ? ThreadOptions() : options
+    if opts.pool == :interactive
+        if Threads.nthreads(:interactive) == 0
+            raise_error(ERROR_THREAD_INVALID_SETTINGS)
+            return ERROR_THREAD_INVALID_SETTINGS
+        end
+    elseif opts.pool != :default
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ERROR_INVALID_ARGUMENT
+    end
     managed = opts.join_strategy == ThreadJoinStrategy.MANAGED
     handle.detach_state = managed ? ThreadDetachState.MANAGED : ThreadDetachState.JOINABLE
     handle.managed = managed
@@ -147,7 +168,11 @@ function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptio
     if managed
         thread_increment_unjoined_count()
     end
-    handle.task = Threads.@spawn _thread_task_entry(handle, fn, ctx)
+    if opts.pool == :interactive
+        handle.task = Threads.@spawn :interactive _thread_task_entry(handle, fn, ctx)
+    else
+        handle.task = Threads.@spawn _thread_task_entry(handle, fn, ctx)
+    end
     return OP_SUCCESS
 end
 

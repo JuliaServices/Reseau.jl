@@ -45,7 +45,7 @@ end
 
 # Create a pipe (returns read_end, write_end)
 function pipe_create()::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
-    fds = Vector{Cint}(undef, 2)
+    fds = Memory{Cint}(undef, 2)
 
     @static if Sys.iswindows()
         # Windows doesn't have pipe(), use _pipe()

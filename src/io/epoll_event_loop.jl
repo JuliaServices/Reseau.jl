@@ -235,7 +235,7 @@
         # Launch the event loop thread
         thread_fn = el -> epoll_event_loop_thread(el)
         impl.thread_created_on = ThreadHandle()
-        thread_options = ThreadOptions(; name = "aws-el-epoll")
+        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-epoll", pool = :interactive)
 
         result = thread_launch(impl.thread_created_on, thread_fn, event_loop, thread_options)
         if result != OP_SUCCESS
@@ -569,7 +569,7 @@
         end
 
         timeout = DEFAULT_TIMEOUT_MS
-        events = Vector{EpollEvent}(undef, MAX_EVENTS)
+        events = Memory{EpollEvent}(undef, MAX_EVENTS)
 
         logf(
             LogLevel.INFO,

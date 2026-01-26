@@ -581,7 +581,8 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
     zeros_needed = 8 - total_parts
 
     # Build 16-byte address
-    addr = zeros(UInt8, 16)
+    addr = Memory{UInt8}(undef, 16)
+    fill!(addr, 0x00)
     byte_idx = 1
 
     for part in left_parts

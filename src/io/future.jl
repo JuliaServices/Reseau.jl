@@ -26,7 +26,6 @@ mutable struct Future{T}
     error_code::Int
     lock::ReentrantLock
     waiters::Union{FutureWaiter, Nothing}  # nullable
-    @atomic ref_count::Int
 end
 
 function Future{T}() where {T}
@@ -36,20 +35,7 @@ function Future{T}() where {T}
         0,
         ReentrantLock(),
         nothing,
-        1,
     )
-end
-
-# Acquire reference to future
-function future_acquire!(future::Future)
-    @atomic future.ref_count += 1
-    return future
-end
-
-# Release reference to future
-function future_release!(future::Future)
-    @atomic future.ref_count -= 1
-    return nothing
 end
 
 # Check if future is complete (success or failure)

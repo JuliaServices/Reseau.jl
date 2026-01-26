@@ -107,15 +107,6 @@ mutable struct ExponentialBackoffRetryStrategy{ELG} <: AbstractRetryStrategy
     event_loop_group::ELG
     config::ExponentialBackoffConfig
     @atomic shutdown::Bool
-    ref_count::RefCounted{ExponentialBackoffRetryStrategy{ELG}, Function}
-end
-
-function _exponential_backoff_on_zero_ref(strategy::ExponentialBackoffRetryStrategy)
-    logf(
-        LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff retry strategy: ref count zero"
-    )
-    return nothing
 end
 
 function ExponentialBackoffRetryStrategy(
@@ -126,9 +117,7 @@ function ExponentialBackoffRetryStrategy(
         event_loop_group,
         config,
         false,
-        RefCounted{ExponentialBackoffRetryStrategy{ELG}, Function}(1, nothing, _exponential_backoff_on_zero_ref),
     )
-    strategy.ref_count = RefCounted(strategy, _exponential_backoff_on_zero_ref)
     return strategy
 end
 
@@ -321,18 +310,6 @@ function retry_token_release!(token::RetryToken{ExponentialBackoffRetryStrategy{
     return nothing
 end
 
-# Acquire strategy reference
-function retry_strategy_acquire!(strategy::ExponentialBackoffRetryStrategy)
-    acquire!(strategy.ref_count)
-    return strategy
-end
-
-# Release strategy reference
-function retry_strategy_release!(strategy::ExponentialBackoffRetryStrategy)
-    release!(strategy.ref_count)
-    return nothing
-end
-
 # Shutdown strategy
 function retry_strategy_shutdown!(strategy::ExponentialBackoffRetryStrategy)
     @atomic strategy.shutdown = true
@@ -385,15 +362,6 @@ mutable struct StandardRetryStrategy{ELG} <: AbstractRetryStrategy
     @atomic bucket_capacity::Int64  # Current tokens in bucket
     lock::ReentrantLock
     @atomic shutdown::Bool
-    ref_count::RefCounted{StandardRetryStrategy{ELG}, Function}
-end
-
-function _standard_retry_on_zero_ref(strategy::StandardRetryStrategy)
-    logf(
-        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry strategy: ref count zero"
-    )
-    return nothing
 end
 
 function StandardRetryStrategy(
@@ -406,9 +374,7 @@ function StandardRetryStrategy(
         Int64(config.initial_bucket_capacity),
         ReentrantLock(),
         false,
-        RefCounted{StandardRetryStrategy{ELG}, Function}(1, nothing, _standard_retry_on_zero_ref),
     )
-    strategy.ref_count = RefCounted(strategy, _standard_retry_on_zero_ref)
     return strategy
 end
 
@@ -633,18 +599,6 @@ function retry_token_release!(token::RetryToken{StandardRetryStrategy{ELG}, U}):
         end
         token.scheduled_retry_task = nothing
     end
-    return nothing
-end
-
-# Acquire strategy reference
-function retry_strategy_acquire!(strategy::StandardRetryStrategy)
-    acquire!(strategy.ref_count)
-    return strategy
-end
-
-# Release strategy reference
-function retry_strategy_release!(strategy::StandardRetryStrategy)
-    release!(strategy.ref_count)
     return nothing
 end
 

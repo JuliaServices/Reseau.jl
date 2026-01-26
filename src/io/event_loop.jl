@@ -353,6 +353,19 @@ function event_loop_group_new(options::EventLoopGroupOptions)
         loop_count = UInt16(Sys.CPU_THREADS)
     end
 
+    interactive_threads = Threads.nthreads(:interactive)
+    if Int(loop_count) >= interactive_threads
+        logf(
+            LogLevel.ERROR,
+            LS_IO_EVENT_LOOP,
+            "Event loop group requires loop_count < interactive thread count (loop_count=%d, interactive=%d)",
+            Int(loop_count),
+            interactive_threads,
+        )
+        raise_error(ERROR_THREAD_INVALID_SETTINGS)
+        return ErrorResult(ERROR_THREAD_INVALID_SETTINGS)
+    end
+
     el_type = options.type
     if el_type == EventLoopType.PLATFORM_DEFAULT
         el_type = event_loop_get_default_type()

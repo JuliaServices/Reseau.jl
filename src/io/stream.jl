@@ -185,7 +185,7 @@ function stream_read(stream::FileInputStream, buffer::ByteBuffer, length::Intege
     end
 
     # Read into buffer
-    data = Vector{UInt8}(undef, Int(to_read))
+    data = Memory{UInt8}(undef, Int(to_read))
 
     bytes_read = try
         readbytes!(stream.file_handle, data, to_read)

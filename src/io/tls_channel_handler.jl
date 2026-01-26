@@ -136,16 +136,16 @@ mutable struct PendingWrite
     offset::Int
 end
 
-mutable struct TlsChannelHandler{FNR <: Union{TlsOnNegotiationResultFn, Nothing}, FDR <: Union{TlsOnDataReadFn, Nothing}, FER <: Union{TlsOnErrorFn, Nothing}, U} <: AbstractChannelHandler
-    slot::Union{ChannelSlot, Nothing}
+mutable struct TlsChannelHandler{FNR <: Union{TlsOnNegotiationResultFn, Nothing}, FDR <: Union{TlsOnDataReadFn, Nothing}, FER <: Union{TlsOnErrorFn, Nothing}, U, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
+    slot::SlotRef
     negotiation_completed::Bool
     pending_writes::Vector{PendingWrite}
     max_read_size::Csize_t
     options::TlsConnectionOptions{TlsContext, FNR, FDR, FER, U}
     state::TlsHandshakeState.T
-    client_random::Vector{UInt8}
-    server_random::Vector{UInt8}
-    session_key::Vector{UInt8}
+    client_random::Memory{UInt8}
+    server_random::Memory{UInt8}
+    session_key::Memory{UInt8}
     inbound_buf::Vector{UInt8}
     inbound_offset::Int
 end
@@ -154,16 +154,16 @@ function TlsChannelHandler(
         options::TlsConnectionOptions;
         max_read_size::Integer = 16384,
     )
-    return TlsChannelHandler(
+    return TlsChannelHandler{typeof(options.on_negotiation_result), typeof(options.on_data_read), typeof(options.on_error), typeof(options.user_data), Union{ChannelSlot, Nothing}}(
         nothing,
         false,
         PendingWrite[],
         Csize_t(max_read_size),
         options,
         TlsHandshakeState.INIT,
-        UInt8[],
-        UInt8[],
-        UInt8[],
+        Memory{UInt8}(undef, 0),
+        Memory{UInt8}(undef, 0),
+        Memory{UInt8}(undef, 0),
         UInt8[],
         0,
     )
@@ -200,26 +200,26 @@ function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
     return nothing
 end
 
-function _aws_byte_cursor_from_vec(vec::Vector{UInt8})
+function _aws_byte_cursor_from_vec(vec::AbstractVector{UInt8})
     if isempty(vec)
         return LibAwsCommon.aws_byte_cursor(Csize_t(0), Ptr{UInt8}(C_NULL))
     end
     return LibAwsCommon.aws_byte_cursor(Csize_t(length(vec)), pointer(vec))
 end
 
-function _aws_byte_buf_from_vec(vec::Vector{UInt8})
+function _aws_byte_buf_from_vec(vec::AbstractVector{UInt8})
     return LibAwsCommon.aws_byte_buf(Csize_t(0), pointer(vec), Csize_t(length(vec)), Ptr{LibAwsCommon.aws_allocator}(C_NULL))
 end
 
-function _derive_session_key(client_random::Vector{UInt8}, server_random::Vector{UInt8})
+function _derive_session_key(client_random::AbstractVector{UInt8}, server_random::AbstractVector{UInt8})
     _tls_cal_init_once()
 
-    psk = Vector{UInt8}(codeunits("awsio-tls-psk"))
+    psk = Memory{UInt8}(codeunits("awsio-tls-psk"))
     ikm = _aws_byte_cursor_from_vec(psk)
     salt = _aws_byte_cursor_from_vec(vcat(client_random, server_random))
-    info = _aws_byte_cursor_from_vec(Vector{UInt8}(codeunits("awsio-tls")))
+    info = _aws_byte_cursor_from_vec(Memory{UInt8}(codeunits("awsio-tls")))
 
-    out = Vector{UInt8}(undef, TLS_SESSION_KEY_LEN)
+    out = Memory{UInt8}(undef, TLS_SESSION_KEY_LEN)
     out_buf = _aws_byte_buf_from_vec(out)
     allocator = LibAwsCommon.default_aws_allocator()
 
@@ -233,12 +233,12 @@ function _derive_session_key(client_random::Vector{UInt8}, server_random::Vector
         Csize_t(TLS_SESSION_KEY_LEN),
     )
     if rv != 0
-        return UInt8[]
+        return Memory{UInt8}(undef, 0)
     end
     return out
 end
 
-function _hmac_sha256(key::Vector{UInt8}, data::Vector{UInt8})
+function _hmac_sha256(key::AbstractVector{UInt8}, data::AbstractVector{UInt8})
     _tls_cal_init_once()
     allocator = LibAwsCommon.default_aws_allocator()
     key_cur = _aws_byte_cursor_from_vec(key)
@@ -246,27 +246,27 @@ function _hmac_sha256(key::Vector{UInt8}, data::Vector{UInt8})
 
     hmac = LibAwsCal.aws_sha256_hmac_new(allocator, Ref(key_cur))
     if hmac == C_NULL
-        return UInt8[]
+        return Memory{UInt8}(undef, 0)
     end
 
     if LibAwsCal.aws_hmac_update(hmac, Ref(data_cur)) != 0
         LibAwsCal.aws_hmac_destroy(hmac)
-        return UInt8[]
+        return Memory{UInt8}(undef, 0)
     end
 
-    out = Vector{UInt8}(undef, TLS_MAC_LEN)
+    out = Memory{UInt8}(undef, TLS_MAC_LEN)
     out_buf = _aws_byte_buf_from_vec(out)
     if LibAwsCal.aws_hmac_finalize(hmac, Ref(out_buf), Csize_t(0)) != 0
         LibAwsCal.aws_hmac_destroy(hmac)
-        return UInt8[]
+        return Memory{UInt8}(undef, 0)
     end
 
     LibAwsCal.aws_hmac_destroy(hmac)
     return out
 end
 
-function _xor_with_key(data::Vector{UInt8}, key::Vector{UInt8})
-    out = Vector{UInt8}(undef, length(data))
+function _xor_with_key(data::AbstractVector{UInt8}, key::AbstractVector{UInt8})
+    out = Memory{UInt8}(undef, length(data))
     key_len = length(key)
     key_len == 0 && return data
     for i in eachindex(data)
@@ -275,7 +275,7 @@ function _xor_with_key(data::Vector{UInt8}, key::Vector{UInt8})
     return out
 end
 
-function _const_time_eq(a::Vector{UInt8}, b::Vector{UInt8})
+function _const_time_eq(a::AbstractVector{UInt8}, b::AbstractVector{UInt8})
     length(a) == length(b) || return false
     acc = UInt8(0)
     for i in eachindex(a)
@@ -316,7 +316,7 @@ function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message
     return nothing
 end
 
-function _tls_send_record!(handler::TlsChannelHandler, record_type::UInt8, payload::Vector{UInt8})
+function _tls_send_record!(handler::TlsChannelHandler, record_type::UInt8, payload::AbstractVector{UInt8})
     slot = handler.slot
     if slot === nothing || slot.channel === nothing
         return nothing
@@ -363,7 +363,7 @@ function _tls_send_client_hello!(handler::TlsChannelHandler)
     handler.state == TlsHandshakeState.INIT || return nothing
     rnd_buf = ByteBuffer(TLS_NONCE_LEN)
     device_random_buffer_append(Ref(rnd_buf), Csize_t(TLS_NONCE_LEN))
-    client_random = Vector{UInt8}(undef, TLS_NONCE_LEN)
+    client_random = Memory{UInt8}(undef, TLS_NONCE_LEN)
     unsafe_copyto!(pointer(client_random), pointer(getfield(rnd_buf, :mem)), TLS_NONCE_LEN)
     handler.client_random = client_random
     handler.state = TlsHandshakeState.CLIENT_HELLO_SENT
@@ -374,7 +374,7 @@ end
 function _tls_send_server_hello!(handler::TlsChannelHandler)
     rnd_buf = ByteBuffer(TLS_NONCE_LEN)
     device_random_buffer_append(Ref(rnd_buf), Csize_t(TLS_NONCE_LEN))
-    server_random = Vector{UInt8}(undef, TLS_NONCE_LEN)
+    server_random = Memory{UInt8}(undef, TLS_NONCE_LEN)
     unsafe_copyto!(pointer(server_random), pointer(getfield(rnd_buf, :mem)), TLS_NONCE_LEN)
     handler.server_random = server_random
     _tls_send_record!(handler, TLS_HANDSHAKE_SERVER_HELLO, server_random)
@@ -397,7 +397,7 @@ function _tls_mark_negotiated!(handler::TlsChannelHandler)
     return nothing
 end
 
-function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, payload::Vector{UInt8})
+function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, payload::AbstractVector{UInt8})
     if record_type == TLS_HANDSHAKE_CLIENT_HELLO
         if !handler.options.ctx.options.is_server || handler.state != TlsHandshakeState.INIT
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Unexpected client hello")
@@ -407,7 +407,7 @@ function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, 
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Invalid client hello size")
             return nothing
         end
-        handler.client_random = copy(payload)
+        handler.client_random = Memory{UInt8}(payload)
         _tls_send_server_hello!(handler)
         handler.session_key = _derive_session_key(handler.client_random, handler.server_random)
         if isempty(handler.session_key)
@@ -427,7 +427,7 @@ function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, 
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Invalid server hello size")
             return nothing
         end
-        handler.server_random = copy(payload)
+        handler.server_random = Memory{UInt8}(payload)
         handler.session_key = _derive_session_key(handler.client_random, handler.server_random)
         if isempty(handler.session_key)
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Session key derivation failed")
@@ -441,7 +441,7 @@ function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, 
     return nothing
 end
 
-function _tls_handle_application!(handler::TlsChannelHandler, payload::Vector{UInt8})
+function _tls_handle_application!(handler::TlsChannelHandler, payload::AbstractVector{UInt8})
     if !handler.negotiation_completed
         _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "Application data before negotiation")
         return nothing
@@ -558,7 +558,7 @@ function _tls_encrypt_message(handler::TlsChannelHandler, message::IoMessage)
         return nothing
     end
 
-    plaintext = Vector{UInt8}(undef, total)
+    plaintext = Memory{UInt8}(undef, total)
     GC.@preserve buf begin
         unsafe_copyto!(pointer(plaintext), pointer(getfield(buf, :mem)), total)
     end

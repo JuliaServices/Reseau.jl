@@ -49,12 +49,6 @@ mutable struct ClientBootstrap{ELG, HR, TO, FS <: Union{OnBootstrapChannelSetupF
     on_shutdown_callback::FD  # nullable
     user_data::U
     @atomic shutdown::Bool
-    ref_count::RefCounted{ClientBootstrap{ELG, HR, TO, FS, FD, U}, Function}
-end
-
-function _client_bootstrap_on_zero_ref(bootstrap::ClientBootstrap)
-    logf(LogLevel.TRACE, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: ref count zero")
-    return nothing
 end
 
 function ClientBootstrap(
@@ -70,25 +64,11 @@ function ClientBootstrap(
         options.on_shutdown_callback,
         options.user_data,
         false,
-        RefCounted{CBT, Function}(1, nothing, _client_bootstrap_on_zero_ref),
     )
-    bootstrap.ref_count = RefCounted(bootstrap, _client_bootstrap_on_zero_ref)
 
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: created")
 
     return bootstrap
-end
-
-# Acquire reference
-function client_bootstrap_acquire!(bootstrap::ClientBootstrap)
-    acquire!(bootstrap.ref_count)
-    return bootstrap
-end
-
-# Release reference
-function client_bootstrap_release!(bootstrap::ClientBootstrap)
-    release!(bootstrap.ref_count)
-    return nothing
 end
 
 # Connection request tracking
@@ -433,15 +413,6 @@ mutable struct ServerBootstrap{ELG, FL <: Union{OnServerListenerSetupFn, Nothing
     on_incoming_channel_shutdown::FD  # nullable
     user_data::U
     @atomic shutdown::Bool
-    ref_count::RefCounted{ServerBootstrap{ELG, FL, FS, FD, U}, Function}
-end
-
-function _server_bootstrap_on_zero_ref(bootstrap::ServerBootstrap)
-    logf(LogLevel.TRACE, LS_IO_CHANNEL_BOOTSTRAP, "ServerBootstrap: ref count zero")
-    if bootstrap.listener_socket !== nothing
-        socket_close!(bootstrap.listener_socket)
-    end
-    return nothing
 end
 
 function ServerBootstrap(
@@ -457,9 +428,7 @@ function ServerBootstrap(
         options.on_incoming_channel_shutdown,
         options.user_data,
         false,
-        RefCounted{SBT, Function}(1, nothing, _server_bootstrap_on_zero_ref),
     )
-    bootstrap.ref_count = RefCounted(bootstrap, _server_bootstrap_on_zero_ref)
 
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ServerBootstrap: created")
 
@@ -546,18 +515,6 @@ function ServerBootstrap(
     )
 
     return bootstrap
-end
-
-# Acquire reference
-function server_bootstrap_acquire!(bootstrap::ServerBootstrap)
-    acquire!(bootstrap.ref_count)
-    return bootstrap
-end
-
-# Release reference
-function server_bootstrap_release!(bootstrap::ServerBootstrap)
-    release!(bootstrap.ref_count)
-    return nothing
 end
 
 # Callback for incoming connections

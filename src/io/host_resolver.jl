@@ -625,7 +625,7 @@ function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
             addr_val = unsafe_load(addr_ptr)
 
             # Convert to dotted decimal string
-            buf = Vector{UInt8}(undef, 16)
+            buf = Memory{UInt8}(undef, 16)
             ret = GC.@preserve buf begin
                 ccall(
                     :inet_ntop, Ptr{UInt8},
@@ -641,7 +641,7 @@ function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
             addr_ptr = Ptr{UInt8}(ai.ai_addr + 8)
 
             # Convert to string
-            buf = Vector{UInt8}(undef, 46)
+            buf = Memory{UInt8}(undef, 46)
             ret = GC.@preserve buf begin
                 ccall(
                     :inet_ntop, Ptr{UInt8},

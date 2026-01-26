@@ -417,7 +417,7 @@ end
 
 # Parse IPv6 address using inet_pton
 function inet_pton_ipv6(address::AbstractString)::Union{NTuple{16, UInt8}, ErrorResult}
-    addr = zeros(UInt8, 16)
+    addr = Memory{UInt8}(undef, 16)
     result = GC.@preserve addr ccall(:inet_pton, Cint, (Cint, Cstring, Ptr{UInt8}), AF_INET6, address, pointer(addr))
     if result != 1
         raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
@@ -428,7 +428,7 @@ end
 
 # Convert IPv4 to string
 function inet_ntop_ipv4(addr::UInt32)::String
-    buf = zeros(UInt8, 16)  # INET_ADDRSTRLEN
+    buf = Memory{UInt8}(undef, 16)  # INET_ADDRSTRLEN
     addr_ref = Ref(addr)
     result = GC.@preserve buf addr_ref ccall(
         :inet_ntop, Cstring, (Cint, Ptr{UInt32}, Ptr{UInt8}, Cuint),
@@ -442,11 +442,14 @@ end
 
 # Convert IPv6 to string
 function inet_ntop_ipv6(addr::NTuple{16, UInt8})::String
-    buf = zeros(UInt8, 46)  # INET6_ADDRSTRLEN
-    addr_vec = collect(addr)
-    result = GC.@preserve buf addr_vec ccall(
+    buf = Memory{UInt8}(undef, 46)  # INET6_ADDRSTRLEN
+    addr_mem = Memory{UInt8}(undef, length(addr))
+    @inbounds for i in eachindex(addr)
+        addr_mem[i] = addr[i]
+    end
+    result = GC.@preserve buf addr_mem ccall(
         :inet_ntop, Cstring, (Cint, Ptr{UInt8}, Ptr{UInt8}, Cuint),
-        AF_INET6, pointer(addr_vec), pointer(buf), Cuint(46)
+        AF_INET6, pointer(addr_mem), pointer(buf), Cuint(46)
     )
     if result == C_NULL
         return ""
@@ -526,7 +529,8 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: connecting to $address:$port")
 
     # Build sockaddr based on domain
-    sockaddr_buf = zeros(UInt8, 128)
+    sockaddr_buf = Memory{UInt8}(undef, 128)
+    fill!(sockaddr_buf, 0x00)
     sockaddr_len::Cuint = 0
 
     if sock.options.domain == SocketDomain.IPV4
@@ -550,7 +554,9 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
         # Build sockaddr_in6
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_INET6)])
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
-        sockaddr_buf[5:8] .= zeros(UInt8, 4)  # flowinfo
+        @inbounds for i in 5:8
+            sockaddr_buf[i] = 0x00
+        end
         for i in 1:16
             sockaddr_buf[8 + i] = addr_result[i]
         end
@@ -559,7 +565,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
     elseif sock.options.domain == SocketDomain.LOCAL
         # Build sockaddr_un
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_UNIX)])
-        addr_bytes = Vector{UInt8}(address)
+        addr_bytes = Memory{UInt8}(codeunits(address))
         copy_len = min(length(addr_bytes), 106)
         for i in 1:copy_len
             sockaddr_buf[2 + i] = addr_bytes[i]
@@ -811,7 +817,8 @@ end
 # Update local endpoint from socket
 function _update_local_endpoint!(sock::PosixSocketType)
     fd = sock.io_handle.fd
-    address = zeros(UInt8, 128)
+    address = Memory{UInt8}(undef, 128)
+    fill!(address, 0x00)
     address_size = Ref{Cuint}(128)
 
     result = GC.@preserve address ccall(
@@ -877,7 +884,8 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
     logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: binding to $address:$port")
 
     # Build sockaddr
-    sockaddr_buf = zeros(UInt8, 128)
+    sockaddr_buf = Memory{UInt8}(undef, 128)
+    fill!(sockaddr_buf, 0x00)
     sockaddr_len::Cuint = 0
 
     if sock.options.domain == SocketDomain.IPV4
@@ -899,7 +907,9 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
 
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_INET6)])
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
-        sockaddr_buf[5:8] .= zeros(UInt8, 4)
+        @inbounds for i in 5:8
+            sockaddr_buf[i] = 0x00
+        end
         for i in 1:16
             sockaddr_buf[8 + i] = addr_result[i]
         end
@@ -907,7 +917,7 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
 
     elseif sock.options.domain == SocketDomain.LOCAL
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_UNIX)])
-        addr_bytes = Vector{UInt8}(address)
+        addr_bytes = Memory{UInt8}(codeunits(address))
         copy_len = min(length(addr_bytes), 106)
         for i in 1:copy_len
             sockaddr_buf[2 + i] = addr_bytes[i]
@@ -1466,7 +1476,8 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
     if socket_impl.continue_accept && (events & Int(IoEventType.READABLE)) != 0
         # Accept loop
         while socket_impl.continue_accept
-            in_addr = zeros(UInt8, 128)
+            in_addr = Memory{UInt8}(undef, 128)
+            fill!(in_addr, 0x00)
             in_len = Ref{Cuint}(128)
 
             in_fd = GC.@preserve in_addr ccall(

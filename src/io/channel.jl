@@ -23,9 +23,9 @@ ChannelHandlerShutdownOptions() = ChannelHandlerShutdownOptions(false, false)
 
 # Channel slot - links handlers in the pipeline
 # Each slot can hold a handler and links to adjacent slots
-mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Union{AbstractChannel, Nothing}}
-    adj_left::Union{ChannelSlot, Nothing}   # Toward the application (outgoing data flows left)
-    adj_right::Union{ChannelSlot, Nothing}  # Toward the socket/network (incoming data flows right)
+mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Union{AbstractChannel, Nothing}, SlotRef}
+    adj_left::SlotRef   # Toward the application (outgoing data flows left)
+    adj_right::SlotRef  # Toward the socket/network (incoming data flows right)
     handler::H
     channel::C
     current_window_update_batch_size::Csize_t
@@ -33,7 +33,7 @@ mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Uni
 end
 
 function ChannelSlot()
-    return ChannelSlot{Union{AbstractChannelHandler, Nothing}, Union{AbstractChannel, Nothing}}(
+    return ChannelSlot{Union{AbstractChannelHandler, Nothing}, Union{AbstractChannel, Nothing}, Union{ChannelSlot, Nothing}}(
         nothing,
         nothing,
         nothing,
@@ -44,7 +44,7 @@ function ChannelSlot()
 end
 
 function ChannelSlot(handler::H, channel::C) where {H, C}
-    return ChannelSlot{H, C}(
+    return ChannelSlot{H, C, Union{ChannelSlot, Nothing}}(
         nothing,
         nothing,
         handler,
@@ -61,16 +61,16 @@ slot_right(slot::ChannelSlot) = slot.adj_right
 
 # Channel handler base structure
 # Concrete handlers should embed this or use similar structure
-mutable struct ChannelHandlerBase{V, Impl}
+mutable struct ChannelHandlerBase{V, Impl, SlotRef <: Union{ChannelSlot, Nothing}}
     vtable::V  # ChannelHandlerVTable implementation
     impl::Impl  # Handler-specific implementation data
-    slot::Union{ChannelSlot, Nothing}
+    slot::SlotRef
     message_overhead::Csize_t
     initial_window_size::Csize_t
 end
 
 function ChannelHandlerBase(vtable::V, impl::Impl; initial_window_size::Integer = 0) where {V, Impl}
-    return ChannelHandlerBase{V, Impl}(
+    return ChannelHandlerBase{V, Impl, Union{ChannelSlot, Nothing}}(
         vtable,
         impl,
         nothing,
@@ -147,10 +147,10 @@ end
 end
 
 # Channel - a bidirectional pipeline of handlers
-mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, US, UD} <: AbstractChannel
+mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, US, UD, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannel
     event_loop::EL
-    first::Union{ChannelSlot, Nothing}  # nullable - Application side (leftmost)
-    last::Union{ChannelSlot, Nothing}   # nullable - Socket side (rightmost)
+    first::SlotRef  # nullable - Application side (leftmost)
+    last::SlotRef   # nullable - Socket side (rightmost)
     channel_state::ChannelState.T
     read_back_pressure_enabled::Bool
     channel_id::UInt64
@@ -189,7 +189,7 @@ function Channel(
     ) where {EL <: AbstractEventLoop}
     channel_id = _next_channel_id()
 
-    return Channel{EL, Nothing, Nothing, Nothing, Nothing}(
+    return Channel{EL, Nothing, Nothing, Nothing, Nothing, Union{ChannelSlot, Nothing}}(
         event_loop,
         nothing,  # first
         nothing,  # last
@@ -660,8 +660,8 @@ end
 # Helper struct for simple passthrough handler
 struct PassthroughHandlerVTable end
 
-mutable struct PassthroughHandler <: AbstractChannelHandler
-    slot::Union{ChannelSlot, Nothing}
+mutable struct PassthroughHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
+    slot::SlotRef
     initial_window_size::Csize_t
     message_overhead::Csize_t
 end
@@ -670,7 +670,7 @@ function PassthroughHandler(;
         initial_window_size::Integer = SIZE_MAX,
         message_overhead::Integer = 0,
     )
-    return PassthroughHandler(
+    return PassthroughHandler{Union{ChannelSlot, Nothing}}(
         nothing,
         Csize_t(initial_window_size),
         Csize_t(message_overhead),

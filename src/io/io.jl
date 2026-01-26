@@ -440,8 +440,8 @@ const _io_error_definitions = [
 
 const _io_error_entries = let
     count = ERROR_IO_DNS_QUERY_AGAIN - ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT + 1
-    # Use Vector here to keep stable pointers for the error registry.
-    entries = Vector{error_info}(undef, count)
+    # Use Memory here for fixed-size storage and stable pointers for the error registry.
+    entries = Memory{error_info}(undef, count)
     for (name, code, msg) in _io_error_definitions
         idx = code - ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT + 1
         entries[idx] = _define_error_info(code, name, msg, "aws-c-io")
