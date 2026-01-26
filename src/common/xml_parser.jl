@@ -22,7 +22,7 @@ struct XmlParserOptions{F}
     on_root::F
 end
 
-XmlParserOptions(on_root, doc::ByteCursor, max_depth::Integer=0) =
+XmlParserOptions(on_root, doc::ByteCursor, max_depth::Integer = 0) =
     XmlParserOptions(doc, Int(max_depth), on_root)
 
 const xml_attribute = XmlAttribute

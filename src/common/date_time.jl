@@ -70,17 +70,17 @@ const _tz_utc = Ref{UInt32}(0)
 const _tz_gmt = Ref{UInt32}(0)
 
 @inline function _tm_with(
-    tm_val::tm;
-    sec::Cint=tm_val.tm_sec,
-    min::Cint=tm_val.tm_min,
-    hour::Cint=tm_val.tm_hour,
-    mday::Cint=tm_val.tm_mday,
-    mon::Cint=tm_val.tm_mon,
-    year::Cint=tm_val.tm_year,
-    wday::Cint=tm_val.tm_wday,
-    yday::Cint=tm_val.tm_yday,
-    isdst::Cint=tm_val.tm_isdst,
-)
+        tm_val::tm;
+        sec::Cint = tm_val.tm_sec,
+        min::Cint = tm_val.tm_min,
+        hour::Cint = tm_val.tm_hour,
+        mday::Cint = tm_val.tm_mday,
+        mon::Cint = tm_val.tm_mon,
+        year::Cint = tm_val.tm_year,
+        wday::Cint = tm_val.tm_wday,
+        yday::Cint = tm_val.tm_yday,
+        isdst::Cint = tm_val.tm_isdst,
+    )
     @static if _PLATFORM_WINDOWS
         return tm(sec, min, hour, mday, mon, year, wday, yday, isdst)
     else
@@ -90,8 +90,8 @@ end
 
 @inline function _triplet_to_index(ptr::Ptr{UInt8})
     return UInt32(_ascii_tolower(unsafe_load(ptr))) |
-           (UInt32(_ascii_tolower(unsafe_load(ptr + 1))) << 8) |
-           (UInt32(_ascii_tolower(unsafe_load(ptr + 2))) << 16)
+        (UInt32(_ascii_tolower(unsafe_load(ptr + 1))) << 8) |
+        (UInt32(_ascii_tolower(unsafe_load(ptr + 2))) << 16)
 end
 
 function _check_init_str_to_int()
@@ -167,7 +167,7 @@ function _is_utc_time_zone(tz_ptr::Ptr{UInt8})
         end
         if len == 2
             return _ascii_tolower(unsafe_load(tz_ptr)) == UInt8('u') &&
-                   _ascii_tolower(unsafe_load(tz_ptr + 1)) == UInt8('t')
+                _ascii_tolower(unsafe_load(tz_ptr + 1)) == UInt8('t')
         end
         if len < 3
             return false
@@ -202,11 +202,11 @@ const _STATE_ON_SECOND = 7
 const _STATE_ON_TZ = 8
 
 function _parse_rfc_822(
-    date_str_cursor::Ptr{ByteCursor},
-    parsed_time::Ptr{tm},
-    tz_buf::Vector{UInt8},
-    utc_assumed::Base.RefValue{Bool},
-)
+        date_str_cursor::Ptr{ByteCursor},
+        parsed_time::Ptr{tm},
+        tz_buf::Vector{UInt8},
+        utc_assumed::Base.RefValue{Bool},
+    )
     len = Int(unsafe_load(date_str_cursor).len)
     index = 0
     state_start_index = 0
@@ -239,7 +239,7 @@ function _parse_rfc_822(
             if isdigit(c)
                 tm_val = unsafe_load(parsed_time)
                 val = tm_val.tm_mday * 10 + (c - UInt8('0'))
-                unsafe_store!(parsed_time, _tm_with(tm_val; mday=Cint(val)))
+                unsafe_store!(parsed_time, _tm_with(tm_val; mday = Cint(val)))
             elseif is_space(c)
                 state = _STATE_ON_MONTH
                 state_start_index = index + 1
@@ -251,7 +251,7 @@ function _parse_rfc_822(
                 month_number = _get_month_number_from_str(ptr, state_start_index, index + 1)
                 if month_number > -1
                     tm_val = unsafe_load(parsed_time)
-                    unsafe_store!(parsed_time, _tm_with(tm_val; mon=Cint(month_number)))
+                    unsafe_store!(parsed_time, _tm_with(tm_val; mon = Cint(month_number)))
                     state = _STATE_ON_YEAR
                     state_start_index = index + 1
                 else
@@ -264,19 +264,19 @@ function _parse_rfc_822(
             if is_space(c) && index - state_start_index == 4
                 tm_val = unsafe_load(parsed_time)
                 year = tm_val.tm_year - 1900
-                unsafe_store!(parsed_time, _tm_with(tm_val; year=Cint(year)))
+                unsafe_store!(parsed_time, _tm_with(tm_val; year = Cint(year)))
                 state = _STATE_ON_HOUR
                 state_start_index = index + 1
             elseif is_space(c) && index - state_start_index == 2
                 tm_val = unsafe_load(parsed_time)
                 year = tm_val.tm_year + (2000 - 1900)
-                unsafe_store!(parsed_time, _tm_with(tm_val; year=Cint(year)))
+                unsafe_store!(parsed_time, _tm_with(tm_val; year = Cint(year)))
                 state = _STATE_ON_HOUR
                 state_start_index = index + 1
             elseif isdigit(c)
                 tm_val = unsafe_load(parsed_time)
                 year = tm_val.tm_year * 10 + (c - UInt8('0'))
-                unsafe_store!(parsed_time, _tm_with(tm_val; year=Cint(year)))
+                unsafe_store!(parsed_time, _tm_with(tm_val; year = Cint(year)))
             else
                 error = true
             end
@@ -287,7 +287,7 @@ function _parse_rfc_822(
             elseif isdigit(c)
                 tm_val = unsafe_load(parsed_time)
                 hour = tm_val.tm_hour * 10 + (c - UInt8('0'))
-                unsafe_store!(parsed_time, _tm_with(tm_val; hour=Cint(hour)))
+                unsafe_store!(parsed_time, _tm_with(tm_val; hour = Cint(hour)))
             else
                 error = true
             end
@@ -298,7 +298,7 @@ function _parse_rfc_822(
             elseif isdigit(c)
                 tm_val = unsafe_load(parsed_time)
                 min = tm_val.tm_min * 10 + (c - UInt8('0'))
-                unsafe_store!(parsed_time, _tm_with(tm_val; min=Cint(min)))
+                unsafe_store!(parsed_time, _tm_with(tm_val; min = Cint(min)))
             else
                 error = true
             end
@@ -309,7 +309,7 @@ function _parse_rfc_822(
             elseif isdigit(c)
                 tm_val = unsafe_load(parsed_time)
                 sec = tm_val.tm_sec * 10 + (c - UInt8('0'))
-                unsafe_store!(parsed_time, _tm_with(tm_val; sec=Cint(sec)))
+                unsafe_store!(parsed_time, _tm_with(tm_val; sec = Cint(sec)))
             else
                 error = true
             end
@@ -408,7 +408,7 @@ function _parse_iso_8601(str::ByteCursor, parsed_time::Ptr{tm}, seconds_offset::
         return false
     end
     tm_val = unsafe_load(parsed_time)
-    unsafe_store!(parsed_time, _tm_with(tm_val; year=Cint(year[] - 1900)))
+    unsafe_store!(parsed_time, _tm_with(tm_val; year = Cint(year[] - 1900)))
 
     has_date_separator = _advance_if_next_char_is(str_ref, UInt8('-'))
 
@@ -417,7 +417,7 @@ function _parse_iso_8601(str::ByteCursor, parsed_time::Ptr{tm}, seconds_offset::
         return false
     end
     tm_val = unsafe_load(parsed_time)
-    unsafe_store!(parsed_time, _tm_with(tm_val; mon=Cint(month[] - 1)))
+    unsafe_store!(parsed_time, _tm_with(tm_val; mon = Cint(month[] - 1)))
 
     if has_date_separator
         if !_read_1_char(str_ref, c) || c[] != UInt8('-')
@@ -430,7 +430,7 @@ function _parse_iso_8601(str::ByteCursor, parsed_time::Ptr{tm}, seconds_offset::
         return false
     end
     tm_val = unsafe_load(parsed_time)
-    unsafe_store!(parsed_time, _tm_with(tm_val; mday=Cint(month_day[])))
+    unsafe_store!(parsed_time, _tm_with(tm_val; mday = Cint(month_day[])))
 
     if str_ref[].len == 0
         return true
@@ -445,7 +445,7 @@ function _parse_iso_8601(str::ByteCursor, parsed_time::Ptr{tm}, seconds_offset::
         return false
     end
     tm_val = unsafe_load(parsed_time)
-    unsafe_store!(parsed_time, _tm_with(tm_val; hour=Cint(hour[])))
+    unsafe_store!(parsed_time, _tm_with(tm_val; hour = Cint(hour[])))
 
     has_time_separator = _advance_if_next_char_is(str_ref, UInt8(':'))
 
@@ -454,7 +454,7 @@ function _parse_iso_8601(str::ByteCursor, parsed_time::Ptr{tm}, seconds_offset::
         return false
     end
     tm_val = unsafe_load(parsed_time)
-    unsafe_store!(parsed_time, _tm_with(tm_val; min=Cint(minute[])))
+    unsafe_store!(parsed_time, _tm_with(tm_val; min = Cint(minute[])))
 
     if has_time_separator
         if !_read_1_char(str_ref, c) || c[] != UInt8(':')
@@ -467,7 +467,7 @@ function _parse_iso_8601(str::ByteCursor, parsed_time::Ptr{tm}, seconds_offset::
         return false
     end
     tm_val = unsafe_load(parsed_time)
-    unsafe_store!(parsed_time, _tm_with(tm_val; sec=Cint(second[])))
+    unsafe_store!(parsed_time, _tm_with(tm_val; sec = Cint(second[])))
 
     if !_skip_optional_fractional_seconds(str_ref)
         return false
@@ -566,10 +566,10 @@ function date_time_init_epoch_secs(dt::Base.RefValue{date_time}, sec_ms::Float64
 end
 
 function date_time_init_from_str_cursor(
-    dt::Ptr{date_time},
-    date_str_cursor::Ptr{ByteCursor},
-    fmt::date_format,
-)
+        dt::Ptr{date_time},
+        date_str_cursor::Ptr{ByteCursor},
+        fmt::date_format,
+    )
     precondition(dt != C_NULL)
     precondition(date_str_cursor != C_NULL)
     if unsafe_load(date_str_cursor).len > DATE_TIME_STR_MAX_LEN
@@ -643,10 +643,10 @@ function date_time_init_from_str_cursor(
 end
 
 function date_time_init_from_str_cursor(
-    dt::Base.RefValue{date_time},
-    date_str_cursor::Base.RefValue{ByteCursor},
-    fmt::date_format,
-)
+        dt::Base.RefValue{date_time},
+        date_str_cursor::Base.RefValue{ByteCursor},
+        fmt::date_format,
+    )
     return date_time_init_from_str_cursor(
         Base.unsafe_convert(Ptr{date_time}, dt),
         Base.unsafe_convert(Ptr{ByteCursor}, date_str_cursor),
@@ -655,10 +655,10 @@ function date_time_init_from_str_cursor(
 end
 
 function date_time_init_from_str(
-    dt::Ptr{date_time},
-    date_str::Ptr{ByteBuffer},
-    fmt::date_format,
-)
+        dt::Ptr{date_time},
+        date_str::Ptr{ByteBuffer},
+        fmt::date_format,
+    )
     precondition(dt != C_NULL)
     precondition(date_str != C_NULL)
     if unsafe_load(date_str).len > DATE_TIME_STR_MAX_LEN
@@ -669,10 +669,10 @@ function date_time_init_from_str(
 end
 
 function date_time_init_from_str(
-    dt::Base.RefValue{date_time},
-    date_str::Base.RefValue{<:ByteBuffer},
-    fmt::date_format,
-)
+        dt::Base.RefValue{date_time},
+        date_str::Base.RefValue{<:ByteBuffer},
+        fmt::date_format,
+    )
     return date_time_init_from_str(
         Base.unsafe_convert(Ptr{date_time}, dt),
         Base.unsafe_convert(Ptr{ByteBuffer}, date_str),
@@ -704,10 +704,10 @@ function _date_to_str(tm_val::tm, format_str::AbstractString, output_buf::Ptr{By
 end
 
 function date_time_to_local_time_str(
-    dt::Ptr{date_time},
-    fmt::date_format,
-    output_buf::Ptr{ByteBuffer},
-)
+        dt::Ptr{date_time},
+        fmt::date_format,
+        output_buf::Ptr{ByteBuffer},
+    )
     precondition(dt != C_NULL)
     precondition(output_buf != C_NULL)
     debug_assert(fmt != DateFormat.AUTO_DETECT)
@@ -723,10 +723,10 @@ function date_time_to_local_time_str(
 end
 
 function date_time_to_local_time_str(
-    dt::Base.RefValue{date_time},
-    fmt::date_format,
-    output_buf::Base.RefValue{<:ByteBuffer},
-)
+        dt::Base.RefValue{date_time},
+        fmt::date_format,
+        output_buf::Base.RefValue{<:ByteBuffer},
+    )
     return date_time_to_local_time_str(
         Base.unsafe_convert(Ptr{date_time}, dt),
         fmt,
@@ -735,10 +735,10 @@ function date_time_to_local_time_str(
 end
 
 function date_time_to_utc_time_str(
-    dt::Ptr{date_time},
-    fmt::date_format,
-    output_buf::Ptr{ByteBuffer},
-)
+        dt::Ptr{date_time},
+        fmt::date_format,
+        output_buf::Ptr{ByteBuffer},
+    )
     precondition(dt != C_NULL)
     precondition(output_buf != C_NULL)
     debug_assert(fmt != DateFormat.AUTO_DETECT)
@@ -754,10 +754,10 @@ function date_time_to_utc_time_str(
 end
 
 function date_time_to_utc_time_str(
-    dt::Base.RefValue{date_time},
-    fmt::date_format,
-    output_buf::Base.RefValue{<:ByteBuffer},
-)
+        dt::Base.RefValue{date_time},
+        fmt::date_format,
+        output_buf::Base.RefValue{<:ByteBuffer},
+    )
     return date_time_to_utc_time_str(
         Base.unsafe_convert(Ptr{date_time}, dt),
         fmt,
@@ -766,10 +766,10 @@ function date_time_to_utc_time_str(
 end
 
 function date_time_to_local_time_short_str(
-    dt::Ptr{date_time},
-    fmt::date_format,
-    output_buf::Ptr{ByteBuffer},
-)
+        dt::Ptr{date_time},
+        fmt::date_format,
+        output_buf::Ptr{ByteBuffer},
+    )
     precondition(dt != C_NULL)
     precondition(output_buf != C_NULL)
     debug_assert(fmt != DateFormat.AUTO_DETECT)
@@ -785,10 +785,10 @@ function date_time_to_local_time_short_str(
 end
 
 function date_time_to_local_time_short_str(
-    dt::Base.RefValue{date_time},
-    fmt::date_format,
-    output_buf::Base.RefValue{<:ByteBuffer},
-)
+        dt::Base.RefValue{date_time},
+        fmt::date_format,
+        output_buf::Base.RefValue{<:ByteBuffer},
+    )
     return date_time_to_local_time_short_str(
         Base.unsafe_convert(Ptr{date_time}, dt),
         fmt,
@@ -797,10 +797,10 @@ function date_time_to_local_time_short_str(
 end
 
 function date_time_to_utc_time_short_str(
-    dt::Ptr{date_time},
-    fmt::date_format,
-    output_buf::Ptr{ByteBuffer},
-)
+        dt::Ptr{date_time},
+        fmt::date_format,
+        output_buf::Ptr{ByteBuffer},
+    )
     precondition(dt != C_NULL)
     precondition(output_buf != C_NULL)
     debug_assert(fmt != DateFormat.AUTO_DETECT)
@@ -816,10 +816,10 @@ function date_time_to_utc_time_short_str(
 end
 
 function date_time_to_utc_time_short_str(
-    dt::Base.RefValue{date_time},
-    fmt::date_format,
-    output_buf::Base.RefValue{<:ByteBuffer},
-)
+        dt::Base.RefValue{date_time},
+        fmt::date_format,
+        output_buf::Base.RefValue{<:ByteBuffer},
+    )
     return date_time_to_utc_time_short_str(
         Base.unsafe_convert(Ptr{date_time}, dt),
         fmt,
@@ -839,7 +839,7 @@ end
 function date_time_as_nanos(dt::Ptr{date_time})
     dt_val = unsafe_load(dt)
     return timestamp_convert(UInt64(dt_val.timestamp), TIMESTAMP_SECS, TIMESTAMP_NANOS, nothing) +
-           timestamp_convert(UInt64(dt_val.milliseconds), TIMESTAMP_MILLIS, TIMESTAMP_NANOS, nothing)
+        timestamp_convert(UInt64(dt_val.milliseconds), TIMESTAMP_MILLIS, TIMESTAMP_NANOS, nothing)
 end
 
 function date_time_as_nanos(dt::Base.RefValue{date_time})
@@ -849,7 +849,7 @@ end
 function date_time_as_millis(dt::Ptr{date_time})
     dt_val = unsafe_load(dt)
     return timestamp_convert(UInt64(dt_val.timestamp), TIMESTAMP_SECS, TIMESTAMP_MILLIS, nothing) +
-           UInt64(dt_val.milliseconds)
+        UInt64(dt_val.milliseconds)
 end
 
 function date_time_as_millis(dt::Base.RefValue{date_time})

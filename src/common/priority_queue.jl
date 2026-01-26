@@ -1,10 +1,10 @@
-mutable struct PriorityQueue{T,Less}
+mutable struct PriorityQueue{T, Less}
     data::Memory{T}
     length::Int
     less::Less
 end
 
-function PriorityQueue{T}(less; capacity::Integer=0) where {T}
+function PriorityQueue{T}(less; capacity::Integer = 0) where {T}
     cap = max(Int(capacity), 0)
     return PriorityQueue{T, typeof(less)}(Memory{T}(undef, cap), 0, less)
 end
@@ -117,7 +117,7 @@ function clear!(queue::PriorityQueue)
     return nothing
 end
 
-function remove!(queue::PriorityQueue, value; eq=isequal)
+function remove!(queue::PriorityQueue, value; eq = isequal)
     for i in 1:queue.length
         if eq(queue.data[i], value)
             queue.data[i] = queue.data[queue.length]

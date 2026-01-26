@@ -89,6 +89,7 @@ function thread_join_all_managed()
 
         Base.yield()
     end
+    return
 end
 
 function thread_pending_join_add(handle::ThreadHandle)

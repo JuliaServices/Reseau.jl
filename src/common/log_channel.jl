@@ -2,12 +2,12 @@ abstract type AbstractLogChannel end
 
 struct ForegroundChannel <: AbstractLogChannel end
 
-mutable struct BackgroundChannel{W<:AbstractLogWriter} <: AbstractLogChannel
+mutable struct BackgroundChannel{W <: AbstractLogWriter} <: AbstractLogChannel
     queue::Channel{Tuple{W, String}}
     task::Task
 end
 
-function BackgroundChannel(::Type{W}; capacity::Integer=256) where {W<:AbstractLogWriter}
+function BackgroundChannel(::Type{W}; capacity::Integer = 256) where {W <: AbstractLogWriter}
     queue = Channel{Tuple{W, String}}(capacity)
     task = @async begin
         for (writer, line) in queue
@@ -22,7 +22,7 @@ end
     return nothing
 end
 
-@inline function send!(channel::BackgroundChannel{W}, writer::W, line::AbstractString) where {W<:AbstractLogWriter}
+@inline function send!(channel::BackgroundChannel{W}, writer::W, line::AbstractString) where {W <: AbstractLogWriter}
     put!(channel.queue, (writer, String(line)))
     return nothing
 end

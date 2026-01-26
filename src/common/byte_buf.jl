@@ -46,12 +46,12 @@ function ByteCursor(s::AbstractString)
     if len == 0
         return ByteCursor(Csize_t(0), memoryref(_null_cursor_mem))
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(s), len; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(s), len; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = s
     return ByteCursor(Csize_t(len), memoryref(mem))
 end
 
-function ByteCursor(mem::Memory{UInt8}, len::Integer=length(mem))
+function ByteCursor(mem::Memory{UInt8}, len::Integer = length(mem))
     if len == 0
         return ByteCursor(Csize_t(0), memoryref(_null_cursor_mem))
     end
@@ -72,11 +72,11 @@ function ByteCursor(ref::MemoryRef{UInt8}, len::Integer)
     return ByteCursor(Csize_t(len), ref)
 end
 
-function ByteCursor(vec::Vector{UInt8}, len::Integer=length(vec))
+function ByteCursor(vec::Vector{UInt8}, len::Integer = length(vec))
     if len == 0
         return ByteCursor(Csize_t(0), memoryref(_null_cursor_mem))
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(vec), Int(len); own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(vec), Int(len); own = false)
     _BUFFER_VIEW_REGISTRY[mem] = vec
     return ByteCursor(Csize_t(len), memoryref(mem))
 end
@@ -107,7 +107,7 @@ function Base.getproperty(buf::ByteBuffer, name::Symbol)
     return getfield(buf, name)
 end
 
-function Base.propertynames(::ByteBuffer; private::Bool=false)
+function Base.propertynames(::ByteBuffer; private::Bool = false)
     return (:mem, :len, :capacity)
 end
 
@@ -329,8 +329,8 @@ const _hex_to_num_table = let
         table[UInt8('0') + i + 1] = UInt8(i)
     end
     for i in 0:5
-        table[UInt8('A') + i + 1] = UInt8(0xA + i)
-        table[UInt8('a') + i + 1] = UInt8(0xA + i)
+        table[UInt8('A') + i + 1] = UInt8(0x0A + i)
+        table[UInt8('a') + i + 1] = UInt8(0x0A + i)
     end
     table
 end
@@ -499,12 +499,12 @@ function byte_buf_from_c_str(c_str::AbstractString)
     if len == 0
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(c_str), len; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(c_str), len; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = c_str
     return ByteBuffer(mem, Csize_t(len))
 end
 
-function byte_buf_from_array(bytes::Memory{UInt8}, len::Integer=length(bytes))
+function byte_buf_from_array(bytes::Memory{UInt8}, len::Integer = length(bytes))
     cap = min(Int(len), length(bytes))
     if cap == 0
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
@@ -512,22 +512,22 @@ function byte_buf_from_array(bytes::Memory{UInt8}, len::Integer=length(bytes))
     return ByteBuffer(bytes, Csize_t(cap))
 end
 
-function byte_buf_from_array(bytes::AbstractVector{UInt8}, len::Integer=length(bytes))
+function byte_buf_from_array(bytes::AbstractVector{UInt8}, len::Integer = length(bytes))
     cap = min(Int(len), length(bytes))
     if cap == 0
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), cap; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), cap; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = bytes
     return ByteBuffer(mem, Csize_t(cap))
 end
 
-function byte_buf_from_empty_array(bytes::AbstractVector{UInt8}, len::Integer=length(bytes))
+function byte_buf_from_empty_array(bytes::AbstractVector{UInt8}, len::Integer = length(bytes))
     cap = min(Int(len), length(bytes))
     if cap == 0
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), cap; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), cap; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = bytes
     return ByteBuffer(mem, Csize_t(0))
 end
@@ -537,11 +537,11 @@ function byte_buf_from_empty_array(ptr::Ptr{UInt8}, len::Integer)
     if cap == 0 || ptr == Ptr{UInt8}(0)
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
-    mem = unsafe_wrap(Memory{UInt8}, ptr, cap; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, ptr, cap; own = false)
     return ByteBuffer(mem, Csize_t(0))
 end
 
-function byte_cursor_from_array(bytes::Memory{UInt8}, len::Integer=length(bytes))
+function byte_cursor_from_array(bytes::Memory{UInt8}, len::Integer = length(bytes))
     if len == 0 || length(bytes) == 0
         return null_cursor()
     end
@@ -555,12 +555,12 @@ function byte_cursor_from_array(ref::MemoryRef{UInt8}, len::Integer)
     return ByteCursor(Csize_t(len), ref)
 end
 
-function byte_cursor_from_array(bytes::AbstractVector{UInt8}, len::Integer=length(bytes))
+function byte_cursor_from_array(bytes::AbstractVector{UInt8}, len::Integer = length(bytes))
     if len == 0 || length(bytes) == 0
         return null_cursor()
     end
     actual_len = min(Int(len), length(bytes))
-    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), actual_len; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), actual_len; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = bytes
     return ByteCursor(Csize_t(len), memoryref(mem))
 end
@@ -574,7 +574,7 @@ function byte_cursor_from_array(bytes::AbstractVector{UInt8}, offset::Integer, l
     start >= length(bytes) && return null_cursor()
     max_len = length(bytes) - start
     actual_len = min(Int(len), max_len)
-    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), length(bytes); own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), length(bytes); own = false)
     _BUFFER_VIEW_REGISTRY[mem] = bytes
     return ByteCursor(Csize_t(actual_len), memoryref(mem, start + 1))
 end
@@ -584,7 +584,7 @@ function byte_cursor_from_c_str(c_str::AbstractString)
     if len == 0
         return null_cursor()
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(c_str), len; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(c_str), len; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = c_str
     return ByteCursor(Csize_t(len), memoryref(mem))
 end
@@ -606,7 +606,7 @@ end
 
 function hash_array_ignore_case(cursor::ByteCursor)
     FNV_OFFSET = UInt64(0xcbf29ce484222325)
-    FNV_PRIME = UInt64(0x100000001b3)
+    FNV_PRIME = UInt64(0x00000100000001b3)
     hash = FNV_OFFSET
     if cursor.len == 0
         return hash
@@ -864,7 +864,7 @@ function byte_buf_write(buf::Base.RefValue{ByteBuffer}, src::Memory{UInt8}, src_
     return true
 end
 
-function byte_buf_write(buf::Base.RefValue{ByteBuffer}, src::AbstractVector{UInt8}, len::Integer=length(src))
+function byte_buf_write(buf::Base.RefValue{ByteBuffer}, src::AbstractVector{UInt8}, len::Integer = length(src))
     if len == 0
         return true
     end
@@ -1188,7 +1188,7 @@ function byte_buf_advance(buffer::Base.RefValue{ByteBuffer}, output::Base.RefVal
             output[] = null_buffer()
         else
             # The output buffer is a view into buffer's memory starting at len position
-            output_mem = unsafe_wrap(Memory{UInt8}, pointer(b.mem, Int(b.len) + 1), Int(len); own=false)
+            output_mem = unsafe_wrap(Memory{UInt8}, pointer(b.mem, Int(b.len) + 1), Int(len); own = false)
             _BUFFER_VIEW_REGISTRY[output_mem] = b.mem
             output[] = ByteBuffer(output_mem, Csize_t(0))
         end
@@ -1526,7 +1526,7 @@ function byte_cursor_next_split(input_str::ByteCursor, split_on::UInt8, substr::
     first_run = _is_first_split_run(substr_val)
 
     if !first_run && substr_val.len == 0 &&
-       pointer(substr_val.ptr) === pointer(memoryref(_null_terminator_storage))
+            pointer(substr_val.ptr) === pointer(memoryref(_null_terminator_storage))
         substr[] = null_cursor()
         return false
     end
@@ -1741,13 +1741,13 @@ end
 
 function isalnum(ch::UInt8)
     return (ch >= UInt8('a') && ch <= UInt8('z')) ||
-           (ch >= UInt8('A') && ch <= UInt8('Z')) ||
-           (ch >= UInt8('0') && ch <= UInt8('9'))
+        (ch >= UInt8('A') && ch <= UInt8('Z')) ||
+        (ch >= UInt8('0') && ch <= UInt8('9'))
 end
 
 function isalpha(ch::UInt8)
     return (ch >= UInt8('a') && ch <= UInt8('z')) ||
-           (ch >= UInt8('A') && ch <= UInt8('Z'))
+        (ch >= UInt8('A') && ch <= UInt8('Z'))
 end
 
 function isdigit(ch::UInt8)
@@ -1756,8 +1756,8 @@ end
 
 function isxdigit(ch::UInt8)
     return (ch >= UInt8('0') && ch <= UInt8('9')) ||
-           (ch >= UInt8('a') && ch <= UInt8('f')) ||
-           (ch >= UInt8('A') && ch <= UInt8('F'))
+        (ch >= UInt8('a') && ch <= UInt8('f')) ||
+        (ch >= UInt8('A') && ch <= UInt8('F'))
 end
 
 function is_space(ch::UInt8)

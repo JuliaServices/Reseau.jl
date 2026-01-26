@@ -10,11 +10,11 @@ struct MessagePoolCreationArgs
 end
 
 function MessagePoolCreationArgs(;
-    application_data_msg_data_size::Integer=16384,  # 16KB default
-    application_data_msg_count::Integer=4,
-    small_block_msg_data_size::Integer=256,
-    small_block_msg_count::Integer=16,
-)
+        application_data_msg_data_size::Integer = 16384,  # 16KB default
+        application_data_msg_count::Integer = 4,
+        small_block_msg_data_size::Integer = 256,
+        small_block_msg_count::Integer = 16,
+    )
     return MessagePoolCreationArgs(
         Csize_t(application_data_msg_data_size),
         UInt8(application_data_msg_count),
@@ -24,10 +24,10 @@ function MessagePoolCreationArgs(;
 end
 
 # Message pool - manages pools of pre-allocated IoMessages
-# Uses Vector as stack-based storage for object pooling
+# Uses ArrayList as stack-based storage for object pooling
 mutable struct MessagePool
-    application_data_pool::Vector{IoMessage}  # Pool of large messages
-    small_block_pool::Vector{IoMessage}       # Pool of small messages
+    application_data_pool::ArrayList{IoMessage}  # Pool of large messages
+    small_block_pool::ArrayList{IoMessage}       # Pool of small messages
     application_data_size::Csize_t
     small_block_size::Csize_t
     ideal_app_data_count::UInt8
@@ -35,47 +35,44 @@ mutable struct MessagePool
 end
 
 function MessagePool(
-    args::MessagePoolCreationArgs=MessagePoolCreationArgs(),
-)::Union{MessagePool, ErrorResult}
+        args::MessagePoolCreationArgs = MessagePoolCreationArgs(),
+    )::Union{MessagePool, ErrorResult}
     pool = MessagePool(
-        Vector{IoMessage}(undef, 0),
-        Vector{IoMessage}(undef, 0),
+        ArrayList{IoMessage}(Int(args.application_data_msg_count)),
+        ArrayList{IoMessage}(Int(args.small_block_msg_count)),
         args.application_data_msg_data_size,
         args.small_block_msg_data_size,
         args.application_data_msg_count,
         args.small_block_msg_count,
     )
 
-    sizehint!(pool.application_data_pool, args.application_data_msg_count)
-    sizehint!(pool.small_block_pool, args.small_block_msg_count)
-
     # Pre-allocate large messages
     for i in 1:args.application_data_msg_count
         msg = IoMessage(args.application_data_msg_data_size)
-        push!(pool.application_data_pool, msg)
+        push_back!(pool.application_data_pool, msg)
     end
 
     # Pre-allocate small messages
     for i in 1:args.small_block_msg_count
         msg = IoMessage(args.small_block_msg_data_size)
-        push!(pool.small_block_pool, msg)
+        push_back!(pool.small_block_pool, msg)
     end
 
     return pool
 end
 
 function message_pool_clean_up!(pool::MessagePool)
-    empty!(pool.application_data_pool)
-    empty!(pool.small_block_pool)
+    clear!(pool.application_data_pool)
+    clear!(pool.small_block_pool)
     return nothing
 end
 
 # Acquire a message from the pool
 function message_pool_acquire(
-    pool::MessagePool,
-    message_type::IoMessageType.T,
-    size_hint::Integer,
-)::Union{IoMessage, Nothing}
+        pool::MessagePool,
+        message_type::IoMessageType.T,
+        size_hint::Integer,
+    )::Union{IoMessage, Nothing}
 
     msg::Union{IoMessage, Nothing} = nothing
     max_size::Csize_t = 0
@@ -84,20 +81,20 @@ function message_pool_acquire(
         # Try small pool first if size_hint fits
         if Csize_t(size_hint) <= pool.small_block_size
             if !isempty(pool.small_block_pool)
-                msg = pop!(pool.small_block_pool)
+                msg = pop_back!(pool.small_block_pool)
                 max_size = pool.small_block_size
             end
         end
 
         # Fall back to large pool
         if msg === nothing && !isempty(pool.application_data_pool)
-            msg = pop!(pool.application_data_pool)
+            msg = pop_back!(pool.application_data_pool)
             max_size = pool.application_data_size
         end
 
         # If still nothing, try small pool again for any size
         if msg === nothing && !isempty(pool.small_block_pool)
-            msg = pop!(pool.small_block_pool)
+            msg = pop_back!(pool.small_block_pool)
             max_size = pool.small_block_size
         end
 
@@ -147,12 +144,12 @@ function message_pool_release!(pool::MessagePool, message::IoMessage)
     # Return to appropriate pool based on capacity
     if capacity <= pool.small_block_size
         if length(pool.small_block_pool) < pool.ideal_small_block_count
-            push!(pool.small_block_pool, message)
+            push_back!(pool.small_block_pool, message)
             return nothing
         end
     else
         if length(pool.application_data_pool) < pool.ideal_app_data_count
-            push!(pool.application_data_pool, message)
+            push_back!(pool.application_data_pool, message)
             return nothing
         end
     end

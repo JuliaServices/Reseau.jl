@@ -1,4 +1,4 @@
-struct HashEq{H,Eq}
+struct HashEq{H, Eq}
     hash::H
     eq::Eq
 end
@@ -6,7 +6,7 @@ end
 struct NoopDestroy end
 (::NoopDestroy)(_) = nothing
 
-mutable struct HashTable{K,V,HE,OnKeyDestroy,OnValDestroy}
+mutable struct HashTable{K, V, HE, OnKeyDestroy, OnValDestroy}
     hash_eq::HE
     on_key_destroy::OnKeyDestroy
     on_val_destroy::OnValDestroy
@@ -35,13 +35,13 @@ end
     return Int(hash & UInt64(capacity - 1)) + 1
 end
 
-function HashTable{K,V}(
-    hash_eq::HashEq{H,Eq};
-    capacity::Integer=16,
-    max_load_factor::Real=0.75,
-    on_key_destroy::OnKeyDestroy=NoopDestroy(),
-    on_val_destroy::OnValDestroy=NoopDestroy(),
-) where {K,V,H,Eq,OnKeyDestroy,OnValDestroy}
+function HashTable{K, V}(
+        hash_eq::HashEq{H, Eq};
+        capacity::Integer = 16,
+        max_load_factor::Real = 0.75,
+        on_key_destroy::OnKeyDestroy = NoopDestroy(),
+        on_val_destroy::OnValDestroy = NoopDestroy(),
+    ) where {K, V, H, Eq, OnKeyDestroy, OnValDestroy}
     cap = max(2, _next_pow2(Int(capacity)))
     keys = Memory{K}(undef, cap)
     values = Memory{V}(undef, cap)
@@ -51,7 +51,7 @@ function HashTable{K,V}(
         states[i] = _HASH_EMPTY
     end
     max_load = floor(Int, cap * float(max_load_factor))
-    return HashTable{K,V,HashEq{H,Eq},OnKeyDestroy,OnValDestroy}(
+    return HashTable{K, V, HashEq{H, Eq}, OnKeyDestroy, OnValDestroy}(
         hash_eq,
         on_key_destroy,
         on_val_destroy,
@@ -66,13 +66,13 @@ function HashTable{K,V}(
     )
 end
 
-function HashTable{K,V}(hash_fn, eq_fn; kwargs...) where {K,V}
-    return HashTable{K,V}(HashEq(hash_fn, eq_fn); kwargs...)
+function HashTable{K, V}(hash_fn, eq_fn; kwargs...) where {K, V}
+    return HashTable{K, V}(HashEq(hash_fn, eq_fn); kwargs...)
 end
 
 @inline Base.length(table::HashTable) = table.size
 
-function _find_slot(table::HashTable{K,V}, key) where {K,V}
+function _find_slot(table::HashTable{K, V}, key) where {K, V}
     hash = UInt64(table.hash_eq.hash(key))
     cap = table.capacity
     idx = _hash_index(hash, cap)
@@ -96,15 +96,15 @@ function _find_slot(table::HashTable{K,V}, key) where {K,V}
 end
 
 function _insert_raw!(
-    keys::Memory{K},
-    values::Memory{V},
-    hashes::Memory{UInt64},
-    states::Memory{UInt8},
-    capacity::Int,
-    key::K,
-    value::V,
-    hash::UInt64,
-) where {K,V}
+        keys::Memory{K},
+        values::Memory{V},
+        hashes::Memory{UInt64},
+        states::Memory{UInt8},
+        capacity::Int,
+        key::K,
+        value::V,
+        hash::UInt64,
+    ) where {K, V}
     idx = _hash_index(hash, capacity)
     while true
         state = states[idx]
@@ -118,6 +118,7 @@ function _insert_raw!(
         idx += 1
         idx > capacity && (idx = 1)
     end
+    return
 end
 
 function _rehash!(table::HashTable, new_capacity::Int)
@@ -154,7 +155,7 @@ function _rehash!(table::HashTable, new_capacity::Int)
     return nothing
 end
 
-function hash_table_put!(table::HashTable{K,V}, key::K, value::V) where {K,V}
+function hash_table_put!(table::HashTable{K, V}, key::K, value::V) where {K, V}
     table.size + 1 > table.max_load && _rehash!(table, table.capacity * 2)
     found, slot, hash = _find_slot(table, key)
     if found
@@ -220,7 +221,7 @@ end
 
 @inline hash_table_get_entry_count(table::HashTable) = table.size
 
-function hash_table_eq(table_a::HashTable, table_b::HashTable; value_eq=isequal)
+function hash_table_eq(table_a::HashTable, table_b::HashTable; value_eq = isequal)
     length(table_a) == length(table_b) || return false
     for (key, value) in table_a
         other = hash_table_get(table_b, key)
@@ -230,7 +231,7 @@ function hash_table_eq(table_a::HashTable, table_b::HashTable; value_eq=isequal)
     return true
 end
 
-function Base.iterate(table::HashTable, state::Int=1)
+function Base.iterate(table::HashTable, state::Int = 1)
     i = state
     while i <= table.capacity
         if table.states[i] == _HASH_FILLED
@@ -254,7 +255,7 @@ function _fnv1a(ptr::Ptr{UInt8}, len::Integer)
     h = UInt64(0xcbf29ce484222325)
     for i in 0:(Int(len) - 1)
         h ⊻= UInt64(unsafe_load(ptr + i))
-        h *= UInt64(0x100000001b3)
+        h *= UInt64(0x00000100000001b3)
     end
     return h
 end
@@ -263,7 +264,7 @@ function _fnv1a_cursor(cur::ByteCursor)
     h = UInt64(0xcbf29ce484222325)
     @inbounds for i in 1:Int(cur.len)
         h ⊻= UInt64(cursor_getbyte(cur, i))
-        h *= UInt64(0x100000001b3)
+        h *= UInt64(0x00000100000001b3)
     end
     return h
 end
@@ -274,7 +275,7 @@ function hash_c_string(ptr::Ptr{UInt8})
     return _fnv1a(ptr, len)
 end
 
-function hash_string(str::Union{ByteString,Nothing})
+function hash_string(str::Union{ByteString, Nothing})
     str === nothing && return UInt64(0)
     return _fnv1a(string_bytes(str), string_len(str))
 end
@@ -289,11 +290,11 @@ function hash_ptr(ptr::Ptr{Cvoid})
     return UInt64(reinterpret(UInt, ptr))
 end
 
-function hash_callback_string_eq(a::Union{ByteString,Nothing}, b::Union{ByteString,Nothing})
+function hash_callback_string_eq(a::Union{ByteString, Nothing}, b::Union{ByteString, Nothing})
     return string_eq(a, b)
 end
 
-function hash_callback_string_destroy(str::Union{ByteString,Nothing})
+function hash_callback_string_destroy(str::Union{ByteString, Nothing})
     return string_destroy(str)
 end
 

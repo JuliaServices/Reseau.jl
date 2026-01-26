@@ -24,7 +24,7 @@ function _array_list_mark_dynamic!(list::ArrayList)
     return nothing
 end
 
-function ArrayList{T}(capacity::Integer=0) where {T}
+function ArrayList{T}(capacity::Integer = 0) where {T}
     cap = max(Int(capacity), 0)
     return ArrayList{T}(Memory{T}(undef, cap), 0)
 end
@@ -208,7 +208,7 @@ function array_list_init_static!(list::ArrayList{T}, raw_array::AbstractVector{T
         _array_list_mark_static!(list, raw_array)
         return nothing
     end
-    data = unsafe_wrap(Memory{T}, pointer(raw_array), len; own=false)
+    data = unsafe_wrap(Memory{T}, pointer(raw_array), len; own = false)
     list.data = data
     list.length = 0
     _array_list_mark_static!(list, raw_array)
@@ -216,10 +216,10 @@ function array_list_init_static!(list::ArrayList{T}, raw_array::AbstractVector{T
 end
 
 function array_list_init_static_from_initialized!(
-    list::ArrayList{T},
-    raw_array::AbstractVector{T},
-    count::Integer,
-) where {T}
+        list::ArrayList{T},
+        raw_array::AbstractVector{T},
+        count::Integer,
+    ) where {T}
     _array_list_mark_dynamic!(list)
     len = min(Int(count), length(raw_array))
     if len <= 0
@@ -228,7 +228,7 @@ function array_list_init_static_from_initialized!(
         _array_list_mark_static!(list, raw_array)
         return nothing
     end
-    data = unsafe_wrap(Memory{T}, pointer(raw_array), len; own=false)
+    data = unsafe_wrap(Memory{T}, pointer(raw_array), len; own = false)
     list.data = data
     list.length = len
     _array_list_mark_static!(list, raw_array)

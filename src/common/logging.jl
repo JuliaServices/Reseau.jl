@@ -7,15 +7,15 @@ log!(::NullLogger, ::LogLevel.T, ::LogSubject, ::AbstractString, args...) = noth
 close!(::NullLogger) = nothing
 set_log_level!(::NullLogger, ::LogLevel.T) = nothing
 
-mutable struct LoggerPipeline{F<:AbstractLogFormatter,C<:AbstractLogChannel,W<:AbstractLogWriter} <: AbstractLogger
+mutable struct LoggerPipeline{F <: AbstractLogFormatter, C <: AbstractLogChannel, W <: AbstractLogWriter} <: AbstractLogger
     formatter::F
     channel::C
     writer::W
     @atomic level::Int
 end
 
-function LoggerPipeline(formatter::F, channel::C, writer::W, level::LogLevel.T=LOG_LEVEL_INFO) where {F<:AbstractLogFormatter,C<:AbstractLogChannel,W<:AbstractLogWriter}
-    return LoggerPipeline{F,C,W}(formatter, channel, writer, Int(level))
+function LoggerPipeline(formatter::F, channel::C, writer::W, level::LogLevel.T = LOG_LEVEL_INFO) where {F <: AbstractLogFormatter, C <: AbstractLogChannel, W <: AbstractLogWriter}
+    return LoggerPipeline{F, C, W}(formatter, channel, writer, Int(level))
 end
 
 log_level(logger::LoggerPipeline, ::LogSubject) = LogLevel.T(@atomic logger.level)
@@ -41,7 +41,7 @@ function close!(logger::LoggerPipeline)
 end
 
 const _default_logger = Ref{AbstractLogger}(NullLogger())
-const _logger_override = ScopedValue{Union{AbstractLogger,Nothing}}(nothing)
+const _logger_override = ScopedValue{Union{AbstractLogger, Nothing}}(nothing)
 
 @inline function current_logger()
     override = _logger_override[]
@@ -161,9 +161,11 @@ function log_subject_description(subject::LogSubject)
     return info === nothing ? "" : info.subject_description
 end
 
-@inline function standard_logger(; level::LogLevel.T=LOG_LEVEL_INFO, writer::AbstractLogWriter=log_writer_stdout(),
-                                channel::AbstractLogChannel=ForegroundChannel(),
-                                date_format::date_format=DateFormat.ISO_8601)
+@inline function standard_logger(;
+        level::LogLevel.T = LOG_LEVEL_INFO, writer::AbstractLogWriter = log_writer_stdout(),
+        channel::AbstractLogChannel = ForegroundChannel(),
+        date_format::date_format = DateFormat.ISO_8601
+    )
     formatter = StandardLogFormatter(date_format)
     return LoggerPipeline(formatter, channel, writer, level)
 end

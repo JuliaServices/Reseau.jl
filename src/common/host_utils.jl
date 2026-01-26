@@ -84,10 +84,14 @@ function host_utils_is_ipv6(host::ByteCursor, is_uri_encoded::Bool)
     if !is_split || substr.len < 2 || substr.len > 39 || !byte_cursor_satisfies_pred(substr_ref, _is_ipv6_char)
         return false
     end
-    if (cursor_getbyte(substr, 1) == UInt8(':') &&
-        (substr.len < 2 || cursor_getbyte(substr, 2) != UInt8(':'))) ||
-       (cursor_getbyte(substr, Int(substr.len)) == UInt8(':') &&
-        (substr.len < 2 || cursor_getbyte(substr, Int(substr.len) - 1) != UInt8(':')))
+    if (
+            cursor_getbyte(substr, 1) == UInt8(':') &&
+                (substr.len < 2 || cursor_getbyte(substr, 2) != UInt8(':'))
+        ) ||
+            (
+            cursor_getbyte(substr, Int(substr.len)) == UInt8(':') &&
+                (substr.len < 2 || cursor_getbyte(substr, Int(substr.len) - 1) != UInt8(':'))
+        )
         return false
     end
 

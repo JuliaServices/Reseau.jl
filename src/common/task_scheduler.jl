@@ -1,8 +1,8 @@
 using EnumX
 
 @enumx TaskStatus::UInt8 begin
-    RUN_READY=0
-    CANCELED=1
+    RUN_READY = 0
+    CANCELED = 1
 end
 
 const _TASK_STATUS_STRINGS = (
@@ -10,32 +10,32 @@ const _TASK_STATUS_STRINGS = (
     "<Canceled>", # TaskStatus.CANCELED == 1
 )
 
-struct TaskFn{F,Ctx}
+struct TaskFn{F, Ctx}
     f::F
     ctx::Ctx
 end
 
 (task::TaskFn)(status::TaskStatus.T) = Base.invokelatest(task.f, task.ctx, status)
 
-mutable struct ScheduledTask{F,Ctx}
-    fn::TaskFn{F,Ctx}
+mutable struct ScheduledTask{F, Ctx}
+    fn::TaskFn{F, Ctx}
     type_tag::String
     timestamp::UInt64
     scheduled::Bool
 end
 
-function ScheduledTask(fn, ctx; type_tag::AbstractString="task")
+function ScheduledTask(fn, ctx; type_tag::AbstractString = "task")
     return ScheduledTask(TaskFn(fn, ctx), String(type_tag), UInt64(0), false)
 end
 
 mutable struct TaskScheduler{Less}
-    timed::PriorityQueue{ScheduledTask,Less}
+    timed::PriorityQueue{ScheduledTask, Less}
     asap::Deque{ScheduledTask}
 end
 
-function TaskScheduler(; capacity::Integer=8)
+function TaskScheduler(; capacity::Integer = 8)
     less = (a::ScheduledTask, b::ScheduledTask) -> a.timestamp < b.timestamp
-    timed = PriorityQueue{ScheduledTask}(less; capacity=capacity)
+    timed = PriorityQueue{ScheduledTask}(less; capacity = capacity)
     asap = Deque{ScheduledTask}(capacity)
     return TaskScheduler{typeof(less)}(timed, asap)
 end
@@ -102,10 +102,10 @@ end
 function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)
     removed = false
     if !isempty(scheduler.asap)
-        removed = remove!(scheduler.asap, task; eq=(===))
+        removed = remove!(scheduler.asap, task; eq = (===))
     end
     if !removed
-        remove!(scheduler.timed, task; eq=(===))
+        remove!(scheduler.timed, task; eq = (===))
     end
     task_run!(task, TaskStatus.CANCELED)
     return nothing

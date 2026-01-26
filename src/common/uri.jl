@@ -40,7 +40,7 @@ Base.@kwdef struct UriBuilderOptions
     path::ByteCursor = null_cursor()
     host_name::ByteCursor = null_cursor()
     port::UInt32 = 0
-    query_params::Union{ArrayList{UriParam},Nothing} = nothing
+    query_params::Union{ArrayList{UriParam}, Nothing} = nothing
     query_string::ByteCursor = null_cursor()
 end
 
@@ -390,18 +390,18 @@ end
 
 @inline function _is_unreserved_path_char(value::UInt8)
     return (value >= UInt8('A') && value <= UInt8('Z')) ||
-           (value >= UInt8('a') && value <= UInt8('z')) ||
-           (value >= UInt8('0') && value <= UInt8('9')) ||
-           value == UInt8('-') || value == UInt8('_') ||
-           value == UInt8('.') || value == UInt8('~') || value == UInt8('/')
+        (value >= UInt8('a') && value <= UInt8('z')) ||
+        (value >= UInt8('0') && value <= UInt8('9')) ||
+        value == UInt8('-') || value == UInt8('_') ||
+        value == UInt8('.') || value == UInt8('~') || value == UInt8('/')
 end
 
 @inline function _is_unreserved_param_char(value::UInt8)
     return (value >= UInt8('A') && value <= UInt8('Z')) ||
-           (value >= UInt8('a') && value <= UInt8('z')) ||
-           (value >= UInt8('0') && value <= UInt8('9')) ||
-           value == UInt8('-') || value == UInt8('_') ||
-           value == UInt8('.') || value == UInt8('~')
+        (value >= UInt8('a') && value <= UInt8('z')) ||
+        (value >= UInt8('0') && value <= UInt8('9')) ||
+        value == UInt8('-') || value == UInt8('_') ||
+        value == UInt8('.') || value == UInt8('~')
 end
 
 function byte_buf_append_encoding_uri_path(buffer::Base.RefValue{ByteBuffer}, cursor::Base.RefValue{ByteCursor})

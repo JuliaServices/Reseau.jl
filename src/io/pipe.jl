@@ -81,8 +81,11 @@ end
 # Set fd to non-blocking mode
 function _set_nonblocking(fd::Cint)
     flags = ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_GETFL, Cint(0))
-    flags |= O_NONBLOCK | O_CLOEXEC
+    flags |= O_NONBLOCK
     ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFL, flags)
+    fd_flags = ccall(:fcntl, Cint, (Cint, Cint), fd, F_GETFD)
+    fd_flags |= FD_CLOEXEC
+    ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFD, fd_flags)
     return nothing
 end
 
@@ -121,7 +124,7 @@ function pipe_write_end_close!(write_end::PipeWriteEnd)::Union{Nothing, ErrorRes
         while !isempty(write_end.write_queue)
             req = popfirst!(write_end.write_queue)
             if req.written_fn !== nothing
-                req.written_fn(write_end, ERROR_IO_BROKEN_PIPE, Csize_t(0), req.user_data)
+                Base.invokelatest(req.written_fn, write_end, ERROR_IO_BROKEN_PIPE, Csize_t(0), req.user_data)
             end
         end
 
@@ -134,11 +137,11 @@ end
 
 # Subscribe to readable events on read end
 function pipe_read_end_subscribe!(
-    read_end::PipeReadEnd,
-    event_loop::EventLoop,
-    on_readable::OnPipeReadableFn,
-    user_data,
-)::Union{Nothing, ErrorResult}
+        read_end::PipeReadEnd,
+        event_loop::EventLoop,
+        on_readable::OnPipeReadableFn,
+        user_data,
+    )::Union{Nothing, ErrorResult}
     if read_end.is_subscribed
         raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
         return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
@@ -162,8 +165,10 @@ function pipe_read_end_subscribe!(
 
     read_end.is_subscribed = true
 
-    logf(LogLevel.TRACE, LS_IO_GENERAL,
-        "Pipe: read end fd=$(read_end.io_handle.fd) subscribed to events")
+    logf(
+        LogLevel.TRACE, LS_IO_GENERAL,
+        "Pipe: read end fd=$(read_end.io_handle.fd) subscribed to events"
+    )
 
     return nothing
 end
@@ -174,13 +179,13 @@ function _pipe_read_event_handler(event_loop, handle::IoHandle, events::Int, use
 
     if (events & Int(IoEventType.READABLE)) != 0
         if read_end.on_readable !== nothing
-            read_end.on_readable(read_end, AWS_OP_SUCCESS, read_end.user_data)
+            Base.invokelatest(read_end.on_readable, read_end, AWS_OP_SUCCESS, read_end.user_data)
         end
     end
 
     if (events & Int(IoEventType.ERROR)) != 0 || (events & Int(IoEventType.CLOSED)) != 0
         if read_end.on_readable !== nothing
-            read_end.on_readable(read_end, ERROR_IO_BROKEN_PIPE, read_end.user_data)
+            Base.invokelatest(read_end.on_readable, read_end, ERROR_IO_BROKEN_PIPE, read_end.user_data)
         end
     end
 
@@ -229,9 +234,9 @@ end
 
 # Subscribe write end to event loop
 function pipe_write_end_subscribe!(
-    write_end::PipeWriteEnd,
-    event_loop::EventLoop,
-)::Union{Nothing, ErrorResult}
+        write_end::PipeWriteEnd,
+        event_loop::EventLoop,
+    )::Union{Nothing, ErrorResult}
     if write_end.is_subscribed
         raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
         return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
@@ -253,8 +258,10 @@ function pipe_write_end_subscribe!(
 
     write_end.is_subscribed = true
 
-    logf(LogLevel.TRACE, LS_IO_GENERAL,
-        "Pipe: write end fd=$(write_end.io_handle.fd) subscribed to events")
+    logf(
+        LogLevel.TRACE, LS_IO_GENERAL,
+        "Pipe: write end fd=$(write_end.io_handle.fd) subscribed to events"
+    )
 
     return nothing
 end
@@ -278,8 +285,10 @@ function _process_pipe_writes(write_end::PipeWriteEnd)
         req = first(write_end.write_queue)
 
         cursor_raw = req.cursor.len > 0 ? pointer(req.cursor.ptr) : Ptr{UInt8}(0)
-        written = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t),
-            fd, cursor_raw, req.cursor.len)
+        written = ccall(
+            :write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t),
+            fd, cursor_raw, req.cursor.len
+        )
         errno_val = get_errno()
 
         if written < 0
@@ -290,7 +299,7 @@ function _process_pipe_writes(write_end::PipeWriteEnd)
             # Error - complete all with error
             popfirst!(write_end.write_queue)
             if req.written_fn !== nothing
-                req.written_fn(write_end, ERROR_IO_BROKEN_PIPE, Csize_t(0), req.user_data)
+                Base.invokelatest(req.written_fn, write_end, ERROR_IO_BROKEN_PIPE, Csize_t(0), req.user_data)
             end
             continue
         end
@@ -302,7 +311,7 @@ function _process_pipe_writes(write_end::PipeWriteEnd)
             # Write complete
             popfirst!(write_end.write_queue)
             if req.written_fn !== nothing
-                req.written_fn(write_end, AWS_OP_SUCCESS, req.original_len, req.user_data)
+                Base.invokelatest(req.written_fn, write_end, AWS_OP_SUCCESS, req.original_len, req.user_data)
             end
         end
     end
@@ -312,11 +321,11 @@ end
 
 # Write to pipe
 function pipe_write!(
-    write_end::PipeWriteEnd,
-    cursor::ByteCursor,
-    on_complete::Union{OnPipeWriteCompleteFn, Nothing}=nothing,
-    user_data=nothing,
-)::Union{Nothing, ErrorResult}
+        write_end::PipeWriteEnd,
+        cursor::ByteCursor,
+        on_complete::Union{OnPipeWriteCompleteFn, Nothing} = nothing,
+        user_data = nothing,
+    )::Union{Nothing, ErrorResult}
     fd = write_end.io_handle.fd
 
     if fd < 0

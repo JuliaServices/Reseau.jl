@@ -1,11 +1,11 @@
-mutable struct RefCounted{T,OnZero}
+mutable struct RefCounted{T, OnZero}
     @atomic count::Int
     value::T
     on_zero::OnZero
 end
 
-function RefCounted(value::T, on_zero::OnZero) where {T,OnZero}
-    return RefCounted{T,OnZero}(1, value, on_zero)
+function RefCounted(value::T, on_zero::OnZero) where {T, OnZero}
+    return RefCounted{T, OnZero}(1, value, on_zero)
 end
 
 @inline function acquire!(ref::RefCounted)

@@ -33,7 +33,7 @@ function condition_variable_notify_all(cond::ConditionVariable)
     lock(cond.cond)
     try
         @atomic cond.seq += 1
-        notify(cond.cond, all=true)
+        notify(cond.cond, all = true)
     finally
         unlock(cond.cond)
     end
@@ -49,11 +49,11 @@ end
 end
 
 function condition_variable_wait_pred(
-    cond::ConditionVariable,
-    mutex::Mutex,
-    pred,
-    pred_ctx,
-)
+        cond::ConditionVariable,
+        mutex::Mutex,
+        pred,
+        pred_ctx,
+    )
     local_seq = @atomic cond.seq
     while !_cond_predicate(pred, pred_ctx)
         mutex_unlock(mutex)
@@ -72,21 +72,21 @@ function condition_variable_wait_pred(
 end
 
 function condition_variable_wait_pred(
-    cond_ref::Base.RefValue{ConditionVariable},
-    mutex_ref::Base.RefValue{Mutex},
-    pred,
-    pred_ctx,
-)
+        cond_ref::Base.RefValue{ConditionVariable},
+        mutex_ref::Base.RefValue{Mutex},
+        pred,
+        pred_ctx,
+    )
     return condition_variable_wait_pred(cond_ref[], mutex_ref[], pred, pred_ctx)
 end
 
 function condition_variable_wait_for_pred(
-    cond::ConditionVariable,
-    mutex::Mutex,
-    time_to_wait::Integer,
-    pred,
-    pred_ctx,
-)
+        cond::ConditionVariable,
+        mutex::Mutex,
+        time_to_wait::Integer,
+        pred,
+        pred_ctx,
+    )
     start_ref = Ref{UInt64}(0)
     if sys_clock_get_ticks(start_ref) != OP_SUCCESS
         return OP_ERR
@@ -115,11 +115,11 @@ function condition_variable_wait_for_pred(
 end
 
 function condition_variable_wait_for_pred(
-    cond_ref::Base.RefValue{ConditionVariable},
-    mutex_ref::Base.RefValue{Mutex},
-    time_to_wait::Integer,
-    pred,
-    pred_ctx,
-)
+        cond_ref::Base.RefValue{ConditionVariable},
+        mutex_ref::Base.RefValue{Mutex},
+        time_to_wait::Integer,
+        pred,
+        pred_ctx,
+    )
     return condition_variable_wait_for_pred(cond_ref[], mutex_ref[], time_to_wait, pred, pred_ctx)
 end

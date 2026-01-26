@@ -13,7 +13,7 @@ end
 const OnFutureCompleteFn = Function  # (future, user_data) -> nothing
 
 # Future waiter - for tracking pending callbacks
-mutable struct FutureWaiter{F,U}
+mutable struct FutureWaiter{F, U}
     callback::F
     user_data::U
     next::Union{FutureWaiter, Nothing}  # nullable
@@ -87,7 +87,7 @@ function future_get_error(future::Future)::Int
 end
 
 # Wait for future to complete (blocking)
-function future_wait(future::Future; timeout_ms::Integer=-1)::Bool
+function future_wait(future::Future; timeout_ms::Integer = -1)::Bool
     start_time = high_res_clock()
     timeout_ns = timeout_ms < 0 ? typemax(UInt64) : UInt64(timeout_ms) * 1_000_000
 
@@ -104,11 +104,11 @@ function future_wait(future::Future; timeout_ms::Integer=-1)::Bool
 end
 
 # Register a callback for when the future completes
-function future_on_complete!(future::Future, callback::OnFutureCompleteFn, user_data=nothing)
+function future_on_complete!(future::Future, callback::OnFutureCompleteFn, user_data = nothing)
     lock(future.lock) do
         if future_is_done(future)
             # Already complete, call immediately
-            callback(future, user_data)
+            Base.invokelatest(callback, future, user_data)
         else
             # Add to waiters list
             waiter = FutureWaiter(callback, user_data, future.waiters)
@@ -179,7 +179,7 @@ function _notify_waiters(future::Future)
 
     while waiter !== nothing
         next = waiter.next
-        waiter.callback(future, waiter.user_data)
+        Base.invokelatest(waiter.callback, future, waiter.user_data)
         waiter = next
     end
 
@@ -242,7 +242,7 @@ function future_all(futures::Vector{<:Future})::Bool
 end
 
 # Wait for any future to complete, returns index of first completed
-function future_any(futures::Vector{<:Future}; timeout_ms::Integer=-1)::Int
+function future_any(futures::Vector{<:Future}; timeout_ms::Integer = -1)::Int
     start_time = high_res_clock()
     timeout_ns = timeout_ms < 0 ? typemax(UInt64) : UInt64(timeout_ms) * 1_000_000
 
@@ -261,27 +261,30 @@ function future_any(futures::Vector{<:Future}; timeout_ms::Integer=-1)::Int
         yield()
         sleep(0.001)
     end
+    return
 end
 
 # Chain futures: when first completes, call continuation
 function future_then(
-    future::Future{T},
-    continuation::Function,  # (result) -> new_future or result
-) where {T}
+        future::Future{T},
+        continuation::Function,  # (result) -> new_future or result
+    ) where {T}
     result_future = Future{Any}()
 
-    future_on_complete!(future, (f, _) -> begin
-        if future_is_success(f)
-            try
-                new_result = continuation(future_get_result(f))
-                future_complete!(result_future, new_result)
-            catch e
-                future_fail!(result_future, ERROR_UNKNOWN)
+    future_on_complete!(
+        future, (f, _) -> begin
+            if future_is_success(f)
+                try
+                    new_result = Base.invokelatest(continuation, future_get_result(f))
+                    future_complete!(result_future, new_result)
+                catch e
+                    future_fail!(result_future, ERROR_UNKNOWN)
+                end
+            else
+                future_fail!(result_future, future_get_error(f))
             end
-        else
-            future_fail!(result_future, future_get_error(f))
         end
-    end)
+    )
 
     return result_future
 end

@@ -27,7 +27,7 @@ using AwsIO
                 try
                     done = Ref(false)
                     thread_ok = Ref(false)
-                    ctx = (el=el, done=done, thread_ok=thread_ok)
+                    ctx = (el = el, done = done, thread_ok = thread_ok)
 
                     task_fn = (ctx, status) -> begin
                         ctx.thread_ok[] = AwsIO.event_loop_thread_is_callers_thread(ctx.el)
@@ -35,7 +35,7 @@ using AwsIO
                         return nothing
                     end
 
-                    task = AwsIO.ScheduledTask(task_fn, ctx; type_tag="event_loop_test_task")
+                    task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "event_loop_test_task")
                     AwsIO.event_loop_schedule_task_now!(el, task)
 
                     deadline = Base.time_ns() + 2_000_000_000
@@ -56,7 +56,7 @@ using AwsIO
         if Sys.iswindows()
             @test true
         else
-            opts = AwsIO.EventLoopGroupOptions(loop_count=1)
+            opts = AwsIO.EventLoopGroupOptions(loop_count = 1)
             elg = AwsIO.event_loop_group_new(opts)
             @test !(elg isa AwsIO.ErrorResult)
 

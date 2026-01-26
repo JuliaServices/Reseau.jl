@@ -44,14 +44,14 @@ function high_res_clock()::UInt64
 end
 
 # Event loop local object for thread-local storage
-mutable struct EventLoopLocalObject{T,OnRemoved}
+mutable struct EventLoopLocalObject{T, OnRemoved}
     key::Ptr{Cvoid}  # Address used as key
     object::T
     on_object_removed::OnRemoved
 end
 
 function EventLoopLocalObject(key::Ptr{Cvoid}, object::T) where {T}
-    return EventLoopLocalObject{T,Nothing}(key, object, nothing)
+    return EventLoopLocalObject{T, Nothing}(key, object, nothing)
 end
 
 # Event loop options
@@ -63,16 +63,16 @@ struct EventLoopOptions{Clock}
 end
 
 function EventLoopOptions(;
-    clock=high_res_clock,
-    thread_options::Union{Nothing, ThreadOptions}=nothing,
-    type::EventLoopType.T=EventLoopType.PLATFORM_DEFAULT,
-    parent_elg::Ptr{Cvoid}=C_NULL,
-)
+        clock = high_res_clock,
+        thread_options::Union{Nothing, ThreadOptions} = nothing,
+        type::EventLoopType.T = EventLoopType.PLATFORM_DEFAULT,
+        parent_elg::Ptr{Cvoid} = C_NULL,
+    )
     return EventLoopOptions(clock, thread_options, type, parent_elg)
 end
 
 # Event loop group options
-struct EventLoopGroupOptions{S,C,Clock}
+struct EventLoopGroupOptions{S, C, Clock}
     loop_count::UInt16
     type::EventLoopType.T
     shutdown_options::S
@@ -81,12 +81,12 @@ struct EventLoopGroupOptions{S,C,Clock}
 end
 
 function EventLoopGroupOptions(;
-    loop_count::Integer=1,
-    type::EventLoopType.T=EventLoopType.PLATFORM_DEFAULT,
-    shutdown_options=nothing,
-    cpu_group=nothing,
-    clock_override=nothing,
-)
+        loop_count::Integer = 1,
+        type::EventLoopType.T = EventLoopType.PLATFORM_DEFAULT,
+        shutdown_options = nothing,
+        cpu_group = nothing,
+        clock_override = nothing,
+    )
     return EventLoopGroupOptions(
         UInt16(loop_count),
         type,
@@ -103,7 +103,7 @@ const OnEventCallback = Function  # signature: (event_loop, io_handle, events::I
 # abstract type AbstractEventLoop already defined in io.jl
 
 # Event loop base structure
-mutable struct EventLoop{Impl,LD,Clock} <: AbstractEventLoop
+mutable struct EventLoop{Impl, LD, Clock} <: AbstractEventLoop
     clock::Clock
     local_data::LD
     @atomic current_load_factor::Csize_t
@@ -118,9 +118,9 @@ mutable struct EventLoop{Impl,LD,Clock} <: AbstractEventLoop
 end
 
 function EventLoop(
-    clock::Clock,
-    impl_data::Impl,
-) where {Clock,Impl}
+        clock::Clock,
+        impl_data::Impl,
+    ) where {Clock, Impl}
     local_data = HashTable{Ptr{Cvoid}, EventLoopLocalObject{Ptr{Cvoid}, Nothing}}(
         hash_ptr,
         ptr_eq;
@@ -199,7 +199,7 @@ end
 # Schedule a task for immediate execution (serialized - maintains order)
 function event_loop_schedule_task_now_serialized!(event_loop::EventLoop, task::ScheduledTask)
     # Default implementation just calls the regular schedule
-    event_loop_schedule_task_now!(event_loop, task)
+    return event_loop_schedule_task_now!(event_loop, task)
 end
 
 # Schedule a task for future execution
@@ -214,20 +214,20 @@ end
 
 # Subscribe to IO events on a handle
 function event_loop_subscribe_to_io_events!(
-    event_loop::EventLoop,
-    handle::IoHandle,
-    events::Int,
-    on_event::OnEventCallback,
-    user_data,
-)::Union{Nothing, ErrorResult}
+        event_loop::EventLoop,
+        handle::IoHandle,
+        events::Int,
+        on_event::OnEventCallback,
+        user_data,
+    )::Union{Nothing, ErrorResult}
     error("event_loop_subscribe_to_io_events! must be implemented by concrete event loop type")
 end
 
 # Unsubscribe from IO events on a handle
 function event_loop_unsubscribe_from_io_events!(
-    event_loop::EventLoop,
-    handle::IoHandle,
-)::Union{Nothing, ErrorResult}
+        event_loop::EventLoop,
+        handle::IoHandle,
+    )::Union{Nothing, ErrorResult}
     error("event_loop_unsubscribe_from_io_events! must be implemented by concrete event loop type")
 end
 
@@ -252,9 +252,9 @@ end
 
 # Local object management
 function event_loop_fetch_local_object(
-    event_loop::EventLoop,
-    key::Ptr{Cvoid},
-)::Union{EventLoopLocalObject, ErrorResult}
+        event_loop::EventLoop,
+        key::Ptr{Cvoid},
+    )::Union{EventLoopLocalObject, ErrorResult}
     obj = hash_table_get(event_loop.local_data, key)
     if obj === nothing
         raise_error(ERROR_HASHTBL_ITEM_NOT_FOUND)
@@ -264,9 +264,9 @@ function event_loop_fetch_local_object(
 end
 
 function event_loop_put_local_object!(
-    event_loop::EventLoop,
-    obj::EventLoopLocalObject,
-)::Union{Nothing, ErrorResult}
+        event_loop::EventLoop,
+        obj::EventLoopLocalObject,
+    )::Union{Nothing, ErrorResult}
     old = hash_table_get(event_loop.local_data, obj.key)
     if old !== nothing && old.on_object_removed !== nothing
         old.on_object_removed(old)
@@ -276,9 +276,9 @@ function event_loop_put_local_object!(
 end
 
 function event_loop_remove_local_object!(
-    event_loop::EventLoop,
-    key::Ptr{Cvoid},
-)::Union{EventLoopLocalObject, Nothing, ErrorResult}
+        event_loop::EventLoop,
+        key::Ptr{Cvoid},
+    )::Union{EventLoopLocalObject, Nothing, ErrorResult}
     obj = hash_table_get(event_loop.local_data, key)
     if obj === nothing
         return nothing
@@ -293,7 +293,7 @@ const LOAD_FACTOR_FLUSH_INTERVAL_NS = UInt64(1_000_000)  # 1ms
 
 function event_loop_register_tick_start!(event_loop::EventLoop)
     current_time = event_loop.clock()
-    event_loop.latest_tick_start = current_time
+    return event_loop.latest_tick_start = current_time
 end
 
 function event_loop_register_tick_end!(event_loop::EventLoop)
@@ -302,7 +302,7 @@ function event_loop_register_tick_end!(event_loop::EventLoop)
     event_loop.current_tick_latency_sum += latency
 
     next_flush = @atomic event_loop.next_flush_time
-    if current_time >= next_flush
+    return if current_time >= next_flush
         # Calculate new load factor
         new_load = event_loop.current_tick_latency_sum
         @atomic event_loop.current_load_factor = new_load
@@ -340,7 +340,7 @@ function event_loop_new(options::EventLoopOptions)::Union{EventLoop, ErrorResult
 end
 
 # Event Loop Group for managing multiple event loops
-mutable struct EventLoopGroup{EL,S}
+mutable struct EventLoopGroup{EL, S}
     event_loops::ArrayList{EL}
     shutdown_options::S
     event_loop_type::EventLoopType.T
@@ -361,7 +361,7 @@ function event_loop_group_new(options::EventLoopGroupOptions)
     clock = options.clock_override === nothing ? high_res_clock : options.clock_override
 
     # Create first event loop to determine concrete type
-    first_opts = EventLoopOptions(; clock=clock, type=el_type, parent_elg=C_NULL)
+    first_opts = EventLoopOptions(; clock = clock, type = el_type, parent_elg = C_NULL)
     first_loop = event_loop_new(first_opts)
     if first_loop isa ErrorResult
         return first_loop
@@ -380,7 +380,7 @@ function event_loop_group_new(options::EventLoopGroupOptions)
 
     # Create remaining event loops
     for _ in 2:loop_count
-        loop_opts = EventLoopOptions(; clock=clock, type=el_type, parent_elg=parent_ptr)
+        loop_opts = EventLoopOptions(; clock = clock, type = el_type, parent_elg = parent_ptr)
         loop = event_loop_new(loop_opts)
         if loop isa ErrorResult
             event_loop_group_destroy!(elg)
@@ -423,7 +423,7 @@ function event_loop_group_destroy!(elg::EventLoopGroup)
     end
     clear!(elg.event_loops)
     if elg.shutdown_options !== nothing
-        elg.shutdown_options.shutdown_callback_fn()
+        Base.invokelatest(elg.shutdown_options.shutdown_callback_fn)
     end
     return nothing
 end
@@ -485,19 +485,19 @@ function event_loop_group_release_from_event_loop!(event_loop::EventLoop)
 end
 
 # Channel task wrapper for use with channels
-mutable struct ChannelTask{F,Ctx}
-    wrapper_task::ScheduledTask{F,Ctx}
+mutable struct ChannelTask{F, Ctx}
+    wrapper_task::ScheduledTask{F, Ctx}
     task_fn::F
     arg::Ctx
     type_tag::String
     # Intrusive list node
-    node_next::Union{ChannelTask{F,Ctx}, Nothing}
-    node_prev::Union{ChannelTask{F,Ctx}, Nothing}
+    node_next::Union{ChannelTask{F, Ctx}, Nothing}
+    node_prev::Union{ChannelTask{F, Ctx}, Nothing}
 end
 
-function ChannelTask(task_fn::F, arg::Ctx, type_tag::AbstractString) where {F,Ctx}
-    scheduled_task = ScheduledTask(task_fn, arg; type_tag=type_tag)
-    return ChannelTask{F,Ctx}(
+function ChannelTask(task_fn::F, arg::Ctx, type_tag::AbstractString) where {F, Ctx}
+    scheduled_task = ScheduledTask(task_fn, arg; type_tag = type_tag)
+    return ChannelTask{F, Ctx}(
         scheduled_task,
         task_fn,
         arg,

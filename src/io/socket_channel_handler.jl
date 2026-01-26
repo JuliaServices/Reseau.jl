@@ -44,10 +44,10 @@ mutable struct SocketChannelHandler{S} <: AbstractChannelHandler
 end
 
 function SocketChannelHandler(
-    socket::S;
-    initial_window_size::Integer=SIZE_MAX,
-    max_read_size::Integer=16384,  # 16KB default
-) where {S}
+        socket::S;
+        initial_window_size::Integer = SIZE_MAX,
+        max_read_size::Integer = 16384,  # 16KB default
+    ) where {S}
     return SocketChannelHandler{S}(
         socket,
         nothing,
@@ -103,8 +103,10 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
     channel = slot.channel
 
     if handler.shutdown_state >= SocketHandlerShutdownState.SHUTTING_DOWN_WRITE
-        logf(LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-            "Socket handler: write message received during shutdown")
+        logf(
+            LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+            "Socket handler: write message received during shutdown"
+        )
         # Release message back to pool
         if channel !== nothing
             channel_release_message_to_pool!(channel, message)
@@ -122,8 +124,10 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
         return nothing
     end
 
-    logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-        "Socket handler: writing $(buf.len) bytes to socket")
+    logf(
+        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+        "Socket handler: writing $(buf.len) bytes to socket"
+    )
 
     # Create byte cursor from message data
     cursor = byte_cursor_from_buf(buf)
@@ -132,8 +136,10 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
     write_result = socket_write(socket, cursor, _on_socket_write_complete, (handler, message))
 
     if write_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_SOCKET_HANDLER,
-            "Socket handler: failed to write to socket, error=$(write_result.code)")
+        logf(
+            LogLevel.ERROR, LS_IO_SOCKET_HANDLER,
+            "Socket handler: failed to write to socket, error=$(write_result.code)"
+        )
         if channel !== nothing
             channel_release_message_to_pool!(channel, message)
         end
@@ -151,11 +157,15 @@ function _on_socket_write_complete(socket, error_code::Int, bytes_written::Csize
     channel = handler.slot !== nothing ? handler.slot.channel : nothing
 
     if error_code != AWS_OP_SUCCESS
-        logf(LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-            "Socket handler: socket write completed with error $error_code, wrote $bytes_written bytes")
+        logf(
+            LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+            "Socket handler: socket write completed with error $error_code, wrote $bytes_written bytes"
+        )
     else
-        logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-            "Socket handler: socket write completed, wrote $bytes_written bytes")
+        logf(
+            LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+            "Socket handler: socket write completed, wrote $bytes_written bytes"
+        )
         handler.stats.bytes_written += bytes_written
     end
 
@@ -178,8 +188,10 @@ end
 function handler_increment_read_window(handler::SocketChannelHandler, slot::ChannelSlot, size::Csize_t)::Union{Nothing, ErrorResult}
     handler.read_window += size
 
-    logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-        "Socket handler: read window incremented by $size, now $(handler.read_window)")
+    logf(
+        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+        "Socket handler: read window incremented by $size, now $(handler.read_window)"
+    )
 
     # If reads were paused due to backpressure, resume
     if handler.read_paused && handler.read_window > 0
@@ -193,8 +205,10 @@ end
 function handler_shutdown(handler::SocketChannelHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int)::Union{Nothing, ErrorResult}
     socket = handler.socket
 
-    logf(LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-        "Socket handler: shutdown requested, direction=$direction, error=$error_code")
+    logf(
+        LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+        "Socket handler: shutdown requested, direction=$direction, error=$error_code"
+    )
 
     handler.shutdown_error_code = error_code
 
@@ -282,8 +296,10 @@ function _on_socket_readable(socket, error_code::Int, user_data)
     handler = user_data
 
     if error_code != AWS_OP_SUCCESS
-        logf(LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-            "Socket handler: readable event with error $error_code")
+        logf(
+            LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+            "Socket handler: readable event with error $error_code"
+        )
 
         if handler.slot !== nothing && handler.slot.channel !== nothing
             channel_shutdown!(handler.slot.channel, ChannelDirection.READ, error_code)
@@ -319,8 +335,10 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
 
     # Check flow control
     if handler.read_window == 0
-        logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-            "Socket handler: read window exhausted, pausing reads")
+        logf(
+            LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+            "Socket handler: read window exhausted, pausing reads"
+        )
         handler.read_paused = true
         handler.reads_in_progress -= 1
         return nothing
@@ -332,8 +350,10 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
     # Acquire message from pool
     message = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, read_size)
     if message === nothing
-        logf(LogLevel.ERROR, LS_IO_SOCKET_HANDLER,
-            "Socket handler: failed to acquire message from pool")
+        logf(
+            LogLevel.ERROR, LS_IO_SOCKET_HANDLER,
+            "Socket handler: failed to acquire message from pool"
+        )
         handler.reads_in_progress -= 1
         return nothing
     end
@@ -349,8 +369,10 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
             return nothing
         end
 
-        logf(LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-            "Socket handler: socket read failed with error $(read_result.code)")
+        logf(
+            LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+            "Socket handler: socket read failed with error $(read_result.code)"
+        )
         channel_release_message_to_pool!(channel, message)
         handler.reads_in_progress -= 1
 
@@ -363,8 +385,10 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
     handler.stats.read_calls += 1
     handler.stats.bytes_read += bytes_read
 
-    logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-        "Socket handler: read $bytes_read bytes from socket")
+    logf(
+        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+        "Socket handler: read $bytes_read bytes from socket"
+    )
 
     if bytes_read == 0
         # EOF - no data read
@@ -380,8 +404,10 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
     send_result = channel_slot_send_message(slot, message, ChannelDirection.READ)
 
     if send_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_SOCKET_HANDLER,
-            "Socket handler: failed to send read message into channel")
+        logf(
+            LogLevel.ERROR, LS_IO_SOCKET_HANDLER,
+            "Socket handler: failed to send read message into channel"
+        )
         channel_release_message_to_pool!(channel, message)
         handler.reads_in_progress -= 1
         channel_shutdown!(channel, ChannelDirection.READ, send_result.code)
@@ -402,15 +428,15 @@ end
 
 # Create and set up a socket channel handler in a channel
 function socket_channel_handler_new!(
-    channel::Channel,
-    socket;
-    initial_window_size::Integer=SIZE_MAX,
-    max_read_size::Integer=16384,
-)::Union{SocketChannelHandler, ErrorResult}
+        channel::Channel,
+        socket;
+        initial_window_size::Integer = SIZE_MAX,
+        max_read_size::Integer = 16384,
+    )::Union{SocketChannelHandler, ErrorResult}
     handler = SocketChannelHandler(
         socket;
-        initial_window_size=initial_window_size,
-        max_read_size=max_read_size,
+        initial_window_size = initial_window_size,
+        max_read_size = max_read_size,
     )
 
     # Create slot and add to channel (at the socket end / right side)
@@ -422,8 +448,10 @@ function socket_channel_handler_new!(
     # Link handler to the socket
     socket.handler = handler
 
-    logf(LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-        "Socket handler: created and added to channel $(channel.channel_id)")
+    logf(
+        LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+        "Socket handler: created and added to channel $(channel.channel_id)"
+    )
 
     return handler
 end

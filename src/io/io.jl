@@ -210,14 +210,16 @@ mutable struct IoHandle
     additional_data::Ptr{Cvoid}
     # set_queue callback - for Apple Network Framework
     set_queue::Ptr{Cvoid}
+    # Keep Julia-side handle data alive when additional_data stores pointer_from_objref
+    additional_ref::Any
 end
 
 function IoHandle()
-    return IoHandle(-1, C_NULL, C_NULL, C_NULL)
+    return IoHandle(-1, C_NULL, C_NULL, C_NULL, nothing)
 end
 
 function IoHandle(fd::Integer)
-    return IoHandle(Int32(fd), C_NULL, C_NULL, C_NULL)
+    return IoHandle(Int32(fd), C_NULL, C_NULL, C_NULL, nothing)
 end
 
 io_handle_is_valid(handle::IoHandle) = handle.fd >= 0 || handle.handle != C_NULL
@@ -228,7 +230,7 @@ abstract type AbstractChannelHandler end
 abstract type AbstractEventLoop end
 
 # IO Message - data unit flowing through channel pipeline
-mutable struct IoMessage{C<:Union{AbstractChannel, Nothing},F,U}
+mutable struct IoMessage{C <: Union{AbstractChannel, Nothing}, F, U}
     message_data::ByteBuffer
     message_type::IoMessageType.T
     message_tag::Int32
@@ -243,7 +245,7 @@ end
 
 function IoMessage(capacity::Integer)
     buf = ByteBuffer(capacity)
-    return IoMessage{Nothing,Nothing,Nothing}(
+    return IoMessage{Nothing, Nothing, Nothing}(
         buf,
         IoMessageType.APPLICATION_DATA,
         Int32(0),
@@ -503,20 +505,20 @@ end
 # Helper for determining if an error code is retryable
 function io_error_code_is_retryable(error_code::Integer)::Bool
     return error_code == ERROR_IO_SOCKET_CONNECTION_REFUSED ||
-           error_code == ERROR_IO_SOCKET_TIMEOUT ||
-           error_code == ERROR_IO_SOCKET_NO_ROUTE_TO_HOST ||
-           error_code == ERROR_IO_SOCKET_NETWORK_DOWN ||
-           error_code == ERROR_IO_SOCKET_CLOSED ||
-           error_code == ERROR_IO_SOCKET_NOT_CONNECTED ||
-           error_code == ERROR_IO_SOCKET_CONNECT_ABORTED ||
-           error_code == ERROR_IO_DNS_QUERY_FAILED ||
-           error_code == ERROR_IO_DNS_NO_ADDRESS_FOR_HOST ||
-           error_code == ERROR_IO_DNS_QUERY_AGAIN ||
-           error_code == ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE ||
-           error_code == ERROR_IO_TLS_NEGOTIATION_TIMEOUT ||
-           error_code == ERROR_IO_TLS_CLOSED_ABORT ||
-           error_code == ERROR_IO_BROKEN_PIPE ||
-           error_code == ERROR_IO_READ_WOULD_BLOCK
+        error_code == ERROR_IO_SOCKET_TIMEOUT ||
+        error_code == ERROR_IO_SOCKET_NO_ROUTE_TO_HOST ||
+        error_code == ERROR_IO_SOCKET_NETWORK_DOWN ||
+        error_code == ERROR_IO_SOCKET_CLOSED ||
+        error_code == ERROR_IO_SOCKET_NOT_CONNECTED ||
+        error_code == ERROR_IO_SOCKET_CONNECT_ABORTED ||
+        error_code == ERROR_IO_DNS_QUERY_FAILED ||
+        error_code == ERROR_IO_DNS_NO_ADDRESS_FOR_HOST ||
+        error_code == ERROR_IO_DNS_QUERY_AGAIN ||
+        error_code == ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE ||
+        error_code == ERROR_IO_TLS_NEGOTIATION_TIMEOUT ||
+        error_code == ERROR_IO_TLS_CLOSED_ABORT ||
+        error_code == ERROR_IO_BROKEN_PIPE ||
+        error_code == ERROR_IO_READ_WOULD_BLOCK
 end
 
 # Include event loop abstractions and platform-specific implementations

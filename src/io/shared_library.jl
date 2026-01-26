@@ -21,19 +21,25 @@ function shared_library_load(path::AbstractString)::Union{SharedLibrary, ErrorRe
 
     if handle == C_NULL
         @static if Sys.iswindows()
-            logf(LogLevel.ERROR, LS_IO_SHARED_LIBRARY,
-                "SharedLib: failed to load '$path'")
+            logf(
+                LogLevel.ERROR, LS_IO_SHARED_LIBRARY,
+                "SharedLib: failed to load '$path'"
+            )
         else
             err_msg = unsafe_string(ccall(:dlerror, Cstring, ()))
-            logf(LogLevel.ERROR, LS_IO_SHARED_LIBRARY,
-                "SharedLib: failed to load '$path': $err_msg")
+            logf(
+                LogLevel.ERROR, LS_IO_SHARED_LIBRARY,
+                "SharedLib: failed to load '$path': $err_msg"
+            )
         end
         raise_error(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
         return ErrorResult(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
     end
 
-    logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
-        "SharedLib: loaded '$path' at handle $handle")
+    logf(
+        LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
+        "SharedLib: loaded '$path' at handle $handle"
+    )
 
     return SharedLibrary(handle, String(path))
 end
@@ -73,19 +79,25 @@ function shared_library_find_symbol(lib::SharedLibrary, symbol_name::AbstractStr
 
     if sym == C_NULL
         @static if Sys.iswindows()
-            logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
-                "SharedLib: symbol '$symbol_name' not found in '$(lib.path)'")
+            logf(
+                LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
+                "SharedLib: symbol '$symbol_name' not found in '$(lib.path)'"
+            )
         else
             err_msg = unsafe_string(ccall(:dlerror, Cstring, ()))
-            logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
-                "SharedLib: symbol '$symbol_name' not found: $err_msg")
+            logf(
+                LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
+                "SharedLib: symbol '$symbol_name' not found: $err_msg"
+            )
         end
         raise_error(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
         return ErrorResult(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
     end
 
-    logf(LogLevel.TRACE, LS_IO_SHARED_LIBRARY,
-        "SharedLib: found symbol '$symbol_name' at $sym")
+    logf(
+        LogLevel.TRACE, LS_IO_SHARED_LIBRARY,
+        "SharedLib: found symbol '$symbol_name' at $sym"
+    )
 
     return sym
 end
@@ -111,8 +123,10 @@ function shared_library_unload!(lib::SharedLibrary)::Union{Nothing, ErrorResult}
         return nothing
     end
 
-    logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
-        "SharedLib: unloading '$(lib.path)'")
+    logf(
+        LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
+        "SharedLib: unloading '$(lib.path)'"
+    )
 
     result = @static if Sys.iswindows()
         ccall(:FreeLibrary, Cint, (Ptr{Cvoid},), lib.handle)
@@ -123,8 +137,10 @@ function shared_library_unload!(lib::SharedLibrary)::Union{Nothing, ErrorResult}
     lib.handle = C_NULL
 
     if result != 0
-        logf(LogLevel.WARN, LS_IO_SHARED_LIBRARY,
-            "SharedLib: unload returned non-zero: $result")
+        logf(
+            LogLevel.WARN, LS_IO_SHARED_LIBRARY,
+            "SharedLib: unload returned non-zero: $result"
+        )
     end
 
     return nothing

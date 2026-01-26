@@ -2,11 +2,11 @@ const MAX_RUN_COMMAND_BUFFER = 2048
 
 struct run_command_result
     ret_code::Cint
-    std_out::Union{ByteString,Nothing}  # nullable
-    std_err::Union{ByteString,Nothing}  # nullable
+    std_out::Union{ByteString, Nothing}  # nullable
+    std_err::Union{ByteString, Nothing}  # nullable
 end
 
-struct run_command_options{S<:AbstractString}
+struct run_command_options{S <: AbstractString}
     command::S
 end
 
@@ -46,13 +46,13 @@ function run_command(options::run_command_options, result::Base.RefValue)
         GC.@preserve output_buffer begin
             while ccall(:feof, Cint, (Ptr{Cvoid},), stream) == 0
                 if ccall(
-                    :fgets,
-                    Ptr{UInt8},
-                    (Ptr{UInt8}, Cint, Ptr{Cvoid}),
-                    pointer(output_buffer),
-                    Cint(MAX_RUN_COMMAND_BUFFER),
-                    stream,
-                ) != C_NULL
+                        :fgets,
+                        Ptr{UInt8},
+                        (Ptr{UInt8}, Cint, Ptr{Cvoid}),
+                        pointer(output_buffer),
+                        Cint(MAX_RUN_COMMAND_BUFFER),
+                        stream,
+                    ) != C_NULL
                     cursor = byte_cursor_from_c_str(pointer(output_buffer))
                     if byte_buf_append_dynamic(result_buffer, cursor) != OP_SUCCESS
                         byte_buf_clean_up_secure(result_buffer)

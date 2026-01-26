@@ -508,7 +508,7 @@ end
 const utf8_decoder_options = Utf8DecoderOptions
 const utf8_decoder = Utf8Decoder
 
-function utf8_decoder_new(options::Utf8DecoderOptions{F}=Utf8DecoderOptions()) where {F}
+function utf8_decoder_new(options::Utf8DecoderOptions{F} = Utf8DecoderOptions()) where {F}
     return Utf8Decoder{F}(0, 0, 0, options.on_codepoint)
 end
 
@@ -551,11 +551,11 @@ function utf8_decoder_update(decoder::Utf8Decoder, bytes::ByteCursor)
             elseif (byte & 0xf0) == 0xe0
                 remaining = UInt8(2)
                 codepoint = UInt32(byte & 0x0f)
-                min_val = UInt32(0x800)
+                min_val = UInt32(0x0800)
             elseif (byte & 0xf8) == 0xf0
                 remaining = UInt8(3)
                 codepoint = UInt32(byte & 0x07)
-                min_val = UInt32(0x10000)
+                min_val = UInt32(0x00010000)
             else
                 _utf8_store!(decoder, codepoint, min_val, remaining)
                 return raise_error(ERROR_INVALID_UTF8)
@@ -598,7 +598,7 @@ function utf8_decoder_finalize(decoder::Utf8Decoder)
     return raise_error(ERROR_INVALID_UTF8)
 end
 
-function decode_utf8(bytes::ByteCursor, options::Utf8DecoderOptions=Utf8DecoderOptions())
+function decode_utf8(bytes::ByteCursor, options::Utf8DecoderOptions = Utf8DecoderOptions())
     decoder = utf8_decoder_new(options)
     if utf8_decoder_update(decoder, bytes) != OP_SUCCESS
         return OP_ERR

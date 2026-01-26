@@ -33,11 +33,11 @@ end
 end
 
 function timestamp_convert_u64(
-    ticks::UInt64,
-    old_frequency::UInt64,
-    new_frequency::UInt64,
-    remainder,
-)
+        ticks::UInt64,
+        old_frequency::UInt64,
+        new_frequency::UInt64,
+        remainder,
+    )
     fatal_assert_bool(old_frequency > 0 && new_frequency > 0, "old_frequency > 0 && new_frequency > 0", "<unknown>", 0)
 
     if _remainder_provided(remainder)
@@ -61,11 +61,11 @@ function timestamp_convert_u64(
 end
 
 function timestamp_convert_u64(
-    ticks::Integer,
-    old_frequency::Integer,
-    new_frequency::Integer,
-    remainder,
-)
+        ticks::Integer,
+        old_frequency::Integer,
+        new_frequency::Integer,
+        remainder,
+    )
     return timestamp_convert_u64(
         UInt64(ticks),
         UInt64(old_frequency),
@@ -75,20 +75,20 @@ function timestamp_convert_u64(
 end
 
 function timestamp_convert(
-    timestamp::UInt64,
-    convert_from::Integer,
-    convert_to::Integer,
-    remainder,
-)
+        timestamp::UInt64,
+        convert_from::Integer,
+        convert_to::Integer,
+        remainder,
+    )
     return timestamp_convert_u64(timestamp, UInt64(convert_from), UInt64(convert_to), remainder)
 end
 
 function timestamp_convert(
-    timestamp::Integer,
-    convert_from::Integer,
-    convert_to::Integer,
-    remainder,
-)
+        timestamp::Integer,
+        convert_from::Integer,
+        convert_to::Integer,
+        remainder,
+    )
     return timestamp_convert(UInt64(timestamp), convert_from, convert_to, remainder)
 end
 
@@ -121,7 +121,7 @@ function high_res_clock_get_ticks(timestamp::Ptr{UInt64})
         ticks = Ref{_large_integer}()
         freq = Ref{_large_integer}()
         if ccall((:QueryPerformanceFrequency, "kernel32"), UInt8, (Ref{_large_integer},), freq) == 0 ||
-           ccall((:QueryPerformanceCounter, "kernel32"), UInt8, (Ref{_large_integer},), ticks) == 0
+                ccall((:QueryPerformanceCounter, "kernel32"), UInt8, (Ref{_large_integer},), ticks) == 0
             return raise_error(ERROR_CLOCK_FAILURE)
         end
         converted = timestamp_convert_u64(

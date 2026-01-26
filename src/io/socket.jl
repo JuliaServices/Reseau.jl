@@ -119,16 +119,16 @@ mutable struct SocketOptions
 end
 
 function SocketOptions(;
-    type::SocketType.T=SocketType.STREAM,
-    domain::SocketDomain.T=SocketDomain.IPV4,
-    impl_type::SocketImplType.T=SocketImplType.PLATFORM_DEFAULT,
-    connect_timeout_ms::Integer=3000,
-    keep_alive_interval_sec::Integer=0,
-    keep_alive_timeout_sec::Integer=0,
-    keep_alive_max_failed_probes::Integer=0,
-    keepalive::Bool=false,
-    network_interface_name::AbstractString="",
-)
+        type::SocketType.T = SocketType.STREAM,
+        domain::SocketDomain.T = SocketDomain.IPV4,
+        impl_type::SocketImplType.T = SocketImplType.PLATFORM_DEFAULT,
+        connect_timeout_ms::Integer = 3000,
+        keep_alive_interval_sec::Integer = 0,
+        keep_alive_timeout_sec::Integer = 0,
+        keep_alive_max_failed_probes::Integer = 0,
+        keepalive::Bool = false,
+        network_interface_name::AbstractString = "",
+    )
     iface = ntuple(i -> i <= length(network_interface_name) ? UInt8(codeunit(network_interface_name, i)) : UInt8(0), NETWORK_INTERFACE_NAME_MAX)
     return SocketOptions(
         type,
@@ -168,7 +168,7 @@ abstract type AbstractSocket end
 abstract type AbstractTlsConnectionOptions end
 
 # Socket connect options
-struct SocketConnectOptions{E<:Union{AbstractEventLoop, Nothing}, T<:Union{AbstractTlsConnectionOptions, Nothing}, F<:Union{SocketOnConnectionResultFn, Nothing}, U}
+struct SocketConnectOptions{E <: Union{AbstractEventLoop, Nothing}, T <: Union{AbstractTlsConnectionOptions, Nothing}, F <: Union{SocketOnConnectionResultFn, Nothing}, U}
     remote_endpoint::SocketEndpoint
     event_loop::E  # nullable
     on_connection_result::F  # nullable
@@ -177,12 +177,12 @@ struct SocketConnectOptions{E<:Union{AbstractEventLoop, Nothing}, T<:Union{Abstr
 end
 
 function SocketConnectOptions(
-    remote_endpoint::SocketEndpoint;
-    event_loop::Union{AbstractEventLoop, Nothing}=nothing,
-    on_connection_result::Union{SocketOnConnectionResultFn, Nothing}=nothing,
-    user_data=nothing,
-    tls_connection_options=nothing,
-)
+        remote_endpoint::SocketEndpoint;
+        event_loop::Union{AbstractEventLoop, Nothing} = nothing,
+        on_connection_result::Union{SocketOnConnectionResultFn, Nothing} = nothing,
+        user_data = nothing,
+        tls_connection_options = nothing,
+    )
     return SocketConnectOptions(
         remote_endpoint,
         event_loop,
@@ -193,7 +193,7 @@ function SocketConnectOptions(
 end
 
 # Socket bind options
-struct SocketBindOptions{E<:Union{AbstractEventLoop, Nothing}, T<:Union{AbstractTlsConnectionOptions, Nothing}, U}
+struct SocketBindOptions{E <: Union{AbstractEventLoop, Nothing}, T <: Union{AbstractTlsConnectionOptions, Nothing}, U}
     local_endpoint::SocketEndpoint
     user_data::U
     event_loop::E  # nullable
@@ -201,11 +201,11 @@ struct SocketBindOptions{E<:Union{AbstractEventLoop, Nothing}, T<:Union{Abstract
 end
 
 function SocketBindOptions(
-    local_endpoint::SocketEndpoint;
-    user_data=nothing,
-    event_loop::Union{AbstractEventLoop, Nothing}=nothing,
-    tls_connection_options=nothing,
-)
+        local_endpoint::SocketEndpoint;
+        user_data = nothing,
+        event_loop::Union{AbstractEventLoop, Nothing} = nothing,
+        tls_connection_options = nothing,
+    )
     return SocketBindOptions(
         local_endpoint,
         user_data,
@@ -215,7 +215,7 @@ function SocketBindOptions(
 end
 
 # Socket listener options
-struct SocketListenerOptions{FR<:Union{SocketOnAcceptResultFn, Nothing}, UR, FS<:Union{SocketOnAcceptStartedFn, Nothing}, US}
+struct SocketListenerOptions{FR <: Union{SocketOnAcceptResultFn, Nothing}, UR, FS <: Union{SocketOnAcceptStartedFn, Nothing}, US}
     on_accept_result::FR  # nullable
     on_accept_result_user_data::UR
     on_accept_start::FS  # nullable
@@ -223,11 +223,11 @@ struct SocketListenerOptions{FR<:Union{SocketOnAcceptResultFn, Nothing}, UR, FS<
 end
 
 function SocketListenerOptions(;
-    on_accept_result::Union{SocketOnAcceptResultFn, Nothing}=nothing,
-    on_accept_result_user_data=nothing,
-    on_accept_start::Union{SocketOnAcceptStartedFn, Nothing}=nothing,
-    on_accept_start_user_data=nothing,
-)
+        on_accept_result::Union{SocketOnAcceptResultFn, Nothing} = nothing,
+        on_accept_result_user_data = nothing,
+        on_accept_start::Union{SocketOnAcceptStartedFn, Nothing} = nothing,
+        on_accept_start_user_data = nothing,
+    )
     return SocketListenerOptions(
         on_accept_result,
         on_accept_result_user_data,
@@ -240,7 +240,7 @@ end
 abstract type SocketVTable end
 
 # Socket struct - polymorphic socket with vtable dispatch
-mutable struct Socket{V<:SocketVTable,I,H<:Union{AbstractChannelHandler, Nothing},FR<:Union{SocketOnReadableFn, Nothing},UR,FC<:Union{SocketOnConnectionResultFn, Nothing},FA<:Union{SocketOnAcceptResultFn, Nothing},UA} <: AbstractSocket
+mutable struct Socket{V <: SocketVTable, I, H <: Union{AbstractChannelHandler, Nothing}, FR <: Union{SocketOnReadableFn, Nothing}, UR, FC <: Union{SocketOnConnectionResultFn, Nothing}, FA <: Union{SocketOnAcceptResultFn, Nothing}, UA} <: AbstractSocket
     vtable::V
     local_endpoint::SocketEndpoint
     remote_endpoint::SocketEndpoint
@@ -261,7 +261,7 @@ end
 
 # Clean up socket resources
 function socket_cleanup!(socket::Socket)
-    vtable_socket_cleanup!(socket.vtable, socket)
+    return vtable_socket_cleanup!(socket.vtable, socket)
 end
 
 function vtable_socket_cleanup!(vtable::SocketVTable, socket::Socket)
@@ -426,8 +426,10 @@ end
 # Get bound address
 function socket_get_bound_address(socket::Socket)::Union{SocketEndpoint, ErrorResult}
     if socket.local_endpoint.address[1] == 0
-        logf(LogLevel.ERROR, LS_IO_SOCKET,
-            "Socket has no local address. Socket must be bound first. fd=$(socket.io_handle.fd)")
+        logf(
+            LogLevel.ERROR, LS_IO_SOCKET,
+            "Socket has no local address. Socket must be bound first. fd=$(socket.io_handle.fd)"
+        )
         raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
@@ -583,7 +585,7 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
     byte_idx = 1
 
     for part in left_parts
-        val = tryparse(UInt16, part; base=16)
+        val = tryparse(UInt16, part; base = 16)
         if val === nothing
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address component: $part")
             raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
@@ -598,7 +600,7 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
     byte_idx += zeros_needed * 2
 
     for part in right_parts
-        val = tryparse(UInt16, part; base=16)
+        val = tryparse(UInt16, part; base = 16)
         if val === nothing
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address component: $part")
             raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)

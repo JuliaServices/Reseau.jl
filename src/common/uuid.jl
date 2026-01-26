@@ -17,7 +17,7 @@ end
 function uuid_init(uuid::Ptr{uuid})
     precondition(uuid != C_NULL)
     # Wrap the uuid's 16 bytes as a Memory and fill with random data
-    mem = unsafe_wrap(Memory{UInt8}, _uuid_bytes_ptr(uuid), 16; own=false)
+    mem = unsafe_wrap(Memory{UInt8}, _uuid_bytes_ptr(uuid), 16; own = false)
     buf = Ref(ByteBuffer(mem, Csize_t(0)))
     return device_random_buffer(buf)
 end
@@ -57,7 +57,7 @@ function uuid_init_from_str(uuid::Ptr{uuid}, uuid_str::Ptr{ByteCursor})
         high_val = Ref{UInt8}(0)
         low_val = Ref{UInt8}(0)
         if _hex_decode_char_to_int(hex_digits[2 * i - 1], high_val) != OP_SUCCESS ||
-           _hex_decode_char_to_int(hex_digits[2 * i], low_val) != OP_SUCCESS
+                _hex_decode_char_to_int(hex_digits[2 * i], low_val) != OP_SUCCESS
             return raise_error(ERROR_MALFORMED_INPUT_STRING)
         end
         bytes[i] = (high_val[] << 4) | low_val[]

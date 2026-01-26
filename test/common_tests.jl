@@ -27,7 +27,7 @@ using AwsIO
     end
 
     @testset "PriorityQueue" begin
-        pq = AwsIO.PriorityQueue{Int}((a, b) -> a < b; capacity=2)
+        pq = AwsIO.PriorityQueue{Int}((a, b) -> a < b; capacity = 2)
         push!(pq, 3)
         push!(pq, 1)
         push!(pq, 2)
@@ -39,7 +39,7 @@ using AwsIO
     end
 
     @testset "HashTable" begin
-        ht = AwsIO.HashTable{Int, String}((x) -> x, (a, b) -> a == b; capacity=4)
+        ht = AwsIO.HashTable{Int, String}((x) -> x, (a, b) -> a == b; capacity = 4)
         @test AwsIO.hash_table_put!(ht, 1, "one") == AwsIO.OP_SUCCESS
         @test AwsIO.hash_table_put!(ht, 2, "two") == AwsIO.OP_SUCCESS
         @test AwsIO.hash_table_get(ht, 1) == "one"
@@ -56,7 +56,7 @@ end
     cur = AwsIO.ByteCursor("hi")
     @test AwsIO.byte_buf_write_from_whole_cursor(buf_ref, cur) == true
     @test buf_ref[].len == 2
-    @test String(unsafe_wrap(Vector{UInt8}, pointer(buf_ref[].mem), Int(buf_ref[].len); own=false)) == "hi"
+    @test String(unsafe_wrap(Vector{UInt8}, pointer(buf_ref[].mem), Int(buf_ref[].len); own = false)) == "hi"
 end
 
 @testset "Error handling" begin

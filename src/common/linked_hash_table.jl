@@ -1,20 +1,20 @@
-mutable struct LinkedHashTable{K,V}
+mutable struct LinkedHashTable{K, V}
     keys::ArrayList{K}
     values::ArrayList{V}
 end
 
-function LinkedHashTable{K,V}() where {K,V}
-    return LinkedHashTable{K,V}(ArrayList{K}(), ArrayList{V}())
+function LinkedHashTable{K, V}() where {K, V}
+    return LinkedHashTable{K, V}(ArrayList{K}(), ArrayList{V}())
 end
 
 const linked_hash_table = LinkedHashTable
 
-function linked_hash_table_init(::Type{K}, ::Type{V}; capacity::Integer=0) where {K,V}
+function linked_hash_table_init(::Type{K}, ::Type{V}; capacity::Integer = 0) where {K, V}
     _ = capacity
-    return LinkedHashTable{K,V}()
+    return LinkedHashTable{K, V}()
 end
 
-function linked_hash_table_put(table::LinkedHashTable{K,V}, key::K, value::V) where {K,V}
+function linked_hash_table_put(table::LinkedHashTable{K, V}, key::K, value::V) where {K, V}
     for i in 1:table.keys.length
         if table.keys.data[i] == key
             table.values.data[i] = value
@@ -26,7 +26,7 @@ function linked_hash_table_put(table::LinkedHashTable{K,V}, key::K, value::V) wh
     return OP_SUCCESS
 end
 
-function linked_hash_table_find(table::LinkedHashTable{K,V}, key::K) where {K,V}
+function linked_hash_table_find(table::LinkedHashTable{K, V}, key::K) where {K, V}
     for i in 1:table.keys.length
         if table.keys.data[i] == key
             return table.values.data[i]
@@ -35,7 +35,7 @@ function linked_hash_table_find(table::LinkedHashTable{K,V}, key::K) where {K,V}
     return nothing
 end
 
-function linked_hash_table_remove(table::LinkedHashTable{K,V}, key::K) where {K,V}
+function linked_hash_table_remove(table::LinkedHashTable{K, V}, key::K) where {K, V}
     for i in 1:table.keys.length
         if table.keys.data[i] == key
             erase!(table.keys, i)

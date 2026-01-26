@@ -1,6 +1,6 @@
 abstract type AbstractLogWriter end
 
-struct FileLogWriter{I<:IO} <: AbstractLogWriter
+struct FileLogWriter{I <: IO} <: AbstractLogWriter
     io::I
     close_on_cleanup::Bool
 end
@@ -30,6 +30,6 @@ function log_writer_file(path::AbstractString)
     return FileLogWriter(io, true)
 end
 
-@inline function log_writer_file(io::IO; close_on_cleanup::Bool=false)
+@inline function log_writer_file(io::IO; close_on_cleanup::Bool = false)
     return FileLogWriter(io, close_on_cleanup)
 end

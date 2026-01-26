@@ -5,7 +5,7 @@ mutable struct Deque{T}
     length::Int
 end
 
-function Deque{T}(capacity::Integer=0) where {T}
+function Deque{T}(capacity::Integer = 0) where {T}
     cap = max(Int(capacity), 0)
     return Deque{T}(Memory{T}(undef, cap), 1, 1, 0)
 end
@@ -125,7 +125,13 @@ function clear!(list::Deque)
     return nothing
 end
 
-function Base.iterate(list::Deque{T}, state::Int=1) where {T}
+@inline Base.first(list::Deque) = front(list)
+@inline Base.push!(list::Deque{T}, value::T) where {T} = push_back!(list, value)
+@inline Base.pushfirst!(list::Deque{T}, value::T) where {T} = push_front!(list, value)
+@inline Base.pop!(list::Deque) = pop_back!(list)
+@inline Base.popfirst!(list::Deque) = pop_front!(list)
+
+function Base.iterate(list::Deque{T}, state::Int = 1) where {T}
     state > list.length && return nothing
     idx = list.head + (state - 1)
     if idx > capacity(list)
@@ -134,7 +140,7 @@ function Base.iterate(list::Deque{T}, state::Int=1) where {T}
     return list.data[idx], state + 1
 end
 
-function remove!(list::Deque{T}, value; eq=isequal) where {T}
+function remove!(list::Deque{T}, value; eq = isequal) where {T}
     if list.length == 0
         return false
     end
@@ -155,7 +161,7 @@ function remove!(list::Deque{T}, value; eq=isequal) where {T}
 end
 
 const linked_list = Deque
-linked_list_init(::Type{T}, capacity::Integer=0) where {T} = Deque{T}(capacity)
+linked_list_init(::Type{T}, capacity::Integer = 0) where {T} = Deque{T}(capacity)
 linked_list_empty(list::Deque) = isempty(list)
 linked_list_push_back(list::Deque{T}, value::T) where {T} = push_back!(list, value)
 linked_list_push_front(list::Deque{T}, value::T) where {T} = push_front!(list, value)

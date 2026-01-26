@@ -40,7 +40,7 @@ function get_env_nonempty(name::AbstractString)
     end
 end
 
-function get_environment_value(variable_name::Union{ByteString,AbstractString})
+function get_environment_value(variable_name::Union{ByteString, AbstractString})
     name_ptr = _env_name_ptr(variable_name)
     value = ccall(:getenv, Ptr{UInt8}, (Ptr{UInt8},), name_ptr)
     value == C_NULL && return nothing
@@ -50,9 +50,9 @@ function get_environment_value(variable_name::Union{ByteString,AbstractString})
 end
 
 function set_environment_value(
-    variable_name::Union{ByteString,AbstractString},
-    value::Union{ByteString,AbstractString},
-)
+        variable_name::Union{ByteString, AbstractString},
+        value::Union{ByteString, AbstractString},
+    )
     name_ptr = _env_name_ptr(variable_name)
     value_ptr = value isa ByteString ? string_c_str(value) : _env_name_ptr(value)
     @static if _PLATFORM_WINDOWS
@@ -67,7 +67,7 @@ function set_environment_value(
     return OP_SUCCESS
 end
 
-function unset_environment_value(variable_name::Union{ByteString,AbstractString})
+function unset_environment_value(variable_name::Union{ByteString, AbstractString})
     name_ptr = _env_name_ptr(variable_name)
     @static if _PLATFORM_WINDOWS
         empty_ptr = Base.cconvert(Ptr{UInt8}, "")

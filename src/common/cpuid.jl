@@ -51,12 +51,12 @@ const _cpu_features_cached = Ref{Bool}(false)
 end
 
 function _cache_cpu_features_x86()
-    abcd = _run_cpuid(0x0, 0x0)
+    abcd = _run_cpuid(0x00, 0x00)
     max_cpuid = abcd[1]
-    if max_cpuid < 0x1
+    if max_cpuid < 0x01
         return nothing
     end
-    abcd = _run_cpuid(0x1, 0x0)
+    abcd = _run_cpuid(0x01, 0x00)
     ecx = abcd[3]
     _cpu_features[_feature_index(CpuFeature.CLMUL)] = (ecx & (1 << 1)) != 0
     _cpu_features[_feature_index(CpuFeature.SSE_4_1)] = (ecx & (1 << 19)) != 0
@@ -77,10 +77,10 @@ function _cache_cpu_features_x86()
         feature_avx = (ecx & (1 << 28)) != 0
     end
 
-    if max_cpuid < 0x7
+    if max_cpuid < 0x07
         return nothing
     end
-    abcd = _run_cpuid(0x7, 0x0)
+    abcd = _run_cpuid(0x07, 0x00)
     ebx = abcd[2]
     ecx_ext = abcd[3]
     _cpu_features[_feature_index(CpuFeature.BMI2)] = (ebx & (1 << 8)) != 0
@@ -118,15 +118,15 @@ end
         name_ptr = Base.cconvert(Ptr{UInt8}, name)
         GC.@preserve name begin
             if ccall(
-                :sysctlbyname,
-                Cint,
-                (Ptr{UInt8}, Ptr{Cvoid}, Ptr{Csize_t}, Ptr{Cvoid}, Csize_t),
-                name_ptr,
-                value,
-                size,
-                C_NULL,
-                0,
-            ) != 0
+                    :sysctlbyname,
+                    Cint,
+                    (Ptr{UInt8}, Ptr{Cvoid}, Ptr{Csize_t}, Ptr{Cvoid}, Csize_t),
+                    name_ptr,
+                    value,
+                    size,
+                    C_NULL,
+                    0,
+                ) != 0
                 return nothing
             end
         end

@@ -12,20 +12,20 @@ end
 # Determine if an error code is retryable
 function retry_error_type_from_io_error(error_code::Int)::RetryErrorType.T
     if error_code == ERROR_IO_SOCKET_CONNECTION_REFUSED ||
-       error_code == ERROR_IO_SOCKET_TIMEOUT ||
-       error_code == ERROR_IO_SOCKET_NO_ROUTE_TO_HOST ||
-       error_code == ERROR_IO_SOCKET_NETWORK_DOWN ||
-       error_code == ERROR_IO_SOCKET_CLOSED ||
-       error_code == ERROR_IO_SOCKET_NOT_CONNECTED ||
-       error_code == ERROR_IO_SOCKET_CONNECT_ABORTED ||
-       error_code == ERROR_IO_DNS_QUERY_FAILED ||
-       error_code == ERROR_IO_DNS_NO_ADDRESS_FOR_HOST ||
-       error_code == ERROR_IO_DNS_QUERY_AGAIN ||
-       error_code == ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE ||
-       error_code == ERROR_IO_TLS_NEGOTIATION_TIMEOUT ||
-       error_code == ERROR_IO_TLS_CLOSED_ABORT ||
-       error_code == ERROR_IO_BROKEN_PIPE ||
-       error_code == ERROR_IO_READ_WOULD_BLOCK
+            error_code == ERROR_IO_SOCKET_TIMEOUT ||
+            error_code == ERROR_IO_SOCKET_NO_ROUTE_TO_HOST ||
+            error_code == ERROR_IO_SOCKET_NETWORK_DOWN ||
+            error_code == ERROR_IO_SOCKET_CLOSED ||
+            error_code == ERROR_IO_SOCKET_NOT_CONNECTED ||
+            error_code == ERROR_IO_SOCKET_CONNECT_ABORTED ||
+            error_code == ERROR_IO_DNS_QUERY_FAILED ||
+            error_code == ERROR_IO_DNS_NO_ADDRESS_FOR_HOST ||
+            error_code == ERROR_IO_DNS_QUERY_AGAIN ||
+            error_code == ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE ||
+            error_code == ERROR_IO_TLS_NEGOTIATION_TIMEOUT ||
+            error_code == ERROR_IO_TLS_CLOSED_ABORT ||
+            error_code == ERROR_IO_BROKEN_PIPE ||
+            error_code == ERROR_IO_READ_WOULD_BLOCK
         return RetryErrorType.TRANSIENT
     end
 
@@ -39,7 +39,7 @@ const OnRetryReadyFn = Function  # (retry_token, error_code, user_data) -> nothi
 # Retry token - represents a single retry attempt
 # Note: user_data is parameterized as U (typically Any) since it can hold any user-provided value
 # and is set dynamically after token creation via retry_token_schedule_retry
-mutable struct RetryToken{S,U}
+mutable struct RetryToken{S, U}
     strategy::S
     error_type::RetryErrorType.T
     original_error::Int
@@ -85,13 +85,13 @@ struct ExponentialBackoffConfig
 end
 
 function ExponentialBackoffConfig(;
-    initial_delay_ms::Integer=100,
-    max_delay_ms::Integer=20_000,  # 20 seconds
-    max_retries::Integer=10,
-    exponential_base::Real=2.0,
-    jitter_mode::Symbol=:full,
-    scale_factor::Real=25.0,
-)
+        initial_delay_ms::Integer = 100,
+        max_delay_ms::Integer = 20_000,  # 20 seconds
+        max_retries::Integer = 10,
+        exponential_base::Real = 2.0,
+        jitter_mode::Symbol = :full,
+        scale_factor::Real = 25.0,
+    )
     return ExponentialBackoffConfig(
         UInt64(initial_delay_ms),
         UInt64(max_delay_ms),
@@ -111,15 +111,17 @@ mutable struct ExponentialBackoffRetryStrategy{ELG} <: AbstractRetryStrategy
 end
 
 function _exponential_backoff_on_zero_ref(strategy::ExponentialBackoffRetryStrategy)
-    logf(LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff retry strategy: ref count zero")
+    logf(
+        LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+        "Exponential backoff retry strategy: ref count zero"
+    )
     return nothing
 end
 
 function ExponentialBackoffRetryStrategy(
-    event_loop_group::ELG,
-    config::ExponentialBackoffConfig=ExponentialBackoffConfig(),
-) where {ELG}
+        event_loop_group::ELG,
+        config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
+    ) where {ELG}
     strategy = ExponentialBackoffRetryStrategy{ELG}(
         event_loop_group,
         config,
@@ -132,19 +134,21 @@ end
 
 # Acquire a retry token from the strategy
 function retry_strategy_acquire_token!(
-    strategy::ExponentialBackoffRetryStrategy,
-    on_acquired::OnRetryTokenAcquiredFn,
-    user_data,
-)::Union{Nothing, ErrorResult}
+        strategy::ExponentialBackoffRetryStrategy,
+        on_acquired::OnRetryTokenAcquiredFn,
+        user_data,
+    )::Union{Nothing, ErrorResult}
     if @atomic strategy.shutdown
-        logf(LogLevel.ERROR, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-            "Exponential backoff: acquire token called after shutdown")
+        logf(
+            LogLevel.ERROR, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+            "Exponential backoff: acquire token called after shutdown"
+        )
         raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
         return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
     # Create token with Any for user_data to allow dynamic assignment
-    token = RetryToken{typeof(strategy),Any}(
+    token = RetryToken{typeof(strategy), Any}(
         strategy,
         RetryErrorType.TRANSIENT,
         0,
@@ -155,8 +159,10 @@ function retry_strategy_acquire_token!(
         nothing,
     )
 
-    logf(LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff: token acquired")
+    logf(
+        LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+        "Exponential backoff: token acquired"
+    )
 
     # Schedule callback
     event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
@@ -164,7 +170,7 @@ function retry_strategy_acquire_token!(
         task = ScheduledTask(
             (t, status) -> on_acquired(token, AWS_OP_SUCCESS, user_data),
             nothing;
-            type_tag="retry_token_acquired"
+            type_tag = "retry_token_acquired"
         )
         event_loop_schedule_task_now!(event_loop, task)
     else
@@ -179,7 +185,7 @@ function _calculate_retry_delay(strategy::ExponentialBackoffRetryStrategy, retry
     config = strategy.config
 
     # Base delay calculation: initial_delay * base^retry_count
-    base_delay = Float64(config.initial_delay_ms) * (config.exponential_base ^ retry_count)
+    base_delay = Float64(config.initial_delay_ms) * (config.exponential_base^retry_count)
 
     # Apply scale factor
     base_delay *= config.scale_factor
@@ -205,21 +211,25 @@ function _calculate_retry_delay(strategy::ExponentialBackoffRetryStrategy, retry
     # Convert to milliseconds and ensure minimum of initial delay
     result = max(UInt64(ceil(delay)), config.initial_delay_ms)
 
-    logf(LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff: retry $retry_count delay = $(result)ms")
+    logf(
+        LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+        "Exponential backoff: retry $retry_count delay = $(result)ms"
+    )
 
     return result
 end
 
 # Schedule retry for exponential backoff token
-function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStrategy{ELG},U}, on_retry_ready::OnRetryReadyFn, user_data) where {ELG,U}
+function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U}, on_retry_ready::OnRetryReadyFn, user_data) where {ELG, U}
     strategy = token.strategy
     config = strategy.config
 
     # Check if max retries exceeded
     if token.retry_count >= config.max_retries
-        logf(LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-            "Exponential backoff: max retries ($(config.max_retries)) exceeded")
+        logf(
+            LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+            "Exponential backoff: max retries ($(config.max_retries)) exceeded"
+        )
         raise_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
         return ErrorResult(ERROR_IO_MAX_RETRIES_EXCEEDED)
     end
@@ -236,8 +246,10 @@ function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStr
     # Calculate delay
     delay_ms = _calculate_retry_delay(strategy, token.retry_count)
 
-    logf(LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff: scheduling retry $(token.retry_count) in $(delay_ms)ms")
+    logf(
+        LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+        "Exponential backoff: scheduling retry $(token.retry_count) in $(delay_ms)ms"
+    )
 
     # Schedule the retry
     event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
@@ -256,7 +268,7 @@ function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStr
     task = ScheduledTask(
         _exponential_backoff_retry_task,
         token;
-        type_tag="exponential_backoff_retry"
+        type_tag = "exponential_backoff_retry"
     )
     token.scheduled_retry_task = task
 
@@ -266,11 +278,12 @@ function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStr
 end
 
 # Retry task callback
-function _exponential_backoff_retry_task(task::ScheduledTask, status::TaskStatus.T)
-    token = task.arg
+function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T)
 
-    logf(LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff: retry task executing, status=$status")
+    logf(
+        LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+        "Exponential backoff: retry task executing, status=$status"
+    )
 
     if status == TaskStatus.CANCELED
         if token.on_retry_ready !== nothing
@@ -287,14 +300,16 @@ function _exponential_backoff_retry_task(task::ScheduledTask, status::TaskStatus
 end
 
 # Record success for exponential backoff token
-function retry_token_record_success(token::RetryToken{ExponentialBackoffRetryStrategy{ELG},U})::Nothing where {ELG,U}
-    logf(LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff: success recorded after $(token.retry_count) retries")
+function retry_token_record_success(token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U})::Nothing where {ELG, U}
+    logf(
+        LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+        "Exponential backoff: success recorded after $(token.retry_count) retries"
+    )
     return nothing
 end
 
 # Release exponential backoff token
-function retry_token_release!(token::RetryToken{ExponentialBackoffRetryStrategy{ELG},U})::Nothing where {ELG,U}
+function retry_token_release!(token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U})::Nothing where {ELG, U}
     if token.scheduled_retry_task !== nothing
         strategy = token.strategy
         event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
@@ -321,8 +336,10 @@ end
 # Shutdown strategy
 function retry_strategy_shutdown!(strategy::ExponentialBackoffRetryStrategy)
     @atomic strategy.shutdown = true
-    logf(LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff retry strategy: shutdown")
+    logf(
+        LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+        "Exponential backoff retry strategy: shutdown"
+    )
     return nothing
 end
 
@@ -342,14 +359,14 @@ struct StandardRetryConfig
 end
 
 function StandardRetryConfig(;
-    initial_bucket_capacity::Integer=500,
-    max_capacity::Integer=500,
-    retry_cost::Integer=5,
-    no_retry_increment::Integer=1,
-    retry_timeout_cost::Integer=10,
-    retry_throttling_cost::Integer=10,
-    backoff_config::ExponentialBackoffConfig=ExponentialBackoffConfig(),
-)
+        initial_bucket_capacity::Integer = 500,
+        max_capacity::Integer = 500,
+        retry_cost::Integer = 5,
+        no_retry_increment::Integer = 1,
+        retry_timeout_cost::Integer = 10,
+        retry_throttling_cost::Integer = 10,
+        backoff_config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
+    )
     return StandardRetryConfig(
         UInt64(initial_bucket_capacity),
         UInt64(max_capacity),
@@ -372,15 +389,17 @@ mutable struct StandardRetryStrategy{ELG} <: AbstractRetryStrategy
 end
 
 function _standard_retry_on_zero_ref(strategy::StandardRetryStrategy)
-    logf(LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry strategy: ref count zero")
+    logf(
+        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
+        "Standard retry strategy: ref count zero"
+    )
     return nothing
 end
 
 function StandardRetryStrategy(
-    event_loop_group::ELG,
-    config::StandardRetryConfig=StandardRetryConfig(),
-) where {ELG}
+        event_loop_group::ELG,
+        config::StandardRetryConfig = StandardRetryConfig(),
+    ) where {ELG}
     strategy = StandardRetryStrategy{ELG}(
         event_loop_group,
         config,
@@ -395,18 +414,20 @@ end
 
 # Acquire a retry token from standard strategy
 function retry_strategy_acquire_token!(
-    strategy::StandardRetryStrategy,
-    on_acquired::OnRetryTokenAcquiredFn,
-    user_data,
-)::Union{Nothing, ErrorResult}
+        strategy::StandardRetryStrategy,
+        on_acquired::OnRetryTokenAcquiredFn,
+        user_data,
+    )::Union{Nothing, ErrorResult}
     if @atomic strategy.shutdown
-        logf(LogLevel.ERROR, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: acquire token called after shutdown")
+        logf(
+            LogLevel.ERROR, LS_IO_STANDARD_RETRY_STRATEGY,
+            "Standard retry: acquire token called after shutdown"
+        )
         raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
         return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
-    token = RetryToken{typeof(strategy),Any}(
+    token = RetryToken{typeof(strategy), Any}(
         strategy,
         RetryErrorType.TRANSIENT,
         0,
@@ -417,8 +438,10 @@ function retry_strategy_acquire_token!(
         nothing,
     )
 
-    logf(LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: token acquired")
+    logf(
+        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
+        "Standard retry: token acquired"
+    )
 
     # Schedule callback
     event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
@@ -426,7 +449,7 @@ function retry_strategy_acquire_token!(
         task = ScheduledTask(
             (t, status) -> on_acquired(token, AWS_OP_SUCCESS, user_data),
             nothing;
-            type_tag="standard_retry_token_acquired"
+            type_tag = "standard_retry_token_acquired"
         )
         event_loop_schedule_task_now!(event_loop, task)
     else
@@ -438,18 +461,22 @@ end
 
 # Try to acquire retry permission from token bucket
 function _try_acquire_retry_capacity(strategy::StandardRetryStrategy, cost::UInt64)::Bool
-    lock(strategy.lock) do
+    return lock(strategy.lock) do
         current = @atomic strategy.bucket_capacity
 
         if current >= Int64(cost)
             @atomic strategy.bucket_capacity = current - Int64(cost)
-            logf(LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-                "Standard retry: acquired $cost capacity, remaining=$(current - Int64(cost))")
+            logf(
+                LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
+                "Standard retry: acquired $cost capacity, remaining=$(current - Int64(cost))"
+            )
             return true
         end
 
-        logf(LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: insufficient capacity (need $cost, have $current)")
+        logf(
+            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
+            "Standard retry: insufficient capacity (need $cost, have $current)"
+        )
         return false
     end
 end
@@ -460,21 +487,25 @@ function _return_retry_capacity(strategy::StandardRetryStrategy, amount::UInt64)
         current = @atomic strategy.bucket_capacity
         new_capacity = min(Int64(strategy.config.max_capacity), current + Int64(amount))
         @atomic strategy.bucket_capacity = new_capacity
-        logf(LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: returned $amount capacity, now=$new_capacity")
+        logf(
+            LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
+            "Standard retry: returned $amount capacity, now=$new_capacity"
+        )
     end
     return nothing
 end
 
 # Schedule retry for standard token
-function retry_token_schedule_retry(token::RetryToken{StandardRetryStrategy{ELG},U}, on_retry_ready::OnRetryReadyFn, user_data) where {ELG,U}
+function retry_token_schedule_retry(token::RetryToken{StandardRetryStrategy{ELG}, U}, on_retry_ready::OnRetryReadyFn, user_data) where {ELG, U}
     strategy = token.strategy
     config = strategy.config
 
     # Check if max retries exceeded
     if token.retry_count >= config.backoff_config.max_retries
-        logf(LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: max retries exceeded")
+        logf(
+            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
+            "Standard retry: max retries exceeded"
+        )
         raise_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
         return ErrorResult(ERROR_IO_MAX_RETRIES_EXCEEDED)
     end
@@ -495,8 +526,10 @@ function retry_token_schedule_retry(token::RetryToken{StandardRetryStrategy{ELG}
 
     # Try to acquire capacity
     if !_try_acquire_retry_capacity(strategy, cost)
-        logf(LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: retry permission denied (quota exhausted)")
+        logf(
+            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
+            "Standard retry: retry permission denied (quota exhausted)"
+        )
         raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
         return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
     end
@@ -509,8 +542,10 @@ function retry_token_schedule_retry(token::RetryToken{StandardRetryStrategy{ELG}
     backoff_config = config.backoff_config
     delay_ms = _calculate_standard_retry_delay(backoff_config, token.retry_count)
 
-    logf(LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: scheduling retry $(token.retry_count) in $(delay_ms)ms")
+    logf(
+        LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
+        "Standard retry: scheduling retry $(token.retry_count) in $(delay_ms)ms"
+    )
 
     # Schedule the retry
     event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
@@ -529,7 +564,7 @@ function retry_token_schedule_retry(token::RetryToken{StandardRetryStrategy{ELG}
     task = ScheduledTask(
         _standard_retry_task,
         token;
-        type_tag="standard_retry"
+        type_tag = "standard_retry"
     )
     token.scheduled_retry_task = task
 
@@ -540,7 +575,7 @@ end
 
 # Calculate delay for standard retry (same as exponential backoff)
 function _calculate_standard_retry_delay(config::ExponentialBackoffConfig, retry_count::UInt32)::UInt64
-    base_delay = Float64(config.initial_delay_ms) * (config.exponential_base ^ retry_count)
+    base_delay = Float64(config.initial_delay_ms) * (config.exponential_base^retry_count)
     base_delay *= config.scale_factor
     base_delay = min(base_delay, Float64(config.max_delay_ms))
 
@@ -556,11 +591,12 @@ function _calculate_standard_retry_delay(config::ExponentialBackoffConfig, retry
 end
 
 # Standard retry task callback
-function _standard_retry_task(task::ScheduledTask, status::TaskStatus.T)
-    token = task.arg
+function _standard_retry_task(token::RetryToken, status::TaskStatus.T)
 
-    logf(LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: task executing, status=$status")
+    logf(
+        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
+        "Standard retry: task executing, status=$status"
+    )
 
     if status == TaskStatus.CANCELED
         if token.on_retry_ready !== nothing
@@ -577,16 +613,18 @@ function _standard_retry_task(task::ScheduledTask, status::TaskStatus.T)
 end
 
 # Record success for standard token
-function retry_token_record_success(token::RetryToken{StandardRetryStrategy{ELG},U})::Nothing where {ELG,U}
+function retry_token_record_success(token::RetryToken{StandardRetryStrategy{ELG}, U})::Nothing where {ELG, U}
     strategy = token.strategy
     _return_retry_capacity(strategy, strategy.config.no_retry_increment)
-    logf(LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: success recorded")
+    logf(
+        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
+        "Standard retry: success recorded"
+    )
     return nothing
 end
 
 # Release standard retry token
-function retry_token_release!(token::RetryToken{StandardRetryStrategy{ELG},U})::Nothing where {ELG,U}
+function retry_token_release!(token::RetryToken{StandardRetryStrategy{ELG}, U})::Nothing where {ELG, U}
     if token.scheduled_retry_task !== nothing
         strategy = token.strategy
         event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
@@ -613,7 +651,9 @@ end
 # Shutdown strategy
 function retry_strategy_shutdown!(strategy::StandardRetryStrategy)
     @atomic strategy.shutdown = true
-    logf(LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry strategy: shutdown")
+    logf(
+        LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
+        "Standard retry strategy: shutdown"
+    )
     return nothing
 end

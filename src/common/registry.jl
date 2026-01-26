@@ -1,14 +1,14 @@
-mutable struct SmallRegistry{K,V}
+mutable struct SmallRegistry{K, V}
     keys::Memory{K}
     values::Memory{V}
     length::Int
 end
 
-function SmallRegistry{K,V}() where {K,V}
-    return SmallRegistry{K,V}(Memory{K}(undef, 0), Memory{V}(undef, 0), 0)
+function SmallRegistry{K, V}() where {K, V}
+    return SmallRegistry{K, V}(Memory{K}(undef, 0), Memory{V}(undef, 0), 0)
 end
 
-@inline function _registry_find(reg::SmallRegistry{K,V}, key::K) where {K,V}
+@inline function _registry_find(reg::SmallRegistry{K, V}, key::K) where {K, V}
     for i in 1:reg.length
         if reg.keys[i] == key
             return i
@@ -17,7 +17,7 @@ end
     return 0
 end
 
-function _registry_grow!(reg::SmallRegistry{K,V}) where {K,V}
+function _registry_grow!(reg::SmallRegistry{K, V}) where {K, V}
     old_cap = length(reg.keys)
     new_cap = old_cap == 0 ? 4 : old_cap * 2
     new_keys = Memory{K}(undef, new_cap)
@@ -31,16 +31,16 @@ function _registry_grow!(reg::SmallRegistry{K,V}) where {K,V}
     return nothing
 end
 
-function registry_get(reg::SmallRegistry{K,V}, key::K, default) where {K,V}
+function registry_get(reg::SmallRegistry{K, V}, key::K, default) where {K, V}
     idx = _registry_find(reg, key)
     return idx == 0 ? default : reg.values[idx]
 end
 
-function registry_get(reg::SmallRegistry{K,V}, key::K) where {K,V}
+function registry_get(reg::SmallRegistry{K, V}, key::K) where {K, V}
     return registry_get(reg, key, nothing)
 end
 
-function Base.get(f::Function, reg::SmallRegistry{K,V}, key::K) where {K,V}
+function Base.get(f::Function, reg::SmallRegistry{K, V}, key::K) where {K, V}
     idx = _registry_find(reg, key)
     if idx != 0
         return reg.values[idx]
@@ -50,11 +50,11 @@ function Base.get(f::Function, reg::SmallRegistry{K,V}, key::K) where {K,V}
     return value
 end
 
-function registry_get!(reg::SmallRegistry{K,V}, key::K, default::V) where {K,V}
+function registry_get!(reg::SmallRegistry{K, V}, key::K, default::V) where {K, V}
     return get(() -> default, reg, key)
 end
 
-function registry_set!(reg::SmallRegistry{K,V}, key::K, value::V) where {K,V}
+function registry_set!(reg::SmallRegistry{K, V}, key::K, value::V) where {K, V}
     idx = _registry_find(reg, key)
     if idx == 0
         if reg.length == length(reg.keys)
@@ -69,7 +69,7 @@ function registry_set!(reg::SmallRegistry{K,V}, key::K, value::V) where {K,V}
     return nothing
 end
 
-function registry_delete!(reg::SmallRegistry{K,V}, key::K) where {K,V}
+function registry_delete!(reg::SmallRegistry{K, V}, key::K) where {K, V}
     idx = _registry_find(reg, key)
     idx == 0 && return nothing
     last = reg.length
@@ -84,14 +84,14 @@ end
 @inline registry_length(reg::SmallRegistry) = reg.length
 @inline registry_isempty(reg::SmallRegistry) = reg.length == 0
 
-function registry_foreach(reg::SmallRegistry{K,V}, f::Function) where {K,V}
+function registry_foreach(reg::SmallRegistry{K, V}, f::Function) where {K, V}
     for i in 1:reg.length
         f(reg.values[i])
     end
     return nothing
 end
 
-function registry_foreach_pair(reg::SmallRegistry{K,V}, f::Function) where {K,V}
+function registry_foreach_pair(reg::SmallRegistry{K, V}, f::Function) where {K, V}
     for i in 1:reg.length
         f(reg.keys[i], reg.values[i])
     end

@@ -69,7 +69,7 @@ function pem_parse(pem_data::AbstractVector{UInt8})::Union{Vector{PemObject}, Er
             return ErrorResult(ERROR_IO_PEM_MALFORMED)
         end
 
-        begin_line = strip(data_str[begin_start:begin_end-1])
+        begin_line = strip(data_str[begin_start:(begin_end - 1)])
 
         # Extract type label
         type_label = ""
@@ -128,8 +128,10 @@ function pem_parse(pem_data::AbstractVector{UInt8})::Union{Vector{PemObject}, Er
         pem_obj = PemObject(obj_type, type_label, buf)
         push!(objects, pem_obj)
 
-        logf(LogLevel.TRACE, LS_IO_PEM,
-            "PEM: parsed object type=$(obj_type), label='$type_label', size=$(length(decoded))")
+        logf(
+            LogLevel.TRACE, LS_IO_PEM,
+            "PEM: parsed object type=$(obj_type), label='$type_label', size=$(length(decoded))"
+        )
 
         # Move past this object
         end_line = findnext('\n', data_str, end_start)
@@ -168,10 +170,10 @@ end
 # Check if PEM object is a private key
 function pem_is_private_key(obj::PemObject)::Bool
     return obj.object_type == PemObjectType.RSA_PRIVATE_KEY ||
-           obj.object_type == PemObjectType.EC_PRIVATE_KEY ||
-           obj.object_type == PemObjectType.DSA_PRIVATE_KEY ||
-           obj.object_type == PemObjectType.PRIVATE_KEY ||
-           obj.object_type == PemObjectType.ENCRYPTED_PRIVATE_KEY
+        obj.object_type == PemObjectType.EC_PRIVATE_KEY ||
+        obj.object_type == PemObjectType.DSA_PRIVATE_KEY ||
+        obj.object_type == PemObjectType.PRIVATE_KEY ||
+        obj.object_type == PemObjectType.ENCRYPTED_PRIVATE_KEY
 end
 
 # Check if PEM object is a public key
@@ -190,9 +192,9 @@ end
 
 # Encode a DER buffer back to PEM format
 function pem_encode(
-    der_data::AbstractVector{UInt8},
-    object_type::PemObjectType.T,
-)::String
+        der_data::AbstractVector{UInt8},
+        object_type::PemObjectType.T,
+    )::String
     # Find markers for this type
     begin_marker = ""
     end_marker = ""
@@ -230,7 +232,7 @@ end
 
 function pem_encode(obj::PemObject)::String
     return pem_encode(
-        unsafe_wrap(Array, pointer(getfield(obj.data, :mem)), obj.data.len; own=false),
+        unsafe_wrap(Array, pointer(getfield(obj.data, :mem)), obj.data.len; own = false),
         obj.object_type
     )
 end

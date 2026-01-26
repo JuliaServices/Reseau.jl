@@ -9,7 +9,7 @@ const OnIncomingChannelSetupFn = Function  # (server_bootstrap, error_code, chan
 const OnIncomingChannelShutdownFn = Function  # (server_bootstrap, error_code, channel, user_data) -> nothing
 
 # Client bootstrap options
-struct ClientBootstrapOptions{ELG,HR,SO,FS<:Union{OnBootstrapChannelSetupFn, Nothing},FD<:Union{OnBootstrapChannelShutdownFn, Nothing},U}
+struct ClientBootstrapOptions{ELG, HR, SO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SO
@@ -19,13 +19,13 @@ struct ClientBootstrapOptions{ELG,HR,SO,FS<:Union{OnBootstrapChannelSetupFn, Not
 end
 
 function ClientBootstrapOptions(;
-    event_loop_group,
-    host_resolver,
-    socket_options::SocketOptions=SocketOptions(),
-    on_setup_callback=nothing,
-    on_shutdown_callback=nothing,
-    user_data=nothing,
-)
+        event_loop_group,
+        host_resolver,
+        socket_options::SocketOptions = SocketOptions(),
+        on_setup_callback = nothing,
+        on_shutdown_callback = nothing,
+        user_data = nothing,
+    )
     return ClientBootstrapOptions(
         event_loop_group,
         host_resolver,
@@ -37,7 +37,7 @@ function ClientBootstrapOptions(;
 end
 
 # Client bootstrap - for creating outgoing connections
-mutable struct ClientBootstrap{ELG,HR,FS<:Union{OnBootstrapChannelSetupFn, Nothing},FD<:Union{OnBootstrapChannelShutdownFn, Nothing},U}
+mutable struct ClientBootstrap{ELG, HR, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SocketOptions
@@ -45,7 +45,7 @@ mutable struct ClientBootstrap{ELG,HR,FS<:Union{OnBootstrapChannelSetupFn, Nothi
     on_shutdown_callback::FD  # nullable
     user_data::U
     @atomic shutdown::Bool
-    ref_count::RefCounted{ClientBootstrap{ELG,HR,FS,FD,U}, Function}
+    ref_count::RefCounted{ClientBootstrap{ELG, HR, FS, FD, U}, Function}
 end
 
 function _client_bootstrap_on_zero_ref(bootstrap::ClientBootstrap)
@@ -54,9 +54,9 @@ function _client_bootstrap_on_zero_ref(bootstrap::ClientBootstrap)
 end
 
 function ClientBootstrap(
-    options::ClientBootstrapOptions{ELG,HR,SO,FS,FD,U},
-) where {ELG,HR,SO,FS,FD,U}
-    CBT = ClientBootstrap{ELG,HR,FS,FD,U}
+        options::ClientBootstrapOptions{ELG, HR, SO, FS, FD, U},
+    ) where {ELG, HR, SO, FS, FD, U}
+    CBT = ClientBootstrap{ELG, HR, FS, FD, U}
     bootstrap = CBT(
         options.event_loop_group,
         options.host_resolver,
@@ -87,7 +87,7 @@ function client_bootstrap_release!(bootstrap::ClientBootstrap)
 end
 
 # Connection request tracking
-mutable struct SocketConnectionRequest{CB,FS<:Union{OnBootstrapChannelSetupFn, Nothing},FD<:Union{OnBootstrapChannelShutdownFn, Nothing},U}
+mutable struct SocketConnectionRequest{CB, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     bootstrap::CB
     host::String
     port::UInt32
@@ -100,14 +100,14 @@ end
 
 # Initiate a connection to a host
 function client_bootstrap_connect!(
-    bootstrap::ClientBootstrap,
-    host::AbstractString,
-    port::Integer;
-    socket_options::SocketOptions=bootstrap.socket_options,
-    on_setup::Union{OnBootstrapChannelSetupFn, Nothing}=bootstrap.on_setup_callback,
-    on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing}=bootstrap.on_shutdown_callback,
-    user_data=bootstrap.user_data,
-)::Union{Nothing, ErrorResult}
+        bootstrap::ClientBootstrap,
+        host::AbstractString,
+        port::Integer;
+        socket_options::SocketOptions = bootstrap.socket_options,
+        on_setup::Union{OnBootstrapChannelSetupFn, Nothing} = bootstrap.on_setup_callback,
+        on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing} = bootstrap.on_shutdown_callback,
+        user_data = bootstrap.user_data,
+    )::Union{Nothing, ErrorResult}
     if @atomic bootstrap.shutdown
         raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
         return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
@@ -115,8 +115,10 @@ function client_bootstrap_connect!(
 
     host_str = String(host)
 
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: initiating connection to $host_str:$port")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: initiating connection to $host_str:$port"
+    )
 
     # Create connection request
     request = SocketConnectionRequest(
@@ -139,8 +141,10 @@ function client_bootstrap_connect!(
     )
 
     if resolve_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to initiate DNS resolution")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: failed to initiate DNS resolution"
+        )
         return resolve_result
     end
 
@@ -152,15 +156,19 @@ function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, ad
     bootstrap = request.bootstrap
 
     if error_code != AWS_OP_SUCCESS
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: DNS resolution failed for $(request.host) with error $error_code")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: DNS resolution failed for $(request.host) with error $error_code"
+        )
         _connection_request_complete(request, error_code, nothing)
         return nothing
     end
 
     if isempty(addresses)
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: no addresses returned for $(request.host)")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: no addresses returned for $(request.host)"
+        )
         _connection_request_complete(request, ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
         return nothing
     end
@@ -168,8 +176,10 @@ function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, ad
     # Use first address
     address = addresses[1]
 
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: resolved $(request.host) to $(address.address)")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: resolved $(request.host) to $(address.address)"
+    )
 
     # Create socket and connect
     _initiate_socket_connect(request, address.address)
@@ -185,8 +195,10 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
     sock_result = socket_init_posix(bootstrap.socket_options)
 
     if sock_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create socket")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: failed to create socket"
+        )
         _connection_request_complete(request, sock_result.code, nothing)
         return nothing
     end
@@ -203,8 +215,10 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
     event_loop = event_loop_group_get_next_loop(bootstrap.event_loop_group)
 
     if event_loop === nothing
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: no event loop available")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: no event loop available"
+        )
         socket_close!(socket)
         _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
         return nothing
@@ -220,8 +234,10 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
     )
 
     if connect_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to initiate connection")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: failed to initiate connection"
+        )
         socket_close!(socket)
         _connection_request_complete(request, connect_result.code, nothing)
         return nothing
@@ -236,15 +252,19 @@ function _on_socket_connect_complete(request::SocketConnectionRequest, error_cod
     socket = request.socket
 
     if error_code != AWS_OP_SUCCESS
-        logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: connection failed with error $error_code")
+        logf(
+            LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: connection failed with error $error_code"
+        )
         socket_close!(socket)
         _connection_request_complete(request, error_code, nothing)
         return nothing
     end
 
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: connection established to $(request.host):$(request.port)")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: connection established to $(request.host):$(request.port)"
+    )
 
     # Create channel for this connection
     _setup_client_channel(request)
@@ -265,18 +285,22 @@ function _setup_client_channel(request::SocketConnectionRequest)
     request.channel = channel
 
     # Set shutdown callback
-    channel_set_shutdown_callback!(channel, (ch, err, ud) -> begin
-        if request.on_shutdown !== nothing
-            request.on_shutdown(bootstrap, err, ch, request.user_data)
-        end
-    end, request)
+    channel_set_shutdown_callback!(
+        channel, (ch, err, ud) -> begin
+            if request.on_shutdown !== nothing
+                Base.invokelatest(request.on_shutdown, bootstrap, err, ch, request.user_data)
+            end
+        end, request
+    )
 
     # Add socket handler to channel
     handler_result = socket_channel_handler_new!(channel, socket)
 
     if handler_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create socket channel handler")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: failed to create socket channel handler"
+        )
         socket_close!(socket)
         _connection_request_complete(request, handler_result.code, nothing)
         return nothing
@@ -286,15 +310,19 @@ function _setup_client_channel(request::SocketConnectionRequest)
     setup_result = channel_setup_complete!(channel)
 
     if setup_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: channel setup failed")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: channel setup failed"
+        )
         socket_close!(socket)
         _connection_request_complete(request, setup_result.code, nothing)
         return nothing
     end
 
-    logf(LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)")
+    logf(
+        LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)"
+    )
 
     _connection_request_complete(request, AWS_OP_SUCCESS, channel)
 
@@ -304,7 +332,7 @@ end
 # Complete connection request and invoke callback
 function _connection_request_complete(request::SocketConnectionRequest, error_code::Int, channel::Union{Channel, Nothing})
     if request.on_setup !== nothing
-        request.on_setup(request.bootstrap, error_code, channel, request.user_data)
+        Base.invokelatest(request.on_setup, request.bootstrap, error_code, channel, request.user_data)
     end
     return nothing
 end
@@ -314,7 +342,7 @@ end
 # =============================================================================
 
 # Server bootstrap options
-struct ServerBootstrapOptions{ELG,SO,FL<:Union{OnServerListenerSetupFn, Nothing},FS<:Union{OnIncomingChannelSetupFn, Nothing},FD<:Union{OnIncomingChannelShutdownFn, Nothing},U}
+struct ServerBootstrapOptions{ELG, SO, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     socket_options::SO
     host::String
@@ -326,15 +354,15 @@ struct ServerBootstrapOptions{ELG,SO,FL<:Union{OnServerListenerSetupFn, Nothing}
 end
 
 function ServerBootstrapOptions(;
-    event_loop_group,
-    socket_options::SocketOptions=SocketOptions(),
-    host::AbstractString="0.0.0.0",
-    port::Integer,
-    on_listener_setup=nothing,
-    on_incoming_channel_setup=nothing,
-    on_incoming_channel_shutdown=nothing,
-    user_data=nothing,
-)
+        event_loop_group,
+        socket_options::SocketOptions = SocketOptions(),
+        host::AbstractString = "0.0.0.0",
+        port::Integer,
+        on_listener_setup = nothing,
+        on_incoming_channel_setup = nothing,
+        on_incoming_channel_shutdown = nothing,
+        user_data = nothing,
+    )
     return ServerBootstrapOptions(
         event_loop_group,
         socket_options,
@@ -348,7 +376,7 @@ function ServerBootstrapOptions(;
 end
 
 # Server bootstrap - for accepting incoming connections
-mutable struct ServerBootstrap{ELG,FL<:Union{OnServerListenerSetupFn, Nothing},FS<:Union{OnIncomingChannelSetupFn, Nothing},FD<:Union{OnIncomingChannelShutdownFn, Nothing},U}
+mutable struct ServerBootstrap{ELG, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     socket_options::SocketOptions
     listener_socket::Union{Socket, Nothing}  # nullable
@@ -357,7 +385,7 @@ mutable struct ServerBootstrap{ELG,FL<:Union{OnServerListenerSetupFn, Nothing},F
     on_incoming_channel_shutdown::FD  # nullable
     user_data::U
     @atomic shutdown::Bool
-    ref_count::RefCounted{ServerBootstrap{ELG,FL,FS,FD,U}, Function}
+    ref_count::RefCounted{ServerBootstrap{ELG, FL, FS, FD, U}, Function}
 end
 
 function _server_bootstrap_on_zero_ref(bootstrap::ServerBootstrap)
@@ -369,9 +397,9 @@ function _server_bootstrap_on_zero_ref(bootstrap::ServerBootstrap)
 end
 
 function ServerBootstrap(
-    options::ServerBootstrapOptions{ELG,SO,FL,FS,FD,U},
-) where {ELG,SO,FL,FS,FD,U}
-    SBT = ServerBootstrap{ELG,FL,FS,FD,U}
+        options::ServerBootstrapOptions{ELG, SO, FL, FS, FD, U},
+    ) where {ELG, SO, FL, FS, FD, U}
+    SBT = ServerBootstrap{ELG, FL, FS, FD, U}
     bootstrap = SBT(
         options.event_loop_group,
         options.socket_options,
@@ -391,8 +419,10 @@ function ServerBootstrap(
     sock_result = socket_init_posix(options.socket_options)
 
     if sock_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to create listener socket")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: failed to create listener socket"
+        )
         return sock_result
     end
 
@@ -407,8 +437,10 @@ function ServerBootstrap(
     bind_result = socket_bind(listener, local_endpoint)
 
     if bind_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to bind to $(options.host):$(options.port)")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: failed to bind to $(options.host):$(options.port)"
+        )
         socket_close!(listener)
         return bind_result
     end
@@ -417,8 +449,10 @@ function ServerBootstrap(
     listen_result = socket_listen(listener, 128)
 
     if listen_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to listen")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: failed to listen"
+        )
         socket_close!(listener)
         return listen_result
     end
@@ -427,8 +461,10 @@ function ServerBootstrap(
     event_loop = event_loop_group_get_next_loop(options.event_loop_group)
 
     if event_loop === nothing
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: no event loop available")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: no event loop available"
+        )
         socket_close!(listener)
         raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
@@ -448,14 +484,18 @@ function ServerBootstrap(
     accept_result = socket_start_accept(listener, event_loop, listener_options)
 
     if accept_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to start accepting connections")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: failed to start accepting connections"
+        )
         socket_close!(listener)
         return accept_result
     end
 
-    logf(LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
-        "ServerBootstrap: listening on $(options.host):$(options.port)")
+    logf(
+        LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
+        "ServerBootstrap: listening on $(options.host):$(options.port)"
+    )
 
     return bootstrap
 end
@@ -475,13 +515,17 @@ end
 # Callback for incoming connections
 function _on_incoming_connection(bootstrap::ServerBootstrap, error_code::Int, new_socket)
     if error_code != AWS_OP_SUCCESS
-        logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: incoming connection error $error_code")
+        logf(
+            LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: incoming connection error $error_code"
+        )
         return nothing
     end
 
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ServerBootstrap: accepted incoming connection")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+        "ServerBootstrap: accepted incoming connection"
+    )
 
     # Set up channel for this connection
     _setup_incoming_channel(bootstrap, new_socket)
@@ -497,18 +541,22 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
     channel = Channel(event_loop, nothing)
 
     # Set shutdown callback
-    channel_set_shutdown_callback!(channel, (ch, err, ud) -> begin
-        if bootstrap.on_incoming_channel_shutdown !== nothing
-            bootstrap.on_incoming_channel_shutdown(bootstrap, err, ch, bootstrap.user_data)
-        end
-    end, bootstrap)
+    channel_set_shutdown_callback!(
+        channel, (ch, err, ud) -> begin
+            if bootstrap.on_incoming_channel_shutdown !== nothing
+                bootstrap.on_incoming_channel_shutdown(bootstrap, err, ch, bootstrap.user_data)
+            end
+        end, bootstrap
+    )
 
     # Add socket handler to channel
     handler_result = socket_channel_handler_new!(channel, socket)
 
     if handler_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to create socket handler for incoming connection")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: failed to create socket handler for incoming connection"
+        )
         socket_close!(socket)
         return nothing
     end
@@ -517,14 +565,18 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
     setup_result = channel_setup_complete!(channel)
 
     if setup_result isa ErrorResult
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: incoming channel setup failed")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: incoming channel setup failed"
+        )
         socket_close!(socket)
         return nothing
     end
 
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ServerBootstrap: incoming channel $(channel.channel_id) setup complete")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+        "ServerBootstrap: incoming channel $(channel.channel_id) setup complete"
+    )
 
     # Invoke setup callback
     if bootstrap.on_incoming_channel_setup !== nothing

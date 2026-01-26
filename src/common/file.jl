@@ -34,18 +34,18 @@ function byte_buf_init_from_file(out_buf::Base.RefValue{<:ByteBuffer}, filename:
 end
 
 function byte_buf_init_from_file_with_size_hint(
-    out_buf::Base.RefValue{<:ByteBuffer},
-    filename::Ptr{UInt8},
-    _size_hint::Integer,
-)
+        out_buf::Base.RefValue{<:ByteBuffer},
+        filename::Ptr{UInt8},
+        _size_hint::Integer,
+    )
     return byte_buf_init_from_file(out_buf, filename)
 end
 
 function byte_buf_init_from_file_with_size_hint(
-    out_buf::Base.RefValue{<:ByteBuffer},
-    filename::AbstractString,
-    _size_hint::Integer,
-)
+        out_buf::Base.RefValue{<:ByteBuffer},
+        filename::AbstractString,
+        _size_hint::Integer,
+    )
     return byte_buf_init_from_file(out_buf, filename)
 end
 

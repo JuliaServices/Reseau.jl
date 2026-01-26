@@ -1,15 +1,15 @@
 using EnumX
 
 @enumx ThreadDetachState::UInt8 begin
-    NOT_CREATED=1
-    JOINABLE=2
-    JOIN_COMPLETED=3
-    MANAGED=4
+    NOT_CREATED = 1
+    JOINABLE = 2
+    JOIN_COMPLETED = 3
+    MANAGED = 4
 end
 
 @enumx ThreadJoinStrategy::UInt8 begin
-    MANUAL=0
-    MANAGED=1
+    MANUAL = 0
+    MANAGED = 1
 end
 
 @static if _PLATFORM_WINDOWS
@@ -41,7 +41,7 @@ end
 mutable struct ThreadHandle{F}
     id::thread_id_t
     detach_state::ThreadDetachState.T
-    task::Union{Task,Nothing}  # nullable
+    task::Union{Task, Nothing}  # nullable
     name::String
     managed::Bool
     atexit::ArrayList{F}
@@ -128,12 +128,12 @@ function thread_init(handle::ThreadHandle)
     return OP_SUCCESS
 end
 
-function thread_init(handle_ref::Base.RefValue{ThreadHandle}, ::Any=nothing)
+function thread_init(handle_ref::Base.RefValue{ThreadHandle}, ::Any = nothing)
     handle_ref[] = ThreadHandle()
     return OP_SUCCESS
 end
 
-function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptions,Nothing}=nothing)
+function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptions, Nothing} = nothing)
     opts = options === nothing ? ThreadOptions() : options
     managed = opts.join_strategy == ThreadJoinStrategy.MANAGED
     handle.detach_state = managed ? ThreadDetachState.MANAGED : ThreadDetachState.JOINABLE
@@ -151,7 +151,7 @@ function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptio
     return OP_SUCCESS
 end
 
-function thread_launch(handle_ref::Base.RefValue{ThreadHandle}, fn, ctx, options::Union{ThreadOptions,Nothing}=nothing)
+function thread_launch(handle_ref::Base.RefValue{ThreadHandle}, fn, ctx, options::Union{ThreadOptions, Nothing} = nothing)
     return thread_launch(handle_ref[], fn, ctx, options)
 end
 

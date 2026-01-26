@@ -16,14 +16,14 @@ const cli_step_kind = CliStepKind.T
 
 Base.@kwdef struct CliOption
     name::String
-    short::Union{Char,Nothing} = nothing
+    short::Union{Char, Nothing} = nothing
     arg::cli_option_arg = CliOptionArg.NO_ARGUMENT
 end
 
 struct CliStep
     kind::cli_step_kind
-    option::Union{CliOption,Nothing}
-    value::Union{String,Nothing}
+    option::Union{CliOption, Nothing}
+    value::Union{String, Nothing}
 end
 
 mutable struct CliParseState

@@ -28,14 +28,14 @@ const IPPROTO_IP = Cint(0)
 const IPPROTO_IPV6 = Cint(41)
 
 # Socket options
-const SO_REUSEADDR = @static Sys.isapple() ? Cint(0x4) : Cint(2)
-const SO_KEEPALIVE = @static Sys.isapple() ? Cint(0x8) : Cint(9)
+const SO_REUSEADDR = @static Sys.isapple() ? Cint(0x04) : Cint(2)
+const SO_KEEPALIVE = @static Sys.isapple() ? Cint(0x08) : Cint(9)
 const SO_ERROR = @static Sys.isapple() ? Cint(0x1007) : Cint(4)
 
 # TCP keepalive options
 @static if Sys.isapple()
-    const TCP_KEEPINTVL = Cint(0x101)  # TCP_KEEPINTVL on macOS
-    const TCP_KEEPCNT = Cint(0x102)    # TCP_KEEPCNT on macOS
+    const TCP_KEEPINTVL = Cint(0x0101)  # TCP_KEEPINTVL on macOS
+    const TCP_KEEPCNT = Cint(0x0102)    # TCP_KEEPCNT on macOS
 else
     const TCP_KEEPIDLE_LINUX = Cint(4)
     const TCP_KEEPINTVL = Cint(5)
@@ -43,10 +43,13 @@ else
 end
 
 # File control constants
+const F_GETFD = Cint(1)
+const F_SETFD = Cint(2)
 const F_GETFL = Cint(3)
 const F_SETFL = Cint(4)
-const O_NONBLOCK = Cint(0x0004)
-const O_CLOEXEC = @static Sys.isapple() ? Cint(0x1000000) : Cint(0o2000000)
+const FD_CLOEXEC = Cint(1)
+const O_NONBLOCK = @static Sys.isapple() ? Cint(0x0004) : Cint(0x0800)
+const O_CLOEXEC = @static Sys.isapple() ? Cint(0x01000000) : Cint(0o2000000)
 
 # Connect errno values
 const EINPROGRESS = @static Sys.isapple() ? 36 : 115
@@ -136,7 +139,7 @@ function determine_socket_error(errno_val::Integer)::Int
 end
 
 # Socket write request for queued writes
-mutable struct SocketWriteRequest{F<:Union{SocketOnWriteCompletedFn, Nothing},U}
+mutable struct SocketWriteRequest{F <: Union{SocketOnWriteCompletedFn, Nothing}, U}
     cursor::ByteCursor
     original_len::Csize_t
     written_fn::F  # nullable
@@ -153,12 +156,11 @@ mutable struct PosixSocketConnectArgs{S}
 end
 
 # POSIX socket implementation data
-mutable struct PosixSocket{FC<:Union{SocketOnShutdownCompleteFn, Nothing},UC,FK<:Union{SocketOnShutdownCompleteFn, Nothing},UK}
+mutable struct PosixSocket{FC <: Union{SocketOnShutdownCompleteFn, Nothing}, UC, FK <: Union{SocketOnShutdownCompleteFn, Nothing}, UK}
     write_queue::Deque{SocketWriteRequest}
     written_queue::Deque{SocketWriteRequest}
     written_task::Union{ScheduledTask, Nothing}  # nullable
     connect_args::Union{PosixSocketConnectArgs, Nothing}  # nullable
-    @atomic internal_refcount::Int
     written_task_scheduled::Bool
     currently_subscribed::Bool
     continue_accept::Bool
@@ -170,12 +172,11 @@ mutable struct PosixSocket{FC<:Union{SocketOnShutdownCompleteFn, Nothing},UC,FK<
 end
 
 function PosixSocket()
-    return PosixSocket{Nothing,Nothing,Nothing,Nothing}(
+    return PosixSocket{Union{SocketOnShutdownCompleteFn, Nothing}, Any, Union{SocketOnShutdownCompleteFn, Nothing}, Any}(
         Deque{SocketWriteRequest}(),
         Deque{SocketWriteRequest}(),
         nothing,
         nothing,
-        1,
         false,
         false,
         false,
@@ -196,7 +197,7 @@ const POSIX_SOCKET_STATE_BOUND = 0x10
 const POSIX_SOCKET_STATE_LISTENING = 0x20
 const POSIX_SOCKET_STATE_TIMEDOUT = 0x40
 const POSIX_SOCKET_STATE_ERROR = 0x80
-const POSIX_SOCKET_STATE_CLOSED = 0x100
+const POSIX_SOCKET_STATE_CLOSED = 0x0100
 
 # POSIX Socket VTable
 struct PosixSocketVTable <: SocketVTable end
@@ -212,7 +213,7 @@ end
 
 # Internal helper to set errno
 function set_errno(val::Integer)
-    ccall(:jl_set_errno, Cvoid, (Cint,), Cint(val))
+    return ccall(:jl_set_errno, Cvoid, (Cint,), Cint(val))
 end
 
 # Create the underlying socket file descriptor
@@ -231,17 +232,21 @@ function create_posix_socket_fd(options::SocketOptions)::Union{Cint, ErrorResult
 
     # Set non-blocking and close-on-exec
     flags = ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_GETFL, Cint(0))
-    flags |= O_NONBLOCK | O_CLOEXEC
+    flags |= O_NONBLOCK
     ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFL, flags)
+
+    fd_flags = ccall(:fcntl, Cint, (Cint, Cint), fd, F_GETFD)
+    fd_flags |= FD_CLOEXEC
+    ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFD, fd_flags)
 
     return fd
 end
 
 # Initialize a POSIX socket
 function socket_init_posix(
-    options::SocketOptions;
-    existing_fd::Cint=Cint(-1),
-)::Union{PosixSocketType, ErrorResult}
+        options::SocketOptions;
+        existing_fd::Cint = Cint(-1),
+    )::Union{PosixSocketType, ErrorResult}
 
     socket_impl = PosixSocket()
 
@@ -256,7 +261,7 @@ function socket_init_posix(
         io_handle.fd = existing_fd
     end
 
-    sock = Socket{PosixSocketVTable, PosixSocket}(
+    sock = Socket{PosixSocketVTable, PosixSocket, Union{AbstractChannelHandler, Nothing}, Union{SocketOnReadableFn, Nothing}, Any, Union{SocketOnConnectionResultFn, Nothing}, Union{SocketOnAcceptResultFn, Nothing}, Any}(
         POSIX_SOCKET_VTABLE,
         SocketEndpoint(),
         SocketEndpoint(),
@@ -283,8 +288,10 @@ function socket_init_posix(
         return result
     end
 
-    logf(LogLevel.DEBUG, LS_IO_SOCKET,
-        "Initializing POSIX socket with domain $(options.domain) and type $(options.type), fd=$(io_handle.fd)")
+    logf(
+        LogLevel.DEBUG, LS_IO_SOCKET,
+        "Initializing POSIX socket with domain $(options.domain) and type $(options.type), fd=$(io_handle.fd)"
+    )
 
     return sock
 end
@@ -311,21 +318,27 @@ function set_posix_socket_options!(sock::PosixSocketType, options::SocketOptions
     # Set NOSIGPIPE on macOS
     @static if Sys.isapple()
         opt_val = Ref{Cint}(1)
-        ccall(:setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
-            fd, SOL_SOCKET, NO_SIGNAL_SOCK_OPT, opt_val, sizeof(Cint))
+        ccall(
+            :setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
+            fd, SOL_SOCKET, NO_SIGNAL_SOCK_OPT, opt_val, sizeof(Cint)
+        )
     end
 
     # Set SO_REUSEADDR
     opt_val = Ref{Cint}(1)
-    ccall(:setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
-        fd, SOL_SOCKET, SO_REUSEADDR, opt_val, sizeof(Cint))
+    ccall(
+        :setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
+        fd, SOL_SOCKET, SO_REUSEADDR, opt_val, sizeof(Cint)
+    )
 
     # Set TCP keepalive options if applicable
     if options.type == SocketType.STREAM && options.domain != SocketDomain.LOCAL
         if options.keepalive
             ka_val = Ref{Cint}(1)
-            ccall(:setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
-                fd, SOL_SOCKET, SO_KEEPALIVE, ka_val, sizeof(Cint))
+            ccall(
+                :setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
+                fd, SOL_SOCKET, SO_KEEPALIVE, ka_val, sizeof(Cint)
+            )
         end
 
         if options.keep_alive_interval_sec > 0 && options.keep_alive_timeout_sec > 0
@@ -336,18 +349,24 @@ function set_posix_socket_options!(sock::PosixSocketType, options::SocketOptions
             end
 
             ival = Ref{Cint}(options.keep_alive_interval_sec)
-            ccall(:setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
-                fd, IPPROTO_TCP, idle_opt, ival, sizeof(Cint))
+            ccall(
+                :setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
+                fd, IPPROTO_TCP, idle_opt, ival, sizeof(Cint)
+            )
 
             tval = Ref{Cint}(options.keep_alive_timeout_sec)
-            ccall(:setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
-                fd, IPPROTO_TCP, TCP_KEEPINTVL, tval, sizeof(Cint))
+            ccall(
+                :setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
+                fd, IPPROTO_TCP, TCP_KEEPINTVL, tval, sizeof(Cint)
+            )
         end
 
         if options.keep_alive_max_failed_probes > 0
             cnt_val = Ref{Cint}(options.keep_alive_max_failed_probes)
-            ccall(:setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
-                fd, IPPROTO_TCP, TCP_KEEPCNT, cnt_val, sizeof(Cint))
+            ccall(
+                :setsockopt, Cint, (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
+                fd, IPPROTO_TCP, TCP_KEEPCNT, cnt_val, sizeof(Cint)
+            )
         end
     end
 
@@ -411,8 +430,10 @@ end
 function inet_ntop_ipv4(addr::UInt32)::String
     buf = zeros(UInt8, 16)  # INET_ADDRSTRLEN
     addr_ref = Ref(addr)
-    result = GC.@preserve buf addr_ref ccall(:inet_ntop, Cstring, (Cint, Ptr{UInt32}, Ptr{UInt8}, Cuint),
-        AF_INET, addr_ref, pointer(buf), Cuint(16))
+    result = GC.@preserve buf addr_ref ccall(
+        :inet_ntop, Cstring, (Cint, Ptr{UInt32}, Ptr{UInt8}, Cuint),
+        AF_INET, addr_ref, pointer(buf), Cuint(16)
+    )
     if result == C_NULL
         return ""
     end
@@ -423,8 +444,10 @@ end
 function inet_ntop_ipv6(addr::NTuple{16, UInt8})::String
     buf = zeros(UInt8, 46)  # INET6_ADDRSTRLEN
     addr_vec = collect(addr)
-    result = GC.@preserve buf addr_vec ccall(:inet_ntop, Cstring, (Cint, Ptr{UInt8}, Ptr{UInt8}, Cuint),
-        AF_INET6, pointer(addr_vec), pointer(buf), Cuint(46))
+    result = GC.@preserve buf addr_vec ccall(
+        :inet_ntop, Cstring, (Cint, Ptr{UInt8}, Ptr{UInt8}, Cuint),
+        AF_INET6, pointer(addr_vec), pointer(buf), Cuint(46)
+    )
     if result == C_NULL
         return ""
     end
@@ -452,22 +475,12 @@ function vtable_socket_cleanup!(vtable::PosixSocketVTable, sock::PosixSocketType
     on_cleanup_complete = socket_impl.on_cleanup_complete
     cleanup_user_data = socket_impl.cleanup_user_data
 
-    # Decrement refcount
-    old_count = @atomic socket_impl.internal_refcount
-    new_count = old_count - 1
-    @atomic socket_impl.internal_refcount = new_count
-
-    if new_count != 0
-        logf(LogLevel.DEBUG, LS_IO_SOCKET,
-            "Socket fd=$fd_for_logging is still pending io, letting it dangle and cleaning up later.")
-    end
-
     # Reset socket fields
     sock.io_handle = IoHandle()
     sock.impl = nothing
 
     if on_cleanup_complete !== nothing
-        on_cleanup_complete(cleanup_user_data)
+        Base.invokelatest(on_cleanup_complete, cleanup_user_data)
     end
 
     return nothing
@@ -570,8 +583,10 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
     socket_impl.connect_args = connect_args
 
     # Attempt to connect
-    error_code = GC.@preserve sockaddr_buf ccall(:connect, Cint, (Cint, Ptr{UInt8}, Cuint),
-        fd, pointer(sockaddr_buf), sockaddr_len)
+    error_code = GC.@preserve sockaddr_buf ccall(
+        :connect, Cint, (Cint, Ptr{UInt8}, Cuint),
+        fd, pointer(sockaddr_buf), sockaddr_len
+    )
     errno_val = get_errno()
 
     sock.event_loop = event_loop
@@ -581,7 +596,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
         logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: connected immediately")
 
         # Schedule success callback
-        connect_args.task = ScheduledTask(_run_connect_success, connect_args; type_tag="posix_connect_success")
+        connect_args.task = ScheduledTask(_run_connect_success, connect_args; type_tag = "posix_connect_success")
         event_loop_schedule_task_now!(event_loop, connect_args.task)
         return nothing
     end
@@ -590,7 +605,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: connection pending")
 
         # Create timeout task
-        timeout_task = ScheduledTask(_handle_socket_timeout, connect_args; type_tag="posix_connect_timeout")
+        timeout_task = ScheduledTask(_handle_socket_timeout, connect_args; type_tag = "posix_connect_timeout")
         connect_args.task = timeout_task
 
         # Subscribe to write events (connection completion triggers writable)
@@ -649,8 +664,10 @@ function _on_connection_success(sock::PosixSocketType)
     # Check for connection errors
     connect_result = Ref{Cint}(0)
     result_len = Ref{Cuint}(sizeof(Cint))
-    if ccall(:getsockopt, Cint, (Cint, Cint, Cint, Ptr{Cint}, Ptr{Cuint}),
-            fd, SOL_SOCKET, SO_ERROR, connect_result, result_len) < 0
+    if ccall(
+            :getsockopt, Cint, (Cint, Cint, Cint, Ptr{Cint}, Ptr{Cuint}),
+            fd, SOL_SOCKET, SO_ERROR, connect_result, result_len
+        ) < 0
         errno_val = get_errno()
         aws_error = determine_socket_error(errno_val)
         raise_error(aws_error)
@@ -681,8 +698,8 @@ function _on_connection_success(sock::PosixSocketType)
     end
 
     # Invoke success callback
-    if sock.connection_result_fn !== nothing
-        sock.connection_result_fn(sock, AWS_OP_SUCCESS, sock.connect_accept_user_data)
+    return if sock.connection_result_fn !== nothing
+        Base.invokelatest(sock.connection_result_fn, sock, AWS_OP_SUCCESS, sock.connect_accept_user_data)
     end
 end
 
@@ -692,10 +709,10 @@ function _on_connection_error(sock::PosixSocketType, error_code::Integer)
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: connection failure, error=$error_code")
 
-    if sock.connection_result_fn !== nothing
-        sock.connection_result_fn(sock, error_code, sock.connect_accept_user_data)
+    return if sock.connection_result_fn !== nothing
+        Base.invokelatest(sock.connection_result_fn, sock, error_code, sock.connect_accept_user_data)
     elseif sock.accept_result_fn !== nothing
-        sock.accept_result_fn(sock, error_code, nothing, sock.connect_accept_user_data)
+        Base.invokelatest(sock.accept_result_fn, sock, error_code, nothing, sock.connect_accept_user_data)
     end
 end
 
@@ -735,8 +752,7 @@ function _socket_connect_event(event_loop, handle::IoHandle, events::Int, user_d
 end
 
 # Handle socket connection timeout
-function _handle_socket_timeout(task::ScheduledTask, status::TaskStatus.T)
-    connect_args = task.arg
+function _handle_socket_timeout(connect_args::PosixSocketConnectArgs, status::TaskStatus.T)
 
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket timeout task triggered")
 
@@ -772,8 +788,7 @@ function _handle_socket_timeout(task::ScheduledTask, status::TaskStatus.T)
 end
 
 # Run connect success callback in event loop thread
-function _run_connect_success(task::ScheduledTask, status::TaskStatus.T)
-    connect_args = task.arg
+function _run_connect_success(connect_args::PosixSocketConnectArgs, status::TaskStatus.T)
 
     if connect_args.socket !== nothing
         sock = connect_args.socket
@@ -799,17 +814,19 @@ function _update_local_endpoint!(sock::PosixSocketType)
     address = zeros(UInt8, 128)
     address_size = Ref{Cuint}(128)
 
-    result = GC.@preserve address ccall(:getsockname, Cint, (Cint, Ptr{UInt8}, Ptr{Cuint}),
-        fd, pointer(address), address_size)
+    result = GC.@preserve address ccall(
+        :getsockname, Cint, (Cint, Ptr{UInt8}, Ptr{Cuint}),
+        fd, pointer(address), address_size
+    )
 
     if result != 0
         return
     end
 
-    # Parse family
-    family = reinterpret(Cushort, address[1:2])[1]
+    # Parse family (macOS sockaddr has length in first byte)
+    family = @static Sys.isapple() ? Cushort(address[2]) : reinterpret(Cushort, address[1:2])[1]
 
-    if family == AF_INET
+    return if family == AF_INET
         port = ntohs(reinterpret(Cushort, address[3:4])[1])
         addr = reinterpret(UInt32, address[5:8])[1]
         addr_str = inet_ntop_ipv4(addr)
@@ -902,8 +919,10 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
     end
 
     # Bind
-    result = GC.@preserve sockaddr_buf ccall(:bind, Cint, (Cint, Ptr{UInt8}, Cuint),
-        fd, pointer(sockaddr_buf), sockaddr_len)
+    result = GC.@preserve sockaddr_buf ccall(
+        :bind, Cint, (Cint, Ptr{UInt8}, Cuint),
+        fd, pointer(sockaddr_buf), sockaddr_len
+    )
 
     if result != 0
         errno_val = get_errno()
@@ -923,8 +942,10 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
         sock.state = SocketState.CONNECTED
     end
 
-    logf(LogLevel.DEBUG, LS_IO_SOCKET,
-        "Socket fd=$fd: successfully bound to $(get_address(sock.local_endpoint)):$(sock.local_endpoint.port)")
+    logf(
+        LogLevel.DEBUG, LS_IO_SOCKET,
+        "Socket fd=$fd: successfully bound to $(get_address(sock.local_endpoint)):$(sock.local_endpoint.port)"
+    )
 
     return nothing
 end
@@ -1000,7 +1021,7 @@ function vtable_socket_close(vtable::PosixSocketVTable, sock::PosixSocketType)::
             write_request = popfirst!(socket_impl.written_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
-                write_request.written_fn(sock, write_request.error_code, bytes_written, write_request.user_data)
+                Base.invokelatest(write_request.written_fn, sock, write_request.error_code, bytes_written, write_request.user_data)
             end
         end
 
@@ -1008,13 +1029,13 @@ function vtable_socket_close(vtable::PosixSocketVTable, sock::PosixSocketType)::
             write_request = popfirst!(socket_impl.write_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
-                write_request.written_fn(sock, ERROR_IO_SOCKET_CLOSED, bytes_written, write_request.user_data)
+                Base.invokelatest(write_request.written_fn, sock, ERROR_IO_SOCKET_CLOSED, bytes_written, write_request.user_data)
             end
         end
     end
 
     if socket_impl.on_close_complete !== nothing
-        socket_impl.on_close_complete(socket_impl.close_user_data)
+        Base.invokelatest(socket_impl.on_close_complete, socket_impl.close_user_data)
     end
 
     return nothing
@@ -1085,15 +1106,11 @@ function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_dat
     socket_impl = sock.impl
     fd = handle.fd
 
-    # Acquire ref to prevent cleanup during callback
-    old_count = @atomic socket_impl.internal_refcount
-    @atomic socket_impl.internal_refcount = old_count + 1
-
     # Handle readable events first
     if socket_impl.currently_subscribed && (events & Int(IoEventType.READABLE)) != 0
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: is readable")
         if sock.readable_fn !== nothing
-            sock.readable_fn(sock, AWS_OP_SUCCESS, sock.readable_user_data)
+            Base.invokelatest(sock.readable_fn, sock, AWS_OP_SUCCESS, sock.readable_user_data)
         end
     end
 
@@ -1108,20 +1125,16 @@ function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_dat
         raise_error(ERROR_IO_SOCKET_CLOSED)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: closed remotely")
         if sock.readable_fn !== nothing
-            sock.readable_fn(sock, ERROR_IO_SOCKET_CLOSED, sock.readable_user_data)
+            Base.invokelatest(sock.readable_fn, sock, ERROR_IO_SOCKET_CLOSED, sock.readable_user_data)
         end
     elseif socket_impl.currently_subscribed && (events & Int(IoEventType.ERROR)) != 0
         aws_error = vtable_socket_get_error(sock.vtable, sock)
         raise_error(aws_error)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: error event occurred")
         if sock.readable_fn !== nothing
-            sock.readable_fn(sock, aws_error, sock.readable_user_data)
+            Base.invokelatest(sock.readable_fn, sock, aws_error, sock.readable_user_data)
         end
     end
-
-    # Release ref
-    old_count = @atomic socket_impl.internal_refcount
-    @atomic socket_impl.internal_refcount = old_count - 1
 
     return nothing
 end
@@ -1232,14 +1245,18 @@ function _process_socket_write_requests(sock::PosixSocketType, parent_request::U
     while !isempty(socket_impl.write_queue)
         write_request = first(socket_impl.write_queue)
 
-        logf(LogLevel.TRACE, LS_IO_SOCKET,
-            "Socket fd=$fd: dequeued write request of size $(write_request.original_len)")
+        logf(
+            LogLevel.TRACE, LS_IO_SOCKET,
+            "Socket fd=$fd: dequeued write request of size $(write_request.original_len)"
+        )
 
         # Send data
         cursor = write_request.cursor
         cursor_raw = cursor.len > 0 ? Ptr{UInt8}(pointer(cursor.ptr)) : Ptr{UInt8}(0)
-        written = ccall(:send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
-            fd, cursor_raw, cursor.len, NO_SIGNAL_SEND)
+        written = ccall(
+            :send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
+            fd, cursor_raw, cursor.len, NO_SIGNAL_SEND
+        )
         errno_val = get_errno()
 
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: send returned $written")
@@ -1296,7 +1313,7 @@ function _process_socket_write_requests(sock::PosixSocketType, parent_request::U
     # Schedule written task if needed
     if pushed_to_written_queue && !socket_impl.written_task_scheduled
         socket_impl.written_task_scheduled = true
-        socket_impl.written_task = ScheduledTask(_written_task_fn, sock; type_tag="socket_written_task")
+        socket_impl.written_task = ScheduledTask(_written_task_fn, sock; type_tag = "socket_written_task")
         event_loop_schedule_task_now!(sock.event_loop, socket_impl.written_task)
     end
 
@@ -1304,15 +1321,10 @@ function _process_socket_write_requests(sock::PosixSocketType, parent_request::U
 end
 
 # Written task callback
-function _written_task_fn(task::ScheduledTask, status::TaskStatus.T)
-    sock = task.arg
+function _written_task_fn(sock::PosixSocketType, status::TaskStatus.T)
     socket_impl = sock.impl
 
     socket_impl.written_task_scheduled = false
-
-    # Acquire ref
-    old_count = @atomic socket_impl.internal_refcount
-    @atomic socket_impl.internal_refcount = old_count + 1
 
     # Process completed writes
     if !isempty(socket_impl.written_queue)
@@ -1325,14 +1337,10 @@ function _written_task_fn(task::ScheduledTask, status::TaskStatus.T)
             write_request = popfirst!(socket_impl.written_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
-                write_request.written_fn(sock, write_request.error_code, bytes_written, write_request.user_data)
+                Base.invokelatest(write_request.written_fn, sock, write_request.error_code, bytes_written, write_request.user_data)
             end
         end
     end
-
-    # Release ref
-    old_count = @atomic socket_impl.internal_refcount
-    @atomic socket_impl.internal_refcount = old_count - 1
 
     return nothing
 end
@@ -1380,8 +1388,10 @@ function vtable_socket_get_error(vtable::PosixSocketVTable, sock::PosixSocketTyp
     connect_result = Ref{Cint}(0)
     result_len = Ref{Cuint}(sizeof(Cint))
 
-    if ccall(:getsockopt, Cint, (Cint, Cint, Cint, Ptr{Cint}, Ptr{Cuint}),
-            fd, SOL_SOCKET, SO_ERROR, connect_result, result_len) < 0
+    if ccall(
+            :getsockopt, Cint, (Cint, Cint, Cint, Ptr{Cint}, Ptr{Cuint}),
+            fd, SOL_SOCKET, SO_ERROR, connect_result, result_len
+        ) < 0
         return determine_socket_error(get_errno())
     end
 
@@ -1439,7 +1449,7 @@ function vtable_socket_start_accept(vtable::PosixSocketVTable, sock::PosixSocket
 
     # Invoke on_accept_start callback if provided
     if options.on_accept_start !== nothing
-        options.on_accept_start(sock, AWS_OP_SUCCESS, options.on_accept_start_user_data)
+        Base.invokelatest(options.on_accept_start, sock, AWS_OP_SUCCESS, options.on_accept_start_user_data)
     end
 
     return nothing
@@ -1459,8 +1469,10 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
             in_addr = zeros(UInt8, 128)
             in_len = Ref{Cuint}(128)
 
-            in_fd = GC.@preserve in_addr ccall(:accept, Cint, (Cint, Ptr{UInt8}, Ptr{Cuint}),
-                fd, pointer(in_addr), in_len)
+            in_fd = GC.@preserve in_addr ccall(
+                :accept, Cint, (Cint, Ptr{UInt8}, Ptr{Cuint}),
+                fd, pointer(in_addr), in_len
+            )
             errno_val = get_errno()
 
             if in_fd == -1
@@ -1476,7 +1488,7 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
             logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: incoming connection, new fd=$in_fd")
 
             # Create new socket for the connection
-            new_sock_result = socket_init_posix(sock.options; existing_fd=Cint(in_fd))
+            new_sock_result = socket_init_posix(sock.options; existing_fd = Cint(in_fd))
             if new_sock_result isa ErrorResult
                 ccall(:close, Cint, (Cint,), in_fd)
                 _on_connection_error(sock, last_error())
@@ -1488,7 +1500,7 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
             new_sock.state = SocketState.CONNECTED
 
             # Parse remote address
-            family = reinterpret(Cushort, in_addr[1:2])[1]
+            family = @static Sys.isapple() ? Cushort(in_addr[2]) : reinterpret(Cushort, in_addr[1:2])[1]
             port = UInt32(0)
 
             if family == AF_INET
@@ -1512,17 +1524,23 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
 
             # Set non-blocking
             flags = ccall(:fcntl, Cint, (Cint, Cint, Cint), in_fd, F_GETFL, Cint(0))
-            flags |= O_NONBLOCK | O_CLOEXEC
+            flags |= O_NONBLOCK
             ccall(:fcntl, Cint, (Cint, Cint, Cint), in_fd, F_SETFL, flags)
 
-            logf(LogLevel.INFO, LS_IO_SOCKET,
-                "Socket fd=$fd: accepted connection from $(get_address(new_sock.remote_endpoint)):$(new_sock.remote_endpoint.port)")
+            fd_flags = ccall(:fcntl, Cint, (Cint, Cint), in_fd, F_GETFD)
+            fd_flags |= FD_CLOEXEC
+            ccall(:fcntl, Cint, (Cint, Cint, Cint), in_fd, F_SETFD, fd_flags)
+
+            logf(
+                LogLevel.INFO, LS_IO_SOCKET,
+                "Socket fd=$fd: accepted connection from $(get_address(new_sock.remote_endpoint)):$(new_sock.remote_endpoint.port)"
+            )
 
             # Track if close happens during callback
             close_occurred = Ref(false)
             socket_impl.close_happened = close_occurred
 
-            sock.accept_result_fn(sock, AWS_OP_SUCCESS, new_sock, sock.connect_accept_user_data)
+            Base.invokelatest(sock.accept_result_fn, sock, AWS_OP_SUCCESS, new_sock, sock.connect_accept_user_data)
 
             if close_occurred[]
                 return nothing

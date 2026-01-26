@@ -66,11 +66,11 @@ mutable struct ByteBufferInputStream <: AbstractInputStream
     owns_buffer::Bool
 end
 
-function ByteBufferInputStream(buffer::ByteBuffer; owns_buffer::Bool=false)
+function ByteBufferInputStream(buffer::ByteBuffer; owns_buffer::Bool = false)
     return ByteBufferInputStream(buffer, Csize_t(0), owns_buffer)
 end
 
-function ByteBufferInputStream(data::AbstractVector{UInt8}; owns_buffer::Bool=true)
+function ByteBufferInputStream(data::AbstractVector{UInt8}; owns_buffer::Bool = true)
     buf = ByteBuffer(length(data))
     byte_buf_write_from_whole_cursor!(buf, ByteCursor(data, length(data)))
     return ByteBufferInputStream(buf, Csize_t(0), owns_buffer)
@@ -336,9 +336,9 @@ end
 
 # Read entire stream into a ByteBuffer
 function stream_read_all(
-    stream::AbstractInputStream,
-    max_size::Integer=SIZE_MAX,
-)::Union{ByteBuffer, ErrorResult}
+        stream::AbstractInputStream,
+        max_size::Integer = SIZE_MAX,
+    )::Union{ByteBuffer, ErrorResult}
     # Try to get length if possible
     initial_size = if stream_has_known_length(stream)
         len_result = stream_get_length(stream)
@@ -397,10 +397,10 @@ end
 
 # Copy from one stream to another (via a buffer)
 function stream_copy(
-    source::AbstractInputStream,
-    dest_buffer::ByteBuffer,
-    max_bytes::Integer=SIZE_MAX,
-)::Union{Csize_t, ErrorResult}
+        source::AbstractInputStream,
+        dest_buffer::ByteBuffer,
+        max_bytes::Integer = SIZE_MAX,
+    )::Union{Csize_t, ErrorResult}
     total_copied = Csize_t(0)
 
     while total_copied < Csize_t(max_bytes)

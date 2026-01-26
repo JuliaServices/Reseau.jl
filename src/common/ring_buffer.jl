@@ -145,11 +145,11 @@ function ring_buffer_acquire(ring_buf::ring_buffer, requested_size::Integer, des
 end
 
 function ring_buffer_acquire_up_to(
-    ring_buf::ring_buffer,
-    minimum_size::Integer,
-    requested_size::Integer,
-    dest,
-)
+        ring_buf::ring_buffer,
+        minimum_size::Integer,
+        requested_size::Integer,
+        dest,
+    )
     dest_ptr = _buf_ptr(dest)
     precondition(requested_size >= minimum_size)
     precondition(ring_buffer_is_valid(ring_buf))

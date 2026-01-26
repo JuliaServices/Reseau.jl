@@ -48,7 +48,7 @@ const OnHostResolvedFn = Function  # (resolver, host_name, error_code, addresses
 const OnHostResolveCompleteFn = Function  # (resolver, user_data) -> nothing
 
 # Resolution request - tracking structure for an outstanding DNS query
-mutable struct HostResolverResolutionRequest{F<:Union{OnHostResolvedFn, Nothing},U}
+mutable struct HostResolverResolutionRequest{F <: Union{OnHostResolvedFn, Nothing}, U}
     host_name::String
     on_resolved::F  # nullable
     user_data::U
@@ -93,13 +93,13 @@ struct HostResolverConfig
 end
 
 function HostResolverConfig(;
-    max_entries::Integer=1024,
-    max_ttl_secs::Integer=300,  # 5 minutes default
-    min_ttl_secs::Integer=10,
-    max_addresses_per_host::Integer=8,
-    resolve_frequency_ns::Integer=5_000_000_000,  # 5 seconds
-    background_refresh::Bool=true,
-)
+        max_entries::Integer = 1024,
+        max_ttl_secs::Integer = 300,  # 5 minutes default
+        min_ttl_secs::Integer = 10,
+        max_addresses_per_host::Integer = 8,
+        resolve_frequency_ns::Integer = 5_000_000_000,  # 5 seconds
+        background_refresh::Bool = true,
+    )
     return HostResolverConfig(
         UInt64(max_entries),
         UInt64(max_ttl_secs),
@@ -133,9 +133,9 @@ function _resolver_on_zero_ref(resolver::DefaultHostResolver)
 end
 
 function DefaultHostResolver(
-    event_loop_group::ELG,
-    config::HostResolverConfig=HostResolverConfig(),
-) where {ELG}
+        event_loop_group::ELG,
+        config::HostResolverConfig = HostResolverConfig(),
+    ) where {ELG}
     resolver = DefaultHostResolver{ELG}(
         event_loop_group,
         config,
@@ -162,12 +162,12 @@ end
 
 # Resolve a hostname to addresses
 function host_resolver_resolve!(
-    resolver::DefaultHostResolver,
-    host_name::AbstractString,
-    on_resolved::OnHostResolvedFn,
-    user_data=nothing;
-    address_type::HostAddressType.T=HostAddressType.A,
-)::Union{Nothing, ErrorResult}
+        resolver::DefaultHostResolver,
+        host_name::AbstractString,
+        on_resolved::OnHostResolvedFn,
+        user_data = nothing;
+        address_type::HostAddressType.T = HostAddressType.A,
+    )::Union{Nothing, ErrorResult}
     if @atomic resolver.shutdown
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve called after shutdown")
         raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
@@ -191,8 +191,10 @@ function host_resolver_resolve!(
             valid_addresses = filter(a -> a.expiry > current_time, addresses)
 
             if !isempty(valid_addresses)
-                logf(LogLevel.TRACE, LS_IO_DNS,
-                    "Host resolver: cache hit for '$host', $(length(valid_addresses)) addresses")
+                logf(
+                    LogLevel.TRACE, LS_IO_DNS,
+                    "Host resolver: cache hit for '$host', $(length(valid_addresses)) addresses"
+                )
 
                 # Update use counts
                 for addr in valid_addresses
@@ -205,7 +207,7 @@ function host_resolver_resolve!(
                     task = ScheduledTask(
                         (t, status) -> on_resolved(resolver, host, AWS_OP_SUCCESS, copy.(valid_addresses)),
                         nothing;
-                        type_tag="dns_resolve_cached"
+                        type_tag = "dns_resolve_cached"
                     )
                     event_loop_schedule_task_now!(event_loop, task)
                 else
@@ -226,12 +228,12 @@ end
 
 # Perform actual DNS resolution using getaddrinfo
 function _perform_dns_resolution(
-    resolver::DefaultHostResolver,
-    host::String,
-    address_type::HostAddressType.T,
-    on_resolved::OnHostResolvedFn,
-    user_data,
-)
+        resolver::DefaultHostResolver,
+        host::String,
+        address_type::HostAddressType.T,
+        on_resolved::OnHostResolvedFn,
+        user_data,
+    )
     logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: performing DNS lookup for '$host'")
 
     # Get an event loop to schedule the async work
@@ -242,7 +244,7 @@ function _perform_dns_resolution(
     task = ScheduledTask(
         (t, status) -> _dns_resolution_task(resolver, host, address_type, on_resolved, user_data),
         nothing;
-        type_tag="dns_resolution"
+        type_tag = "dns_resolution"
     )
 
     if event_loop !== nothing
@@ -257,12 +259,12 @@ end
 
 # DNS resolution task - called on event loop
 function _dns_resolution_task(
-    resolver::DefaultHostResolver,
-    host::String,
-    address_type::HostAddressType.T,
-    on_resolved::OnHostResolvedFn,
-    user_data,
-)
+        resolver::DefaultHostResolver,
+        host::String,
+        address_type::HostAddressType.T,
+        on_resolved::OnHostResolvedFn,
+        user_data,
+    )
     logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: DNS task executing for '$host'")
 
     addresses = Vector{HostAddress}()
@@ -281,8 +283,10 @@ function _dns_resolution_task(
                 push!(addresses, HostAddress(addr_str, address_type, host, ttl_nanos))
             end
 
-            logf(LogLevel.DEBUG, LS_IO_DNS,
-                "Host resolver: resolved '$host' to $(length(addresses)) addresses")
+            logf(
+                LogLevel.DEBUG, LS_IO_DNS,
+                "Host resolver: resolved '$host' to $(length(addresses)) addresses"
+            )
 
             # Update cache
             _update_cache!(resolver, host, addresses, address_type)
@@ -340,7 +344,7 @@ function _trim_cache!(resolver::DefaultHostResolver)
         all_expired_aaaa = all(a -> a.expiry < current_time, entry.addresses_aaaa)
 
         if (isempty(entry.addresses_a) || all_expired_a) &&
-           (isempty(entry.addresses_aaaa) || all_expired_aaaa)
+                (isempty(entry.addresses_aaaa) || all_expired_aaaa)
             push!(entries_to_remove, host)
         end
     end
@@ -366,13 +370,13 @@ end
 
 # Get a single best address for a host (simplified version)
 function host_resolver_get_address!(
-    resolver::DefaultHostResolver,
-    host_name::AbstractString;
-    address_type::HostAddressType.T=HostAddressType.A,
-)::Union{HostAddress, Nothing}
+        resolver::DefaultHostResolver,
+        host_name::AbstractString;
+        address_type::HostAddressType.T = HostAddressType.A,
+    )::Union{HostAddress, Nothing}
     host = String(host_name)
 
-    lock(resolver.lock) do
+    return lock(resolver.lock) do
         entry = get(resolver.cache, host, nothing)
 
         if entry === nothing
@@ -403,9 +407,9 @@ end
 
 # Record a connection failure for an address (for load balancing)
 function host_resolver_record_connection_failure!(
-    resolver::DefaultHostResolver,
-    address::HostAddress,
-)
+        resolver::DefaultHostResolver,
+        address::HostAddress,
+    )
     lock(resolver.lock) do
         entry = get(resolver.cache, address.host, nothing)
         if entry === nothing
@@ -417,8 +421,10 @@ function host_resolver_record_connection_failure!(
         for addr in addresses
             if addr.address == address.address
                 addr.connection_failure_count += 1
-                logf(LogLevel.TRACE, LS_IO_DNS,
-                    "Host resolver: recorded failure for $(addr.address), count=$(addr.connection_failure_count)")
+                logf(
+                    LogLevel.TRACE, LS_IO_DNS,
+                    "Host resolver: recorded failure for $(addr.address), count=$(addr.connection_failure_count)"
+                )
                 break
             end
         end
@@ -489,9 +495,11 @@ function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
     # Call getaddrinfo
     result_ptr = Ref{Ptr{addrinfo}}(C_NULL)
     ret = GC.@preserve hints begin
-        ccall(:getaddrinfo, Cint,
+        ccall(
+            :getaddrinfo, Cint,
             (Cstring, Ptr{Cvoid}, Ptr{addrinfo}, Ptr{Ptr{addrinfo}}),
-            hostname, C_NULL, hints_ptr, result_ptr)
+            hostname, C_NULL, hints_ptr, result_ptr
+        )
     end
 
     if ret != 0
@@ -513,9 +521,11 @@ function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
             # Convert to dotted decimal string
             buf = Vector{UInt8}(undef, 16)
             ret = GC.@preserve buf begin
-                ccall(:inet_ntop, Ptr{UInt8},
+                ccall(
+                    :inet_ntop, Ptr{UInt8},
                     (Cint, Ptr{UInt32}, Ptr{UInt8}, Cuint),
-                    AF_INET, addr_ptr, pointer(buf), Cuint(16))
+                    AF_INET, addr_ptr, pointer(buf), Cuint(16)
+                )
             end
             if ret != C_NULL
                 push!(addresses, unsafe_string(pointer(buf)))
@@ -527,9 +537,11 @@ function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
             # Convert to string
             buf = Vector{UInt8}(undef, 46)
             ret = GC.@preserve buf begin
-                ccall(:inet_ntop, Ptr{UInt8},
+                ccall(
+                    :inet_ntop, Ptr{UInt8},
                     (Cint, Ptr{UInt8}, Ptr{UInt8}, Cuint),
-                    AF_INET6, addr_ptr, pointer(buf), Cuint(46))
+                    AF_INET6, addr_ptr, pointer(buf), Cuint(46)
+                )
             end
             if ret != C_NULL
                 push!(addresses, unsafe_string(pointer(buf)))

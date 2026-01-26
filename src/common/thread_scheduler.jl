@@ -3,7 +3,7 @@ mutable struct ThreadScheduler
     lock::Mutex
     cond::ConditionVariable
     @atomic should_exit::Bool
-    worker::Union{Task,Nothing}
+    worker::Union{Task, Nothing}
 end
 
 function _thread_scheduler_loop(ts::ThreadScheduler)
@@ -26,7 +26,7 @@ function _thread_scheduler_loop(ts::ThreadScheduler)
     return nothing
 end
 
-function thread_scheduler_new(options::Union{ThreadOptions,Nothing}=nothing)
+function thread_scheduler_new(options::Union{ThreadOptions, Nothing} = nothing)
     _ = options
     scheduler = TaskScheduler()
     ts = ThreadScheduler(scheduler, Mutex(), ConditionVariable(), false, nothing)

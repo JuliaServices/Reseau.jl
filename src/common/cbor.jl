@@ -153,7 +153,7 @@ function cbor_encoder_new()
     return cbor_encoder(buf_ref[])
 end
 
-function cbor_encoder_destroy(encoder::Union{cbor_encoder,Nothing})
+function cbor_encoder_destroy(encoder::Union{cbor_encoder, Nothing})
     encoder === nothing && return nothing
     buf_ref = Ref(encoder.encoded_buf)
     byte_buf_clean_up(buf_ref)
@@ -161,13 +161,13 @@ function cbor_encoder_destroy(encoder::Union{cbor_encoder,Nothing})
     return nothing
 end
 
-function cbor_encoder_get_encoded_data(encoder::Union{cbor_encoder,Nothing})
+function cbor_encoder_get_encoded_data(encoder::Union{cbor_encoder, Nothing})
     encoder === nothing && return null_cursor()
     buf_ref = Ref(encoder.encoded_buf)
     return byte_cursor_from_buf(buf_ref)
 end
 
-function cbor_encoder_reset(encoder::Union{cbor_encoder,Nothing})
+function cbor_encoder_reset(encoder::Union{cbor_encoder, Nothing})
     encoder === nothing && return nothing
     buf_ref = Ref(encoder.encoded_buf)
     byte_buf_reset(buf_ref, false)
@@ -350,17 +350,17 @@ function cbor_decoder_new(src::ByteCursor)
     return cbor_decoder(src, _cbor_context_zero(), ERROR_SUCCESS)
 end
 
-function cbor_decoder_destroy(decoder::Union{cbor_decoder,Nothing})
+function cbor_decoder_destroy(decoder::Union{cbor_decoder, Nothing})
     # No-op: Julia GC handles memory
     return nothing
 end
 
-function cbor_decoder_get_remaining_length(decoder::Union{cbor_decoder,Nothing})
+function cbor_decoder_get_remaining_length(decoder::Union{cbor_decoder, Nothing})
     decoder === nothing && return Csize_t(0)
     return decoder.src.len
 end
 
-function cbor_decoder_reset_src(decoder::Union{cbor_decoder,Nothing}, src::ByteCursor)
+function cbor_decoder_reset_src(decoder::Union{cbor_decoder, Nothing}, src::ByteCursor)
     decoder === nothing && return nothing
     decoder.src = src
     decoder.cached_context = _cbor_context_zero()
@@ -405,7 +405,7 @@ end
 end
 
 @inline function _cbor_decode_half(value::UInt16)
-    sign = (value >> 15) & 0x1
+    sign = (value >> 15) & 0x01
     exp = (value >> 10) & 0x1f
     frac = value & 0x03ff
     if exp == 0
@@ -756,9 +756,9 @@ function cbor_decoder_consume_next_whole_data_item(decoder::cbor_decoder)
             end
         end
     elseif context_val.type == CborType.INDEF_BYTES_START ||
-           context_val.type == CborType.INDEF_TEXT_START ||
-           context_val.type == CborType.INDEF_ARRAY_START ||
-           context_val.type == CborType.INDEF_MAP_START
+            context_val.type == CborType.INDEF_TEXT_START ||
+            context_val.type == CborType.INDEF_ARRAY_START ||
+            context_val.type == CborType.INDEF_MAP_START
         decoder.cached_context = _cbor_context_zero()
         next_type = Ref{cbor_type}(CborType.UNKNOWN)
         if cbor_decoder_peek_type(decoder, next_type) != OP_SUCCESS

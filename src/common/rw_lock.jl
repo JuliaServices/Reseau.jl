@@ -96,10 +96,10 @@ end
     function _rwlock_try_load()
         if !_rwlock_try_checked[]
             _rwlock_try_checked[] = true
-            handle = Libdl.dlopen("kernel32"; throw_error=false)
+            handle = Libdl.dlopen("kernel32"; throw_error = false)
             if handle != C_NULL
-                shared_ptr = Libdl.dlsym(handle, "TryAcquireSRWLockShared"; throw_error=false)
-                exclusive_ptr = Libdl.dlsym(handle, "TryAcquireSRWLockExclusive"; throw_error=false)
+                shared_ptr = Libdl.dlsym(handle, "TryAcquireSRWLockShared"; throw_error = false)
+                exclusive_ptr = Libdl.dlsym(handle, "TryAcquireSRWLockExclusive"; throw_error = false)
                 if shared_ptr != C_NULL
                     _rwlock_try_shared_fn[] = shared_ptr
                 end

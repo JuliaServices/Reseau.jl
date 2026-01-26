@@ -23,7 +23,7 @@ ChannelHandlerShutdownOptions() = ChannelHandlerShutdownOptions(false, false)
 
 # Channel slot - links handlers in the pipeline
 # Each slot can hold a handler and links to adjacent slots
-mutable struct ChannelSlot{H<:Union{AbstractChannelHandler, Nothing},C<:Union{AbstractChannel, Nothing}}
+mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Union{AbstractChannel, Nothing}}
     adj_left::Union{ChannelSlot, Nothing}   # Toward the application (outgoing data flows left)
     adj_right::Union{ChannelSlot, Nothing}  # Toward the socket/network (incoming data flows right)
     handler::H
@@ -43,8 +43,8 @@ function ChannelSlot()
     )
 end
 
-function ChannelSlot(handler::H, channel::C) where {H,C}
-    return ChannelSlot{H,C}(
+function ChannelSlot(handler::H, channel::C) where {H, C}
+    return ChannelSlot{H, C}(
         nothing,
         nothing,
         handler,
@@ -61,7 +61,7 @@ slot_right(slot::ChannelSlot) = slot.adj_right
 
 # Channel handler base structure
 # Concrete handlers should embed this or use similar structure
-mutable struct ChannelHandlerBase{V,Impl}
+mutable struct ChannelHandlerBase{V, Impl}
     vtable::V  # ChannelHandlerVTable implementation
     impl::Impl  # Handler-specific implementation data
     slot::Union{ChannelSlot, Nothing}
@@ -69,8 +69,8 @@ mutable struct ChannelHandlerBase{V,Impl}
     initial_window_size::Csize_t
 end
 
-function ChannelHandlerBase(vtable::V, impl::Impl; initial_window_size::Integer=0) where {V,Impl}
-    return ChannelHandlerBase{V,Impl}(
+function ChannelHandlerBase(vtable::V, impl::Impl; initial_window_size::Integer = 0) where {V, Impl}
+    return ChannelHandlerBase{V, Impl}(
         vtable,
         impl,
         nothing,
@@ -147,7 +147,7 @@ end
 end
 
 # Channel - a bidirectional pipeline of handlers
-mutable struct Channel{EL<:AbstractEventLoop,FS<:Union{ChannelOnSetupCompletedFn, Nothing},FD<:Union{ChannelOnShutdownCompletedFn, Nothing},US,UD}
+mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, US, UD}
     event_loop::EL
     first::Union{ChannelSlot, Nothing}  # nullable - Application side (leftmost)
     last::Union{ChannelSlot, Nothing}   # nullable - Socket side (rightmost)
@@ -184,12 +184,12 @@ function _next_channel_id()::UInt64
 end
 
 function Channel(
-    event_loop::EL,
-    message_pool::Union{MessagePool, Nothing}=nothing,
-) where {EL<:AbstractEventLoop}
+        event_loop::EL,
+        message_pool::Union{MessagePool, Nothing} = nothing,
+    ) where {EL <: AbstractEventLoop}
     channel_id = _next_channel_id()
 
-    return Channel{EL,Nothing,Nothing,Nothing,Nothing}(
+    return Channel{EL, Nothing, Nothing, Nothing, Nothing}(
         event_loop,
         nothing,  # first
         nothing,  # last
@@ -252,8 +252,10 @@ function channel_slot_new!(channel::Channel)::ChannelSlot
     slot.current_window_update_batch_size = Csize_t(0)
     slot.upstream_message_overhead = Csize_t(0)
 
-    logf(LogLevel.TRACE, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): created new slot")
+    logf(
+        LogLevel.TRACE, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): created new slot"
+    )
 
     return slot
 end
@@ -389,8 +391,10 @@ function channel_slot_send_message(slot::ChannelSlot, message::IoMessage, direct
         # Send toward application (left)
         next_slot = slot.adj_left
         if next_slot === nothing || next_slot.handler === nothing
-            logf(LogLevel.WARN, LS_IO_CHANNEL,
-                "Channel id=$(channel.channel_id): no handler to process read message")
+            logf(
+                LogLevel.WARN, LS_IO_CHANNEL,
+                "Channel id=$(channel.channel_id): no handler to process read message"
+            )
             raise_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
             return ErrorResult(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
         end
@@ -403,8 +407,10 @@ function channel_slot_send_message(slot::ChannelSlot, message::IoMessage, direct
         # Send toward socket (right)
         next_slot = slot.adj_right
         if next_slot === nothing || next_slot.handler === nothing
-            logf(LogLevel.WARN, LS_IO_CHANNEL,
-                "Channel id=$(channel.channel_id): no handler to process write message")
+            logf(
+                LogLevel.WARN, LS_IO_CHANNEL,
+                "Channel id=$(channel.channel_id): no handler to process write message"
+            )
             raise_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
             return ErrorResult(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
         end
@@ -433,8 +439,10 @@ function channel_slot_increment_read_window!(slot::ChannelSlot, size::Csize_t)::
     # Batch window updates
     next_slot.current_window_update_batch_size += size
 
-    logf(LogLevel.TRACE, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): slot window increment of $size, batch now $(next_slot.current_window_update_batch_size)")
+    logf(
+        LogLevel.TRACE, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): slot window increment of $size, batch now $(next_slot.current_window_update_batch_size)"
+    )
 
     return handler_increment_read_window(next_slot.handler, next_slot, next_slot.current_window_update_batch_size)
 end
@@ -465,14 +473,18 @@ end
 # Initialize the channel after all handlers are set up
 function channel_setup_complete!(channel::Channel)::Union{Nothing, ErrorResult}
     if channel.channel_state != ChannelState.NOT_INITIALIZED && channel.channel_state != ChannelState.SETTING_UP
-        logf(LogLevel.ERROR, LS_IO_CHANNEL,
-            "Channel id=$(channel.channel_id): setup complete called in invalid state")
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL,
+            "Channel id=$(channel.channel_id): setup complete called in invalid state"
+        )
         raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
 
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): setup complete")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): setup complete"
+    )
 
     # Calculate message overheads
     _channel_calculate_message_overheads!(channel)
@@ -486,23 +498,27 @@ function channel_setup_complete!(channel::Channel)::Union{Nothing, ErrorResult}
 
     # Invoke setup callback
     if channel.on_setup_completed !== nothing
-        channel.on_setup_completed(channel, AWS_OP_SUCCESS, channel.setup_user_data)
+        Base.invokelatest(channel.on_setup_completed, channel, AWS_OP_SUCCESS, channel.setup_user_data)
     end
 
     return nothing
 end
 
 # Shutdown the channel
-function channel_shutdown!(channel::Channel, direction::ChannelDirection.T, error_code::Int=0)::Union{Nothing, ErrorResult}
+function channel_shutdown!(channel::Channel, direction::ChannelDirection.T, error_code::Int = 0)::Union{Nothing, ErrorResult}
     if channel.channel_state == ChannelState.SHUT_DOWN
-        logf(LogLevel.DEBUG, LS_IO_CHANNEL,
-            "Channel id=$(channel.channel_id): already shut down")
+        logf(
+            LogLevel.DEBUG, LS_IO_CHANNEL,
+            "Channel id=$(channel.channel_id): already shut down"
+        )
         return nothing
     end
 
     if channel.channel_state == ChannelState.SHUTTING_DOWN_READ || channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE
-        logf(LogLevel.DEBUG, LS_IO_CHANNEL,
-            "Channel id=$(channel.channel_id): already shutting down")
+        logf(
+            LogLevel.DEBUG, LS_IO_CHANNEL,
+            "Channel id=$(channel.channel_id): already shutting down"
+        )
         # Only update if error_code is set
         if error_code != 0 && channel.shutdown_error_code == 0
             channel.shutdown_error_code = error_code
@@ -510,8 +526,10 @@ function channel_shutdown!(channel::Channel, direction::ChannelDirection.T, erro
         return nothing
     end
 
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): shutting down, direction=$direction, error=$error_code")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): shutting down, direction=$direction, error=$error_code"
+    )
 
     channel.shutdown_error_code = error_code
     channel.shutdown_direction = direction
@@ -541,8 +559,10 @@ function channel_slot_on_handler_shutdown_complete!(slot::ChannelSlot, direction
         return nothing
     end
 
-    logf(LogLevel.TRACE, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): slot handler shutdown complete, direction=$direction")
+    logf(
+        LogLevel.TRACE, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): slot handler shutdown complete, direction=$direction"
+    )
 
     if !propagate_shutdown
         return nothing
@@ -573,8 +593,10 @@ end
 
 # Internal - called when shutdown completes in a direction
 function _channel_on_shutdown_direction_complete!(channel::Channel, direction::ChannelDirection.T)
-    logf(LogLevel.DEBUG, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): shutdown complete for direction $direction")
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): shutdown complete for direction $direction"
+    )
 
     if channel.channel_state == ChannelState.SHUTTING_DOWN_READ && direction == ChannelDirection.READ
         # Start shutdown in write direction
@@ -589,8 +611,10 @@ end
 
 # Internal - called when shutdown completes in both directions
 function _channel_on_shutdown_complete!(channel::Channel)
-    logf(LogLevel.INFO, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): shutdown complete, error=$(channel.shutdown_error_code)")
+    logf(
+        LogLevel.INFO, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): shutdown complete, error=$(channel.shutdown_error_code)"
+    )
 
     channel.channel_state = ChannelState.SHUT_DOWN
 
@@ -607,7 +631,7 @@ function _channel_on_shutdown_complete!(channel::Channel)
 
     # Invoke shutdown callback
     if channel.on_shutdown_completed !== nothing
-        channel.on_shutdown_completed(channel, channel.shutdown_error_code, channel.shutdown_user_data)
+        Base.invokelatest(channel.on_shutdown_completed, channel, channel.shutdown_error_code, channel.shutdown_user_data)
     end
 
     return nothing
@@ -643,9 +667,9 @@ mutable struct PassthroughHandler <: AbstractChannelHandler
 end
 
 function PassthroughHandler(;
-    initial_window_size::Integer=SIZE_MAX,
-    message_overhead::Integer=0,
-)
+        initial_window_size::Integer = SIZE_MAX,
+        message_overhead::Integer = 0,
+    )
     return PassthroughHandler(
         nothing,
         Csize_t(initial_window_size),
