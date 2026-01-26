@@ -231,13 +231,13 @@ function create_posix_socket_fd(options::SocketOptions)::Union{Cint, ErrorResult
     end
 
     # Set non-blocking and close-on-exec
-    flags = ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_GETFL, Cint(0))
+    flags = _fcntl(fd, F_GETFL)
     flags |= O_NONBLOCK
-    ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFL, flags)
+    _fcntl(fd, F_SETFL, flags)
 
-    fd_flags = ccall(:fcntl, Cint, (Cint, Cint), fd, F_GETFD)
+    fd_flags = _fcntl(fd, F_GETFD)
     fd_flags |= FD_CLOEXEC
-    ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFD, fd_flags)
+    _fcntl(fd, F_SETFD, fd_flags)
 
     return fd
 end
@@ -1523,13 +1523,13 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
             new_sock.remote_endpoint.port = port
 
             # Set non-blocking
-            flags = ccall(:fcntl, Cint, (Cint, Cint, Cint), in_fd, F_GETFL, Cint(0))
+            flags = _fcntl(in_fd, F_GETFL)
             flags |= O_NONBLOCK
-            ccall(:fcntl, Cint, (Cint, Cint, Cint), in_fd, F_SETFL, flags)
+            _fcntl(in_fd, F_SETFL, flags)
 
-            fd_flags = ccall(:fcntl, Cint, (Cint, Cint), in_fd, F_GETFD)
+            fd_flags = _fcntl(in_fd, F_GETFD)
             fd_flags |= FD_CLOEXEC
-            ccall(:fcntl, Cint, (Cint, Cint, Cint), in_fd, F_SETFD, fd_flags)
+            _fcntl(in_fd, F_SETFD, fd_flags)
 
             logf(
                 LogLevel.INFO, LS_IO_SOCKET,

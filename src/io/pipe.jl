@@ -80,12 +80,12 @@ end
 
 # Set fd to non-blocking mode
 function _set_nonblocking(fd::Cint)
-    flags = ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_GETFL, Cint(0))
+    flags = _fcntl(fd, F_GETFL)
     flags |= O_NONBLOCK
-    ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFL, flags)
-    fd_flags = ccall(:fcntl, Cint, (Cint, Cint), fd, F_GETFD)
+    _fcntl(fd, F_SETFL, flags)
+    fd_flags = _fcntl(fd, F_GETFD)
     fd_flags |= FD_CLOEXEC
-    ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_SETFD, fd_flags)
+    _fcntl(fd, F_SETFD, fd_flags)
     return nothing
 end
 

@@ -247,6 +247,14 @@
         event_loop.thread = impl.thread_created_on
         @atomic event_loop.running = true
 
+        wait_start = time_ns()
+        while impl.thread_data.state != EventThreadState.RUNNING
+            if time_ns() - wait_start > 1_000_000_000
+                return ErrorResult(raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN))
+            end
+            sleep(0.001)
+        end
+
         return nothing
     end
 

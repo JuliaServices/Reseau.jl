@@ -33,7 +33,7 @@ const _device_random_initialized = Ref{Bool}(false)
             end
         end
         _device_random_fd[] = fd
-        if ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, _F_SETFD, _FD_CLOEXEC) == -1
+        if _fcntl(fd, _F_SETFD, _FD_CLOEXEC) == -1
             ccall(:abort, Cvoid, ())
         end
         return nothing

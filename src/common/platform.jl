@@ -96,3 +96,20 @@ elseif _PLATFORM_LINUX
     const _CLOCK_MONOTONIC_RAW = Cint(4)
     const _CLOCK_BOOTTIME = Cint(7)
 end
+
+@inline function _fcntl(fd::Cint, cmd::Cint, arg::Cint = Cint(0))::Cint
+    @static if _PLATFORM_APPLE
+        return ccall(
+            (:__fcntl, "/usr/lib/system/libsystem_kernel.dylib"),
+            Cint,
+            (Cint, Cint, Cint),
+            fd,
+            cmd,
+            arg,
+        )
+    elseif _PLATFORM_WINDOWS
+        return Cint(-1)
+    else
+        return ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, cmd, arg)
+    end
+end

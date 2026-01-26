@@ -278,6 +278,25 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)
     # Subscribe to readable events if not already
     _socket_handler_subscribe_to_read(handler)
 
+    sock = handler.socket
+    event_loop = sock.event_loop
+    if event_loop === nothing
+        return nothing
+    end
+
+    if event_loop_thread_is_callers_thread(event_loop)
+        _socket_handler_do_read(handler)
+        return nothing
+    end
+
+    task_fn = (ctx, status) -> begin
+        status == TaskStatus.RUN_READY || return nothing
+        _socket_handler_do_read(ctx)
+        return nothing
+    end
+    task = ScheduledTask(task_fn, handler; type_tag = "socket_read_now")
+    event_loop_schedule_task_now!(event_loop, task)
+
     return nothing
 end
 

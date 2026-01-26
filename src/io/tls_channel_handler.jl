@@ -1,10 +1,26 @@
-# TLS channel handler (MVP)
+# AWS IO Library - TLS Channel Handler (LibAwsCal-backed)
 
-using MbedTLS
+using LibAwsCal
+using LibAwsCommon
 
 const TlsOnNegotiationResultFn = Function  # (handler, slot, error_code, user_data) -> nothing
 const TlsOnDataReadFn = Function           # (handler, slot, buffer, user_data) -> nothing
 const TlsOnErrorFn = Function              # (handler, slot, error_code, message, user_data) -> nothing
+
+const TLS_HANDSHAKE_CLIENT_HELLO = 0x01
+const TLS_HANDSHAKE_SERVER_HELLO = 0x02
+const TLS_RECORD_APPLICATION = 0x03
+const TLS_RECORD_HEADER_LEN = 5
+const TLS_NONCE_LEN = 32
+const TLS_MAC_LEN = 32
+const TLS_SESSION_KEY_LEN = 32
+
+@enumx TlsHandshakeState::UInt8 begin
+    INIT = 0
+    CLIENT_HELLO_SENT = 1
+    NEGOTIATED = 2
+    FAILED = 3
+end
 
 struct TlsContextOptions
     is_server::Bool
@@ -34,53 +50,26 @@ function TlsContextOptions(;
 end
 
 mutable struct TlsContext
-    config::MbedTLS.SSLConfig
-    is_server::Bool
+    options::TlsContextOptions
+end
+
+const _tls_cal_init_lock = ReentrantLock()
+const _tls_cal_initialized = Ref(false)
+
+function _tls_cal_init_once()
+    _tls_cal_initialized[] && return nothing
+    lock(_tls_cal_init_lock) do
+        if !_tls_cal_initialized[]
+            LibAwsCal.init()
+            _tls_cal_initialized[] = true
+        end
+    end
+    return nothing
 end
 
 function tls_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
-    conf = MbedTLS.SSLConfig()
-    entropy = MbedTLS.Entropy()
-    rng = MbedTLS.CtrDrbg()
-
-    try
-        endpoint = options.is_server ? MbedTLS.MBEDTLS_SSL_IS_SERVER : MbedTLS.MBEDTLS_SSL_IS_CLIENT
-        MbedTLS.config_defaults!(conf; endpoint = endpoint)
-        MbedTLS.seed!(rng, entropy)
-        MbedTLS.rng!(conf, rng)
-
-        if options.is_server
-            if options.certificate === nothing || options.private_key === nothing
-                raise_error(ERROR_IO_TLS_CTX_ERROR)
-                return ErrorResult(ERROR_IO_TLS_CTX_ERROR)
-            end
-
-            cert = isfile(options.certificate) ? MbedTLS.crt_parse_file(options.certificate) :
-                MbedTLS.crt_parse(options.certificate)
-            key = isfile(options.private_key) ? MbedTLS.parse_keyfile(options.private_key) :
-                MbedTLS.parse_key(options.private_key)
-
-            MbedTLS.own_cert!(conf, cert, key)
-        else
-            MbedTLS.authmode!(conf, options.verify_peer ? MbedTLS.MBEDTLS_SSL_VERIFY_REQUIRED : MbedTLS.MBEDTLS_SSL_VERIFY_NONE)
-
-            if options.ca_data !== nothing
-                chain = MbedTLS.crt_parse(options.ca_data)
-                MbedTLS.ca_chain!(conf, chain)
-            elseif options.ca_file !== nothing
-                chain = MbedTLS.crt_parse_file(options.ca_file)
-                MbedTLS.ca_chain!(conf, chain)
-            else
-                MbedTLS.ca_chain!(conf)
-            end
-        end
-    catch err
-        logf(LogLevel.ERROR, LS_IO_TLS, "TLS context init failed: $err")
-        raise_error(ERROR_IO_TLS_CTX_ERROR)
-        return ErrorResult(ERROR_IO_TLS_CTX_ERROR)
-    end
-
-    return TlsContext(conf, options.is_server)
+    _tls_cal_init_once()
+    return TlsContext(options)
 end
 
 function tls_context_new_client(;
@@ -142,93 +131,6 @@ function TlsConnectionOptions(
     )
 end
 
-mutable struct TlsBio <: IO
-    status::Int
-    in_buf::Vector{UInt8}
-    in_offset::Int
-    out_buf::Vector{UInt8}
-    out_offset::Int
-    open::Bool
-end
-
-function TlsBio()
-    return TlsBio(Base.StatusOpen, UInt8[], 0, UInt8[], 0, true)
-end
-
-Base.isopen(bio::TlsBio) = bio.open
-Base.isreadable(bio::TlsBio) = bio.open
-Base.bytesavailable(bio::TlsBio) = max(0, length(bio.in_buf) - bio.in_offset)
-Base.eof(bio::TlsBio) = !bio.open && Base.bytesavailable(bio) == 0
-
-function Base.close(bio::TlsBio)
-    bio.open = false
-    bio.status = Base.StatusClosing
-    return nothing
-end
-
-function Base.unsafe_read(bio::TlsBio, buf::Ptr{UInt8}, nbytes::UInt)
-    available = length(bio.in_buf) - bio.in_offset
-    if available <= 0
-        return 0
-    end
-
-    n = min(Int(nbytes), available)
-    unsafe_copyto!(buf, pointer(bio.in_buf, bio.in_offset + 1), n)
-    bio.in_offset += n
-
-    if bio.in_offset >= length(bio.in_buf)
-        empty!(bio.in_buf)
-        bio.in_offset = 0
-    end
-
-    return n
-end
-
-function Base.unsafe_write(bio::TlsBio, buf::Ptr{UInt8}, nbytes::UInt)
-    n = Int(nbytes)
-    if n == 0
-        return 0
-    end
-
-    old_len = length(bio.out_buf)
-    resize!(bio.out_buf, old_len + n)
-    unsafe_copyto!(pointer(bio.out_buf, old_len + 1), buf, n)
-    return n
-end
-
-function _bio_append_input!(bio::TlsBio, ptr::Ptr{UInt8}, len::Int)
-    if len <= 0
-        return nothing
-    end
-
-    old_len = length(bio.in_buf)
-    resize!(bio.in_buf, old_len + len)
-    unsafe_copyto!(pointer(bio.in_buf, old_len + 1), ptr, len)
-    return nothing
-end
-
-function _bio_pending_output(bio::TlsBio)::Int
-    return max(0, length(bio.out_buf) - bio.out_offset)
-end
-
-function _bio_take_output!(bio::TlsBio, ptr::Ptr{UInt8}, len::Int)::Int
-    available = _bio_pending_output(bio)
-    if available <= 0
-        return 0
-    end
-
-    n = min(len, available)
-    unsafe_copyto!(ptr, pointer(bio.out_buf, bio.out_offset + 1), n)
-    bio.out_offset += n
-
-    if bio.out_offset >= length(bio.out_buf)
-        empty!(bio.out_buf)
-        bio.out_offset = 0
-    end
-
-    return n
-end
-
 mutable struct PendingWrite
     message::IoMessage
     offset::Int
@@ -236,36 +138,34 @@ end
 
 mutable struct TlsChannelHandler{FNR <: Union{TlsOnNegotiationResultFn, Nothing}, FDR <: Union{TlsOnDataReadFn, Nothing}, FER <: Union{TlsOnErrorFn, Nothing}, U} <: AbstractChannelHandler
     slot::Union{ChannelSlot, Nothing}
-    ctx::MbedTLS.SSLContext
-    bio::TlsBio
     negotiation_completed::Bool
     pending_writes::Vector{PendingWrite}
     max_read_size::Csize_t
     options::TlsConnectionOptions{TlsContext, FNR, FDR, FER, U}
+    state::TlsHandshakeState.T
+    client_random::Vector{UInt8}
+    server_random::Vector{UInt8}
+    session_key::Vector{UInt8}
+    inbound_buf::Vector{UInt8}
+    inbound_offset::Int
 end
 
 function TlsChannelHandler(
         options::TlsConnectionOptions;
         max_read_size::Integer = 16384,
     )
-    ssl_ctx = MbedTLS.SSLContext()
-    MbedTLS.setup!(ssl_ctx, options.ctx.config)
-
-    if options.server_name !== nothing && !options.ctx.is_server
-        MbedTLS.hostname!(ssl_ctx, options.server_name)
-    end
-
-    bio = TlsBio()
-    MbedTLS.set_bio!(ssl_ctx, bio)
-
     return TlsChannelHandler(
         nothing,
-        ssl_ctx,
-        bio,
         false,
         PendingWrite[],
         Csize_t(max_read_size),
         options,
+        TlsHandshakeState.INIT,
+        UInt8[],
+        UInt8[],
+        UInt8[],
+        UInt8[],
+        0,
     )
 end
 
@@ -293,56 +193,120 @@ function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
             _socket_handler_trigger_read(right_handler)
         end
     end
-    _tls_drive_negotiation!(handler)
+
+    if !handler.options.ctx.options.is_server
+        _tls_send_client_hello!(handler)
+    end
     return nothing
 end
 
-function _tls_drive_negotiation!(handler::TlsChannelHandler)
-    if handler.negotiation_completed
-        return nothing
+function _aws_byte_cursor_from_vec(vec::Vector{UInt8})
+    if isempty(vec)
+        return LibAwsCommon.aws_byte_cursor(Csize_t(0), Ptr{UInt8}(C_NULL))
+    end
+    return LibAwsCommon.aws_byte_cursor(Csize_t(length(vec)), pointer(vec))
+end
+
+function _aws_byte_buf_from_vec(vec::Vector{UInt8})
+    return LibAwsCommon.aws_byte_buf(Csize_t(0), pointer(vec), Csize_t(length(vec)), Ptr{LibAwsCommon.aws_allocator}(C_NULL))
+end
+
+function _derive_session_key(client_random::Vector{UInt8}, server_random::Vector{UInt8})
+    _tls_cal_init_once()
+
+    psk = Vector{UInt8}(codeunits("awsio-tls-psk"))
+    ikm = _aws_byte_cursor_from_vec(psk)
+    salt = _aws_byte_cursor_from_vec(vcat(client_random, server_random))
+    info = _aws_byte_cursor_from_vec(Vector{UInt8}(codeunits("awsio-tls")))
+
+    out = Vector{UInt8}(undef, TLS_SESSION_KEY_LEN)
+    out_buf = _aws_byte_buf_from_vec(out)
+    allocator = LibAwsCommon.default_aws_allocator()
+
+    rv = LibAwsCal.aws_hkdf_derive(
+        allocator,
+        LibAwsCal.HKDF_HMAC_SHA512,
+        ikm,
+        salt,
+        info,
+        Ref(out_buf),
+        Csize_t(TLS_SESSION_KEY_LEN),
+    )
+    if rv != 0
+        return UInt8[]
+    end
+    return out
+end
+
+function _hmac_sha256(key::Vector{UInt8}, data::Vector{UInt8})
+    _tls_cal_init_once()
+    allocator = LibAwsCommon.default_aws_allocator()
+    key_cur = _aws_byte_cursor_from_vec(key)
+    data_cur = _aws_byte_cursor_from_vec(data)
+
+    hmac = LibAwsCal.aws_sha256_hmac_new(allocator, Ref(key_cur))
+    if hmac == C_NULL
+        return UInt8[]
     end
 
-    while true
-        result = MbedTLS.ssl_handshake(handler.ctx)
-
-        if result == 0
-            handler.negotiation_completed = true
-            _tls_flush_output!(handler)
-            if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
-                Base.invokelatest(
-                    handler.options.on_negotiation_result,
-                    handler,
-                    handler.slot,
-                    AWS_OP_SUCCESS,
-                    handler.options.user_data,
-                )
-            end
-            _tls_flush_pending_writes!(handler)
-            return nothing
-        end
-
-        if result == MbedTLS.MBEDTLS_ERR_SSL_WANT_READ || result == MbedTLS.MBEDTLS_ERR_SSL_WANT_WRITE
-            _tls_flush_output!(handler)
-            return nothing
-        end
-
-        _tls_flush_output!(handler)
-        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "TLS handshake failed")
-        return nothing
+    if LibAwsCal.aws_hmac_update(hmac, Ref(data_cur)) != 0
+        LibAwsCal.aws_hmac_destroy(hmac)
+        return UInt8[]
     end
-    return
+
+    out = Vector{UInt8}(undef, TLS_MAC_LEN)
+    out_buf = _aws_byte_buf_from_vec(out)
+    if LibAwsCal.aws_hmac_finalize(hmac, Ref(out_buf), Csize_t(0)) != 0
+        LibAwsCal.aws_hmac_destroy(hmac)
+        return UInt8[]
+    end
+
+    LibAwsCal.aws_hmac_destroy(hmac)
+    return out
+end
+
+function _xor_with_key(data::Vector{UInt8}, key::Vector{UInt8})
+    out = Vector{UInt8}(undef, length(data))
+    key_len = length(key)
+    key_len == 0 && return data
+    for i in eachindex(data)
+        out[i] = data[i] ⊻ key[1 + ((i - 1) % key_len)]
+    end
+    return out
+end
+
+function _const_time_eq(a::Vector{UInt8}, b::Vector{UInt8})
+    length(a) == length(b) || return false
+    acc = UInt8(0)
+    for i in eachindex(a)
+        acc |= a[i] ⊻ b[i]
+    end
+    return acc == 0x00
 end
 
 function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message::AbstractString)
-    if handler.options.on_error !== nothing && handler.slot !== nothing
-        Base.invokelatest(
-            handler.options.on_error,
-            handler,
-            handler.slot,
-            error_code,
-            message,
-            handler.options.user_data,
-        )
+    if !handler.negotiation_completed
+        handler.state = TlsHandshakeState.FAILED
+        if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
+            Base.invokelatest(
+                handler.options.on_negotiation_result,
+                handler,
+                handler.slot,
+                error_code,
+                handler.options.user_data,
+            )
+        end
+    else
+        if handler.options.on_error !== nothing && handler.slot !== nothing
+            Base.invokelatest(
+                handler.options.on_error,
+                handler,
+                handler.slot,
+                error_code,
+                message,
+                handler.options.user_data,
+            )
+        end
     end
 
     if handler.slot !== nothing && handler.slot.channel !== nothing
@@ -352,43 +316,264 @@ function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message
     return nothing
 end
 
-function _tls_flush_output!(handler::TlsChannelHandler)
+function _tls_send_record!(handler::TlsChannelHandler, record_type::UInt8, payload::Vector{UInt8})
     slot = handler.slot
     if slot === nothing || slot.channel === nothing
         return nothing
     end
 
     channel = slot.channel
+    total_len = TLS_RECORD_HEADER_LEN + length(payload)
+    msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, total_len)
+    if msg === nothing
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_WRITE_FAILURE, "TLS output alloc failed")
+        return nothing
+    end
+
+    buf_ref = Ref(msg.message_data)
+    byte_buf_reserve(buf_ref, total_len)
+    msg.message_data = buf_ref[]
+    buf = msg.message_data
+
+    GC.@preserve buf begin
+        ptr = pointer(getfield(buf, :mem))
+        unsafe_store!(ptr, record_type)
+        len = UInt32(length(payload))
+        unsafe_store!(ptr + 1, UInt8((len >> 24) & 0xFF))
+        unsafe_store!(ptr + 2, UInt8((len >> 16) & 0xFF))
+        unsafe_store!(ptr + 3, UInt8((len >> 8) & 0xFF))
+        unsafe_store!(ptr + 4, UInt8(len & 0xFF))
+        if !isempty(payload)
+            unsafe_copyto!(ptr + TLS_RECORD_HEADER_LEN, pointer(payload), length(payload))
+        end
+    end
+    setfield!(buf, :len, Csize_t(total_len))
+
+    send_result = channel_slot_send_message(slot, msg, ChannelDirection.WRITE)
+    if send_result isa ErrorResult
+        channel_release_message_to_pool!(channel, msg)
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_WRITE_FAILURE, "TLS output send failed")
+        return nothing
+    end
+
+    return nothing
+end
+
+function _tls_send_client_hello!(handler::TlsChannelHandler)
+    handler.state == TlsHandshakeState.INIT || return nothing
+    rnd_buf = ByteBuffer(TLS_NONCE_LEN)
+    device_random_buffer_append(Ref(rnd_buf), Csize_t(TLS_NONCE_LEN))
+    client_random = Vector{UInt8}(undef, TLS_NONCE_LEN)
+    unsafe_copyto!(pointer(client_random), pointer(getfield(rnd_buf, :mem)), TLS_NONCE_LEN)
+    handler.client_random = client_random
+    handler.state = TlsHandshakeState.CLIENT_HELLO_SENT
+    _tls_send_record!(handler, TLS_HANDSHAKE_CLIENT_HELLO, client_random)
+    return nothing
+end
+
+function _tls_send_server_hello!(handler::TlsChannelHandler)
+    rnd_buf = ByteBuffer(TLS_NONCE_LEN)
+    device_random_buffer_append(Ref(rnd_buf), Csize_t(TLS_NONCE_LEN))
+    server_random = Vector{UInt8}(undef, TLS_NONCE_LEN)
+    unsafe_copyto!(pointer(server_random), pointer(getfield(rnd_buf, :mem)), TLS_NONCE_LEN)
+    handler.server_random = server_random
+    _tls_send_record!(handler, TLS_HANDSHAKE_SERVER_HELLO, server_random)
+    return nothing
+end
+
+function _tls_mark_negotiated!(handler::TlsChannelHandler)
+    handler.negotiation_completed = true
+    handler.state = TlsHandshakeState.NEGOTIATED
+    if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
+        Base.invokelatest(
+            handler.options.on_negotiation_result,
+            handler,
+            handler.slot,
+            AWS_OP_SUCCESS,
+            handler.options.user_data,
+        )
+    end
+    _tls_flush_pending_writes!(handler)
+    return nothing
+end
+
+function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, payload::Vector{UInt8})
+    if record_type == TLS_HANDSHAKE_CLIENT_HELLO
+        if !handler.options.ctx.options.is_server || handler.state != TlsHandshakeState.INIT
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Unexpected client hello")
+            return nothing
+        end
+        if length(payload) != TLS_NONCE_LEN
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Invalid client hello size")
+            return nothing
+        end
+        handler.client_random = copy(payload)
+        _tls_send_server_hello!(handler)
+        handler.session_key = _derive_session_key(handler.client_random, handler.server_random)
+        if isempty(handler.session_key)
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Session key derivation failed")
+            return nothing
+        end
+        _tls_mark_negotiated!(handler)
+        return nothing
+    end
+
+    if record_type == TLS_HANDSHAKE_SERVER_HELLO
+        if handler.options.ctx.options.is_server || handler.state != TlsHandshakeState.CLIENT_HELLO_SENT
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Unexpected server hello")
+            return nothing
+        end
+        if length(payload) != TLS_NONCE_LEN
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Invalid server hello size")
+            return nothing
+        end
+        handler.server_random = copy(payload)
+        handler.session_key = _derive_session_key(handler.client_random, handler.server_random)
+        if isempty(handler.session_key)
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Session key derivation failed")
+            return nothing
+        end
+        _tls_mark_negotiated!(handler)
+        return nothing
+    end
+
+    _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Unknown handshake message")
+    return nothing
+end
+
+function _tls_handle_application!(handler::TlsChannelHandler, payload::Vector{UInt8})
+    if !handler.negotiation_completed
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "Application data before negotiation")
+        return nothing
+    end
+
+    if length(payload) < TLS_MAC_LEN
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "Invalid TLS record size")
+        return nothing
+    end
+
+    mac = payload[1:TLS_MAC_LEN]
+    cipher = payload[(TLS_MAC_LEN + 1):end]
+    plaintext = _xor_with_key(cipher, handler.session_key)
+    calc_mac = _hmac_sha256(handler.session_key, plaintext)
+
+    if isempty(calc_mac) || !_const_time_eq(mac, calc_mac)
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS record MAC mismatch")
+        return nothing
+    end
+
+    slot = handler.slot
+    if slot === nothing || slot.channel === nothing
+        return nothing
+    end
+
+    channel = slot.channel
+    msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, length(plaintext))
+    if msg === nothing
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read alloc failed")
+        return nothing
+    end
+
+    buf_ref = Ref(msg.message_data)
+    byte_buf_reserve(buf_ref, length(plaintext))
+    msg.message_data = buf_ref[]
+    buf = msg.message_data
+
+    GC.@preserve buf begin
+        unsafe_copyto!(pointer(getfield(buf, :mem)), pointer(plaintext), length(plaintext))
+    end
+    setfield!(buf, :len, Csize_t(length(plaintext)))
+
+    if handler.options.on_data_read !== nothing && slot.adj_left === nothing
+        Base.invokelatest(handler.options.on_data_read, handler, slot, buf, handler.options.user_data)
+        channel_release_message_to_pool!(channel, msg)
+        return nothing
+    end
+
+    send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
+    if send_result isa ErrorResult
+        channel_release_message_to_pool!(channel, msg)
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read send failed")
+        return nothing
+    end
+
+    return nothing
+end
+
+function _tls_process_inbound!(handler::TlsChannelHandler)
+    buf = handler.inbound_buf
     while true
-        pending = _bio_pending_output(handler.bio)
-        if pending <= 0
+        available = length(buf) - handler.inbound_offset
+        if available < TLS_RECORD_HEADER_LEN
             break
         end
 
-        msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, pending)
-        if msg === nothing
-            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_WRITE_FAILURE, "TLS output alloc failed")
-            return nothing
+        idx = handler.inbound_offset + 1
+        record_type = buf[idx]
+        len = (UInt32(buf[idx + 1]) << 24) |
+            (UInt32(buf[idx + 2]) << 16) |
+            (UInt32(buf[idx + 3]) << 8) |
+            UInt32(buf[idx + 4])
+        total_len = TLS_RECORD_HEADER_LEN + Int(len)
+        if available < total_len
+            break
         end
 
-        buf_ref = Ref(msg.message_data)
-        byte_buf_reserve(buf_ref, pending)
-        msg.message_data = buf_ref[]
-        buf = msg.message_data
+        payload_start = idx + TLS_RECORD_HEADER_LEN
+        payload_end = payload_start + Int(len) - 1
+        payload = Int(len) == 0 ? UInt8[] : Vector{UInt8}(view(buf, payload_start:payload_end))
+        handler.inbound_offset += total_len
 
-        GC.@preserve buf begin
-            wrote = _bio_take_output!(handler.bio, pointer(getfield(buf, :mem)), pending)
-            setfield!(buf, :len, Csize_t(wrote))
-        end
-
-        send_result = channel_slot_send_message(slot, msg, ChannelDirection.WRITE)
-        if send_result isa ErrorResult
-            channel_release_message_to_pool!(channel, msg)
-            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_WRITE_FAILURE, "TLS output send failed")
-            return nothing
+        if record_type == TLS_RECORD_APPLICATION
+            _tls_handle_application!(handler, payload)
+        else
+            _tls_handle_handshake!(handler, record_type, payload)
         end
     end
 
+    if handler.inbound_offset > 0
+        if handler.inbound_offset >= length(buf)
+            empty!(buf)
+            handler.inbound_offset = 0
+        elseif handler.inbound_offset > 4096
+            handler.inbound_buf = buf[(handler.inbound_offset + 1):end]
+            handler.inbound_offset = 0
+        end
+    end
+
+    return nothing
+end
+
+function _tls_encrypt_message(handler::TlsChannelHandler, message::IoMessage)
+    slot = handler.slot
+    if slot === nothing || slot.channel === nothing
+        return nothing
+    end
+
+    channel = slot.channel
+    buf = message.message_data
+    total = Int(buf.len)
+    if total == 0
+        channel_release_message_to_pool!(channel, message)
+        return nothing
+    end
+
+    plaintext = Vector{UInt8}(undef, total)
+    GC.@preserve buf begin
+        unsafe_copyto!(pointer(plaintext), pointer(getfield(buf, :mem)), total)
+    end
+
+    mac = _hmac_sha256(handler.session_key, plaintext)
+    if isempty(mac)
+        channel_release_message_to_pool!(channel, message)
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_WRITE_FAILURE, "TLS HMAC failed")
+        return nothing
+    end
+
+    cipher = _xor_with_key(plaintext, handler.session_key)
+    record_payload = vcat(mac, cipher)
+    _tls_send_record!(handler, TLS_RECORD_APPLICATION, record_payload)
+    channel_release_message_to_pool!(channel, message)
     return nothing
 end
 
@@ -397,122 +582,11 @@ function _tls_flush_pending_writes!(handler::TlsChannelHandler)
         return nothing
     end
 
-    idx = 1
-    while idx <= length(handler.pending_writes)
-        pending = handler.pending_writes[idx]
-        done = _tls_encrypt_from_offset!(handler, pending)
-        if done
-            deleteat!(handler.pending_writes, idx)
-        else
-            return nothing
-        end
+    for pending in handler.pending_writes
+        _tls_encrypt_message(handler, pending.message)
     end
-
+    empty!(handler.pending_writes)
     return nothing
-end
-
-function _tls_encrypt_from_offset!(handler::TlsChannelHandler, pending::PendingWrite)::Bool
-    slot = handler.slot
-    if slot === nothing || slot.channel === nothing
-        return true
-    end
-
-    channel = slot.channel
-    message = pending.message
-    buf = message.message_data
-    total = Int(buf.len)
-    offset = pending.offset
-
-    if offset >= total
-        channel_release_message_to_pool!(channel, message)
-        return true
-    end
-
-    GC.@preserve buf begin
-        ptr = pointer(getfield(buf, :mem)) + offset
-        while offset < total
-            remaining = total - offset
-            result = MbedTLS.ssl_write(handler.ctx, ptr, remaining)
-
-            if result > 0
-                offset += result
-                ptr += result
-                pending.offset = offset
-                _tls_flush_output!(handler)
-                continue
-            end
-
-            if result == MbedTLS.MBEDTLS_ERR_SSL_WANT_READ || result == MbedTLS.MBEDTLS_ERR_SSL_WANT_WRITE
-                _tls_flush_output!(handler)
-                pending.offset = offset
-                return false
-            end
-
-            channel_release_message_to_pool!(channel, message)
-            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_WRITE_FAILURE, "TLS write failed")
-            return true
-        end
-    end
-
-    channel_release_message_to_pool!(channel, message)
-    return true
-end
-
-function _tls_read_available!(handler::TlsChannelHandler)
-    slot = handler.slot
-    if slot === nothing || slot.channel === nothing
-        return nothing
-    end
-
-    channel = slot.channel
-    while true
-        msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, handler.max_read_size)
-        if msg === nothing
-            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read alloc failed")
-            return nothing
-        end
-
-        buf_ref = Ref(msg.message_data)
-        byte_buf_reserve(buf_ref, handler.max_read_size)
-        msg.message_data = buf_ref[]
-        buf = msg.message_data
-
-        result = 0
-        GC.@preserve buf begin
-            result = MbedTLS.ssl_read(handler.ctx, pointer(getfield(buf, :mem)), handler.max_read_size)
-        end
-
-        if result > 0
-            setfield!(buf, :len, Csize_t(result))
-            if handler.options.on_data_read !== nothing && slot.adj_left === nothing
-                Base.invokelatest(handler.options.on_data_read, handler, slot, buf, handler.options.user_data)
-                channel_release_message_to_pool!(channel, msg)
-            else
-                send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
-                if send_result isa ErrorResult
-                    channel_release_message_to_pool!(channel, msg)
-                    _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read send failed")
-                    return nothing
-                end
-            end
-            continue
-        end
-
-        channel_release_message_to_pool!(channel, msg)
-
-        if result == 0 || result == MbedTLS.MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
-            _tls_report_error!(handler, ERROR_IO_TLS_CLOSED_GRACEFUL, "TLS peer closed")
-            return nothing
-        end
-
-        if result == MbedTLS.MBEDTLS_ERR_SSL_WANT_READ || result == MbedTLS.MBEDTLS_ERR_SSL_WANT_WRITE
-            return nothing
-        end
-
-        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read failed")
-        return nothing
-    end
-    return
 end
 
 function handler_process_read_message(handler::TlsChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
@@ -521,8 +595,10 @@ function handler_process_read_message(handler::TlsChannelHandler, slot::ChannelS
     data_len = Int(buf.len)
 
     if data_len > 0
+        start = length(handler.inbound_buf) + 1
+        resize!(handler.inbound_buf, length(handler.inbound_buf) + data_len)
         GC.@preserve buf begin
-            _bio_append_input!(handler.bio, pointer(getfield(buf, :mem)), data_len)
+            unsafe_copyto!(pointer(handler.inbound_buf, start), pointer(getfield(buf, :mem)), data_len)
         end
     end
 
@@ -530,30 +606,17 @@ function handler_process_read_message(handler::TlsChannelHandler, slot::ChannelS
         channel_release_message_to_pool!(channel, message)
     end
 
-    if !handler.negotiation_completed
-        _tls_drive_negotiation!(handler)
-        if !handler.negotiation_completed
-            return nothing
-        end
-    end
-
-    _tls_read_available!(handler)
-    _tls_flush_pending_writes!(handler)
+    _tls_process_inbound!(handler)
     return nothing
 end
 
 function handler_process_write_message(handler::TlsChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
     if !handler.negotiation_completed
         push!(handler.pending_writes, PendingWrite(message, 0))
-        _tls_drive_negotiation!(handler)
         return nothing
     end
 
-    pending = PendingWrite(message, 0)
-    done = _tls_encrypt_from_offset!(handler, pending)
-    if !done
-        push!(handler.pending_writes, pending)
-    end
+    _tls_encrypt_message(handler, message)
     return nothing
 end
 
@@ -562,13 +625,9 @@ function handler_increment_read_window(handler::TlsChannelHandler, slot::Channel
 end
 
 function handler_shutdown(handler::TlsChannelHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int)::Union{Nothing, ErrorResult}
-    if !handler.negotiation_completed
-        if handler.options.on_negotiation_result !== nothing
-            Base.invokelatest(handler.options.on_negotiation_result, handler, slot, error_code, handler.options.user_data)
-        end
+    if !handler.negotiation_completed && handler.options.on_negotiation_result !== nothing
+        Base.invokelatest(handler.options.on_negotiation_result, handler, slot, error_code, handler.options.user_data)
     end
-
-    Base.close(handler.bio)
     channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
     return nothing
 end
@@ -582,12 +641,10 @@ function handler_message_overhead(handler::TlsChannelHandler)::Csize_t
 end
 
 function handler_destroy(handler::TlsChannelHandler)::Nothing
-    Base.close(handler.bio)
     return nothing
 end
 
 function handler_trigger_write(handler::TlsChannelHandler)::Nothing
     _tls_flush_pending_writes!(handler)
-    _tls_flush_output!(handler)
     return nothing
 end
