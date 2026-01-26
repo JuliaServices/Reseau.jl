@@ -50,6 +50,7 @@ const OnHostResolveCompleteFn = Function  # (resolver, user_data) -> nothing
 # Resolution request - tracking structure for an outstanding DNS query
 mutable struct HostResolverResolutionRequest{F <: Union{OnHostResolvedFn, Nothing}, U}
     host_name::String
+    address_type::HostAddressType.T
     on_resolved::F  # nullable
     user_data::U
     # Linked list for queued requests
@@ -66,7 +67,8 @@ mutable struct HostEntry
     last_resolve_request_time::UInt64
     resolved_time::UInt64
     # Linked list of waiting requests
-    pending_requests::Union{HostResolverResolutionRequest, Nothing}  # nullable
+    pending_requests_a::Union{HostResolverResolutionRequest, Nothing}  # nullable
+    pending_requests_aaaa::Union{HostResolverResolutionRequest, Nothing}  # nullable
 end
 
 function HostEntry(host_name::AbstractString)
@@ -78,6 +80,7 @@ function HostEntry(host_name::AbstractString)
         false,
         UInt64(0),
         UInt64(0),
+        nothing,
         nothing,
     )
 end
@@ -113,6 +116,17 @@ end
 # Default TTL in nanoseconds (5 minutes)
 const HOST_RESOLVER_DEFAULT_TTL_NS = UInt64(300_000_000_000)
 
+# Cache hash helpers
+host_string_hash(key::String) = hash(key)
+host_string_eq(a::String, b::String) = a == b
+const HostResolverCache = HashTable{
+    String,
+    HostEntry,
+    HashEq{typeof(host_string_hash), typeof(host_string_eq)},
+    NoopDestroy,
+    NoopDestroy,
+}
+
 # Abstract resolver interface
 abstract type AbstractHostResolver end
 
@@ -120,43 +134,127 @@ abstract type AbstractHostResolver end
 mutable struct DefaultHostResolver{ELG} <: AbstractHostResolver
     event_loop_group::ELG
     config::HostResolverConfig
-    cache::Dict{String, HostEntry}
+    cache::HostResolverCache
     lock::ReentrantLock
     @atomic shutdown::Bool
-    ref_count::RefCounted{DefaultHostResolver{ELG}, Function}
-end
-
-function _resolver_on_zero_ref(resolver::DefaultHostResolver)
-    logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: ref count zero, cleaning up")
-    empty!(resolver.cache)
-    return nothing
 end
 
 function DefaultHostResolver(
         event_loop_group::ELG,
         config::HostResolverConfig = HostResolverConfig(),
     ) where {ELG}
+    cache = HashTable{String, HostEntry}(
+        host_string_hash,
+        host_string_eq;
+        capacity = Int(config.max_entries),
+    )
     resolver = DefaultHostResolver{ELG}(
         event_loop_group,
         config,
-        Dict{String, HostEntry}(),
+        cache,
         ReentrantLock(),
         false,
-        RefCounted{DefaultHostResolver{ELG}, Function}(1, nothing, _resolver_on_zero_ref),  # placeholder
     )
-    resolver.ref_count = RefCounted(resolver, _resolver_on_zero_ref)
     return resolver
 end
 
-# Acquire reference to resolver
-function host_resolver_acquire!(resolver::DefaultHostResolver)
-    acquire!(resolver.ref_count)
-    return resolver
+function _entry_addresses(entry::HostEntry, address_type::HostAddressType.T)
+    return address_type == HostAddressType.A ? entry.addresses_a : entry.addresses_aaaa
 end
 
-# Release reference to resolver
-function host_resolver_release!(resolver::DefaultHostResolver)
-    release!(resolver.ref_count)
+function _entry_pending(entry::HostEntry, address_type::HostAddressType.T)::Bool
+    return address_type == HostAddressType.A ? entry.pending_a : entry.pending_aaaa
+end
+
+function _set_entry_pending!(entry::HostEntry, address_type::HostAddressType.T, pending::Bool)
+    if address_type == HostAddressType.A
+        entry.pending_a = pending
+    else
+        entry.pending_aaaa = pending
+    end
+    return nothing
+end
+
+function _cache_get_or_create!(resolver::DefaultHostResolver, host::String)::HostEntry
+    found, entry = hash_table_get_entry(resolver.cache, host)
+    if found
+        return entry
+    end
+    entry = HostEntry(host)
+    hash_table_put!(resolver.cache, host, entry)
+    return entry
+end
+
+function _pending_requests(entry::HostEntry, address_type::HostAddressType.T)
+    return address_type == HostAddressType.A ? entry.pending_requests_a : entry.pending_requests_aaaa
+end
+
+function _set_pending_requests!(
+        entry::HostEntry,
+        address_type::HostAddressType.T,
+        head::Union{HostResolverResolutionRequest, Nothing},
+    )
+    if address_type == HostAddressType.A
+        entry.pending_requests_a = head
+    else
+        entry.pending_requests_aaaa = head
+    end
+    return nothing
+end
+
+function _enqueue_request!(
+        entry::HostEntry,
+        host::String,
+        address_type::HostAddressType.T,
+        on_resolved::OnHostResolvedFn,
+        user_data,
+    )
+    head = _pending_requests(entry, address_type)
+    req = HostResolverResolutionRequest(host, address_type, on_resolved, user_data, head)
+    _set_pending_requests!(entry, address_type, req)
+    return req
+end
+
+function _drain_pending_requests!(
+        entry::HostEntry,
+        address_type::HostAddressType.T,
+    )::Union{HostResolverResolutionRequest, Nothing}
+    head = _pending_requests(entry, address_type)
+    _set_pending_requests!(entry, address_type, nothing)
+    return head
+end
+
+function _update_entry_cache!(
+        entry::HostEntry,
+        addresses::Vector{HostAddress},
+        address_type::HostAddressType.T,
+    )
+    if address_type == HostAddressType.A
+        entry.addresses_a = addresses
+    else
+        entry.addresses_aaaa = addresses
+    end
+    return nothing
+end
+
+function _dispatch_resolved_callback(
+        resolver::DefaultHostResolver,
+        host::String,
+        error_code::Int,
+        addresses::Vector{HostAddress},
+        on_resolved::OnHostResolvedFn,
+    )
+    event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
+    if event_loop !== nothing
+        task = ScheduledTask(
+            (t, status) -> on_resolved(resolver, host, error_code, addresses),
+            nothing;
+            type_tag = "dns_resolve_cached"
+        )
+        event_loop_schedule_task_now!(event_loop, task)
+    else
+        on_resolved(resolver, host, error_code, addresses)
+    end
     return nothing
 end
 
@@ -178,108 +276,112 @@ function host_resolver_resolve!(
 
     logf(LogLevel.DEBUG, LS_IO_DNS, "Host resolver: resolving host '$host'")
 
-    # Check cache first
+    cached_addresses = HostAddress[]
+    schedule_resolution = false
+
     lock(resolver.lock) do
-        entry = get(resolver.cache, host, nothing)
+        entry = _cache_get_or_create!(resolver, host)
+        addresses = _entry_addresses(entry, address_type)
+        current_time = high_res_clock()
 
-        if entry !== nothing
-            # Check if we have valid cached addresses
-            addresses = address_type == HostAddressType.A ? entry.addresses_a : entry.addresses_aaaa
-            current_time = high_res_clock()
+        valid_addresses = filter(a -> a.expiry > current_time, addresses)
+        if !isempty(valid_addresses)
+            logf(
+                LogLevel.TRACE, LS_IO_DNS,
+                "Host resolver: cache hit for '$host', $(length(valid_addresses)) addresses"
+            )
 
-            # Filter to non-expired addresses
-            valid_addresses = filter(a -> a.expiry > current_time, addresses)
+            for addr in valid_addresses
+                addr.use_count += 1
+            end
+            cached_addresses = copy.(valid_addresses)
 
-            if !isempty(valid_addresses)
-                logf(
-                    LogLevel.TRACE, LS_IO_DNS,
-                    "Host resolver: cache hit for '$host', $(length(valid_addresses)) addresses"
-                )
-
-                # Update use counts
-                for addr in valid_addresses
-                    addr.use_count += 1
-                end
-
-                # Schedule callback
-                event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
-                if event_loop !== nothing
-                    task = ScheduledTask(
-                        (t, status) -> on_resolved(resolver, host, AWS_OP_SUCCESS, copy.(valid_addresses)),
-                        nothing;
-                        type_tag = "dns_resolve_cached"
+            if resolver.config.background_refresh
+                if !_entry_pending(entry, address_type) &&
+                        (
+                        entry.resolved_time == 0 ||
+                            current_time - entry.resolved_time >= resolver.config.resolve_frequency_ns
                     )
-                    event_loop_schedule_task_now!(event_loop, task)
-                else
-                    # No event loop, call directly
-                    on_resolved(resolver, host, AWS_OP_SUCCESS, copy.(valid_addresses))
+                    _set_entry_pending!(entry, address_type, true)
+                    entry.last_resolve_request_time = current_time
+                    schedule_resolution = true
                 end
-
-                return nothing
+            end
+        else
+            _enqueue_request!(entry, host, address_type, on_resolved, user_data)
+            if !_entry_pending(entry, address_type)
+                _set_entry_pending!(entry, address_type, true)
+                entry.last_resolve_request_time = current_time
+                schedule_resolution = true
             end
         end
     end
 
-    # Need to resolve - perform getaddrinfo
-    _perform_dns_resolution(resolver, host, address_type, on_resolved, user_data)
+    if !isempty(cached_addresses)
+        _dispatch_resolved_callback(resolver, host, AWS_OP_SUCCESS, cached_addresses, on_resolved)
+    end
 
-    return nothing
-end
-
-# Perform actual DNS resolution using getaddrinfo
-function _perform_dns_resolution(
-        resolver::DefaultHostResolver,
-        host::String,
-        address_type::HostAddressType.T,
-        on_resolved::OnHostResolvedFn,
-        user_data,
-    )
-    logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: performing DNS lookup for '$host'")
-
-    # Get an event loop to schedule the async work
-    event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
-
-    # Schedule DNS resolution as a task
-    # In a real implementation, this would be done in a thread pool to avoid blocking
-    task = ScheduledTask(
-        (t, status) -> _dns_resolution_task(resolver, host, address_type, on_resolved, user_data),
-        nothing;
-        type_tag = "dns_resolution"
-    )
-
-    if event_loop !== nothing
-        event_loop_schedule_task_now!(event_loop, task)
-    else
-        # No event loop, execute directly
-        _dns_resolution_task(resolver, host, address_type, on_resolved, user_data)
+    if schedule_resolution
+        _perform_dns_resolution(resolver, host, address_type)
     end
 
     return nothing
 end
 
-# DNS resolution task - called on event loop
-function _dns_resolution_task(
+# Perform actual DNS resolution using getaddrinfo (off the event-loop thread)
+function _perform_dns_resolution(
         resolver::DefaultHostResolver,
         host::String,
         address_type::HostAddressType.T,
-        on_resolved::OnHostResolvedFn,
-        user_data,
     )
-    logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: DNS task executing for '$host'")
+    logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: performing DNS lookup for '$host'")
+
+    event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
+    config = resolver.config
+
+    Threads.@spawn begin
+        addresses, error_code = _dns_lookup(host, address_type, config)
+
+        if event_loop !== nothing
+            task = ScheduledTask(
+                (t, status) -> _dns_resolution_complete(resolver, host, address_type, addresses, error_code),
+                nothing;
+                type_tag = "dns_resolution_complete"
+            )
+            event_loop_schedule_task_now!(event_loop, task)
+        else
+            _dns_resolution_complete(resolver, host, address_type, addresses, error_code)
+        end
+    end
+
+    return nothing
+end
+
+function _dns_lookup(
+        host::String,
+        address_type::HostAddressType.T,
+        config::HostResolverConfig,
+    )::Tuple{Vector{HostAddress}, Int}
+    logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: DNS lookup executing for '$host'")
 
     addresses = Vector{HostAddress}()
     error_code = AWS_OP_SUCCESS
 
     try
-        # Use native getaddrinfo
         family = address_type == HostAddressType.A ? AF_INET : AF_INET6
         addrs = _native_getaddrinfo(host, family)
 
-        current_time = high_res_clock()
-        ttl_nanos = current_time + HOST_RESOLVER_DEFAULT_TTL_NS
-
         if !isempty(addrs)
-            for addr_str in addrs
+            current_time = high_res_clock()
+            ttl_secs = clamp(
+                Int(HOST_RESOLVER_DEFAULT_TTL_NS ÷ 1_000_000_000),
+                Int(config.min_ttl_secs),
+                Int(config.max_ttl_secs),
+            )
+            ttl_nanos = current_time + UInt64(ttl_secs) * 1_000_000_000
+            max_addresses = Int(config.max_addresses_per_host)
+
+            for addr_str in Iterators.take(addrs, max_addresses)
                 push!(addresses, HostAddress(addr_str, address_type, host, ttl_nanos))
             end
 
@@ -287,9 +389,6 @@ function _dns_resolution_task(
                 LogLevel.DEBUG, LS_IO_DNS,
                 "Host resolver: resolved '$host' to $(length(addresses)) addresses"
             )
-
-            # Update cache
-            _update_cache!(resolver, host, addresses, address_type)
         else
             logf(LogLevel.DEBUG, LS_IO_DNS, "Host resolver: no addresses found for '$host'")
             error_code = ERROR_IO_DNS_NO_ADDRESS_FOR_HOST
@@ -300,33 +399,40 @@ function _dns_resolution_task(
         error_code = ERROR_IO_DNS_QUERY_FAILED
     end
 
-    # Invoke callback
-    on_resolved(resolver, host, error_code, addresses)
-
-    return nothing
+    return addresses, error_code
 end
 
-# Update the cache with resolved addresses
-function _update_cache!(resolver::DefaultHostResolver, host::String, addresses::Vector{HostAddress}, address_type::HostAddressType.T)
+function _dns_resolution_complete(
+        resolver::DefaultHostResolver,
+        host::String,
+        address_type::HostAddressType.T,
+        addresses::Vector{HostAddress},
+        error_code::Int,
+    )
+    pending = nothing
+
     lock(resolver.lock) do
-        entry = get!(resolver.cache, host) do
-            HostEntry(host)
+        entry = _cache_get_or_create!(resolver, host)
+
+        if error_code == AWS_OP_SUCCESS && !isempty(addresses)
+            _update_entry_cache!(entry, addresses, address_type)
+            entry.resolved_time = high_res_clock()
         end
 
-        if address_type == HostAddressType.A
-            entry.addresses_a = addresses
-            entry.pending_a = false
-        else
-            entry.addresses_aaaa = addresses
-            entry.pending_aaaa = false
-        end
+        _set_entry_pending!(entry, address_type, false)
+        pending = _drain_pending_requests!(entry, address_type)
 
-        entry.resolved_time = high_res_clock()
-
-        # Trim cache if too large
         if length(resolver.cache) > resolver.config.max_entries
             _trim_cache!(resolver)
         end
+    end
+
+    req = pending
+    while req !== nothing
+        if req.on_resolved !== nothing
+            Base.invokelatest(req.on_resolved, resolver, host, error_code, copy.(addresses))
+        end
+        req = req.next
     end
 
     return nothing
@@ -350,7 +456,7 @@ function _trim_cache!(resolver::DefaultHostResolver)
     end
 
     for host in entries_to_remove
-        delete!(resolver.cache, host)
+        hash_table_remove!(resolver.cache, host)
         if length(resolver.cache) <= resolver.config.max_entries
             break
         end
@@ -362,7 +468,7 @@ end
 # Purge the entire cache
 function host_resolver_purge_cache!(resolver::DefaultHostResolver)
     lock(resolver.lock) do
-        empty!(resolver.cache)
+        hash_table_clear!(resolver.cache)
     end
     logf(LogLevel.DEBUG, LS_IO_DNS, "Host resolver: cache purged")
     return nothing
@@ -377,7 +483,7 @@ function host_resolver_get_address!(
     host = String(host_name)
 
     return lock(resolver.lock) do
-        entry = get(resolver.cache, host, nothing)
+        entry = hash_table_get(resolver.cache, host)
 
         if entry === nothing
             return nothing
@@ -411,7 +517,7 @@ function host_resolver_record_connection_failure!(
         address::HostAddress,
     )
     lock(resolver.lock) do
-        entry = get(resolver.cache, address.host, nothing)
+        entry = hash_table_get(resolver.cache, address.host)
         if entry === nothing
             return nothing
         end

@@ -230,7 +230,7 @@ src/
 2. [x] **Event loops**: epoll + kqueue loops, cross-thread scheduling.
 3. [x] **Channel + socket**: channel pipeline, socket handler, message pool.
 4. [x] **TLS handler**: TLS channel handler using MbedTLS.
-5. [ ] **Host resolver**: full resolver with cache + TTL.
+5. [x] **Host resolver**: full resolver with cache + TTL.
 6. [ ] **Async stream**: async read/write streams.
 7. [ ] **Tests + docs**: port/author tests, add usage docs.
 
