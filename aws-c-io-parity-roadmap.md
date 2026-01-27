@@ -212,6 +212,7 @@ Legend:
 - [ ] Token acquire/release semantics parity
 - [ ] Schedule timing on event loops parity
 - [ ] Tests matching `exponential_backoff_retry_test.c`
+- [x] Basic max-retry + client-error behavior tests
 
 ### 7.2 Standard retry (token bucket)
 - [ ] Capacity refill and cost semantics parity

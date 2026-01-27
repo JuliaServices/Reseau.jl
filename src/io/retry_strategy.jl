@@ -241,7 +241,7 @@ function _calculate_retry_delay(strategy::ExponentialBackoffRetryStrategy, retry
     base_delay = min(base_delay, Float64(config.max_delay_ms))
 
     # Apply jitter
-    delay = if config.jitter_mode == :full
+    delay = if config.jitter_mode == :full || config.jitter_mode == :default
         # Full jitter: random between 0 and calculated delay
         rand() * base_delay
     elseif config.jitter_mode == :equal
@@ -266,32 +266,49 @@ function _calculate_retry_delay(strategy::ExponentialBackoffRetryStrategy, retry
     return result
 end
 
+# Schedule retry for exponential backoff token (default error type)
+function retry_token_schedule_retry(
+        token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U},
+        on_retry_ready::OnRetryReadyFn,
+        user_data,
+    ) where {ELG, U}
+    return retry_token_schedule_retry(token, token.error_type, on_retry_ready, user_data)
+end
+
 # Schedule retry for exponential backoff token
-function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U}, on_retry_ready::OnRetryReadyFn, user_data) where {ELG, U}
+function retry_token_schedule_retry(
+        token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U},
+        error_type::RetryErrorType.T,
+        on_retry_ready::OnRetryReadyFn,
+        user_data,
+    ) where {ELG, U}
     strategy = token.strategy
     config = strategy.config
+    token.error_type = error_type
 
-    # Check if max retries exceeded
-    if token.retry_count >= config.max_retries
-        logf(
-            LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-            "Exponential backoff: max retries ($(config.max_retries)) exceeded"
-        )
-        raise_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
-        return ErrorResult(ERROR_IO_MAX_RETRIES_EXCEEDED)
+    delay_ms = UInt64(0)
+
+    if error_type != RetryErrorType.CLIENT_ERROR
+        # Check if max retries exceeded
+        if token.retry_count >= config.max_retries
+            logf(
+                LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+                "Exponential backoff: max retries ($(config.max_retries)) exceeded"
+            )
+            raise_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
+            return ErrorResult(ERROR_IO_MAX_RETRIES_EXCEEDED)
+        end
+
+        delay_ms = _calculate_retry_delay(strategy, token.retry_count)
+        token.retry_count += 1
     end
 
     if @atomic strategy.shutdown
         raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
         return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
-
-    token.retry_count += 1
     token.on_retry_ready = on_retry_ready
     token.user_data = user_data
-
-    # Calculate delay
-    delay_ms = _calculate_retry_delay(strategy, token.retry_count)
 
     logf(
         LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
@@ -310,7 +327,7 @@ function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStr
         return current_time
     end
 
-    run_at = current_time + UInt64(delay_ms * 1_000_000)  # Convert ms to ns
+    run_at = delay_ms == 0 ? current_time : current_time + UInt64(delay_ms * 1_000_000)
 
     task = ScheduledTask(
         _exponential_backoff_retry_task,
@@ -319,13 +336,19 @@ function retry_token_schedule_retry(token::RetryToken{ExponentialBackoffRetryStr
     )
     token.scheduled_retry_task = task
 
-    event_loop_schedule_task_future!(event_loop, task, run_at)
+    if delay_ms == 0
+        event_loop_schedule_task_now!(event_loop, task)
+    else
+        event_loop_schedule_task_future!(event_loop, task, run_at)
+    end
 
     return nothing
 end
 
 # Retry task callback
 function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T)
+    # Task is executing (or canceled). Clear to avoid canceling a running task.
+    token.scheduled_retry_task = nothing
 
     logf(
         LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
@@ -520,9 +543,34 @@ function _return_retry_capacity(strategy::StandardRetryStrategy, amount::UInt64)
 end
 
 # Schedule retry for standard token
-function retry_token_schedule_retry(token::RetryToken{StandardRetryStrategy{ELG}, U}, on_retry_ready::OnRetryReadyFn, user_data) where {ELG, U}
+# Schedule retry for standard token (default error type)
+function retry_token_schedule_retry(
+        token::RetryToken{StandardRetryStrategy{ELG}, U},
+        on_retry_ready::OnRetryReadyFn,
+        user_data,
+    ) where {ELG, U}
+    return retry_token_schedule_retry(token, token.error_type, on_retry_ready, user_data)
+end
+
+# Schedule retry for standard token
+function retry_token_schedule_retry(
+        token::RetryToken{StandardRetryStrategy{ELG}, U},
+        error_type::RetryErrorType.T,
+        on_retry_ready::OnRetryReadyFn,
+        user_data,
+    ) where {ELG, U}
     strategy = token.strategy
     config = strategy.config
+    token.error_type = error_type
+
+    if error_type == RetryErrorType.CLIENT_ERROR
+        logf(
+            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
+            "Standard retry: client error does not permit retry"
+        )
+        raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
+        return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
+    end
 
     # Check if max retries exceeded
     if token.retry_count >= config.backoff_config.max_retries
@@ -603,10 +651,12 @@ function _calculate_standard_retry_delay(config::ExponentialBackoffConfig, retry
     base_delay *= config.scale_factor
     base_delay = min(base_delay, Float64(config.max_delay_ms))
 
-    delay = if config.jitter_mode == :full
+    delay = if config.jitter_mode == :full || config.jitter_mode == :default
         rand() * base_delay
     elseif config.jitter_mode == :equal
         (base_delay / 2) + (rand() * base_delay / 2)
+    elseif config.jitter_mode == :decorrelated
+        min(Float64(config.max_delay_ms), rand() * base_delay * 3)
     else
         base_delay
     end
@@ -616,6 +666,8 @@ end
 
 # Standard retry task callback
 function _standard_retry_task(token::RetryToken, status::TaskStatus.T)
+    # Task is executing (or canceled). Clear to avoid canceling a running task.
+    token.scheduled_retry_task = nothing
 
     logf(
         LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
