@@ -443,6 +443,87 @@ const _dispatch_queue_setter_c =
         end
     end
 
+    @testset "Event loop syscall error mapping" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+
+                        read_end, write_end = pipe_res
+                        bad_fd = read_end.io_handle.fd
+                        ccall(:close, Cint, (Cint,), bad_fd)
+                        read_end.io_handle.fd = -1
+                        bad_handle = AwsIO.IoHandle(bad_fd)
+
+                        if Sys.islinux()
+                            res = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                bad_handle,
+                                Int(AwsIO.IoEventType.READABLE),
+                                (loop, handle, events, data) -> nothing,
+                                nothing,
+                            )
+                            @test res isa AwsIO.ErrorResult
+                            res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_SYS_CALL_FAILURE
+                        elseif Sys.isapple()
+                            done_ch = Channel{Int}(1)
+                            on_event = (loop, handle, events, data) -> begin
+                                _ = AwsIO.event_loop_unsubscribe_from_io_events!(loop, handle)
+                                put!(done_ch, events)
+                                return nothing
+                            end
+                            res = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                bad_handle,
+                                Int(AwsIO.IoEventType.READABLE),
+                                on_event,
+                                nothing,
+                            )
+                            @test res === nothing
+
+                            deadline = Base.time_ns() + 2_000_000_000
+                            while !isready(done_ch) && Base.time_ns() < deadline
+                                yield()
+                            end
+
+                            @test isready(done_ch)
+                            if isready(done_ch)
+                                events = take!(done_ch)
+                                @test (events & Int(AwsIO.IoEventType.ERROR)) != 0
+                            end
+                        else
+                            @test true
+                        end
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
     @testset "Event loop serialized ordering" begin
         if Sys.iswindows()
             @test true
