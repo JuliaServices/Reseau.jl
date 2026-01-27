@@ -219,6 +219,10 @@ Legend:
 - [ ] Tests matching `standard_retry_test.c`
 
 ### 7.3 No-retry strategy
+- [x] Implement no-retry strategy (always denies permission)
+- [x] Tests matching `no_retry_strategy_test.c`
+
+### 7.3 No-retry strategy
 - [ ] Implement `no_retry_strategy` parity (source/no_retry_strategy.c)
 - [ ] Tests matching `no_retry_strategy_test.c`
 
@@ -431,7 +435,7 @@ Legend:
 - [ ] `async_stream_test.c` -> `test/async_stream_tests.jl` (extend)
 - [ ] `exponential_backoff_retry_test.c` -> new `test/retry_strategy_tests.jl`
 - [ ] `standard_retry_test.c` -> new `test/retry_strategy_tests.jl`
-- [ ] `no_retry_strategy_test.c` -> new `test/retry_strategy_tests.jl`
+- [x] `no_retry_strategy_test.c` -> new `test/retry_strategy_tests.jl`
 - [ ] `statistics_handler_test.c` -> new `test/statistics_tests.jl`
 - [ ] `alpn_handler_test.c` -> new `test/alpn_tests.jl`
 - [ ] `tls_handler_test.c` -> `test/tls_tests.jl` (extend)

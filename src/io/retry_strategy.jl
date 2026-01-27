@@ -54,6 +54,64 @@ end
 # Abstract retry strategy interface
 abstract type AbstractRetryStrategy end
 
+# =============================================================================
+# No Retry Strategy
+# =============================================================================
+
+mutable struct NoRetryStrategy <: AbstractRetryStrategy
+    shutdown_options::shutdown_callback_options
+    @atomic shutdown::Bool
+end
+
+function NoRetryStrategy(;
+        shutdown_options::shutdown_callback_options = shutdown_callback_options(),
+    )
+    return NoRetryStrategy(shutdown_options, false)
+end
+
+function retry_strategy_acquire_token!(
+        strategy::NoRetryStrategy,
+        on_acquired::OnRetryTokenAcquiredFn,
+        user_data,
+    )::Union{Nothing, ErrorResult}
+    _ = on_acquired
+    _ = user_data
+    if @atomic strategy.shutdown
+        raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+    end
+    raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
+    return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
+end
+
+function retry_token_schedule_retry(token::RetryToken{NoRetryStrategy, U}, on_retry_ready::OnRetryReadyFn, user_data) where {U}
+    _ = token
+    _ = on_retry_ready
+    _ = user_data
+    fatal_assert("schedule_retry must not be called for no-retry strategy", "<unknown>", 0)
+    return nothing
+end
+
+function retry_token_record_success(token::RetryToken{NoRetryStrategy, U})::Nothing where {U}
+    _ = token
+    fatal_assert("record_success must not be called for no-retry strategy", "<unknown>", 0)
+    return nothing
+end
+
+function retry_token_release!(token::RetryToken{NoRetryStrategy, U})::Nothing where {U}
+    _ = token
+    fatal_assert("release_token must not be called for no-retry strategy", "<unknown>", 0)
+    return nothing
+end
+
+function retry_strategy_shutdown!(strategy::NoRetryStrategy)
+    @atomic strategy.shutdown = true
+    if strategy.shutdown_options.shutdown_callback_fn !== nothing
+        strategy.shutdown_options.shutdown_callback_fn(strategy.shutdown_options.shutdown_callback_user_data)
+    end
+    return nothing
+end
+
 # Schedule retry callback
 function retry_token_schedule_retry(token::RetryToken, on_retry_ready::OnRetryReadyFn, user_data)::Union{Nothing, ErrorResult}
     error("retry_token_schedule_retry must be implemented by concrete retry strategy")
