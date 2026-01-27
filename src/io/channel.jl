@@ -164,6 +164,10 @@ mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupComple
     # Statistics tracking
     read_message_count::Csize_t
     write_message_count::Csize_t
+    statistics_handler::Union{StatisticsHandler, Nothing}  # nullable
+    statistics_task::Union{ScheduledTask, Nothing}  # nullable
+    statistics_interval_start_time_ms::UInt64
+    statistics_list::ArrayList{Any}
     # Shutdown tracking
     shutdown_direction::Union{ChannelDirection.T, Nothing}  # nullable
     shutdown_is_immediate::Bool
@@ -205,6 +209,10 @@ function Channel(
         0,        # shutdown_error_code
         Csize_t(0),  # read_message_count
         Csize_t(0),  # write_message_count
+        nothing,  # statistics_handler
+        nothing,  # statistics_task
+        UInt64(0),  # statistics_interval_start_time_ms
+        ArrayList{Any}(16),
         nothing,  # shutdown_direction
         false,    # shutdown_is_immediate
         false,    # shutdown_pending
@@ -240,6 +248,91 @@ end
 function channel_set_shutdown_callback!(channel::Channel, callback::ChannelOnShutdownCompletedFn, user_data)
     channel.on_shutdown_completed = callback
     channel.shutdown_user_data = user_data
+    return nothing
+end
+
+function _channel_reset_statistics!(channel::Channel)
+    current = channel.first
+    while current !== nothing
+        handler = current.handler
+        handler !== nothing && handler_reset_statistics(handler)
+        current = current.adj_right
+    end
+    return nothing
+end
+
+function _channel_gather_statistics_task(channel::Channel, status::TaskStatus.T)
+    status == TaskStatus.RUN_READY || return nothing
+    channel.statistics_handler === nothing && return nothing
+
+    if channel.channel_state == ChannelState.SHUTTING_DOWN_READ ||
+            channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE ||
+            channel.channel_state == ChannelState.SHUT_DOWN
+        return nothing
+    end
+
+    now_ns = event_loop_current_clock_time(channel.event_loop)
+    now_ns isa ErrorResult && return nothing
+    now_ms = timestamp_convert(now_ns, TIMESTAMP_NANOS, TIMESTAMP_MILLIS, nothing)
+
+    clear!(channel.statistics_list)
+    current = channel.first
+    while current !== nothing
+        handler = current.handler
+        if handler !== nothing
+            stats = handler_gather_statistics(handler)
+            stats !== nothing && push_back!(channel.statistics_list, stats)
+        end
+        current = current.adj_right
+    end
+
+    interval = StatisticsSampleInterval(channel.statistics_interval_start_time_ms, now_ms)
+    process_statistics(channel.statistics_handler, interval, channel.statistics_list)
+    _channel_reset_statistics!(channel)
+
+    report_ns = timestamp_convert(
+        report_interval_ms(channel.statistics_handler),
+        TIMESTAMP_MILLIS,
+        TIMESTAMP_NANOS,
+        nothing,
+    )
+    if channel.statistics_task !== nothing
+        event_loop_schedule_task_future!(channel.event_loop, channel.statistics_task, now_ns + report_ns)
+    end
+    channel.statistics_interval_start_time_ms = now_ms
+    return nothing
+end
+
+function channel_set_statistics_handler!(channel::Channel, handler::Union{StatisticsHandler, Nothing})
+    if channel.statistics_handler !== nothing
+        close!(channel.statistics_handler)
+        if channel.statistics_task !== nothing
+            event_loop_cancel_task!(channel.event_loop, channel.statistics_task)
+        end
+        channel.statistics_handler = nothing
+        channel.statistics_task = nothing
+    end
+
+    if handler !== nothing
+        task = ScheduledTask(_channel_gather_statistics_task, channel; type_tag = "gather_statistics")
+        now_ns = event_loop_current_clock_time(channel.event_loop)
+        if now_ns isa ErrorResult
+            return now_ns
+        end
+        report_ns = timestamp_convert(
+            report_interval_ms(handler),
+            TIMESTAMP_MILLIS,
+            TIMESTAMP_NANOS,
+            nothing,
+        )
+        channel.statistics_interval_start_time_ms =
+            timestamp_convert(now_ns, TIMESTAMP_NANOS, TIMESTAMP_MILLIS, nothing)
+        _channel_reset_statistics!(channel)
+        event_loop_schedule_task_future!(channel.event_loop, task, now_ns + report_ns)
+        channel.statistics_task = task
+    end
+
+    channel.statistics_handler = handler
     return nothing
 end
 
@@ -627,6 +720,15 @@ function _channel_on_shutdown_complete!(channel::Channel)
             slot.handler = nothing
         end
         slot = next
+    end
+
+    if channel.statistics_handler !== nothing
+        if channel.statistics_task !== nothing
+            event_loop_cancel_task!(channel.event_loop, channel.statistics_task)
+        end
+        close!(channel.statistics_handler)
+        channel.statistics_handler = nothing
+        channel.statistics_task = nothing
     end
 
     # Invoke shutdown callback

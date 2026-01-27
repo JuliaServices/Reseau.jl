@@ -363,7 +363,7 @@ Legend:
 
 ### 15.2 Stats integration
 - [x] `handler_reset_statistics` and `handler_gather_statistics` parity in channel handlers
-- [ ] Channel aggregation of handler stats
+- [x] Channel aggregation of handler stats
 
 ### 15.3 Tests
 - [ ] Port `statistics_handler_test.c`
