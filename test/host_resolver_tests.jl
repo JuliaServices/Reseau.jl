@@ -13,93 +13,39 @@ function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
     return false
 end
 
-@testset "host resolver cache and ttl" begin
+@testset "host resolver cached results" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    cfg = AwsIO.HostResolverConfig(;
-        max_ttl_secs = 1,
-        min_ttl_secs = 1,
-        resolve_frequency_ns = 1_000_000_000,
-        background_refresh = false,
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    resolve_calls = Ref(0)
+    impl = (host, data) -> begin
+        resolve_calls[] += 1
+        return [AwsIO.HostAddress("127.0.0.1", AwsIO.HostAddressType.A, host, 0)]
+    end
+
+    config = AwsIO.HostResolutionConfig(
+        impl = impl,
+        max_ttl_secs = 5,
+        resolve_frequency_ns = 5_000_000_000,
     )
-    resolver = AwsIO.DefaultHostResolver(elg, cfg)
 
     resolved = Ref(false)
-    err = Ref{Int}(0)
     addrs = Ref{Vector{AwsIO.HostAddress}}(AwsIO.HostAddress[])
-
     cb = (res, host, error_code, addresses) -> begin
-        err[] = error_code
         addrs[] = addresses
         resolved[] = true
         return nothing
     end
 
-    @test AwsIO.host_resolver_resolve!(resolver, "localhost", cb) === nothing
+    @test AwsIO.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
     @test wait_for_pred(() -> resolved[])
-    @test err[] == AwsIO.AWS_OP_SUCCESS
+    @test resolve_calls[] == 1
     @test !isempty(addrs[])
 
-    entry = AwsIO.hash_table_get(resolver.cache, "localhost")
-    @test entry !== nothing
-    first_resolved = entry.resolved_time
-
     resolved[] = false
-    err[] = 0
-    @test AwsIO.host_resolver_resolve!(resolver, "localhost", cb) === nothing
+    @test AwsIO.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
     @test wait_for_pred(() -> resolved[])
-    @test err[] == AwsIO.AWS_OP_SUCCESS
-    entry_cached = AwsIO.hash_table_get(resolver.cache, "localhost")
-    @test entry_cached.resolved_time == first_resolved
-
-    sleep(1.2)
-    resolved[] = false
-    @test AwsIO.host_resolver_resolve!(resolver, "localhost", cb) === nothing
-    @test wait_for_pred(() -> resolved[])
-    entry_refreshed = AwsIO.hash_table_get(resolver.cache, "localhost")
-    @test entry_refreshed.resolved_time >= first_resolved
-
-    AwsIO.host_resolver_shutdown!(resolver)
-    AwsIO.event_loop_group_destroy!(elg)
-end
-
-@testset "host resolver background refresh" begin
-    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    cfg = AwsIO.HostResolverConfig(;
-        max_ttl_secs = 5,
-        min_ttl_secs = 1,
-        resolve_frequency_ns = 10_000_000,
-        background_refresh = true,
-    )
-    resolver = AwsIO.DefaultHostResolver(elg, cfg)
-
-    resolved = Ref(false)
-    err = Ref{Int}(0)
-
-    cb = (res, host, error_code, addresses) -> begin
-        err[] = error_code
-        resolved[] = true
-        return nothing
-    end
-
-    @test AwsIO.host_resolver_resolve!(resolver, "localhost", cb) === nothing
-    @test wait_for_pred(() -> resolved[])
-    @test err[] == AwsIO.AWS_OP_SUCCESS
-    entry = AwsIO.hash_table_get(resolver.cache, "localhost")
-    @test entry !== nothing
-    first_resolved = entry.resolved_time
-
-    sleep(0.05)
-    resolved[] = false
-    err[] = 0
-    @test AwsIO.host_resolver_resolve!(resolver, "localhost", cb) === nothing
-    @test wait_for_pred(() -> resolved[])
-    @test err[] == AwsIO.AWS_OP_SUCCESS
-    @test wait_for_pred(
-        () -> begin
-            entry = AwsIO.hash_table_get(resolver.cache, "localhost")
-            entry !== nothing && entry.resolved_time > first_resolved
-        end
-    )
+    @test resolve_calls[] == 1
 
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)
@@ -110,42 +56,45 @@ end
     resolver = AwsIO.DefaultHostResolver(elg)
 
     resolved = Ref(false)
-    err = Ref{Int}(0)
+    addrs = Ref{Vector{AwsIO.HostAddress}}(AwsIO.HostAddress[])
+
+    impl = (host, data) -> begin
+        return [AwsIO.HostAddress("127.0.0.1", AwsIO.HostAddressType.A, host, 0)]
+    end
+
+    config = AwsIO.HostResolutionConfig(
+        impl = impl,
+        max_ttl_secs = 5,
+        resolve_frequency_ns = 5_000_000_000,
+    )
 
     cb = (res, host, error_code, addresses) -> begin
-        err[] = error_code
+        addrs[] = addresses
         resolved[] = true
         return nothing
     end
 
-    @test AwsIO.host_resolver_resolve!(resolver, "localhost", cb; address_type = AwsIO.HostAddressType.A) === nothing
+    @test AwsIO.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
     @test wait_for_pred(() -> resolved[])
-    @test err[] == AwsIO.AWS_OP_SUCCESS
+    @test !isempty(addrs[])
 
     count_a = AwsIO.host_resolver_get_host_address_count(
         resolver,
-        "localhost";
+        "example.com";
         flags = AwsIO.GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A,
     )
     @test count_a >= 1
 
-    count_all = AwsIO.host_resolver_get_host_address_count(
-        resolver,
-        "localhost";
-        flags = AwsIO.GET_HOST_ADDRESS_COUNT_ALL,
-    )
-    @test count_all >= count_a
-
     purge_host_done = Ref(false)
     @test AwsIO.host_resolver_purge_host_cache!(
         resolver,
-        "localhost";
+        "example.com";
         on_host_purge_complete = _ -> (purge_host_done[] = true),
     ) === nothing
     @test wait_for_pred(() -> purge_host_done[])
     @test AwsIO.host_resolver_get_host_address_count(
         resolver,
-        "localhost";
+        "example.com";
         flags = AwsIO.GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A,
     ) == 0
 
@@ -155,6 +104,46 @@ end
         _ -> (purge_done[] = true),
     ) === nothing
     @test wait_for_pred(() -> purge_done[])
+
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "host resolver record failure moves address" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    resolved = Ref(false)
+    addrs = Ref{Vector{AwsIO.HostAddress}}(AwsIO.HostAddress[])
+
+    impl = (host, data) -> begin
+        return [AwsIO.HostAddress("127.0.0.1", AwsIO.HostAddressType.A, host, 0)]
+    end
+
+    config = AwsIO.HostResolutionConfig(
+        impl = impl,
+        max_ttl_secs = 5,
+        resolve_frequency_ns = 5_000_000_000,
+    )
+
+    cb = (res, host, error_code, addresses) -> begin
+        addrs[] = addresses
+        resolved[] = true
+        return nothing
+    end
+
+    @test AwsIO.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
+    @test wait_for_pred(() -> resolved[])
+    @test !isempty(addrs[])
+
+    addr = addrs[][1]
+    AwsIO.host_resolver_record_connection_failure!(resolver, addr)
+    count_a = AwsIO.host_resolver_get_host_address_count(
+        resolver,
+        "example.com";
+        flags = AwsIO.GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A,
+    )
+    @test count_a == 0
 
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)

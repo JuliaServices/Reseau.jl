@@ -106,7 +106,7 @@ function condition_variable_wait_for_pred(
         mutex_unlock(mutex)
         ok = Base.timedwait(() -> (@atomic cond.seq) != local_seq, remaining / 1_000_000_000)
         mutex_lock(mutex)
-        if !ok
+        if ok == false || ok == :timed_out
             return raise_error(ERROR_COND_VARIABLE_TIMED_OUT)
         end
         local_seq = @atomic cond.seq

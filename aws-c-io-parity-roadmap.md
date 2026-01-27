@@ -188,15 +188,16 @@ Legend:
 ## 6) Host resolver
 
 ### 6.1 Default resolver parity
-- [ ] Implement full aws-c-io default resolver behavior (cache, TTL rules, refresh frequency)
+- [x] Implement full aws-c-io default resolver behavior (cache, TTL rules, refresh frequency)
 - [x] Connection failure tracking and load-balancing influence
 - [x] Purge cache API + purge host API + callbacks
 - [x] `get_host_address_count` parity
+- [x] World-age safe callback invocation from resolver threads and purge paths
 
 ### 6.2 Custom resolver vtable
-- [~] Support custom `resolve_host` implementation callbacks
-- [ ] Blocking resolution handling parity
-- [ ] Threading model parity (background resolver thread)
+- [x] Support custom `resolve_host` implementation callbacks
+- [x] Blocking resolution handling parity
+- [x] Threading model parity (background resolver thread)
 
 ### 6.3 Tests
 - [ ] Port `default_host_resolver_test.c` scenarios

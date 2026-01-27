@@ -238,8 +238,18 @@ function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, ad
         return nothing
     end
 
-    # Use first address
-    address = addresses[1]
+    # Prefer address matching socket domain
+    preferred_type = bootstrap.socket_options.domain == SocketDomain.IPV6 ?
+        HostAddressType.AAAA :
+        HostAddressType.A
+    address = nothing
+    for addr in addresses
+        if addr.address_type == preferred_type
+            address = addr
+            break
+        end
+    end
+    address === nothing && (address = addresses[1])
 
     logf(
         LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,

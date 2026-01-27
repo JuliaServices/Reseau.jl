@@ -79,6 +79,7 @@
         state::HandleState.T
         subscribe_task::Union{Nothing, ScheduledTask}  # nullable
         cleanup_task::Union{Nothing, ScheduledTask}  # nullable
+        registry_key::Ptr{Cvoid}
     end
 
     function KqueueHandleData(
@@ -98,6 +99,7 @@
             HandleState.SUBSCRIBING,
             nothing,
             nothing,
+            C_NULL,
         )
     end
 
@@ -143,6 +145,7 @@
         cross_thread_data::KqueueCrossThreadData
         thread_data::KqueueThreadData
         thread_options::ThreadOptions
+        handle_registry::Dict{Ptr{Cvoid}, Any}
     end
 
     function KqueueLoopImpl()
@@ -155,6 +158,7 @@
             KqueueCrossThreadData(),
             KqueueThreadData(),
             ThreadOptions(),
+            Dict{Ptr{Cvoid}, Any}(),
         )
     end
 
@@ -339,20 +343,24 @@
     # Stop the event loop
     function event_loop_stop!(event_loop::KqueueEventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
+        @atomic event_loop.should_stop = true
+
+        if event_loop_thread_is_callers_thread(event_loop)
+            impl.thread_data.state = EventThreadState.STOPPING
+            return nothing
+        end
 
         signal_thread = false
         mutex_lock(impl.cross_thread_data.mutex)
         if impl.cross_thread_data.state == EventThreadState.RUNNING
             impl.cross_thread_data.state = EventThreadState.STOPPING
-            signal_thread = !impl.cross_thread_data.thread_signaled
             impl.cross_thread_data.thread_signaled = true
+            signal_thread = true
         end
         mutex_unlock(impl.cross_thread_data.mutex)
         if signal_thread
             signal_cross_thread_data_changed(event_loop)
         end
-
-        @atomic event_loop.should_stop = true
 
         return nothing
     end
@@ -589,8 +597,11 @@
         handle_data = KqueueHandleData(handle, event_loop, on_event, user_data, events)
 
         # Store handle data reference
-        handle.additional_data = pointer_from_objref(handle_data)
+        handle_data_ptr = pointer_from_objref(handle_data)
+        handle.additional_data = handle_data_ptr
         handle.additional_ref = handle_data
+        handle_data.registry_key = handle_data_ptr
+        event_loop.impl_data.handle_registry[handle_data_ptr] = handle_data
 
         # Create subscribe task
         subscribe_fn = (ctx, status) -> kqueue_subscribe_task_callback(ctx, status)
@@ -605,6 +616,10 @@
     function kqueue_cleanup_task_callback(handle_data::KqueueHandleData, status::TaskStatus.T)
         impl = handle_data.event_loop.impl_data
         impl.thread_data.connected_handle_count -= 1
+        if handle_data.registry_key != C_NULL
+            delete!(impl.handle_registry, handle_data.registry_key)
+            handle_data.registry_key = C_NULL
+        end
         return nothing
     end
 
@@ -817,7 +832,8 @@
                 end
 
                 if kevent.udata != C_NULL
-                    handle_data = unsafe_pointer_to_objref(kevent.udata)::KqueueHandleData
+                    handle_data = get(impl.handle_registry, kevent.udata, nothing)
+                    handle_data === nothing && continue
                     if handle_data.events_this_loop == 0
                         push!(io_handle_events, handle_data)
                     end
