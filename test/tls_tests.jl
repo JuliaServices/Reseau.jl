@@ -13,6 +13,62 @@ function wait_for_flag_tls(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
     return false
 end
 
+@testset "TLS options parity" begin
+    opts = AwsIO.tls_ctx_options_init_default_client()
+    @test !opts.is_server
+    @test opts.verify_peer
+
+    AwsIO.tls_ctx_options_set_verify_peer!(opts, false)
+    @test !opts.verify_peer
+
+    AwsIO.tls_ctx_options_set_minimum_tls_version!(opts, AwsIO.TlsVersion.TLSv1_2)
+    @test opts.minimum_tls_version == AwsIO.TlsVersion.TLSv1_2
+
+    AwsIO.tls_ctx_options_set_tls_cipher_preference!(
+        opts,
+        AwsIO.TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
+    )
+    @test AwsIO.tls_is_cipher_pref_supported(opts.cipher_pref)
+
+    AwsIO.tls_ctx_options_override_default_trust_store!(
+        opts;
+        ca_file = "cafile",
+        ca_path = "/tmp",
+        ca_data = "cadata",
+    )
+    @test opts.ca_file == "cafile"
+    @test opts.ca_path == "/tmp"
+    @test opts.ca_data == "cadata"
+
+    ctx = AwsIO.tls_context_new(opts)
+    @test ctx isa AwsIO.TlsContext
+
+    conn = AwsIO.tls_connection_options_init_from_ctx(ctx)
+    AwsIO.tls_connection_options_set_server_name!(conn, "example.com")
+    AwsIO.tls_connection_options_set_alpn_list!(conn, "h2")
+    AwsIO.tls_connection_options_set_timeout_ms!(conn, 250)
+    AwsIO.tls_connection_options_set_advertise_alpn_message!(conn, true)
+
+    cb1 = (handler, slot, err, ud) -> nothing
+    cb2 = (handler, slot, buf, ud) -> nothing
+    cb3 = (handler, slot, err, msg, ud) -> nothing
+    AwsIO.tls_connection_options_set_callbacks!(conn, cb1, cb2, cb3, 123)
+
+    @test conn.server_name == "example.com"
+    @test conn.alpn_list == "h2"
+    @test conn.timeout_ms == 0x000000fa
+    @test conn.advertise_alpn_message
+    @test conn.on_negotiation_result === cb1
+    @test conn.on_data_read === cb2
+    @test conn.on_error === cb3
+    @test conn.user_data == 123
+
+    conn_copy = AwsIO.tls_connection_options_copy(conn)
+    @test conn_copy.server_name == conn.server_name
+    @test conn_copy.alpn_list == conn.alpn_list
+    @test conn_copy.timeout_ms == conn.timeout_ms
+end
+
 mutable struct EchoHandler <: AwsIO.AbstractChannelHandler
     slot::Union{AwsIO.ChannelSlot, Nothing}
     saw_ping::Base.RefValue{Bool}

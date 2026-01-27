@@ -15,6 +15,34 @@ const TLS_NONCE_LEN = 32
 const TLS_MAC_LEN = 32
 const TLS_SESSION_KEY_LEN = 32
 
+@enumx TlsVersion::UInt8 begin
+    SSLv3 = 0
+    TLSv1 = 1
+    TLSv1_1 = 2
+    TLSv1_2 = 3
+    TLSv1_3 = 4
+    TLS_VER_SYS_DEFAULTS = 128
+end
+
+@enumx TlsCipherPref::UInt16 begin
+    TLS_CIPHER_PREF_SYSTEM_DEFAULT = 0
+    TLS_CIPHER_PREF_KMS_PQ_TLSv1_0_2019_06 = 1
+    TLS_CIPHER_PREF_KMS_PQ_SIKE_TLSv1_0_2019_11 = 2
+    TLS_CIPHER_PREF_KMS_PQ_TLSv1_0_2020_02 = 3
+    TLS_CIPHER_PREF_KMS_PQ_SIKE_TLSv1_0_2020_02 = 4
+    TLS_CIPHER_PREF_KMS_PQ_TLSv1_0_2020_07 = 5
+    TLS_CIPHER_PREF_PQ_TLSv1_0_2021_05 = 6
+    TLS_CIPHER_PREF_PQ_TLSV1_2_2024_10 = 7
+    TLS_CIPHER_PREF_PQ_DEFAULT = 8
+    TLS_CIPHER_PREF_TLSV1_2_2025_07 = 9
+    TLS_CIPHER_PREF_TLSV1_0_2023_06 = 10
+    TLS_CIPHER_PREF_END_RANGE = 0xffff
+end
+
+function tls_is_cipher_pref_supported(pref::TlsCipherPref.T)::Bool
+    return pref != TlsCipherPref.TLS_CIPHER_PREF_END_RANGE
+end
+
 @enumx TlsHandshakeState::UInt8 begin
     INIT = 0
     CLIENT_HELLO_SENT = 1
@@ -22,33 +50,72 @@ const TLS_SESSION_KEY_LEN = 32
     FAILED = 3
 end
 
-struct TlsContextOptions
+struct SecItemOptions
+    cert_label::Union{String, Nothing}
+    key_label::Union{String, Nothing}
+end
+
+mutable struct TlsContextOptions
     is_server::Bool
-    verify_peer::Bool
+    minimum_tls_version::TlsVersion.T
+    cipher_pref::TlsCipherPref.T
     ca_file::Union{String, Nothing}
+    ca_path::Union{String, Nothing}
     ca_data::Union{String, Nothing}
+    alpn_list::Union{String, Nothing}
     certificate::Union{String, Nothing}
     private_key::Union{String, Nothing}
-    alpn_list::Union{String, Nothing}
+    system_certificate_path::Union{String, Nothing}
+    pkcs12::Union{String, Nothing}
+    pkcs12_password::Union{String, Nothing}
+    secitem_options::Union{SecItemOptions, Nothing}
+    keychain_path::Union{String, Nothing}
+    max_fragment_size::Csize_t
+    verify_peer::Bool
+    ctx_options_extension::Any
+    custom_key_op_handler::Any
 end
 
 function TlsContextOptions(;
         is_server::Bool = false,
-        verify_peer::Bool = true,
+        minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
+        cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
         ca_file::Union{String, Nothing} = nothing,
+        ca_path::Union{String, Nothing} = nothing,
         ca_data::Union{String, Nothing} = nothing,
+        alpn_list::Union{String, Nothing} = nothing,
         certificate::Union{String, Nothing} = nothing,
         private_key::Union{String, Nothing} = nothing,
-        alpn_list::Union{String, Nothing} = nothing,
+        system_certificate_path::Union{String, Nothing} = nothing,
+        pkcs12::Union{String, Nothing} = nothing,
+        pkcs12_password::Union{String, Nothing} = nothing,
+        secitem_options::Union{SecItemOptions, Nothing} = nothing,
+        keychain_path::Union{String, Nothing} = nothing,
+        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+        verify_peer::Union{Bool, Nothing} = nothing,
+        ctx_options_extension = nothing,
+        custom_key_op_handler = nothing,
     )
+    verify_peer_final = verify_peer === nothing ? !is_server : verify_peer
     return TlsContextOptions(
         is_server,
-        verify_peer,
+        minimum_tls_version,
+        cipher_pref,
         ca_file,
+        ca_path,
         ca_data,
+        alpn_list,
         certificate,
         private_key,
-        alpn_list,
+        system_certificate_path,
+        pkcs12,
+        pkcs12_password,
+        secitem_options,
+        keychain_path,
+        Csize_t(max_fragment_size),
+        verify_peer_final,
+        ctx_options_extension,
+        custom_key_op_handler,
     )
 end
 
@@ -75,48 +142,147 @@ function tls_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorRes
     return TlsContext(options)
 end
 
+function tls_ctx_options_init_default_client(;
+        verify_peer::Bool = true,
+        ca_file::Union{String, Nothing} = nothing,
+        ca_path::Union{String, Nothing} = nothing,
+        ca_data::Union{String, Nothing} = nothing,
+        alpn_list::Union{String, Nothing} = nothing,
+        minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
+        cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
+        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+    )
+    return TlsContextOptions(;
+        is_server = false,
+        verify_peer = verify_peer,
+        ca_file = ca_file,
+        ca_path = ca_path,
+        ca_data = ca_data,
+        alpn_list = alpn_list,
+        minimum_tls_version = minimum_tls_version,
+        cipher_pref = cipher_pref,
+        max_fragment_size = max_fragment_size,
+    )
+end
+
+function tls_ctx_options_init_default_server(;
+        certificate::Union{String, Nothing} = nothing,
+        private_key::Union{String, Nothing} = nothing,
+        alpn_list::Union{String, Nothing} = nothing,
+        minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
+        cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
+        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+        verify_peer::Bool = false,
+    )
+    return TlsContextOptions(;
+        is_server = true,
+        verify_peer = verify_peer,
+        certificate = certificate,
+        private_key = private_key,
+        alpn_list = alpn_list,
+        minimum_tls_version = minimum_tls_version,
+        cipher_pref = cipher_pref,
+        max_fragment_size = max_fragment_size,
+    )
+end
+
+tls_ctx_options_clean_up!(::TlsContextOptions) = nothing
+
+function tls_ctx_options_set_alpn_list!(options::TlsContextOptions, alpn_list::Union{String, Nothing})
+    options.alpn_list = alpn_list
+    return nothing
+end
+
+function tls_ctx_options_set_verify_peer!(options::TlsContextOptions, verify_peer::Bool)
+    options.verify_peer = verify_peer
+    return nothing
+end
+
+function tls_ctx_options_set_tls_cipher_preference!(options::TlsContextOptions, cipher_pref::TlsCipherPref.T)
+    options.cipher_pref = cipher_pref
+    return nothing
+end
+
+function tls_ctx_options_set_minimum_tls_version!(options::TlsContextOptions, minimum_tls_version::TlsVersion.T)
+    options.minimum_tls_version = minimum_tls_version
+    return nothing
+end
+
+function tls_ctx_options_set_max_fragment_size!(options::TlsContextOptions, max_fragment_size::Integer)
+    options.max_fragment_size = Csize_t(max_fragment_size)
+    return nothing
+end
+
+function tls_ctx_options_override_default_trust_store!(
+        options::TlsContextOptions;
+        ca_file::Union{String, Nothing} = options.ca_file,
+        ca_path::Union{String, Nothing} = options.ca_path,
+        ca_data::Union{String, Nothing} = options.ca_data,
+    )
+    options.ca_file = ca_file
+    options.ca_path = ca_path
+    options.ca_data = ca_data
+    return nothing
+end
+
+function tls_ctx_options_set_extension_data!(options::TlsContextOptions, extension_data)
+    options.ctx_options_extension = extension_data
+    return nothing
+end
+
 function tls_context_new_client(;
         verify_peer::Bool = true,
         ca_file::Union{String, Nothing} = nothing,
         ca_data::Union{String, Nothing} = nothing,
+        ca_path::Union{String, Nothing} = nothing,
         alpn_list::Union{String, Nothing} = nothing,
+        minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
+        cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
+        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
     )
-    return tls_context_new(
-        TlsContextOptions(;
-            is_server = false,
-            verify_peer = verify_peer,
-            ca_file = ca_file,
-            ca_data = ca_data,
-            alpn_list = alpn_list,
-        )
+    opts = tls_ctx_options_init_default_client(;
+        verify_peer = verify_peer,
+        ca_file = ca_file,
+        ca_path = ca_path,
+        ca_data = ca_data,
+        alpn_list = alpn_list,
+        minimum_tls_version = minimum_tls_version,
+        cipher_pref = cipher_pref,
+        max_fragment_size = max_fragment_size,
     )
+    return tls_context_new(opts)
 end
 
 function tls_context_new_server(;
         certificate::String,
         private_key::String,
         alpn_list::Union{String, Nothing} = nothing,
+        minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
+        cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
+        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+        verify_peer::Bool = false,
     )
-    return tls_context_new(
-        TlsContextOptions(;
-            is_server = true,
-            verify_peer = false,
-            certificate = certificate,
-            private_key = private_key,
-            alpn_list = alpn_list,
-        )
+    opts = tls_ctx_options_init_default_server(;
+        certificate = certificate,
+        private_key = private_key,
+        alpn_list = alpn_list,
+        minimum_tls_version = minimum_tls_version,
+        cipher_pref = cipher_pref,
+        max_fragment_size = max_fragment_size,
+        verify_peer = verify_peer,
     )
+    return tls_context_new(opts)
 end
 
-struct TlsConnectionOptions{C <: TlsContext, FNR <: Union{TlsOnNegotiationResultFn, Nothing}, FDR <: Union{TlsOnDataReadFn, Nothing}, FER <: Union{TlsOnErrorFn, Nothing}, U} <: AbstractTlsConnectionOptions
-    ctx::C
+mutable struct TlsConnectionOptions <: AbstractTlsConnectionOptions
+    ctx::TlsContext
     server_name::Union{String, Nothing}
     alpn_list::Union{String, Nothing}
     advertise_alpn_message::Bool
-    on_negotiation_result::FNR
-    on_data_read::FDR
-    on_error::FER
-    user_data::U
+    on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing}
+    on_data_read::Union{TlsOnDataReadFn, Nothing}
+    on_error::Union{TlsOnErrorFn, Nothing}
+    user_data::Any
     timeout_ms::UInt32
 end
 
@@ -144,6 +310,58 @@ function TlsConnectionOptions(
     )
 end
 
+tls_connection_options_init_from_ctx(ctx::TlsContext) = TlsConnectionOptions(ctx)
+
+tls_connection_options_clean_up!(::TlsConnectionOptions) = nothing
+
+function tls_connection_options_copy(options::TlsConnectionOptions)
+    return TlsConnectionOptions(
+        options.ctx;
+        server_name = options.server_name,
+        alpn_list = options.alpn_list,
+        advertise_alpn_message = options.advertise_alpn_message,
+        on_negotiation_result = options.on_negotiation_result,
+        on_data_read = options.on_data_read,
+        on_error = options.on_error,
+        user_data = options.user_data,
+        timeout_ms = options.timeout_ms,
+    )
+end
+
+function tls_connection_options_set_callbacks!(
+        options::TlsConnectionOptions,
+        on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing},
+        on_data_read::Union{TlsOnDataReadFn, Nothing},
+        on_error::Union{TlsOnErrorFn, Nothing},
+        user_data = options.user_data,
+    )
+    options.on_negotiation_result = on_negotiation_result
+    options.on_data_read = on_data_read
+    options.on_error = on_error
+    options.user_data = user_data
+    return nothing
+end
+
+function tls_connection_options_set_server_name!(options::TlsConnectionOptions, server_name::Union{String, Nothing})
+    options.server_name = server_name
+    return nothing
+end
+
+function tls_connection_options_set_alpn_list!(options::TlsConnectionOptions, alpn_list::Union{String, Nothing})
+    options.alpn_list = alpn_list
+    return nothing
+end
+
+function tls_connection_options_set_timeout_ms!(options::TlsConnectionOptions, timeout_ms::Integer)
+    options.timeout_ms = UInt32(timeout_ms)
+    return nothing
+end
+
+function tls_connection_options_set_advertise_alpn_message!(options::TlsConnectionOptions, advertise::Bool)
+    options.advertise_alpn_message = advertise
+    return nothing
+end
+
 struct TlsNegotiatedProtocolMessage
     protocol::ByteBuffer
 end
@@ -153,12 +371,12 @@ mutable struct PendingWrite
     offset::Int
 end
 
-mutable struct TlsChannelHandler{FNR <: Union{TlsOnNegotiationResultFn, Nothing}, FDR <: Union{TlsOnDataReadFn, Nothing}, FER <: Union{TlsOnErrorFn, Nothing}, U, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
+mutable struct TlsChannelHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
     slot::SlotRef
     negotiation_completed::Bool
     pending_writes::Vector{PendingWrite}
     max_read_size::Csize_t
-    options::TlsConnectionOptions{TlsContext, FNR, FDR, FER, U}
+    options::TlsConnectionOptions
     state::TlsHandshakeState.T
     stats::TlsHandlerStatistics
     protocol::ByteBuffer
@@ -173,7 +391,7 @@ function TlsChannelHandler(
         options::TlsConnectionOptions;
         max_read_size::Integer = 16384,
     )
-    return TlsChannelHandler{typeof(options.on_negotiation_result), typeof(options.on_data_read), typeof(options.on_error), typeof(options.user_data), Union{ChannelSlot, Nothing}}(
+    return TlsChannelHandler{Union{ChannelSlot, Nothing}}(
         nothing,
         false,
         PendingWrite[],

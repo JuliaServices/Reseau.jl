@@ -283,9 +283,9 @@ Legend:
 ## 12) TLS + ALPN (full implementation)
 
 ### 12.1 TLS context/options API parity
-- [ ] Implement `tls_ctx` and `tls_ctx_options` parity (min version, cipher prefs, trust store)
-- [ ] Support `tls_connection_options` parity (server_name, ALPN list, callbacks, timeout)
-- [ ] Support `advertise_alpn_message` semantics
+- [x] Implement `tls_ctx` and `tls_ctx_options` parity (min version, cipher prefs, trust store)
+- [x] Support `tls_connection_options` parity (server_name, ALPN list, callbacks, timeout)
+- [x] Support `advertise_alpn_message` semantics
 
 ### 12.2 TLS protocol support
 - [ ] TLS 1.2 full handshake (client + server)
