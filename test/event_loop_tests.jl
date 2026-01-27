@@ -122,6 +122,148 @@ const _dispatch_queue_setter_c =
         end
     end
 
+    @testset "Event loop stress scheduling" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    try
+                        total = 500
+                        count = Ref(0)
+                        done_ch = Channel{Nothing}(1)
+                        count_lock = ReentrantLock()
+
+                        ctx = (count = count, lock = count_lock, done_ch = done_ch, total = total)
+                        task_fn = (ctx, status) -> begin
+                            local current
+                            Base.lock(ctx.lock) do
+                                ctx.count[] += 1
+                                current = ctx.count[]
+                            end
+                            if current == ctx.total
+                                put!(ctx.done_ch, nothing)
+                            end
+                            return nothing
+                        end
+
+                        for _ in 1:total
+                            task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "stress_now")
+                            AwsIO.event_loop_schedule_task_now!(el, task)
+                        end
+
+                        deadline = Base.time_ns() + 3_000_000_000
+                        while !isready(done_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
+
+                        @test isready(done_ch)
+                        isready(done_ch) && take!(done_ch)
+                    finally
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop pipe subscribe stress" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+
+                        read_end, write_end = pipe_res
+
+                        payload = Vector{UInt8}("ping")
+                        total_writes = 50
+                        expected_bytes = total_writes * length(payload)
+
+                        bytes_read = Ref(0)
+                        done = Ref(false)
+                        done_ch = Channel{Nothing}(1)
+                        read_lock = ReentrantLock()
+
+                        on_readable = (pipe, err, user_data) -> begin
+                            if err != AwsIO.AWS_OP_SUCCESS
+                                return nothing
+                            end
+
+                            buf = AwsIO.ByteBuffer(64)
+                            read_res = AwsIO.pipe_read!(pipe, buf)
+                            if read_res isa AwsIO.ErrorResult
+                                return nothing
+                            end
+
+                            _, amount = read_res
+                            local total
+                            Base.lock(read_lock) do
+                                bytes_read[] += Int(amount)
+                                total = bytes_read[]
+                                if !done[] && total >= expected_bytes
+                                    done[] = true
+                                    put!(done_ch, nothing)
+                                end
+                            end
+
+                            return nothing
+                        end
+
+                        sub_res = AwsIO.pipe_read_end_subscribe!(read_end, el, on_readable, nothing)
+                        @test sub_res === nothing
+
+                        for _ in 1:total_writes
+                            write_res = AwsIO.pipe_write_sync!(write_end, payload)
+                            @test !(write_res isa AwsIO.ErrorResult)
+                        end
+
+                        deadline = Base.time_ns() + 3_000_000_000
+                        while !isready(done_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
+
+                        @test isready(done_ch)
+                        isready(done_ch) && take!(done_ch)
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
     @testset "Event loop serialized ordering" begin
         if Sys.iswindows()
             @test true
