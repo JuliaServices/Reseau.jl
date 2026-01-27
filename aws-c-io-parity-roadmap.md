@@ -215,9 +215,9 @@ Legend:
 - [x] Basic max-retry + client-error behavior tests
 
 ### 7.2 Standard retry (token bucket)
-- [ ] Capacity refill and cost semantics parity
-- [ ] Retry token scheduling parity
-- [ ] Tests matching `standard_retry_test.c`
+- [x] Capacity refill and cost semantics parity
+- [x] Retry token scheduling parity
+- [x] Tests matching `standard_retry_test.c`
 
 ### 7.3 No-retry strategy
 - [x] Implement no-retry strategy (always denies permission)

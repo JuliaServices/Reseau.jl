@@ -74,9 +74,13 @@ end
 
 function retry_strategy_acquire_token!(
         strategy::NoRetryStrategy,
+        partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
+        timeout_ms::Integer = 0,
     )::Union{Nothing, ErrorResult}
+    _ = partition_id
+    _ = timeout_ms
     _ = on_acquired
     _ = user_data
     if @atomic strategy.shutdown
@@ -85,6 +89,14 @@ function retry_strategy_acquire_token!(
     end
     raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
     return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
+end
+
+function retry_strategy_acquire_token!(
+        strategy::NoRetryStrategy,
+        on_acquired::OnRetryTokenAcquiredFn,
+        user_data,
+    )::Union{Nothing, ErrorResult}
+    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
 end
 
 function retry_token_schedule_retry(token::RetryToken{NoRetryStrategy, U}, on_retry_ready::OnRetryReadyFn, user_data) where {U}
@@ -211,10 +223,14 @@ end
 
 # Acquire a retry token from the strategy
 function retry_strategy_acquire_token!(
-        strategy::ExponentialBackoffRetryStrategy,
+        strategy::ExponentialBackoffRetryStrategy{ELG},
+        partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+        timeout_ms::Integer = 0,
+    )::Union{Nothing, ErrorResult} where {ELG}
+    _ = partition_id
+    _ = timeout_ms
     if @atomic strategy.shutdown
         logf(
             LogLevel.ERROR, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
@@ -259,6 +275,14 @@ function retry_strategy_acquire_token!(
     event_loop_schedule_task_now!(event_loop, task)
 
     return nothing
+end
+
+function retry_strategy_acquire_token!(
+        strategy::ExponentialBackoffRetryStrategy,
+        on_acquired::OnRetryTokenAcquiredFn,
+        user_data,
+    )::Union{Nothing, ErrorResult}
+    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
 end
 
 @inline function _saturating_mul(a::UInt64, b::UInt64)::UInt64
@@ -499,40 +523,41 @@ end
 # Standard retry configuration
 struct StandardRetryConfig
     initial_bucket_capacity::UInt64
-    max_capacity::UInt64
-    retry_cost::UInt64
-    no_retry_increment::UInt64
-    retry_timeout_cost::UInt64
-    retry_throttling_cost::UInt64
     backoff_config::ExponentialBackoffConfig
 end
 
 function StandardRetryConfig(;
         initial_bucket_capacity::Integer = 500,
-        max_capacity::Integer = 500,
-        retry_cost::Integer = 5,
-        no_retry_increment::Integer = 1,
-        retry_timeout_cost::Integer = 10,
-        retry_throttling_cost::Integer = 10,
         backoff_config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
     )
-    return StandardRetryConfig(
-        UInt64(initial_bucket_capacity),
-        UInt64(max_capacity),
-        UInt64(retry_cost),
-        UInt64(no_retry_increment),
-        UInt64(retry_timeout_cost),
-        UInt64(retry_throttling_cost),
-        backoff_config,
-    )
+    if initial_bucket_capacity == 0
+        initial_bucket_capacity = 500
+    end
+    return StandardRetryConfig(UInt64(initial_bucket_capacity), backoff_config)
+end
+
+const _STANDARD_RETRY_COST = UInt64(5)
+const _STANDARD_TRANSIENT_COST = UInt64(10)
+const _STANDARD_NO_RETRY_COST = UInt64(1)
+
+mutable struct RetryBucket
+    partition_id::String
+    current_capacity::UInt64
+    lock::ReentrantLock
+end
+
+function RetryBucket(partition_id::AbstractString, capacity::UInt64)
+    return RetryBucket(String(partition_id), capacity, ReentrantLock())
 end
 
 # Standard retry strategy with token bucket rate limiting
 mutable struct StandardRetryStrategy{ELG} <: AbstractRetryStrategy
     event_loop_group::ELG
     config::StandardRetryConfig
-    @atomic bucket_capacity::Int64  # Current tokens in bucket
+    max_capacity::UInt64
+    buckets::Dict{String, RetryBucket}
     lock::ReentrantLock
+    backoff_strategy::ExponentialBackoffRetryStrategy{ELG}
     @atomic shutdown::Bool
 end
 
@@ -540,22 +565,64 @@ function StandardRetryStrategy(
         event_loop_group::ELG,
         config::StandardRetryConfig = StandardRetryConfig(),
     ) where {ELG}
+    backoff_strategy = ExponentialBackoffRetryStrategy(event_loop_group, config.backoff_config)
+    if backoff_strategy isa ErrorResult
+        return backoff_strategy
+    end
     strategy = StandardRetryStrategy{ELG}(
         event_loop_group,
         config,
-        Int64(config.initial_bucket_capacity),
+        config.initial_bucket_capacity,
+        Dict{String, RetryBucket}(),
         ReentrantLock(),
+        backoff_strategy,
         false,
     )
     return strategy
 end
 
+mutable struct StandardRetryToken{ELG, U}
+    strategy::StandardRetryStrategy{ELG}
+    bucket::RetryBucket
+    exp_token::Union{Nothing, RetryToken{ExponentialBackoffRetryStrategy{ELG}, Any}}
+    last_retry_cost::UInt64
+    on_acquired::Union{OnRetryTokenAcquiredFn, Nothing}
+    acquired_user_data::U
+    on_ready::Union{OnRetryReadyFn, Nothing}
+    ready_user_data::Any
+    lock::ReentrantLock
+end
+
+function _standard_partition_key(partition_id)::String
+    if partition_id === nothing
+        return ""
+    end
+    if partition_id isa AbstractString
+        return lowercase(String(partition_id))
+    end
+    if partition_id isa AbstractVector{UInt8}
+        return lowercase(String(partition_id))
+    end
+    return lowercase(String(partition_id))
+end
+
+function _standard_get_bucket!(strategy::StandardRetryStrategy, partition_id)
+    key = _standard_partition_key(partition_id)
+    return lock(strategy.lock) do
+        return get!(strategy.buckets, key) do
+            RetryBucket(key, strategy.max_capacity)
+        end
+    end
+end
+
 # Acquire a retry token from standard strategy
 function retry_strategy_acquire_token!(
-        strategy::StandardRetryStrategy,
+        strategy::StandardRetryStrategy{ELG},
+        partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+        timeout_ms::Integer = 0,
+    )::Union{Nothing, ErrorResult} where {ELG}
     if @atomic strategy.shutdown
         logf(
             LogLevel.ERROR, LS_IO_STANDARD_RETRY_STRATEGY,
@@ -565,247 +632,171 @@ function retry_strategy_acquire_token!(
         return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
-    event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
-    if event_loop === nothing
-        raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-        return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-    end
+    bucket = _standard_get_bucket!(strategy, partition_id)
 
-    token = RetryToken{typeof(strategy), Any}(
+    token = StandardRetryToken{ELG, Any}(
         strategy,
-        RetryErrorType.TRANSIENT,
-        0,
-        UInt32(0),
-        UInt64(0),
-        0,
-        event_loop,
+        bucket,
+        nothing,
+        _STANDARD_NO_RETRY_COST,
+        on_acquired,
+        user_data,
+        nothing,
+        nothing,
         ReentrantLock(),
-        nothing,
-        nothing,
-        nothing,
     )
 
-    logf(
-        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: token acquired"
-    )
-
-    # Schedule callback
-    task = ScheduledTask(
-        (t, status) -> on_acquired(token, AWS_OP_SUCCESS, user_data),
-        nothing;
-        type_tag = "standard_retry_token_acquired"
-    )
-    event_loop_schedule_task_now!(event_loop, task)
-
-    return nothing
-end
-
-# Try to acquire retry permission from token bucket
-function _try_acquire_retry_capacity(strategy::StandardRetryStrategy, cost::UInt64)::Bool
-    return lock(strategy.lock) do
-        current = @atomic strategy.bucket_capacity
-
-        if current >= Int64(cost)
-            @atomic strategy.bucket_capacity = current - Int64(cost)
-            logf(
-                LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-                "Standard retry: acquired $cost capacity, remaining=$(current - Int64(cost))"
-            )
-            return true
+    on_backoff_acquired = function (exp_token, code, token_ud)
+        local cb
+        local cb_user_data
+        lock(token.lock) do
+            cb = token.on_acquired
+            cb_user_data = token.acquired_user_data
+            token.on_acquired = nothing
         end
-
-        logf(
-            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: insufficient capacity (need $cost, have $current)"
-        )
-        return false
+        if code != AWS_OP_SUCCESS || exp_token === nothing
+            cb !== nothing && cb(nothing, code, cb_user_data)
+            return nothing
+        end
+        token.exp_token = exp_token
+        cb !== nothing && cb(token, AWS_OP_SUCCESS, cb_user_data)
+        return nothing
     end
-end
 
-# Return capacity to bucket (on success)
-function _return_retry_capacity(strategy::StandardRetryStrategy, amount::UInt64)
-    lock(strategy.lock) do
-        current = @atomic strategy.bucket_capacity
-        new_capacity = min(Int64(strategy.config.max_capacity), current + Int64(amount))
-        @atomic strategy.bucket_capacity = new_capacity
-        logf(
-            LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: returned $amount capacity, now=$new_capacity"
-        )
+    result = retry_strategy_acquire_token!(
+        strategy.backoff_strategy,
+        partition_id,
+        on_backoff_acquired,
+        token,
+        timeout_ms,
+    )
+    if result isa ErrorResult
+        return result
     end
     return nothing
 end
 
-# Schedule retry for standard token
+function retry_strategy_acquire_token!(
+        strategy::StandardRetryStrategy,
+        on_acquired::OnRetryTokenAcquiredFn,
+        user_data,
+    )::Union{Nothing, ErrorResult}
+    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
+end
+
+function _standard_on_retry_ready(_exp_token, code, token::StandardRetryToken)
+    local cb
+    local cb_user_data
+    lock(token.lock) do
+        cb = token.on_ready
+        cb_user_data = token.ready_user_data
+        token.on_ready = nothing
+        token.ready_user_data = nothing
+    end
+    cb !== nothing && cb(token, code, cb_user_data)
+    return nothing
+end
+
 # Schedule retry for standard token (default error type)
 function retry_token_schedule_retry(
-        token::RetryToken{StandardRetryStrategy{ELG}, U},
+        token::StandardRetryToken,
         on_retry_ready::OnRetryReadyFn,
         user_data,
-    ) where {ELG, U}
-    return retry_token_schedule_retry(token, token.error_type, on_retry_ready, user_data)
+    )
+    return retry_token_schedule_retry(token, RetryErrorType.TRANSIENT, on_retry_ready, user_data)
 end
 
 # Schedule retry for standard token
 function retry_token_schedule_retry(
-        token::RetryToken{StandardRetryStrategy{ELG}, U},
+        token::StandardRetryToken,
         error_type::RetryErrorType.T,
         on_retry_ready::OnRetryReadyFn,
         user_data,
-    ) where {ELG, U}
-    strategy = token.strategy
-    config = strategy.config
-    token.error_type = error_type
-
+    )::Union{Nothing, ErrorResult}
     if error_type == RetryErrorType.CLIENT_ERROR
-        logf(
-            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: client error does not permit retry"
-        )
         raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
         return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
     end
 
-    retry_count = @atomic token.retry_count
-    if retry_count >= config.backoff_config.max_retries
-        logf(
-            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: max retries exceeded"
-        )
-        raise_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
-        return ErrorResult(ERROR_IO_MAX_RETRIES_EXCEEDED)
-    end
+    bucket = token.bucket
+    capacity_consumed = UInt64(0)
+    previous_cost = token.last_retry_cost
 
-    if @atomic strategy.shutdown
-        raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-    end
-
-    # Determine cost based on error type
-    cost = if token.error_type == RetryErrorType.THROTTLING
-        config.retry_throttling_cost
-    elseif token.last_error == ERROR_IO_SOCKET_TIMEOUT
-        config.retry_timeout_cost
-    else
-        config.retry_cost
-    end
-
-    # Try to acquire capacity
-    if !_try_acquire_retry_capacity(strategy, cost)
-        logf(
-            LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: retry permission denied (quota exhausted)"
-        )
-        raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
-        return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
-    end
-
-    backoff_config = config.backoff_config
-    last_backoff = @atomic token.last_backoff
-    backoff_ns = _compute_backoff_ns(backoff_config, retry_count, last_backoff)
-
-    logf(
-        LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: scheduling retry $(retry_count + 1) in $(backoff_ns ÷ 1_000_000)ms"
-    )
-
-    # Schedule the retry
-    event_loop = token.bound_loop
-    event_loop === nothing && return ErrorResult(raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
-
-    current_time = event_loop_current_clock_time(event_loop)
-    if current_time isa ErrorResult
-        return current_time
-    end
-
-    run_at = current_time + backoff_ns
-
-    task = ScheduledTask(
-        _standard_retry_task,
-        token;
-        type_tag = "standard_retry"
-    )
-    already_scheduled = false
-    lock(token.lock) do
-        if token.scheduled_retry_task !== nothing
-            already_scheduled = true
+    lock(bucket.lock) do
+        current = bucket.current_capacity
+        if current == 0
+            capacity_consumed = UInt64(0)
         else
-            token.on_retry_ready = on_retry_ready
-            token.user_data = user_data
-            token.scheduled_retry_task = task
+            if error_type == RetryErrorType.TRANSIENT
+                capacity_consumed = min(current, _STANDARD_TRANSIENT_COST)
+            else
+                capacity_consumed = min(current, _STANDARD_RETRY_COST)
+            end
+            token.last_retry_cost = capacity_consumed
+            bucket.current_capacity -= capacity_consumed
         end
     end
 
-    if already_scheduled
-        logf(
-            LogLevel.ERROR, LS_IO_STANDARD_RETRY_STRATEGY,
-            "Standard retry: token already scheduled"
-        )
+    if capacity_consumed == 0
+        raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
+        return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
+    end
+
+    lock(token.lock) do
+        token.on_ready = on_retry_ready
+        token.ready_user_data = user_data
+    end
+
+    exp_token = token.exp_token
+    if exp_token === nothing
+        lock(bucket.lock) do
+            token.last_retry_cost = previous_cost
+            desired_capacity = bucket.current_capacity + capacity_consumed
+            bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
+        end
         raise_error(ERROR_INVALID_STATE)
         return ErrorResult(ERROR_INVALID_STATE)
     end
 
-    @atomic token.last_backoff = backoff_ns
-    @atomic token.retry_count = retry_count + 1
-
-    event_loop_schedule_task_future!(event_loop, task, run_at)
-
-    return nothing
-end
-
-# Standard retry task callback
-function _standard_retry_task(token::RetryToken, status::TaskStatus.T)
-    # Task is executing (or canceled). Clear scheduling state before callbacks.
-    local on_retry_ready
-    local user_data
-    lock(token.lock) do
-        token.scheduled_retry_task = nothing
-        on_retry_ready = token.on_retry_ready
-        user_data = token.user_data
-        token.on_retry_ready = nothing
-        token.user_data = nothing
-    end
-
-    logf(
-        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: task executing, status=$status"
-    )
-
-    if status == TaskStatus.CANCELED
-        if on_retry_ready !== nothing
-            on_retry_ready(token, ERROR_IO_OPERATION_CANCELLED, user_data)
+    result = retry_token_schedule_retry(exp_token, error_type, _standard_on_retry_ready, token)
+    if result isa ErrorResult
+        lock(bucket.lock) do
+            token.last_retry_cost = previous_cost
+            desired_capacity = bucket.current_capacity + capacity_consumed
+            bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
         end
-        return nothing
-    end
-
-    if on_retry_ready !== nothing
-        on_retry_ready(token, AWS_OP_SUCCESS, user_data)
+        return result
     end
 
     return nothing
 end
 
 # Record success for standard token
-function retry_token_record_success(token::RetryToken{StandardRetryStrategy{ELG}, U})::Nothing where {ELG, U}
-    strategy = token.strategy
-    _return_retry_capacity(strategy, strategy.config.no_retry_increment)
-    logf(
-        LogLevel.TRACE, LS_IO_STANDARD_RETRY_STRATEGY,
-        "Standard retry: success recorded"
-    )
+function retry_token_record_success(token::StandardRetryToken)::Nothing
+    bucket = token.bucket
+    lock(bucket.lock) do
+        desired_capacity = bucket.current_capacity + token.last_retry_cost
+        bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
+        token.last_retry_cost = 0
+    end
     return nothing
 end
 
 # Release standard retry token
-function retry_token_release!(token::RetryToken{StandardRetryStrategy{ELG}, U})::Nothing where {ELG, U}
-    _ = token
+function retry_token_release!(token::StandardRetryToken)::Nothing
+    lock(token.lock) do
+        token.on_ready = nothing
+        token.ready_user_data = nothing
+        token.on_acquired = nothing
+    end
+    token.exp_token = nothing
     return nothing
 end
 
 # Shutdown strategy
 function retry_strategy_shutdown!(strategy::StandardRetryStrategy)
     @atomic strategy.shutdown = true
+    retry_strategy_shutdown!(strategy.backoff_strategy)
     logf(
         LogLevel.DEBUG, LS_IO_STANDARD_RETRY_STRATEGY,
         "Standard retry strategy: shutdown"

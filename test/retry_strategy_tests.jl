@@ -1,6 +1,14 @@
 using Test
 using AwsIO
 
+function _wait_ready(ch::Channel; timeout_ns::Integer = 5_000_000_000)
+    deadline = Base.time_ns() + timeout_ns
+    while !isready(ch) && Base.time_ns() < deadline
+        yield()
+    end
+    return isready(ch)
+end
+
 @testset "no retry strategy" begin
     AwsIO.io_library_init()
 
@@ -360,4 +368,207 @@ end
 
     AwsIO.event_loop_group_destroy!(elg)
     AwsIO.io_library_clean_up()
+end
+
+@testset "standard retry failure exhausts bucket" begin
+    if Threads.nthreads(:interactive) <= 1
+        @test true
+    else
+        AwsIO.io_library_init()
+
+        elg_opts = AwsIO.EventLoopGroupOptions(; loop_count = 1)
+        elg = AwsIO.event_loop_group_new(elg_opts)
+        @test !(elg isa AwsIO.ErrorResult)
+        elg isa AwsIO.ErrorResult && return
+
+        backoff_config = AwsIO.ExponentialBackoffConfig(;
+            backoff_scale_factor_ms = 1,
+            max_backoff_secs = 1,
+            max_retries = 3,
+            jitter_mode = :none,
+        )
+        config = AwsIO.StandardRetryConfig(;
+            initial_bucket_capacity = 15,
+            backoff_config = backoff_config,
+        )
+        strategy = AwsIO.StandardRetryStrategy(elg, config)
+        @test !(strategy isa AwsIO.ErrorResult)
+        if strategy isa AwsIO.ErrorResult
+            AwsIO.event_loop_group_destroy!(elg)
+            AwsIO.io_library_clean_up()
+            return
+        end
+
+        partition = "us-east-1:super-badly-named-aws-service"
+
+        acquired_ch = Channel{Tuple{Any, Int}}(1)
+        on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
+        _ = AwsIO.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        @test _wait_ready(acquired_ch)
+        token1, code1 = take!(acquired_ch)
+        @test code1 == AwsIO.AWS_OP_SUCCESS
+
+        acquired_ch2 = Channel{Tuple{Any, Int}}(1)
+        on_acquired2 = (token, code, ud) -> put!(acquired_ch2, (token, code))
+        _ = AwsIO.retry_strategy_acquire_token!(strategy, partition, on_acquired2, nothing, 0)
+        @test _wait_ready(acquired_ch2)
+        token2, code2 = take!(acquired_ch2)
+        @test code2 == AwsIO.AWS_OP_SUCCESS
+
+        ready_ch = Channel{Tuple{Any, Int}}(1)
+        on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
+        res = AwsIO.retry_token_schedule_retry(token1, AwsIO.RetryErrorType.TRANSIENT, on_ready, nothing)
+        @test !(res isa AwsIO.ErrorResult)
+        @test _wait_ready(ready_ch)
+        ready_token, ready_code = take!(ready_ch)
+        @test ready_token === token1
+        @test ready_code == AwsIO.AWS_OP_SUCCESS
+
+        ready_ch2 = Channel{Tuple{Any, Int}}(1)
+        on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
+        res = AwsIO.retry_token_schedule_retry(token2, AwsIO.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
+        @test !(res isa AwsIO.ErrorResult)
+        @test _wait_ready(ready_ch2)
+        ready_token2, ready_code2 = take!(ready_ch2)
+        @test ready_token2 === token2
+        @test ready_code2 == AwsIO.AWS_OP_SUCCESS
+
+        res = AwsIO.retry_token_schedule_retry(
+            token1,
+            AwsIO.RetryErrorType.SERVER_ERROR,
+            on_ready,
+            nothing,
+        )
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_RETRY_PERMISSION_DENIED
+
+        res = AwsIO.retry_token_schedule_retry(
+            token2,
+            AwsIO.RetryErrorType.SERVER_ERROR,
+            on_ready2,
+            nothing,
+        )
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_RETRY_PERMISSION_DENIED
+
+        AwsIO.retry_token_release!(token1)
+        AwsIO.retry_token_release!(token2)
+
+        acquired_ch3 = Channel{Tuple{Any, Int}}(1)
+        on_acquired3 = (token, code, ud) -> put!(acquired_ch3, (token, code))
+        _ = AwsIO.retry_strategy_acquire_token!(strategy, nothing, on_acquired3, nothing, 0)
+        @test _wait_ready(acquired_ch3)
+        token3, code3 = take!(acquired_ch3)
+        @test code3 == AwsIO.AWS_OP_SUCCESS
+
+        ready_ch3 = Channel{Tuple{Any, Int}}(1)
+        on_ready3 = (token, code, ud) -> put!(ready_ch3, (token, code))
+        res = AwsIO.retry_token_schedule_retry(token3, AwsIO.RetryErrorType.SERVER_ERROR, on_ready3, nothing)
+        @test !(res isa AwsIO.ErrorResult)
+        @test _wait_ready(ready_ch3)
+        ready_token3, ready_code3 = take!(ready_ch3)
+        @test ready_token3 === token3
+        @test ready_code3 == AwsIO.AWS_OP_SUCCESS
+
+        AwsIO.retry_token_release!(token3)
+
+        AwsIO.retry_strategy_shutdown!(strategy)
+        AwsIO.event_loop_group_destroy!(elg)
+        AwsIO.io_library_clean_up()
+    end
+end
+
+@testset "standard retry failure recovers capacity" begin
+    if Threads.nthreads(:interactive) <= 1
+        @test true
+    else
+        AwsIO.io_library_init()
+
+        elg_opts = AwsIO.EventLoopGroupOptions(; loop_count = 1)
+        elg = AwsIO.event_loop_group_new(elg_opts)
+        @test !(elg isa AwsIO.ErrorResult)
+        elg isa AwsIO.ErrorResult && return
+
+        backoff_config = AwsIO.ExponentialBackoffConfig(;
+            backoff_scale_factor_ms = 1,
+            max_backoff_secs = 1,
+            max_retries = 3,
+            jitter_mode = :none,
+        )
+        config = AwsIO.StandardRetryConfig(;
+            initial_bucket_capacity = 15,
+            backoff_config = backoff_config,
+        )
+        strategy = AwsIO.StandardRetryStrategy(elg, config)
+        @test !(strategy isa AwsIO.ErrorResult)
+        if strategy isa AwsIO.ErrorResult
+            AwsIO.event_loop_group_destroy!(elg)
+            AwsIO.io_library_clean_up()
+            return
+        end
+
+        partition = "us-west-2:elastic-something-something-manager-manager"
+
+        acquired_ch = Channel{Tuple{Any, Int}}(1)
+        on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
+        _ = AwsIO.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        @test _wait_ready(acquired_ch)
+        token, code = take!(acquired_ch)
+        @test code == AwsIO.AWS_OP_SUCCESS
+
+        ready_ch = Channel{Tuple{Any, Int}}(1)
+        on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
+        res = AwsIO.retry_token_schedule_retry(token, AwsIO.RetryErrorType.TRANSIENT, on_ready, nothing)
+        @test !(res isa AwsIO.ErrorResult)
+        @test _wait_ready(ready_ch)
+        _ = take!(ready_ch)
+
+        ready_ch2 = Channel{Tuple{Any, Int}}(1)
+        on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
+        res = AwsIO.retry_token_schedule_retry(token, AwsIO.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
+        @test !(res isa AwsIO.ErrorResult)
+        @test _wait_ready(ready_ch2)
+        _ = take!(ready_ch2)
+
+        res = AwsIO.retry_token_schedule_retry(token, AwsIO.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_RETRY_PERMISSION_DENIED
+
+        AwsIO.retry_token_release!(token)
+
+        for _ in 1:5
+            acquired_ch = Channel{Tuple{Any, Int}}(1)
+            on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
+            _ = AwsIO.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+            @test _wait_ready(acquired_ch)
+            token, code = take!(acquired_ch)
+            @test code == AwsIO.AWS_OP_SUCCESS
+            AwsIO.retry_token_record_success(token)
+            AwsIO.retry_token_release!(token)
+        end
+
+        acquired_ch = Channel{Tuple{Any, Int}}(1)
+        on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
+        _ = AwsIO.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        @test _wait_ready(acquired_ch)
+        token, code = take!(acquired_ch)
+        @test code == AwsIO.AWS_OP_SUCCESS
+
+        ready_ch = Channel{Tuple{Any, Int}}(1)
+        on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
+        res = AwsIO.retry_token_schedule_retry(token, AwsIO.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+        @test !(res isa AwsIO.ErrorResult)
+        @test _wait_ready(ready_ch)
+        _ = take!(ready_ch)
+
+        res = AwsIO.retry_token_schedule_retry(token, AwsIO.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_RETRY_PERMISSION_DENIED
+
+        AwsIO.retry_token_release!(token)
+
+        AwsIO.retry_strategy_shutdown!(strategy)
+        AwsIO.event_loop_group_destroy!(elg)
+        AwsIO.io_library_clean_up()
+    end
 end
