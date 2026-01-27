@@ -196,10 +196,8 @@ function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOption
     handler.slot = slot
     channel_slot_set_handler!(slot, handler)
 
-    if channel.last === nothing
-        channel_slot_insert_end!(channel, slot)
-    else
-        channel_slot_insert_left!(slot, channel.last)
+    if channel.first !== slot
+        channel_slot_insert_left!(channel.last, slot)
     end
 
     tls_channel_handler_start_negotiation!(handler)
@@ -333,7 +331,7 @@ function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message
     end
 
     if handler.slot !== nothing && handler.slot.channel !== nothing
-        channel_shutdown!(handler.slot.channel, ChannelDirection.READ, error_code)
+        channel_shutdown!(handler.slot.channel, error_code)
     end
 
     return nothing
@@ -408,7 +406,7 @@ function _tls_send_alpn_message!(handler::TlsChannelHandler)::Bool
     send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
     if send_result isa ErrorResult
         channel_release_message_to_pool!(channel, msg)
-        channel_shutdown!(channel, ChannelDirection.READ, send_result.code)
+        channel_shutdown!(channel, send_result.code)
         return false
     end
 
@@ -728,11 +726,17 @@ function handler_increment_read_window(handler::TlsChannelHandler, slot::Channel
     return channel_slot_increment_read_window!(slot, size)
 end
 
-function handler_shutdown(handler::TlsChannelHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int)::Union{Nothing, ErrorResult}
+function handler_shutdown(
+        handler::TlsChannelHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Union{Nothing, ErrorResult}
     if !handler.negotiation_completed && handler.options.on_negotiation_result !== nothing
         Base.invokelatest(handler.options.on_negotiation_result, handler, slot, error_code, handler.options.user_data)
     end
-    channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
+    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end
 

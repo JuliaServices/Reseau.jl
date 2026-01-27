@@ -322,7 +322,7 @@ function _setup_client_channel(request::SocketConnectionRequest)
                 end
                 _connection_request_complete(request, AWS_OP_SUCCESS, channel)
             else
-                channel_shutdown!(channel, ChannelDirection.READ, err)
+                channel_shutdown!(channel, err)
                 socket_close!(socket)
                 _connection_request_complete(request, err, nothing)
             end
@@ -346,7 +346,7 @@ function _setup_client_channel(request::SocketConnectionRequest)
 
         if advertise_alpn
             alpn_slot = channel_slot_new!(channel)
-            channel_slot_insert_left!(alpn_slot, tls_handler.slot)
+            channel_slot_insert_left!(tls_handler.slot, alpn_slot)
             alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated, request.user_data)
             channel_slot_set_handler!(alpn_slot, alpn_handler)
             alpn_handler.slot = alpn_slot

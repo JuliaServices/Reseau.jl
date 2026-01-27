@@ -538,35 +538,3 @@ function event_loop_group_release_from_event_loop!(event_loop::EventLoop)
     end
     return nothing
 end
-
-# Channel task wrapper for use with channels
-mutable struct ChannelTask{F, Ctx}
-    wrapper_task::ScheduledTask{F, Ctx}
-    task_fn::F
-    arg::Ctx
-    type_tag::String
-    # Intrusive list node
-    node_next::Union{ChannelTask{F, Ctx}, Nothing}
-    node_prev::Union{ChannelTask{F, Ctx}, Nothing}
-end
-
-function ChannelTask(task_fn::F, arg::Ctx, type_tag::AbstractString) where {F, Ctx}
-    scheduled_task = ScheduledTask(task_fn, arg; type_tag = type_tag)
-    return ChannelTask{F, Ctx}(
-        scheduled_task,
-        task_fn,
-        arg,
-        String(type_tag),
-        nothing,
-        nothing,
-    )
-end
-
-function channel_task_init!(task::ChannelTask, task_fn, arg, type_tag::AbstractString)
-    task.task_fn = task_fn
-    task.arg = arg
-    task.type_tag = String(type_tag)
-    task.node_next = nothing
-    task.node_prev = nothing
-    return nothing
-end

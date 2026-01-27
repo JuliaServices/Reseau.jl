@@ -387,6 +387,7 @@
         )
 
         task.timestamp = run_at_nanos
+        task.scheduled = true
         should_signal_thread = false
 
         mutex_lock(impl.cross_thread_data.mutex)
@@ -450,6 +451,22 @@
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "cancelling task %s", task.type_tag)
+        if !task.scheduled
+            return nothing
+        end
+
+        removed = false
+        mutex_lock(impl.cross_thread_data.mutex)
+        if !isempty(impl.cross_thread_data.tasks_to_schedule)
+            removed = remove!(impl.cross_thread_data.tasks_to_schedule, task; eq = (===))
+        end
+        mutex_unlock(impl.cross_thread_data.mutex)
+
+        if removed
+            task_run!(task, TaskStatus.CANCELED)
+            return nothing
+        end
+
         task_scheduler_cancel!(impl.thread_data.scheduler, task)
     end
 

@@ -313,6 +313,7 @@
         )
 
         task.timestamp = run_at_nanos
+        task.scheduled = true
 
         mutex_lock(impl.task_pre_queue_mutex)
 
@@ -378,6 +379,22 @@
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "cancelling %s task", task.type_tag)
+        if !task.scheduled
+            return nothing
+        end
+
+        removed = false
+        mutex_lock(impl.task_pre_queue_mutex)
+        if !isempty(impl.task_pre_queue)
+            removed = remove!(impl.task_pre_queue, task; eq = (===))
+        end
+        mutex_unlock(impl.task_pre_queue_mutex)
+
+        if removed
+            task_run!(task, TaskStatus.CANCELED)
+            return nothing
+        end
+
         task_scheduler_cancel!(impl.scheduler, task)
     end
 

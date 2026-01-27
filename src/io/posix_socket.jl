@@ -358,29 +358,32 @@ function set_posix_socket_options!(sock::PosixSocketType, options::SocketOptions
 
     if iface_len != 0
         if SO_BINDTODEVICE != 0
-            iface_bytes = Vector{UInt8}(undef, iface_len)
+            iface_bytes = Memory{UInt8}(undef, iface_len)
             for i in 1:iface_len
                 iface_bytes[i] = options.network_interface_name[i]
             end
-            ret = ccall(
-                :setsockopt,
-                Cint,
-                (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
-                fd,
-                SOL_SOCKET,
-                SO_BINDTODEVICE,
-                iface_bytes,
-                Cuint(iface_len),
-            )
+            ret = GC.@preserve iface_bytes begin
+                ccall(
+                    :setsockopt,
+                    Cint,
+                    (Cint, Cint, Cint, Ptr{Cvoid}, Cuint),
+                    fd,
+                    SOL_SOCKET,
+                    SO_BINDTODEVICE,
+                    pointer(iface_bytes),
+                    Cuint(iface_len),
+                )
+            end
             if ret != 0
                 errno_val = get_errno()
+                iface_name = String(Vector{UInt8}(iface_bytes))
                 logf(
                     LogLevel.ERROR,
                     LS_IO_SOCKET,
                     "id=%p fd=%d: setsockopt() with SO_BINDTODEVICE for \"%s\" failed with errno %d.",
                     sock,
                     fd,
-                    String(iface_bytes),
+                    iface_name,
                     errno_val,
                 )
                 raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)

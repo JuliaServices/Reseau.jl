@@ -1,17 +1,80 @@
 # AWS IO Library - Channel Pipeline
 # Port of aws-c-io/source/channel.c and include/aws/io/channel.h
 
-# Channel handler task status
-@enumx ChannelTaskStatus::UInt8 begin
-    RUN_TASK_SUCCESS = 0
-    TASK_CANCEL = 1
-end
-
 # Channel read/write directions are defined in socket.jl as ChannelDirection
 
 # Callbacks
 const ChannelOnSetupCompletedFn = Function  # (channel, error_code, user_data) -> nothing
 const ChannelOnShutdownCompletedFn = Function  # (channel, error_code, user_data) -> nothing
+
+const DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE = 16 * 1024
+const g_aws_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE))
+const _CHANNEL_MESSAGE_POOL_KEY = Ref{UInt8}(0)
+const _CHANNEL_MESSAGE_POOL_KEY_PTR = pointer_from_objref(_CHANNEL_MESSAGE_POOL_KEY)
+
+struct ChannelOptions{EL}
+    event_loop::EL
+    on_setup_completed::Union{ChannelOnSetupCompletedFn, Nothing}
+    on_shutdown_completed::Union{ChannelOnShutdownCompletedFn, Nothing}
+    setup_user_data::Any
+    shutdown_user_data::Any
+    enable_read_back_pressure::Bool
+end
+
+function ChannelOptions(;
+        event_loop,
+        on_setup_completed = nothing,
+        on_shutdown_completed = nothing,
+        setup_user_data = nothing,
+        shutdown_user_data = nothing,
+        enable_read_back_pressure::Bool = false,
+    )
+    return ChannelOptions(
+        event_loop,
+        on_setup_completed,
+        on_shutdown_completed,
+        setup_user_data,
+        shutdown_user_data,
+        enable_read_back_pressure,
+    )
+end
+
+# Channel task wrapper (aws_channel_task)
+mutable struct ChannelTaskContext
+    channel::Any
+    task::Any
+end
+
+mutable struct ChannelTask
+    wrapper_task::ScheduledTask
+    task_fn::Function
+    arg::Any
+    type_tag::String
+    ctx::ChannelTaskContext
+end
+
+function ChannelTask(task_fn, arg, type_tag::AbstractString)
+    ctx = ChannelTaskContext(nothing, nothing)
+    wrapper_task = ScheduledTask(_channel_task_wrapper, ctx; type_tag = type_tag)
+    task = ChannelTask(wrapper_task, task_fn, arg, String(type_tag), ctx)
+    ctx.task = task
+    return task
+end
+
+function ChannelTask()
+    return ChannelTask((task, arg, status) -> nothing, nothing, "channel_task")
+end
+
+function channel_task_init!(task::ChannelTask, task_fn, arg, type_tag::AbstractString)
+    task.task_fn = task_fn
+    task.arg = arg
+    task.type_tag = String(type_tag)
+    task.wrapper_task.type_tag = task.type_tag
+    task.wrapper_task.timestamp = UInt64(0)
+    task.wrapper_task.scheduled = false
+    return nothing
+end
+
 
 # Channel handler options for shutdown behavior
 struct ChannelHandlerShutdownOptions
@@ -24,10 +87,11 @@ ChannelHandlerShutdownOptions() = ChannelHandlerShutdownOptions(false, false)
 # Channel slot - links handlers in the pipeline
 # Each slot can hold a handler and links to adjacent slots
 mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Union{AbstractChannel, Nothing}, SlotRef}
-    adj_left::SlotRef   # Toward the application (outgoing data flows left)
-    adj_right::SlotRef  # Toward the socket/network (incoming data flows right)
+    adj_left::SlotRef   # Toward the application (incoming data flows left)
+    adj_right::SlotRef  # Toward the socket/network (outgoing data flows right)
     handler::H
     channel::C
+    window_size::Csize_t
     current_window_update_batch_size::Csize_t
     upstream_message_overhead::Csize_t
 end
@@ -40,6 +104,7 @@ function ChannelSlot()
         nothing,
         Csize_t(0),
         Csize_t(0),
+        Csize_t(0),
     )
 end
 
@@ -49,6 +114,7 @@ function ChannelSlot(handler::H, channel::C) where {H, C}
         nothing,
         handler,
         channel,
+        Csize_t(0),
         Csize_t(0),
         Csize_t(0),
     )
@@ -98,7 +164,13 @@ function handler_increment_read_window(handler::AbstractChannelHandler, slot::Ch
 end
 
 # Initiate graceful shutdown of the handler
-function handler_shutdown(handler::AbstractChannelHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int)::Union{Nothing, ErrorResult}
+function handler_shutdown(
+        handler::AbstractChannelHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Union{Nothing, ErrorResult}
     error("handler_shutdown must be implemented for $(typeof(handler))")
 end
 
@@ -136,6 +208,12 @@ function handler_trigger_write(handler::AbstractChannelHandler)::Nothing
     return nothing
 end
 
+# Trigger handler to read data if it is a data-source handler
+function handler_trigger_read(handler::AbstractChannelHandler)::Nothing
+    # Default implementation does nothing
+    return nothing
+end
+
 # Channel state tracking
 @enumx ChannelState::UInt8 begin
     NOT_INITIALIZED = 0
@@ -154,7 +232,6 @@ mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, No
     channel_state::ChannelState.T
     read_back_pressure_enabled::Bool
     channel_id::UInt64
-    window::Csize_t
     message_pool::Union{MessagePool, Nothing}  # nullable
     on_setup_completed::Union{ChannelOnSetupCompletedFn, Nothing}  # nullable
     on_shutdown_completed::Union{ChannelOnShutdownCompletedFn, Nothing}  # nullable
@@ -168,14 +245,18 @@ mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, No
     statistics_task::Union{ScheduledTask, Nothing}  # nullable
     statistics_interval_start_time_ms::UInt64
     statistics_list::ArrayList{Any}
+    # Window/backpressure tracking
+    window_update_batch_emit_threshold::Csize_t
+    window_update_scheduled::Bool
+    window_update_task::ChannelTask
+    # Channel task tracking
+    pending_tasks::IdDict{Any, Bool}
+    pending_tasks_lock::ReentrantLock
     # Shutdown tracking
-    shutdown_direction::Union{ChannelDirection.T, Nothing}  # nullable
-    shutdown_is_immediate::Bool
     shutdown_pending::Bool
-    # Cross-thread task scheduling
-    cross_thread_window_increment_pending::Bool
-    cross_thread_window_increment_amount::Csize_t
-    cross_thread_tasks::Union{Vector{ChannelTask}, Nothing}  # nullable
+    shutdown_immediately::Bool
+    shutdown_task::ChannelTask
+    shutdown_lock::ReentrantLock
 end
 
 # Global channel counter for unique IDs
@@ -189,18 +270,19 @@ end
 
 function Channel(
         event_loop::EL,
-        message_pool::Union{MessagePool, Nothing} = nothing,
+        message_pool::Union{MessagePool, Nothing} = nothing;
+        enable_read_back_pressure::Bool = false,
     ) where {EL <: AbstractEventLoop}
     channel_id = _next_channel_id()
+    window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
 
     return Channel{EL, Union{ChannelSlot, Nothing}}(
         event_loop,
         nothing,  # first
         nothing,  # last
         ChannelState.NOT_INITIALIZED,
-        false,    # read_back_pressure_enabled
+        enable_read_back_pressure,
         channel_id,
-        Csize_t(0),  # window
         message_pool,
         nothing,  # on_setup_completed
         nothing,  # on_shutdown_completed
@@ -213,17 +295,171 @@ function Channel(
         nothing,  # statistics_task
         UInt64(0),  # statistics_interval_start_time_ms
         ArrayList{Any}(16),
-        nothing,  # shutdown_direction
-        false,    # shutdown_is_immediate
+        window_threshold,
+        false,       # window_update_scheduled
+        ChannelTask(),
+        IdDict{ChannelTask, Bool}(),
+        ReentrantLock(),
         false,    # shutdown_pending
-        false,    # cross_thread_window_increment_pending
-        Csize_t(0),  # cross_thread_window_increment_amount
-        nothing,  # cross_thread_tasks
+        false,    # shutdown_immediately
+        ChannelTask(),
+        ReentrantLock(),
     )
+end
+
+function _channel_add_pending_task!(channel::Channel, task::ChannelTask)
+    lock(channel.pending_tasks_lock) do
+        channel.pending_tasks[task] = true
+    end
+    return nothing
+end
+
+function _channel_remove_pending_task!(channel::Channel, task::ChannelTask)
+    lock(channel.pending_tasks_lock) do
+        delete!(channel.pending_tasks, task)
+    end
+    return nothing
+end
+
+function _channel_task_wrapper(ctx::ChannelTaskContext, status::TaskStatus.T)
+    task = ctx.task::ChannelTask
+    channel = ctx.channel
+    if channel isa Channel
+        _channel_remove_pending_task!(channel, task)
+        final_status = (status == TaskStatus.CANCELED || channel.channel_state == ChannelState.SHUT_DOWN) ?
+            TaskStatus.CANCELED : status
+        task.task_fn(task, task.arg, final_status)
+        return nothing
+    end
+    task.task_fn(task, task.arg, status)
+    return nothing
 end
 
 # Get the event loop associated with a channel
 channel_event_loop(channel::Channel) = channel.event_loop
+
+# Check if caller is on channel's event loop thread
+channel_thread_is_callers_thread(channel::Channel) = event_loop_thread_is_callers_thread(channel.event_loop)
+
+# Get current clock time from event loop
+channel_current_clock_time(channel::Channel) = event_loop_current_clock_time(channel.event_loop)
+
+# Force a read by the data-source handler (socket side)
+function channel_trigger_read(channel::Channel)::Union{Nothing, ErrorResult}
+    if channel === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    if !channel_thread_is_callers_thread(channel)
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    slot = channel.last
+    if slot === nothing || slot.handler === nothing
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    handler_trigger_read(slot.handler)
+    return nothing
+end
+
+# Event loop local object wrappers
+channel_fetch_local_object(channel::Channel, key::Ptr{Cvoid}) = event_loop_fetch_local_object(channel.event_loop, key)
+channel_put_local_object!(channel::Channel, obj::EventLoopLocalObject) = event_loop_put_local_object!(channel.event_loop, obj)
+channel_remove_local_object!(channel::Channel, key::Ptr{Cvoid}) = event_loop_remove_local_object!(channel.event_loop, key)
+
+# Channel creation API matching aws_channel_new
+mutable struct ChannelSetupArgs
+    channel::Channel
+end
+
+function _channel_message_pool_on_removed(obj::EventLoopLocalObject)
+    pool = obj.object
+    if pool isa MessagePool
+        message_pool_clean_up!(pool)
+    end
+    return nothing
+end
+
+function _channel_get_or_create_message_pool(channel::Channel)::Union{MessagePool, ErrorResult}
+    local_obj = channel_fetch_local_object(channel, _CHANNEL_MESSAGE_POOL_KEY_PTR)
+    if !(local_obj isa ErrorResult)
+        obj = local_obj::EventLoopLocalObject
+        pool = obj.object
+        if pool isa MessagePool
+            return pool
+        end
+    end
+
+    creation_args = MessagePoolCreationArgs(;
+        application_data_msg_data_size = Int(g_aws_channel_max_fragment_size[]),
+        application_data_msg_count = 4,
+        small_block_msg_data_size = 128,
+        small_block_msg_count = 4,
+    )
+
+    pool = MessagePool(creation_args)
+    if pool isa ErrorResult
+        return pool
+    end
+
+    local_object = EventLoopLocalObject(_CHANNEL_MESSAGE_POOL_KEY_PTR, pool, _channel_message_pool_on_removed)
+    put_res = channel_put_local_object!(channel, local_object)
+    if put_res isa ErrorResult
+        return put_res
+    end
+    return pool
+end
+
+function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
+    channel = args.channel
+    if status != TaskStatus.RUN_READY
+        if channel.on_setup_completed !== nothing
+            Base.invokelatest(channel.on_setup_completed, channel, ERROR_SYS_CALL_FAILURE, channel.setup_user_data)
+        end
+        return nothing
+    end
+
+    pool = _channel_get_or_create_message_pool(channel)
+    if pool isa ErrorResult
+        if channel.on_setup_completed !== nothing
+            Base.invokelatest(channel.on_setup_completed, channel, pool.code, channel.setup_user_data)
+        end
+        return nothing
+    end
+
+    channel.message_pool = pool
+    channel.channel_state = ChannelState.ACTIVE
+
+    if channel.on_setup_completed !== nothing
+        Base.invokelatest(channel.on_setup_completed, channel, AWS_OP_SUCCESS, channel.setup_user_data)
+    end
+    return nothing
+end
+
+function channel_new(options::ChannelOptions)::Union{Channel, ErrorResult}
+    if options.event_loop === nothing
+        return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
+    end
+
+    channel = Channel(
+        options.event_loop,
+        nothing;
+        enable_read_back_pressure = options.enable_read_back_pressure,
+    )
+    channel.on_setup_completed = options.on_setup_completed
+    channel.on_shutdown_completed = options.on_shutdown_completed
+    channel.setup_user_data = options.setup_user_data
+    channel.shutdown_user_data = options.shutdown_user_data
+    channel.channel_state = ChannelState.SETTING_UP
+
+    event_loop_group_acquire_from_event_loop(options.event_loop)
+
+    setup_args = ChannelSetupArgs(channel)
+    task = ScheduledTask(_channel_setup_task, setup_args; type_tag = "channel_setup")
+    event_loop_schedule_task_now!(options.event_loop, task)
+    return channel
+end
 
 # Get unique channel ID
 channel_id(channel::Channel) = channel.channel_id
@@ -233,6 +469,46 @@ channel_first_slot(channel::Channel) = channel.first
 
 # Get the last slot (socket side)
 channel_last_slot(channel::Channel) = channel.last
+
+# Channel task scheduling
+function _channel_register_task!(
+        channel::Channel,
+        task::ChannelTask,
+        run_at_nanos::UInt64;
+        serialized::Bool = false,
+    )
+    if channel.channel_state == ChannelState.SHUT_DOWN
+        task.task_fn(task, task.arg, TaskStatus.CANCELED)
+        return nothing
+    end
+
+    task.ctx.channel = channel
+    _channel_add_pending_task!(channel, task)
+
+    if run_at_nanos == 0
+        if serialized
+            event_loop_schedule_task_now_serialized!(channel.event_loop, task.wrapper_task)
+        else
+            event_loop_schedule_task_now!(channel.event_loop, task.wrapper_task)
+        end
+    else
+        event_loop_schedule_task_future!(channel.event_loop, task.wrapper_task, run_at_nanos)
+    end
+
+    return nothing
+end
+
+function channel_schedule_task_now!(channel::Channel, task::ChannelTask)
+    return _channel_register_task!(channel, task, UInt64(0); serialized = false)
+end
+
+function channel_schedule_task_now_serialized!(channel::Channel, task::ChannelTask)
+    return _channel_register_task!(channel, task, UInt64(0); serialized = true)
+end
+
+function channel_schedule_task_future!(channel::Channel, task::ChannelTask, run_at_nanos::UInt64)
+    return _channel_register_task!(channel, task, run_at_nanos; serialized = false)
+end
 
 # Check if channel is active
 channel_is_active(channel::Channel) = channel.channel_state == ChannelState.ACTIVE
@@ -342,8 +618,14 @@ end
 function channel_slot_new!(channel::Channel)::ChannelSlot
     slot = ChannelSlot()
     slot.channel = channel
+    slot.window_size = Csize_t(0)
     slot.current_window_update_batch_size = Csize_t(0)
     slot.upstream_message_overhead = Csize_t(0)
+
+    if channel.first === nothing
+        channel.first = slot
+        channel.last = slot
+    end
 
     logf(
         LogLevel.TRACE, LS_IO_CHANNEL,
@@ -354,44 +636,38 @@ function channel_slot_new!(channel::Channel)::ChannelSlot
 end
 
 # Insert slot to the right of another slot
-function channel_slot_insert_right!(slot::ChannelSlot, right_of::ChannelSlot)
-    channel = right_of.channel
+function channel_slot_insert_right!(slot::ChannelSlot, to_add::ChannelSlot)
+    channel = slot.channel
 
-    slot.adj_left = right_of
-    slot.adj_right = right_of.adj_right
-    slot.channel = channel
-
-    if right_of.adj_right !== nothing
-        right_of.adj_right.adj_left = slot
+    to_add.adj_right = slot.adj_right
+    if slot.adj_right !== nothing
+        slot.adj_right.adj_left = to_add
     end
+    slot.adj_right = to_add
+    to_add.adj_left = slot
+    to_add.channel = channel
 
-    right_of.adj_right = slot
-
-    # Update last pointer if needed
-    if channel !== nothing && channel.last === right_of
-        channel.last = slot
+    if channel !== nothing && channel.last === slot
+        channel.last = to_add
     end
 
     return nothing
 end
 
 # Insert slot to the left of another slot
-function channel_slot_insert_left!(slot::ChannelSlot, left_of::ChannelSlot)
-    channel = left_of.channel
+function channel_slot_insert_left!(slot::ChannelSlot, to_add::ChannelSlot)
+    channel = slot.channel
 
-    slot.adj_right = left_of
-    slot.adj_left = left_of.adj_left
-    slot.channel = channel
-
-    if left_of.adj_left !== nothing
-        left_of.adj_left.adj_right = slot
+    to_add.adj_left = slot.adj_left
+    if slot.adj_left !== nothing
+        slot.adj_left.adj_right = to_add
     end
+    slot.adj_left = to_add
+    to_add.adj_right = slot
+    to_add.channel = channel
 
-    left_of.adj_left = slot
-
-    # Update first pointer if needed
-    if channel !== nothing && channel.first === left_of
-        channel.first = slot
+    if channel !== nothing && channel.first === slot
+        channel.first = to_add
     end
 
     return nothing
@@ -401,13 +677,17 @@ end
 function channel_slot_insert_end!(channel::Channel, slot::ChannelSlot)
     slot.channel = channel
 
-    if channel.last === nothing
-        channel.first = slot
-        channel.last = slot
-    else
-        channel_slot_insert_right!(slot, channel.last)
+    if channel.first === nothing || channel.first === slot
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
     end
 
+    if channel.last === nothing
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+
+    channel_slot_insert_right!(channel.last, slot)
     return nothing
 end
 
@@ -415,11 +695,15 @@ end
 function channel_slot_insert_front!(channel::Channel, slot::ChannelSlot)
     slot.channel = channel
 
+    if channel.first === slot
+        return nothing
+    end
+
     if channel.first === nothing
         channel.first = slot
         channel.last = slot
     else
-        channel_slot_insert_left!(slot, channel.first)
+        channel_slot_insert_left!(channel.first, slot)
     end
 
     return nothing
@@ -449,6 +733,15 @@ function channel_slot_remove!(slot::ChannelSlot)
     slot.adj_left = nothing
     slot.adj_right = nothing
     slot.channel = nothing
+
+    if slot.handler !== nothing
+        handler_destroy(slot.handler)
+        slot.handler = nothing
+    end
+
+    if channel !== nothing
+        _channel_calculate_message_overheads!(channel)
+    end
 
     return nothing
 end
@@ -493,10 +786,16 @@ end
 # Set the handler for a slot
 function channel_slot_set_handler!(slot::ChannelSlot, handler::AbstractChannelHandler)
     slot.handler = handler
-    if handler isa ChannelHandlerBase
-        handler.slot = slot
+    if hasproperty(handler, :slot)
+        try
+            setfield!(handler, :slot, slot)
+        catch
+        end
     end
-    return nothing
+    if slot.channel !== nothing
+        _channel_calculate_message_overheads!(slot.channel)
+    end
+    return channel_slot_increment_read_window!(slot, handler_initial_window_size(handler))
 end
 
 # Replace handler in a slot
@@ -529,8 +828,20 @@ function channel_slot_send_message(slot::ChannelSlot, message::IoMessage, direct
             return ErrorResult(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
         end
 
+        if channel.read_back_pressure_enabled && next_slot.window_size < message.message_data.len
+            logf(
+                LogLevel.ERROR, LS_IO_CHANNEL,
+                "Channel id=$(channel.channel_id): read message exceeds window size"
+            )
+            raise_error(ERROR_IO_CHANNEL_READ_WOULD_EXCEED_WINDOW)
+            return ErrorResult(ERROR_IO_CHANNEL_READ_WOULD_EXCEED_WINDOW)
+        end
+
         message.owning_channel = channel
         channel.read_message_count += 1
+        if channel.read_back_pressure_enabled
+            next_slot.window_size = sub_size_saturating(next_slot.window_size, message.message_data.len)
+        end
 
         return handler_process_read_message(next_slot.handler, next_slot, message)
     else
@@ -552,6 +863,38 @@ function channel_slot_send_message(slot::ChannelSlot, message::IoMessage, direct
     end
 end
 
+# Returns downstream read window size for slot
+function channel_slot_downstream_read_window(slot::ChannelSlot)::Csize_t
+    channel = slot.channel
+    if channel === nothing || !channel.read_back_pressure_enabled
+        return SIZE_MAX
+    end
+    next_slot = slot.adj_left
+    if next_slot === nothing
+        return Csize_t(0)
+    end
+    return next_slot.window_size
+end
+
+# Acquire a message sized to max fragment size minus upstream overhead
+function channel_slot_acquire_max_message_for_write(slot::ChannelSlot)
+    channel = slot.channel
+    if channel === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    if !channel_thread_is_callers_thread(channel)
+        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+    end
+    overhead = channel_slot_upstream_message_overhead(slot)
+    if overhead >= g_aws_channel_max_fragment_size[]
+        fatal_assert("Upstream overhead exceeds channel max fragment size", "<unknown>", 0)
+    end
+    size_hint = g_aws_channel_max_fragment_size[] - overhead
+    return channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, size_hint)
+end
+
 # Increment read window (flow control propagation)
 function channel_slot_increment_read_window!(slot::ChannelSlot, size::Csize_t)::Union{Nothing, ErrorResult}
     channel = slot.channel
@@ -560,21 +903,48 @@ function channel_slot_increment_read_window!(slot::ChannelSlot, size::Csize_t)::
         return nothing
     end
 
-    # Propagate to the next slot toward the socket
-    next_slot = slot.adj_right
-    if next_slot === nothing || next_slot.handler === nothing
+    if channel.read_back_pressure_enabled && channel.channel_state != ChannelState.SHUT_DOWN
+        slot.current_window_update_batch_size = add_size_saturating(slot.current_window_update_batch_size, size)
+
+        if !channel.window_update_scheduled && slot.window_size <= channel.window_update_batch_emit_threshold
+            channel.window_update_scheduled = true
+            channel_task_init!(channel.window_update_task, _channel_window_update_task, channel, "window_update_task")
+            channel_schedule_task_now!(channel, channel.window_update_task)
+        end
+    end
+
+    return nothing
+end
+
+function _channel_window_update_task(channel::Channel, status::TaskStatus.T)
+    channel.window_update_scheduled = false
+    status == TaskStatus.RUN_READY || return nothing
+
+    if channel.channel_state == ChannelState.SHUT_DOWN
         return nothing
     end
 
-    # Batch window updates
-    next_slot.current_window_update_batch_size += size
+    slot = channel.first
+    while slot !== nothing && slot.adj_right !== nothing
+        upstream_slot = slot.adj_right
+        if upstream_slot.handler !== nothing
+            slot.window_size = add_size_saturating(slot.window_size, slot.current_window_update_batch_size)
+            update_size = slot.current_window_update_batch_size
+            slot.current_window_update_batch_size = 0
+            res = handler_increment_read_window(upstream_slot.handler, upstream_slot, update_size)
+            if res isa ErrorResult
+                logf(
+                    LogLevel.ERROR, LS_IO_CHANNEL,
+                    "Channel id=$(channel.channel_id): window update failed with error $(res.code)"
+                )
+                channel_shutdown!(channel, res.code)
+                return nothing
+            end
+        end
+        slot = slot.adj_right
+    end
 
-    logf(
-        LogLevel.TRACE, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): slot window increment of $size, batch now $(next_slot.current_window_update_batch_size)"
-    )
-
-    return handler_increment_read_window(next_slot.handler, next_slot, next_slot.current_window_update_batch_size)
+    return nothing
 end
 
 # Get the upstream message overhead for a slot
@@ -602,6 +972,9 @@ end
 
 # Initialize the channel after all handlers are set up
 function channel_setup_complete!(channel::Channel)::Union{Nothing, ErrorResult}
+    if channel.channel_state == ChannelState.ACTIVE
+        return nothing
+    end
     if channel.channel_state != ChannelState.NOT_INITIALIZED && channel.channel_state != ChannelState.SETTING_UP
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL,
@@ -619,11 +992,6 @@ function channel_setup_complete!(channel::Channel)::Union{Nothing, ErrorResult}
     # Calculate message overheads
     _channel_calculate_message_overheads!(channel)
 
-    # Initialize window to the first handler's initial window size
-    if channel.first !== nothing && channel.first.handler !== nothing
-        channel.window = handler_initial_window_size(channel.first.handler)
-    end
-
     channel.channel_state = ChannelState.ACTIVE
 
     # Invoke setup callback
@@ -634,133 +1002,31 @@ function channel_setup_complete!(channel::Channel)::Union{Nothing, ErrorResult}
     return nothing
 end
 
-# Shutdown the channel
-function channel_shutdown!(channel::Channel, direction::ChannelDirection.T, error_code::Int = 0)::Union{Nothing, ErrorResult}
-    if channel.channel_state == ChannelState.SHUT_DOWN
-        logf(
-            LogLevel.DEBUG, LS_IO_CHANNEL,
-            "Channel id=$(channel.channel_id): already shut down"
-        )
+mutable struct ChannelShutdownWriteArgs
+    slot::ChannelSlot
+    error_code::Int
+    shutdown_immediately::Bool
+end
+
+function _channel_shutdown_write_task(args::ChannelShutdownWriteArgs, status::TaskStatus.T)
+    slot = args.slot
+    if slot.handler === nothing
         return nothing
     end
-
-    if channel.channel_state == ChannelState.SHUTTING_DOWN_READ || channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE
-        if (channel.channel_state == ChannelState.SHUTTING_DOWN_READ && direction == ChannelDirection.READ) ||
-                (channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE && direction == ChannelDirection.WRITE) ||
-                (channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE && direction == ChannelDirection.READ)
-            logf(
-                LogLevel.DEBUG, LS_IO_CHANNEL,
-                "Channel id=$(channel.channel_id): already shutting down"
-            )
-            # Only update if error_code is set
-            if error_code != 0 && channel.shutdown_error_code == 0
-                channel.shutdown_error_code = error_code
-            end
-            return nothing
-        end
-    end
-
-    logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): shutting down, direction=$direction, error=$error_code"
-    )
-
-    channel.shutdown_error_code = error_code
-    channel.shutdown_direction = direction
-
-    if direction == ChannelDirection.READ
-        channel.channel_state = ChannelState.SHUTTING_DOWN_READ
-        # Shutdown starts at socket side and propagates left
-        if channel.last !== nothing && channel.last.handler !== nothing
-            handler_shutdown(channel.last.handler, channel.last, direction, error_code)
-        end
-    else
-        channel.channel_state = ChannelState.SHUTTING_DOWN_WRITE
-        # Shutdown starts at application side and propagates right
-        if channel.first !== nothing && channel.first.handler !== nothing
-            handler_shutdown(channel.first.handler, channel.first, direction, error_code)
-        end
-    end
-
+    handler_shutdown(slot.handler, slot, ChannelDirection.WRITE, args.error_code, args.shutdown_immediately)
     return nothing
 end
 
-# Called when a slot completes its shutdown in a direction
-function channel_slot_on_handler_shutdown_complete!(slot::ChannelSlot, direction::ChannelDirection.T, aborted::Bool, propagate_shutdown::Bool)
-    channel = slot.channel
-
-    if channel === nothing
-        return nothing
-    end
-
-    logf(
-        LogLevel.TRACE, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): slot handler shutdown complete, direction=$direction"
-    )
-
-    if !propagate_shutdown
-        return nothing
-    end
-
-    if direction == ChannelDirection.READ
-        # Propagate left (toward application)
-        next_slot = slot.adj_left
-        if next_slot !== nothing && next_slot.handler !== nothing
-            handler_shutdown(next_slot.handler, next_slot, direction, channel.shutdown_error_code)
-        else
-            # Reached end of chain, shutdown complete for read direction
-            _channel_on_shutdown_direction_complete!(channel, direction)
-        end
-    else
-        # Propagate right (toward socket)
-        next_slot = slot.adj_right
-        if next_slot !== nothing && next_slot.handler !== nothing
-            handler_shutdown(next_slot.handler, next_slot, direction, channel.shutdown_error_code)
-        else
-            # Reached end of chain, shutdown complete for write direction
-            _channel_on_shutdown_direction_complete!(channel, direction)
+function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.T)
+    tasks = ChannelTask[]
+    lock(channel.pending_tasks_lock) do
+        for (task, _) in channel.pending_tasks
+            push!(tasks, task)
         end
     end
 
-    return nothing
-end
-
-# Internal - called when shutdown completes in a direction
-function _channel_on_shutdown_direction_complete!(channel::Channel, direction::ChannelDirection.T)
-    logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): shutdown complete for direction $direction"
-    )
-
-    if channel.channel_state == ChannelState.SHUTTING_DOWN_READ && direction == ChannelDirection.READ
-        # Start shutdown in write direction
-        channel_shutdown!(channel, ChannelDirection.WRITE, channel.shutdown_error_code)
-    elseif channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE && direction == ChannelDirection.WRITE
-        # Both directions complete
-        _channel_on_shutdown_complete!(channel)
-    end
-
-    return nothing
-end
-
-# Internal - called when shutdown completes in both directions
-function _channel_on_shutdown_complete!(channel::Channel)
-    logf(
-        LogLevel.INFO, LS_IO_CHANNEL,
-        "Channel id=$(channel.channel_id): shutdown complete, error=$(channel.shutdown_error_code)"
-    )
-
-    channel.channel_state = ChannelState.SHUT_DOWN
-
-    # Destroy all handlers
-    slot = channel.first
-    while slot !== nothing
-        next = slot.adj_right
-        if slot.handler !== nothing
-            handler_destroy(slot.handler)
-            slot.handler = nothing
-        end
-        slot = next
+    for task in tasks
+        event_loop_cancel_task!(channel.event_loop, task.wrapper_task)
     end
 
     if channel.statistics_handler !== nothing
@@ -772,9 +1038,134 @@ function _channel_on_shutdown_complete!(channel::Channel)
         channel.statistics_task = nothing
     end
 
-    # Invoke shutdown callback
     if channel.on_shutdown_completed !== nothing
         Base.invokelatest(channel.on_shutdown_completed, channel, channel.shutdown_error_code, channel.shutdown_user_data)
+    end
+
+    return nothing
+end
+
+function _channel_schedule_shutdown_completion!(channel::Channel)
+    logf(
+        LogLevel.INFO, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): shutdown complete, error=$(channel.shutdown_error_code)"
+    )
+    task = ScheduledTask(_channel_shutdown_completion_task, channel; type_tag = "channel_shutdown_complete")
+    event_loop_schedule_task_now!(channel.event_loop, task)
+    return nothing
+end
+
+function _channel_shutdown_task(task::ChannelTask, channel::Channel, status::TaskStatus.T)
+    if channel.channel_state == ChannelState.SHUT_DOWN ||
+            channel.channel_state == ChannelState.SHUTTING_DOWN_READ ||
+            channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE
+        return nothing
+    end
+
+    channel.channel_state = ChannelState.SHUTTING_DOWN_READ
+
+    slot = channel.last
+    if slot !== nothing && slot.handler !== nothing
+        channel_slot_shutdown!(slot, ChannelDirection.READ, channel.shutdown_error_code, channel.shutdown_immediately)
+        return nothing
+    end
+
+    channel.channel_state = ChannelState.SHUT_DOWN
+    _channel_schedule_shutdown_completion!(channel)
+    return nothing
+end
+
+# Shutdown the channel
+function channel_shutdown!(channel::Channel, error_code::Int = 0; shutdown_immediately::Bool = false)::Union{Nothing, ErrorResult}
+    if channel.channel_state == ChannelState.SHUT_DOWN ||
+            channel.channel_state == ChannelState.SHUTTING_DOWN_READ ||
+            channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE ||
+            channel.shutdown_pending
+        return nothing
+    end
+
+    channel.shutdown_error_code = error_code
+    channel.shutdown_immediately = shutdown_immediately
+    channel.shutdown_pending = true
+
+    channel_task_init!(channel.shutdown_task, _channel_shutdown_task, channel, "channel_shutdown")
+    channel_schedule_task_now!(channel, channel.shutdown_task)
+    return nothing
+end
+
+# Shutdown a handler slot
+function channel_slot_shutdown!(
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Union{Nothing, ErrorResult}
+    if slot.handler === nothing
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    return handler_shutdown(slot.handler, slot, direction, error_code, free_scarce_resources_immediately)
+end
+
+# Called when a slot completes its shutdown in a direction
+function channel_slot_on_handler_shutdown_complete!(
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )
+    channel = slot.channel
+
+    if channel === nothing
+        return nothing
+    end
+
+    logf(
+        LogLevel.TRACE, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): slot handler shutdown complete, direction=$direction"
+    )
+
+    if channel.channel_state == ChannelState.SHUT_DOWN
+        return nothing
+    end
+
+    if error_code != 0 && channel.shutdown_error_code == 0
+        channel.shutdown_error_code = error_code
+    end
+
+    if direction == ChannelDirection.READ
+        next_slot = slot.adj_left
+        if next_slot !== nothing && next_slot.handler !== nothing
+            return handler_shutdown(
+                next_slot.handler,
+                next_slot,
+                direction,
+                error_code,
+                free_scarce_resources_immediately,
+            )
+        end
+
+        channel.channel_state = ChannelState.SHUTTING_DOWN_WRITE
+        write_args = ChannelShutdownWriteArgs(slot, error_code, free_scarce_resources_immediately)
+        write_task = ScheduledTask(_channel_shutdown_write_task, write_args; type_tag = "channel_shutdown_write")
+        event_loop_schedule_task_now!(channel.event_loop, write_task)
+        return nothing
+    end
+
+    next_slot = slot.adj_right
+    if next_slot !== nothing && next_slot.handler !== nothing
+        return handler_shutdown(
+            next_slot.handler,
+            next_slot,
+            direction,
+            error_code,
+            free_scarce_resources_immediately,
+        )
+    end
+
+    if slot === channel.last
+        channel.channel_state = ChannelState.SHUT_DOWN
+        _channel_schedule_shutdown_completion!(channel)
     end
 
     return nothing
@@ -784,10 +1175,16 @@ end
 function channel_acquire_message_from_pool(channel::Channel, message_type::IoMessageType.T, size_hint::Integer)::Union{IoMessage, Nothing}
     if channel.message_pool === nothing
         # No pool, create directly
-        return IoMessage(size_hint)
+        message = IoMessage(size_hint)
+        message.owning_channel = channel
+        return message
     end
 
-    return message_pool_acquire(channel.message_pool, message_type, size_hint)
+    message = message_pool_acquire(channel.message_pool, message_type, size_hint)
+    if message !== nothing
+        message.owning_channel = channel
+    end
+    return message
 end
 
 # Release a message back to the channel's message pool
@@ -798,6 +1195,64 @@ function channel_release_message_to_pool!(channel::Channel, message::IoMessage)
     end
 
     return message_pool_release!(channel.message_pool, message)
+end
+
+function _channel_destroy_impl!(channel::Channel)
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL,
+        "Channel id=$(channel.channel_id): destroying channel"
+    )
+
+    slot = channel.first
+    if slot === nothing || slot.handler === nothing
+        channel.channel_state = ChannelState.SHUT_DOWN
+    end
+
+    if channel.channel_state != ChannelState.SHUT_DOWN
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL,
+            "Channel id=$(channel.channel_id): destroy called before shutdown complete"
+        )
+        return nothing
+    end
+
+    while slot !== nothing
+        next = slot.adj_right
+        if slot.handler !== nothing
+            handler_destroy(slot.handler)
+            slot.handler = nothing
+        end
+        slot.adj_left = nothing
+        slot.adj_right = nothing
+        slot.channel = nothing
+        slot = next
+    end
+
+    clear!(channel.statistics_list)
+    if channel.statistics_handler !== nothing
+        close!(channel.statistics_handler)
+        channel.statistics_handler = nothing
+        channel.statistics_task = nothing
+    end
+
+    event_loop_group_release_from_event_loop!(channel.event_loop)
+    channel.first = nothing
+    channel.last = nothing
+    return nothing
+end
+
+function _channel_destroy_task(channel::Channel, status::TaskStatus.T)
+    _channel_destroy_impl!(channel)
+    return nothing
+end
+
+function channel_destroy!(channel::Channel)
+    if channel_thread_is_callers_thread(channel)
+        return _channel_destroy_impl!(channel)
+    end
+    task = ScheduledTask(_channel_destroy_task, channel; type_tag = "channel_destroy")
+    event_loop_schedule_task_now!(channel.event_loop, task)
+    return nothing
 end
 
 # Helper struct for simple passthrough handler
@@ -832,8 +1287,14 @@ function handler_increment_read_window(handler::PassthroughHandler, slot::Channe
     return channel_slot_increment_read_window!(slot, size)
 end
 
-function handler_shutdown(handler::PassthroughHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int)::Union{Nothing, ErrorResult}
-    channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
+function handler_shutdown(
+        handler::PassthroughHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Union{Nothing, ErrorResult}
+    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end
 

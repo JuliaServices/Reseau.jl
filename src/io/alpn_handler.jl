@@ -74,8 +74,14 @@ function handler_increment_read_window(handler::AlpnHandler, slot::ChannelSlot, 
     return ErrorResult(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
 end
 
-function handler_shutdown(handler::AlpnHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int)::Union{Nothing, ErrorResult}
-    channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
+function handler_shutdown(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Union{Nothing, ErrorResult}
+    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end
 

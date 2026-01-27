@@ -145,20 +145,20 @@ Legend:
 ## 4) Channel pipeline + handlers
 
 ### 4.1 Channel core
-- [ ] Implement channel options parity (enable_read_back_pressure)
-- [ ] Implement channel holds/lifecycle semantics without refcount (GC/finalizers + explicit shutdown)
-- [ ] Max fragment size handling parity (`g_aws_channel_max_fragment_size` equivalent)
-- [ ] Window management + read back pressure parity
-- [ ] Cross-thread task scheduling semantics parity
-- [ ] Shutdown sequencing parity (left-to-right read, right-to-left write)
+- [x] Implement channel options parity (enable_read_back_pressure)
+- [x] Implement channel holds/lifecycle semantics without refcount (GC/finalizers + explicit shutdown)
+- [x] Max fragment size handling parity (`g_aws_channel_max_fragment_size` equivalent)
+- [x] Window management + read back pressure parity
+- [x] Cross-thread task scheduling semantics parity
+- [x] Shutdown sequencing parity (left-to-right read, right-to-left write)
 
 ### 4.2 Channel task API
-- [ ] Implement channel task wrapper parity (`aws_channel_task_init`, task_fn signature)
-- [ ] Ensure task execution semantics match aws-c-io (including cancellation)
+- [x] Implement channel task wrapper parity (`aws_channel_task_init`, task_fn signature)
+- [x] Ensure task execution semantics match aws-c-io (including cancellation)
 
 ### 4.3 Socket channel handler
 - [ ] Validate read/write flow-control and fragmenting behavior parity
-- [ ] Ensure trigger_read behavior matches aws-c-io semantics
+- [x] Ensure trigger_read behavior matches aws-c-io semantics
 - [x] Implement statistics hooks (see Statistics section)
 
 ### 4.4 ALPN handler
@@ -426,7 +426,7 @@ Legend:
 - [ ] `event_loop_test.c` -> `test/event_loop_tests.jl` (extend)
 - [ ] `socket_test.c` -> `test/socket_tests.jl` (extend)
 - [ ] `socket_handler_test.c` -> new `test/socket_handler_tests.jl`
-- [ ] `channel_test.c` -> new `test/channel_tests.jl`
+- [x] `channel_test.c` -> new `test/channel_tests.jl`
 - [ ] `io_testing_channel_test.c` -> new `test/io_testing_channel_tests.jl`
 - [ ] `pipe_test.c` -> new `test/pipe_tests.jl`
 - [x] `shared_library_test.c` -> new `test/shared_library_tests.jl`

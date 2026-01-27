@@ -55,7 +55,9 @@ end
     )
 
     slot = AwsIO.channel_slot_new!(channel)
-    AwsIO.channel_slot_insert_front!(channel, slot)
+    if AwsIO.channel_first_slot(channel) !== slot
+        AwsIO.channel_slot_insert_front!(channel, slot)
+    end
 
     args = AlpnNegotiationArgs()
     on_protocol = (new_slot, protocol, user_data) -> begin
@@ -87,7 +89,7 @@ end
     @test channel.last === args.new_slot
     @test args.new_handler !== nothing
 
-    AwsIO.channel_shutdown!(channel, AwsIO.ChannelDirection.READ, AwsIO.AWS_OP_SUCCESS)
+    AwsIO.channel_shutdown!(channel, AwsIO.AWS_OP_SUCCESS)
     @test wait_for_flag_alpn(shutdown_done)
     AwsIO.event_loop_group_destroy!(elg)
 end
@@ -103,7 +105,9 @@ end
 
     channel = AwsIO.Channel(event_loop, nothing)
     slot = AwsIO.channel_slot_new!(channel)
-    AwsIO.channel_slot_insert_front!(channel, slot)
+    if AwsIO.channel_first_slot(channel) !== slot
+        AwsIO.channel_slot_insert_front!(channel, slot)
+    end
 
     args = AlpnNegotiationArgs()
     handler = AwsIO.tls_alpn_handler_new((new_slot, protocol, ud) -> AwsIO.PassthroughHandler(), args)
@@ -117,7 +121,7 @@ end
     @test res isa AwsIO.ErrorResult
     res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_MISSING_ALPN_MESSAGE
 
-    AwsIO.channel_shutdown!(channel, AwsIO.ChannelDirection.READ, AwsIO.AWS_OP_SUCCESS)
+    AwsIO.channel_shutdown!(channel, AwsIO.AWS_OP_SUCCESS)
     AwsIO.event_loop_group_destroy!(elg)
 end
 
@@ -132,7 +136,9 @@ end
 
     channel = AwsIO.Channel(event_loop, nothing)
     slot = AwsIO.channel_slot_new!(channel)
-    AwsIO.channel_slot_insert_front!(channel, slot)
+    if AwsIO.channel_first_slot(channel) !== slot
+        AwsIO.channel_slot_insert_front!(channel, slot)
+    end
 
     handler = AwsIO.tls_alpn_handler_new((new_slot, protocol, ud) -> nothing, nothing)
     AwsIO.channel_slot_set_handler!(slot, handler)
@@ -147,6 +153,6 @@ end
     @test res isa AwsIO.ErrorResult
     res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE
 
-    AwsIO.channel_shutdown!(channel, AwsIO.ChannelDirection.READ, AwsIO.AWS_OP_SUCCESS)
+    AwsIO.channel_shutdown!(channel, AwsIO.AWS_OP_SUCCESS)
     AwsIO.event_loop_group_destroy!(elg)
 end

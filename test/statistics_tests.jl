@@ -104,7 +104,9 @@ end
         handler = TestStatsChannelHandler()
         slot = AwsIO.channel_slot_new!(channel)
         AwsIO.channel_slot_set_handler!(slot, handler)
-        AwsIO.channel_slot_insert_end!(channel, slot)
+        if AwsIO.channel_first_slot(channel) !== slot
+            AwsIO.channel_slot_insert_end!(channel, slot)
+        end
 
         results = Channel{Tuple{AwsIO.StatisticsSampleInterval, Vector{Any}}}(1)
         stats_handler = TestStatisticsHandler(UInt64(50), results)

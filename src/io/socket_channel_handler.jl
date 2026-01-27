@@ -165,7 +165,7 @@ function _on_socket_write_complete(socket, error_code::Int, bytes_written::Csize
     # If error, trigger shutdown
     if error_code != AWS_OP_SUCCESS && handler.shutdown_state == SocketHandlerShutdownState.NONE
         if handler.slot !== nothing
-            channel_shutdown!(handler.slot.channel, ChannelDirection.WRITE, error_code)
+            channel_shutdown!(handler.slot.channel, error_code)
         end
     end
 
@@ -190,7 +190,13 @@ function handler_increment_read_window(handler::SocketChannelHandler, slot::Chan
 end
 
 # Shutdown handler
-function handler_shutdown(handler::SocketChannelHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int)::Union{Nothing, ErrorResult}
+function handler_shutdown(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Union{Nothing, ErrorResult}
     socket = handler.socket
 
     logf(
@@ -199,6 +205,7 @@ function handler_shutdown(handler::SocketChannelHandler, slot::ChannelSlot, dire
     )
 
     handler.shutdown_error_code = error_code
+    handler.shutdown_immediately = free_scarce_resources_immediately
 
     if direction == ChannelDirection.READ
         if handler.shutdown_state >= SocketHandlerShutdownState.SHUTTING_DOWN_READ
@@ -213,7 +220,7 @@ function handler_shutdown(handler::SocketChannelHandler, slot::ChannelSlot, dire
 
         # Complete read shutdown
         handler.shutdown_state = SocketHandlerShutdownState.SHUT_DOWN_READ
-        channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
+        channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
 
     else  # WRITE
         if handler.shutdown_state >= SocketHandlerShutdownState.SHUTTING_DOWN_WRITE
@@ -227,7 +234,7 @@ function handler_shutdown(handler::SocketChannelHandler, slot::ChannelSlot, dire
 
         # Complete write shutdown
         handler.shutdown_state = SocketHandlerShutdownState.SHUT_DOWN_WRITE
-        channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
+        channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
 
         # If both directions are done, mark complete
         if handler.shutdown_state == SocketHandlerShutdownState.SHUT_DOWN_WRITE
@@ -241,6 +248,11 @@ end
 # Trigger handler to process pending writes
 function handler_trigger_write(handler::SocketChannelHandler)::Nothing
     # Socket handler doesn't batch writes, so nothing to do
+    return nothing
+end
+
+function handler_trigger_read(handler::SocketChannelHandler)::Nothing
+    _socket_handler_trigger_read(handler)
     return nothing
 end
 
@@ -309,7 +321,7 @@ function _on_socket_readable(socket, error_code::Int, user_data)
         )
 
         if handler.slot !== nothing && handler.slot.channel !== nothing
-            channel_shutdown!(handler.slot.channel, ChannelDirection.READ, error_code)
+            channel_shutdown!(handler.slot.channel, error_code)
         end
         return nothing
     end
@@ -384,7 +396,7 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
         handler.reads_in_progress -= 1
 
         # Trigger shutdown on error
-        channel_shutdown!(channel, ChannelDirection.READ, read_result.code)
+        channel_shutdown!(channel, read_result.code)
         return nothing
     end
 
@@ -416,7 +428,7 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
         )
         channel_release_message_to_pool!(channel, message)
         handler.reads_in_progress -= 1
-        channel_shutdown!(channel, ChannelDirection.READ, send_result.code)
+        channel_shutdown!(channel, send_result.code)
         return nothing
     end
 
@@ -447,7 +459,9 @@ function socket_channel_handler_new!(
 
     # Create slot and add to channel (at the socket end / right side)
     slot = channel_slot_new!(channel)
-    channel_slot_insert_end!(channel, slot)
+    if channel.first !== slot
+        channel_slot_insert_end!(channel, slot)
+    end
     channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 

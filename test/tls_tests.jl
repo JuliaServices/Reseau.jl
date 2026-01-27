@@ -110,7 +110,9 @@ end
 
         echo = EchoHandler(server_received)
         echo_slot = AwsIO.channel_slot_new!(channel)
-        AwsIO.channel_slot_insert_front!(channel, echo_slot)
+        if AwsIO.channel_first_slot(channel) !== echo_slot
+            AwsIO.channel_slot_insert_front!(channel, echo_slot)
+        end
         AwsIO.channel_slot_set_handler!(echo_slot, echo)
         echo.slot = echo_slot
 

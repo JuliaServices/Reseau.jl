@@ -409,6 +409,7 @@
     function event_loop_schedule_task_now!(event_loop::DispatchQueueEventLoop, task::ScheduledTask)
         dispatch_loop = event_loop.impl_data
         task.timestamp = UInt64(0)
+        task.scheduled = true
         _dispatch_lock(dispatch_loop)
         push_back!(dispatch_loop.synced_data.cross_thread_tasks, task)
         _dispatch_try_schedule_new_iteration!(dispatch_loop, UInt64(0))
@@ -427,6 +428,7 @@
         )
         dispatch_loop = event_loop.impl_data
         task.timestamp = run_at_nanos
+        task.scheduled = true
         _dispatch_lock(dispatch_loop)
         push_back!(dispatch_loop.synced_data.cross_thread_tasks, task)
         _dispatch_try_schedule_new_iteration!(dispatch_loop, run_at_nanos)
@@ -438,20 +440,20 @@
         dispatch_loop = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "dispatch queue cancelling %s task", task.type_tag)
 
-        local_cross_thread = Deque{ScheduledTask}(16)
+        if !task.scheduled
+            return nothing
+        end
+
+        removed = false
         _dispatch_lock(dispatch_loop)
-        local_cross_thread = dispatch_loop.synced_data.cross_thread_tasks
-        dispatch_loop.synced_data.cross_thread_tasks = Deque{ScheduledTask}(16)
+        if !isempty(dispatch_loop.synced_data.cross_thread_tasks)
+            removed = remove!(dispatch_loop.synced_data.cross_thread_tasks, task; eq = (===))
+        end
         _dispatch_unlock(dispatch_loop)
 
-        while !isempty(local_cross_thread)
-            task_local = pop_front!(local_cross_thread)
-            task_local === nothing && break
-            if task_local.timestamp == 0
-                task_scheduler_schedule_now!(dispatch_loop.scheduler, task_local)
-            else
-                task_scheduler_schedule_future!(dispatch_loop.scheduler, task_local, task_local.timestamp)
-            end
+        if removed
+            task_run!(task, TaskStatus.CANCELED)
+            return nothing
         end
 
         task_scheduler_cancel!(dispatch_loop.scheduler, task)

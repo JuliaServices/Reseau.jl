@@ -100,14 +100,20 @@ function task_scheduler_schedule_future!(scheduler::TaskScheduler, task::Schedul
 end
 
 function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)
+    if !task.scheduled
+        return nothing
+    end
+
     removed = false
     if !isempty(scheduler.asap)
         removed = remove!(scheduler.asap, task; eq = (===))
     end
     if !removed
-        remove!(scheduler.timed, task; eq = (===))
+        removed = remove!(scheduler.timed, task; eq = (===))
     end
-    task_run!(task, TaskStatus.CANCELED)
+    if removed
+        task_run!(task, TaskStatus.CANCELED)
+    end
     return nothing
 end
 
