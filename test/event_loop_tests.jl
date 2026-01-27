@@ -264,6 +264,73 @@ const _dispatch_queue_setter_c =
         end
     end
 
+    @testset "Event loop group thread affinity" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 2
+                @test true
+            else
+                opts = AwsIO.EventLoopGroupOptions(loop_count = 2)
+                elg = AwsIO.event_loop_group_new(opts)
+                @test !(elg isa AwsIO.ErrorResult)
+
+                if !(elg isa AwsIO.ErrorResult)
+                    try
+                        loop1 = AwsIO.event_loop_group_get_next_loop(elg)
+                        loop2 = AwsIO.event_loop_group_get_next_loop(elg)
+
+                        @test loop1 !== loop2
+
+                        ids1 = Int[]
+                        ids2 = Int[]
+                        lock = ReentrantLock()
+                        done_ch = Channel{Nothing}(1)
+                        done_count = Ref(0)
+                        total = 4
+
+                        task_fn = (ctx, status) -> begin
+                            Base.lock(lock) do
+                                push!(ctx.ids, Threads.threadid())
+                                done_count[] += 1
+                                if done_count[] == total
+                                    put!(done_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end
+
+                        for _ in 1:2
+                            task1 = AwsIO.ScheduledTask(task_fn, (ids = ids1,); type_tag = "elg_affinity")
+                            AwsIO.event_loop_schedule_task_now!(loop1, task1)
+
+                            task2 = AwsIO.ScheduledTask(task_fn, (ids = ids2,); type_tag = "elg_affinity")
+                            AwsIO.event_loop_schedule_task_now!(loop2, task2)
+                        end
+
+                        deadline = Base.time_ns() + 3_000_000_000
+                        while !isready(done_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
+
+                        @test isready(done_ch)
+                        isready(done_ch) && take!(done_ch)
+
+                        Base.lock(lock) do
+                            @test !isempty(ids1)
+                            @test !isempty(ids2)
+                            @test all(==(ids1[1]), ids1)
+                            @test all(==(ids2[1]), ids2)
+                        end
+                    finally
+                        AwsIO.event_loop_group_destroy!(elg)
+                    end
+                end
+            end
+        end
+    end
+
     @testset "Event loop serialized ordering" begin
         if Sys.iswindows()
             @test true

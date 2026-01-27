@@ -99,7 +99,7 @@ Legend:
 ### 2.6 Threading constraints
 - [x] Document required Julia startup flags for parity behavior
 - [x] Pin event-loop tasks to non-main interactive threads (sticky) to avoid main-thread blocking
-- [ ] Verify multi-loop scheduling guarantees with Julia tasks
+- [x] Verify multi-loop scheduling guarantees with Julia tasks
 
 ---
 
