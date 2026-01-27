@@ -529,8 +529,8 @@ function tls_ctx_options_init_client_mtls_with_custom_key_operations(
     )::Union{TlsContextOptions, ErrorResult}
     _ = custom_key_op_handler
     _ = cert
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    raise_error(ERROR_UNIMPLEMENTED)
+    return ErrorResult(ERROR_UNIMPLEMENTED)
 end
 
 function tls_ctx_options_init_client_mtls_with_pkcs11(

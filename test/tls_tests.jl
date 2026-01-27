@@ -149,6 +149,17 @@ end
     end
 end
 
+@testset "TLS ctx options custom key ops" begin
+    res = AwsIO.tls_ctx_options_init_client_mtls_with_custom_key_operations(
+        nothing,
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+    )
+    @test res isa AwsIO.ErrorResult
+    if res isa AwsIO.ErrorResult
+        @test res.code == AwsIO.ERROR_UNIMPLEMENTED
+    end
+end
+
 @testset "TLS timeout task" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
