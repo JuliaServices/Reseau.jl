@@ -24,6 +24,7 @@ struct ClientBootstrapOptions{
 }
     event_loop_group::ELG
     host_resolver::HR
+    host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SO
     tls_connection_options::TO
     on_protocol_negotiated::FP
@@ -36,6 +37,7 @@ end
 function ClientBootstrapOptions(;
         event_loop_group,
         host_resolver,
+        host_resolution_config = nothing,
         socket_options::SocketOptions = SocketOptions(),
         tls_connection_options = nothing,
         on_protocol_negotiated = nothing,
@@ -47,6 +49,7 @@ function ClientBootstrapOptions(;
     return ClientBootstrapOptions(
         event_loop_group,
         host_resolver,
+        host_resolution_config,
         socket_options,
         tls_connection_options,
         on_protocol_negotiated,
@@ -70,6 +73,7 @@ mutable struct ClientBootstrap{
 }
     event_loop_group::ELG
     host_resolver::HR
+    host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
     tls_connection_options::TO
     on_protocol_negotiated::FP
@@ -87,6 +91,7 @@ function ClientBootstrap(
     bootstrap = CBT(
         options.event_loop_group,
         options.host_resolver,
+        options.host_resolution_config,
         options.socket_options,
         options.tls_connection_options,
         options.on_protocol_negotiated,
@@ -142,6 +147,7 @@ function client_bootstrap_connect!(
         user_data = bootstrap.user_data,
         enable_read_back_pressure::Bool = false,
         requested_event_loop::Union{AbstractEventLoop, Nothing} = nothing,
+        host_resolution_config::Union{HostResolutionConfig, Nothing} = bootstrap.host_resolution_config,
     )::Union{Nothing, ErrorResult}
     if @atomic bootstrap.shutdown
         raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
@@ -184,6 +190,7 @@ function client_bootstrap_connect!(
         host_str,
         (resolver, host, error_code, addresses) -> _on_host_resolved(request, error_code, addresses),
         request,
+        resolution_config = host_resolution_config,
     )
 
     if resolve_result isa ErrorResult
