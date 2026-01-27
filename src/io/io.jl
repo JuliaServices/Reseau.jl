@@ -611,6 +611,35 @@ function io_error_code_is_retryable(error_code::Integer)::Bool
         error_code == ERROR_IO_TLS_NEGOTIATION_TIMEOUT
 end
 
+function io_error_code_is_tls(error_code::Integer)::Bool
+    return error_code == ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE ||
+        error_code == ERROR_IO_TLS_ERROR_NOT_NEGOTIATED ||
+        error_code == ERROR_IO_TLS_ERROR_WRITE_FAILURE ||
+        error_code == ERROR_IO_TLS_ERROR_ALERT_RECEIVED ||
+        error_code == ERROR_IO_TLS_CTX_ERROR ||
+        error_code == ERROR_IO_TLS_VERSION_UNSUPPORTED ||
+        error_code == ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED ||
+        error_code == ERROR_IO_TLS_NEGOTIATION_TIMEOUT ||
+        error_code == ERROR_IO_TLS_ALERT_NOT_GRACEFUL ||
+        error_code == ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED ||
+        error_code == ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED ||
+        error_code == ERROR_IO_TLS_ERROR_READ_FAILURE ||
+        error_code == ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE ||
+        error_code == ERROR_IO_TLS_NO_ROOT_CERTIFICATE_FOUND ||
+        error_code == ERROR_IO_TLS_CERTIFICATE_EXPIRED ||
+        error_code == ERROR_IO_TLS_CERTIFICATE_NOT_YET_VALID ||
+        error_code == ERROR_IO_TLS_BAD_CERTIFICATE ||
+        error_code == ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED ||
+        error_code == ERROR_IO_TLS_BAD_PEER_CERTIFICATE ||
+        error_code == ERROR_IO_TLS_PEER_CERTIFICATE_REVOKED ||
+        error_code == ERROR_IO_TLS_PEER_CERTIFICATE_UNKNOWN ||
+        error_code == ERROR_IO_TLS_INTERNAL_ERROR ||
+        error_code == ERROR_IO_TLS_CLOSED_GRACEFUL ||
+        error_code == ERROR_IO_TLS_CLOSED_ABORT ||
+        error_code == ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN ||
+        error_code == ERROR_IO_TLS_HOST_NAME_MISMATCH
+end
+
 # Include tracing hooks (no-op)
 include("tracing.jl")
 

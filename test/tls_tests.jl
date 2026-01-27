@@ -100,6 +100,12 @@ end
     @test conn_copy.timeout_ms == conn.timeout_ms
 end
 
+@testset "TLS error code predicate" begin
+    @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+    @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH)
+    @test !AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_SOCKET_TIMEOUT)
+end
+
 @testset "TLS ctx options mtls" begin
     opts = AwsIO.tls_ctx_options_init_client_mtls(
         AwsIO.ByteCursor(TEST_PEM_CERT),
