@@ -289,7 +289,12 @@ end
 
 # Load factor for load balancing
 const LOAD_FACTOR_SLIDING_WINDOW_SIZE = 64
-const LOAD_FACTOR_FLUSH_INTERVAL_NS = UInt64(1_000_000)  # 1ms
+const LOAD_FACTOR_FLUSH_INTERVAL_SECS = UInt64(1)
+const LOAD_FACTOR_STALE_SECS = UInt64(10)
+
+@inline function _clock_nanos_to_secs(nanos::UInt64)::UInt64
+    return nanos ÷ UInt64(1_000_000_000)
+end
 
 function event_loop_register_tick_start!(event_loop::EventLoop)
     current_time = event_loop.clock()
@@ -299,19 +304,35 @@ end
 function event_loop_register_tick_end!(event_loop::EventLoop)
     current_time = event_loop.clock()
     latency = current_time - event_loop.latest_tick_start
-    event_loop.current_tick_latency_sum += latency
 
-    next_flush = @atomic event_loop.next_flush_time
-    return if current_time >= next_flush
-        # Calculate new load factor
-        new_load = event_loop.current_tick_latency_sum
-        @atomic event_loop.current_load_factor = new_load
+    # Saturating add into current_tick_latency_sum
+    latency_sz = Csize_t(min(latency, UInt64(typemax(Csize_t))))
+    if event_loop.current_tick_latency_sum > typemax(Csize_t) - latency_sz
+        event_loop.current_tick_latency_sum = typemax(Csize_t)
+    else
+        event_loop.current_tick_latency_sum += latency_sz
+    end
+
+    event_loop.latest_tick_start = UInt64(0)
+
+    next_flush_secs = @atomic event_loop.next_flush_time
+    end_tick_secs = _clock_nanos_to_secs(current_time)
+    return if end_tick_secs > next_flush_secs
+        @atomic event_loop.current_load_factor = event_loop.current_tick_latency_sum
         event_loop.current_tick_latency_sum = 0
-        @atomic event_loop.next_flush_time = current_time + LOAD_FACTOR_FLUSH_INTERVAL_NS
+        @atomic event_loop.next_flush_time = end_tick_secs + LOAD_FACTOR_FLUSH_INTERVAL_SECS
     end
 end
 
 function event_loop_get_load_factor(event_loop::EventLoop)::Csize_t
+    current_time = event_loop.clock()
+    current_time_secs = _clock_nanos_to_secs(current_time)
+    next_flush_secs = @atomic event_loop.next_flush_time
+
+    if current_time_secs > next_flush_secs + LOAD_FACTOR_STALE_SECS
+        return Csize_t(0)
+    end
+
     return @atomic event_loop.current_load_factor
 end
 
@@ -326,16 +347,16 @@ function event_loop_new(options::EventLoopOptions)::Union{EventLoop, ErrorResult
         @static if Sys.islinux()
             return event_loop_new_with_epoll(options)
         else
-            return ErrorResult(raise_error(ERROR_UNSUPPORTED_OPERATION))
+            return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
         end
     elseif el_type == EventLoopType.KQUEUE
         @static if Sys.isapple() || Sys.isbsd()
             return event_loop_new_with_kqueue(options)
         else
-            return ErrorResult(raise_error(ERROR_UNSUPPORTED_OPERATION))
+            return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
         end
     else
-        return ErrorResult(raise_error(ERROR_UNSUPPORTED_OPERATION))
+        return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
     end
 end
 
@@ -350,7 +371,8 @@ end
 function event_loop_group_new(options::EventLoopGroupOptions)
     loop_count = options.loop_count
     if loop_count == 0
-        loop_count = UInt16(Sys.CPU_THREADS)
+        processor_count = Sys.CPU_THREADS
+        loop_count = UInt16(processor_count > 1 ? processor_count ÷ 2 : processor_count)
     end
 
     interactive_threads = Threads.nthreads(:interactive)
@@ -436,7 +458,10 @@ function event_loop_group_destroy!(elg::EventLoopGroup)
     end
     clear!(elg.event_loops)
     if elg.shutdown_options !== nothing
-        Base.invokelatest(elg.shutdown_options.shutdown_callback_fn)
+        Base.invokelatest(
+            elg.shutdown_options.shutdown_callback_fn,
+            elg.shutdown_options.shutdown_callback_user_data,
+        )
     end
     return nothing
 end

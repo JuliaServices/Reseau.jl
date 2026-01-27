@@ -82,4 +82,23 @@ using AwsIO
             end
         end
     end
+
+    @testset "Event loop load factor" begin
+        times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
+        idx = Ref(0)
+        clock = () -> begin
+            idx[] += 1
+            return idx[] <= length(times) ? times[idx[]] : times[end]
+        end
+
+        struct DummyImpl end
+        el = AwsIO.EventLoop(clock, DummyImpl())
+
+        AwsIO.event_loop_register_tick_start!(el)
+        AwsIO.event_loop_register_tick_end!(el)
+
+        # Force stale state and confirm load factor reports 0
+        @atomic el.next_flush_time = UInt64(0)
+        @test AwsIO.event_loop_get_load_factor(el) == 0
+    end
 end
