@@ -48,8 +48,14 @@ function AwsIO.handler_increment_read_window(handler::EchoHandler, slot::AwsIO.C
     return AwsIO.channel_slot_increment_read_window!(slot, size)
 end
 
-function AwsIO.handler_shutdown(handler::EchoHandler, slot::AwsIO.ChannelSlot, direction::AwsIO.ChannelDirection.T, error_code::Int)
-    AwsIO.channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
+function AwsIO.handler_shutdown(
+        handler::EchoHandler,
+        slot::AwsIO.ChannelSlot,
+        direction::AwsIO.ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )
+    AwsIO.channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end
 

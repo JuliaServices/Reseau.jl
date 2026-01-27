@@ -157,7 +157,7 @@ Legend:
 - [x] Ensure task execution semantics match aws-c-io (including cancellation)
 
 ### 4.3 Socket channel handler
-- [ ] Validate read/write flow-control and fragmenting behavior parity
+- [x] Validate read/write flow-control and fragmenting behavior parity
 - [x] Ensure trigger_read behavior matches aws-c-io semantics
 - [x] Implement statistics hooks (see Statistics section)
 
@@ -425,7 +425,7 @@ Legend:
 
 - [ ] `event_loop_test.c` -> `test/event_loop_tests.jl` (extend)
 - [ ] `socket_test.c` -> `test/socket_tests.jl` (extend)
-- [ ] `socket_handler_test.c` -> new `test/socket_handler_tests.jl`
+- [x] `socket_handler_test.c` -> new `test/socket_handler_tests.jl`
 - [x] `channel_test.c` -> new `test/channel_tests.jl`
 - [ ] `io_testing_channel_test.c` -> new `test/io_testing_channel_tests.jl`
 - [ ] `pipe_test.c` -> new `test/pipe_tests.jl`

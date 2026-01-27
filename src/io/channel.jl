@@ -916,7 +916,8 @@ function channel_slot_increment_read_window!(slot::ChannelSlot, size::Csize_t)::
     return nothing
 end
 
-function _channel_window_update_task(channel::Channel, status::TaskStatus.T)
+function _channel_window_update_task(task::ChannelTask, channel::Channel, status::TaskStatus.T)
+    _ = task
     channel.window_update_scheduled = false
     status == TaskStatus.RUN_READY || return nothing
 
