@@ -100,6 +100,12 @@ end
     @test conn_copy.timeout_ms == conn.timeout_ms
 end
 
+@testset "TLS static state" begin
+    AwsIO.tls_init_static_state()
+    @test !AwsIO.is_using_secitem()
+    AwsIO.tls_clean_up_static_state()
+end
+
 @testset "TLS error code predicate" begin
     @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
     @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH)

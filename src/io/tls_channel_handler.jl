@@ -128,6 +128,7 @@ end
 
 const _tls_cal_init_lock = ReentrantLock()
 const _tls_cal_initialized = Ref(false)
+const _tls_use_secitem = Ref(false)
 
 function _tls_cal_init_once()
     _tls_cal_initialized[] && return nothing
@@ -139,6 +140,17 @@ function _tls_cal_init_once()
     end
     return nothing
 end
+
+function tls_init_static_state()
+    _tls_cal_init_once()
+    return nothing
+end
+
+function tls_clean_up_static_state()
+    return nothing
+end
+
+is_using_secitem() = _tls_use_secitem[]
 
 @inline function _tls_options_buf_is_set(buf::ByteBuffer)::Bool
     return buf.len > 0
