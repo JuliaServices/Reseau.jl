@@ -174,13 +174,13 @@ Legend:
 ### 5.1 Client bootstrap
 - [ ] Implement full aws-c-io client bootstrap options (host resolution config, protocol negotiation callback)
 - [x] Support requested event loop and event loop group constraints
-- [ ] TLS integration: add TLS handler at setup and block setup completion until negotiated
+- [x] TLS integration: add TLS handler at setup and block setup completion until negotiated
 - [x] Provide creation/setup/shutdown callbacks parity
 
 ### 5.2 Server bootstrap
 - [x] Listener setup callbacks (async listener for Apple Network Framework)
 - [x] Accept channel setup/shutdown callbacks parity
-- [ ] TLS integration on accepted sockets
+- [x] TLS integration on accepted sockets
 - [ ] Shutdown semantics parity (listener teardown + inflight channels)
 
 ---

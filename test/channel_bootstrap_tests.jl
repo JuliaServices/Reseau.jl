@@ -136,3 +136,89 @@ end
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)
 end
+
+@testset "bootstrap tls negotiation" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    server_ctx = AwsIO.tls_context_new(AwsIO.TlsContextOptions(; is_server = true, verify_peer = false))
+    @test server_ctx isa AwsIO.TlsContext
+    client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
+    @test client_ctx isa AwsIO.TlsContext
+
+    server_negotiated = Ref(false)
+    client_negotiated = Ref(false)
+    server_setup = Ref(false)
+    client_setup = Ref(false)
+    server_channel = Ref{Any}(nothing)
+    client_channel = Ref{Any}(nothing)
+
+    server_tls_opts = AwsIO.TlsConnectionOptions(
+        server_ctx;
+        on_negotiation_result = (handler, slot, err, ud) -> begin
+            server_negotiated[] = true
+            return nothing
+        end,
+    )
+
+    server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
+        event_loop_group = elg,
+        host = "127.0.0.1",
+        port = 0,
+        tls_connection_options = server_tls_opts,
+        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+            server_setup[] = err == AwsIO.AWS_OP_SUCCESS
+            server_channel[] = channel
+            return nothing
+        end,
+    ))
+
+    listener = server_bootstrap.listener_socket
+    @test listener !== nothing
+    bound = AwsIO.socket_get_bound_address(listener)
+    @test bound isa AwsIO.SocketEndpoint
+    port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+    @test port != 0
+
+    client_tls_opts = AwsIO.TlsConnectionOptions(
+        client_ctx;
+        server_name = "localhost",
+        on_negotiation_result = (handler, slot, err, ud) -> begin
+            client_negotiated[] = true
+            return nothing
+        end,
+    )
+
+    client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+        event_loop_group = elg,
+        host_resolver = resolver,
+    ))
+
+    @test AwsIO.client_bootstrap_connect!(
+        client_bootstrap,
+        "127.0.0.1",
+        port;
+        tls_connection_options = client_tls_opts,
+        on_setup = (bs, err, channel, ud) -> begin
+            client_setup[] = err == AwsIO.AWS_OP_SUCCESS
+            client_channel[] = channel
+            return nothing
+        end,
+    ) === nothing
+
+    @test wait_for_pred(() -> server_setup[])
+    @test wait_for_pred(() -> client_setup[])
+    @test wait_for_pred(() -> server_negotiated[])
+    @test wait_for_pred(() -> client_negotiated[])
+
+    if client_channel[] !== nothing
+        AwsIO.channel_shutdown!(client_channel[], 0)
+    end
+    if server_channel[] !== nothing
+        AwsIO.channel_shutdown!(server_channel[], 0)
+    end
+
+    AwsIO.server_bootstrap_shutdown!(server_bootstrap)
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+end

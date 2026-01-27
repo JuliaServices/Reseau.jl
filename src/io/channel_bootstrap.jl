@@ -467,6 +467,7 @@ end
 struct ServerBootstrapOptions{
     ELG,
     SO,
+    TO,
     FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
     FL <: Union{OnServerListenerSetupFn, Nothing},
     FS <: Union{OnIncomingChannelSetupFn, Nothing},
@@ -477,6 +478,7 @@ struct ServerBootstrapOptions{
     socket_options::SO
     host::String
     port::UInt32
+    tls_connection_options::TO
     on_protocol_negotiated::FP
     on_listener_setup::FL  # nullable
     on_incoming_channel_setup::FS  # nullable
@@ -490,6 +492,7 @@ function ServerBootstrapOptions(;
         socket_options::SocketOptions = SocketOptions(),
         host::AbstractString = "0.0.0.0",
         port::Integer,
+        tls_connection_options = nothing,
         on_protocol_negotiated = nothing,
         on_listener_setup = nothing,
         on_incoming_channel_setup = nothing,
@@ -502,6 +505,7 @@ function ServerBootstrapOptions(;
         socket_options,
         String(host),
         UInt32(port),
+        tls_connection_options,
         on_protocol_negotiated,
         on_listener_setup,
         on_incoming_channel_setup,
@@ -514,6 +518,7 @@ end
 # Server bootstrap - for accepting incoming connections
 mutable struct ServerBootstrap{
     ELG,
+    TO,
     FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
     FL <: Union{OnServerListenerSetupFn, Nothing},
     FS <: Union{OnIncomingChannelSetupFn, Nothing},
@@ -523,6 +528,7 @@ mutable struct ServerBootstrap{
     event_loop_group::ELG
     socket_options::SocketOptions
     listener_socket::Union{Socket, Nothing}  # nullable
+    tls_connection_options::TO
     on_protocol_negotiated::FP
     on_listener_setup::FL  # nullable
     on_incoming_channel_setup::FS  # nullable
@@ -533,13 +539,14 @@ mutable struct ServerBootstrap{
 end
 
 function ServerBootstrap(
-        options::ServerBootstrapOptions{ELG, SO, FP, FL, FS, FD, U},
-    ) where {ELG, SO, FP, FL, FS, FD, U}
-    SBT = ServerBootstrap{ELG, FP, FL, FS, FD, U}
+        options::ServerBootstrapOptions{ELG, SO, TO, FP, FL, FS, FD, U},
+    ) where {ELG, SO, TO, FP, FL, FS, FD, U}
+    SBT = ServerBootstrap{ELG, TO, FP, FL, FS, FD, U}
     bootstrap = SBT(
         options.event_loop_group,
         options.socket_options,
         nothing,
+        options.tls_connection_options,
         options.on_protocol_negotiated,
         options.on_listener_setup,
         options.on_incoming_channel_setup,
@@ -699,11 +706,12 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
 
     # Create channel
     channel = Channel(event_loop, nothing; enable_read_back_pressure = bootstrap.enable_read_back_pressure)
+    setup_succeeded = Ref(false)
 
     # Set shutdown callback
     channel_set_shutdown_callback!(
         channel, (ch, err, ud) -> begin
-            if bootstrap.on_incoming_channel_shutdown !== nothing
+            if setup_succeeded[] && bootstrap.on_incoming_channel_shutdown !== nothing
                 bootstrap.on_incoming_channel_shutdown(bootstrap, err, ch, bootstrap.user_data)
             end
         end, bootstrap
@@ -729,6 +737,68 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         return nothing
     end
 
+    if bootstrap.tls_connection_options !== nothing
+        tls_options = bootstrap.tls_connection_options
+        advertise_alpn = bootstrap.on_protocol_negotiated !== nothing
+
+        on_negotiation = (handler, slot, err, ud) -> begin
+            if tls_options.on_negotiation_result !== nothing
+                Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
+            end
+
+            if err == AWS_OP_SUCCESS
+                setup_result = channel_setup_complete!(channel)
+                if setup_result isa ErrorResult
+                    if bootstrap.on_incoming_channel_setup !== nothing
+                        bootstrap.on_incoming_channel_setup(
+                            bootstrap,
+                            setup_result.code,
+                            nothing,
+                            bootstrap.user_data,
+                        )
+                    end
+                    socket_close(socket)
+                    return nothing
+                end
+                setup_succeeded[] = true
+                if bootstrap.on_incoming_channel_setup !== nothing
+                    bootstrap.on_incoming_channel_setup(bootstrap, AWS_OP_SUCCESS, channel, bootstrap.user_data)
+                end
+            else
+                if bootstrap.on_incoming_channel_setup !== nothing
+                    bootstrap.on_incoming_channel_setup(bootstrap, err, nothing, bootstrap.user_data)
+                end
+                channel_shutdown!(channel, err)
+                socket_close(socket)
+            end
+            return nothing
+        end
+
+        wrapped = TlsConnectionOptions(
+            tls_options.ctx;
+            server_name = tls_options.server_name,
+            alpn_list = tls_options.alpn_list,
+            advertise_alpn_message = tls_options.advertise_alpn_message || advertise_alpn,
+            on_negotiation_result = on_negotiation,
+            on_data_read = tls_options.on_data_read,
+            on_error = tls_options.on_error,
+            user_data = tls_options.user_data,
+            timeout_ms = tls_options.timeout_ms,
+        )
+
+        tls_handler = tls_channel_handler_new!(channel, wrapped)
+
+        if advertise_alpn
+            alpn_slot = channel_slot_new!(channel)
+            channel_slot_insert_left!(tls_handler.slot, alpn_slot)
+            alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated, bootstrap.user_data)
+            channel_slot_set_handler!(alpn_slot, alpn_handler)
+            alpn_handler.slot = alpn_slot
+        end
+
+        return nothing
+    end
+
     # Complete channel setup
     setup_result = channel_setup_complete!(channel)
 
@@ -748,6 +818,8 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         socket_close(socket)
         return nothing
     end
+
+    setup_succeeded[] = true
 
     logf(
         LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
