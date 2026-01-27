@@ -30,7 +30,7 @@ Legend:
 - [x] Future (future.h) feature parity (callbacks, waiting, error/result semantics)
 - [x] Stream (stream.h) feature parity (input stream vtables and constructors)
 - [ ] Message pool + memory pool (message_pool.h)
-- [ ] PEM utilities (pem.h)
+- [x] PEM utilities (pem.h)
 - [ ] Shared library (shared_library.h)
 - [ ] Statistics (statistics.h)
 - [ ] PKCS#11 support (pkcs11.h + pkcs11_tls_op_handler.c)
@@ -376,9 +376,9 @@ Legend:
 ## 17) PEM utilities
 
 ### 17.1 PEM support parity
-- [ ] Implement full PEM type enum set and mapping
-- [ ] Validate parsing edge cases (CRLF, multiple objects)
-- [ ] Tests matching `pem_test.c`
+- [x] Implement full PEM type enum set and mapping
+- [x] Validate parsing edge cases (CRLF, multiple objects)
+- [x] Tests matching `pem_test.c`
 
 ---
 
@@ -425,7 +425,7 @@ Legend:
 - [ ] `io_testing_channel_test.c` -> new `test/io_testing_channel_tests.jl`
 - [ ] `pipe_test.c` -> new `test/pipe_tests.jl`
 - [ ] `shared_library_test.c` -> new `test/shared_library_tests.jl`
-- [ ] `pem_test.c` -> new `test/pem_tests.jl`
+- [x] `pem_test.c` -> new `test/pem_tests.jl`
 - [ ] `future_test.c` -> new `test/future_tests.jl`
 - [ ] `stream_test.c` -> new `test/stream_tests.jl`
 - [ ] `async_stream_test.c` -> `test/async_stream_tests.jl` (extend)

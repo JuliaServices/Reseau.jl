@@ -1,42 +1,96 @@
 # AWS IO Library - PEM Parsing Utilities
 # Port of aws-c-io/source/pem.c
+using Base64: base64decode, base64encode
 
 # PEM object types
 @enumx PemObjectType::UInt8 begin
     UNKNOWN = 0
-    X509_OLD = 1           # -----BEGIN X509 CERTIFICATE-----
-    X509 = 2               # -----BEGIN CERTIFICATE-----
-    PUBLIC_KEY = 3         # -----BEGIN PUBLIC KEY-----
-    RSA_PRIVATE_KEY = 4    # -----BEGIN RSA PRIVATE KEY-----
-    EC_PRIVATE_KEY = 5     # -----BEGIN EC PRIVATE KEY-----
-    DSA_PRIVATE_KEY = 6    # -----BEGIN DSA PRIVATE KEY-----
-    PRIVATE_KEY = 7        # -----BEGIN PRIVATE KEY-----
-    ENCRYPTED_PRIVATE_KEY = 8  # -----BEGIN ENCRYPTED PRIVATE KEY-----
-    DH_PARAMETERS = 9      # -----BEGIN DH PARAMETERS-----
-    EC_PARAMETERS = 10     # -----BEGIN EC PARAMETERS-----
-    CRL = 11               # -----BEGIN X509 CRL-----
+    X509_OLD = 1
+    X509 = 2
+    X509_TRUSTED = 3
+    X509_REQ_OLD = 4
+    X509_REQ = 5
+    X509_CRL = 6
+    EVP_PKEY = 7
+    PUBLIC_KEY = 8
+    RSA_PRIVATE_KEY = 9
+    RSA_PUBLIC_KEY = 10
+    DSA_PRIVATE_KEY = 11
+    DSA_PUBLIC_KEY = 12
+    PKCS7 = 13
+    PKCS7_SIGNED_DATA = 14
+    ENCRYPTED_PRIVATE_KEY = 15
+    PRIVATE_KEY = 16
+    DH_PARAMETERS = 17
+    DH_PARAMETERS_X942 = 18
+    SSL_SESSION_PARAMETERS = 19
+    DSA_PARAMETERS = 20
+    ECDSA_PUBLIC_KEY = 21
+    EC_PARAMETERS = 22
+    EC_PRIVATE_KEY = 23
+    PARAMETERS = 24
+    CMS = 25
+    SM2_PARAMETERS = 26
 end
 
-# Mapping of PEM begin/end markers to object types
-const PEM_MARKERS = [
-    ("-----BEGIN X509 CERTIFICATE-----", "-----END X509 CERTIFICATE-----", PemObjectType.X509_OLD),
-    ("-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", PemObjectType.X509),
-    ("-----BEGIN PUBLIC KEY-----", "-----END PUBLIC KEY-----", PemObjectType.PUBLIC_KEY),
-    ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----", PemObjectType.RSA_PRIVATE_KEY),
-    ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----", PemObjectType.EC_PRIVATE_KEY),
-    ("-----BEGIN DSA PRIVATE KEY-----", "-----END DSA PRIVATE KEY-----", PemObjectType.DSA_PRIVATE_KEY),
-    ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----", PemObjectType.PRIVATE_KEY),
-    ("-----BEGIN ENCRYPTED PRIVATE KEY-----", "-----END ENCRYPTED PRIVATE KEY-----", PemObjectType.ENCRYPTED_PRIVATE_KEY),
-    ("-----BEGIN DH PARAMETERS-----", "-----END DH PARAMETERS-----", PemObjectType.DH_PARAMETERS),
-    ("-----BEGIN EC PARAMETERS-----", "-----END EC PARAMETERS-----", PemObjectType.EC_PARAMETERS),
-    ("-----BEGIN X509 CRL-----", "-----END X509 CRL-----", PemObjectType.CRL),
+const PEM_BEGIN_PREFIX = "-----BEGIN "
+const PEM_END_PREFIX = "-----END "
+const PEM_DELIM = "-----"
+
+const PEM_LABELS = [
+    ("X509 CERTIFICATE", PemObjectType.X509_OLD),
+    ("CERTIFICATE", PemObjectType.X509),
+    ("TRUSTED CERTIFICATE", PemObjectType.X509_TRUSTED),
+    ("NEW CERTIFICATE REQUEST", PemObjectType.X509_REQ_OLD),
+    ("CERTIFICATE REQUEST", PemObjectType.X509_REQ),
+    ("X509 CRL", PemObjectType.X509_CRL),
+    ("ANY PRIVATE KEY", PemObjectType.EVP_PKEY),
+    ("PUBLIC KEY", PemObjectType.PUBLIC_KEY),
+    ("RSA PRIVATE KEY", PemObjectType.RSA_PRIVATE_KEY),
+    ("RSA PUBLIC KEY", PemObjectType.RSA_PUBLIC_KEY),
+    ("DSA PRIVATE KEY", PemObjectType.DSA_PRIVATE_KEY),
+    ("DSA PUBLIC KEY", PemObjectType.DSA_PUBLIC_KEY),
+    ("PKCS7", PemObjectType.PKCS7),
+    ("PKCS #7 SIGNED DATA", PemObjectType.PKCS7_SIGNED_DATA),
+    ("ENCRYPTED PRIVATE KEY", PemObjectType.ENCRYPTED_PRIVATE_KEY),
+    ("PRIVATE KEY", PemObjectType.PRIVATE_KEY),
+    ("DH PARAMETERS", PemObjectType.DH_PARAMETERS),
+    ("X9.42 DH PARAMETERS", PemObjectType.DH_PARAMETERS_X942),
+    ("SSL SESSION PARAMETERS", PemObjectType.SSL_SESSION_PARAMETERS),
+    ("DSA PARAMETERS", PemObjectType.DSA_PARAMETERS),
+    ("ECDSA PUBLIC KEY", PemObjectType.ECDSA_PUBLIC_KEY),
+    ("EC PARAMETERS", PemObjectType.EC_PARAMETERS),
+    ("EC PRIVATE KEY", PemObjectType.EC_PRIVATE_KEY),
+    ("PARAMETERS", PemObjectType.PARAMETERS),
+    ("CMS", PemObjectType.CMS),
+    ("SM2 PARAMETERS", PemObjectType.SM2_PARAMETERS),
 ]
+
+const PEM_LABEL_TO_TYPE = Dict{String, PemObjectType.T}(
+    label => obj_type for (label, obj_type) in PEM_LABELS
+)
+const PEM_TYPE_TO_LABEL = Dict{PemObjectType.T, String}(
+    obj_type => label for (label, obj_type) in PEM_LABELS
+)
 
 # A single PEM object
 struct PemObject
     object_type::PemObjectType.T
     type_string::String  # The label from the PEM header (e.g., "CERTIFICATE")
     data::ByteBuffer  # Decoded binary data (DER format)
+end
+
+@inline function _extract_pem_label(line::AbstractString)::Union{String, Nothing}
+    if !startswith(line, PEM_BEGIN_PREFIX) || !endswith(line, PEM_DELIM)
+        return nothing
+    end
+    label_start = length(PEM_BEGIN_PREFIX) + 1
+    label_end = lastindex(line) - length(PEM_DELIM)
+    if label_end < label_start
+        return nothing
+    end
+    label = strip(line[label_start:label_end])
+    return isempty(label) ? nothing : label
 end
 
 # Parse a PEM-encoded string into a list of PEM objects
@@ -50,97 +104,70 @@ function pem_parse(pem_data::AbstractVector{UInt8})::Union{Vector{PemObject}, Er
 
     logf(LogLevel.TRACE, LS_IO_PEM, "PEM: parsing $(length(data_str)) bytes")
 
-    pos = 1
-    while pos <= length(data_str)
-        # Find next BEGIN marker
-        begin_idx = findfirst("-----BEGIN ", SubString(data_str, pos))
+    state = :BEGIN
+    current_label = ""
+    current_obj_type = PemObjectType.UNKNOWN
+    base64_lines = String[]
 
-        if begin_idx === nothing
-            break  # No more PEM objects
-        end
+    for line in split(data_str, '\n'; keepempty = true)
+        trimmed = strip(line)
+        if state === :BEGIN
+            if startswith(trimmed, PEM_BEGIN_PREFIX)
+                label = _extract_pem_label(trimmed)
+                if label === nothing
+                    logf(LogLevel.ERROR, LS_IO_PEM, "PEM: malformed - invalid BEGIN header")
+                    raise_error(ERROR_IO_PEM_MALFORMED)
+                    return ErrorResult(ERROR_IO_PEM_MALFORMED)
+                end
+                current_label = label
+                current_obj_type = get(() -> PemObjectType.UNKNOWN, PEM_LABEL_TO_TYPE, label)
+                empty!(base64_lines)
+                state = :ON_DATA
+            end
+        else
+            if startswith(trimmed, "-----END")
+                base64_clean = join(base64_lines)
+                decoded = try
+                    base64decode(base64_clean)
+                catch e
+                    logf(LogLevel.ERROR, LS_IO_PEM, "PEM: base64 decode failed: $e")
+                    raise_error(ERROR_IO_PEM_MALFORMED)
+                    return ErrorResult(ERROR_IO_PEM_MALFORMED)
+                end
 
-        begin_start = pos + first(begin_idx) - 1
+                buf = ByteBuffer(length(decoded))
+                if !isempty(decoded)
+                    copyto!(buf.mem, 1, decoded, 1, length(decoded))
+                    setfield!(buf, :len, Csize_t(length(decoded)))
+                end
 
-        # Find the end of the BEGIN line
-        begin_end = findnext('\n', data_str, begin_start)
-        if begin_end === nothing
-            logf(LogLevel.ERROR, LS_IO_PEM, "PEM: malformed - no newline after BEGIN")
-            raise_error(ERROR_IO_PEM_MALFORMED)
-            return ErrorResult(ERROR_IO_PEM_MALFORMED)
-        end
+                pem_obj = PemObject(current_obj_type, current_label, buf)
+                push!(objects, pem_obj)
 
-        begin_line = strip(data_str[begin_start:(begin_end - 1)])
+                logf(
+                    LogLevel.TRACE, LS_IO_PEM,
+                    "PEM: parsed object type=$(current_obj_type), label='$current_label', size=$(length(decoded))"
+                )
 
-        # Extract type label
-        type_label = ""
-        for (begin_marker, end_marker, obj_type) in PEM_MARKERS
-            if startswith(begin_line, begin_marker)
-                type_label = replace(begin_marker, "-----BEGIN " => "", "-----" => "")
-                break
+                state = :BEGIN
+                current_label = ""
+                current_obj_type = PemObjectType.UNKNOWN
+            else
+                if !isempty(trimmed)
+                    push!(base64_lines, trimmed)
+                end
             end
         end
-
-        # Find matching END marker
-        expected_end = replace(begin_line, "BEGIN" => "END")
-        end_idx = findfirst(expected_end, SubString(data_str, begin_end))
-
-        if end_idx === nothing
-            logf(LogLevel.ERROR, LS_IO_PEM, "PEM: malformed - no matching END marker for $begin_line")
-            raise_error(ERROR_IO_PEM_MALFORMED)
-            return ErrorResult(ERROR_IO_PEM_MALFORMED)
-        end
-
-        end_start = begin_end + first(end_idx) - 1
-
-        # Extract Base64 content between markers
-        content_start = begin_end + 1
-        content_end = end_start - 1
-        base64_content = data_str[content_start:content_end]
-
-        # Remove whitespace from base64 content
-        base64_clean = filter(c -> !isspace(c), base64_content)
-
-        # Decode base64
-        decoded = try
-            base64decode(base64_clean)
-        catch e
-            logf(LogLevel.ERROR, LS_IO_PEM, "PEM: base64 decode failed: $e")
-            raise_error(ERROR_IO_PEM_MALFORMED)
-            return ErrorResult(ERROR_IO_PEM_MALFORMED)
-        end
-
-        # Determine object type
-        obj_type = PemObjectType.UNKNOWN
-        for (begin_marker, end_marker, marker_type) in PEM_MARKERS
-            if startswith(begin_line, begin_marker)
-                obj_type = marker_type
-                break
-            end
-        end
-
-        # Create ByteBuffer with decoded data
-        buf = ByteBuffer(length(decoded))
-        if !isempty(decoded)
-            unsafe_copyto!(pointer(getfield(buf, :mem)), pointer(decoded), length(decoded))
-            setfield!(buf, :len, Csize_t(length(decoded)))
-        end
-
-        pem_obj = PemObject(obj_type, type_label, buf)
-        push!(objects, pem_obj)
-
-        logf(
-            LogLevel.TRACE, LS_IO_PEM,
-            "PEM: parsed object type=$(obj_type), label='$type_label', size=$(length(decoded))"
-        )
-
-        # Move past this object
-        end_line = findnext('\n', data_str, end_start)
-        pos = end_line === nothing ? length(data_str) + 1 : end_line + 1
     end
 
-    logf(LogLevel.DEBUG, LS_IO_PEM, "PEM: parsed $(length(objects)) objects")
+    if state === :BEGIN && !isempty(objects)
+        logf(LogLevel.DEBUG, LS_IO_PEM, "PEM: parsed $(length(objects)) objects")
+        return objects
+    end
 
-    return objects
+    logf(LogLevel.ERROR, LS_IO_PEM, "PEM: malformed - invalid PEM buffer")
+    raise_error(ERROR_IO_PEM_MALFORMED)
+    return ErrorResult(ERROR_IO_PEM_MALFORMED)
 end
 
 # Read and parse PEM from a file
@@ -164,7 +191,9 @@ end
 
 # Check if PEM object is a certificate
 function pem_is_certificate(obj::PemObject)::Bool
-    return obj.object_type == PemObjectType.X509 || obj.object_type == PemObjectType.X509_OLD
+    return obj.object_type == PemObjectType.X509 ||
+        obj.object_type == PemObjectType.X509_OLD ||
+        obj.object_type == PemObjectType.X509_TRUSTED
 end
 
 # Check if PEM object is a private key
@@ -173,12 +202,16 @@ function pem_is_private_key(obj::PemObject)::Bool
         obj.object_type == PemObjectType.EC_PRIVATE_KEY ||
         obj.object_type == PemObjectType.DSA_PRIVATE_KEY ||
         obj.object_type == PemObjectType.PRIVATE_KEY ||
-        obj.object_type == PemObjectType.ENCRYPTED_PRIVATE_KEY
+        obj.object_type == PemObjectType.ENCRYPTED_PRIVATE_KEY ||
+        obj.object_type == PemObjectType.EVP_PKEY
 end
 
 # Check if PEM object is a public key
 function pem_is_public_key(obj::PemObject)::Bool
-    return obj.object_type == PemObjectType.PUBLIC_KEY
+    return obj.object_type == PemObjectType.PUBLIC_KEY ||
+        obj.object_type == PemObjectType.RSA_PUBLIC_KEY ||
+        obj.object_type == PemObjectType.DSA_PUBLIC_KEY ||
+        obj.object_type == PemObjectType.ECDSA_PUBLIC_KEY
 end
 
 # Filter PEM objects by type
@@ -195,23 +228,9 @@ function pem_encode(
         der_data::AbstractVector{UInt8},
         object_type::PemObjectType.T,
     )::String
-    # Find markers for this type
-    begin_marker = ""
-    end_marker = ""
-
-    for (bm, em, ot) in PEM_MARKERS
-        if ot == object_type
-            begin_marker = bm
-            end_marker = em
-            break
-        end
-    end
-
-    if isempty(begin_marker)
-        # Use generic format
-        begin_marker = "-----BEGIN UNKNOWN-----"
-        end_marker = "-----END UNKNOWN-----"
-    end
+    label = get(() -> "UNKNOWN", PEM_TYPE_TO_LABEL, object_type)
+    begin_marker = PEM_BEGIN_PREFIX * label * PEM_DELIM
+    end_marker = PEM_END_PREFIX * label * PEM_DELIM
 
     # Base64 encode
     encoded = base64encode(der_data)
