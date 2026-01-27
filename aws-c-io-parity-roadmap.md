@@ -81,7 +81,7 @@ Legend:
 
 ### 2.3 BSD/macOS: kqueue
 - [ ] Match aws-c-io kqueue event loop semantics (user events, trigger behavior, timer handling)
-- [ ] Validate cross-thread scheduling wakeups parity
+- [x] Validate cross-thread scheduling wakeups parity
 - [ ] Stress tests similar to aws-c-io vcc suite
 
 ### 2.4 macOS/iOS: dispatch queue event loop

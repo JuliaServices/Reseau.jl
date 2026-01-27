@@ -8,7 +8,6 @@
     # Constants from sys/event.h
     const EVFILT_READ = Int16(-1)
     const EVFILT_WRITE = Int16(-2)
-    const EVFILT_USER = Int16(-10)
     const EV_ADD = UInt16(0x0001)
     const EV_DELETE = UInt16(0x0002)
     const EV_ENABLE = UInt16(0x0004)
@@ -19,8 +18,10 @@
     const EV_DISPATCH = UInt16(0x0080)
     const EV_EOF = UInt16(0x8000)
     const EV_ERROR = UInt16(0x4000)
-    const NOTE_TRIGGER = UInt32(0x01000000)
-    const CROSS_THREAD_SIGNAL_IDENT = UInt(1)
+    const READ_FD = 1
+    const WRITE_FD = 2
+    const O_NONBLOCK = Cint(0x0004)
+    const FD_CLOEXEC = Cint(0x0001)
 
     # kevent structure - must match C struct layout
     # Note: ident is uintptr_t (pointer-sized unsigned), data is intptr_t (pointer-sized signed)
@@ -138,7 +139,7 @@
         thread_joined_to::UInt64
         @atomic running_thread_id::UInt64
         kq_fd::Int32
-        cross_thread_signal_ident::UInt
+        cross_thread_signal_pipe::NTuple{2, Int32}
         cross_thread_data::KqueueCrossThreadData
         thread_data::KqueueThreadData
         thread_options::ThreadOptions
@@ -150,7 +151,7 @@
             UInt64(0),
             UInt64(0),
             Int32(-1),
-            CROSS_THREAD_SIGNAL_IDENT,
+            (Int32(-1), Int32(-1)),
             KqueueCrossThreadData(),
             KqueueThreadData(),
             ThreadOptions(),
@@ -159,6 +160,47 @@
 
     # KQueue event loop concrete type
     const KqueueEventLoop = EventLoop{KqueueLoopImpl, LD, Clock} where {LD, Clock}
+
+    function open_nonblocking_posix_pipe()::Union{NTuple{2, Int32}, ErrorResult}
+        pipe_fds = Ref{NTuple{2, Int32}}((Int32(-1), Int32(-1)))
+
+        ret = @ccall pipe(pipe_fds::Ptr{Int32})::Cint
+        if ret != 0
+            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+        end
+
+        read_fd = pipe_fds[][1]
+        write_fd = pipe_fds[][2]
+
+        for fd in (read_fd, write_fd)
+            flags = _fcntl(fd, Cint(3))  # F_GETFL = 3
+            if flags == -1
+                @ccall close(read_fd::Cint)::Cint
+                @ccall close(write_fd::Cint)::Cint
+                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            end
+            ret = _fcntl(fd, Cint(4), (flags | O_NONBLOCK))  # F_SETFL = 4
+            if ret == -1
+                @ccall close(read_fd::Cint)::Cint
+                @ccall close(write_fd::Cint)::Cint
+                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            end
+            fdflags = _fcntl(fd, Cint(1))  # F_GETFD = 1
+            if fdflags == -1
+                @ccall close(read_fd::Cint)::Cint
+                @ccall close(write_fd::Cint)::Cint
+                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            end
+            ret = _fcntl(fd, Cint(2), (fdflags | FD_CLOEXEC))  # F_SETFD = 2
+            if ret == -1
+                @ccall close(read_fd::Cint)::Cint
+                @ccall close(write_fd::Cint)::Cint
+                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            end
+        end
+
+        return (read_fd, write_fd)
+    end
 
     # Create a new kqueue event loop
     function event_loop_new_with_kqueue(
@@ -180,10 +222,27 @@
         end
         impl.kq_fd = Int32(kq_fd)
 
-        # Set up kevent to handle cross-thread signals
+        pipe_result = open_nonblocking_posix_pipe()
+        if pipe_result isa ErrorResult
+            @ccall close(kq_fd::Cint)::Cint
+            logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "failed to open pipe handle")
+            return pipe_result
+        end
+
+        logf(
+            LogLevel.TRACE,
+            LS_IO_EVENT_LOOP,
+            "pipe descriptors read %d, write %d",
+            pipe_result[READ_FD],
+            pipe_result[WRITE_FD],
+        )
+
+        impl.cross_thread_signal_pipe = pipe_result
+
+        # Set up kevent to handle activity on the cross-thread signal pipe
         thread_signal_kevent = Kevent(
-            impl.cross_thread_signal_ident,
-            EVFILT_USER,
+            impl.cross_thread_signal_pipe[READ_FD],
+            EVFILT_READ,
             EV_ADD | EV_CLEAR,
             UInt32(0),
             0,
@@ -201,8 +260,10 @@
         )::Cint
 
         if res == -1
+            @ccall close(impl.cross_thread_signal_pipe[READ_FD]::Cint)::Cint
+            @ccall close(impl.cross_thread_signal_pipe[WRITE_FD]::Cint)::Cint
             @ccall close(kq_fd::Cint)::Cint
-            logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "Failed to create cross-thread user kevent")
+            logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "failed to register kevent for signal pipe")
             return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
         end
 
@@ -223,26 +284,13 @@
             LS_IO_EVENT_LOOP,
             "signaling event-loop that cross-thread tasks need to be scheduled",
         )
-        trigger = Kevent(
-            impl.cross_thread_signal_ident,
-            EVFILT_USER,
-            UInt16(0),
-            NOTE_TRIGGER,
-            0,
-            C_NULL,
-        )
-        changelist = Ref(trigger)
-        res = @ccall kevent(
-            impl.kq_fd::Cint,
-            changelist::Ptr{Kevent},
-            1::Cint,
-            C_NULL::Ptr{Kevent},
-            0::Cint,
-            C_NULL::Ptr{Cvoid},
-        )::Cint
-        if res == -1
-            logf(LogLevel.WARN, LS_IO_EVENT_LOOP, "failed to signal cross-thread user event")
-        end
+        write_val = Ref{UInt32}(0x00C0FFEE)
+        write_size = Csize_t(sizeof(UInt32))
+        _ = @ccall write(
+            impl.cross_thread_signal_pipe[WRITE_FD]::Cint,
+            write_val::Ptr{UInt32},
+            write_size::Csize_t,
+        )::Cssize_t
         return nothing
     end
 
@@ -728,9 +776,20 @@
             for i in 1:num_kevents
                 kevent = kevents[i]
                 # Check if this is the cross-thread signal
-                if kevent.filter == EVFILT_USER &&
-                        kevent.ident == impl.cross_thread_signal_ident
+                if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
                     should_process_cross_thread_data = true
+                    read_val = Ref{UInt32}(0)
+                    read_size = Csize_t(sizeof(UInt32))
+                    while true
+                        read_result = @ccall read(
+                            impl.cross_thread_signal_pipe[READ_FD]::Cint,
+                            read_val::Ptr{UInt32},
+                            read_size::Csize_t,
+                        )::Cssize_t
+                        if read_result <= 0
+                            break
+                        end
+                    end
                     continue
                 end
 
@@ -854,8 +913,8 @@
 
         # Remove signal kevent
         del_kevent = Kevent(
-            impl.cross_thread_signal_ident,
-            EVFILT_USER,
+            impl.cross_thread_signal_pipe[READ_FD],
+            EVFILT_READ,
             EV_DELETE,
             UInt32(0),
             0,
@@ -863,6 +922,8 @@
         )
         del_ref = Ref(del_kevent)
         @ccall kevent(impl.kq_fd::Cint, del_ref::Ptr{Kevent}, 1::Cint, C_NULL::Ptr{Kevent}, 0::Cint, C_NULL::Ptr{Cvoid})::Cint
+        @ccall close(impl.cross_thread_signal_pipe[READ_FD]::Cint)::Cint
+        @ccall close(impl.cross_thread_signal_pipe[WRITE_FD]::Cint)::Cint
         @ccall close(impl.kq_fd::Cint)::Cint
 
         # Clean up local data (invokes on_object_removed callbacks)
