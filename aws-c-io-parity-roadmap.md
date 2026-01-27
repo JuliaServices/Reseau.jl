@@ -122,7 +122,7 @@ Legend:
 - [x] Confirm non-blocking and CLOEXEC handling parity
 - [x] Implement network interface binding (SO_BINDTODEVICE / IP_BOUND_IF) where supported
 - [x] VSOCK support on Linux
-- [ ] Edge-triggered behavior and read/write semantics parity
+- [x] Edge-triggered behavior and read/write semantics parity
 
 ### 3.3 Apple Network Framework sockets
 - [ ] Implement NW socket (source/darwin/nw_socket.c)

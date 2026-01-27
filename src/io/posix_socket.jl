@@ -708,7 +708,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
         end
     else
         # UDP sockets can be in INIT or CONNECTED_READ (if bound first)
-        if sock.state != SocketState.INIT && sock.state != SocketState.CONNECTED
+        if sock.state != SocketState.INIT && !socket_state_has(sock.state, SocketState.CONNECTED_READ)
             raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
             return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
@@ -914,7 +914,7 @@ function _on_connection_success(sock::PosixSocketType)
     # Update local endpoint
     _update_local_endpoint!(sock)
 
-    sock.state = SocketState.CONNECTED
+    sock.state = socket_state_mask(SocketState.CONNECTED_READ, SocketState.CONNECTED_WRITE)
 
     # Re-assign to event loop
     assign_result = vtable_socket_assign_to_event_loop(sock.vtable, sock, event_loop)
@@ -1210,7 +1210,7 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
         sock.state = SocketState.BOUND
     else
         # UDP is now readable
-        sock.state = SocketState.CONNECTED
+        sock.state = SocketState.CONNECTED_READ
     end
 
     logf(
@@ -1326,6 +1326,12 @@ function vtable_socket_shutdown_dir(vtable::PosixSocketVTable, sock::PosixSocket
         return ErrorResult(aws_error)
     end
 
+    if dir == ChannelDirection.READ
+        sock.state = socket_state_clear(sock.state, SocketState.CONNECTED_READ)
+    else
+        sock.state = socket_state_clear(sock.state, SocketState.CONNECTED_WRITE)
+    end
+
     return nothing
 end
 
@@ -1415,7 +1421,7 @@ function vtable_socket_subscribe_to_readable_events(vtable::PosixSocketVTable, s
     fd = sock.io_handle.fd
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: subscribing to readable events")
 
-    if sock.state != SocketState.CONNECTED
+    if !socket_state_has(sock.state, SocketState.CONNECTED_READ)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: can't subscribe, not connected")
         raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
@@ -1443,7 +1449,7 @@ function vtable_socket_read(vtable::PosixSocketVTable, sock::PosixSocketType, bu
         return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
 
-    if sock.state != SocketState.CONNECTED
+    if !socket_state_has(sock.state, SocketState.CONNECTED_READ)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: cannot read, not connected")
         raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
@@ -1627,7 +1633,7 @@ function vtable_socket_write(vtable::PosixSocketVTable, sock::PosixSocketType, c
         return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
 
-    if sock.state != SocketState.CONNECTED
+    if !socket_state_has(sock.state, SocketState.CONNECTED_WRITE)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: cannot write, not connected")
         raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
@@ -1771,7 +1777,7 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
 
             new_sock = new_sock_result
             copy!(new_sock.local_endpoint, sock.local_endpoint)
-            new_sock.state = SocketState.CONNECTED
+            new_sock.state = socket_state_mask(SocketState.CONNECTED_READ, SocketState.CONNECTED_WRITE)
 
             # Parse remote address
             family = @static Sys.isapple() ? Cushort(in_addr[2]) : reinterpret(Cushort, in_addr[1:2])[1]

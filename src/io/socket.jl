@@ -29,16 +29,33 @@ end
     WRITE = 1
 end
 
-# Socket state enum
-@enumx SocketState::UInt8 begin
-    INIT = 0
-    CONNECTING = 1
-    CONNECTED = 2
-    BOUND = 3
-    LISTENING = 4
-    HALF_CLOSED = 5
-    CLOSED = 6
-    ERROR = 7
+# Socket state bitmask (matches aws-c-io semantics)
+@enumx SocketState::UInt16 begin
+    NONE = 0x00
+    INIT = 0x01
+    CONNECTING = 0x02
+    CONNECTED_READ = 0x04
+    CONNECTED_WRITE = 0x08
+    CONNECTED = 0x0c
+    BOUND = 0x10
+    LISTENING = 0x20
+    CLOSED = 0x40
+    ERROR = 0x80
+end
+
+@inline socket_state_has(state::SocketState.T, flag::SocketState.T) =
+    (UInt16(state) & UInt16(flag)) != 0
+
+@inline function socket_state_set(state::SocketState.T, flag::SocketState.T)::SocketState.T
+    return SocketState.T(UInt16(state) | UInt16(flag))
+end
+
+@inline function socket_state_clear(state::SocketState.T, flag::SocketState.T)::SocketState.T
+    return SocketState.T(UInt16(state) & ~UInt16(flag))
+end
+
+@inline function socket_state_mask(flags::SocketState.T...)::SocketState.T
+    return SocketState.T(reduce(|, (UInt16(f) for f in flags); init = UInt16(0)))
 end
 
 # Constants
