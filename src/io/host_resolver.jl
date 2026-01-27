@@ -7,6 +7,12 @@
     AAAA = 1  # IPv6
 end
 
+# Flags for host address count queries
+const GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A = UInt32(0x00000001)
+const GET_HOST_ADDRESS_COUNT_RECORD_TYPE_AAAA = UInt32(0x00000002)
+const GET_HOST_ADDRESS_COUNT_ALL =
+    GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A | GET_HOST_ADDRESS_COUNT_RECORD_TYPE_AAAA
+
 # Host address - a single resolved address for a host
 mutable struct HostAddress
     address::String  # The IP address as a string
@@ -258,6 +264,26 @@ function _dispatch_resolved_callback(
     return nothing
 end
 
+function _dispatch_simple_callback(
+        resolver::DefaultHostResolver,
+        callback::Union{Function, Nothing},
+        user_data,
+    )
+    callback === nothing && return nothing
+    event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
+    if event_loop !== nothing
+        task = ScheduledTask(
+            (t, status) -> callback(user_data),
+            nothing;
+            type_tag = "dns_purge_callback"
+        )
+        event_loop_schedule_task_now!(event_loop, task)
+    else
+        callback(user_data)
+    end
+    return nothing
+end
+
 # Resolve a hostname to addresses
 function host_resolver_resolve!(
         resolver::DefaultHostResolver,
@@ -472,6 +498,51 @@ function host_resolver_purge_cache!(resolver::DefaultHostResolver)
     end
     logf(LogLevel.DEBUG, LS_IO_DNS, "Host resolver: cache purged")
     return nothing
+end
+
+function host_resolver_purge_cache_with_callback!(
+        resolver::DefaultHostResolver,
+        on_purge_cache_complete::Union{Function, Nothing},
+        user_data = nothing,
+    )::Union{Nothing, ErrorResult}
+    host_resolver_purge_cache!(resolver)
+    _dispatch_simple_callback(resolver, on_purge_cache_complete, user_data)
+    return nothing
+end
+
+function host_resolver_purge_host_cache!(
+        resolver::DefaultHostResolver,
+        host_name::AbstractString;
+        on_host_purge_complete::Union{Function, Nothing} = nothing,
+        user_data = nothing,
+    )::Union{Nothing, ErrorResult}
+    host = String(host_name)
+    lock(resolver.lock) do
+        hash_table_remove!(resolver.cache, host)
+    end
+    _dispatch_simple_callback(resolver, on_host_purge_complete, user_data)
+    return nothing
+end
+
+function host_resolver_get_host_address_count(
+        resolver::DefaultHostResolver,
+        host_name::AbstractString;
+        flags::UInt32 = GET_HOST_ADDRESS_COUNT_ALL,
+    )::Csize_t
+    host = String(host_name)
+    return lock(resolver.lock) do
+        entry = hash_table_get(resolver.cache, host)
+        entry === nothing && return Csize_t(0)
+
+        count = 0
+        if (flags & GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A) != 0
+            count += length(entry.addresses_a)
+        end
+        if (flags & GET_HOST_ADDRESS_COUNT_RECORD_TYPE_AAAA) != 0
+            count += length(entry.addresses_aaaa)
+        end
+        return Csize_t(count)
+    end
 end
 
 # Get a single best address for a host (simplified version)

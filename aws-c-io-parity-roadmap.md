@@ -190,8 +190,8 @@ Legend:
 ### 6.1 Default resolver parity
 - [ ] Implement full aws-c-io default resolver behavior (cache, TTL rules, refresh frequency)
 - [ ] Connection failure tracking and load-balancing influence
-- [ ] Purge cache API + purge host API + callbacks
-- [ ] `get_host_address_count` parity
+- [x] Purge cache API + purge host API + callbacks
+- [x] `get_host_address_count` parity
 
 ### 6.2 Custom resolver vtable
 - [ ] Support custom `resolve_host` implementation callbacks

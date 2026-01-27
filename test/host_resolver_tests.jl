@@ -104,3 +104,58 @@ end
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)
 end
+
+@testset "host resolver purge and count" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    resolved = Ref(false)
+    err = Ref{Int}(0)
+
+    cb = (res, host, error_code, addresses) -> begin
+        err[] = error_code
+        resolved[] = true
+        return nothing
+    end
+
+    @test AwsIO.host_resolver_resolve!(resolver, "localhost", cb; address_type = AwsIO.HostAddressType.A) === nothing
+    @test wait_for_pred(() -> resolved[])
+    @test err[] == AwsIO.AWS_OP_SUCCESS
+
+    count_a = AwsIO.host_resolver_get_host_address_count(
+        resolver,
+        "localhost";
+        flags = AwsIO.GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A,
+    )
+    @test count_a >= 1
+
+    count_all = AwsIO.host_resolver_get_host_address_count(
+        resolver,
+        "localhost";
+        flags = AwsIO.GET_HOST_ADDRESS_COUNT_ALL,
+    )
+    @test count_all >= count_a
+
+    purge_host_done = Ref(false)
+    @test AwsIO.host_resolver_purge_host_cache!(
+        resolver,
+        "localhost";
+        on_host_purge_complete = _ -> (purge_host_done[] = true),
+    ) === nothing
+    @test wait_for_pred(() -> purge_host_done[])
+    @test AwsIO.host_resolver_get_host_address_count(
+        resolver,
+        "localhost";
+        flags = AwsIO.GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A,
+    ) == 0
+
+    purge_done = Ref(false)
+    @test AwsIO.host_resolver_purge_cache_with_callback!(
+        resolver,
+        _ -> (purge_done[] = true),
+    ) === nothing
+    @test wait_for_pred(() -> purge_done[])
+
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+end
