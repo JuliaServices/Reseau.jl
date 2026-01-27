@@ -262,9 +262,9 @@ Legend:
 
 ### 10.1 Input stream API parity
 - [x] Vtable parity: seek, read, get_status, get_length
-- [ ] Acquire/release hooks (no refcount, but API compatibility)
-- [ ] Constructors: from cursor, from file, from open file
-- [ ] Error and status semantics parity
+- [x] Acquire/release hooks (no refcount, but API compatibility)
+- [x] Constructors: from cursor, from file, from open file
+- [x] Error and status semantics parity
 
 ### 10.2 Tests
 - [x] Port `stream_test.c`

@@ -112,6 +112,28 @@ end
     end
 end
 
+@testset "InputStream constructors" begin
+    mktemp() do path, io
+        write(io, "openfile")
+        flush(io)
+        seek(io, 0)
+
+        stream = AwsIO.input_stream_new_from_file(path)
+        @test stream isa AwsIO.FileInputStream
+        AwsIO.stream_destroy!(stream)
+
+        file = Libc.FILE(io)
+        stream2 = AwsIO.input_stream_new_from_open_file(file)
+        buf = AwsIO.ByteBuffer(16)
+        bytes, status = AwsIO.stream_read(stream2, buf, 16)
+        @test status == AwsIO.StreamStatus.OK || status == AwsIO.StreamStatus.END_OF_STREAM
+        @test bytes == 8
+        @test String(AwsIO.byte_cursor_from_buf(buf)) == "openfile"
+        AwsIO.stream_destroy!(stream2)
+        close(file)
+    end
+end
+
 @testset "Stream copy" begin
     data = Vector{UInt8}("copyme")
     stream = AwsIO.ByteBufferInputStream(data; owns_buffer = false)
