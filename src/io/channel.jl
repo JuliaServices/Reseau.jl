@@ -85,10 +85,12 @@ end
 ChannelHandlerShutdownOptions() = ChannelHandlerShutdownOptions(false, false)
 
 # Channel slot - links handlers in the pipeline
-# Each slot can hold a handler and links to adjacent slots
+# Each slot can hold a handler and links to adjacent slots.
+# Read direction flows left -> right (toward application).
+# Write direction flows right -> left (toward socket).
 mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Union{AbstractChannel, Nothing}, SlotRef}
-    adj_left::SlotRef   # Toward the application (incoming data flows left)
-    adj_right::SlotRef  # Toward the socket/network (outgoing data flows right)
+    adj_left::SlotRef   # Toward the socket/network (write direction)
+    adj_right::SlotRef  # Toward the application (read direction)
     handler::H
     channel::C
     window_size::Csize_t
@@ -120,9 +122,9 @@ function ChannelSlot(handler::H, channel::C) where {H, C}
     )
 end
 
-# Get the slot immediately to the left (application side)
+# Get the slot immediately to the left (socket side)
 slot_left(slot::ChannelSlot) = slot.adj_left
-# Get the slot immediately to the right (socket side)
+# Get the slot immediately to the right (application side)
 slot_right(slot::ChannelSlot) = slot.adj_right
 
 # Channel handler base structure
@@ -817,8 +819,8 @@ function channel_slot_send_message(slot::ChannelSlot, message::IoMessage, direct
     end
 
     if direction == ChannelDirection.READ
-        # Send toward application (left)
-        next_slot = slot.adj_left
+        # Send toward application (right)
+        next_slot = slot.adj_right
         if next_slot === nothing || next_slot.handler === nothing
             logf(
                 LogLevel.WARN, LS_IO_CHANNEL,
@@ -845,8 +847,8 @@ function channel_slot_send_message(slot::ChannelSlot, message::IoMessage, direct
 
         return handler_process_read_message(next_slot.handler, next_slot, message)
     else
-        # Send toward socket (right)
-        next_slot = slot.adj_right
+        # Send toward socket (left)
+        next_slot = slot.adj_left
         if next_slot === nothing || next_slot.handler === nothing
             logf(
                 LogLevel.WARN, LS_IO_CHANNEL,
@@ -869,7 +871,7 @@ function channel_slot_downstream_read_window(slot::ChannelSlot)::Csize_t
     if channel === nothing || !channel.read_back_pressure_enabled
         return SIZE_MAX
     end
-    next_slot = slot.adj_left
+    next_slot = slot.adj_right
     if next_slot === nothing
         return Csize_t(0)
     end
@@ -925,9 +927,9 @@ function _channel_window_update_task(task::ChannelTask, channel::Channel, status
         return nothing
     end
 
-    slot = channel.first
-    while slot !== nothing && slot.adj_right !== nothing
-        upstream_slot = slot.adj_right
+    slot = channel.last
+    while slot !== nothing && slot.adj_left !== nothing
+        upstream_slot = slot.adj_left
         if upstream_slot.handler !== nothing
             slot.window_size = add_size_saturating(slot.window_size, slot.current_window_update_batch_size)
             update_size = slot.current_window_update_batch_size
@@ -942,7 +944,7 @@ function _channel_window_update_task(task::ChannelTask, channel::Channel, status
                 return nothing
             end
         end
-        slot = slot.adj_right
+        slot = slot.adj_left
     end
 
     return nothing
@@ -1065,7 +1067,7 @@ function _channel_shutdown_task(task::ChannelTask, channel::Channel, status::Tas
 
     channel.channel_state = ChannelState.SHUTTING_DOWN_READ
 
-    slot = channel.last
+    slot = channel.first
     if slot !== nothing && slot.handler !== nothing
         channel_slot_shutdown!(slot, ChannelDirection.READ, channel.shutdown_error_code, channel.shutdown_immediately)
         return nothing
@@ -1135,7 +1137,7 @@ function channel_slot_on_handler_shutdown_complete!(
     end
 
     if direction == ChannelDirection.READ
-        next_slot = slot.adj_left
+        next_slot = slot.adj_right
         if next_slot !== nothing && next_slot.handler !== nothing
             return handler_shutdown(
                 next_slot.handler,
@@ -1153,7 +1155,7 @@ function channel_slot_on_handler_shutdown_complete!(
         return nothing
     end
 
-    next_slot = slot.adj_right
+    next_slot = slot.adj_left
     if next_slot !== nothing && next_slot.handler !== nothing
         return handler_shutdown(
             next_slot.handler,
@@ -1164,7 +1166,7 @@ function channel_slot_on_handler_shutdown_complete!(
         )
     end
 
-    if slot === channel.last
+    if slot === channel.first
         channel.channel_state = ChannelState.SHUT_DOWN
         _channel_schedule_shutdown_completion!(channel)
     end

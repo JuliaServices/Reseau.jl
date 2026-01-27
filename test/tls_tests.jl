@@ -114,16 +114,17 @@ end
         channel = AwsIO.Channel(event_loop, nothing)
         AwsIO.socket_channel_handler_new!(channel, new_sock)
 
+        tls_opts = AwsIO.TlsConnectionOptions(server_ctx)
+        AwsIO.tls_channel_handler_new!(channel, tls_opts)
+
         echo = EchoHandler(server_received)
         echo_slot = AwsIO.channel_slot_new!(channel)
         if AwsIO.channel_first_slot(channel) !== echo_slot
-            AwsIO.channel_slot_insert_front!(channel, echo_slot)
+            AwsIO.channel_slot_insert_end!(channel, echo_slot)
         end
         AwsIO.channel_slot_set_handler!(echo_slot, echo)
         echo.slot = echo_slot
 
-        tls_opts = AwsIO.TlsConnectionOptions(server_ctx)
-        AwsIO.tls_channel_handler_new!(channel, tls_opts)
         AwsIO.channel_setup_complete!(channel)
         server_ready[] = true
         return nothing

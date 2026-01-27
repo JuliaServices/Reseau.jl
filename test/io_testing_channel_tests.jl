@@ -37,7 +37,7 @@ function AwsIO.handler_process_write_message(
         message::AwsIO.IoMessage,
     )::Union{Nothing, AwsIO.ErrorResult}
     push!(handler.messages, message)
-    if handler.complete_write_immediately && message.on_completion !== nothing && slot.adj_right === nothing
+    if handler.complete_write_immediately && message.on_completion !== nothing && slot.adj_left === nothing
         Base.invokelatest(message.on_completion, slot.channel, message, handler.complete_write_error_code, message.user_data)
         message.on_completion = nothing
     end
@@ -138,14 +138,14 @@ end
             el = setup.el
             channel = setup.channel
 
-            app_slot = AwsIO.channel_slot_new!(channel)
-            app_handler = TestingChannelHandler(16 * 1024)
-            @test AwsIO.channel_slot_set_handler!(app_slot, app_handler) === nothing
+            left_slot = AwsIO.channel_slot_new!(channel)
+            left_handler = TestingChannelHandler(16 * 1024)
+            @test AwsIO.channel_slot_set_handler!(left_slot, left_handler) === nothing
 
-            socket_slot = AwsIO.channel_slot_new!(channel)
-            @test AwsIO.channel_slot_insert_end!(channel, socket_slot) === nothing
-            socket_handler = TestingChannelHandler(16 * 1024)
-            @test AwsIO.channel_slot_set_handler!(socket_slot, socket_handler) === nothing
+            right_slot = AwsIO.channel_slot_new!(channel)
+            @test AwsIO.channel_slot_insert_end!(channel, right_slot) === nothing
+            right_handler = TestingChannelHandler(16 * 1024)
+            @test AwsIO.channel_slot_set_handler!(right_slot, right_handler) === nothing
 
             read_msg = AwsIO.channel_acquire_message_from_pool(
                 channel,
@@ -153,9 +153,9 @@ end
                 64,
             )
             @test read_msg !== nothing
-            @test AwsIO.channel_slot_send_message(socket_slot, read_msg, AwsIO.ChannelDirection.READ) === nothing
-            @test length(app_handler.messages) == 1
-            @test app_handler.messages[1] === read_msg
+            @test AwsIO.channel_slot_send_message(left_slot, read_msg, AwsIO.ChannelDirection.READ) === nothing
+            @test length(right_handler.messages) == 1
+            @test right_handler.messages[1] === read_msg
 
             write_msg = AwsIO.channel_acquire_message_from_pool(
                 channel,
@@ -163,13 +163,13 @@ end
                 64,
             )
             @test write_msg !== nothing
-            @test AwsIO.channel_slot_send_message(app_slot, write_msg, AwsIO.ChannelDirection.WRITE) === nothing
-            @test length(socket_handler.messages) == 1
-            @test socket_handler.messages[1] === write_msg
+            @test AwsIO.channel_slot_send_message(right_slot, write_msg, AwsIO.ChannelDirection.WRITE) === nothing
+            @test length(left_handler.messages) == 1
+            @test left_handler.messages[1] === write_msg
 
-            @test AwsIO.channel_slot_increment_read_window!(app_slot, Csize_t(12345)) === nothing
-            @test _wait_until(() -> socket_handler.latest_window_update == Csize_t(12345))
-            @test socket_handler.latest_window_update == Csize_t(12345)
+            @test AwsIO.channel_slot_increment_read_window!(right_slot, Csize_t(12345)) === nothing
+            @test _wait_until(() -> left_handler.latest_window_update == Csize_t(12345))
+            @test left_handler.latest_window_update == Csize_t(12345)
 
             AwsIO.channel_destroy!(channel)
             AwsIO.event_loop_destroy!(el)

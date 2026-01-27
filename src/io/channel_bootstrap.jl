@@ -434,7 +434,7 @@ function _setup_client_channel(request::SocketConnectionRequest)
 
         if advertise_alpn
             alpn_slot = channel_slot_new!(channel)
-            channel_slot_insert_left!(tls_handler.slot, alpn_slot)
+            channel_slot_insert_right!(tls_handler.slot, alpn_slot)
             alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated, request.user_data)
             channel_slot_set_handler!(alpn_slot, alpn_handler)
             alpn_handler.slot = alpn_slot
@@ -881,7 +881,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
 
         if advertise_alpn
             alpn_slot = channel_slot_new!(channel)
-            channel_slot_insert_left!(tls_handler.slot, alpn_slot)
+            channel_slot_insert_right!(tls_handler.slot, alpn_slot)
             alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated, bootstrap.user_data)
             channel_slot_set_handler!(alpn_slot, alpn_handler)
             alpn_handler.slot = alpn_slot

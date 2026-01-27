@@ -110,7 +110,7 @@ AwsIO.handler_destroy(::TestReadHandler) = nothing
         app_handler = TestReadHandler(4; auto_increment = false)
         app_slot = AwsIO.channel_slot_new!(channel)
         if AwsIO.channel_first_slot(channel) !== app_slot
-            AwsIO.channel_slot_insert_front!(channel, app_slot)
+            AwsIO.channel_slot_insert_end!(channel, app_slot)
         end
         AwsIO.channel_slot_set_handler!(app_slot, app_handler)
         app_handler.slot = app_slot
@@ -279,7 +279,7 @@ end
 
         app_slot = AwsIO.channel_slot_new!(channel)
         if AwsIO.channel_first_slot(channel) !== app_slot
-            AwsIO.channel_slot_insert_front!(channel, app_slot)
+            AwsIO.channel_slot_insert_end!(channel, app_slot)
         end
         AwsIO.channel_slot_set_handler!(app_slot, AwsIO.PassthroughHandler())
 

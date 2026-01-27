@@ -470,10 +470,10 @@ function socket_channel_handler_new!(
         max_read_size = max_read_size,
     )
 
-    # Create slot and add to channel (at the socket end / right side)
+    # Create slot and add to channel (socket is left-most)
     slot = channel_slot_new!(channel)
     if channel.first !== slot
-        channel_slot_insert_end!(channel, slot)
+        channel_slot_insert_front!(channel, slot)
     end
     channel_slot_set_handler!(slot, handler)
     handler.slot = slot

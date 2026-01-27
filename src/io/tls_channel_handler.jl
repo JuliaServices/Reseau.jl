@@ -197,7 +197,7 @@ function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOption
     channel_slot_set_handler!(slot, handler)
 
     if channel.first !== slot
-        channel_slot_insert_left!(channel.last, slot)
+        channel_slot_insert_end!(channel, slot)
     end
 
     tls_channel_handler_start_negotiation!(handler)
@@ -207,10 +207,10 @@ end
 
 function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
     _tls_mark_handshake_start!(handler)
-    if handler.slot !== nothing && handler.slot.adj_right !== nothing
-        right_handler = handler.slot.adj_right.handler
-        if right_handler isa SocketChannelHandler
-            _socket_handler_trigger_read(right_handler)
+    if handler.slot !== nothing && handler.slot.adj_left !== nothing
+        left_handler = handler.slot.adj_left.handler
+        if left_handler isa SocketChannelHandler
+            _socket_handler_trigger_read(left_handler)
         end
     end
 
@@ -381,7 +381,7 @@ function _tls_send_alpn_message!(handler::TlsChannelHandler)::Bool
     if slot === nothing || slot.channel === nothing
         return true
     end
-    if slot.adj_left === nothing
+    if slot.adj_right === nothing
         return true
     end
     if handler.protocol.len == 0
@@ -586,17 +586,19 @@ function _tls_handle_application!(handler::TlsChannelHandler, payload::AbstractV
     end
     setfield!(buf, :len, Csize_t(length(plaintext)))
 
-    if handler.options.on_data_read !== nothing && slot.adj_left === nothing
+    if handler.options.on_data_read !== nothing
         Base.invokelatest(handler.options.on_data_read, handler, slot, buf, handler.options.user_data)
-        channel_release_message_to_pool!(channel, msg)
-        return nothing
     end
 
-    send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
-    if send_result isa ErrorResult
+    if slot.adj_right !== nothing
+        send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
+        if send_result isa ErrorResult
+            channel_release_message_to_pool!(channel, msg)
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read send failed")
+            return nothing
+        end
+    else
         channel_release_message_to_pool!(channel, msg)
-        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read send failed")
-        return nothing
     end
 
     return nothing
