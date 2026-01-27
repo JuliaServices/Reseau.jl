@@ -2,20 +2,32 @@
 # Port of aws-c-io/source/channel_bootstrap.c
 
 # Callback types for bootstrap operations
-const OnBootstrapChannelSetupFn = Function  # (bootstrap, error_code, channel, user_data) -> nothing
+const OnBootstrapChannelCreationFn = Function  # (bootstrap, error_code, channel, user_data) -> nothing
+const OnBootstrapChannelSetupFn = Function     # (bootstrap, error_code, channel, user_data) -> nothing
 const OnBootstrapChannelShutdownFn = Function  # (bootstrap, error_code, channel, user_data) -> nothing
-const OnServerListenerSetupFn = Function  # (server_bootstrap, error_code, socket, user_data) -> nothing
-const OnIncomingChannelSetupFn = Function  # (server_bootstrap, error_code, channel, user_data) -> nothing
-const OnIncomingChannelShutdownFn = Function  # (server_bootstrap, error_code, channel, user_data) -> nothing
-const ChannelOnProtocolNegotiatedFn = Function  # (new_slot, protocol::ByteBuffer, user_data) -> AbstractChannelHandler
+const OnServerListenerSetupFn = Function       # (server_bootstrap, error_code, user_data) -> nothing
+const OnIncomingChannelSetupFn = Function      # (server_bootstrap, error_code, channel, user_data) -> nothing
+const OnIncomingChannelShutdownFn = Function   # (server_bootstrap, error_code, channel, user_data) -> nothing
+const ChannelOnProtocolNegotiatedFn = Function # (new_slot, protocol::ByteBuffer, user_data) -> AbstractChannelHandler
 
 # Client bootstrap options
-struct ClientBootstrapOptions{ELG, HR, SO, TO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+struct ClientBootstrapOptions{
+    ELG,
+    HR,
+    SO,
+    TO,
+    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
+    FC <: Union{OnBootstrapChannelCreationFn, Nothing},
+    FS <: Union{OnBootstrapChannelSetupFn, Nothing},
+    FD <: Union{OnBootstrapChannelShutdownFn, Nothing},
+    U,
+}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SO
     tls_connection_options::TO
     on_protocol_negotiated::FP
+    on_creation_callback::FC
     on_setup_callback::FS  # nullable
     on_shutdown_callback::FD  # nullable
     user_data::U
@@ -27,6 +39,7 @@ function ClientBootstrapOptions(;
         socket_options::SocketOptions = SocketOptions(),
         tls_connection_options = nothing,
         on_protocol_negotiated = nothing,
+        on_creation_callback = nothing,
         on_setup_callback = nothing,
         on_shutdown_callback = nothing,
         user_data = nothing,
@@ -37,6 +50,7 @@ function ClientBootstrapOptions(;
         socket_options,
         tls_connection_options,
         on_protocol_negotiated,
+        on_creation_callback,
         on_setup_callback,
         on_shutdown_callback,
         user_data,
@@ -44,12 +58,22 @@ function ClientBootstrapOptions(;
 end
 
 # Client bootstrap - for creating outgoing connections
-mutable struct ClientBootstrap{ELG, HR, TO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+mutable struct ClientBootstrap{
+    ELG,
+    HR,
+    TO,
+    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
+    FC <: Union{OnBootstrapChannelCreationFn, Nothing},
+    FS <: Union{OnBootstrapChannelSetupFn, Nothing},
+    FD <: Union{OnBootstrapChannelShutdownFn, Nothing},
+    U,
+}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SocketOptions
     tls_connection_options::TO
     on_protocol_negotiated::FP
+    on_creation_callback::FC
     on_setup_callback::FS  # nullable
     on_shutdown_callback::FD  # nullable
     user_data::U
@@ -57,15 +81,16 @@ mutable struct ClientBootstrap{ELG, HR, TO, FP <: Union{ChannelOnProtocolNegotia
 end
 
 function ClientBootstrap(
-        options::ClientBootstrapOptions{ELG, HR, SO, TO, FP, FS, FD, U},
-    ) where {ELG, HR, SO, TO, FP, FS, FD, U}
-    CBT = ClientBootstrap{ELG, HR, TO, FP, FS, FD, U}
+        options::ClientBootstrapOptions{ELG, HR, SO, TO, FP, FC, FS, FD, U},
+    ) where {ELG, HR, SO, TO, FP, FC, FS, FD, U}
+    CBT = ClientBootstrap{ELG, HR, TO, FP, FC, FS, FD, U}
     bootstrap = CBT(
         options.event_loop_group,
         options.host_resolver,
         options.socket_options,
         options.tls_connection_options,
         options.on_protocol_negotiated,
+        options.on_creation_callback,
         options.on_setup_callback,
         options.on_shutdown_callback,
         options.user_data,
@@ -78,7 +103,16 @@ function ClientBootstrap(
 end
 
 # Connection request tracking
-mutable struct SocketConnectionRequest{CB, TO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+mutable struct SocketConnectionRequest{
+    CB,
+    TO,
+    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
+    FC <: Union{OnBootstrapChannelCreationFn, Nothing},
+    FS <: Union{OnBootstrapChannelSetupFn, Nothing},
+    FD <: Union{OnBootstrapChannelShutdownFn, Nothing},
+    U,
+    EL <: Union{AbstractEventLoop, Nothing},
+}
     bootstrap::CB
     host::String
     port::UInt32
@@ -86,9 +120,12 @@ mutable struct SocketConnectionRequest{CB, TO, FP <: Union{ChannelOnProtocolNego
     channel::Union{Channel, Nothing}  # nullable
     tls_connection_options::TO
     on_protocol_negotiated::FP
+    on_creation::FC
     on_setup::FS  # nullable
     on_shutdown::FD  # nullable
     user_data::U
+    enable_read_back_pressure::Bool
+    requested_event_loop::EL
 end
 
 # Initiate a connection to a host
@@ -99,13 +136,22 @@ function client_bootstrap_connect!(
         socket_options::SocketOptions = bootstrap.socket_options,
         tls_connection_options = bootstrap.tls_connection_options,
         on_protocol_negotiated = bootstrap.on_protocol_negotiated,
+        on_creation::Union{OnBootstrapChannelCreationFn, Nothing} = bootstrap.on_creation_callback,
         on_setup::Union{OnBootstrapChannelSetupFn, Nothing} = bootstrap.on_setup_callback,
         on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing} = bootstrap.on_shutdown_callback,
         user_data = bootstrap.user_data,
+        enable_read_back_pressure::Bool = false,
+        requested_event_loop::Union{AbstractEventLoop, Nothing} = nothing,
     )::Union{Nothing, ErrorResult}
     if @atomic bootstrap.shutdown
         raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
         return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+    end
+
+    if requested_event_loop !== nothing &&
+            !_event_loop_group_contains_loop(bootstrap.event_loop_group, requested_event_loop)
+        raise_error(ERROR_IO_PINNED_EVENT_LOOP_MISMATCH)
+        return ErrorResult(ERROR_IO_PINNED_EVENT_LOOP_MISMATCH)
     end
 
     host_str = String(host)
@@ -124,9 +170,12 @@ function client_bootstrap_connect!(
         nothing,
         tls_connection_options,
         on_protocol_negotiated,
+        on_creation,
         on_setup,
         on_shutdown,
         user_data,
+        enable_read_back_pressure,
+        requested_event_loop,
     )
 
     # Resolve host
@@ -146,6 +195,17 @@ function client_bootstrap_connect!(
     end
 
     return nothing
+end
+
+function _event_loop_group_contains_loop(elg, event_loop::AbstractEventLoop)::Bool
+    count = Int(event_loop_group_get_loop_count(elg))
+    for idx in 0:(count - 1)
+        loop = event_loop_group_get_loop_at(elg, idx)
+        if loop === event_loop
+            return true
+        end
+    end
+    return false
 end
 
 # Callback when host resolution completes
@@ -209,33 +269,36 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
     remote_endpoint.port = request.port
 
     # Get event loop
-    event_loop = event_loop_group_get_next_loop(bootstrap.event_loop_group)
+    event_loop = request.requested_event_loop === nothing ?
+        event_loop_group_get_next_loop(bootstrap.event_loop_group) :
+        request.requested_event_loop
 
     if event_loop === nothing
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: no event loop available"
         )
-        socket_close!(socket)
+        socket_close(socket)
         _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
         return nothing
     end
 
-    # Initiate async connect
-    connect_result = socket_connect(
-        socket,
-        remote_endpoint,
-        event_loop,
-        (sock, err, ud) -> _on_socket_connect_complete(ud, err),
-        request,
+    connect_opts = SocketConnectOptions(
+        remote_endpoint;
+        event_loop = event_loop,
+        on_connection_result = (sock, err, ud) -> _on_socket_connect_complete(ud, err),
+        user_data = request,
     )
+
+    # Initiate async connect
+    connect_result = socket_connect(socket, connect_opts)
 
     if connect_result isa ErrorResult
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: failed to initiate connection"
         )
-        socket_close!(socket)
+        socket_close(socket)
         _connection_request_complete(request, connect_result.code, nothing)
         return nothing
     end
@@ -253,7 +316,7 @@ function _on_socket_connect_complete(request::SocketConnectionRequest, error_cod
             LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: connection failed with error $error_code"
         )
-        socket_close!(socket)
+        socket_close(socket)
         _connection_request_complete(request, error_code, nothing)
         return nothing
     end
@@ -278,8 +341,12 @@ function _setup_client_channel(request::SocketConnectionRequest)
     event_loop = socket.event_loop
 
     # Create channel
-    channel = Channel(event_loop, nothing)
+    channel = Channel(event_loop, nothing; enable_read_back_pressure = request.enable_read_back_pressure)
     request.channel = channel
+
+    if request.on_creation !== nothing
+        Base.invokelatest(request.on_creation, bootstrap, AWS_OP_SUCCESS, channel, request.user_data)
+    end
 
     # Set shutdown callback
     channel_set_shutdown_callback!(
@@ -298,7 +365,8 @@ function _setup_client_channel(request::SocketConnectionRequest)
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: failed to create socket channel handler"
         )
-        socket_close!(socket)
+        request.on_shutdown = nothing
+        socket_close(socket)
         _connection_request_complete(request, handler_result.code, nothing)
         return nothing
     end
@@ -316,14 +384,16 @@ function _setup_client_channel(request::SocketConnectionRequest)
             if err == AWS_OP_SUCCESS
                 setup_result = channel_setup_complete!(channel)
                 if setup_result isa ErrorResult
-                    socket_close!(socket)
+                    request.on_shutdown = nothing
+                    socket_close(socket)
                     _connection_request_complete(request, setup_result.code, nothing)
                     return nothing
                 end
                 _connection_request_complete(request, AWS_OP_SUCCESS, channel)
             else
+                request.on_shutdown = nothing
                 channel_shutdown!(channel, err)
-                socket_close!(socket)
+                socket_close(socket)
                 _connection_request_complete(request, err, nothing)
             end
 
@@ -362,7 +432,8 @@ function _setup_client_channel(request::SocketConnectionRequest)
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: channel setup failed"
         )
-        socket_close!(socket)
+        request.on_shutdown = nothing
+        socket_close(socket)
         _connection_request_complete(request, setup_result.code, nothing)
         return nothing
     end
@@ -379,6 +450,9 @@ end
 
 # Complete connection request and invoke callback
 function _connection_request_complete(request::SocketConnectionRequest, error_code::Int, channel::Union{Channel, Nothing})
+    if error_code != AWS_OP_SUCCESS
+        request.on_shutdown = nothing
+    end
     if request.on_setup !== nothing
         Base.invokelatest(request.on_setup, request.bootstrap, error_code, channel, request.user_data)
     end
@@ -390,7 +464,15 @@ end
 # =============================================================================
 
 # Server bootstrap options
-struct ServerBootstrapOptions{ELG, SO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
+struct ServerBootstrapOptions{
+    ELG,
+    SO,
+    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
+    FL <: Union{OnServerListenerSetupFn, Nothing},
+    FS <: Union{OnIncomingChannelSetupFn, Nothing},
+    FD <: Union{OnIncomingChannelShutdownFn, Nothing},
+    U,
+}
     event_loop_group::ELG
     socket_options::SO
     host::String
@@ -400,6 +482,7 @@ struct ServerBootstrapOptions{ELG, SO, FP <: Union{ChannelOnProtocolNegotiatedFn
     on_incoming_channel_setup::FS  # nullable
     on_incoming_channel_shutdown::FD  # nullable
     user_data::U
+    enable_read_back_pressure::Bool
 end
 
 function ServerBootstrapOptions(;
@@ -412,6 +495,7 @@ function ServerBootstrapOptions(;
         on_incoming_channel_setup = nothing,
         on_incoming_channel_shutdown = nothing,
         user_data = nothing,
+        enable_read_back_pressure::Bool = false,
     )
     return ServerBootstrapOptions(
         event_loop_group,
@@ -423,11 +507,19 @@ function ServerBootstrapOptions(;
         on_incoming_channel_setup,
         on_incoming_channel_shutdown,
         user_data,
+        enable_read_back_pressure,
     )
 end
 
 # Server bootstrap - for accepting incoming connections
-mutable struct ServerBootstrap{ELG, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
+mutable struct ServerBootstrap{
+    ELG,
+    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
+    FL <: Union{OnServerListenerSetupFn, Nothing},
+    FS <: Union{OnIncomingChannelSetupFn, Nothing},
+    FD <: Union{OnIncomingChannelShutdownFn, Nothing},
+    U,
+}
     event_loop_group::ELG
     socket_options::SocketOptions
     listener_socket::Union{Socket, Nothing}  # nullable
@@ -436,6 +528,7 @@ mutable struct ServerBootstrap{ELG, FP <: Union{ChannelOnProtocolNegotiatedFn, N
     on_incoming_channel_setup::FS  # nullable
     on_incoming_channel_shutdown::FD  # nullable
     user_data::U
+    enable_read_back_pressure::Bool
     @atomic shutdown::Bool
 end
 
@@ -452,6 +545,7 @@ function ServerBootstrap(
         options.on_incoming_channel_setup,
         options.on_incoming_channel_shutdown,
         options.user_data,
+        options.enable_read_back_pressure,
         false,
     )
 
@@ -476,14 +570,14 @@ function ServerBootstrap(
     set_address!(local_endpoint, options.host)
     local_endpoint.port = options.port
 
-    bind_result = socket_bind(listener, local_endpoint)
+    bind_result = socket_bind(listener, SocketBindOptions(local_endpoint))
 
     if bind_result isa ErrorResult
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: failed to bind to $(options.host):$(options.port)"
         )
-        socket_close!(listener)
+        socket_close(listener)
         return bind_result
     end
 
@@ -495,7 +589,7 @@ function ServerBootstrap(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: failed to listen"
         )
-        socket_close!(listener)
+        socket_close(listener)
         return listen_result
     end
 
@@ -507,7 +601,7 @@ function ServerBootstrap(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: no event loop available"
         )
-        socket_close!(listener)
+        socket_close(listener)
         raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
@@ -517,7 +611,7 @@ function ServerBootstrap(
         on_accept_result_user_data = bootstrap,
         on_accept_start = (sock, err, ud) -> begin
             if options.on_listener_setup !== nothing
-                options.on_listener_setup(bootstrap, err, sock, options.user_data)
+                options.on_listener_setup(bootstrap, err, options.user_data)
             end
         end,
         on_accept_start_user_data = bootstrap,
@@ -530,7 +624,7 @@ function ServerBootstrap(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: failed to start accepting connections"
         )
-        socket_close!(listener)
+        socket_close(listener)
         return accept_result
     end
 
@@ -565,10 +659,46 @@ end
 
 # Set up channel for incoming connection
 function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
-    event_loop = socket.event_loop
+    event_loop = event_loop_group_get_next_loop(bootstrap.event_loop_group)
+    if event_loop === nothing
+        logf(
+            LogLevel.ERROR,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: no event loop available for incoming channel"
+        )
+        if bootstrap.on_incoming_channel_setup !== nothing
+            bootstrap.on_incoming_channel_setup(
+                bootstrap,
+                ERROR_IO_SOCKET_MISSING_EVENT_LOOP,
+                nothing,
+                bootstrap.user_data,
+            )
+        end
+        socket_close(socket)
+        return nothing
+    end
+
+    assign_result = socket_assign_to_event_loop(socket, event_loop)
+    if assign_result isa ErrorResult
+        logf(
+            LogLevel.ERROR,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: failed to assign incoming socket to event loop"
+        )
+        if bootstrap.on_incoming_channel_setup !== nothing
+            bootstrap.on_incoming_channel_setup(
+                bootstrap,
+                assign_result.code,
+                nothing,
+                bootstrap.user_data,
+            )
+        end
+        socket_close(socket)
+        return nothing
+    end
 
     # Create channel
-    channel = Channel(event_loop, nothing)
+    channel = Channel(event_loop, nothing; enable_read_back_pressure = bootstrap.enable_read_back_pressure)
 
     # Set shutdown callback
     channel_set_shutdown_callback!(
@@ -587,7 +717,15 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: failed to create socket handler for incoming connection"
         )
-        socket_close!(socket)
+        if bootstrap.on_incoming_channel_setup !== nothing
+            bootstrap.on_incoming_channel_setup(
+                bootstrap,
+                handler_result.code,
+                nothing,
+                bootstrap.user_data,
+            )
+        end
+        socket_close(socket)
         return nothing
     end
 
@@ -599,7 +737,15 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: incoming channel setup failed"
         )
-        socket_close!(socket)
+        if bootstrap.on_incoming_channel_setup !== nothing
+            bootstrap.on_incoming_channel_setup(
+                bootstrap,
+                setup_result.code,
+                nothing,
+                bootstrap.user_data,
+            )
+        end
+        socket_close(socket)
         return nothing
     end
 
@@ -622,7 +768,7 @@ function server_bootstrap_shutdown!(bootstrap::ServerBootstrap)
 
     if bootstrap.listener_socket !== nothing
         socket_stop_accept(bootstrap.listener_socket)
-        socket_close!(bootstrap.listener_socket)
+        socket_close(bootstrap.listener_socket)
         bootstrap.listener_socket = nothing
     end
 
