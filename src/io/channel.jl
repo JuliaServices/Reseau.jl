@@ -147,7 +147,7 @@ end
 end
 
 # Channel - a bidirectional pipeline of handlers
-mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, US, UD, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannel
+mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannel
     event_loop::EL
     first::SlotRef  # nullable - Application side (leftmost)
     last::SlotRef   # nullable - Socket side (rightmost)
@@ -156,10 +156,10 @@ mutable struct Channel{EL <: AbstractEventLoop, FS <: Union{ChannelOnSetupComple
     channel_id::UInt64
     window::Csize_t
     message_pool::Union{MessagePool, Nothing}  # nullable
-    on_setup_completed::FS  # nullable
-    on_shutdown_completed::FD  # nullable
-    setup_user_data::US
-    shutdown_user_data::UD
+    on_setup_completed::Union{ChannelOnSetupCompletedFn, Nothing}  # nullable
+    on_shutdown_completed::Union{ChannelOnShutdownCompletedFn, Nothing}  # nullable
+    setup_user_data::Any
+    shutdown_user_data::Any
     shutdown_error_code::Int
     # Statistics tracking
     read_message_count::Csize_t
@@ -193,7 +193,7 @@ function Channel(
     ) where {EL <: AbstractEventLoop}
     channel_id = _next_channel_id()
 
-    return Channel{EL, Nothing, Nothing, Nothing, Nothing, Union{ChannelSlot, Nothing}}(
+    return Channel{EL, Union{ChannelSlot, Nothing}}(
         event_loop,
         nothing,  # first
         nothing,  # last
@@ -453,6 +453,43 @@ function channel_slot_remove!(slot::ChannelSlot)
     return nothing
 end
 
+# Replace a slot in the channel with a new slot
+function channel_slot_replace!(remove::ChannelSlot, new_slot::ChannelSlot)
+    channel = remove.channel
+    new_slot.channel = channel
+    new_slot.adj_left = remove.adj_left
+    new_slot.adj_right = remove.adj_right
+
+    if remove.adj_left !== nothing
+        remove.adj_left.adj_right = new_slot
+    end
+    if remove.adj_right !== nothing
+        remove.adj_right.adj_left = new_slot
+    end
+
+    if channel !== nothing && channel.first === remove
+        channel.first = new_slot
+    end
+    if channel !== nothing && channel.last === remove
+        channel.last = new_slot
+    end
+
+    remove.adj_left = nothing
+    remove.adj_right = nothing
+    remove.channel = nothing
+
+    if remove.handler !== nothing
+        handler_destroy(remove.handler)
+        remove.handler = nothing
+    end
+
+    if channel !== nothing
+        _channel_calculate_message_overheads!(channel)
+    end
+
+    return nothing
+end
+
 # Set the handler for a slot
 function channel_slot_set_handler!(slot::ChannelSlot, handler::AbstractChannelHandler)
     slot.handler = handler
@@ -608,15 +645,19 @@ function channel_shutdown!(channel::Channel, direction::ChannelDirection.T, erro
     end
 
     if channel.channel_state == ChannelState.SHUTTING_DOWN_READ || channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE
-        logf(
-            LogLevel.DEBUG, LS_IO_CHANNEL,
-            "Channel id=$(channel.channel_id): already shutting down"
-        )
-        # Only update if error_code is set
-        if error_code != 0 && channel.shutdown_error_code == 0
-            channel.shutdown_error_code = error_code
+        if (channel.channel_state == ChannelState.SHUTTING_DOWN_READ && direction == ChannelDirection.READ) ||
+                (channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE && direction == ChannelDirection.WRITE) ||
+                (channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE && direction == ChannelDirection.READ)
+            logf(
+                LogLevel.DEBUG, LS_IO_CHANNEL,
+                "Channel id=$(channel.channel_id): already shutting down"
+            )
+            # Only update if error_code is set
+            if error_code != 0 && channel.shutdown_error_code == 0
+                channel.shutdown_error_code = error_code
+            end
+            return nothing
         end
-        return nothing
     end
 
     logf(

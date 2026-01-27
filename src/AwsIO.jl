@@ -45,5 +45,6 @@ include("common/common.jl")
 include("io/io.jl")
 include("io/async_stream.jl")
 include("io/tls_channel_handler.jl")
+include("io/alpn_handler.jl")
 
 end # module AwsIO

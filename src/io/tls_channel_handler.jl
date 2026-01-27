@@ -29,6 +29,7 @@ struct TlsContextOptions
     ca_data::Union{String, Nothing}
     certificate::Union{String, Nothing}
     private_key::Union{String, Nothing}
+    alpn_list::Union{String, Nothing}
 end
 
 function TlsContextOptions(;
@@ -38,6 +39,7 @@ function TlsContextOptions(;
         ca_data::Union{String, Nothing} = nothing,
         certificate::Union{String, Nothing} = nothing,
         private_key::Union{String, Nothing} = nothing,
+        alpn_list::Union{String, Nothing} = nothing,
     )
     return TlsContextOptions(
         is_server,
@@ -46,6 +48,7 @@ function TlsContextOptions(;
         ca_data,
         certificate,
         private_key,
+        alpn_list,
     )
 end
 
@@ -76,6 +79,7 @@ function tls_context_new_client(;
         verify_peer::Bool = true,
         ca_file::Union{String, Nothing} = nothing,
         ca_data::Union{String, Nothing} = nothing,
+        alpn_list::Union{String, Nothing} = nothing,
     )
     return tls_context_new(
         TlsContextOptions(;
@@ -83,6 +87,7 @@ function tls_context_new_client(;
             verify_peer = verify_peer,
             ca_file = ca_file,
             ca_data = ca_data,
+            alpn_list = alpn_list,
         )
     )
 end
@@ -90,6 +95,7 @@ end
 function tls_context_new_server(;
         certificate::String,
         private_key::String,
+        alpn_list::Union{String, Nothing} = nothing,
     )
     return tls_context_new(
         TlsContextOptions(;
@@ -97,13 +103,16 @@ function tls_context_new_server(;
             verify_peer = false,
             certificate = certificate,
             private_key = private_key,
+            alpn_list = alpn_list,
         )
     )
 end
 
-struct TlsConnectionOptions{C <: TlsContext, FNR <: Union{TlsOnNegotiationResultFn, Nothing}, FDR <: Union{TlsOnDataReadFn, Nothing}, FER <: Union{TlsOnErrorFn, Nothing}, U}
+struct TlsConnectionOptions{C <: TlsContext, FNR <: Union{TlsOnNegotiationResultFn, Nothing}, FDR <: Union{TlsOnDataReadFn, Nothing}, FER <: Union{TlsOnErrorFn, Nothing}, U} <: AbstractTlsConnectionOptions
     ctx::C
     server_name::Union{String, Nothing}
+    alpn_list::Union{String, Nothing}
+    advertise_alpn_message::Bool
     on_negotiation_result::FNR
     on_data_read::FDR
     on_error::FER
@@ -114,6 +123,8 @@ end
 function TlsConnectionOptions(
         ctx::TlsContext;
         server_name::Union{String, Nothing} = nothing,
+        alpn_list::Union{String, Nothing} = ctx.options.alpn_list,
+        advertise_alpn_message::Bool = false,
         on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing} = nothing,
         on_data_read::Union{TlsOnDataReadFn, Nothing} = nothing,
         on_error::Union{TlsOnErrorFn, Nothing} = nothing,
@@ -123,12 +134,18 @@ function TlsConnectionOptions(
     return TlsConnectionOptions(
         ctx,
         server_name,
+        alpn_list,
+        advertise_alpn_message,
         on_negotiation_result,
         on_data_read,
         on_error,
         user_data,
         UInt32(timeout_ms),
     )
+end
+
+struct TlsNegotiatedProtocolMessage
+    protocol::ByteBuffer
 end
 
 mutable struct PendingWrite
@@ -144,6 +161,7 @@ mutable struct TlsChannelHandler{FNR <: Union{TlsOnNegotiationResultFn, Nothing}
     options::TlsConnectionOptions{TlsContext, FNR, FDR, FER, U}
     state::TlsHandshakeState.T
     stats::TlsHandlerStatistics
+    protocol::ByteBuffer
     client_random::Memory{UInt8}
     server_random::Memory{UInt8}
     session_key::Memory{UInt8}
@@ -163,6 +181,7 @@ function TlsChannelHandler(
         options,
         TlsHandshakeState.INIT,
         TlsHandlerStatistics(),
+        null_buffer(),
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
@@ -342,6 +361,60 @@ function _tls_mark_handshake_end!(handler::TlsChannelHandler, status::TlsNegotia
     return nothing
 end
 
+function _tls_select_alpn_protocol(options::TlsConnectionOptions)
+    list = options.alpn_list
+    if list === nothing || isempty(list)
+        return null_buffer()
+    end
+    for token in split(list, ';')
+        proto = strip(token)
+        if !isempty(proto)
+            return byte_buf_from_c_str(proto)
+        end
+    end
+    return null_buffer()
+end
+
+function _tls_send_alpn_message!(handler::TlsChannelHandler)::Bool
+    if !handler.options.advertise_alpn_message
+        return true
+    end
+    slot = handler.slot
+    if slot === nothing || slot.channel === nothing
+        return true
+    end
+    if slot.adj_left === nothing
+        return true
+    end
+    if handler.protocol.len == 0
+        return true
+    end
+
+    channel = slot.channel
+    msg = channel_acquire_message_from_pool(
+        channel,
+        IoMessageType.APPLICATION_DATA,
+        sizeof(TlsNegotiatedProtocolMessage),
+    )
+    if msg === nothing
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_WRITE_FAILURE, "ALPN message alloc failed")
+        return false
+    end
+
+    msg.message_tag = TLS_NEGOTIATED_PROTOCOL_MESSAGE
+    msg.user_data = TlsNegotiatedProtocolMessage(handler.protocol)
+    msg.message_data.len = Csize_t(sizeof(TlsNegotiatedProtocolMessage))
+
+    send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
+    if send_result isa ErrorResult
+        channel_release_message_to_pool!(channel, msg)
+        channel_shutdown!(channel, ChannelDirection.READ, send_result.code)
+        return false
+    end
+
+    return true
+end
+
 function _tls_send_record!(handler::TlsChannelHandler, record_type::UInt8, payload::AbstractVector{UInt8})
     slot = handler.slot
     if slot === nothing || slot.channel === nothing
@@ -411,6 +484,10 @@ function _tls_mark_negotiated!(handler::TlsChannelHandler)
     handler.negotiation_completed = true
     handler.state = TlsHandshakeState.NEGOTIATED
     _tls_mark_handshake_end!(handler, TlsNegotiationStatus.SUCCESS)
+    handler.protocol = _tls_select_alpn_protocol(handler.options)
+    if !_tls_send_alpn_message!(handler)
+        return nothing
+    end
     if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
         Base.invokelatest(
             handler.options.on_negotiation_result,

@@ -35,7 +35,7 @@ Legend:
 - [x] Statistics (statistics.h)
 - [ ] PKCS#11 support (pkcs11.h + pkcs11_tls_op_handler.c)
 - [ ] TLS channel handler (tls_channel_handler.h + tls_channel_handler_shared.c)
-- [ ] ALPN handler (alpn_handler.c)
+- [x] ALPN handler (alpn_handler.c)
 - [ ] Tracing hooks (private/tracing.h)
 
 ### 0.2 Explicitly out of scope
@@ -162,10 +162,10 @@ Legend:
 - [x] Implement statistics hooks (see Statistics section)
 
 ### 4.4 ALPN handler
-- [ ] Implement ALPN channel handler (source/alpn_handler.c)
-- [ ] Inject negotiated protocol message handling
-- [ ] Integrate with channel bootstrap `on_protocol_negotiated` callback
-- [ ] Implement error paths: missing/unknown ALPN message
+- [x] Implement ALPN channel handler (source/alpn_handler.c)
+- [x] Inject negotiated protocol message handling
+- [x] Integrate with channel bootstrap `on_protocol_negotiated` callback
+- [x] Implement error paths: missing/unknown ALPN message
 
 ---
 
@@ -324,7 +324,7 @@ Legend:
 - [ ] Port `tls_handler_test.c` scenarios
 - [ ] Port `byo_crypto_test.c`
 - [ ] Port TLS server tests (use provided test certs/resources)
-- [ ] Add ALPN test coverage (`alpn_handler_test.c`)
+- [x] Add ALPN test coverage (`alpn_handler_test.c`)
 
 ---
 
@@ -437,8 +437,8 @@ Legend:
 - [ ] `exponential_backoff_retry_test.c` -> new `test/retry_strategy_tests.jl`
 - [ ] `standard_retry_test.c` -> new `test/retry_strategy_tests.jl`
 - [x] `no_retry_strategy_test.c` -> new `test/retry_strategy_tests.jl`
-- [ ] `statistics_handler_test.c` -> new `test/statistics_tests.jl`
-- [ ] `alpn_handler_test.c` -> new `test/alpn_tests.jl`
+- [x] `statistics_handler_test.c` -> new `test/statistics_tests.jl`
+- [x] `alpn_handler_test.c` -> new `test/alpn_tests.jl`
 - [ ] `tls_handler_test.c` -> `test/tls_tests.jl` (extend)
 - [ ] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
 - [ ] `pkcs11_test.c` -> new `test/pkcs11_tests.jl`

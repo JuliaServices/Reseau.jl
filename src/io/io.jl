@@ -204,6 +204,9 @@ const LS_IO_LAST = LOG_SUBJECT_END_RANGE(IO_PACKAGE_ID)
     APPLICATION_DATA = 0
 end
 
+# TLS message tag for negotiated protocol notification (ALPN)
+const TLS_NEGOTIATED_PROTOCOL_MESSAGE = Int32(0x01)
+
 # IO Handle - union of fd (POSIX) or handle (Windows/Apple)
 mutable struct IoHandle
     fd::Int32  # File descriptor on POSIX

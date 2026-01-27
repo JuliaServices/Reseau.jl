@@ -7,13 +7,15 @@ const OnBootstrapChannelShutdownFn = Function  # (bootstrap, error_code, channel
 const OnServerListenerSetupFn = Function  # (server_bootstrap, error_code, socket, user_data) -> nothing
 const OnIncomingChannelSetupFn = Function  # (server_bootstrap, error_code, channel, user_data) -> nothing
 const OnIncomingChannelShutdownFn = Function  # (server_bootstrap, error_code, channel, user_data) -> nothing
+const ChannelOnProtocolNegotiatedFn = Function  # (new_slot, protocol::ByteBuffer, user_data) -> AbstractChannelHandler
 
 # Client bootstrap options
-struct ClientBootstrapOptions{ELG, HR, SO, TO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+struct ClientBootstrapOptions{ELG, HR, SO, TO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SO
     tls_connection_options::TO
+    on_protocol_negotiated::FP
     on_setup_callback::FS  # nullable
     on_shutdown_callback::FD  # nullable
     user_data::U
@@ -24,6 +26,7 @@ function ClientBootstrapOptions(;
         host_resolver,
         socket_options::SocketOptions = SocketOptions(),
         tls_connection_options = nothing,
+        on_protocol_negotiated = nothing,
         on_setup_callback = nothing,
         on_shutdown_callback = nothing,
         user_data = nothing,
@@ -33,6 +36,7 @@ function ClientBootstrapOptions(;
         host_resolver,
         socket_options,
         tls_connection_options,
+        on_protocol_negotiated,
         on_setup_callback,
         on_shutdown_callback,
         user_data,
@@ -40,11 +44,12 @@ function ClientBootstrapOptions(;
 end
 
 # Client bootstrap - for creating outgoing connections
-mutable struct ClientBootstrap{ELG, HR, TO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+mutable struct ClientBootstrap{ELG, HR, TO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     host_resolver::HR
     socket_options::SocketOptions
     tls_connection_options::TO
+    on_protocol_negotiated::FP
     on_setup_callback::FS  # nullable
     on_shutdown_callback::FD  # nullable
     user_data::U
@@ -52,14 +57,15 @@ mutable struct ClientBootstrap{ELG, HR, TO, FS <: Union{OnBootstrapChannelSetupF
 end
 
 function ClientBootstrap(
-        options::ClientBootstrapOptions{ELG, HR, SO, TO, FS, FD, U},
-    ) where {ELG, HR, SO, TO, FS, FD, U}
-    CBT = ClientBootstrap{ELG, HR, TO, FS, FD, U}
+        options::ClientBootstrapOptions{ELG, HR, SO, TO, FP, FS, FD, U},
+    ) where {ELG, HR, SO, TO, FP, FS, FD, U}
+    CBT = ClientBootstrap{ELG, HR, TO, FP, FS, FD, U}
     bootstrap = CBT(
         options.event_loop_group,
         options.host_resolver,
         options.socket_options,
         options.tls_connection_options,
+        options.on_protocol_negotiated,
         options.on_setup_callback,
         options.on_shutdown_callback,
         options.user_data,
@@ -72,13 +78,14 @@ function ClientBootstrap(
 end
 
 # Connection request tracking
-mutable struct SocketConnectionRequest{CB, TO, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
+mutable struct SocketConnectionRequest{CB, TO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FS <: Union{OnBootstrapChannelSetupFn, Nothing}, FD <: Union{OnBootstrapChannelShutdownFn, Nothing}, U}
     bootstrap::CB
     host::String
     port::UInt32
     socket::Union{Socket, Nothing}  # nullable
     channel::Union{Channel, Nothing}  # nullable
     tls_connection_options::TO
+    on_protocol_negotiated::FP
     on_setup::FS  # nullable
     on_shutdown::FD  # nullable
     user_data::U
@@ -91,6 +98,7 @@ function client_bootstrap_connect!(
         port::Integer;
         socket_options::SocketOptions = bootstrap.socket_options,
         tls_connection_options = bootstrap.tls_connection_options,
+        on_protocol_negotiated = bootstrap.on_protocol_negotiated,
         on_setup::Union{OnBootstrapChannelSetupFn, Nothing} = bootstrap.on_setup_callback,
         on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing} = bootstrap.on_shutdown_callback,
         user_data = bootstrap.user_data,
@@ -115,6 +123,7 @@ function client_bootstrap_connect!(
         nothing,
         nothing,
         tls_connection_options,
+        on_protocol_negotiated,
         on_setup,
         on_shutdown,
         user_data,
@@ -297,6 +306,7 @@ function _setup_client_channel(request::SocketConnectionRequest)
     # If TLS requested, insert TLS handler and defer setup completion
     if request.tls_connection_options !== nothing
         tls_options = request.tls_connection_options
+        advertise_alpn = request.on_protocol_negotiated !== nothing
 
         on_negotiation = (handler, slot, err, ud) -> begin
             if tls_options.on_negotiation_result !== nothing
@@ -323,6 +333,8 @@ function _setup_client_channel(request::SocketConnectionRequest)
         wrapped = TlsConnectionOptions(
             tls_options.ctx;
             server_name = tls_options.server_name,
+            alpn_list = tls_options.alpn_list,
+            advertise_alpn_message = tls_options.advertise_alpn_message || advertise_alpn,
             on_negotiation_result = on_negotiation,
             on_data_read = tls_options.on_data_read,
             on_error = tls_options.on_error,
@@ -330,7 +342,15 @@ function _setup_client_channel(request::SocketConnectionRequest)
             timeout_ms = tls_options.timeout_ms,
         )
 
-        tls_channel_handler_new!(channel, wrapped)
+        tls_handler = tls_channel_handler_new!(channel, wrapped)
+
+        if advertise_alpn
+            alpn_slot = channel_slot_new!(channel)
+            channel_slot_insert_left!(alpn_slot, tls_handler.slot)
+            alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated, request.user_data)
+            channel_slot_set_handler!(alpn_slot, alpn_handler)
+            alpn_handler.slot = alpn_slot
+        end
         return nothing
     end
 
@@ -370,11 +390,12 @@ end
 # =============================================================================
 
 # Server bootstrap options
-struct ServerBootstrapOptions{ELG, SO, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
+struct ServerBootstrapOptions{ELG, SO, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     socket_options::SO
     host::String
     port::UInt32
+    on_protocol_negotiated::FP
     on_listener_setup::FL  # nullable
     on_incoming_channel_setup::FS  # nullable
     on_incoming_channel_shutdown::FD  # nullable
@@ -386,6 +407,7 @@ function ServerBootstrapOptions(;
         socket_options::SocketOptions = SocketOptions(),
         host::AbstractString = "0.0.0.0",
         port::Integer,
+        on_protocol_negotiated = nothing,
         on_listener_setup = nothing,
         on_incoming_channel_setup = nothing,
         on_incoming_channel_shutdown = nothing,
@@ -396,6 +418,7 @@ function ServerBootstrapOptions(;
         socket_options,
         String(host),
         UInt32(port),
+        on_protocol_negotiated,
         on_listener_setup,
         on_incoming_channel_setup,
         on_incoming_channel_shutdown,
@@ -404,10 +427,11 @@ function ServerBootstrapOptions(;
 end
 
 # Server bootstrap - for accepting incoming connections
-mutable struct ServerBootstrap{ELG, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
+mutable struct ServerBootstrap{ELG, FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, FL <: Union{OnServerListenerSetupFn, Nothing}, FS <: Union{OnIncomingChannelSetupFn, Nothing}, FD <: Union{OnIncomingChannelShutdownFn, Nothing}, U}
     event_loop_group::ELG
     socket_options::SocketOptions
     listener_socket::Union{Socket, Nothing}  # nullable
+    on_protocol_negotiated::FP
     on_listener_setup::FL  # nullable
     on_incoming_channel_setup::FS  # nullable
     on_incoming_channel_shutdown::FD  # nullable
@@ -416,13 +440,14 @@ mutable struct ServerBootstrap{ELG, FL <: Union{OnServerListenerSetupFn, Nothing
 end
 
 function ServerBootstrap(
-        options::ServerBootstrapOptions{ELG, SO, FL, FS, FD, U},
-    ) where {ELG, SO, FL, FS, FD, U}
-    SBT = ServerBootstrap{ELG, FL, FS, FD, U}
+        options::ServerBootstrapOptions{ELG, SO, FP, FL, FS, FD, U},
+    ) where {ELG, SO, FP, FL, FS, FD, U}
+    SBT = ServerBootstrap{ELG, FP, FL, FS, FD, U}
     bootstrap = SBT(
         options.event_loop_group,
         options.socket_options,
         nothing,
+        options.on_protocol_negotiated,
         options.on_listener_setup,
         options.on_incoming_channel_setup,
         options.on_incoming_channel_shutdown,
