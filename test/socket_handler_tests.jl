@@ -71,7 +71,7 @@ AwsIO.handler_destroy(::TestReadHandler) = nothing
     end
 
     opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    server = AwsIO.socket_init_posix(opts)
+    server = AwsIO.socket_init(opts)
     @test server isa AwsIO.Socket
     if server isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -136,7 +136,7 @@ AwsIO.handler_destroy(::TestReadHandler) = nothing
     accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
     @test AwsIO.socket_start_accept(server, event_loop, accept_opts) === nothing
 
-    client = AwsIO.socket_init_posix(opts)
+    client = AwsIO.socket_init(opts)
     @test client isa AwsIO.Socket
     if client isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -241,7 +241,7 @@ end
     end
 
     opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    server = AwsIO.socket_init_posix(opts)
+    server = AwsIO.socket_init(opts)
     @test server isa AwsIO.Socket
     if server isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -296,7 +296,7 @@ end
     accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
     @test AwsIO.socket_start_accept(server, event_loop, accept_opts) === nothing
 
-    client = AwsIO.socket_init_posix(opts)
+    client = AwsIO.socket_init(opts)
     @test client isa AwsIO.Socket
     if client isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)

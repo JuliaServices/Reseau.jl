@@ -81,7 +81,7 @@ end
     end
 
     server_opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    server_sock = AwsIO.socket_init_posix(server_opts)
+    server_sock = AwsIO.socket_init(server_opts)
     @test server_sock isa AwsIO.Socket
     if server_sock isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -134,7 +134,7 @@ end
     @test AwsIO.socket_start_accept(server_sock, event_loop, listener_opts) === nothing
 
     client_opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    client_sock = AwsIO.socket_init_posix(client_opts)
+    client_sock = AwsIO.socket_init(client_opts)
     @test client_sock isa AwsIO.Socket
     if client_sock isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)

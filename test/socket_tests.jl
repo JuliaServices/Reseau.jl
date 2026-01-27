@@ -69,7 +69,7 @@ end
             domain = AwsIO.SocketDomain.IPV4,
             network_interface_name = long_name,
         )
-        res = AwsIO.socket_init_posix(opts)
+        res = AwsIO.socket_init(opts)
         @test res isa AwsIO.ErrorResult
         res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
     end
@@ -97,7 +97,7 @@ end
             type = AwsIO.SocketType.STREAM,
             domain = AwsIO.SocketDomain.IPV4,
         )
-        sock = AwsIO.socket_init_posix(opts)
+        sock = AwsIO.socket_init(opts)
         @test sock isa AwsIO.Socket
         if sock isa AwsIO.Socket
             fd = sock.io_handle.fd
@@ -120,7 +120,7 @@ end
     end
     @test AwsIO.event_loop_run!(el_val) === nothing
     opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    server = AwsIO.socket_init_posix(opts)
+    server = AwsIO.socket_init(opts)
     server_socket = server isa AwsIO.Socket ? server : nothing
     @test server_socket !== nothing
 
@@ -198,7 +198,7 @@ end
         accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
         @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-        client = AwsIO.socket_init_posix(opts)
+        client = AwsIO.socket_init(opts)
         client_socket = client isa AwsIO.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
