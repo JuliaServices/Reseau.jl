@@ -193,6 +193,14 @@ function ExponentialBackoffRetryStrategy(
         event_loop_group::ELG,
         config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
     ) where {ELG}
+    if config.max_retries > 63
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    if !(config.jitter_mode in (:default, :none, :full, :decorrelated, :equal))
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
     strategy = ExponentialBackoffRetryStrategy{ELG}(
         event_loop_group,
         config,
