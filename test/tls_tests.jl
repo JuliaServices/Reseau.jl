@@ -13,6 +13,22 @@ function wait_for_flag_tls(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
     return false
 end
 
+const TEST_PEM_CERT = """
+-----BEGIN CERTIFICATE-----
+dGVzdA==
+-----END CERTIFICATE-----
+"""
+
+const TEST_PEM_KEY = """
+-----BEGIN PRIVATE KEY-----
+dGVzdA==
+-----END PRIVATE KEY-----
+"""
+
+function _buf_to_string(buf::AwsIO.ByteBuffer)
+    return String(AwsIO.byte_cursor_from_buf(buf))
+end
+
 @testset "TLS options parity" begin
     opts = AwsIO.tls_ctx_options_init_default_client()
     @test !opts.is_server
@@ -30,15 +46,29 @@ end
     )
     @test AwsIO.tls_is_cipher_pref_supported(opts.cipher_pref)
 
-    AwsIO.tls_ctx_options_override_default_trust_store!(
+    @test AwsIO.tls_ctx_options_override_default_trust_store!(
+        opts,
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+    ) === nothing
+    @test _buf_to_string(opts.ca_file) == TEST_PEM_CERT
+
+    temp_dir = mktempdir()
+    ca_path = joinpath(temp_dir, "ca.pem")
+    write(ca_path, TEST_PEM_CERT)
+    @test AwsIO.tls_ctx_options_override_default_trust_store_from_path!(
         opts;
-        ca_file = "cafile",
         ca_path = "/tmp",
-        ca_data = "cadata",
-    )
-    @test opts.ca_file == "cafile"
-    @test opts.ca_path == "/tmp"
-    @test opts.ca_data == "cadata"
+        ca_file = ca_path,
+    ) isa AwsIO.ErrorResult
+
+    opts2 = AwsIO.tls_ctx_options_init_default_client()
+    @test AwsIO.tls_ctx_options_override_default_trust_store_from_path!(
+        opts2;
+        ca_path = "/tmp",
+        ca_file = ca_path,
+    ) === nothing
+    @test opts2.ca_path == "/tmp"
+    @test _buf_to_string(opts2.ca_file) == TEST_PEM_CERT
 
     ctx = AwsIO.tls_context_new(opts)
     @test ctx isa AwsIO.TlsContext
@@ -67,6 +97,31 @@ end
     @test conn_copy.server_name == conn.server_name
     @test conn_copy.alpn_list == conn.alpn_list
     @test conn_copy.timeout_ms == conn.timeout_ms
+end
+
+@testset "TLS ctx options mtls" begin
+    opts = AwsIO.tls_ctx_options_init_client_mtls(
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+        AwsIO.ByteCursor(TEST_PEM_KEY),
+    )
+    @test opts isa AwsIO.TlsContextOptions
+    if opts isa AwsIO.TlsContextOptions
+        @test _buf_to_string(opts.certificate) == TEST_PEM_CERT
+        @test _buf_to_string(opts.private_key) == TEST_PEM_KEY
+    end
+
+    temp_dir = mktempdir()
+    cert_path = joinpath(temp_dir, "cert.pem")
+    key_path = joinpath(temp_dir, "key.pem")
+    write(cert_path, TEST_PEM_CERT)
+    write(key_path, TEST_PEM_KEY)
+
+    opts2 = AwsIO.tls_ctx_options_init_client_mtls_from_path(cert_path, key_path)
+    @test opts2 isa AwsIO.TlsContextOptions
+    if opts2 isa AwsIO.TlsContextOptions
+        @test _buf_to_string(opts2.certificate) == TEST_PEM_CERT
+        @test _buf_to_string(opts2.private_key) == TEST_PEM_KEY
+    end
 end
 
 mutable struct EchoHandler <: AwsIO.AbstractChannelHandler

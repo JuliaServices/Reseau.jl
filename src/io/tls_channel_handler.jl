@@ -59,15 +59,14 @@ mutable struct TlsContextOptions
     is_server::Bool
     minimum_tls_version::TlsVersion.T
     cipher_pref::TlsCipherPref.T
-    ca_file::Union{String, Nothing}
+    ca_file::ByteBuffer
     ca_path::Union{String, Nothing}
-    ca_data::Union{String, Nothing}
     alpn_list::Union{String, Nothing}
-    certificate::Union{String, Nothing}
-    private_key::Union{String, Nothing}
+    certificate::ByteBuffer
+    private_key::ByteBuffer
     system_certificate_path::Union{String, Nothing}
-    pkcs12::Union{String, Nothing}
-    pkcs12_password::Union{String, Nothing}
+    pkcs12::ByteBuffer
+    pkcs12_password::ByteBuffer
     secitem_options::Union{SecItemOptions, Nothing}
     keychain_path::Union{String, Nothing}
     max_fragment_size::Csize_t
@@ -80,15 +79,14 @@ function TlsContextOptions(;
         is_server::Bool = false,
         minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
         cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
-        ca_file::Union{String, Nothing} = nothing,
+        ca_file::Union{ByteBuffer, Nothing} = nothing,
         ca_path::Union{String, Nothing} = nothing,
-        ca_data::Union{String, Nothing} = nothing,
         alpn_list::Union{String, Nothing} = nothing,
-        certificate::Union{String, Nothing} = nothing,
-        private_key::Union{String, Nothing} = nothing,
+        certificate::Union{ByteBuffer, Nothing} = nothing,
+        private_key::Union{ByteBuffer, Nothing} = nothing,
         system_certificate_path::Union{String, Nothing} = nothing,
-        pkcs12::Union{String, Nothing} = nothing,
-        pkcs12_password::Union{String, Nothing} = nothing,
+        pkcs12::Union{ByteBuffer, Nothing} = nothing,
+        pkcs12_password::Union{ByteBuffer, Nothing} = nothing,
         secitem_options::Union{SecItemOptions, Nothing} = nothing,
         keychain_path::Union{String, Nothing} = nothing,
         max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
@@ -97,19 +95,23 @@ function TlsContextOptions(;
         custom_key_op_handler = nothing,
     )
     verify_peer_final = verify_peer === nothing ? !is_server : verify_peer
+    ca_file_buf = ca_file === nothing ? null_buffer() : ca_file
+    certificate_buf = certificate === nothing ? null_buffer() : certificate
+    private_key_buf = private_key === nothing ? null_buffer() : private_key
+    pkcs12_buf = pkcs12 === nothing ? null_buffer() : pkcs12
+    pkcs12_password_buf = pkcs12_password === nothing ? null_buffer() : pkcs12_password
     return TlsContextOptions(
         is_server,
         minimum_tls_version,
         cipher_pref,
-        ca_file,
+        ca_file_buf,
         ca_path,
-        ca_data,
         alpn_list,
-        certificate,
-        private_key,
+        certificate_buf,
+        private_key_buf,
         system_certificate_path,
-        pkcs12,
-        pkcs12_password,
+        pkcs12_buf,
+        pkcs12_password_buf,
         secitem_options,
         keychain_path,
         Csize_t(max_fragment_size),
@@ -137,6 +139,57 @@ function _tls_cal_init_once()
     return nothing
 end
 
+@inline function _tls_options_buf_is_set(buf::ByteBuffer)::Bool
+    return buf.len > 0
+end
+
+function _tls_buf_copy_from(value)::Union{ByteBuffer, ErrorResult}
+    if value === nothing
+        return null_buffer()
+    end
+
+    cursor = if value isa ByteBuffer
+        byte_cursor_from_buf(value)
+    elseif value isa ByteCursor
+        value
+    elseif value isa AbstractVector{UInt8}
+        ByteCursor(value)
+    elseif value isa AbstractString
+        ByteCursor(value)
+    else
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+
+    dest_ref = Ref(null_buffer())
+    if byte_buf_init_copy_from_cursor(dest_ref, cursor) != OP_SUCCESS
+        return ErrorResult(last_error())
+    end
+    return dest_ref[]
+end
+
+function _tls_buf_from_file(path::AbstractString)::Union{ByteBuffer, ErrorResult}
+    dest_ref = Ref(null_buffer())
+    if byte_buf_init_from_file(dest_ref, path) != OP_SUCCESS
+        return ErrorResult(last_error())
+    end
+    return dest_ref[]
+end
+
+function _tls_validate_pem(buf::ByteBuffer)::Union{Nothing, ErrorResult}
+    if buf.len == 0
+        raise_error(ERROR_IO_PEM_MALFORMED)
+        return ErrorResult(ERROR_IO_PEM_MALFORMED)
+    end
+    data = Vector{UInt8}(undef, Int(buf.len))
+    copyto!(data, 1, buf.mem, 1, Int(buf.len))
+    parsed = pem_parse(data)
+    if parsed isa ErrorResult
+        return ErrorResult(last_error())
+    end
+    return nothing
+end
+
 function tls_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
     _tls_cal_init_once()
     return TlsContext(options)
@@ -144,9 +197,8 @@ end
 
 function tls_ctx_options_init_default_client(;
         verify_peer::Bool = true,
-        ca_file::Union{String, Nothing} = nothing,
+        ca_file::Union{ByteBuffer, Nothing} = nothing,
         ca_path::Union{String, Nothing} = nothing,
-        ca_data::Union{String, Nothing} = nothing,
         alpn_list::Union{String, Nothing} = nothing,
         minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
         cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
@@ -157,7 +209,6 @@ function tls_ctx_options_init_default_client(;
         verify_peer = verify_peer,
         ca_file = ca_file,
         ca_path = ca_path,
-        ca_data = ca_data,
         alpn_list = alpn_list,
         minimum_tls_version = minimum_tls_version,
         cipher_pref = cipher_pref,
@@ -165,28 +216,23 @@ function tls_ctx_options_init_default_client(;
     )
 end
 
-function tls_ctx_options_init_default_server(;
-        certificate::Union{String, Nothing} = nothing,
-        private_key::Union{String, Nothing} = nothing,
-        alpn_list::Union{String, Nothing} = nothing,
-        minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
-        cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
-        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
-        verify_peer::Bool = false,
-    )
-    return TlsContextOptions(;
-        is_server = true,
-        verify_peer = verify_peer,
-        certificate = certificate,
-        private_key = private_key,
-        alpn_list = alpn_list,
-        minimum_tls_version = minimum_tls_version,
-        cipher_pref = cipher_pref,
-        max_fragment_size = max_fragment_size,
-    )
-end
+function tls_ctx_options_clean_up!(options::TlsContextOptions)
+    byte_buf_clean_up(Ref(options.ca_file))
+    byte_buf_clean_up(Ref(options.certificate))
+    byte_buf_clean_up_secure(Ref(options.private_key))
 
-tls_ctx_options_clean_up!(::TlsContextOptions) = nothing
+    byte_buf_clean_up_secure(Ref(options.pkcs12))
+    byte_buf_clean_up_secure(Ref(options.pkcs12_password))
+    options.keychain_path = nothing
+    options.secitem_options = nothing
+
+    options.ca_path = nothing
+    options.alpn_list = nothing
+    options.system_certificate_path = nothing
+    options.ctx_options_extension = nothing
+    options.custom_key_op_handler = nothing
+    return nothing
+end
 
 function tls_ctx_options_set_alpn_list!(options::TlsContextOptions, alpn_list::Union{String, Nothing})
     options.alpn_list = alpn_list
@@ -214,14 +260,57 @@ function tls_ctx_options_set_max_fragment_size!(options::TlsContextOptions, max_
 end
 
 function tls_ctx_options_override_default_trust_store!(
+        options::TlsContextOptions,
+        ca_file,
+    )::Union{Nothing, ErrorResult}
+    if _tls_options_buf_is_set(options.ca_file)
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    ca_buf = _tls_buf_copy_from(ca_file)
+    if ca_buf isa ErrorResult
+        return ca_buf
+    end
+    pem_res = _tls_validate_pem(ca_buf)
+    if pem_res isa ErrorResult
+        byte_buf_clean_up_secure(Ref(ca_buf))
+        return pem_res
+    end
+    options.ca_file = ca_buf
+    return nothing
+end
+
+function tls_ctx_options_override_default_trust_store_from_path!(
         options::TlsContextOptions;
-        ca_file::Union{String, Nothing} = options.ca_file,
-        ca_path::Union{String, Nothing} = options.ca_path,
-        ca_data::Union{String, Nothing} = options.ca_data,
-    )
-    options.ca_file = ca_file
-    options.ca_path = ca_path
-    options.ca_data = ca_data
+        ca_path::Union{String, Nothing} = nothing,
+        ca_file::Union{String, Nothing} = nothing,
+    )::Union{Nothing, ErrorResult}
+    if ca_path !== nothing && options.ca_path !== nothing
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    if ca_file !== nothing && _tls_options_buf_is_set(options.ca_file)
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+
+    if ca_path !== nothing
+        options.ca_path = ca_path
+    end
+
+    if ca_file !== nothing
+        ca_buf = _tls_buf_from_file(ca_file)
+        if ca_buf isa ErrorResult
+            return ca_buf
+        end
+        pem_res = _tls_validate_pem(ca_buf)
+        if pem_res isa ErrorResult
+            byte_buf_clean_up_secure(Ref(ca_buf))
+            return pem_res
+        end
+        options.ca_file = ca_buf
+    end
+
     return nothing
 end
 
@@ -230,10 +319,218 @@ function tls_ctx_options_set_extension_data!(options::TlsContextOptions, extensi
     return nothing
 end
 
+function tls_ctx_options_init_client_mtls(cert, pkey)::Union{TlsContextOptions, ErrorResult}
+    opts = tls_ctx_options_init_default_client()
+
+    cert_buf = _tls_buf_copy_from(cert)
+    cert_buf isa ErrorResult && return cert_buf
+    opts.certificate = cert_buf
+    pem_res = _tls_validate_pem(cert_buf)
+    if pem_res isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return pem_res
+    end
+
+    key_buf = _tls_buf_copy_from(pkey)
+    key_buf isa ErrorResult && return key_buf
+    opts.private_key = key_buf
+    pem_res = _tls_validate_pem(key_buf)
+    if pem_res isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return pem_res
+    end
+
+    return opts
+end
+
+function tls_ctx_options_init_client_mtls_from_path(
+        cert_path::AbstractString,
+        pkey_path::AbstractString,
+    )::Union{TlsContextOptions, ErrorResult}
+    opts = tls_ctx_options_init_default_client()
+
+    cert_buf = _tls_buf_from_file(cert_path)
+    cert_buf isa ErrorResult && return cert_buf
+    opts.certificate = cert_buf
+    pem_res = _tls_validate_pem(cert_buf)
+    if pem_res isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return pem_res
+    end
+
+    key_buf = _tls_buf_from_file(pkey_path)
+    key_buf isa ErrorResult && return key_buf
+    opts.private_key = key_buf
+    pem_res = _tls_validate_pem(key_buf)
+    if pem_res isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return pem_res
+    end
+
+    return opts
+end
+
+function tls_ctx_options_init_client_mtls_from_system_path(
+        cert_reg_path::AbstractString,
+    )::Union{TlsContextOptions, ErrorResult}
+    if !Sys.iswindows()
+        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+    opts = tls_ctx_options_init_default_client()
+    opts.system_certificate_path = cert_reg_path
+    return opts
+end
+
+function tls_ctx_options_init_default_server(
+        cert,
+        pkey;
+        alpn_list::Union{String, Nothing} = nothing,
+    )::Union{TlsContextOptions, ErrorResult}
+    opts = tls_ctx_options_init_client_mtls(cert, pkey)
+    if opts isa ErrorResult
+        return opts
+    end
+    opts.is_server = true
+    opts.verify_peer = false
+    opts.alpn_list = alpn_list
+    return opts
+end
+
+function tls_ctx_options_init_default_server_from_path(
+        cert_path::AbstractString,
+        pkey_path::AbstractString;
+        alpn_list::Union{String, Nothing} = nothing,
+    )::Union{TlsContextOptions, ErrorResult}
+    opts = tls_ctx_options_init_client_mtls_from_path(cert_path, pkey_path)
+    if opts isa ErrorResult
+        return opts
+    end
+    opts.is_server = true
+    opts.verify_peer = false
+    opts.alpn_list = alpn_list
+    return opts
+end
+
+function tls_ctx_options_init_default_server_from_system_path(
+        cert_reg_path::AbstractString,
+    )::Union{TlsContextOptions, ErrorResult}
+    opts = tls_ctx_options_init_client_mtls_from_system_path(cert_reg_path)
+    if opts isa ErrorResult
+        return opts
+    end
+    opts.is_server = true
+    opts.verify_peer = false
+    return opts
+end
+
+function tls_ctx_options_init_client_mtls_pkcs12_from_path(
+        pkcs12_path::AbstractString,
+        pkcs_password,
+    )::Union{TlsContextOptions, ErrorResult}
+    if !Sys.isapple()
+        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+    opts = tls_ctx_options_init_default_client()
+    pkcs_buf = _tls_buf_from_file(pkcs12_path)
+    pkcs_buf isa ErrorResult && return pkcs_buf
+    pwd_buf = _tls_buf_copy_from(pkcs_password)
+    pwd_buf isa ErrorResult && return pwd_buf
+    opts.pkcs12 = pkcs_buf
+    opts.pkcs12_password = pwd_buf
+    return opts
+end
+
+function tls_ctx_options_init_client_mtls_pkcs12(
+        pkcs12,
+        pkcs_password,
+    )::Union{TlsContextOptions, ErrorResult}
+    if !Sys.isapple()
+        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+    opts = tls_ctx_options_init_default_client()
+    pkcs_buf = _tls_buf_copy_from(pkcs12)
+    pkcs_buf isa ErrorResult && return pkcs_buf
+    pwd_buf = _tls_buf_copy_from(pkcs_password)
+    pwd_buf isa ErrorResult && return pwd_buf
+    opts.pkcs12 = pkcs_buf
+    opts.pkcs12_password = pwd_buf
+    return opts
+end
+
+function tls_ctx_options_init_server_pkcs12_from_path(
+        pkcs12_path::AbstractString,
+        pkcs_password,
+    )::Union{TlsContextOptions, ErrorResult}
+    opts = tls_ctx_options_init_client_mtls_pkcs12_from_path(pkcs12_path, pkcs_password)
+    if opts isa ErrorResult
+        return opts
+    end
+    opts.is_server = true
+    opts.verify_peer = false
+    return opts
+end
+
+function tls_ctx_options_init_server_pkcs12(
+        pkcs12,
+        pkcs_password,
+    )::Union{TlsContextOptions, ErrorResult}
+    opts = tls_ctx_options_init_client_mtls_pkcs12(pkcs12, pkcs_password)
+    if opts isa ErrorResult
+        return opts
+    end
+    opts.is_server = true
+    opts.verify_peer = false
+    return opts
+end
+
+function tls_ctx_options_set_keychain_path!(
+        options::TlsContextOptions,
+        keychain_path::AbstractString,
+    )::Union{Nothing, ErrorResult}
+    if !Sys.isapple()
+        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+    options.keychain_path = keychain_path
+    return nothing
+end
+
+function tls_ctx_options_set_secitem_options!(
+        options::TlsContextOptions,
+        secitem_options::SecItemOptions,
+    )::Union{Nothing, ErrorResult}
+    if !Sys.isapple()
+        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+    options.secitem_options = SecItemOptions(secitem_options.cert_label, secitem_options.key_label)
+    return nothing
+end
+
+function tls_ctx_options_init_client_mtls_with_custom_key_operations(
+        custom_key_op_handler,
+        cert,
+    )::Union{TlsContextOptions, ErrorResult}
+    _ = custom_key_op_handler
+    _ = cert
+    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+end
+
+function tls_ctx_options_init_client_mtls_with_pkcs11(
+        pkcs11_options,
+    )::Union{TlsContextOptions, ErrorResult}
+    _ = pkcs11_options
+    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+end
+
 function tls_context_new_client(;
         verify_peer::Bool = true,
         ca_file::Union{String, Nothing} = nothing,
-        ca_data::Union{String, Nothing} = nothing,
         ca_path::Union{String, Nothing} = nothing,
         alpn_list::Union{String, Nothing} = nothing,
         minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
@@ -242,35 +539,37 @@ function tls_context_new_client(;
     )
     opts = tls_ctx_options_init_default_client(;
         verify_peer = verify_peer,
-        ca_file = ca_file,
-        ca_path = ca_path,
-        ca_data = ca_data,
         alpn_list = alpn_list,
         minimum_tls_version = minimum_tls_version,
         cipher_pref = cipher_pref,
         max_fragment_size = max_fragment_size,
     )
+    if ca_file !== nothing || ca_path !== nothing
+        res = tls_ctx_options_override_default_trust_store_from_path!(opts; ca_path = ca_path, ca_file = ca_file)
+        res isa ErrorResult && return res
+    end
     return tls_context_new(opts)
 end
 
 function tls_context_new_server(;
-        certificate::String,
-        private_key::String,
+        certificate,
+        private_key,
         alpn_list::Union{String, Nothing} = nothing,
         minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
         cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
         max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
-        verify_peer::Bool = false,
     )
-    opts = tls_ctx_options_init_default_server(;
-        certificate = certificate,
-        private_key = private_key,
+    opts = tls_ctx_options_init_default_server(
+        certificate,
+        private_key;
         alpn_list = alpn_list,
-        minimum_tls_version = minimum_tls_version,
-        cipher_pref = cipher_pref,
-        max_fragment_size = max_fragment_size,
-        verify_peer = verify_peer,
     )
+    if opts isa ErrorResult
+        return opts
+    end
+    opts.minimum_tls_version = minimum_tls_version
+    opts.cipher_pref = cipher_pref
+    opts.max_fragment_size = Csize_t(max_fragment_size)
     return tls_context_new(opts)
 end
 
