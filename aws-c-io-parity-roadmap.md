@@ -74,9 +74,9 @@ Legend:
 - [x] Shutdown callback user_data support (event loop group)
 
 ### 2.2 Linux: epoll
-- [ ] Reconcile epoll implementation with aws-c-io (edge-triggered behavior, task pre-queue)
-- [ ] Support `eventfd` path and pipe fallback behavior as aws-c-io
-- [ ] Cancellation semantics and wake-up logic parity
+- [x] Reconcile epoll implementation with aws-c-io (edge-triggered behavior, task pre-queue)
+- [x] Support `eventfd` path and pipe fallback behavior as aws-c-io
+- [x] Cancellation semantics and wake-up logic parity
 - [ ] Stress tests matching `tests/vcc/*` in aws-c-io
 
 ### 2.3 BSD/macOS: kqueue

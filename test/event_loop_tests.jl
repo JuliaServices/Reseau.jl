@@ -418,4 +418,55 @@ using AwsIO
             @test clock_calls[] >= 1
         end
     end
+
+    @testset "Epoll task pre-queue drain" begin
+        if !Sys.islinux()
+            @test true
+        else
+            opts = AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.EPOLL)
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
+
+            if !(el isa AwsIO.ErrorResult)
+                impl = el.impl_data
+
+                noop_ctx = (nothing = nothing,)
+                noop_fn = (ctx, status) -> nothing
+                tasks = [
+                    AwsIO.ScheduledTask(noop_fn, noop_ctx; type_tag = "pre_queue_task_1"),
+                    AwsIO.ScheduledTask(noop_fn, noop_ctx; type_tag = "pre_queue_task_2"),
+                ]
+
+                AwsIO.mutex_lock(impl.task_pre_queue_mutex)
+                for task in tasks
+                    AwsIO.push_back!(impl.task_pre_queue, task)
+                end
+                AwsIO.mutex_unlock(impl.task_pre_queue_mutex)
+
+                counter = Ref(UInt64(1))
+                for _ in 1:3
+                    @ccall write(
+                        impl.write_task_handle.fd::Cint,
+                        counter::Ptr{UInt64},
+                        sizeof(UInt64)::Csize_t,
+                    )::Cssize_t
+                end
+
+                impl.should_process_task_pre_queue = true
+                AwsIO.process_task_pre_queue(el)
+
+                @test isempty(impl.task_pre_queue)
+
+                read_buf = Ref(UInt64(0))
+                read_res = @ccall read(
+                    impl.read_task_handle.fd::Cint,
+                    read_buf::Ptr{UInt64},
+                    sizeof(UInt64)::Csize_t,
+                )::Cssize_t
+                @test read_res < 0
+
+                AwsIO.event_loop_destroy!(el)
+            end
+        end
+    end
 end

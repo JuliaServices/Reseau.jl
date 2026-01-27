@@ -3,6 +3,7 @@
 
 # Only define on Linux
 @static if Sys.islinux()
+    using LibAwsCal
 
     # Constants from sys/epoll.h
     const EPOLLIN = UInt32(0x0001)
@@ -41,6 +42,10 @@
     # Pipe fd indices
     const READ_FD = 1
     const WRITE_FD = 2
+
+    # fcntl flags (Linux)
+    const O_NONBLOCK = Cint(0x0800)
+    const O_CLOEXEC = Cint(0o2000000)
 
     # Handle data attached to IoHandle while subscribed
     # Note: user_data is parameterized as U (typically Any) since it can hold any user-provided value
@@ -138,7 +143,7 @@
                 @ccall close(write_fd::Cint)::Cint
                 return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
             end
-            ret = @ccall fcntl(fd::Cint, 4::Cint, (flags | 0x0800)::Cint)::Cint  # F_SETFL = 4, O_NONBLOCK = 0x0800
+            ret = @ccall fcntl(fd::Cint, 4::Cint, (flags | O_NONBLOCK | O_CLOEXEC)::Cint)::Cint  # F_SETFL = 4
             if ret == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
@@ -513,26 +518,30 @@
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
         impl.should_process_task_pre_queue = false
 
-        tasks_to_schedule = Vector{ScheduledTask}()
         count_ignore = Ref(UInt64(0))
 
         mutex_lock(impl.task_pre_queue_mutex)
 
         # Drain the eventfd/pipe
-        @ccall read(impl.read_task_handle.fd::Cint, count_ignore::Ptr{UInt64}, sizeof(UInt64)::Csize_t)::Cssize_t
-
-        # Move tasks from pre-queue
-        while !isempty(impl.task_pre_queue)
-            task = pop_front!(impl.task_pre_queue)
-            if task !== nothing
-                push!(tasks_to_schedule, task)
-            end
+        while true
+            read_bytes = @ccall read(
+                impl.read_task_handle.fd::Cint,
+                count_ignore::Ptr{UInt64},
+                sizeof(UInt64)::Csize_t,
+            )::Cssize_t
+            read_bytes < 0 && break
         end
+
+        # Swap pre-queue contents to minimize lock hold time
+        tasks_to_schedule = impl.task_pre_queue
+        impl.task_pre_queue = Deque{ScheduledTask}(16)
 
         mutex_unlock(impl.task_pre_queue_mutex)
 
         # Schedule the tasks
-        for task in tasks_to_schedule
+        while !isempty(tasks_to_schedule)
+            task = pop_front!(tasks_to_schedule)
+            task === nothing && break
             logf(
                 LogLevel.TRACE,
                 LS_IO_EVENT_LOOP,
@@ -569,6 +578,8 @@
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to task notification events")
             return nothing
         end
+
+        _ = thread_current_at_exit(() -> LibAwsCal.aws_cal_thread_clean_up())
 
         timeout = DEFAULT_TIMEOUT_MS
         events = Memory{EpollEvent}(undef, MAX_EVENTS)

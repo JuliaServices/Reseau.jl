@@ -3,6 +3,7 @@
 
 # Only define on BSD/macOS
 @static if Sys.isapple() || Sys.isbsd()
+    using LibAwsCal
 
     # Constants from sys/event.h
     const EVFILT_READ = Int16(-1)
@@ -672,6 +673,8 @@
         # Set running thread ID
         @atomic impl.running_thread_id = thread_current_thread_id()
         impl.thread_data.state = EventThreadState.RUNNING
+
+        _ = thread_current_at_exit(() -> LibAwsCal.aws_cal_thread_clean_up())
 
         kevents = Memory{Kevent}(undef, MAX_EVENTS)
         io_handle_events = Vector{KqueueHandleData}()
