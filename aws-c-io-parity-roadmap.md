@@ -121,7 +121,7 @@ Legend:
 ### 3.2 POSIX sockets (Linux/BSD/macOS)
 - [x] Confirm non-blocking and CLOEXEC handling parity
 - [x] Implement network interface binding (SO_BINDTODEVICE / IP_BOUND_IF) where supported
-- [ ] VSOCK support on Linux
+- [x] VSOCK support on Linux
 - [ ] Edge-triggered behavior and read/write semantics parity
 
 ### 3.3 Apple Network Framework sockets

@@ -16,6 +16,10 @@ end
 const AF_INET = Cint(2)
 const AF_INET6 = @static Sys.isapple() ? Cint(30) : Cint(10)
 const AF_UNIX = Cint(1)
+@static if Sys.islinux()
+    const AF_VSOCK = isdefined(Libc, :AF_VSOCK) ? Cint(Libc.AF_VSOCK) : Cint(40)
+    const VMADDR_CID_ANY = UInt32(0xffffffff)
+end
 
 # Socket type constants
 const SOCK_STREAM = Cint(1)
@@ -82,6 +86,18 @@ const EPIPE = @static Sys.isapple() ? 32 : 32
 const SHUT_RD = Cint(0)
 const SHUT_WR = Cint(1)
 
+# VSOCK sockaddr (Linux only)
+@static if Sys.islinux()
+    struct SockAddrVM
+        svm_family::Cushort
+        svm_reserved1::Cushort
+        svm_port::UInt32
+        svm_cid::UInt32
+        svm_zero::NTuple{8, UInt8}
+    end
+    const _VSOCK_ZERO = ntuple(_ -> UInt8(0), 8)
+end
+
 # Convert domain enum to system constant
 function convert_domain(domain::SocketDomain.T)::Cint
     if domain == SocketDomain.IPV4
@@ -90,6 +106,12 @@ function convert_domain(domain::SocketDomain.T)::Cint
         return AF_INET6
     elseif domain == SocketDomain.LOCAL
         return AF_UNIX
+    elseif domain == SocketDomain.VSOCK
+        @static if Sys.islinux()
+            return AF_VSOCK
+        else
+            error("Unsupported socket domain: $domain")
+        end
     else
         error("Unsupported socket domain: $domain")
     end
@@ -138,6 +160,33 @@ function determine_socket_error(errno_val::Integer)::Int
         return ERROR_NO_PERMISSION
     else
         return ERROR_IO_SOCKET_NOT_CONNECTED
+    end
+end
+
+# Parse VSOCK CID from string (Linux only). Returns UInt32 or ErrorResult.
+function _parse_vsock_cid(address::AbstractString)::Union{UInt32, ErrorResult}
+    @static if Sys.islinux()
+        if isempty(address)
+            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        end
+        if address == "-1"
+            return VMADDR_CID_ANY
+        end
+        cid_val = try
+            parse(Int64, address)
+        catch
+            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        end
+        if cid_val < 0 || cid_val > typemax(UInt32)
+            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        end
+        return UInt32(cid_val)
+    else
+        raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
     end
 end
 
@@ -221,6 +270,13 @@ end
 
 # Create the underlying socket file descriptor
 function create_posix_socket_fd(options::SocketOptions)::Union{Cint, ErrorResult}
+    if options.domain == SocketDomain.VSOCK
+        @static if !Sys.islinux()
+            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        end
+    end
+
     domain = convert_domain(options.domain)
     sock_type = convert_socket_type(options.type)
 
@@ -670,8 +726,8 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: connecting to $address:$port")
 
     # Build sockaddr based on domain
-    sockaddr_buf = Memory{UInt8}(undef, 128)
-    fill!(sockaddr_buf, 0x00)
+    sockaddr_obj = nothing
+    sockaddr_ptr = Ptr{UInt8}(0)
     sockaddr_len::Cuint = 0
 
     if sock.options.domain == SocketDomain.IPV4
@@ -680,10 +736,13 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
             return addr_result
         end
 
-        # Build sockaddr_in
+        sockaddr_buf = Memory{UInt8}(undef, 128)
+        fill!(sockaddr_buf, 0x00)
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cshort(AF_INET)])
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         sockaddr_buf[5:8] .= reinterpret(UInt8, [addr_result])
+        sockaddr_obj = sockaddr_buf
+        sockaddr_ptr = pointer(sockaddr_buf)
         sockaddr_len = Cuint(16)  # sizeof(sockaddr_in)
 
     elseif sock.options.domain == SocketDomain.IPV6
@@ -692,7 +751,8 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
             return addr_result
         end
 
-        # Build sockaddr_in6
+        sockaddr_buf = Memory{UInt8}(undef, 128)
+        fill!(sockaddr_buf, 0x00)
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_INET6)])
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         @inbounds for i in 5:8
@@ -701,17 +761,37 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
         for i in 1:16
             sockaddr_buf[8 + i] = addr_result[i]
         end
+        sockaddr_obj = sockaddr_buf
+        sockaddr_ptr = pointer(sockaddr_buf)
         sockaddr_len = Cuint(28)  # sizeof(sockaddr_in6)
 
     elseif sock.options.domain == SocketDomain.LOCAL
-        # Build sockaddr_un
+        sockaddr_buf = Memory{UInt8}(undef, 128)
+        fill!(sockaddr_buf, 0x00)
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_UNIX)])
         addr_bytes = Memory{UInt8}(codeunits(address))
         copy_len = min(length(addr_bytes), 106)
         for i in 1:copy_len
             sockaddr_buf[2 + i] = addr_bytes[i]
         end
+        sockaddr_obj = sockaddr_buf
+        sockaddr_ptr = pointer(sockaddr_buf)
         sockaddr_len = Cuint(110)  # sizeof(sockaddr_un)
+    elseif sock.options.domain == SocketDomain.VSOCK
+        cid_result = _parse_vsock_cid(address)
+        if cid_result isa ErrorResult
+            return cid_result
+        end
+        @static if Sys.islinux()
+            vm_addr = SockAddrVM(Cushort(AF_VSOCK), Cushort(0), UInt32(port), cid_result, _VSOCK_ZERO)
+            vm_ref = Ref(vm_addr)
+            sockaddr_obj = vm_ref
+            sockaddr_ptr = Base.unsafe_convert(Ptr{UInt8}, vm_ref)
+            sockaddr_len = Cuint(sizeof(SockAddrVM))
+        else
+            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        end
     else
         raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
         return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
@@ -730,9 +810,9 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
     socket_impl.connect_args = connect_args
 
     # Attempt to connect
-    error_code = GC.@preserve sockaddr_buf ccall(
+    error_code = GC.@preserve sockaddr_obj ccall(
         :connect, Cint, (Cint, Ptr{UInt8}, Cuint),
-        fd, pointer(sockaddr_buf), sockaddr_len
+        fd, sockaddr_ptr, sockaddr_len
     )
     errno_val = get_errno()
 
@@ -974,18 +1054,20 @@ function _update_local_endpoint!(sock::PosixSocketType)
     # Parse family (macOS sockaddr has length in first byte)
     family = @static Sys.isapple() ? Cushort(address[2]) : reinterpret(Cushort, address[1:2])[1]
 
-    return if family == AF_INET
+    if family == AF_INET
         port = ntohs(reinterpret(Cushort, address[3:4])[1])
         addr = reinterpret(UInt32, address[5:8])[1]
         addr_str = inet_ntop_ipv4(addr)
         set_address!(sock.local_endpoint, addr_str)
         sock.local_endpoint.port = UInt32(port)
+        return nothing
     elseif family == AF_INET6
         port = ntohs(reinterpret(Cushort, address[3:4])[1])
         addr_tuple = Tuple(address[9:24])
         addr_str = inet_ntop_ipv6(addr_tuple)
         set_address!(sock.local_endpoint, addr_str)
         sock.local_endpoint.port = UInt32(port)
+        return nothing
     elseif family == AF_UNIX
         # Find null terminator
         path_start = 3
@@ -999,7 +1081,18 @@ function _update_local_endpoint!(sock::PosixSocketType)
         path = String(address[path_start:path_end])
         set_address!(sock.local_endpoint, path)
         sock.local_endpoint.port = UInt32(0)
+        return nothing
     end
+
+    @static if Sys.islinux()
+        if family == AF_VSOCK
+            vm_addr = GC.@preserve address unsafe_load(Ptr{SockAddrVM}(pointer(address)))
+            set_address!(sock.local_endpoint, string(vm_addr.svm_cid))
+            sock.local_endpoint.port = UInt32(vm_addr.svm_port)
+        end
+    end
+
+    return nothing
 end
 
 # VTable implementation - bind
@@ -1025,8 +1118,8 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
     logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: binding to $address:$port")
 
     # Build sockaddr
-    sockaddr_buf = Memory{UInt8}(undef, 128)
-    fill!(sockaddr_buf, 0x00)
+    sockaddr_obj = nothing
+    sockaddr_ptr = Ptr{UInt8}(0)
     sockaddr_len::Cuint = 0
 
     if sock.options.domain == SocketDomain.IPV4
@@ -1035,9 +1128,13 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
             return addr_result
         end
 
+        sockaddr_buf = Memory{UInt8}(undef, 128)
+        fill!(sockaddr_buf, 0x00)
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cshort(AF_INET)])
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         sockaddr_buf[5:8] .= reinterpret(UInt8, [addr_result])
+        sockaddr_obj = sockaddr_buf
+        sockaddr_ptr = pointer(sockaddr_buf)
         sockaddr_len = Cuint(16)
 
     elseif sock.options.domain == SocketDomain.IPV6
@@ -1046,6 +1143,8 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
             return addr_result
         end
 
+        sockaddr_buf = Memory{UInt8}(undef, 128)
+        fill!(sockaddr_buf, 0x00)
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_INET6)])
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         @inbounds for i in 5:8
@@ -1054,25 +1153,46 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
         for i in 1:16
             sockaddr_buf[8 + i] = addr_result[i]
         end
+        sockaddr_obj = sockaddr_buf
+        sockaddr_ptr = pointer(sockaddr_buf)
         sockaddr_len = Cuint(28)
 
     elseif sock.options.domain == SocketDomain.LOCAL
+        sockaddr_buf = Memory{UInt8}(undef, 128)
+        fill!(sockaddr_buf, 0x00)
         sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_UNIX)])
         addr_bytes = Memory{UInt8}(codeunits(address))
         copy_len = min(length(addr_bytes), 106)
         for i in 1:copy_len
             sockaddr_buf[2 + i] = addr_bytes[i]
         end
+        sockaddr_obj = sockaddr_buf
+        sockaddr_ptr = pointer(sockaddr_buf)
         sockaddr_len = Cuint(110)
+    elseif sock.options.domain == SocketDomain.VSOCK
+        cid_result = _parse_vsock_cid(address)
+        if cid_result isa ErrorResult
+            return cid_result
+        end
+        @static if Sys.islinux()
+            vm_addr = SockAddrVM(Cushort(AF_VSOCK), Cushort(0), UInt32(port), cid_result, _VSOCK_ZERO)
+            vm_ref = Ref(vm_addr)
+            sockaddr_obj = vm_ref
+            sockaddr_ptr = Base.unsafe_convert(Ptr{UInt8}, vm_ref)
+            sockaddr_len = Cuint(sizeof(SockAddrVM))
+        else
+            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        end
     else
         raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
         return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
     end
 
     # Bind
-    result = GC.@preserve sockaddr_buf ccall(
+    result = GC.@preserve sockaddr_obj ccall(
         :bind, Cint, (Cint, Ptr{UInt8}, Cuint),
-        fd, pointer(sockaddr_buf), sockaddr_len
+        fd, sockaddr_ptr, sockaddr_len
     )
 
     if result != 0
@@ -1672,6 +1792,15 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
             elseif family == AF_UNIX
                 copy!(new_sock.remote_endpoint, sock.local_endpoint)
                 new_sock.options.domain = SocketDomain.LOCAL
+            end
+
+            @static if Sys.islinux()
+                if family == AF_VSOCK
+                    vm_addr = GC.@preserve in_addr unsafe_load(Ptr{SockAddrVM}(pointer(in_addr)))
+                    port = UInt32(vm_addr.svm_port)
+                    set_address!(new_sock.remote_endpoint, string(vm_addr.svm_cid))
+                    new_sock.options.domain = SocketDomain.VSOCK
+                end
             end
 
             new_sock.remote_endpoint.port = port
