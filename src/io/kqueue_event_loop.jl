@@ -805,40 +805,51 @@
             end
 
             # Process kevents
+            if num_kevents > 0
+                tracing_task_begin(tracing_event_loop_events)
+            end
             for i in 1:num_kevents
-                kevent = kevents[i]
-                # Check if this is the cross-thread signal
-                if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
-                    should_process_cross_thread_data = true
-                    read_val = Ref{UInt32}(0)
-                    read_size = Csize_t(sizeof(UInt32))
-                    while true
-                        read_result = @ccall read(
-                            impl.cross_thread_signal_pipe[READ_FD]::Cint,
-                            read_val::Ptr{UInt32},
-                            read_size::Csize_t,
-                        )::Cssize_t
-                        if read_result <= 0
-                            break
+                tracing_task_begin(tracing_event_loop_event)
+                try
+                    kevent = kevents[i]
+                    # Check if this is the cross-thread signal
+                    if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
+                        should_process_cross_thread_data = true
+                        read_val = Ref{UInt32}(0)
+                        read_size = Csize_t(sizeof(UInt32))
+                        while true
+                            read_result = @ccall read(
+                                impl.cross_thread_signal_pipe[READ_FD]::Cint,
+                                read_val::Ptr{UInt32},
+                                read_size::Csize_t,
+                            )::Cssize_t
+                            if read_result <= 0
+                                break
+                            end
                         end
+                        continue
                     end
-                    continue
-                end
 
-                # Process normal event
-                event_flags = event_flags_from_kevent(kevent)
-                if event_flags == 0
-                    continue
-                end
-
-                if kevent.udata != C_NULL
-                    handle_data = get(impl.handle_registry, kevent.udata, nothing)
-                    handle_data === nothing && continue
-                    if handle_data.events_this_loop == 0
-                        push!(io_handle_events, handle_data)
+                    # Process normal event
+                    event_flags = event_flags_from_kevent(kevent)
+                    if event_flags == 0
+                        continue
                     end
-                    handle_data.events_this_loop |= event_flags
+
+                    if kevent.udata != C_NULL
+                        handle_data = get(impl.handle_registry, kevent.udata, nothing)
+                        handle_data === nothing && continue
+                        if handle_data.events_this_loop == 0
+                            push!(io_handle_events, handle_data)
+                        end
+                        handle_data.events_this_loop |= event_flags
+                    end
+                finally
+                    tracing_task_end(tracing_event_loop_event)
                 end
+            end
+            if num_kevents > 0
+                tracing_task_end(tracing_event_loop_events)
             end
 
             # Invoke callbacks for handles with events
@@ -870,7 +881,12 @@
             now_ns = now_ns_result isa ErrorResult ? UInt64(0) : now_ns_result
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
-            task_scheduler_run_all!(impl.thread_data.scheduler, now_ns)
+            tracing_task_begin(tracing_event_loop_run_tasks)
+            try
+                task_scheduler_run_all!(impl.thread_data.scheduler, now_ns)
+            finally
+                tracing_task_end(tracing_event_loop_run_tasks)
+            end
 
             # Calculate next timeout
             use_default_timeout = false

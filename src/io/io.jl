@@ -573,6 +573,7 @@ function io_library_init()
     _init_io_error_list!()
     register_error_info(Base.unsafe_convert(Ptr{error_info_list}, _io_error_list_ref))
     register_log_subject_info_list(_io_log_subject_list)
+    io_tracing_init()
     return nothing
 end
 
@@ -609,6 +610,9 @@ function io_error_code_is_retryable(error_code::Integer)::Bool
         error_code == ERROR_IO_SOCKET_TIMEOUT ||
         error_code == ERROR_IO_TLS_NEGOTIATION_TIMEOUT
 end
+
+# Include tracing hooks (no-op)
+include("tracing.jl")
 
 # Include event loop abstractions and platform-specific implementations
 include("event_loop.jl")

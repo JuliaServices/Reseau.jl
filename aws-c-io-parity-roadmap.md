@@ -36,7 +36,7 @@ Legend:
 - [ ] PKCS#11 support (pkcs11.h + pkcs11_tls_op_handler.c)
 - [ ] TLS channel handler (tls_channel_handler.h + tls_channel_handler_shared.c)
 - [x] ALPN handler (alpn_handler.c)
-- [ ] Tracing hooks (private/tracing.h)
+- [x] Tracing hooks (private/tracing.h)
 
 ### 0.2 Explicitly out of scope
 - [ ] File/URI shim headers (file_utils.h, uri.h) NOT REQUIRED
@@ -114,7 +114,7 @@ Legend:
 
 ### 3.1 Socket API parity
 - [ ] Implement all socket options from aws-c-io (keepalive, interface binding, connect timeout, etc.)
-- [ ] Domain parity: IPv4, IPv6, LOCAL, VSOCK
+- [x] Domain parity: IPv4, IPv6, LOCAL, VSOCK
 - [ ] Socket impl type parity: POSIX, Winsock, Apple Network Framework, PLATFORM_DEFAULT
 - [ ] All socket lifecycle methods (connect/bind/listen/accept/assign/reassign/close/cleanup)
 

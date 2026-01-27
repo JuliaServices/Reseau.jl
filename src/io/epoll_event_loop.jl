@@ -625,48 +625,59 @@
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "wake up with %d events to process", event_count)
 
             # Process events
+            if event_count > 0
+                tracing_task_begin(tracing_event_loop_events)
+            end
             for i in 1:event_count
-                ev = events[i]
-                event_data_ptr = ev.data.ptr
+                tracing_task_begin(tracing_event_loop_event)
+                try
+                    ev = events[i]
+                    event_data_ptr = ev.data.ptr
 
-                if event_data_ptr == C_NULL
-                    continue
+                    if event_data_ptr == C_NULL
+                        continue
+                    end
+
+                    event_data = unsafe_pointer_to_objref(event_data_ptr)::EpollEventHandleData
+
+                    # Convert epoll events to our event mask
+                    event_mask = 0
+
+                    if (ev.events & EPOLLIN) != 0
+                        event_mask |= Int(IoEventType.READABLE)
+                    end
+
+                    if (ev.events & EPOLLOUT) != 0
+                        event_mask |= Int(IoEventType.WRITABLE)
+                    end
+
+                    if (ev.events & EPOLLRDHUP) != 0
+                        event_mask |= Int(IoEventType.REMOTE_HANG_UP)
+                    end
+
+                    if (ev.events & EPOLLHUP) != 0
+                        event_mask |= Int(IoEventType.CLOSED)
+                    end
+
+                    if (ev.events & EPOLLERR) != 0
+                        event_mask |= Int(IoEventType.ERROR)
+                    end
+
+                    if event_data.is_subscribed
+                        logf(
+                            LogLevel.TRACE,
+                            LS_IO_EVENT_LOOP,
+                            "activity on fd %d, invoking handler",
+                            event_data.handle.fd,
+                        )
+                        event_data.on_event(event_loop, event_data.handle, event_mask, event_data.user_data)
+                    end
+                finally
+                    tracing_task_end(tracing_event_loop_event)
                 end
-
-                event_data = unsafe_pointer_to_objref(event_data_ptr)::EpollEventHandleData
-
-                # Convert epoll events to our event mask
-                event_mask = 0
-
-                if (ev.events & EPOLLIN) != 0
-                    event_mask |= Int(IoEventType.READABLE)
-                end
-
-                if (ev.events & EPOLLOUT) != 0
-                    event_mask |= Int(IoEventType.WRITABLE)
-                end
-
-                if (ev.events & EPOLLRDHUP) != 0
-                    event_mask |= Int(IoEventType.REMOTE_HANG_UP)
-                end
-
-                if (ev.events & EPOLLHUP) != 0
-                    event_mask |= Int(IoEventType.CLOSED)
-                end
-
-                if (ev.events & EPOLLERR) != 0
-                    event_mask |= Int(IoEventType.ERROR)
-                end
-
-                if event_data.is_subscribed
-                    logf(
-                        LogLevel.TRACE,
-                        LS_IO_EVENT_LOOP,
-                        "activity on fd %d, invoking handler",
-                        event_data.handle.fd,
-                    )
-                    event_data.on_event(event_loop, event_data.handle, event_mask, event_data.user_data)
-                end
+            end
+            if event_count > 0
+                tracing_task_end(tracing_event_loop_events)
             end
 
             # Process cross-thread tasks
@@ -677,7 +688,12 @@
             now_ns = now_ns_result isa ErrorResult ? UInt64(0) : now_ns_result
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
-            task_scheduler_run_all!(impl.scheduler, now_ns)
+            tracing_task_begin(tracing_event_loop_run_tasks)
+            try
+                task_scheduler_run_all!(impl.scheduler, now_ns)
+            finally
+                tracing_task_end(tracing_event_loop_run_tasks)
+            end
 
             # Calculate next timeout
             use_default_timeout = false
