@@ -369,7 +369,7 @@ Legend:
 
 ### 16.1 API parity
 - [ ] Ensure `shared_library_*` matches aws-c-io error behavior and Windows parity
-- [ ] Add tests matching `shared_library_test.c`
+- [x] Add tests matching `shared_library_test.c`
 
 ---
 
@@ -424,7 +424,7 @@ Legend:
 - [ ] `channel_test.c` -> new `test/channel_tests.jl`
 - [ ] `io_testing_channel_test.c` -> new `test/io_testing_channel_tests.jl`
 - [ ] `pipe_test.c` -> new `test/pipe_tests.jl`
-- [ ] `shared_library_test.c` -> new `test/shared_library_tests.jl`
+- [x] `shared_library_test.c` -> new `test/shared_library_tests.jl`
 - [x] `pem_test.c` -> new `test/pem_tests.jl`
 - [ ] `future_test.c` -> new `test/future_tests.jl`
 - [ ] `stream_test.c` -> new `test/stream_tests.jl`
