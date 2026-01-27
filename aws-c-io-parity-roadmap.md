@@ -261,7 +261,7 @@ Legend:
 ## 10) Streams (input stream)
 
 ### 10.1 Input stream API parity
-- [ ] Vtable parity: seek, read, get_status, get_length
+- [x] Vtable parity: seek, read, get_status, get_length
 - [ ] Acquire/release hooks (no refcount, but API compatibility)
 - [ ] Constructors: from cursor, from file, from open file
 - [ ] Error and status semantics parity
@@ -432,9 +432,9 @@ Legend:
 - [ ] `pipe_test.c` -> new `test/pipe_tests.jl`
 - [x] `shared_library_test.c` -> new `test/shared_library_tests.jl`
 - [x] `pem_test.c` -> new `test/pem_tests.jl`
-- [ ] `future_test.c` -> new `test/future_tests.jl`
+- [x] `future_test.c` -> new `test/future_tests.jl`
 - [x] `stream_test.c` -> new `test/stream_tests.jl`
-- [ ] `async_stream_test.c` -> `test/async_stream_tests.jl` (extend)
+- [x] `async_stream_test.c` -> `test/async_stream_tests.jl` (extend)
 - [ ] `exponential_backoff_retry_test.c` -> new `test/retry_strategy_tests.jl`
 - [ ] `standard_retry_test.c` -> new `test/retry_strategy_tests.jl`
 - [x] `no_retry_strategy_test.c` -> new `test/retry_strategy_tests.jl`

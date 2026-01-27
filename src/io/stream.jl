@@ -15,6 +15,11 @@ end
     ERROR = 2
 end
 
+struct InputStreamStatus
+    is_end_of_stream::Bool
+    is_valid::Bool
+end
+
 # Abstract stream interface
 abstract type AbstractInputStream end
 
@@ -23,6 +28,11 @@ abstract type AbstractInputStream end
 # Read from stream into buffer, returns (bytes_read, status)
 function stream_read(stream::AbstractInputStream, buffer::ByteBuffer, length::Integer)::Union{Tuple{Csize_t, StreamStatus.T}, ErrorResult}
     error("stream_read must be implemented for $(typeof(stream))")
+end
+
+# Get stream status (valid + end-of-stream)
+function stream_get_status(stream::AbstractInputStream)::Union{InputStreamStatus, ErrorResult}
+    error("stream_get_status must be implemented for $(typeof(stream))")
 end
 
 # Seek to position in stream
@@ -136,6 +146,11 @@ end
 function stream_destroy!(stream::ByteBufferInputStream)::Nothing
     # Buffer cleanup handled by GC
     return nothing
+end
+
+function stream_get_status(stream::ByteBufferInputStream)::Union{InputStreamStatus, ErrorResult}
+    is_end = stream.position >= stream.buffer.len
+    return InputStreamStatus(is_end, true)
 end
 
 # =============================================================================
@@ -266,6 +281,14 @@ function stream_destroy!(stream::FileInputStream)::Nothing
     return nothing
 end
 
+function stream_get_status(stream::FileInputStream)::Union{InputStreamStatus, ErrorResult}
+    if stream.file_handle === nothing
+        return InputStreamStatus(true, false)
+    end
+    is_end = stream.position >= stream.length
+    return InputStreamStatus(is_end, true)
+end
+
 # =============================================================================
 # Cursor Input Stream - reads from a ByteCursor (non-owning view)
 # =============================================================================
@@ -331,6 +354,11 @@ end
 
 function stream_has_known_length(stream::CursorInputStream)::Bool
     return true
+end
+
+function stream_get_status(stream::CursorInputStream)::Union{InputStreamStatus, ErrorResult}
+    is_end = stream.position >= stream.cursor.len
+    return InputStreamStatus(is_end, true)
 end
 
 # =============================================================================

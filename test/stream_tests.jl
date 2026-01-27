@@ -127,8 +127,17 @@ end
 
     @testset "memory simple/iterate" begin
         stream = AwsIO.CursorInputStream(AwsIO.ByteCursor(test_data))
+        status = AwsIO.stream_get_status(stream)
+        @test status.is_valid
+        @test !status.is_end_of_stream
         assert_stream_contents(stream, test_data, 100)
+        status = AwsIO.stream_get_status(stream)
+        @test status.is_valid
+        @test status.is_end_of_stream
         AwsIO.stream_reset(stream)
+        status = AwsIO.stream_get_status(stream)
+        @test status.is_valid
+        @test !status.is_end_of_stream
         assert_stream_contents(stream, test_data, 2)
     end
 
@@ -138,8 +147,17 @@ end
             close(io)
             stream = AwsIO.FileInputStream(path)
             @test !(stream isa AwsIO.ErrorResult)
+            status = AwsIO.stream_get_status(stream)
+            @test status.is_valid
+            @test !status.is_end_of_stream
             assert_stream_contents(stream, test_data, 100)
+            status = AwsIO.stream_get_status(stream)
+            @test status.is_valid
+            @test status.is_end_of_stream
             AwsIO.stream_reset(stream)
+            status = AwsIO.stream_get_status(stream)
+            @test status.is_valid
+            @test !status.is_end_of_stream
             assert_stream_contents(stream, test_data, 2)
             AwsIO.stream_destroy!(stream)
         end
