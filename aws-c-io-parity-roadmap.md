@@ -80,7 +80,7 @@ Legend:
 - [ ] Stress tests matching `tests/vcc/*` in aws-c-io
 
 ### 2.3 BSD/macOS: kqueue
-- [ ] Match aws-c-io kqueue event loop semantics (user events, trigger behavior, timer handling)
+- [x] Match aws-c-io kqueue event loop semantics (user events, trigger behavior, timer handling)
 - [x] Validate cross-thread scheduling wakeups parity
 - [ ] Stress tests similar to aws-c-io vcc suite
 

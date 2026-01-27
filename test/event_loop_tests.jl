@@ -66,6 +66,62 @@ const _dispatch_queue_setter_c =
         end
     end
 
+    @testset "Event loop future scheduling timing" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    try
+                        done = Ref(false)
+                        actual_time = Ref{UInt64}(0)
+
+                        start_time = AwsIO.event_loop_current_clock_time(el)
+                        if start_time isa AwsIO.ErrorResult
+                            @test false
+                        else
+                            target_time = start_time + 50_000_000
+
+                            ctx = (el = el, done = done, actual_time = actual_time)
+                            task_fn = (ctx, status) -> begin
+                                now = AwsIO.event_loop_current_clock_time(ctx.el)
+                                ctx.actual_time[] = now isa AwsIO.ErrorResult ? UInt64(0) : now
+                                ctx.done[] = true
+                                return nothing
+                            end
+
+                            task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "future_timing")
+                            AwsIO.event_loop_schedule_task_future!(el, task, target_time)
+
+                            deadline = Base.time_ns() + 2_000_000_000
+                            while !done[] && Base.time_ns() < deadline
+                                yield()
+                            end
+
+                            @test done[]
+                            if done[]
+                                @test actual_time[] >= target_time
+                                @test actual_time[] - target_time < 1_000_000_000
+                            end
+                        end
+                    finally
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
     @testset "Event loop serialized ordering" begin
         if Sys.iswindows()
             @test true
