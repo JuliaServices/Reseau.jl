@@ -125,6 +125,24 @@ end
     end
 end
 
+@testset "TLS ctx options pkcs12" begin
+    pkcs_bytes = UInt8[0x01, 0x02, 0x03, 0x04]
+    pkcs_pwd = "secret"
+
+    if Sys.isapple()
+        opts = AwsIO.tls_ctx_options_init_client_mtls_pkcs12(pkcs_bytes, pkcs_pwd)
+        @test opts isa AwsIO.TlsContextOptions
+        if opts isa AwsIO.TlsContextOptions
+            pkcs_out = Vector{UInt8}(undef, Int(opts.pkcs12.len))
+            copyto!(pkcs_out, 1, opts.pkcs12.mem, 1, Int(opts.pkcs12.len))
+            @test pkcs_out == pkcs_bytes
+            @test _buf_to_string(opts.pkcs12_password) == pkcs_pwd
+        end
+    else
+        @test AwsIO.tls_ctx_options_init_client_mtls_pkcs12(pkcs_bytes, pkcs_pwd) isa AwsIO.ErrorResult
+    end
+end
+
 mutable struct EchoHandler <: AwsIO.AbstractChannelHandler
     slot::Union{AwsIO.ChannelSlot, Nothing}
     saw_ping::Base.RefValue{Bool}
