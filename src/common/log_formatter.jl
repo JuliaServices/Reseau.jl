@@ -27,14 +27,14 @@ end
 end
 
 function _timestamp_string(date_format::date_format)
-    buf = Vector{UInt8}(undef, DATE_TIME_STR_MAX_LEN)
-    byte_buf = Ref(byte_buf_from_empty_array(buf))
+    buf_mem = Memory{UInt8}(undef, DATE_TIME_STR_MAX_LEN)
+    byte_buf = Ref(ByteBuffer(buf_mem, 0))
     dt = Ref{date_time}()
     date_time_init_now(dt)
     if date_time_to_utc_time_str(dt, date_format, byte_buf) != OP_SUCCESS
         return ""
     end
-    return String(buf[1:byte_buf[].len])
+    return String(byte_cursor_from_buf(byte_buf[]))
 end
 
 function format_line(formatter::StandardLogFormatter, level::LogLevel.T, subject::LogSubject, fmt::AbstractString, args...)

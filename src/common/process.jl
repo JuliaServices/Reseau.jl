@@ -42,7 +42,7 @@ function run_command(options::run_command_options, result::Base.RefValue)
 
     ret_code = Cint(0)
     if stream != C_NULL
-        output_buffer = Vector{UInt8}(undef, MAX_RUN_COMMAND_BUFFER)
+        output_buffer = Memory{UInt8}(undef, MAX_RUN_COMMAND_BUFFER)
         GC.@preserve output_buffer begin
             while ccall(:feof, Cint, (Ptr{Cvoid},), stream) == 0
                 if ccall(
