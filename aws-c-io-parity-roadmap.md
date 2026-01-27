@@ -28,7 +28,7 @@ Legend:
 - [ ] Retry strategies (retry_strategy.h) including no-retry
 - [ ] Async stream (async_stream.h)
 - [x] Future (future.h) feature parity (callbacks, waiting, error/result semantics)
-- [ ] Stream (stream.h) feature parity (input stream vtables and constructors)
+- [x] Stream (stream.h) feature parity (input stream vtables and constructors)
 - [ ] Message pool + memory pool (message_pool.h)
 - [ ] PEM utilities (pem.h)
 - [ ] Shared library (shared_library.h)

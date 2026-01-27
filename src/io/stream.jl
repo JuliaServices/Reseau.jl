@@ -72,7 +72,10 @@ end
 
 function ByteBufferInputStream(data::AbstractVector{UInt8}; owns_buffer::Bool = true)
     buf = ByteBuffer(length(data))
-    byte_buf_write_from_whole_cursor!(buf, ByteCursor(data, length(data)))
+    if !isempty(data)
+        copyto!(buf.mem, 1, data, 1, length(data))
+        buf.len = Csize_t(length(data))
+    end
     return ByteBufferInputStream(buf, Csize_t(0), owns_buffer)
 end
 
