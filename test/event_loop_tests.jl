@@ -83,6 +83,124 @@ using AwsIO
         end
     end
 
+    @testset "Event loop local objects" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    done = Ref(false)
+                    done_cleanup = Ref(false)
+                    missing_err1 = Ref(0)
+                    missing_err2 = Ref(0)
+                    removed_calls = Ref(0)
+                    cleanup_calls = Ref(0)
+                    fetched_value = Ref{Any}(nothing)
+                    removed_value = Ref{Any}(nothing)
+
+                    key_obj = Ref(0)
+                    key = pointer_from_objref(key_obj)
+
+                    ctx = (
+                        el = el,
+                        key = key,
+                        missing_err1 = missing_err1,
+                        missing_err2 = missing_err2,
+                        removed_calls = removed_calls,
+                        fetched_value = fetched_value,
+                        removed_value = removed_value,
+                        done = done,
+                    )
+
+                    task_fn = (ctx, status) -> begin
+                        res = AwsIO.event_loop_fetch_local_object(ctx.el, ctx.key)
+                        if res isa AwsIO.ErrorResult
+                            ctx.missing_err1[] = AwsIO.last_error()
+                        end
+
+                        on_removed = obj -> (ctx.removed_calls[] += 1)
+                        obj1 = AwsIO.EventLoopLocalObject(ctx.key, "one", on_removed)
+                        AwsIO.event_loop_put_local_object!(ctx.el, obj1)
+
+                        obj2 = AwsIO.EventLoopLocalObject(ctx.key, "two", on_removed)
+                        AwsIO.event_loop_put_local_object!(ctx.el, obj2)
+
+                        fetched = AwsIO.event_loop_fetch_local_object(ctx.el, ctx.key)
+                        if !(fetched isa AwsIO.ErrorResult)
+                            ctx.fetched_value[] = fetched.object
+                        end
+
+                        removed_obj = AwsIO.event_loop_remove_local_object!(ctx.el, ctx.key)
+                        if removed_obj !== nothing
+                            ctx.removed_value[] = removed_obj.object
+                        end
+
+                        res2 = AwsIO.event_loop_fetch_local_object(ctx.el, ctx.key)
+                        if res2 isa AwsIO.ErrorResult
+                            ctx.missing_err2[] = AwsIO.last_error()
+                        end
+
+                        ctx.done[] = true
+                        return nothing
+                    end
+
+                    task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "event_loop_local_object_test")
+                    AwsIO.event_loop_schedule_task_now!(el, task)
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !done[] && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test done[]
+                    @test missing_err1[] == AwsIO.ERROR_INVALID_ARGUMENT
+                    @test missing_err2[] == AwsIO.ERROR_INVALID_ARGUMENT
+                    @test fetched_value[] == "two"
+                    @test removed_value[] == "two"
+                    @test removed_calls[] == 1
+
+                    cleanup_ctx = (
+                        el = el,
+                        key = key,
+                        cleanup_calls = cleanup_calls,
+                        done_cleanup = done_cleanup,
+                    )
+
+                    cleanup_task_fn = (ctx, status) -> begin
+                        on_removed = obj -> (ctx.cleanup_calls[] += 1)
+                        obj = AwsIO.EventLoopLocalObject(ctx.key, "cleanup", on_removed)
+                        AwsIO.event_loop_put_local_object!(ctx.el, obj)
+                        ctx.done_cleanup[] = true
+                        return nothing
+                    end
+
+                    cleanup_task = AwsIO.ScheduledTask(cleanup_task_fn, cleanup_ctx; type_tag = "event_loop_local_object_cleanup")
+                    AwsIO.event_loop_schedule_task_now!(el, cleanup_task)
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !done_cleanup[] && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test done_cleanup[]
+
+                    AwsIO.event_loop_destroy!(el)
+                    @test cleanup_calls[] == 1
+                end
+            end
+        end
+    end
+
     @testset "Event loop load factor" begin
         times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
         idx = Ref(0)
@@ -100,5 +218,46 @@ using AwsIO
         # Force stale state and confirm load factor reports 0
         @atomic el.next_flush_time = UInt64(0)
         @test AwsIO.event_loop_get_load_factor(el) == 0
+    end
+
+    @testset "Event loop clock override" begin
+        if Sys.iswindows()
+            @test true
+        else
+            clock_calls = Ref(0)
+            clock = () -> begin
+                clock_calls[] += 1
+                return UInt64(42)
+            end
+
+            opts = AwsIO.EventLoopOptions(clock = clock)
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
+
+            if !(el isa AwsIO.ErrorResult)
+                @test AwsIO.event_loop_current_clock_time(el) == UInt64(42)
+            end
+
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads > 1
+                group_opts = AwsIO.EventLoopGroupOptions(loop_count = 1, clock_override = clock)
+                elg = AwsIO.event_loop_group_new(group_opts)
+                @test !(elg isa AwsIO.ErrorResult)
+
+                if !(elg isa AwsIO.ErrorResult)
+                    try
+                        loop = AwsIO.event_loop_group_get_next_loop(elg)
+                        @test loop !== nothing
+                        if loop !== nothing
+                            @test AwsIO.event_loop_current_clock_time(loop) == UInt64(42)
+                        end
+                    finally
+                        AwsIO.event_loop_group_destroy!(elg)
+                    end
+                end
+            end
+
+            @test clock_calls[] >= 1
+        end
     end
 end

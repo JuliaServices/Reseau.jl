@@ -737,12 +737,7 @@
 
         @ccall close(impl.epoll_fd::Cint)::Cint
 
-        # Clean up local data
-        for (key, obj) in event_loop.local_data
-            if obj.on_object_removed !== nothing
-                obj.on_object_removed(obj)
-            end
-        end
+        # Clean up local data (invokes on_object_removed callbacks)
         hash_table_clear!(event_loop.local_data)
 
         return nothing

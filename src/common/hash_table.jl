@@ -179,6 +179,24 @@ function hash_table_put!(table::HashTable{K, V}, key::K, value::V) where {K, V}
     return OP_SUCCESS
 end
 
+function hash_table_put_no_destroy!(table::HashTable{K, V}, key::K, value::V) where {K, V}
+    table.size + 1 > table.max_load && _rehash!(table, table.capacity * 2)
+    found, slot, hash = _find_slot(table, key)
+    if found
+        table.keys[slot] = key
+        table.values[slot] = value
+        table.hashes[slot] = hash
+        return OP_SUCCESS
+    end
+    slot == 0 && return raise_error(ERROR_NO_SPACE)
+    table.keys[slot] = key
+    table.values[slot] = value
+    table.hashes[slot] = hash
+    table.states[slot] = _HASH_FILLED
+    table.size += 1
+    return OP_SUCCESS
+end
+
 function hash_table_get(table::HashTable, key)
     found, slot, _ = _find_slot(table, key)
     found || return nothing

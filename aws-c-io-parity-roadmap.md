@@ -66,10 +66,10 @@ Legend:
 ### 2.1 Common event loop semantics
 - [ ] API parity for schedule/cancel/serialized scheduling semantics (order-of-execution guarantees)
 - [ ] Match task cancellation semantics (may execute off-thread) with aws-c-io
-- [ ] `event_loop_current_clock_time()` parity and clock override support
+- [x] `event_loop_current_clock_time()` parity and clock override support
 - [ ] `event_loop_group_acquire_from_event_loop()` semantics
 - [x] Load factor sampling + best-of-two selection parity
-- [ ] Event loop local objects parity (get/set/remove)
+- [x] Event loop local objects parity (get/set/remove)
 - [ ] Thread ownership check `event_loop_thread_is_callers_thread()` parity
 - [x] Shutdown callback user_data support (event loop group)
 

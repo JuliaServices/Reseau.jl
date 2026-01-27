@@ -54,6 +54,13 @@ function EventLoopLocalObject(key::Ptr{Cvoid}, object::T) where {T}
     return EventLoopLocalObject{T, Nothing}(key, object, nothing)
 end
 
+function _event_loop_local_object_destroy(obj)
+    if obj isa EventLoopLocalObject && obj.on_object_removed !== nothing
+        obj.on_object_removed(obj)
+    end
+    return nothing
+end
+
 # Event loop options
 struct EventLoopOptions{Clock}
     clock::Clock
@@ -121,10 +128,11 @@ function EventLoop(
         clock::Clock,
         impl_data::Impl,
     ) where {Clock, Impl}
-    local_data = HashTable{Ptr{Cvoid}, EventLoopLocalObject{Ptr{Cvoid}, Nothing}}(
+    local_data = HashTable{Ptr{Cvoid}, Any}(
         hash_ptr,
         ptr_eq;
         capacity = 20,
+        on_val_destroy = _event_loop_local_object_destroy,
     )
     return EventLoop{Impl, typeof(local_data), Clock}(
         clock,
@@ -155,12 +163,7 @@ function event_loop_complete_destroy!(event_loop::EventLoop)
     # Stop the event loop and wait for completion
     event_loop_stop!(event_loop)
     event_loop_wait_for_stop_completion!(event_loop)
-    # Clean up local data
-    for (key, obj) in event_loop.local_data
-        if obj.on_object_removed !== nothing
-            obj.on_object_removed(obj)
-        end
-    end
+    # Clean up local data (invokes on_object_removed callbacks)
     hash_table_clear!(event_loop.local_data)
     return nothing
 end
@@ -255,23 +258,21 @@ function event_loop_fetch_local_object(
         event_loop::EventLoop,
         key::Ptr{Cvoid},
     )::Union{EventLoopLocalObject, ErrorResult}
+    debug_assert(event_loop_thread_is_callers_thread(event_loop))
     obj = hash_table_get(event_loop.local_data, key)
-    if obj === nothing
-        raise_error(ERROR_HASHTBL_ITEM_NOT_FOUND)
-        return ErrorResult(ERROR_HASHTBL_ITEM_NOT_FOUND)
+    if obj === nothing || !(obj isa EventLoopLocalObject)
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    return obj
+    return obj::EventLoopLocalObject
 end
 
 function event_loop_put_local_object!(
         event_loop::EventLoop,
         obj::EventLoopLocalObject,
     )::Union{Nothing, ErrorResult}
-    old = hash_table_get(event_loop.local_data, obj.key)
-    if old !== nothing && old.on_object_removed !== nothing
-        old.on_object_removed(old)
-    end
-    hash_table_put!(event_loop.local_data, obj.key, obj)
+    debug_assert(event_loop_thread_is_callers_thread(event_loop))
+    hash_table_put_no_destroy!(event_loop.local_data, obj.key, obj)
     return nothing
 end
 
@@ -279,12 +280,14 @@ function event_loop_remove_local_object!(
         event_loop::EventLoop,
         key::Ptr{Cvoid},
     )::Union{EventLoopLocalObject, Nothing, ErrorResult}
+    debug_assert(event_loop_thread_is_callers_thread(event_loop))
     obj = hash_table_get(event_loop.local_data, key)
-    if obj === nothing
+    if obj === nothing || !(obj isa EventLoopLocalObject)
         return nothing
     end
+    removed_copy = EventLoopLocalObject(obj.key, obj.object, obj.on_object_removed)
     hash_table_remove!(event_loop.local_data, key)
-    return obj
+    return removed_copy
 end
 
 # Load factor for load balancing
