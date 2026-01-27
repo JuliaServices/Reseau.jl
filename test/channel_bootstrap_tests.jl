@@ -222,3 +222,98 @@ end
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)
 end
+
+@testset "server bootstrap destroy callback waits for channels" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    destroy_called = Ref(false)
+    server_setup = Ref(false)
+    server_shutdown = Ref(false)
+    server_channel = Ref{Any}(nothing)
+    client_channel = Ref{Any}(nothing)
+
+    server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
+        event_loop_group = elg,
+        host = "127.0.0.1",
+        port = 0,
+        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+            server_setup[] = err == AwsIO.AWS_OP_SUCCESS
+            server_channel[] = channel
+            return nothing
+        end,
+        on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
+            server_shutdown[] = true
+            return nothing
+        end,
+        on_listener_destroy = (bs, ud) -> begin
+            destroy_called[] = true
+            return nothing
+        end,
+    ))
+
+    listener = server_bootstrap.listener_socket
+    @test listener !== nothing
+    bound = AwsIO.socket_get_bound_address(listener)
+    @test bound isa AwsIO.SocketEndpoint
+    port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+    @test port != 0
+
+    client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+        event_loop_group = elg,
+        host_resolver = resolver,
+    ))
+
+    @test AwsIO.client_bootstrap_connect!(
+        client_bootstrap,
+        "127.0.0.1",
+        port;
+        on_setup = (bs, err, channel, ud) -> begin
+            if err == AwsIO.AWS_OP_SUCCESS
+                client_channel[] = channel
+            end
+            return nothing
+        end,
+    ) === nothing
+
+    @test wait_for_pred(() -> server_setup[])
+
+    AwsIO.server_bootstrap_shutdown!(server_bootstrap)
+    sleep(0.05)
+    @test !destroy_called[]
+
+    if server_channel[] !== nothing
+        AwsIO.channel_shutdown!(server_channel[], 0)
+    end
+    if client_channel[] !== nothing
+        AwsIO.channel_shutdown!(client_channel[], 0)
+    end
+
+    @test wait_for_pred(() -> server_shutdown[])
+    @test wait_for_pred(() -> destroy_called[])
+
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "server bootstrap destroy callback without channels" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    destroy_called = Ref(false)
+    server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
+        event_loop_group = elg,
+        host = "127.0.0.1",
+        port = 0,
+        on_listener_destroy = (bs, ud) -> begin
+            destroy_called[] = true
+            return nothing
+        end,
+    ))
+
+    AwsIO.server_bootstrap_shutdown!(server_bootstrap)
+    @test wait_for_pred(() -> destroy_called[])
+
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+end

@@ -8,6 +8,7 @@ const OnBootstrapChannelShutdownFn = Function  # (bootstrap, error_code, channel
 const OnServerListenerSetupFn = Function       # (server_bootstrap, error_code, user_data) -> nothing
 const OnIncomingChannelSetupFn = Function      # (server_bootstrap, error_code, channel, user_data) -> nothing
 const OnIncomingChannelShutdownFn = Function   # (server_bootstrap, error_code, channel, user_data) -> nothing
+const OnServerListenerDestroyFn = Function     # (server_bootstrap, user_data) -> nothing
 const ChannelOnProtocolNegotiatedFn = Function # (new_slot, protocol::ByteBuffer, user_data) -> AbstractChannelHandler
 
 # Client bootstrap options
@@ -479,6 +480,7 @@ struct ServerBootstrapOptions{
     FL <: Union{OnServerListenerSetupFn, Nothing},
     FS <: Union{OnIncomingChannelSetupFn, Nothing},
     FD <: Union{OnIncomingChannelShutdownFn, Nothing},
+    FDest <: Union{OnServerListenerDestroyFn, Nothing},
     U,
 }
     event_loop_group::ELG
@@ -490,6 +492,7 @@ struct ServerBootstrapOptions{
     on_listener_setup::FL  # nullable
     on_incoming_channel_setup::FS  # nullable
     on_incoming_channel_shutdown::FD  # nullable
+    on_listener_destroy::FDest  # nullable
     user_data::U
     enable_read_back_pressure::Bool
 end
@@ -504,6 +507,7 @@ function ServerBootstrapOptions(;
         on_listener_setup = nothing,
         on_incoming_channel_setup = nothing,
         on_incoming_channel_shutdown = nothing,
+        on_listener_destroy = nothing,
         user_data = nothing,
         enable_read_back_pressure::Bool = false,
     )
@@ -517,6 +521,7 @@ function ServerBootstrapOptions(;
         on_listener_setup,
         on_incoming_channel_setup,
         on_incoming_channel_shutdown,
+        on_listener_destroy,
         user_data,
         enable_read_back_pressure,
     )
@@ -530,36 +535,47 @@ mutable struct ServerBootstrap{
     FL <: Union{OnServerListenerSetupFn, Nothing},
     FS <: Union{OnIncomingChannelSetupFn, Nothing},
     FD <: Union{OnIncomingChannelShutdownFn, Nothing},
+    FDest <: Union{OnServerListenerDestroyFn, Nothing},
     U,
 }
     event_loop_group::ELG
     socket_options::SocketOptions
     listener_socket::Union{Socket, Nothing}  # nullable
+    listener_event_loop::Union{EventLoop, Nothing}  # nullable
     tls_connection_options::TO
     on_protocol_negotiated::FP
     on_listener_setup::FL  # nullable
     on_incoming_channel_setup::FS  # nullable
     on_incoming_channel_shutdown::FD  # nullable
+    on_listener_destroy::FDest  # nullable
     user_data::U
     enable_read_back_pressure::Bool
+    @atomic inflight_channels::Int
+    @atomic listener_closed::Bool
+    @atomic destroy_called::Bool
     @atomic shutdown::Bool
 end
 
 function ServerBootstrap(
-        options::ServerBootstrapOptions{ELG, SO, TO, FP, FL, FS, FD, U},
-    ) where {ELG, SO, TO, FP, FL, FS, FD, U}
-    SBT = ServerBootstrap{ELG, TO, FP, FL, FS, FD, U}
+        options::ServerBootstrapOptions{ELG, SO, TO, FP, FL, FS, FD, FDest, U},
+    ) where {ELG, SO, TO, FP, FL, FS, FD, FDest, U}
+    SBT = ServerBootstrap{ELG, TO, FP, FL, FS, FD, FDest, U}
     bootstrap = SBT(
         options.event_loop_group,
         options.socket_options,
+        nothing,
         nothing,
         options.tls_connection_options,
         options.on_protocol_negotiated,
         options.on_listener_setup,
         options.on_incoming_channel_setup,
         options.on_incoming_channel_shutdown,
+        options.on_listener_destroy,
         options.user_data,
         options.enable_read_back_pressure,
+        0,
+        false,
+        false,
         false,
     )
 
@@ -620,6 +636,8 @@ function ServerBootstrap(
         return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
 
+    bootstrap.listener_event_loop = event_loop
+
     listener_options = SocketListenerOptions(
         on_accept_result = (sock, err, new_sock, ud) -> _on_incoming_connection(bootstrap, err, new_sock),
         on_accept_result_user_data = bootstrap,
@@ -650,6 +668,65 @@ function ServerBootstrap(
     return bootstrap
 end
 
+function _server_bootstrap_incoming_started!(bootstrap::ServerBootstrap)
+    @atomic bootstrap.inflight_channels += 1
+    return nothing
+end
+
+function _server_bootstrap_incoming_finished!(bootstrap::ServerBootstrap)
+    @atomic bootstrap.inflight_channels -= 1
+    _server_bootstrap_maybe_destroy(bootstrap)
+    return nothing
+end
+
+function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
+    listener_closed = @atomic bootstrap.listener_closed
+    inflight = @atomic bootstrap.inflight_channels
+    if !listener_closed || inflight != 0
+        return nothing
+    end
+
+    expected = false
+    if !(@atomicreplace bootstrap.destroy_called expected => true).success
+        return nothing
+    end
+
+    if bootstrap.on_listener_destroy === nothing
+        return nothing
+    end
+
+    listener_loop = bootstrap.listener_event_loop
+    if listener_loop !== nothing && !event_loop_thread_is_callers_thread(listener_loop)
+        task = ScheduledTask(
+            (ctx, status) -> begin
+                ctx.bootstrap.on_listener_destroy === nothing && return nothing
+                Base.invokelatest(ctx.bootstrap.on_listener_destroy, ctx.bootstrap, ctx.bootstrap.user_data)
+                return nothing
+            end,
+            (bootstrap = bootstrap,);
+            type_tag = "server_listener_destroy",
+        )
+        event_loop_schedule_task_now!(listener_loop, task)
+    else
+        Base.invokelatest(bootstrap.on_listener_destroy, bootstrap, bootstrap.user_data)
+    end
+
+    return nothing
+end
+
+function _server_bootstrap_listener_destroy_task(ctx, status::TaskStatus.T)
+    bootstrap = ctx.bootstrap
+    listener = bootstrap.listener_socket
+    if listener !== nothing
+        socket_stop_accept(listener)
+        socket_close(listener)
+        bootstrap.listener_socket = nothing
+    end
+    @atomic bootstrap.listener_closed = true
+    _server_bootstrap_maybe_destroy(bootstrap)
+    return nothing
+end
+
 # Callback for incoming connections
 function _on_incoming_connection(bootstrap::ServerBootstrap, error_code::Int, new_socket)
     if error_code != AWS_OP_SUCCESS
@@ -657,6 +734,11 @@ function _on_incoming_connection(bootstrap::ServerBootstrap, error_code::Int, ne
             LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: incoming connection error $error_code"
         )
+        return nothing
+    end
+
+    if @atomic bootstrap.shutdown
+        socket_close(new_socket)
         return nothing
     end
 
@@ -673,6 +755,21 @@ end
 
 # Set up channel for incoming connection
 function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
+    _server_bootstrap_incoming_started!(bootstrap)
+    incoming_called = Ref(false)
+    setup_succeeded = Ref(false)
+
+    function invoke_incoming_callback(err, channel)
+        if incoming_called[]
+            return nothing
+        end
+        incoming_called[] = true
+        if bootstrap.on_incoming_channel_setup !== nothing
+            bootstrap.on_incoming_channel_setup(bootstrap, err, channel, bootstrap.user_data)
+        end
+        return nothing
+    end
+
     event_loop = event_loop_group_get_next_loop(bootstrap.event_loop_group)
     if event_loop === nothing
         logf(
@@ -680,15 +777,9 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: no event loop available for incoming channel"
         )
-        if bootstrap.on_incoming_channel_setup !== nothing
-            bootstrap.on_incoming_channel_setup(
-                bootstrap,
-                ERROR_IO_SOCKET_MISSING_EVENT_LOOP,
-                nothing,
-                bootstrap.user_data,
-            )
-        end
+        invoke_incoming_callback(ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
         socket_close(socket)
+        _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
 
@@ -699,28 +790,32 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: failed to assign incoming socket to event loop"
         )
-        if bootstrap.on_incoming_channel_setup !== nothing
-            bootstrap.on_incoming_channel_setup(
-                bootstrap,
-                assign_result.code,
-                nothing,
-                bootstrap.user_data,
-            )
-        end
+        invoke_incoming_callback(assign_result.code, nothing)
         socket_close(socket)
+        _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
 
     # Create channel
     channel = Channel(event_loop, nothing; enable_read_back_pressure = bootstrap.enable_read_back_pressure)
-    setup_succeeded = Ref(false)
 
     # Set shutdown callback
     channel_set_shutdown_callback!(
         channel, (ch, err, ud) -> begin
+            shutdown_err = err
+            if !incoming_called[]
+                if shutdown_err == AWS_OP_SUCCESS
+                    shutdown_err = ERROR_UNKNOWN
+                end
+                invoke_incoming_callback(shutdown_err, nothing)
+            end
+
             if setup_succeeded[] && bootstrap.on_incoming_channel_shutdown !== nothing
                 bootstrap.on_incoming_channel_shutdown(bootstrap, err, ch, bootstrap.user_data)
             end
+
+            _server_bootstrap_incoming_finished!(bootstrap)
+            return nothing
         end, bootstrap
     )
 
@@ -732,14 +827,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: failed to create socket handler for incoming connection"
         )
-        if bootstrap.on_incoming_channel_setup !== nothing
-            bootstrap.on_incoming_channel_setup(
-                bootstrap,
-                handler_result.code,
-                nothing,
-                bootstrap.user_data,
-            )
-        end
+        channel_shutdown!(channel, handler_result.code)
         socket_close(socket)
         return nothing
     end
@@ -756,27 +844,13 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             if err == AWS_OP_SUCCESS
                 setup_result = channel_setup_complete!(channel)
                 if setup_result isa ErrorResult
-                    if bootstrap.on_incoming_channel_setup !== nothing
-                        bootstrap.on_incoming_channel_setup(
-                            bootstrap,
-                            setup_result.code,
-                            nothing,
-                            bootstrap.user_data,
-                        )
-                    end
-                    socket_close(socket)
+                    channel_shutdown!(channel, setup_result.code)
                     return nothing
                 end
                 setup_succeeded[] = true
-                if bootstrap.on_incoming_channel_setup !== nothing
-                    bootstrap.on_incoming_channel_setup(bootstrap, AWS_OP_SUCCESS, channel, bootstrap.user_data)
-                end
+                invoke_incoming_callback(AWS_OP_SUCCESS, channel)
             else
-                if bootstrap.on_incoming_channel_setup !== nothing
-                    bootstrap.on_incoming_channel_setup(bootstrap, err, nothing, bootstrap.user_data)
-                end
                 channel_shutdown!(channel, err)
-                socket_close(socket)
             end
             return nothing
         end
@@ -814,15 +888,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: incoming channel setup failed"
         )
-        if bootstrap.on_incoming_channel_setup !== nothing
-            bootstrap.on_incoming_channel_setup(
-                bootstrap,
-                setup_result.code,
-                nothing,
-                bootstrap.user_data,
-            )
-        end
-        socket_close(socket)
+        channel_shutdown!(channel, setup_result.code)
         return nothing
     end
 
@@ -833,22 +899,27 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         "ServerBootstrap: incoming channel $(channel.channel_id) setup complete"
     )
 
-    # Invoke setup callback
-    if bootstrap.on_incoming_channel_setup !== nothing
-        bootstrap.on_incoming_channel_setup(bootstrap, AWS_OP_SUCCESS, channel, bootstrap.user_data)
-    end
+    invoke_incoming_callback(AWS_OP_SUCCESS, channel)
 
     return nothing
 end
 
 # Shutdown server bootstrap
 function server_bootstrap_shutdown!(bootstrap::ServerBootstrap)
-    @atomic bootstrap.shutdown = true
+    expected = false
+    if !(@atomicreplace bootstrap.shutdown expected => true).success
+        return nothing
+    end
 
-    if bootstrap.listener_socket !== nothing
-        socket_stop_accept(bootstrap.listener_socket)
-        socket_close(bootstrap.listener_socket)
-        bootstrap.listener_socket = nothing
+    if bootstrap.listener_socket !== nothing && bootstrap.listener_event_loop !== nothing
+        task = ScheduledTask(
+            _server_bootstrap_listener_destroy_task,
+            (bootstrap = bootstrap,);
+            type_tag = "server_listener_shutdown",
+        )
+        event_loop_schedule_task_now!(bootstrap.listener_event_loop, task)
+    else
+        _server_bootstrap_listener_destroy_task((bootstrap = bootstrap,), TaskStatus.RUN_READY)
     end
 
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ServerBootstrap: shutdown")

@@ -181,7 +181,7 @@ Legend:
 - [x] Listener setup callbacks (async listener for Apple Network Framework)
 - [x] Accept channel setup/shutdown callbacks parity
 - [x] TLS integration on accepted sockets
-- [ ] Shutdown semantics parity (listener teardown + inflight channels)
+- [x] Shutdown semantics parity (listener teardown + inflight channels)
 
 ---
 
