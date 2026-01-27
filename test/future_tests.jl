@@ -1,6 +1,18 @@
 using Test
 using AwsIO
 
+function _wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
+    start = Base.time_ns()
+    timeout_ns = Int(timeout_s * 1_000_000_000)
+    while (Base.time_ns() - start) < timeout_ns
+        if pred()
+            return true
+        end
+        sleep(0.01)
+    end
+    return false
+end
+
 @testset "Future basics" begin
     future = AwsIO.Future{Int}()
 
@@ -93,4 +105,65 @@ end
     @test AwsIO.promise_fail!(p_fail, AwsIO.ERROR_IO_SOCKET_TIMEOUT) === nothing
     @test AwsIO.future_is_failed(f_fail)
     @test AwsIO.future_get_error(f_fail) == AwsIO.ERROR_IO_SOCKET_TIMEOUT
+end
+
+@testset "Future callback registration" begin
+    pending = AwsIO.Future{Bool}()
+    called = Ref(false)
+    @test AwsIO.future_on_complete_if_not_done!(pending, (f, ud) -> (ud[] = true), called)
+    AwsIO.future_complete!(pending, true)
+    @test called[]
+
+    done = AwsIO.Future{Bool}()
+    AwsIO.future_complete!(done, true)
+    called2 = Ref(false)
+    @test !AwsIO.future_on_complete_if_not_done!(done, (f, ud) -> (ud[] = true), called2)
+    @test !called2[]
+end
+
+@testset "Future event loop callback" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    future = AwsIO.Future{Int}()
+    called = Ref(false)
+    AwsIO.future_on_event_loop!(future, event_loop, (f, ud) -> (ud[] = true), called)
+    AwsIO.future_complete!(future, 1)
+    @test _wait_for_pred(() -> called[])
+
+    done = AwsIO.Future{Int}()
+    AwsIO.future_complete!(done, 2)
+    called2 = Ref(false)
+    AwsIO.future_on_event_loop!(done, event_loop, (f, ud) -> (ud[] = true), called2)
+    @test _wait_for_pred(() -> called2[])
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "Future channel callback" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    channel = AwsIO.Channel(event_loop, nothing)
+
+    future = AwsIO.Future{Int}()
+    called = Ref(false)
+    AwsIO.future_on_channel!(future, channel, (f, ud) -> (ud[] = true), called)
+    AwsIO.future_complete!(future, 1)
+    @test _wait_for_pred(() -> called[])
+
+    done = AwsIO.Future{Int}()
+    AwsIO.future_complete!(done, 2)
+    called2 = Ref(false)
+    AwsIO.future_on_channel!(done, channel, (f, ud) -> (ud[] = true), called2)
+    @test _wait_for_pred(() -> called2[])
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "Future wait ns" begin
+    pending = AwsIO.Future{Bool}()
+    @test !AwsIO.future_wait_ns(pending; timeout_ns = 1_000_000)
+
+    done = AwsIO.Future{Bool}()
+    AwsIO.future_complete!(done, true)
+    @test AwsIO.future_wait_ns(done; timeout_ns = 1_000_000)
 end

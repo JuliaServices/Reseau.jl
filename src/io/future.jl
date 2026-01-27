@@ -104,6 +104,87 @@ function future_on_complete!(future::Future, callback::OnFutureCompleteFn, user_
     return nothing
 end
 
+# Register a callback only if the future isn't done.
+# Returns true if callback was registered, false if already done.
+function future_on_complete_if_not_done!(future::Future, callback::OnFutureCompleteFn, user_data = nothing)::Bool
+    return lock(future.lock) do
+        if future_is_done(future)
+            return false
+        end
+        waiter = FutureWaiter(callback, user_data, future.waiters)
+        future.waiters = waiter
+        return true
+    end
+end
+
+# Register a callback to run on an event loop thread.
+# Always schedules the callback asynchronously.
+function future_on_event_loop!(
+        future::Future,
+        event_loop::AbstractEventLoop,
+        callback::OnFutureCompleteFn,
+        user_data = nothing,
+    )
+    schedule_callback = () -> begin
+        task = ScheduledTask(
+            (t, status) -> callback(future, user_data),
+            nothing;
+            type_tag = "future_event_loop_callback",
+        )
+        event_loop_schedule_task_now!(event_loop, task)
+    end
+
+    if future_is_done(future)
+        schedule_callback()
+        return nothing
+    end
+
+    future_on_complete!(future, (f, ud) -> schedule_callback(), nothing)
+    return nothing
+end
+
+# Register a callback to run on a channel's event loop.
+function future_on_channel!(
+        future::Future,
+        channel::Channel,
+        callback::OnFutureCompleteFn,
+        user_data = nothing,
+    )
+    schedule_callback = () -> begin
+        task = ScheduledTask(
+            (t, status) -> callback(future, user_data),
+            nothing;
+            type_tag = "future_channel_callback",
+        )
+        event_loop_schedule_task_now!(channel.event_loop, task)
+    end
+
+    if future_is_done(future)
+        schedule_callback()
+        return nothing
+    end
+
+    future_on_complete!(future, (f, ud) -> schedule_callback(), nothing)
+    return nothing
+end
+
+# Wait for future to complete (timeout in nanoseconds)
+function future_wait_ns(future::Future; timeout_ns::Integer)::Bool
+    start_time = high_res_clock()
+    limit = timeout_ns < 0 ? typemax(UInt64) : UInt64(timeout_ns)
+
+    while !future_is_done(future)
+        elapsed = high_res_clock() - start_time
+        if elapsed >= limit
+            return false
+        end
+        yield()
+        sleep(0.001)
+    end
+
+    return true
+end
+
 # Complete the future with a result
 function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorResult} where {T}
     return lock(future.lock) do

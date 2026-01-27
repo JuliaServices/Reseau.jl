@@ -84,8 +84,10 @@ end
 function _async_stream_fill_job_loop(job::AsyncStreamFillJob)
     while true
         if job.read_future !== nothing
-            if !future_is_done(job.read_future)
-                future_on_complete!(job.read_future, (f, ud) -> _async_stream_fill_job_loop(job))
+            if future_on_complete_if_not_done!(
+                job.read_future,
+                (f, ud) -> _async_stream_fill_job_loop(job),
+            )
                 return nothing
             end
 

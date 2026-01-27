@@ -242,18 +242,18 @@ Legend:
 ## 9) Futures
 
 ### 9.1 Future behavior parity
-- [ ] Register callback (single callback only) behavior parity
-- [ ] Register-if-not-done semantics (avoid sync callbacks)
-- [ ] Event loop callback scheduling parity
-- [ ] Channel callback scheduling parity
-- [ ] Wait with timeout semantics parity
+- [~] Register callback (single callback only) behavior parity
+- [x] Register-if-not-done semantics (avoid sync callbacks)
+- [x] Event loop callback scheduling parity
+- [x] Channel callback scheduling parity
+- [x] Wait with timeout semantics parity
 
 ### 9.2 Result/move semantics
 - [ ] Support move semantics for types with cleanup (e.g., ByteBuffer)
 - [ ] Error + result handling parity for all future types
 
 ### 9.3 Tests
-- [ ] Port `future_test.c`
+- [x] Port `future_test.c`
 
 ---
 
