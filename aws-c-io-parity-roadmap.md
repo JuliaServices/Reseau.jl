@@ -428,7 +428,7 @@ Legend:
 - [ ] `socket_test.c` -> `test/socket_tests.jl` (extend)
 - [x] `socket_handler_test.c` -> new `test/socket_handler_tests.jl`
 - [x] `channel_test.c` -> new `test/channel_tests.jl`
-- [ ] `io_testing_channel_test.c` -> new `test/io_testing_channel_tests.jl`
+- [x] `io_testing_channel_test.c` -> new `test/io_testing_channel_tests.jl`
 - [ ] `pipe_test.c` -> new `test/pipe_tests.jl`
 - [x] `shared_library_test.c` -> new `test/shared_library_tests.jl`
 - [x] `pem_test.c` -> new `test/pem_tests.jl`
