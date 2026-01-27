@@ -366,7 +366,7 @@ Legend:
 - [x] Channel aggregation of handler stats
 
 ### 15.3 Tests
-- [ ] Port `statistics_handler_test.c`
+- [x] Port `statistics_handler_test.c`
 
 ---
 
