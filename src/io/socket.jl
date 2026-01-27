@@ -276,6 +276,25 @@ end
 
 # Vtable interface functions - must be implemented by platform-specific vtables
 
+# Initialize socket based on impl_type (platform default if unspecified)
+function socket_init(options::SocketOptions)::Union{Socket, ErrorResult}
+    impl_type = options.impl_type == SocketImplType.PLATFORM_DEFAULT ?
+        socket_get_default_impl_type() : options.impl_type
+
+    if impl_type == SocketImplType.POSIX
+        return socket_init_posix(options)
+    elseif impl_type == SocketImplType.WINSOCK
+        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    elseif impl_type == SocketImplType.APPLE_NETWORK_FRAMEWORK
+        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+
+    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+end
+
 # Clean up socket resources
 function socket_cleanup!(socket::Socket)
     return vtable_socket_cleanup!(socket.vtable, socket)

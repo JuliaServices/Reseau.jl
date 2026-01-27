@@ -75,6 +75,20 @@ end
     end
 end
 
+@testset "socket init impl type" begin
+    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    sock = AwsIO.socket_init(opts)
+    @test sock isa AwsIO.Socket
+    sock isa AwsIO.Socket && AwsIO.socket_close(sock)
+
+    @static if !Sys.iswindows()
+        win_opts = AwsIO.SocketOptions(; impl_type = AwsIO.SocketImplType.WINSOCK)
+        win_sock = AwsIO.socket_init(win_opts)
+        @test win_sock isa AwsIO.ErrorResult
+        win_sock isa AwsIO.ErrorResult && @test win_sock.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+    end
+end
+
 @testset "socket nonblocking cloexec" begin
     if Sys.iswindows()
         @test true

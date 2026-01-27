@@ -113,7 +113,7 @@ Legend:
 ## 3) Sockets (platform parity)
 
 ### 3.1 Socket API parity
-- [ ] Implement all socket options from aws-c-io (keepalive, interface binding, connect timeout, etc.)
+- [x] Implement all socket options from aws-c-io (keepalive, interface binding, connect timeout, etc.)
 - [x] Domain parity: IPv4, IPv6, LOCAL, VSOCK
 - [ ] Socket impl type parity: POSIX, Winsock, Apple Network Framework, PLATFORM_DEFAULT
 - [ ] All socket lifecycle methods (connect/bind/listen/accept/assign/reassign/close/cleanup)

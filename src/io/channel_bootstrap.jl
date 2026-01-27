@@ -267,7 +267,7 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
     bootstrap = request.bootstrap
 
     # Create socket
-    sock_result = socket_init_posix(bootstrap.socket_options)
+    sock_result = socket_init(bootstrap.socket_options)
 
     if sock_result isa ErrorResult
         logf(
@@ -592,7 +592,7 @@ function ServerBootstrap(
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ServerBootstrap: created")
 
     # Create listener socket
-    sock_result = socket_init_posix(options.socket_options)
+    sock_result = socket_init(options.socket_options)
 
     if sock_result isa ErrorResult
         logf(
