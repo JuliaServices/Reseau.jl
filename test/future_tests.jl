@@ -111,6 +111,8 @@ end
     pending = AwsIO.Future{Bool}()
     called = Ref(false)
     @test AwsIO.future_on_complete_if_not_done!(pending, (f, ud) -> (ud[] = true), called)
+    @test_throws ErrorException AwsIO.future_on_complete!(pending, (f, ud) -> nothing, nothing)
+    @test_throws ErrorException AwsIO.future_on_complete_if_not_done!(pending, (f, ud) -> nothing, nothing)
     AwsIO.future_complete!(pending, true)
     @test called[]
 

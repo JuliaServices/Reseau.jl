@@ -25,7 +25,7 @@ mutable struct Future{T}
     result::Union{T, Nothing}  # nullable
     error_code::Int
     lock::ReentrantLock
-    waiters::Union{FutureWaiter, Nothing}  # nullable
+    callback::Union{FutureWaiter, Nothing}  # nullable
 end
 
 function Future{T}() where {T}
@@ -91,15 +91,17 @@ end
 
 # Register a callback for when the future completes
 function future_on_complete!(future::Future, callback::OnFutureCompleteFn, user_data = nothing)
+    invoke_now = false
     lock(future.lock) do
+        fatal_assert_bool(future.callback === nothing, "Future done callback must only be set once", "<unknown>", 0)
         if future_is_done(future)
-            # Already complete, call immediately
-            Base.invokelatest(callback, future, user_data)
+            invoke_now = true
         else
-            # Add to waiters list
-            waiter = FutureWaiter(callback, user_data, future.waiters)
-            future.waiters = waiter
+            future.callback = FutureWaiter(callback, user_data, nothing)
         end
+    end
+    if invoke_now
+        Base.invokelatest(callback, future, user_data)
     end
     return nothing
 end
@@ -108,11 +110,11 @@ end
 # Returns true if callback was registered, false if already done.
 function future_on_complete_if_not_done!(future::Future, callback::OnFutureCompleteFn, user_data = nothing)::Bool
     return lock(future.lock) do
+        fatal_assert_bool(future.callback === nothing, "Future done callback must only be set once", "<unknown>", 0)
         if future_is_done(future)
             return false
         end
-        waiter = FutureWaiter(callback, user_data, future.waiters)
-        future.waiters = waiter
+        future.callback = FutureWaiter(callback, user_data, nothing)
         return true
     end
 end
@@ -187,7 +189,8 @@ end
 
 # Complete the future with a result
 function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorResult} where {T}
-    return lock(future.lock) do
+    callback = nothing
+    ret = lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
             raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
@@ -197,15 +200,21 @@ function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorRes
         future.result = result
         @atomic future.state = FutureState.COMPLETED
 
-        # Notify all waiters
-        _notify_waiters(future)
+        callback = future.callback
+        future.callback = nothing
         return nothing
     end
+    if ret isa ErrorResult
+        return ret
+    end
+    _notify_callback(callback, future)
+    return nothing
 end
 
 # Fail the future with an error code
 function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResult}
-    return lock(future.lock) do
+    callback = nothing
+    ret = lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
             raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
@@ -215,15 +224,21 @@ function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResu
         future.error_code = error_code
         @atomic future.state = FutureState.FAILED
 
-        # Notify all waiters
-        _notify_waiters(future)
+        callback = future.callback
+        future.callback = nothing
         return nothing
     end
+    if ret isa ErrorResult
+        return ret
+    end
+    _notify_callback(callback, future)
+    return nothing
 end
 
 # Cancel the future
 function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
-    return lock(future.lock) do
+    callback = nothing
+    ret = lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
             # Already done, nothing to cancel
@@ -233,23 +248,22 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
         future.error_code = ERROR_IO_OPERATION_CANCELLED
         @atomic future.state = FutureState.CANCELLED
 
-        # Notify all waiters
-        _notify_waiters(future)
+        callback = future.callback
+        future.callback = nothing
         return nothing
     end
+    if ret isa ErrorResult
+        return ret
+    end
+    _notify_callback(callback, future)
+    return nothing
 end
 
-# Internal - notify all registered waiters
-function _notify_waiters(future::Future)
-    waiter = future.waiters
-    future.waiters = nothing
-
-    while waiter !== nothing
-        next = waiter.next
-        Base.invokelatest(waiter.callback, future, waiter.user_data)
-        waiter = next
+# Internal - invoke registered callback
+function _notify_callback(callback::Union{FutureWaiter, Nothing}, future::Future)
+    if callback !== nothing
+        Base.invokelatest(callback.callback, future, callback.user_data)
     end
-
     return nothing
 end
 

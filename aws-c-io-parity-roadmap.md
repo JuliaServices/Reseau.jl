@@ -243,7 +243,7 @@ Legend:
 ## 9) Futures
 
 ### 9.1 Future behavior parity
-- [~] Register callback (single callback only) behavior parity
+- [x] Register callback (single callback only) behavior parity
 - [x] Register-if-not-done semantics (avoid sync callbacks)
 - [x] Event loop callback scheduling parity
 - [x] Channel callback scheduling parity
