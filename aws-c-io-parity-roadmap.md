@@ -67,7 +67,7 @@ Legend:
 - [x] API parity for schedule/cancel/serialized scheduling semantics (order-of-execution guarantees)
 - [x] Match task cancellation semantics (may execute off-thread) with aws-c-io
 - [x] `event_loop_current_clock_time()` parity and clock override support
-- [ ] `event_loop_group_acquire_from_event_loop()` semantics
+- [x] `event_loop_group_acquire_from_event_loop()` semantics
 - [x] Load factor sampling + best-of-two selection parity
 - [x] Event loop local objects parity (get/set/remove)
 - [x] Thread ownership check `event_loop_thread_is_callers_thread()` parity
@@ -97,7 +97,7 @@ Legend:
 - [ ] Windows event loop tests analogous to aws-c-io event_loop_test.c and vcc suite
 
 ### 2.6 Threading constraints
-- [ ] Document required Julia startup flags for parity behavior
+- [x] Document required Julia startup flags for parity behavior
 - [x] Pin event-loop tasks to non-main interactive threads (sticky) to avoid main-thread blocking
 - [ ] Verify multi-loop scheduling guarantees with Julia tasks
 

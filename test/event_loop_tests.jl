@@ -228,9 +228,9 @@ const _dispatch_queue_setter_c =
         if Sys.iswindows()
             @test true
         else
+            interactive_threads = Threads.nthreads(:interactive)
             opts = AwsIO.EventLoopGroupOptions(loop_count = 1)
             elg = AwsIO.event_loop_group_new(opts)
-            interactive_threads = Threads.nthreads(:interactive)
             if interactive_threads <= 1
                 @test elg isa AwsIO.ErrorResult
             else
@@ -241,10 +241,21 @@ const _dispatch_queue_setter_c =
                         @test AwsIO.event_loop_group_get_loop_count(elg) == 1
                         el = AwsIO.event_loop_group_get_next_loop(elg)
                         @test el !== nothing
+                        if el !== nothing
+                            acquired = AwsIO.event_loop_group_acquire_from_event_loop(el)
+                            @test acquired === elg
+                            AwsIO.event_loop_group_release_from_event_loop!(el)
+                        end
                     finally
                         AwsIO.event_loop_group_destroy!(elg)
                     end
                 end
+            end
+
+            if interactive_threads > 1
+                bad_opts = AwsIO.EventLoopGroupOptions(loop_count = interactive_threads)
+                bad_elg = AwsIO.event_loop_group_new(bad_opts)
+                @test bad_elg isa AwsIO.ErrorResult
             end
         end
     end

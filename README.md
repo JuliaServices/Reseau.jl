@@ -77,3 +77,15 @@ end, s -> nothing, nothing)
 future = async_input_stream_read_to_fill(stream, data)
 future_wait(future)
 ```
+
+## Threading requirements
+
+AwsIO runs event loops on Julia-managed threads and intentionally avoids the libuv global IO lock.
+For correctness and to keep the main interactive thread available, the event-loop group requires:
+
+- `Threads.nthreads(:interactive) > 1`
+- `loop_count < Threads.nthreads(:interactive)`
+
+If these constraints are not met, `event_loop_group_new` returns an error. Recommended settings
+for local development are `JULIA_NUM_THREADS=auto,2` (or higher interactive count when using
+multiple event loops).
