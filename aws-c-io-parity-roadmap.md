@@ -200,8 +200,8 @@ Legend:
 - [x] Threading model parity (background resolver thread)
 
 ### 6.3 Tests
-- [ ] Port `default_host_resolver_test.c` scenarios
-- [ ] Port mock DNS resolver tests
+- [x] Port `default_host_resolver_test.c` scenarios (network cases gated via `AWSIO_RUN_NETWORK_TESTS`)
+- [x] Port mock DNS resolver tests
 - [ ] Add stress tests for background refresh + TTL behavior
 
 ---

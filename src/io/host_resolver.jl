@@ -75,6 +75,7 @@ struct HostResolverConfig
     max_addresses_per_host::UInt64
     resolve_frequency_ns::UInt64  # How often to re-resolve
     background_refresh::Bool  # retained for compatibility
+    clock_override::Union{Function, Nothing}
 end
 
 struct HostResolutionConfig
@@ -105,6 +106,7 @@ function HostResolverConfig(;
         max_addresses_per_host::Integer = 8,
         resolve_frequency_ns::Integer = 1_000_000_000,  # 1 second
         background_refresh::Bool = true,
+        clock_override::Union{Function, Nothing} = nothing,
     )
     return HostResolverConfig(
         UInt64(max_entries),
@@ -113,6 +115,7 @@ function HostResolverConfig(;
         UInt64(max_addresses_per_host),
         UInt64(resolve_frequency_ns),
         background_refresh,
+        clock_override,
     )
 end
 
@@ -140,6 +143,11 @@ mutable struct DefaultHostResolver{ELG} <: AbstractHostResolver
     cache::HostResolverCache
     resolver_lock::Mutex
     @atomic shutdown::Bool
+end
+
+@inline function _resolver_clock(resolver::DefaultHostResolver)::UInt64
+    clock_override = resolver.config.clock_override
+    return clock_override === nothing ? high_res_clock() : clock_override()
 end
 
 function DefaultHostResolver(
@@ -465,7 +473,7 @@ function _host_resolver_thread(entry::HostEntry)
         while (@atomic entry.state) == DefaultResolverState.ACTIVE
             keep_going = true
             addresses, err_code = _resolve_addresses(entry)
-            timestamp = high_res_clock()
+            timestamp = _resolver_clock(entry.resolver)
             new_expiry = timestamp + entry.resolution_config.max_ttl_secs * UInt64(1_000_000_000)
 
             pending = Deque{PendingCallback}(0)
@@ -562,7 +570,7 @@ function _host_resolver_thread(entry::HostEntry)
             try
                 mutex_lock(entry.entry_lock)
                 try
-                    now = high_res_clock()
+                    now = _resolver_clock(resolver)
                     if resolver.shutdown || (
                             isempty(entry.pending_callbacks) &&
                             entry.last_resolve_request_time + max_no_solicitation_interval < now
@@ -617,7 +625,7 @@ function host_resolver_resolve!(
     end
 
     host = String(host_name)
-    timestamp = high_res_clock()
+    timestamp = _resolver_clock(resolver)
 
     mutex_lock(resolver.resolver_lock)
     entry = hash_table_get(resolver.cache, host)
