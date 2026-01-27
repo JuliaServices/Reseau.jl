@@ -267,7 +267,7 @@ Legend:
 - [ ] Error and status semantics parity
 
 ### 10.2 Tests
-- [ ] Port `stream_test.c`
+- [x] Port `stream_test.c`
 
 ---
 
@@ -433,7 +433,7 @@ Legend:
 - [x] `shared_library_test.c` -> new `test/shared_library_tests.jl`
 - [x] `pem_test.c` -> new `test/pem_tests.jl`
 - [ ] `future_test.c` -> new `test/future_tests.jl`
-- [ ] `stream_test.c` -> new `test/stream_tests.jl`
+- [x] `stream_test.c` -> new `test/stream_tests.jl`
 - [ ] `async_stream_test.c` -> `test/async_stream_tests.jl` (extend)
 - [ ] `exponential_backoff_retry_test.c` -> new `test/retry_strategy_tests.jl`
 - [ ] `standard_retry_test.c` -> new `test/retry_strategy_tests.jl`
