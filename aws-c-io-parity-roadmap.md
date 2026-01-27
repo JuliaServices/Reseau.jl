@@ -309,7 +309,8 @@ Legend:
 - [ ] Error mapping to aws-c-io error codes
 
 ### 12.5 TLS channel handler integration
-- [ ] Implement tls_channel_handler_shared semantics
+- [~] Implement tls_channel_handler_shared semantics
+  - [x] Handshake timeout scheduling and stats timestamps
 - [ ] Channel handler state machine parity
 - [ ] Ensure callbacks fire on correct thread
 - [ ] Integrate ALPN handler and TLS negotiated protocol message
