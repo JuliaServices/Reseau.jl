@@ -84,7 +84,7 @@ Legend:
 - [x] Reconcile epoll implementation with aws-c-io (edge-triggered behavior, task pre-queue)
 - [x] Support `eventfd` path and pipe fallback behavior as aws-c-io
 - [x] Cancellation semantics and wake-up logic parity
-- [ ] Stress tests matching `tests/vcc/*` in aws-c-io
+- [x] Stress tests matching `tests/vcc/*` in aws-c-io
 
 ### 2.3 BSD/macOS: kqueue
 - [x] Match aws-c-io kqueue event loop semantics (user events, trigger behavior, timer handling)
@@ -223,10 +223,6 @@ Legend:
 ### 7.3 No-retry strategy
 - [x] Implement no-retry strategy (always denies permission)
 - [x] Tests matching `no_retry_strategy_test.c`
-
-### 7.3 No-retry strategy
-- [ ] Implement `no_retry_strategy` parity (source/no_retry_strategy.c)
-- [ ] Tests matching `no_retry_strategy_test.c`
 
 ---
 
@@ -391,8 +387,8 @@ Legend:
 ## 18) Tracing
 
 ### 18.1 Tracing hooks
-- [ ] Implement tracing API stubs or full integration
-- [ ] Ensure no behavior regressions when tracing is enabled
+- [x] Implement tracing API stubs or full integration
+- [x] Ensure no behavior regressions when tracing is enabled
 
 ---
 
@@ -435,15 +431,15 @@ Legend:
 - [x] `future_test.c` -> new `test/future_tests.jl`
 - [x] `stream_test.c` -> new `test/stream_tests.jl`
 - [x] `async_stream_test.c` -> `test/async_stream_tests.jl` (extend)
-- [ ] `exponential_backoff_retry_test.c` -> new `test/retry_strategy_tests.jl`
-- [ ] `standard_retry_test.c` -> new `test/retry_strategy_tests.jl`
+- [x] `exponential_backoff_retry_test.c` -> new `test/retry_strategy_tests.jl`
+- [x] `standard_retry_test.c` -> new `test/retry_strategy_tests.jl`
 - [x] `no_retry_strategy_test.c` -> new `test/retry_strategy_tests.jl`
 - [x] `statistics_handler_test.c` -> new `test/statistics_tests.jl`
 - [x] `alpn_handler_test.c` -> new `test/alpn_tests.jl`
 - [ ] `tls_handler_test.c` -> `test/tls_tests.jl` (extend)
 - [ ] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
 - [ ] `pkcs11_test.c` -> new `test/pkcs11_tests.jl`
-- [ ] vcc suite (`tests/vcc/*`) -> new stress tests (schedule, cancel, subscribe, etc.)
+- [x] vcc suite (`tests/vcc/*`) -> new stress tests (schedule, cancel, subscribe, etc.)
 
 ---
 
