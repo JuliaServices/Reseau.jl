@@ -7,6 +7,22 @@ mutable struct SharedLibrary
     path::String
 end
 
+SharedLibrary() = SharedLibrary(C_NULL, "")
+
+function shared_library_init!(lib::SharedLibrary, path::AbstractString)::Union{Nothing, ErrorResult}
+    res = shared_library_load(path)
+    if res isa ErrorResult
+        return res
+    end
+    lib.handle = res.handle
+    lib.path = res.path
+    return nothing
+end
+
+function shared_library_clean_up!(lib::SharedLibrary)::Union{Nothing, ErrorResult}
+    return shared_library_unload!(lib)
+end
+
 # Load a shared library from path
 function shared_library_load(path::AbstractString)::Union{SharedLibrary, ErrorResult}
     logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY, "SharedLib: loading '$path'")
@@ -80,13 +96,13 @@ function shared_library_find_symbol(lib::SharedLibrary, symbol_name::AbstractStr
     if sym == C_NULL
         @static if Sys.iswindows()
             logf(
-                LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
+                LogLevel.ERROR, LS_IO_SHARED_LIBRARY,
                 "SharedLib: symbol '$symbol_name' not found in '$(lib.path)'"
             )
         else
             err_msg = unsafe_string(ccall(:dlerror, Cstring, ()))
             logf(
-                LogLevel.DEBUG, LS_IO_SHARED_LIBRARY,
+                LogLevel.ERROR, LS_IO_SHARED_LIBRARY,
                 "SharedLib: symbol '$symbol_name' not found: $err_msg"
             )
         end

@@ -31,7 +31,7 @@ Legend:
 - [x] Stream (stream.h) feature parity (input stream vtables and constructors)
 - [x] Message pool + memory pool (message_pool.h)
 - [x] PEM utilities (pem.h)
-- [ ] Shared library (shared_library.h)
+- [x] Shared library (shared_library.h)
 - [x] Statistics (statistics.h)
 - [ ] PKCS#11 support (pkcs11.h + pkcs11_tls_op_handler.c)
 - [ ] TLS channel handler (tls_channel_handler.h + tls_channel_handler_shared.c)
@@ -373,7 +373,7 @@ Legend:
 ## 16) Shared library
 
 ### 16.1 API parity
-- [ ] Ensure `shared_library_*` matches aws-c-io error behavior and Windows parity
+- [x] Ensure `shared_library_*` matches aws-c-io error behavior and Windows parity
 - [x] Add tests matching `shared_library_test.c`
 
 ---
