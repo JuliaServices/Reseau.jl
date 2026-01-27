@@ -68,24 +68,36 @@ mutable struct HostEntry
     host_name::String
     addresses_a::Vector{HostAddress}      # IPv4 addresses
     addresses_aaaa::Vector{HostAddress}   # IPv6 addresses
+    failed_addresses_a::Vector{HostAddress}
+    failed_addresses_aaaa::Vector{HostAddress}
     pending_a::Bool  # A (IPv4) resolution pending
     pending_aaaa::Bool  # AAAA (IPv6) resolution pending
     last_resolve_request_time::UInt64
     resolved_time::UInt64
+    resolve_frequency_ns::UInt64
+    max_ttl_secs::UInt64
+    resolve_impl::Union{Function, Nothing}
+    resolve_impl_data::Any
     # Linked list of waiting requests
     pending_requests_a::Union{HostResolverResolutionRequest, Nothing}  # nullable
     pending_requests_aaaa::Union{HostResolverResolutionRequest, Nothing}  # nullable
 end
 
-function HostEntry(host_name::AbstractString)
+function HostEntry(host_name::AbstractString, config)
     return HostEntry(
         String(host_name),
         Vector{HostAddress}(),
         Vector{HostAddress}(),
+        Vector{HostAddress}(),
+        Vector{HostAddress}(),
         false,
         false,
         UInt64(0),
         UInt64(0),
+        config.resolve_frequency_ns == 0 ? UInt64(1_000_000_000) : config.resolve_frequency_ns,
+        config.max_ttl_secs,
+        nothing,
+        nothing,
         nothing,
         nothing,
     )
@@ -101,12 +113,33 @@ struct HostResolverConfig
     background_refresh::Bool  # Whether to refresh in background
 end
 
+struct HostResolutionConfig
+    impl::Union{Function, Nothing}
+    max_ttl_secs::UInt64
+    resolve_frequency_ns::UInt64
+    impl_data::Any
+end
+
+function HostResolutionConfig(;
+        impl::Union{Function, Nothing} = nothing,
+        max_ttl_secs::Integer = 0,
+        resolve_frequency_ns::Integer = 0,
+        impl_data = nothing,
+    )
+    return HostResolutionConfig(
+        impl,
+        UInt64(max_ttl_secs),
+        UInt64(resolve_frequency_ns),
+        impl_data,
+    )
+end
+
 function HostResolverConfig(;
         max_entries::Integer = 1024,
-        max_ttl_secs::Integer = 300,  # 5 minutes default
-        min_ttl_secs::Integer = 10,
+        max_ttl_secs::Integer = 30,  # 30 seconds default
+        min_ttl_secs::Integer = 1,
         max_addresses_per_host::Integer = 8,
-        resolve_frequency_ns::Integer = 5_000_000_000,  # 5 seconds
+        resolve_frequency_ns::Integer = 1_000_000_000,  # 1 second
         background_refresh::Bool = true,
     )
     return HostResolverConfig(
@@ -119,8 +152,8 @@ function HostResolverConfig(;
     )
 end
 
-# Default TTL in nanoseconds (5 minutes)
-const HOST_RESOLVER_DEFAULT_TTL_NS = UInt64(300_000_000_000)
+# Default TTL in nanoseconds (30 seconds)
+const HOST_RESOLVER_DEFAULT_TTL_NS = UInt64(30_000_000_000)
 
 # Cache hash helpers
 host_string_hash(key::String) = hash(key)
@@ -168,6 +201,10 @@ function _entry_addresses(entry::HostEntry, address_type::HostAddressType.T)
     return address_type == HostAddressType.A ? entry.addresses_a : entry.addresses_aaaa
 end
 
+function _entry_failed_addresses(entry::HostEntry, address_type::HostAddressType.T)
+    return address_type == HostAddressType.A ? entry.failed_addresses_a : entry.failed_addresses_aaaa
+end
+
 function _entry_pending(entry::HostEntry, address_type::HostAddressType.T)::Bool
     return address_type == HostAddressType.A ? entry.pending_a : entry.pending_aaaa
 end
@@ -186,7 +223,7 @@ function _cache_get_or_create!(resolver::DefaultHostResolver, host::String)::Hos
     if found
         return entry
     end
-    entry = HostEntry(host)
+    entry = HostEntry(host, resolver.config)
     hash_table_put!(resolver.cache, host, entry)
     return entry
 end
@@ -291,6 +328,7 @@ function host_resolver_resolve!(
         on_resolved::OnHostResolvedFn,
         user_data = nothing;
         address_type::HostAddressType.T = HostAddressType.A,
+        resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
     )::Union{Nothing, ErrorResult}
     if @atomic resolver.shutdown
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve called after shutdown")
@@ -305,9 +343,21 @@ function host_resolver_resolve!(
     cached_addresses = HostAddress[]
     schedule_resolution = false
 
+    entry = nothing
     lock(resolver.lock) do
         entry = _cache_get_or_create!(resolver, host)
+        if resolution_config !== nothing
+            if resolution_config.max_ttl_secs != 0
+                entry.max_ttl_secs = resolution_config.max_ttl_secs
+            end
+            if resolution_config.resolve_frequency_ns != 0
+                entry.resolve_frequency_ns = resolution_config.resolve_frequency_ns
+            end
+            entry.resolve_impl = resolution_config.impl
+            entry.resolve_impl_data = resolution_config.impl_data
+        end
         addresses = _entry_addresses(entry, address_type)
+        failed_addresses = _entry_failed_addresses(entry, address_type)
         current_time = high_res_clock()
 
         valid_addresses = filter(a -> a.expiry > current_time, addresses)
@@ -326,7 +376,7 @@ function host_resolver_resolve!(
                 if !_entry_pending(entry, address_type) &&
                         (
                         entry.resolved_time == 0 ||
-                            current_time - entry.resolved_time >= resolver.config.resolve_frequency_ns
+                            current_time - entry.resolved_time >= entry.resolve_frequency_ns
                     )
                     _set_entry_pending!(entry, address_type, true)
                     entry.last_resolve_request_time = current_time
@@ -334,6 +384,10 @@ function host_resolver_resolve!(
                 end
             end
         else
+            valid_failed = filter(a -> a.expiry > current_time, failed_addresses)
+            if !isempty(valid_failed)
+                cached_addresses = copy.(valid_failed)
+            end
             _enqueue_request!(entry, host, address_type, on_resolved, user_data)
             if !_entry_pending(entry, address_type)
                 _set_entry_pending!(entry, address_type, true)
@@ -348,7 +402,7 @@ function host_resolver_resolve!(
     end
 
     if schedule_resolution
-        _perform_dns_resolution(resolver, host, address_type)
+        _perform_dns_resolution(resolver, host, address_type, entry)
     end
 
     return nothing
@@ -359,14 +413,26 @@ function _perform_dns_resolution(
         resolver::DefaultHostResolver,
         host::String,
         address_type::HostAddressType.T,
+        entry::HostEntry,
     )
     logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: performing DNS lookup for '$host'")
 
     event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
     config = resolver.config
+    max_ttl_secs = entry.max_ttl_secs == 0 ? config.max_ttl_secs : entry.max_ttl_secs
+    resolve_impl = entry.resolve_impl
+    resolve_impl_data = entry.resolve_impl_data
 
     Threads.@spawn begin
-        addresses, error_code = _dns_lookup(host, address_type, config)
+        addresses, error_code = _dns_lookup(
+            host,
+            address_type,
+            max_ttl_secs,
+            config.min_ttl_secs,
+            config.max_addresses_per_host,
+            resolve_impl,
+            resolve_impl_data,
+        )
 
         if event_loop !== nothing
             task = ScheduledTask(
@@ -386,26 +452,56 @@ end
 function _dns_lookup(
         host::String,
         address_type::HostAddressType.T,
-        config::HostResolverConfig,
+        max_ttl_secs::UInt64,
+        min_ttl_secs::UInt64,
+        max_addresses_per_host::UInt64,
+        resolve_impl::Union{Function, Nothing},
+        resolve_impl_data,
     )::Tuple{Vector{HostAddress}, Int}
     logf(LogLevel.TRACE, LS_IO_DNS, "Host resolver: DNS lookup executing for '$host'")
 
     addresses = Vector{HostAddress}()
     error_code = AWS_OP_SUCCESS
 
+    ttl_secs = max_ttl_secs == 0 ?
+        Int(HOST_RESOLVER_DEFAULT_TTL_NS ÷ 1_000_000_000) :
+        Int(max_ttl_secs)
+    if min_ttl_secs > 0 && ttl_secs < Int(min_ttl_secs)
+        ttl_secs = Int(min_ttl_secs)
+    end
+    ttl_nanos = high_res_clock() + UInt64(ttl_secs) * 1_000_000_000
+
+    if resolve_impl !== nothing
+        try
+            result = resolve_impl(host, address_type, resolve_impl_data)
+            if result isa Tuple
+                addresses, error_code = result
+            else
+                addresses = result
+                error_code = AWS_OP_SUCCESS
+            end
+        catch e
+            logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: custom resolve failed for '$host': $e")
+            error_code = ERROR_IO_DNS_QUERY_FAILED
+        end
+
+        if error_code == AWS_OP_SUCCESS
+            for addr in addresses
+                if addr.expiry == 0
+                    addr.expiry = ttl_nanos
+                end
+            end
+        end
+
+        return addresses, error_code
+    end
+
     try
         family = address_type == HostAddressType.A ? AF_INET : AF_INET6
         addrs = _native_getaddrinfo(host, family)
 
         if !isempty(addrs)
-            current_time = high_res_clock()
-            ttl_secs = clamp(
-                Int(HOST_RESOLVER_DEFAULT_TTL_NS ÷ 1_000_000_000),
-                Int(config.min_ttl_secs),
-                Int(config.max_ttl_secs),
-            )
-            ttl_nanos = current_time + UInt64(ttl_secs) * 1_000_000_000
-            max_addresses = Int(config.max_addresses_per_host)
+            max_addresses = Int(max_addresses_per_host)
 
             for addr_str in Iterators.take(addrs, max_addresses)
                 push!(addresses, HostAddress(addr_str, address_type, host, ttl_nanos))
@@ -442,6 +538,11 @@ function _dns_resolution_complete(
 
         if error_code == AWS_OP_SUCCESS && !isempty(addresses)
             _update_entry_cache!(entry, addresses, address_type)
+            if address_type == HostAddressType.A
+                empty!(entry.failed_addresses_a)
+            else
+                empty!(entry.failed_addresses_aaaa)
+            end
             entry.resolved_time = high_res_clock()
         end
 
@@ -471,12 +572,14 @@ function _trim_cache!(resolver::DefaultHostResolver)
     current_time = high_res_clock()
 
     for (host, entry) in resolver.cache
-        # Check if all addresses are expired
-        all_expired_a = all(a -> a.expiry < current_time, entry.addresses_a)
-        all_expired_aaaa = all(a -> a.expiry < current_time, entry.addresses_aaaa)
+        # Check if all addresses are expired (including failed lists)
+        all_expired_a = all(a -> a.expiry < current_time, entry.addresses_a) &&
+            all(a -> a.expiry < current_time, entry.failed_addresses_a)
+        all_expired_aaaa = all(a -> a.expiry < current_time, entry.addresses_aaaa) &&
+            all(a -> a.expiry < current_time, entry.failed_addresses_aaaa)
 
-        if (isempty(entry.addresses_a) || all_expired_a) &&
-                (isempty(entry.addresses_aaaa) || all_expired_aaaa)
+        if (isempty(entry.addresses_a) && isempty(entry.failed_addresses_a) || all_expired_a) &&
+                (isempty(entry.addresses_aaaa) && isempty(entry.failed_addresses_aaaa) || all_expired_aaaa)
             push!(entries_to_remove, host)
         end
     end
@@ -560,7 +663,8 @@ function host_resolver_get_address!(
             return nothing
         end
 
-        addresses = address_type == HostAddressType.A ? entry.addresses_a : entry.addresses_aaaa
+        addresses = _entry_addresses(entry, address_type)
+        failed_addresses = _entry_failed_addresses(entry, address_type)
         current_time = high_res_clock()
 
         # Find a valid address with lowest connection failure count
@@ -569,6 +673,16 @@ function host_resolver_get_address!(
             if addr.expiry > current_time
                 if best_addr === nothing || addr.connection_failure_count < best_addr.connection_failure_count
                     best_addr = addr
+                end
+            end
+        end
+
+        if best_addr === nothing
+            for addr in failed_addresses
+                if addr.expiry > current_time
+                    if best_addr === nothing || addr.connection_failure_count < best_addr.connection_failure_count
+                        best_addr = addr
+                    end
                 end
             end
         end
@@ -593,9 +707,24 @@ function host_resolver_record_connection_failure!(
             return nothing
         end
 
-        addresses = address.address_type == HostAddressType.A ? entry.addresses_a : entry.addresses_aaaa
+        addresses = _entry_addresses(entry, address.address_type)
+        failed_addresses = _entry_failed_addresses(entry, address.address_type)
 
-        for addr in addresses
+        for i in eachindex(addresses)
+            addr = addresses[i]
+            if addr.address == address.address
+                addr.connection_failure_count += 1
+                push!(failed_addresses, addr)
+                deleteat!(addresses, i)
+                logf(
+                    LogLevel.TRACE, LS_IO_DNS,
+                    "Host resolver: recorded failure for $(addr.address), count=$(addr.connection_failure_count)"
+                )
+                return nothing
+            end
+        end
+
+        for addr in failed_addresses
             if addr.address == address.address
                 addr.connection_failure_count += 1
                 logf(
