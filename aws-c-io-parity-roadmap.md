@@ -284,6 +284,7 @@ Legend:
 
 ### 12.1 TLS context/options API parity
 - [x] Implement `tls_ctx` and `tls_ctx_options` parity (min version, cipher prefs, trust store)
+- [x] mTLS init variants (in-memory + from path) + trust store override helpers
 - [x] Support `tls_connection_options` parity (server_name, ALPN list, callbacks, timeout)
 - [x] Support `advertise_alpn_message` semantics
 
