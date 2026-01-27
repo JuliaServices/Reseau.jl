@@ -137,7 +137,7 @@ Legend:
 - [ ] Accept/connect/read/write parity with IOCP
 
 ### 3.5 Pipes
-- [ ] POSIX pipe parity (source/posix/pipe.c)
+- [x] POSIX pipe parity (source/posix/pipe.c)
 - [ ] Windows IOCP pipe backend (source/windows/iocp/pipe.c)
 
 ---
@@ -429,7 +429,7 @@ Legend:
 - [x] `socket_handler_test.c` -> new `test/socket_handler_tests.jl`
 - [x] `channel_test.c` -> new `test/channel_tests.jl`
 - [x] `io_testing_channel_test.c` -> new `test/io_testing_channel_tests.jl`
-- [ ] `pipe_test.c` -> new `test/pipe_tests.jl`
+- [x] `pipe_test.c` -> new `test/pipe_tests.jl`
 - [x] `shared_library_test.c` -> new `test/shared_library_tests.jl`
 - [x] `pem_test.c` -> new `test/pem_tests.jl`
 - [x] `future_test.c` -> new `test/future_tests.jl`

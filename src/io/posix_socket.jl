@@ -1435,8 +1435,10 @@ function _process_socket_write_requests(sock::PosixSocketType, parent_request::U
 
         remaining = cursor.len
 
-        # Advance cursor
-        write_request.cursor = byte_cursor_advance(cursor, Csize_t(written))
+        # Advance cursor (keep remaining bytes)
+        cursor_ref = Ref(cursor)
+        _ = byte_cursor_advance(cursor_ref, Csize_t(written))
+        write_request.cursor = cursor_ref[]
 
         if Csize_t(written) == remaining
             # Write complete

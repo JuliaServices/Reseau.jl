@@ -103,6 +103,9 @@ function pipe_read_end_close!(read_end::PipeReadEnd)::Union{Nothing, ErrorResult
 
         ccall(:close, Cint, (Cint,), fd)
         read_end.io_handle.fd = -1
+        read_end.on_readable = nothing
+        read_end.user_data = nothing
+        read_end.event_loop = nothing
     end
 
     return nothing
@@ -130,6 +133,7 @@ function pipe_write_end_close!(write_end::PipeWriteEnd)::Union{Nothing, ErrorRes
 
         ccall(:close, Cint, (Cint,), fd)
         write_end.io_handle.fd = -1
+        write_end.event_loop = nothing
     end
 
     return nothing
@@ -189,6 +193,130 @@ function _pipe_read_event_handler(event_loop, handle::IoHandle, events::Int, use
         end
     end
 
+    return nothing
+end
+
+# =============================================================================
+# aws-c-io style wrappers (no aws_ prefix)
+# =============================================================================
+
+function pipe_init(
+        read_end_event_loop::EventLoop,
+        write_end_event_loop::EventLoop,
+    )::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
+    result = pipe_create()
+    result isa ErrorResult && return result
+    read_end, write_end = result
+
+    read_end.event_loop = read_end_event_loop
+    write_end.event_loop = write_end_event_loop
+
+    sub_result = pipe_write_end_subscribe!(write_end, write_end_event_loop)
+    if sub_result isa ErrorResult
+        pipe_read_end_close!(read_end)
+        pipe_write_end_close!(write_end)
+        return sub_result
+    end
+
+    return (read_end, write_end)
+end
+
+function pipe_clean_up_read_end(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+    if read_end.event_loop === nothing
+        raise_error(ERROR_IO_BROKEN_PIPE)
+        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+    end
+    if !event_loop_thread_is_callers_thread(read_end.event_loop)
+        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+    end
+    return pipe_read_end_close!(read_end)
+end
+
+function pipe_clean_up_write_end(write_end::PipeWriteEnd)::Union{Nothing, ErrorResult}
+    if write_end.event_loop === nothing
+        raise_error(ERROR_IO_BROKEN_PIPE)
+        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+    end
+    if !event_loop_thread_is_callers_thread(write_end.event_loop)
+        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+    end
+    return pipe_write_end_close!(write_end)
+end
+
+function pipe_get_read_end_event_loop(read_end::PipeReadEnd)::Union{EventLoop, ErrorResult}
+    if read_end.event_loop === nothing
+        raise_error(ERROR_IO_BROKEN_PIPE)
+        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+    end
+    return read_end.event_loop
+end
+
+function pipe_get_write_end_event_loop(write_end::PipeWriteEnd)::Union{EventLoop, ErrorResult}
+    if write_end.event_loop === nothing
+        raise_error(ERROR_IO_BROKEN_PIPE)
+        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+    end
+    return write_end.event_loop
+end
+
+function pipe_read(read_end::PipeReadEnd, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+    if read_end.event_loop !== nothing && !event_loop_thread_is_callers_thread(read_end.event_loop)
+        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+    end
+    return pipe_read!(read_end, buffer)
+end
+
+function pipe_write(
+        write_end::PipeWriteEnd,
+        cursor::ByteCursor,
+        on_complete::Union{OnPipeWriteCompleteFn, Nothing} = nothing,
+        user_data = nothing,
+    )::Union{Nothing, ErrorResult}
+    if write_end.event_loop !== nothing && !event_loop_thread_is_callers_thread(write_end.event_loop)
+        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+    end
+    return pipe_write!(write_end, cursor, on_complete, user_data)
+end
+
+function pipe_subscribe_to_readable_events(
+        read_end::PipeReadEnd,
+        on_readable::OnPipeReadableFn,
+        user_data = nothing,
+    )::Union{Nothing, ErrorResult}
+    if read_end.event_loop === nothing
+        raise_error(ERROR_IO_BROKEN_PIPE)
+        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+    end
+    if !event_loop_thread_is_callers_thread(read_end.event_loop)
+        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+    end
+    return pipe_read_end_subscribe!(read_end, read_end.event_loop, on_readable, user_data)
+end
+
+function pipe_unsubscribe_from_readable_events(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+    if read_end.event_loop === nothing
+        raise_error(ERROR_IO_BROKEN_PIPE)
+        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+    end
+    if !event_loop_thread_is_callers_thread(read_end.event_loop)
+        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+    end
+    if !read_end.is_subscribed
+        raise_error(ERROR_IO_NOT_SUBSCRIBED)
+        return ErrorResult(ERROR_IO_NOT_SUBSCRIBED)
+    end
+
+    result = event_loop_unsubscribe_from_io_events!(read_end.event_loop, read_end.io_handle)
+    if result isa ErrorResult
+        return result
+    end
+    read_end.is_subscribed = false
     return nothing
 end
 
@@ -305,7 +433,9 @@ function _process_pipe_writes(write_end::PipeWriteEnd)
         end
 
         remaining = req.cursor.len
-        req.cursor = byte_cursor_advance(req.cursor, Csize_t(written))
+        cursor_ref = Ref(req.cursor)
+        _ = byte_cursor_advance(cursor_ref, Csize_t(written))
+        req.cursor = cursor_ref[]
 
         if Csize_t(written) == remaining
             # Write complete
