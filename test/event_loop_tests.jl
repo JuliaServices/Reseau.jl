@@ -397,6 +397,52 @@ const _dispatch_queue_setter_c =
         end
     end
 
+    @testset "Event loop unsubscribe error" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    try
+                        done_ch = Channel{Int}(1)
+                        ctx = (el = el, handle = AwsIO.IoHandle(), done_ch = done_ch)
+                        task_fn = (ctx, status) -> begin
+                            res = AwsIO.event_loop_unsubscribe_from_io_events!(ctx.el, ctx.handle)
+                            code = res isa AwsIO.ErrorResult ? AwsIO.last_error() : 0
+                            put!(ctx.done_ch, code)
+                            return nothing
+                        end
+                        task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "unsubscribe_error")
+                        AwsIO.event_loop_schedule_task_now!(el, task)
+
+                        deadline = Base.time_ns() + 2_000_000_000
+                        while !isready(done_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
+
+                        @test isready(done_ch)
+                        if isready(done_ch)
+                            code = take!(done_ch)
+                            @test code == AwsIO.ERROR_IO_NOT_SUBSCRIBED
+                        end
+                    finally
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
     @testset "Event loop serialized ordering" begin
         if Sys.iswindows()
             @test true
