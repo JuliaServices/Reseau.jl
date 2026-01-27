@@ -2,7 +2,7 @@
 # Port of aws-c-io/source/socket_channel_handler.c
 
 # Socket channel handler - bridges socket IO to channel pipeline
-# This handler is typically the rightmost handler in a channel (socket side)
+# This handler is typically the leftmost handler in a channel (socket side)
 # It reads from the socket and pushes messages into the channel (read direction)
 # It receives write messages and sends them out the socket (write direction)
 
@@ -123,8 +123,8 @@ function _on_socket_write_complete(socket, error_code::Int, bytes_written::Csize
 
     if socket !== nothing && socket.handler isa SocketChannelHandler
         socket.handler.stats.bytes_written += UInt64(bytes_written)
-    elseif channel isa Channel && channel.last !== nothing && channel.last.handler isa SocketChannelHandler
-        channel.last.handler.stats.bytes_written += UInt64(bytes_written)
+    elseif channel isa Channel && channel.first !== nothing && channel.first.handler isa SocketChannelHandler
+        channel.first.handler.stats.bytes_written += UInt64(bytes_written)
     end
 
     if message isa IoMessage && message.on_completion !== nothing

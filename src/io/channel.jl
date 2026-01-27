@@ -229,8 +229,8 @@ end
 # Channel - a bidirectional pipeline of handlers
 mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannel
     event_loop::EL
-    first::SlotRef  # nullable - Application side (leftmost)
-    last::SlotRef   # nullable - Socket side (rightmost)
+    first::SlotRef  # nullable - Socket side (leftmost)
+    last::SlotRef   # nullable - Application side (rightmost)
     channel_state::ChannelState.T
     read_back_pressure_enabled::Bool
     channel_id::UInt64
@@ -356,7 +356,7 @@ function channel_trigger_read(channel::Channel)::Union{Nothing, ErrorResult}
         raise_error(ERROR_INVALID_STATE)
         return ErrorResult(ERROR_INVALID_STATE)
     end
-    slot = channel.last
+    slot = channel.first
     if slot === nothing || slot.handler === nothing
         raise_error(ERROR_INVALID_STATE)
         return ErrorResult(ERROR_INVALID_STATE)
@@ -466,10 +466,10 @@ end
 # Get unique channel ID
 channel_id(channel::Channel) = channel.channel_id
 
-# Get the first slot (application side)
+# Get the first slot (socket side)
 channel_first_slot(channel::Channel) = channel.first
 
-# Get the last slot (socket side)
+# Get the last slot (application side)
 channel_last_slot(channel::Channel) = channel.last
 
 # Channel task scheduling
@@ -675,7 +675,7 @@ function channel_slot_insert_left!(slot::ChannelSlot, to_add::ChannelSlot)
     return nothing
 end
 
-# Insert slot at the end of the channel (socket side)
+# Insert slot at the end of the channel (application side)
 function channel_slot_insert_end!(channel::Channel, slot::ChannelSlot)
     slot.channel = channel
 
@@ -693,7 +693,7 @@ function channel_slot_insert_end!(channel::Channel, slot::ChannelSlot)
     return nothing
 end
 
-# Insert slot at the front of the channel (application side)
+# Insert slot at the front of the channel (socket side)
 function channel_slot_insert_front!(channel::Channel, slot::ChannelSlot)
     slot.channel = channel
 
