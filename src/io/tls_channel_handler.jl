@@ -11,6 +11,7 @@ const TLS_HANDSHAKE_CLIENT_HELLO = 0x01
 const TLS_HANDSHAKE_SERVER_HELLO = 0x02
 const TLS_RECORD_APPLICATION = 0x03
 const TLS_RECORD_HEADER_LEN = 5
+const TLS_DEFAULT_TIMEOUT_MS = 10_000
 const TLS_NONCE_LEN = 32
 const TLS_MAC_LEN = 32
 const TLS_SESSION_KEY_LEN = 32
@@ -594,7 +595,7 @@ function TlsConnectionOptions(
         on_data_read::Union{TlsOnDataReadFn, Nothing} = nothing,
         on_error::Union{TlsOnErrorFn, Nothing} = nothing,
         user_data = nothing,
-        timeout_ms::Integer = 0,
+        timeout_ms::Integer = TLS_DEFAULT_TIMEOUT_MS,
     )
     return TlsConnectionOptions(
         ctx,

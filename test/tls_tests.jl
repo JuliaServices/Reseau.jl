@@ -74,6 +74,7 @@ end
     @test ctx isa AwsIO.TlsContext
 
     conn = AwsIO.tls_connection_options_init_from_ctx(ctx)
+    @test conn.timeout_ms == 0x00002710
     AwsIO.tls_connection_options_set_server_name!(conn, "example.com")
     AwsIO.tls_connection_options_set_alpn_list!(conn, "h2")
     AwsIO.tls_connection_options_set_timeout_ms!(conn, 250)
