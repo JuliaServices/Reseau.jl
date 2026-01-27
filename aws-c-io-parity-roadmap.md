@@ -53,7 +53,10 @@ Legend:
 
 ### 1.2 Error code parity
 - [x] Validate complete error list vs `aws/io/io.h` (including PKCS#11 and TLS errors)
-- [ ] Ensure error raise/translate paths are consistent with aws-c-io for socket + event loop + TLS
+- [~] Ensure error raise/translate paths are consistent with aws-c-io for socket + event loop + TLS
+  - [x] Socket errno mapping parity (`s_determine_socket_error`)
+  - [ ] Event loop error propagation parity
+  - [ ] TLS error translation parity
 
 ### 1.3 IO handle parity
 - [ ] Match `aws_io_handle` semantics, including platform data and set_queue hooks

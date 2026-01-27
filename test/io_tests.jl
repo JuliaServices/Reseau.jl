@@ -91,3 +91,50 @@ end
         @test isempty(missing)
     end
 end
+
+@testset "Socket errno mapping parity" begin
+    if Sys.iswindows()
+        @test true
+    else
+        @test AwsIO.determine_socket_error(AwsIO.ECONNREFUSED) ==
+            AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED
+        @test AwsIO.determine_socket_error(AwsIO.ECONNRESET) ==
+            AwsIO.ERROR_IO_SOCKET_CLOSED
+        @test AwsIO.determine_socket_error(AwsIO.ETIMEDOUT) ==
+            AwsIO.ERROR_IO_SOCKET_TIMEOUT
+        @test AwsIO.determine_socket_error(AwsIO.EHOSTUNREACH) ==
+            AwsIO.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST
+        @test AwsIO.determine_socket_error(AwsIO.ENETUNREACH) ==
+            AwsIO.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST
+        @test AwsIO.determine_socket_error(AwsIO.EADDRNOTAVAIL) ==
+            AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+        @test AwsIO.determine_socket_error(AwsIO.ENETDOWN) ==
+            AwsIO.ERROR_IO_SOCKET_NETWORK_DOWN
+        @test AwsIO.determine_socket_error(AwsIO.ECONNABORTED) ==
+            AwsIO.ERROR_IO_SOCKET_CONNECT_ABORTED
+        @test AwsIO.determine_socket_error(AwsIO.EADDRINUSE) ==
+            AwsIO.ERROR_IO_SOCKET_ADDRESS_IN_USE
+        @test AwsIO.determine_socket_error(AwsIO.ENOBUFS) ==
+            AwsIO.ERROR_OOM
+        @test AwsIO.determine_socket_error(AwsIO.ENOMEM) ==
+            AwsIO.ERROR_OOM
+        @test AwsIO.determine_socket_error(AwsIO.EAGAIN) ==
+            AwsIO.ERROR_IO_READ_WOULD_BLOCK
+        @test AwsIO.determine_socket_error(AwsIO.EWOULDBLOCK) ==
+            AwsIO.ERROR_IO_READ_WOULD_BLOCK
+        @test AwsIO.determine_socket_error(AwsIO.EMFILE) ==
+            AwsIO.ERROR_MAX_FDS_EXCEEDED
+        @test AwsIO.determine_socket_error(AwsIO.ENFILE) ==
+            AwsIO.ERROR_MAX_FDS_EXCEEDED
+        @test AwsIO.determine_socket_error(AwsIO.ENOENT) ==
+            AwsIO.ERROR_FILE_INVALID_PATH
+        @test AwsIO.determine_socket_error(AwsIO.EINVAL) ==
+            AwsIO.ERROR_FILE_INVALID_PATH
+        @test AwsIO.determine_socket_error(AwsIO.EAFNOSUPPORT) ==
+            AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
+        @test AwsIO.determine_socket_error(AwsIO.EACCES) ==
+            AwsIO.ERROR_NO_PERMISSION
+        @test AwsIO.determine_socket_error(9999) ==
+            AwsIO.ERROR_IO_SOCKET_NOT_CONNECTED
+    end
+end
