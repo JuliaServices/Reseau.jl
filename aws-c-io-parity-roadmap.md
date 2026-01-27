@@ -59,8 +59,10 @@ Legend:
   - [ ] TLS error translation parity
 
 ### 1.3 IO handle parity
-- [ ] Match `aws_io_handle` semantics, including platform data and set_queue hooks
-- [ ] Implement `set_queue` and `additional_data` behavior where needed (dispatch queue, NW, IOCP)
+- [~] Match `aws_io_handle` semantics, including platform data and set_queue hooks
+  - [x] Dispatch queue `set_queue` hook behavior
+  - [x] `additional_data` lifecycle on subscribe/unsubscribe
+  - [ ] Network Framework + IOCP handle metadata parity
 
 ---
 

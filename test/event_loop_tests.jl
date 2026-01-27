@@ -331,6 +331,72 @@ const _dispatch_queue_setter_c =
         end
     end
 
+    @testset "IoHandle additional_data parity" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+
+                        read_end, write_end = pipe_res
+
+                        sub_res = AwsIO.event_loop_subscribe_to_io_events!(
+                            el,
+                            read_end.io_handle,
+                            Int(AwsIO.IoEventType.READABLE),
+                            (loop, handle, events, data) -> nothing,
+                            nothing,
+                        )
+                        @test sub_res === nothing
+                        @test read_end.io_handle.additional_data != C_NULL
+
+                        done_ch = Channel{Nothing}(1)
+                        unsub_ctx = (el = el, handle = read_end.io_handle, done_ch = done_ch)
+                        unsub_fn = (ctx, status) -> begin
+                            AwsIO.event_loop_unsubscribe_from_io_events!(ctx.el, ctx.handle)
+                            put!(ctx.done_ch, nothing)
+                            return nothing
+                        end
+                        unsub_task = AwsIO.ScheduledTask(unsub_fn, unsub_ctx; type_tag = "handle_unsubscribe")
+                        AwsIO.event_loop_schedule_task_now!(el, unsub_task)
+
+                        deadline = Base.time_ns() + 2_000_000_000
+                        while !isready(done_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
+
+                        @test isready(done_ch)
+                        isready(done_ch) && take!(done_ch)
+                        @test read_end.io_handle.additional_data == C_NULL
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
     @testset "Event loop serialized ordering" begin
         if Sys.iswindows()
             @test true
