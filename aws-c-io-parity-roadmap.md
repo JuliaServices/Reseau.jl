@@ -46,10 +46,10 @@ Legend:
 ## 1) Core IO, errors, logging, registry
 
 ### 1.1 IO init/cleanup
-- [ ] Match aws-c-io `aws_io_library_init()` and `aws_io_library_clean_up()` semantics, refcount-free
-- [ ] Ensure idempotent init/cleanup across modules
-- [ ] Confirm all error ranges and messages are registered with `aws-c-io` parity
-- [ ] Verify log subject list matches aws-c-io (names, ids)
+- [x] Match aws-c-io `aws_io_library_init()` and `aws_io_library_clean_up()` semantics, refcount-free
+- [x] Ensure idempotent init/cleanup across modules
+- [x] Confirm all error ranges and messages are registered with `aws-c-io` parity
+- [x] Verify log subject list matches aws-c-io (names, ids)
 
 ### 1.2 Error code parity
 - [ ] Validate complete error list vs `aws/io/io.h` (including PKCS#11 and TLS errors)

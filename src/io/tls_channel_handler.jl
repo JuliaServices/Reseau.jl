@@ -60,7 +60,7 @@ function _tls_cal_init_once()
     _tls_cal_initialized[] && return nothing
     lock(_tls_cal_init_lock) do
         if !_tls_cal_initialized[]
-            LibAwsCal.init()
+            _cal_init()
             _tls_cal_initialized[] = true
         end
     end
