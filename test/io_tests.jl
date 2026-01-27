@@ -27,3 +27,67 @@ using AwsIO
     AwsIO.io_library_clean_up()
     @test_throws ErrorException AwsIO.io_fatal_assert_library_initialized()
 end
+
+@testset "IO error parity" begin
+    root = dirname(@__DIR__)
+    header_path = joinpath(root, "aws-c-io", "include", "aws", "io", "io.h")
+
+    if !isfile(header_path)
+        @test true
+    else
+        function parse_aws_io_errors(path::AbstractString)
+            names = String[]
+            inside_enum = false
+            for line in eachline(path)
+                if occursin("enum aws_io_errors", line)
+                    inside_enum = true
+                    continue
+                end
+                if !inside_enum
+                    continue
+                end
+                if occursin("};", line)
+                    break
+                end
+                line = split(line, "//"; limit = 2)[1]
+                line = split(line, "/*"; limit = 2)[1]
+                line = strip(line)
+                isempty(line) && continue
+                line = replace(line, "," => "")
+                name = strip(first(split(line, "="; limit = 2)))
+                if startswith(name, "AWS_") || startswith(name, "DEPRECATED_")
+                    push!(names, name)
+                end
+            end
+            return names
+        end
+
+        function map_aws_error_name(name::AbstractString)
+            if name == "AWS_IO_CHANNEL_ERROR_ERROR_CANT_ACCEPT_INPUT"
+                return "ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT"
+            elseif name == "DEPRECATED_AWS_IO_INVALID_FILE_HANDLE"
+                return "ERROR_IO_INVALID_FILE_HANDLE_DEPRECATED"
+            elseif name == "AWS_IO_ERROR_END_RANGE"
+                return "ERROR_IO_END_RANGE"
+            elseif startswith(name, "AWS_ERROR_IO_")
+                return "ERROR_" * name[11:end]
+            elseif startswith(name, "AWS_IO_")
+                return "ERROR_" * name[5:end]
+            elseif startswith(name, "AWS_ERROR_")
+                return "ERROR_IO_" * name[11:end]
+            else
+                return "ERROR_" * String(name)
+            end
+        end
+
+        missing = String[]
+        for name in parse_aws_io_errors(header_path)
+            mapped = Symbol(map_aws_error_name(name))
+            if !isdefined(AwsIO, mapped)
+                push!(missing, String(mapped))
+            end
+        end
+
+        @test isempty(missing)
+    end
+end

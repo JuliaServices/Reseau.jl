@@ -52,7 +52,7 @@ Legend:
 - [x] Verify log subject list matches aws-c-io (names, ids)
 
 ### 1.2 Error code parity
-- [ ] Validate complete error list vs `aws/io/io.h` (including PKCS#11 and TLS errors)
+- [x] Validate complete error list vs `aws/io/io.h` (including PKCS#11 and TLS errors)
 - [ ] Ensure error raise/translate paths are consistent with aws-c-io for socket + event loop + TLS
 
 ### 1.3 IO handle parity
