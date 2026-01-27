@@ -202,7 +202,7 @@ Legend:
 ### 6.3 Tests
 - [x] Port `default_host_resolver_test.c` scenarios (network cases gated via `AWSIO_RUN_NETWORK_TESTS`)
 - [x] Port mock DNS resolver tests
-- [ ] Add stress tests for background refresh + TTL behavior
+- [x] Add stress tests for background refresh + TTL behavior
 
 ---
 

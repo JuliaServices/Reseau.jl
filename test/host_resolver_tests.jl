@@ -96,6 +96,45 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+@testset "host resolver background refresh stress" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver_config = AwsIO.HostResolverConfig(; max_ttl_secs = 2, resolve_frequency_ns = 100_000_000)
+    resolver = AwsIO.DefaultHostResolver(elg, resolver_config)
+
+    host = "refresh.example"
+    addr1_ipv4 = AwsIO.HostAddress("address1ipv4", AwsIO.HostAddressType.A, host, 0)
+    addr1_ipv6 = AwsIO.HostAddress("address1ipv6", AwsIO.HostAddressType.AAAA, host, 0)
+
+    mock = MockDnsResolver(50)
+    mock_dns_append!(mock, [addr1_ipv6, addr1_ipv4])
+
+    config = AwsIO.HostResolutionConfig(;
+        impl = (h, data) -> mock_dns_resolve(h, data),
+        impl_data = mock,
+        max_ttl_secs = 2,
+        resolve_frequency_ns = 100_000_000,
+    )
+
+    err, addrs = resolve_and_wait(resolver, host; config = config, timeout_s = 2.0)
+    @test err == AwsIO.AWS_OP_SUCCESS
+    @test !isempty(addrs)
+
+    @test wait_for_pred(() -> mock.resolve_count >= 3; timeout_s = 2.5)
+
+    for _ in 1:10
+        result = resolve_and_wait(resolver, host; config = config, timeout_s = 2.0)
+        @test result !== :timeout
+        if result !== :timeout
+            err_code, addresses = result
+            @test err_code == AwsIO.AWS_OP_SUCCESS
+            @test !isempty(addresses)
+        end
+    end
+
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 @testset "host resolver literal address lookups" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)
