@@ -143,6 +143,7 @@ mutable struct TlsChannelHandler{FNR <: Union{TlsOnNegotiationResultFn, Nothing}
     max_read_size::Csize_t
     options::TlsConnectionOptions{TlsContext, FNR, FDR, FER, U}
     state::TlsHandshakeState.T
+    stats::TlsHandlerStatistics
     client_random::Memory{UInt8}
     server_random::Memory{UInt8}
     session_key::Memory{UInt8}
@@ -161,6 +162,7 @@ function TlsChannelHandler(
         Csize_t(max_read_size),
         options,
         TlsHandshakeState.INIT,
+        TlsHandlerStatistics(),
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
@@ -187,6 +189,7 @@ function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOption
 end
 
 function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
+    _tls_mark_handshake_start!(handler)
     if handler.slot !== nothing && handler.slot.adj_right !== nothing
         right_handler = handler.slot.adj_right.handler
         if right_handler isa SocketChannelHandler
@@ -287,6 +290,7 @@ end
 function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message::AbstractString)
     if !handler.negotiation_completed
         handler.state = TlsHandshakeState.FAILED
+        _tls_mark_handshake_end!(handler, TlsNegotiationStatus.FAILURE)
         if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
             Base.invokelatest(
                 handler.options.on_negotiation_result,
@@ -313,6 +317,28 @@ function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message
         channel_shutdown!(handler.slot.channel, ChannelDirection.READ, error_code)
     end
 
+    return nothing
+end
+
+function _tls_mark_handshake_start!(handler::TlsChannelHandler)
+    if handler.stats.handshake_start_ns == 0
+        ts = Ref{UInt64}()
+        if high_res_clock_get_ticks(ts) == OP_SUCCESS
+            handler.stats.handshake_start_ns = ts[]
+        end
+    end
+    handler.stats.handshake_status = TlsNegotiationStatus.ONGOING
+    return nothing
+end
+
+function _tls_mark_handshake_end!(handler::TlsChannelHandler, status::TlsNegotiationStatus.T)
+    if handler.stats.handshake_end_ns == 0
+        ts = Ref{UInt64}()
+        if high_res_clock_get_ticks(ts) == OP_SUCCESS
+            handler.stats.handshake_end_ns = ts[]
+        end
+    end
+    handler.stats.handshake_status = status
     return nothing
 end
 
@@ -384,6 +410,7 @@ end
 function _tls_mark_negotiated!(handler::TlsChannelHandler)
     handler.negotiation_completed = true
     handler.state = TlsHandshakeState.NEGOTIATED
+    _tls_mark_handshake_end!(handler, TlsNegotiationStatus.SUCCESS)
     if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
         Base.invokelatest(
             handler.options.on_negotiation_result,
@@ -642,6 +669,15 @@ end
 
 function handler_destroy(handler::TlsChannelHandler)::Nothing
     return nothing
+end
+
+function handler_reset_statistics(handler::TlsChannelHandler)::Nothing
+    crt_statistics_tls_reset!(handler.stats)
+    return nothing
+end
+
+function handler_gather_statistics(handler::TlsChannelHandler)::TlsHandlerStatistics
+    return handler.stats
 end
 
 function handler_trigger_write(handler::TlsChannelHandler)::Nothing

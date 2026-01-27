@@ -6,16 +6,6 @@
 # It reads from the socket and pushes messages into the channel (read direction)
 # It receives write messages and sends them out the socket (write direction)
 
-# Socket handler statistics
-mutable struct SocketHandlerStatistics
-    bytes_read::Csize_t
-    bytes_written::Csize_t
-    read_calls::Csize_t
-    write_calls::Csize_t
-end
-
-SocketHandlerStatistics() = SocketHandlerStatistics(Csize_t(0), Csize_t(0), Csize_t(0), Csize_t(0))
-
 # Socket handler shutdown state
 @enumx SocketHandlerShutdownState::UInt8 begin
     NONE = 0
@@ -81,7 +71,7 @@ function handler_destroy(handler::SocketChannelHandler)::Nothing
 end
 
 function handler_reset_statistics(handler::SocketChannelHandler)::Nothing
-    handler.stats = SocketHandlerStatistics()
+    crt_statistics_socket_reset!(handler.stats)
     return nothing
 end
 
@@ -146,8 +136,6 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
         return write_result
     end
 
-    handler.stats.write_calls += 1
-
     return nothing
 end
 
@@ -166,7 +154,7 @@ function _on_socket_write_complete(socket, error_code::Int, bytes_written::Csize
             LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
             "Socket handler: socket write completed, wrote $bytes_written bytes"
         )
-        handler.stats.bytes_written += bytes_written
+        handler.stats.bytes_written += UInt64(bytes_written)
     end
 
     # Release the message back to pool
@@ -401,8 +389,7 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
     end
 
     _, bytes_read = read_result
-    handler.stats.read_calls += 1
-    handler.stats.bytes_read += bytes_read
+    handler.stats.bytes_read += UInt64(bytes_read)
 
     logf(
         LogLevel.TRACE, LS_IO_SOCKET_HANDLER,

@@ -32,7 +32,7 @@ Legend:
 - [x] Message pool + memory pool (message_pool.h)
 - [x] PEM utilities (pem.h)
 - [ ] Shared library (shared_library.h)
-- [ ] Statistics (statistics.h)
+- [x] Statistics (statistics.h)
 - [ ] PKCS#11 support (pkcs11.h + pkcs11_tls_op_handler.c)
 - [ ] TLS channel handler (tls_channel_handler.h + tls_channel_handler_shared.c)
 - [ ] ALPN handler (alpn_handler.c)
@@ -159,7 +159,7 @@ Legend:
 ### 4.3 Socket channel handler
 - [ ] Validate read/write flow-control and fragmenting behavior parity
 - [ ] Ensure trigger_read behavior matches aws-c-io semantics
-- [ ] Implement statistics hooks (see Statistics section)
+- [x] Implement statistics hooks (see Statistics section)
 
 ### 4.4 ALPN handler
 - [ ] Implement ALPN channel handler (source/alpn_handler.c)
@@ -358,11 +358,11 @@ Legend:
 ## 15) Statistics
 
 ### 15.1 Stats structures
-- [ ] Implement socket statistics record
-- [ ] Implement TLS statistics record (handshake start/end, status)
+- [x] Implement socket statistics record
+- [x] Implement TLS statistics record (handshake start/end, status)
 
 ### 15.2 Stats integration
-- [ ] `handler_reset_statistics` and `handler_gather_statistics` parity in channel handlers
+- [x] `handler_reset_statistics` and `handler_gather_statistics` parity in channel handlers
 - [ ] Channel aggregation of handler stats
 
 ### 15.3 Tests
