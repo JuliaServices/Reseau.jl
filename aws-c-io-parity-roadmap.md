@@ -64,8 +64,8 @@ Legend:
 ## 2) Event loops (platform parity)
 
 ### 2.1 Common event loop semantics
-- [ ] API parity for schedule/cancel/serialized scheduling semantics (order-of-execution guarantees)
-- [ ] Match task cancellation semantics (may execute off-thread) with aws-c-io
+- [x] API parity for schedule/cancel/serialized scheduling semantics (order-of-execution guarantees)
+- [x] Match task cancellation semantics (may execute off-thread) with aws-c-io
 - [x] `event_loop_current_clock_time()` parity and clock override support
 - [ ] `event_loop_group_acquire_from_event_loop()` semantics
 - [x] Load factor sampling + best-of-two selection parity

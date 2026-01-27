@@ -395,6 +395,7 @@
 
     # Cancel task
     function event_loop_cancel_task!(event_loop::KqueueEventLoop, task::ScheduledTask)
+        debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "cancelling task %s", task.type_tag)
         task_scheduler_cancel!(impl.thread_data.scheduler, task)

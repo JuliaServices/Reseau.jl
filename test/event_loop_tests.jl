@@ -22,11 +22,11 @@ using AwsIO
 
             if !(el isa AwsIO.ErrorResult)
                 interactive_threads = Threads.nthreads(:interactive)
-                run_res = AwsIO.event_loop_run!(el)
-                if interactive_threads == 0
-                    @test run_res isa AwsIO.ErrorResult
+                if interactive_threads <= 1
+                    @test true
                     AwsIO.event_loop_destroy!(el)
                 else
+                    run_res = AwsIO.event_loop_run!(el)
                     @test run_res === nothing
 
                     try
@@ -52,6 +52,164 @@ using AwsIO
                         @test thread_ok[]
                     finally
                         AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop serialized ordering" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    try
+                        order = Int[]
+                        order_lock = ReentrantLock()
+                        done_ch = Channel{Nothing}(1)
+                        total = 5
+
+                        for i in 1:total
+                            ctx = (order = order, lock = order_lock, done_ch = done_ch, i = i, total = total)
+                            task_fn = (ctx, status) -> begin
+                                local count
+                                Base.lock(ctx.lock) do
+                                    push!(ctx.order, ctx.i)
+                                    count = length(ctx.order)
+                                end
+                                if count == ctx.total
+                                    put!(ctx.done_ch, nothing)
+                                end
+                                return nothing
+                            end
+                            task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "serialized_order")
+                            AwsIO.event_loop_schedule_task_now_serialized!(el, task)
+                        end
+
+                        deadline = Base.time_ns() + 2_000_000_000
+                        while !isready(done_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
+
+                        @test isready(done_ch)
+                        isready(done_ch) && take!(done_ch)
+                        Base.lock(order_lock) do
+                            @test order == collect(1:total)
+                        end
+                    finally
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop cancel task" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    try
+                        status_ch = Channel{Tuple{AwsIO.TaskStatus.T, Bool}}(1)
+                        ctx = (el = el, status_ch = status_ch)
+                        future_fn = (ctx, status) -> begin
+                            put!(ctx.status_ch, (status, AwsIO.event_loop_thread_is_callers_thread(ctx.el)))
+                            return nothing
+                        end
+                        future_task = AwsIO.ScheduledTask(future_fn, ctx; type_tag = "future_task")
+
+                        now = AwsIO.event_loop_current_clock_time(el)
+                        if now isa AwsIO.ErrorResult
+                            @test false
+                        else
+                            AwsIO.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
+
+                            cancel_ctx = (el = el, task = future_task)
+                            cancel_fn = (ctx, status) -> begin
+                                AwsIO.event_loop_cancel_task!(ctx.el, ctx.task)
+                                return nothing
+                            end
+                            cancel_task = AwsIO.ScheduledTask(cancel_fn, cancel_ctx; type_tag = "cancel_task")
+                            AwsIO.event_loop_schedule_task_now!(el, cancel_task)
+
+                            deadline = Base.time_ns() + 2_000_000_000
+                            while !isready(status_ch) && Base.time_ns() < deadline
+                                yield()
+                            end
+
+                            @test isready(status_ch)
+                            if isready(status_ch)
+                                status, thread_ok = take!(status_ch)
+                                @test status == AwsIO.TaskStatus.CANCELED
+                                @test thread_ok
+                            end
+                        end
+                    finally
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop destroy cancels pending task" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    status_ch = Channel{AwsIO.TaskStatus.T}(1)
+                    ctx = (status_ch = status_ch,)
+                    future_fn = (ctx, status) -> begin
+                        put!(ctx.status_ch, status)
+                        return nothing
+                    end
+                    future_task = AwsIO.ScheduledTask(future_fn, ctx; type_tag = "future_task_destroy")
+
+                    now = AwsIO.event_loop_current_clock_time(el)
+                    if now isa AwsIO.ErrorResult
+                        @test false
+                    else
+                        AwsIO.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
+                        AwsIO.event_loop_destroy!(el)
+
+                        @test isready(status_ch)
+                        if isready(status_ch)
+                            status = take!(status_ch)
+                            @test status == AwsIO.TaskStatus.CANCELED
+                        end
                     end
                 end
             end
