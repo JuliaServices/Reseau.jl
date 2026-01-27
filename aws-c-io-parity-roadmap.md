@@ -50,6 +50,7 @@ Legend:
 - [x] Ensure idempotent init/cleanup across modules
 - [x] Confirm all error ranges and messages are registered with `aws-c-io` parity
 - [x] Verify log subject list matches aws-c-io (names, ids)
+- [x] Fixed-size log/process buffers use `Memory`
 
 ### 1.2 Error code parity
 - [x] Validate complete error list vs `aws/io/io.h` (including PKCS#11 and TLS errors)
