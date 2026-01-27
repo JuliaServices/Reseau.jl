@@ -25,12 +25,10 @@ end
         elg isa AwsIO.ErrorResult && return
 
         config = AwsIO.ExponentialBackoffConfig(;
-            initial_delay_ms = 1,
-            max_delay_ms = 5,
+            backoff_scale_factor_ms = 1,
+            max_backoff_secs = 1,
             max_retries = 3,
-            exponential_base = 2.0,
             jitter_mode = :none,
-            scale_factor = 1.0,
         )
         strategy = AwsIO.ExponentialBackoffRetryStrategy(elg, config)
 
@@ -94,12 +92,10 @@ end
         elg isa AwsIO.ErrorResult && return
 
         config = AwsIO.ExponentialBackoffConfig(;
-            initial_delay_ms = 1,
-            max_delay_ms = 5,
+            backoff_scale_factor_ms = 1,
+            max_backoff_secs = 1,
             max_retries = 3,
-            exponential_base = 2.0,
             jitter_mode = :none,
-            scale_factor = 1.0,
         )
         strategy = AwsIO.ExponentialBackoffRetryStrategy(elg, config)
 

@@ -208,9 +208,9 @@ Legend:
 ## 7) Retry strategies
 
 ### 7.1 Exponential backoff
-- [ ] Ensure backoff formula + jitter modes parity
-- [ ] Token acquire/release semantics parity
-- [ ] Schedule timing on event loops parity
+- [x] Ensure backoff formula + jitter modes parity
+- [x] Token acquire/release semantics parity
+- [x] Schedule timing on event loops parity
 - [ ] Tests matching `exponential_backoff_retry_test.c`
 - [x] Basic max-retry + client-error behavior tests
 
