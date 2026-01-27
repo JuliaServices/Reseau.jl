@@ -9,7 +9,6 @@
     const EVFILT_READ = Int16(-1)
     const EVFILT_WRITE = Int16(-2)
     const EVFILT_USER = Int16(-10)
-
     const EV_ADD = UInt16(0x0001)
     const EV_DELETE = UInt16(0x0002)
     const EV_ENABLE = UInt16(0x0004)
@@ -293,13 +292,17 @@
     function event_loop_stop!(event_loop::KqueueEventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
 
+        signal_thread = false
         mutex_lock(impl.cross_thread_data.mutex)
         if impl.cross_thread_data.state == EventThreadState.RUNNING
             impl.cross_thread_data.state = EventThreadState.STOPPING
+            signal_thread = !impl.cross_thread_data.thread_signaled
             impl.cross_thread_data.thread_signaled = true
         end
         mutex_unlock(impl.cross_thread_data.mutex)
-        signal_cross_thread_data_changed(event_loop)
+        if signal_thread
+            signal_cross_thread_data_changed(event_loop)
+        end
 
         @atomic event_loop.should_stop = true
 

@@ -58,6 +58,30 @@ const thread_options = ThreadOptions
 const _thread_state_registry = SmallRegistry{UInt64, ThreadHandle{Any}}()
 const _thread_name_registry = SmallRegistry{UInt64, String}()
 
+mutable struct _interactive_thread_state
+    @atomic next_id::Int
+end
+
+const _interactive_thread_state = _interactive_thread_state(0)
+
+function _next_interactive_thread_id()
+    count = Threads.nthreads(:interactive)
+    if count <= 1
+        return 1
+    end
+    next_idx = @atomic _interactive_thread_state.next_id += 1
+    return Int(mod(next_idx - 1, count - 1)) + 2
+end
+
+function _spawn_on_interactive_thread(handle::ThreadHandle, fn, ctx, target_tid::Int)
+    task = Task(() -> _thread_task_entry(handle, fn, ctx))
+    task.sticky = true
+    Base.Threads._spawn_set_thrpool(task, :interactive)
+    _ = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, target_tid - 1)
+    schedule(task)
+    return task
+end
+
 @inline function _thread_tls_handle()
     return get(Base.task_local_storage(), :thread_handle, nothing)
 end
@@ -148,7 +172,7 @@ end
 function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptions, Nothing} = nothing)
     opts = options === nothing ? ThreadOptions() : options
     if opts.pool == :interactive
-        if Threads.nthreads(:interactive) == 0
+        if Threads.nthreads(:interactive) <= 1
             raise_error(ERROR_THREAD_INVALID_SETTINGS)
             return ERROR_THREAD_INVALID_SETTINGS
         end
@@ -169,7 +193,8 @@ function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptio
         thread_increment_unjoined_count()
     end
     if opts.pool == :interactive
-        handle.task = Threads.@spawn :interactive _thread_task_entry(handle, fn, ctx)
+        target_tid = _next_interactive_thread_id()
+        handle.task = _spawn_on_interactive_thread(handle, fn, ctx, target_tid)
     else
         handle.task = Threads.@spawn _thread_task_entry(handle, fn, ctx)
     end
