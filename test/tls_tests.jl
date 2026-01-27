@@ -250,6 +250,57 @@ function AwsIO.handler_destroy(handler::EchoHandler)
     return nothing
 end
 
+mutable struct SinkHandler <: AwsIO.AbstractChannelHandler
+    slot::Union{AwsIO.ChannelSlot, Nothing}
+    writes::Base.RefValue{Int}
+end
+
+function SinkHandler()
+    return SinkHandler(nothing, Ref(0))
+end
+
+function AwsIO.handler_process_read_message(handler::SinkHandler, slot::AwsIO.ChannelSlot, message::AwsIO.IoMessage)
+    if slot.channel !== nothing
+        AwsIO.channel_release_message_to_pool!(slot.channel, message)
+    end
+    return nothing
+end
+
+function AwsIO.handler_process_write_message(handler::SinkHandler, slot::AwsIO.ChannelSlot, message::AwsIO.IoMessage)
+    handler.writes[] += 1
+    if slot.channel !== nothing
+        AwsIO.channel_release_message_to_pool!(slot.channel, message)
+    end
+    return nothing
+end
+
+function AwsIO.handler_increment_read_window(handler::SinkHandler, slot::AwsIO.ChannelSlot, size::Csize_t)
+    return AwsIO.channel_slot_increment_read_window!(slot, size)
+end
+
+function AwsIO.handler_shutdown(
+        handler::SinkHandler,
+        slot::AwsIO.ChannelSlot,
+        direction::AwsIO.ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )
+    AwsIO.channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
+    return nothing
+end
+
+function AwsIO.handler_initial_window_size(handler::SinkHandler)
+    return AwsIO.SIZE_MAX
+end
+
+function AwsIO.handler_message_overhead(handler::SinkHandler)
+    return Csize_t(0)
+end
+
+function AwsIO.handler_destroy(handler::SinkHandler)
+    return nothing
+end
+
 @testset "tls handler" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
@@ -382,5 +433,38 @@ end
 
     AwsIO.socket_close(server_sock)
     AwsIO.socket_close(client_sock)
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "channel_setup_client_tls" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    left_slot = AwsIO.channel_slot_new!(channel)
+    sink = SinkHandler()
+    AwsIO.channel_slot_set_handler!(left_slot, sink)
+    sink.slot = left_slot
+
+    opts = AwsIO.TlsConnectionOptions(ctx; timeout_ms = 1)
+    handler = AwsIO.channel_setup_client_tls!(left_slot, opts)
+    @test handler isa AwsIO.TlsChannelHandler
+    if handler isa AwsIO.TlsChannelHandler
+        @test left_slot.adj_right === handler.slot
+        @test handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.ONGOING
+    end
+
     AwsIO.event_loop_group_destroy!(elg)
 end

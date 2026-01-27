@@ -737,6 +737,27 @@ function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOption
     return handler
 end
 
+function channel_setup_client_tls!(right_of_slot::ChannelSlot, options::TlsConnectionOptions)
+    channel = right_of_slot.channel
+    if channel === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+
+    handler = TlsChannelHandler(options)
+    slot = channel_slot_new!(channel)
+    handler.slot = slot
+
+    set_res = channel_slot_set_handler!(slot, handler)
+    if set_res isa ErrorResult
+        return set_res
+    end
+
+    channel_slot_insert_right!(right_of_slot, slot)
+    tls_channel_handler_start_negotiation!(handler)
+    return handler
+end
+
 function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
     _tls_mark_handshake_start!(handler)
     if handler.slot !== nothing && handler.slot.adj_left !== nothing
