@@ -143,6 +143,38 @@ end
     end
 end
 
+@testset "TLS timeout task" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    opts = AwsIO.TlsConnectionOptions(ctx; timeout_ms = 1)
+    handler = AwsIO.TlsChannelHandler(opts)
+    channel = AwsIO.Channel(event_loop, nothing)
+    slot = AwsIO.channel_slot_new!(channel)
+    handler.slot = slot
+    AwsIO.channel_slot_set_handler!(slot, handler)
+
+    handler.stats.handshake_status = AwsIO.TlsNegotiationStatus.ONGOING
+    AwsIO._tls_timeout_task(handler.timeout_task, handler, AwsIO.TaskStatus.RUN_READY)
+
+    @test channel.shutdown_pending
+    @test channel.shutdown_error_code == AwsIO.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 mutable struct EchoHandler <: AwsIO.AbstractChannelHandler
     slot::Union{AwsIO.ChannelSlot, Nothing}
     saw_ping::Base.RefValue{Bool}

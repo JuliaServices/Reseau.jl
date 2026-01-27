@@ -691,6 +691,7 @@ mutable struct TlsChannelHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: Abst
     options::TlsConnectionOptions
     state::TlsHandshakeState.T
     stats::TlsHandlerStatistics
+    timeout_task::ChannelTask
     protocol::ByteBuffer
     client_random::Memory{UInt8}
     server_random::Memory{UInt8}
@@ -711,6 +712,7 @@ function TlsChannelHandler(
         options,
         TlsHandshakeState.INIT,
         TlsHandlerStatistics(),
+        ChannelTask(),
         null_buffer(),
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
@@ -867,22 +869,42 @@ function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message
     return nothing
 end
 
+function _tls_timeout_task(task::ChannelTask, handler::TlsChannelHandler, status::TaskStatus.T)
+    _ = task
+    status == TaskStatus.RUN_READY || return nothing
+    handler.stats.handshake_status == TlsNegotiationStatus.ONGOING || return nothing
+    if handler.slot !== nothing && handler.slot.channel !== nothing
+        channel_shutdown!(handler.slot.channel, ERROR_IO_TLS_NEGOTIATION_TIMEOUT)
+    end
+    return nothing
+end
+
 function _tls_mark_handshake_start!(handler::TlsChannelHandler)
-    if handler.stats.handshake_start_ns == 0
-        ts = Ref{UInt64}()
-        if high_res_clock_get_ticks(ts) == OP_SUCCESS
-            handler.stats.handshake_start_ns = ts[]
+    handler.stats.handshake_status == TlsNegotiationStatus.NONE || return nothing
+    handler.stats.handshake_status = TlsNegotiationStatus.ONGOING
+
+    if handler.slot === nothing || handler.slot.channel === nothing
+        return nothing
+    end
+
+    now = channel_current_clock_time(handler.slot.channel)
+    if !(now isa ErrorResult)
+        handler.stats.handshake_start_ns = now
+        if handler.options.timeout_ms > 0
+            timeout_ns = timestamp_convert(handler.options.timeout_ms, TIMESTAMP_MILLIS, TIMESTAMP_NANOS, nothing)
+            channel_task_init!(handler.timeout_task, _tls_timeout_task, handler, "tls_timeout")
+            channel_schedule_task_future!(handler.slot.channel, handler.timeout_task, now + timeout_ns)
         end
     end
-    handler.stats.handshake_status = TlsNegotiationStatus.ONGOING
+
     return nothing
 end
 
 function _tls_mark_handshake_end!(handler::TlsChannelHandler, status::TlsNegotiationStatus.T)
-    if handler.stats.handshake_end_ns == 0
-        ts = Ref{UInt64}()
-        if high_res_clock_get_ticks(ts) == OP_SUCCESS
-            handler.stats.handshake_end_ns = ts[]
+    if handler.slot !== nothing && handler.slot.channel !== nothing
+        now = channel_current_clock_time(handler.slot.channel)
+        if !(now isa ErrorResult)
+            handler.stats.handshake_end_ns = now
         end
     end
     handler.stats.handshake_status = status
