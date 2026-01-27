@@ -324,6 +324,7 @@ Legend:
 - [ ] Port `byo_crypto_test.c`
 - [ ] Port TLS server tests (use provided test certs/resources)
 - [x] Add ALPN test coverage (`alpn_handler_test.c`)
+- [x] Add TLS ctx options coverage (mTLS + PKCS#12)
 
 ---
 
