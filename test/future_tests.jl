@@ -1,0 +1,96 @@
+using Test
+using AwsIO
+
+@testset "Future basics" begin
+    future = AwsIO.Future{Int}()
+
+    @test !AwsIO.future_is_done(future)
+    @test !AwsIO.future_is_success(future)
+    @test !AwsIO.future_is_failed(future)
+    @test !AwsIO.future_is_cancelled(future)
+
+    on_done = Ref(false)
+    AwsIO.future_on_complete!(future, (f, ud) -> (ud[] = true), on_done)
+
+    @test AwsIO.future_complete!(future, 42) === nothing
+    @test AwsIO.future_is_done(future)
+    @test AwsIO.future_is_success(future)
+    @test AwsIO.future_get_result(future) == 42
+    @test on_done[]
+
+    immediate = Ref(false)
+    AwsIO.future_on_complete!(future, (f, ud) -> (ud[] = true), immediate)
+    @test immediate[]
+
+    err = AwsIO.future_complete!(future, 7)
+    @test err isa AwsIO.ErrorResult
+    @test err.code == AwsIO.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE
+end
+
+@testset "Future fail/cancel" begin
+    failed = AwsIO.Future{Int}()
+    @test AwsIO.future_fail!(failed, AwsIO.ERROR_IO_SOCKET_TIMEOUT) === nothing
+    @test AwsIO.future_is_failed(failed)
+    @test AwsIO.future_get_error(failed) == AwsIO.ERROR_IO_SOCKET_TIMEOUT
+
+    cancelled = AwsIO.Future{Int}()
+    @test AwsIO.future_cancel!(cancelled) === nothing
+    @test AwsIO.future_is_cancelled(cancelled)
+    @test AwsIO.future_get_error(cancelled) == AwsIO.ERROR_IO_OPERATION_CANCELLED
+
+    noop = AwsIO.future_cancel!(cancelled)
+    @test noop === nothing
+end
+
+@testset "Future wait/any/all" begin
+    pending = AwsIO.Future{Int}()
+    @test !AwsIO.future_wait(pending; timeout_ms = 1)
+
+    done = AwsIO.Future{Int}()
+    @test AwsIO.future_complete!(done, 5) === nothing
+    @test AwsIO.future_wait(done; timeout_ms = 1)
+
+    f1 = AwsIO.Future{Int}()
+    f2 = AwsIO.Future{Int}()
+    AwsIO.future_complete!(f2, 9)
+    @test AwsIO.future_any([f1, f2]; timeout_ms = 10) == 2
+
+    f3 = AwsIO.Future{Int}()
+    AwsIO.future_complete!(f1, 1)
+    AwsIO.future_complete!(f3, 3)
+    @test AwsIO.future_all([f1, f2, f3])
+end
+
+@testset "Future chaining" begin
+    base = AwsIO.Future{Int}()
+    chained = AwsIO.future_then(base, x -> x + 1)
+    AwsIO.future_complete!(base, 41)
+    @test AwsIO.future_is_success(chained)
+    @test AwsIO.future_get_result(chained) == 42
+
+    base_fail = AwsIO.Future{Int}()
+    chained_fail = AwsIO.future_then(base_fail, x -> x + 1)
+    AwsIO.future_fail!(base_fail, AwsIO.ERROR_IO_SOCKET_TIMEOUT)
+    @test AwsIO.future_is_failed(chained_fail)
+    @test AwsIO.future_get_error(chained_fail) == AwsIO.ERROR_IO_SOCKET_TIMEOUT
+
+    base_throw = AwsIO.Future{Int}()
+    chained_throw = AwsIO.future_then(base_throw, x -> error("boom"))
+    AwsIO.future_complete!(base_throw, 1)
+    @test AwsIO.future_is_failed(chained_throw)
+    @test AwsIO.future_get_error(chained_throw) == AwsIO.ERROR_UNKNOWN
+end
+
+@testset "Promise" begin
+    promise = AwsIO.Promise{Int}()
+    future = AwsIO.promise_get_future(promise)
+    @test AwsIO.promise_complete!(promise, 99) === nothing
+    @test AwsIO.future_is_success(future)
+    @test AwsIO.future_get_result(future) == 99
+
+    p_fail = AwsIO.Promise{Int}()
+    f_fail = AwsIO.promise_get_future(p_fail)
+    @test AwsIO.promise_fail!(p_fail, AwsIO.ERROR_IO_SOCKET_TIMEOUT) === nothing
+    @test AwsIO.future_is_failed(f_fail)
+    @test AwsIO.future_get_error(f_fail) == AwsIO.ERROR_IO_SOCKET_TIMEOUT
+end

@@ -106,7 +106,7 @@ end
 
 # Complete the future with a result
 function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorResult} where {T}
-    lock(future.lock) do
+    return lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
             raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
@@ -118,13 +118,13 @@ function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorRes
 
         # Notify all waiters
         _notify_waiters(future)
+        return nothing
     end
-    return nothing
 end
 
 # Fail the future with an error code
 function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResult}
-    lock(future.lock) do
+    return lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
             raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
@@ -136,13 +136,13 @@ function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResu
 
         # Notify all waiters
         _notify_waiters(future)
+        return nothing
     end
-    return nothing
 end
 
 # Cancel the future
 function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
-    lock(future.lock) do
+    return lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
             # Already done, nothing to cancel
@@ -154,8 +154,8 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
 
         # Notify all waiters
         _notify_waiters(future)
+        return nothing
     end
-    return nothing
 end
 
 # Internal - notify all registered waiters
