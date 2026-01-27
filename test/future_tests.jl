@@ -169,3 +169,11 @@ end
     AwsIO.future_complete!(done, true)
     @test AwsIO.future_wait_ns(done; timeout_ns = 1_000_000)
 end
+
+@testset "Future move semantics" begin
+    future = AwsIO.Future{Int}()
+    AwsIO.future_complete!(future, 10)
+    @test AwsIO.future_get_result_by_move!(future) == 10
+    @test_throws ErrorException AwsIO.future_get_result(future)
+    @test_throws ErrorException AwsIO.future_get_result_by_move!(future)
+end

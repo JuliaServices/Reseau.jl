@@ -250,8 +250,8 @@ Legend:
 - [x] Wait with timeout semantics parity
 
 ### 9.2 Result/move semantics
-- [ ] Support move semantics for types with cleanup (e.g., ByteBuffer)
-- [ ] Error + result handling parity for all future types
+- [x] Support move semantics for types with cleanup (e.g., ByteBuffer)
+- [x] Error + result handling parity for all future types
 
 ### 9.3 Tests
 - [x] Port `future_test.c`

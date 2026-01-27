@@ -26,6 +26,7 @@ mutable struct Future{T}
     error_code::Int
     lock::ReentrantLock
     callback::Union{FutureWaiter, Nothing}  # nullable
+    owns_result::Bool
 end
 
 function Future{T}() where {T}
@@ -35,6 +36,7 @@ function Future{T}() where {T}
         0,
         ReentrantLock(),
         nothing,
+        false,
     )
 end
 
@@ -61,14 +63,15 @@ end
 
 # Get the result (only valid if completed successfully)
 function future_get_result(future::Future{T})::Union{T, Nothing} where {T}
-    if future_is_success(future)
-        return future.result
-    end
-    return nothing
+    fatal_assert_bool(future_is_done(future), "Cannot get result before future is done", "<unknown>", 0)
+    fatal_assert_bool(future_is_success(future), "Cannot get result from future that failed with an error", "<unknown>", 0)
+    fatal_assert_bool(future.owns_result, "Result was already moved from future", "<unknown>", 0)
+    return future.result
 end
 
 # Get the error code (only valid if failed)
 function future_get_error(future::Future)::Int
+    fatal_assert_bool(future_is_done(future), "Cannot get error before future is done", "<unknown>", 0)
     return future.error_code
 end
 
@@ -198,6 +201,7 @@ function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorRes
         end
 
         future.result = result
+        future.owns_result = true
         @atomic future.state = FutureState.COMPLETED
 
         callback = future.callback
@@ -221,6 +225,8 @@ function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResu
             return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
+        future.result = nothing
+        future.owns_result = false
         future.error_code = error_code
         @atomic future.state = FutureState.FAILED
 
@@ -245,6 +251,8 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
             return nothing
         end
 
+        future.result = nothing
+        future.owns_result = false
         future.error_code = ERROR_IO_OPERATION_CANCELLED
         @atomic future.state = FutureState.CANCELLED
 
@@ -257,6 +265,18 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
     end
     _notify_callback(callback, future)
     return nothing
+end
+
+# Get result by move (result can be taken only once)
+function future_get_result_by_move!(future::Future{T})::Union{T, Nothing} where {T}
+    fatal_assert_bool(future_is_done(future), "Cannot get result before future is done", "<unknown>", 0)
+    fatal_assert_bool(future_is_success(future), "Cannot get result from future that failed with an error", "<unknown>", 0)
+    fatal_assert_bool(future.owns_result, "Result was already moved from future", "<unknown>", 0)
+
+    result = future.result
+    future.result = nothing
+    future.owns_result = false
+    return result
 end
 
 # Internal - invoke registered callback
