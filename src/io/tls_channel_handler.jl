@@ -333,7 +333,10 @@ function tls_ctx_options_init_client_mtls(cert, pkey)::Union{TlsContextOptions, 
     end
 
     key_buf = _tls_buf_copy_from(pkey)
-    key_buf isa ErrorResult && return key_buf
+    if key_buf isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return key_buf
+    end
     opts.private_key = key_buf
     pem_res = _tls_validate_pem(key_buf)
     if pem_res isa ErrorResult
@@ -360,7 +363,10 @@ function tls_ctx_options_init_client_mtls_from_path(
     end
 
     key_buf = _tls_buf_from_file(pkey_path)
-    key_buf isa ErrorResult && return key_buf
+    if key_buf isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return key_buf
+    end
     opts.private_key = key_buf
     pem_res = _tls_validate_pem(key_buf)
     if pem_res isa ErrorResult
@@ -437,7 +443,10 @@ function tls_ctx_options_init_client_mtls_pkcs12_from_path(
     pkcs_buf = _tls_buf_from_file(pkcs12_path)
     pkcs_buf isa ErrorResult && return pkcs_buf
     pwd_buf = _tls_buf_copy_from(pkcs_password)
-    pwd_buf isa ErrorResult && return pwd_buf
+    if pwd_buf isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return pwd_buf
+    end
     opts.pkcs12 = pkcs_buf
     opts.pkcs12_password = pwd_buf
     return opts
@@ -455,7 +464,10 @@ function tls_ctx_options_init_client_mtls_pkcs12(
     pkcs_buf = _tls_buf_copy_from(pkcs12)
     pkcs_buf isa ErrorResult && return pkcs_buf
     pwd_buf = _tls_buf_copy_from(pkcs_password)
-    pwd_buf isa ErrorResult && return pwd_buf
+    if pwd_buf isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return pwd_buf
+    end
     opts.pkcs12 = pkcs_buf
     opts.pkcs12_password = pwd_buf
     return opts
