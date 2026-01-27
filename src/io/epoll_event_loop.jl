@@ -449,6 +449,7 @@
             event_loop::EpollEventLoop,
             handle::IoHandle,
         )::Union{Nothing, ErrorResult}
+        debug_assert(event_loop_thread_is_callers_thread(event_loop))
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "un-subscribing from events on fd %d", handle.fd)
 
         impl = event_loop.impl_data

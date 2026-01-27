@@ -543,6 +543,7 @@
             event_loop::KqueueEventLoop,
             handle::IoHandle,
         )::Union{Nothing, ErrorResult}
+        debug_assert(event_loop_thread_is_callers_thread(event_loop))
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "un-subscribing from events on fd %d", handle.fd)
 
         if handle.additional_data == C_NULL

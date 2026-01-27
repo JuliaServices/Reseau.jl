@@ -70,7 +70,7 @@ Legend:
 - [ ] `event_loop_group_acquire_from_event_loop()` semantics
 - [x] Load factor sampling + best-of-two selection parity
 - [x] Event loop local objects parity (get/set/remove)
-- [ ] Thread ownership check `event_loop_thread_is_callers_thread()` parity
+- [x] Thread ownership check `event_loop_thread_is_callers_thread()` parity
 - [x] Shutdown callback user_data support (event loop group)
 
 ### 2.2 Linux: epoll
