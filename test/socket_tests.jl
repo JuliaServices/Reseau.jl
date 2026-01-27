@@ -75,6 +75,27 @@ end
     end
 end
 
+@testset "socket nonblocking cloexec" begin
+    if Sys.iswindows()
+        @test true
+    else
+        opts = AwsIO.SocketOptions(;
+            type = AwsIO.SocketType.STREAM,
+            domain = AwsIO.SocketDomain.IPV4,
+        )
+        sock = AwsIO.socket_init_posix(opts)
+        @test sock isa AwsIO.Socket
+        if sock isa AwsIO.Socket
+            fd = sock.io_handle.fd
+            flags = AwsIO._fcntl(fd, AwsIO.F_GETFL)
+            @test (flags & AwsIO.O_NONBLOCK) != 0
+            fd_flags = AwsIO._fcntl(fd, AwsIO.F_GETFD)
+            @test (fd_flags & AwsIO.FD_CLOEXEC) != 0
+            AwsIO.socket_close(sock)
+        end
+    end
+end
+
 @testset "socket connect read write" begin
     el_type = AwsIO.event_loop_get_default_type()
     el = AwsIO.event_loop_new(AwsIO.EventLoopOptions(; type = el_type))
