@@ -344,7 +344,8 @@ Legend:
 ## 14) PKI utilities
 
 ### 14.1 PKI utils
-- [ ] Implement certificate + key loading helpers (pki_utils)
+- [~] Implement certificate + key loading helpers (pki_utils)
+- [x] Default trust store path detection (Linux/BSD)
 - [ ] Platform-specific helpers (darwin_pki_utils, windows_pki_utils)
 
 ### 14.2 Tests
