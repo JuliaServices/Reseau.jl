@@ -72,3 +72,17 @@ end
     @test AwsIO.uuid_to_str(u, out) == AwsIO.OP_SUCCESS
     @test out[].len == AwsIO.UUID_STR_LEN - 1
 end
+
+@testset "byte buffer init from file" begin
+    mktemp() do path, io
+        write(io, "filedata")
+        close(io)
+
+        buf_ref = Ref{AwsIO.ByteBuffer}()
+        @test AwsIO.byte_buf_init_from_file(buf_ref, path) == AwsIO.AWS_OP_SUCCESS
+        buf = buf_ref[]
+        @test buf.len == 8
+        @test String(AwsIO.byte_cursor_from_buf(buf)) == "filedata"
+        @test buf.mem[Int(buf.len) + 1] == 0x00
+    end
+end
