@@ -4,7 +4,7 @@ const _PLATFORM_APPLE = Sys.isapple()
 
 const _IS_LITTLE_ENDIAN = Base.ENDIAN_BOM == 0x04030201
 
-function _words_from_bytes(bytes::Vector{UInt8}, ::Type{T}) where {T}
+function _words_from_bytes(bytes::AbstractVector{UInt8}, ::Type{T}) where {T}
     word_bytes = sizeof(T)
     if length(bytes) % word_bytes != 0
         error("byte length must be multiple of word size")
@@ -51,10 +51,38 @@ elseif _PLATFORM_APPLE
     const _PTHREAD_COND_WORDS = _PTHREAD_COND_SIZE ÷ sizeof(UInt)
     const _PTHREAD_RWLOCK_WORDS = _PTHREAD_RWLOCK_SIZE ÷ sizeof(UInt)
 
-    const _PTHREAD_MUTEX_INIT_BYTES = vcat(UInt8[0xa7, 0xab, 0xaa, 0x32], zeros(UInt8, 60))
-    const _PTHREAD_COND_INIT_BYTES = vcat(UInt8[0xbb, 0xb1, 0xb0, 0x3c], zeros(UInt8, 44))
-    const _PTHREAD_RWLOCK_INIT_BYTES = vcat(UInt8[0xb4, 0xb3, 0xa8, 0x2d], zeros(UInt8, 196))
-    const _PTHREAD_ONCE_INIT_BYTES = vcat(UInt8[0xba, 0xbc, 0xb1, 0x30], zeros(UInt8, 12))
+    const _PTHREAD_MUTEX_INIT_BYTES = let m = Memory{UInt8}(undef, _PTHREAD_MUTEX_SIZE)
+        fill!(m, 0x00)
+        m[1] = 0xa7
+        m[2] = 0xab
+        m[3] = 0xaa
+        m[4] = 0x32
+        m
+    end
+    const _PTHREAD_COND_INIT_BYTES = let m = Memory{UInt8}(undef, _PTHREAD_COND_SIZE)
+        fill!(m, 0x00)
+        m[1] = 0xbb
+        m[2] = 0xb1
+        m[3] = 0xb0
+        m[4] = 0x3c
+        m
+    end
+    const _PTHREAD_RWLOCK_INIT_BYTES = let m = Memory{UInt8}(undef, _PTHREAD_RWLOCK_SIZE)
+        fill!(m, 0x00)
+        m[1] = 0xb4
+        m[2] = 0xb3
+        m[3] = 0xa8
+        m[4] = 0x2d
+        m
+    end
+    const _PTHREAD_ONCE_INIT_BYTES = let m = Memory{UInt8}(undef, _PTHREAD_ONCE_SIZE)
+        fill!(m, 0x00)
+        m[1] = 0xba
+        m[2] = 0xbc
+        m[3] = 0xb1
+        m[4] = 0x30
+        m
+    end
 
     const _PTHREAD_MUTEX_INIT_WORDS = _words_from_bytes(_PTHREAD_MUTEX_INIT_BYTES, UInt)
     const _PTHREAD_COND_INIT_WORDS = _words_from_bytes(_PTHREAD_COND_INIT_BYTES, UInt)
