@@ -172,7 +172,7 @@ Legend:
 ## 5) Channel bootstrap (client + server)
 
 ### 5.1 Client bootstrap
-- [ ] Implement full aws-c-io client bootstrap options (host resolution config, protocol negotiation callback)
+- [x] Implement full aws-c-io client bootstrap options (host resolution config, protocol negotiation callback)
 - [x] Support requested event loop and event loop group constraints
 - [x] TLS integration: add TLS handler at setup and block setup completion until negotiated
 - [x] Provide creation/setup/shutdown callbacks parity
