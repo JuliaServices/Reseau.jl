@@ -226,6 +226,14 @@ function event_loop_subscribe_to_io_events!(
     error("event_loop_subscribe_to_io_events! must be implemented by concrete event loop type")
 end
 
+# Connect an IO handle to the event loop's completion port / queue (platform-specific)
+function event_loop_connect_to_io_completion_port!(
+        event_loop::EventLoop,
+        handle::IoHandle,
+    )::Union{Nothing, ErrorResult}
+    return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+end
+
 # Unsubscribe from IO events on a handle
 function event_loop_unsubscribe_from_io_events!(
         event_loop::EventLoop,
@@ -355,6 +363,12 @@ function event_loop_new(options::EventLoopOptions)::Union{EventLoop, ErrorResult
     elseif el_type == EventLoopType.KQUEUE
         @static if Sys.isapple() || Sys.isbsd()
             return event_loop_new_with_kqueue(options)
+        else
+            return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+        end
+    elseif el_type == EventLoopType.DISPATCH_QUEUE
+        @static if Sys.isapple()
+            return event_loop_new_with_dispatch_queue(options)
         else
             return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
         end

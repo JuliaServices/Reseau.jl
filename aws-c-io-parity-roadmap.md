@@ -85,10 +85,10 @@ Legend:
 - [ ] Stress tests similar to aws-c-io vcc suite
 
 ### 2.4 macOS/iOS: dispatch queue event loop
-- [ ] Implement dispatch-queue event loop backend (source/darwin/dispatch_queue_event_loop.c)
-- [ ] Provide lifecycle + task scheduling parity
-- [ ] Integrate with `aws_io_handle.set_queue`
-- [ ] Tests covering schedule/cancel/subscribe/unsubscribe and timing
+- [x] Implement dispatch-queue event loop backend (source/darwin/dispatch_queue_event_loop.c)
+- [x] Provide lifecycle + task scheduling parity
+- [x] Integrate with `aws_io_handle.set_queue`
+- [x] Tests covering schedule/cancel/subscribe/unsubscribe and timing
 
 ### 2.5 Windows: IOCP
 - [ ] Implement IOCP event loop backend (source/windows/iocp/iocp_event_loop.c)

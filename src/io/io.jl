@@ -533,6 +533,7 @@ end
 include("event_loop.jl")
 include("kqueue_event_loop.jl")
 include("epoll_event_loop.jl")
+include("dispatch_queue_event_loop.jl")
 include("message_pool.jl")
 include("socket.jl")
 include("posix_socket.jl")

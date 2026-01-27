@@ -1,6 +1,14 @@
 using Test
 using AwsIO
 
+const _dispatch_queue_store = Ref{Ptr{Cvoid}}(C_NULL)
+function _dispatch_queue_setter(handle::Ptr{AwsIO.IoHandle}, queue::Ptr{Cvoid})
+    _dispatch_queue_store[] = queue
+    return nothing
+end
+const _dispatch_queue_setter_c =
+    @cfunction(_dispatch_queue_setter, Cvoid, (Ptr{AwsIO.IoHandle}, Ptr{Cvoid}))
+
 @testset "Event Loops" begin
     @testset "EventLoopType default" begin
         el_type = AwsIO.event_loop_get_default_type()
@@ -466,6 +474,136 @@ using AwsIO
                 @test read_res < 0
 
                 AwsIO.event_loop_destroy!(el)
+            end
+        end
+    end
+
+    @testset "Dispatch queue event loop" begin
+        if !Sys.isapple()
+            @test true
+        else
+            opts = AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.DISPATCH_QUEUE)
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
+
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
+
+                try
+                    order = Int[]
+                    order_lock = ReentrantLock()
+                    done_ch = Channel{Nothing}(1)
+                    total = 3
+
+                    for i in 1:total
+                        ctx = (order = order, lock = order_lock, done_ch = done_ch, i = i, total = total)
+                        task_fn = (ctx, status) -> begin
+                            local count
+                            Base.lock(ctx.lock) do
+                                push!(ctx.order, ctx.i)
+                                count = length(ctx.order)
+                            end
+                            if count == ctx.total
+                                put!(ctx.done_ch, nothing)
+                            end
+                            return nothing
+                        end
+                        task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "dispatch_queue_order")
+                        AwsIO.event_loop_schedule_task_now!(el, task)
+                    end
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !isready(done_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test isready(done_ch)
+                    isready(done_ch) && take!(done_ch)
+                    Base.lock(order_lock) do
+                        @test order == collect(1:total)
+                    end
+
+                    elapsed_ch = Channel{UInt64}(1)
+                    start_time = AwsIO.event_loop_current_clock_time(el)
+                    if start_time isa AwsIO.ErrorResult
+                        @test false
+                    else
+                        timing_ctx = (el = el, start = start_time, elapsed_ch = elapsed_ch)
+                        timing_fn = (ctx, status) -> begin
+                            now = AwsIO.event_loop_current_clock_time(ctx.el)
+                            now = now isa AwsIO.ErrorResult ? UInt64(0) : now
+                            put!(ctx.elapsed_ch, now - ctx.start)
+                            return nothing
+                        end
+                        timing_task = AwsIO.ScheduledTask(timing_fn, timing_ctx; type_tag = "dispatch_queue_future")
+                        AwsIO.event_loop_schedule_task_future!(el, timing_task, start_time + 50_000_000)
+
+                        deadline = Base.time_ns() + 2_000_000_000
+                        while !isready(elapsed_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
+
+                        @test isready(elapsed_ch)
+                        if isready(elapsed_ch)
+                            elapsed = take!(elapsed_ch)
+                            @test elapsed >= 10_000_000
+                        end
+                    end
+
+                    status_ch = Channel{AwsIO.TaskStatus.T}(1)
+                    cancel_ctx = (el = el, status_ch = status_ch)
+                    future_fn = (ctx, status) -> begin
+                        put!(ctx.status_ch, status)
+                        return nothing
+                    end
+                    future_task = AwsIO.ScheduledTask(future_fn, cancel_ctx; type_tag = "dispatch_queue_cancelled")
+                    now = AwsIO.event_loop_current_clock_time(el)
+                    now = now isa AwsIO.ErrorResult ? UInt64(0) : now
+                    AwsIO.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
+
+                    cancel_task = AwsIO.ScheduledTask(
+                        (ctx, status) -> AwsIO.event_loop_cancel_task!(ctx.el, future_task),
+                        cancel_ctx;
+                        type_tag = "dispatch_queue_cancel",
+                    )
+                    AwsIO.event_loop_schedule_task_now!(el, cancel_task)
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !isready(status_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test isready(status_ch)
+                    if isready(status_ch)
+                        status = take!(status_ch)
+                        @test status == AwsIO.TaskStatus.CANCELED
+                    end
+
+                    handle = AwsIO.IoHandle()
+                    handle.set_queue = _dispatch_queue_setter_c
+                    _dispatch_queue_store[] = C_NULL
+
+                    conn_res = AwsIO.event_loop_connect_to_io_completion_port!(el, handle)
+                    @test conn_res === nothing
+                    @test _dispatch_queue_store[] == el.impl_data.dispatch_queue
+
+                    sub_res = AwsIO.event_loop_subscribe_to_io_events!(
+                        el,
+                        handle,
+                        Int(AwsIO.IoEventType.READABLE),
+                        (loop, h, events, data) -> nothing,
+                        nothing,
+                    )
+                    @test sub_res isa AwsIO.ErrorResult
+                    @test AwsIO.last_error() == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+
+                    unsub_res = AwsIO.event_loop_unsubscribe_from_io_events!(el, handle)
+                    @test unsub_res isa AwsIO.ErrorResult
+                    @test AwsIO.last_error() == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+                finally
+                    AwsIO.event_loop_destroy!(el)
+                end
             end
         end
     end
