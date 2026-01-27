@@ -204,7 +204,7 @@ const _STATE_ON_TZ = 8
 function _parse_rfc_822(
         date_str_cursor::Ptr{ByteCursor},
         parsed_time::Ptr{tm},
-        tz_buf::Vector{UInt8},
+        tz_buf::Memory{UInt8},
         utc_assumed::Base.RefValue{Bool},
     )
     len = Int(unsafe_load(date_str_cursor).len)
@@ -580,7 +580,8 @@ function date_time_init_from_str_cursor(
     parsed_time = Ref{tm}()
     successfully_parsed = false
     seconds_offset = Ref{time_t}(0)
-    tz_buf = fill(UInt8(0), 6)
+    tz_buf = Memory{UInt8}(undef, 6)
+    fill!(tz_buf, 0x00)
     utc_assumed = Ref{Bool}(false)
 
     if fmt == DateFormat.ISO_8601 || fmt == DateFormat.ISO_8601_BASIC || fmt == DateFormat.AUTO_DETECT
@@ -595,8 +596,8 @@ function date_time_init_from_str_cursor(
             successfully_parsed = true
             if utc_assumed[]
                 if tz_buf[1] == UInt8('+') || tz_buf[1] == UInt8('-')
-                    hour_str = Vector{UInt8}(undef, 3)
-                    min_str = Vector{UInt8}(undef, 3)
+                    hour_str = Memory{UInt8}(undef, 3)
+                    min_str = Memory{UInt8}(undef, 3)
                     hour_str[1] = tz_buf[2]
                     hour_str[2] = tz_buf[3]
                     hour_str[3] = 0x00

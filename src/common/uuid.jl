@@ -5,10 +5,25 @@ struct uuid
 end
 
 const _UUID_DATA_OFFSET = fieldoffset(uuid, 1)
-const _hex_digits = UInt8[
-    UInt8('0'), UInt8('1'), UInt8('2'), UInt8('3'), UInt8('4'), UInt8('5'), UInt8('6'), UInt8('7'),
-    UInt8('8'), UInt8('9'), UInt8('a'), UInt8('b'), UInt8('c'), UInt8('d'), UInt8('e'), UInt8('f'),
-]
+const _hex_digits = let digits = Memory{UInt8}(undef, 16)
+    digits[1] = UInt8('0')
+    digits[2] = UInt8('1')
+    digits[3] = UInt8('2')
+    digits[4] = UInt8('3')
+    digits[5] = UInt8('4')
+    digits[6] = UInt8('5')
+    digits[7] = UInt8('6')
+    digits[8] = UInt8('7')
+    digits[9] = UInt8('8')
+    digits[10] = UInt8('9')
+    digits[11] = UInt8('a')
+    digits[12] = UInt8('b')
+    digits[13] = UInt8('c')
+    digits[14] = UInt8('d')
+    digits[15] = UInt8('e')
+    digits[16] = UInt8('f')
+    digits
+end
 
 @inline function _uuid_bytes_ptr(uuid::Ptr{uuid})
     return Ptr{UInt8}(Ptr{UInt8}(uuid) + _UUID_DATA_OFFSET)
@@ -33,7 +48,7 @@ function uuid_init_from_str(uuid::Ptr{uuid}, uuid_str::Ptr{ByteCursor})
     if str_val.len < UUID_STR_LEN - 1
         return raise_error(ERROR_INVALID_BUFFER_SIZE)
     end
-    hex_digits = Vector{UInt8}(undef, 32)
+    hex_digits = Memory{UInt8}(undef, 32)
     idx = 1
     for pos in 0:35
         ch = unsafe_load(str_val.ptr + pos)
@@ -52,7 +67,7 @@ function uuid_init_from_str(uuid::Ptr{uuid}, uuid_str::Ptr{ByteCursor})
     if idx != 33
         return raise_error(ERROR_MALFORMED_INPUT_STRING)
     end
-    bytes = Vector{UInt8}(undef, 16)
+    bytes = Memory{UInt8}(undef, 16)
     for i in 1:16
         high_val = Ref{UInt8}(0)
         low_val = Ref{UInt8}(0)
