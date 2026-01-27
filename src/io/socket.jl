@@ -519,12 +519,25 @@ end
 # Check if network interface name is valid
 function is_network_interface_name_valid(interface_name::AbstractString)::Bool
     @static if Sys.iswindows()
-        # Network interface binding not supported on Windows
+        logf(LogLevel.ERROR, LS_IO_SOCKET, "network_interface_names are not supported on Windows")
         return false
     else
-        # Non-empty name is considered potentially valid
-        # Actual validation happens when trying to use it
-        return !isempty(interface_name) && length(interface_name) < NETWORK_INTERFACE_NAME_MAX
+        if isempty(interface_name) || length(interface_name) >= NETWORK_INTERFACE_NAME_MAX
+            return false
+        end
+        iface_index = ccall(:if_nametoindex, Cuint, (Cstring,), interface_name)
+        if iface_index == 0
+            err = Libc.errno()
+            logf(
+                LogLevel.ERROR,
+                LS_IO_SOCKET,
+                "network_interface_name(%s) is invalid with errno: %d",
+                interface_name,
+                err,
+            )
+            return false
+        end
+        return true
     end
 end
 

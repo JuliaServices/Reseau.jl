@@ -56,6 +56,25 @@ end
     @test length(pool) == 2
 end
 
+@testset "socket interface options" begin
+    if Sys.iswindows()
+        @test !AwsIO.is_network_interface_name_valid("lo")
+    else
+        long_name = repeat("a", AwsIO.NETWORK_INTERFACE_NAME_MAX)
+        @test !AwsIO.is_network_interface_name_valid(long_name)
+        @test !AwsIO.is_network_interface_name_valid("definitely_not_an_iface")
+
+        opts = AwsIO.SocketOptions(;
+            type = AwsIO.SocketType.STREAM,
+            domain = AwsIO.SocketDomain.IPV4,
+            network_interface_name = long_name,
+        )
+        res = AwsIO.socket_init_posix(opts)
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
+    end
+end
+
 @testset "socket connect read write" begin
     el_type = AwsIO.event_loop_get_default_type()
     el = AwsIO.event_loop_new(AwsIO.EventLoopOptions(; type = el_type))
