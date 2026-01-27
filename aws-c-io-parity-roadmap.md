@@ -232,10 +232,10 @@ Legend:
 ## 8) Async streams
 
 ### 8.1 Async input stream API
-- [ ] Full vtable parity (read semantics, no double-read, buffer constraints)
-- [ ] `read_to_fill` logic parity
-- [ ] Ensure async completion semantics and thread behavior parity
-- [ ] Tests analogous to `async_stream_test.c`
+- [x] Full vtable parity (read semantics, no double-read, buffer constraints)
+- [x] `read_to_fill` logic parity
+- [x] Ensure async completion semantics and thread behavior parity
+- [x] Tests analogous to `async_stream_test.c`
 
 ---
 

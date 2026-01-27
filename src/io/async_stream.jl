@@ -42,13 +42,23 @@ function async_input_stream_read(stream::AsyncInputStream, dest::ByteBuffer)::Fu
 
     @atomic stream.read_in_progress = true
     read_future = stream.read_fn(stream, dest)
+
+    wrapped = Future{Bool}()
     future_on_complete!(
         read_future, (f, ud) -> begin
+            # Clear read-in-progress before completing wrapper to avoid reentrancy issues.
             @atomic stream.read_in_progress = false
+            err = future_get_error(f)
+            if err != 0
+                future_fail!(wrapped, err)
+            else
+                result = future_get_result(f)
+                future_complete!(wrapped, result)
+            end
             return nothing
         end
     )
-    return read_future
+    return wrapped
 end
 
 mutable struct AsyncStreamFillJob{S}
