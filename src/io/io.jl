@@ -242,6 +242,7 @@ mutable struct IoMessage
     # Intrusive list node for queueing
     queueing_handle_next::Union{IoMessage, Nothing}  # nullable
     queueing_handle_prev::Union{IoMessage, Nothing}  # nullable
+    pool_segment::Union{Memory{UInt8}, Nothing}  # nullable
 end
 
 function IoMessage(capacity::Integer)
@@ -251,6 +252,7 @@ function IoMessage(capacity::Integer)
         IoMessageType.APPLICATION_DATA,
         Int32(0),
         Csize_t(0),
+        nothing,
         nothing,
         nothing,
         nothing,

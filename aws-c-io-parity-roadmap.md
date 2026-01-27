@@ -29,7 +29,7 @@ Legend:
 - [ ] Async stream (async_stream.h)
 - [x] Future (future.h) feature parity (callbacks, waiting, error/result semantics)
 - [x] Stream (stream.h) feature parity (input stream vtables and constructors)
-- [ ] Message pool + memory pool (message_pool.h)
+- [x] Message pool + memory pool (message_pool.h)
 - [x] PEM utilities (pem.h)
 - [ ] Shared library (shared_library.h)
 - [ ] Statistics (statistics.h)
@@ -268,13 +268,13 @@ Legend:
 ## 11) Message pool + memory pool
 
 ### 11.1 Memory pool
-- [ ] `aws_memory_pool_*` semantics parity (acquire/release/segment sizing)
-- [ ] Align allocation and release behavior with aws-c-io
+- [x] `aws_memory_pool_*` semantics parity (acquire/release/segment sizing)
+- [x] Align allocation and release behavior with aws-c-io
 
 ### 11.2 Message pool
-- [ ] Message pool acquire/release semantics parity
-- [ ] Application data vs small block pool behavior parity
-- [ ] Tests parity with `io_lib_test.c` and `socket_test.c` message pool scenarios
+- [x] Message pool acquire/release semantics parity
+- [x] Application data vs small block pool behavior parity
+- [x] Tests parity with `io_lib_test.c` and `socket_test.c` message pool scenarios
 
 ---
 

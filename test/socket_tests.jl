@@ -28,10 +28,32 @@ end
     msg = AwsIO.message_pool_acquire(pool, AwsIO.IoMessageType.APPLICATION_DATA, 8)
     @test msg isa AwsIO.IoMessage
     @test length(pool.small_block_pool) == 1
-    @test AwsIO.capacity(msg.message_data) == Csize_t(16)
+    @test AwsIO.capacity(msg.message_data) == Csize_t(8)
 
     AwsIO.message_pool_release!(pool, msg)
     @test length(pool.small_block_pool) == 2
+end
+
+@testset "memory pool" begin
+    pool = AwsIO.MemoryPool(2, 32)
+    @test length(pool) == 2
+
+    seg1 = AwsIO.memory_pool_acquire(pool)
+    seg2 = AwsIO.memory_pool_acquire(pool)
+    @test length(pool) == 0
+    @test length(seg1) == 32
+    @test length(seg2) == 32
+
+    seg3 = AwsIO.memory_pool_acquire(pool)
+    @test length(pool) == 0
+    @test length(seg3) == 32
+
+    AwsIO.memory_pool_release!(pool, seg1)
+    @test length(pool) == 1
+    AwsIO.memory_pool_release!(pool, seg2)
+    @test length(pool) == 2
+    AwsIO.memory_pool_release!(pool, seg3)
+    @test length(pool) == 2
 end
 
 @testset "socket connect read write" begin
