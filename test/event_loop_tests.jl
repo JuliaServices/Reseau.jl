@@ -896,6 +896,18 @@ const _dispatch_queue_setter_c =
         end
     end
 
+    @testset "Event loop group thread constraint" begin
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads > 0
+            opts = AwsIO.EventLoopGroupOptions(loop_count = UInt16(interactive_threads))
+            elg = AwsIO.event_loop_group_new(opts)
+            @test elg isa AwsIO.ErrorResult
+            if elg isa AwsIO.ErrorResult
+                @test elg.code == AwsIO.ERROR_THREAD_INVALID_SETTINGS
+            end
+        end
+    end
+
     @testset "Epoll task pre-queue drain" begin
         if !Sys.islinux()
             @test true
