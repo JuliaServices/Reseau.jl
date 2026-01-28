@@ -60,9 +60,14 @@ function pkcs11_error_from_ckr(rv::Integer)::Int
 end
 
 function pkcs11_lib_new(options::Pkcs11LibOptions)::Union{Pkcs11Lib, ErrorResult}
-    _ = options
-    raise_error(ERROR_UNIMPLEMENTED)
-    return ErrorResult(ERROR_UNIMPLEMENTED)
+    behavior = options.initialize_finalize_behavior
+    if behavior != Pkcs11LibBehavior.DEFAULT_BEHAVIOR &&
+        behavior != Pkcs11LibBehavior.OMIT_INITIALIZE &&
+        behavior != Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    return Pkcs11Lib(options)
 end
 
 pkcs11_lib_acquire(lib::Pkcs11Lib) = lib
