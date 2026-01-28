@@ -231,6 +231,9 @@ function tls_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorRes
     return TlsContext(options)
 end
 
+tls_ctx_acquire(ctx::TlsContext) = ctx
+tls_ctx_release(::TlsContext) = nothing
+
 function tls_hash_algorithm_str(hash::TlsHashAlgorithm.T)::String
     return hash == TlsHashAlgorithm.SHA1 ? "SHA1" :
         hash == TlsHashAlgorithm.SHA224 ? "SHA224" :

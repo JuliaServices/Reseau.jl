@@ -317,6 +317,7 @@ Legend:
 - [x] Provide non-bang TLS ctx/connection option setters for API parity
 - [x] `tls_client_handler_new`/`tls_server_handler_new` + client negotiation entrypoint
 - [x] `tls_is_alpn_available` API
+- [x] `tls_ctx_acquire`/`tls_ctx_release` no-op parity
 - [ ] Channel handler state machine parity
 - [ ] Ensure callbacks fire on correct thread
 - [ ] Integrate ALPN handler and TLS negotiated protocol message

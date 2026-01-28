@@ -106,6 +106,15 @@ end
     AwsIO.tls_clean_up_static_state()
 end
 
+@testset "TLS ctx acquire/release" begin
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.TlsContext
+        @test AwsIO.tls_ctx_acquire(ctx) === ctx
+        @test AwsIO.tls_ctx_release(ctx) === nothing
+    end
+end
+
 @testset "TLS error code predicate" begin
     @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
     @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH)
