@@ -44,6 +44,30 @@ end
     end
 end
 
+@testset "PKCS11 CKR mapping" begin
+    root = dirname(@__DIR__)
+    header_path = joinpath(root, "aws-c-io", "source", "pkcs11", "v2.40", "pkcs11.h")
+    if !isfile(header_path)
+        @test true
+    else
+        rv_cancel = nothing
+        rx = r"^#define\s+CKR_CANCEL\s+(0x[0-9A-Fa-f]+|[0-9]+)[uUlL]*"
+        for line in eachline(header_path)
+            m = match(rx, strip(line))
+            m === nothing && continue
+            val = m.captures[1]
+            rv_cancel = startswith(val, "0x") ? parse(UInt64, val) : parse(UInt64, val)
+            break
+        end
+        @test rv_cancel !== nothing
+        if rv_cancel !== nothing
+            @test AwsIO.pkcs11_error_from_ckr(rv_cancel) == AwsIO.ERROR_IO_PKCS11_CKR_CANCEL
+        end
+        @test AwsIO.pkcs11_error_from_ckr(0xffffffffffffffff) ==
+            AwsIO.ERROR_IO_PKCS11_UNKNOWN_CRYPTOKI_RETURN_VALUE
+    end
+end
+
 @testset "IO error parity" begin
     root = dirname(@__DIR__)
     header_path = joinpath(root, "aws-c-io", "include", "aws", "io", "io.h")
