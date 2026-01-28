@@ -1,4 +1,5 @@
 using Test
+using Random
 using AwsIO
 
 function wait_for_flag_tls(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
@@ -957,6 +958,66 @@ end
     setfield!(buf, :len, Csize_t(1 + AwsIO.TLS_RECORD_HEADER_LEN))
     AwsIO.handler_process_read_message(handler, slot, msg)
     @test channel.shutdown_error_code == AwsIO.ERROR_IO_TLS_ERROR_ALERT_RECEIVED
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "TLS handshake stats" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    left_slot = AwsIO.channel_slot_new!(channel)
+    left_sink = SinkHandler()
+    AwsIO.channel_slot_set_handler!(left_slot, left_sink)
+
+    tls_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(left_slot, tls_slot)
+    right_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(tls_slot, right_slot)
+    right_sink = SinkHandler()
+    AwsIO.channel_slot_set_handler!(right_slot, right_sink)
+
+    handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(ctx), tls_slot)
+    @test handler isa AwsIO.TlsChannelHandler
+    if handler isa AwsIO.TlsChannelHandler
+        @test AwsIO.tls_client_handler_start_negotiation(handler) === nothing
+        @test wait_for_handshake_status(handler, AwsIO.TlsNegotiationStatus.ONGOING)
+        @test handler.stats.handshake_start_ns > 0
+
+        payload = rand(UInt8, AwsIO.TLS_NONCE_LEN)
+        msg = AwsIO.IoMessage(AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN)
+        msg_ref = Ref(msg.message_data)
+        AwsIO.byte_buf_reserve(msg_ref, AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN)
+        msg.message_data = msg_ref[]
+        buf = msg.message_data
+        GC.@preserve buf payload begin
+            ptr = pointer(getfield(buf, :mem))
+            unsafe_store!(ptr, AwsIO.TLS_HANDSHAKE_SERVER_HELLO)
+            len = UInt32(AwsIO.TLS_NONCE_LEN)
+            unsafe_store!(ptr + 1, UInt8((len >> 24) & 0xFF))
+            unsafe_store!(ptr + 2, UInt8((len >> 16) & 0xFF))
+            unsafe_store!(ptr + 3, UInt8((len >> 8) & 0xFF))
+            unsafe_store!(ptr + 4, UInt8(len & 0xFF))
+            unsafe_copyto!(ptr + AwsIO.TLS_RECORD_HEADER_LEN, pointer(payload), AwsIO.TLS_NONCE_LEN)
+        end
+        setfield!(buf, :len, Csize_t(AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN))
+        AwsIO.handler_process_read_message(handler, tls_slot, msg)
+        @test wait_for_handshake_status(handler, AwsIO.TlsNegotiationStatus.SUCCESS)
+        @test handler.stats.handshake_end_ns >= handler.stats.handshake_start_ns
+    end
 
     AwsIO.event_loop_group_destroy!(elg)
 end

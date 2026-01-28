@@ -341,6 +341,7 @@ Legend:
   - [x] Null tls_ctx_release parity
   - [x] Concurrent cert import coverage
   - [x] Duplicate cert import coverage
+  - [x] Handshake stats coverage
 - [~] Port `byo_crypto_test.c`
   - [x] BYO handler wiring + start negotiation hook
   - [x] BYO server handler wiring
