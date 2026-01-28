@@ -313,6 +313,7 @@ Legend:
 - [~] Implement tls_channel_handler_shared semantics
   - [x] Handshake timeout scheduling and stats timestamps
 - [x] `channel_setup_client_tls` helper
+- [x] `tls_handler_protocol` and `tls_handler_server_name` accessors
 - [ ] Channel handler state machine parity
 - [ ] Ensure callbacks fire on correct thread
 - [ ] Integrate ALPN handler and TLS negotiated protocol message

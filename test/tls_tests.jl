@@ -261,6 +261,25 @@ end
     @test AwsIO.tls_key_operation_type_str(AwsIO.TlsKeyOperationType.UNKNOWN) == "UNKNOWN"
 end
 
+@testset "TLS handler accessors" begin
+    opts = AwsIO.tls_ctx_options_init_default_client()
+    ctx = AwsIO.tls_context_new(opts)
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        return
+    end
+
+    conn = AwsIO.tls_connection_options_init_from_ctx(ctx)
+    AwsIO.tls_connection_options_set_server_name!(conn, "example.com")
+    handler = AwsIO.TlsChannelHandler(conn)
+
+    @test _buf_to_string(AwsIO.tls_handler_server_name(handler)) == "example.com"
+    @test AwsIO.tls_handler_protocol(handler).len == 0
+
+    handler.protocol = AwsIO.byte_buf_from_c_str("h2")
+    @test _buf_to_string(AwsIO.tls_handler_protocol(handler)) == "h2"
+end
+
 mutable struct EchoHandler <: AwsIO.AbstractChannelHandler
     slot::Union{AwsIO.ChannelSlot, Nothing}
     saw_ping::Base.RefValue{Bool}

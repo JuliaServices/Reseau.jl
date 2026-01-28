@@ -809,6 +809,7 @@ mutable struct TlsChannelHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: Abst
     stats::TlsHandlerStatistics
     timeout_task::ChannelTask
     protocol::ByteBuffer
+    server_name::ByteBuffer
     client_random::Memory{UInt8}
     server_random::Memory{UInt8}
     session_key::Memory{UInt8}
@@ -820,6 +821,7 @@ function TlsChannelHandler(
         options::TlsConnectionOptions;
         max_read_size::Integer = 16384,
     )
+    server_name_buf = options.server_name === nothing ? null_buffer() : byte_buf_from_c_str(options.server_name)
     return TlsChannelHandler{Union{ChannelSlot, Nothing}}(
         nothing,
         false,
@@ -830,6 +832,7 @@ function TlsChannelHandler(
         TlsHandlerStatistics(),
         ChannelTask(),
         null_buffer(),
+        server_name_buf,
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
@@ -837,6 +840,9 @@ function TlsChannelHandler(
         0,
     )
 end
+
+tls_handler_protocol(handler::TlsChannelHandler) = handler.protocol
+tls_handler_server_name(handler::TlsChannelHandler) = handler.server_name
 
 function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOptions; max_read_size::Integer = 16384)
     handler = TlsChannelHandler(options; max_read_size = max_read_size)
