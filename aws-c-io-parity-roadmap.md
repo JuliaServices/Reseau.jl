@@ -321,6 +321,7 @@ Legend:
 - [x] `tls_client_ctx_new`/`tls_server_ctx_new` with options copy + cipher pref validation
 - [~] Channel handler state machine parity
   - [x] Schedule client negotiation on event loop thread and guard double-start
+  - [x] Mark server handshake start on first client hello
 - [x] Ensure callbacks fire on correct thread
 - [x] Integrate ALPN handler and TLS negotiated protocol message
 
