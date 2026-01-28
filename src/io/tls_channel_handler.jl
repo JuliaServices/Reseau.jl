@@ -1081,7 +1081,9 @@ function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOption
         channel_slot_insert_end!(channel, slot)
     end
 
-    tls_channel_handler_start_negotiation!(handler)
+    if !handler.options.ctx.options.is_server
+        tls_client_handler_start_negotiation(handler)
+    end
 
     return handler
 end
@@ -1114,12 +1116,31 @@ function tls_server_handler_new(options::TlsConnectionOptions, slot::ChannelSlot
     return handler
 end
 
+function _tls_start_negotiation_task(task::ChannelTask, handler::TlsChannelHandler, status::TaskStatus.T)
+    _ = task
+    status == TaskStatus.RUN_READY || return nothing
+    tls_channel_handler_start_negotiation!(handler)
+    return nothing
+end
+
 function tls_client_handler_start_negotiation(handler::TlsChannelHandler)
     if handler.options.ctx.options.is_server
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    tls_channel_handler_start_negotiation!(handler)
+    slot = handler.slot
+    channel = slot === nothing ? nothing : slot.channel
+    if channel === nothing
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    if channel_thread_is_callers_thread(channel)
+        tls_channel_handler_start_negotiation!(handler)
+        return nothing
+    end
+    task = ChannelTask()
+    channel_task_init!(task, _tls_start_negotiation_task, handler, "tls_start_negotiation")
+    channel_schedule_task_now!(channel, task)
     return nothing
 end
 
@@ -1140,7 +1161,7 @@ function channel_setup_client_tls!(right_of_slot::ChannelSlot, options::TlsConne
     end
 
     channel_slot_insert_right!(right_of_slot, slot)
-    tls_channel_handler_start_negotiation!(handler)
+    tls_client_handler_start_negotiation(handler)
     return handler
 end
 
@@ -1148,6 +1169,7 @@ channel_setup_client_tls(right_of_slot::ChannelSlot, options::TlsConnectionOptio
     channel_setup_client_tls!(right_of_slot, options)
 
 function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
+    handler.state == TlsHandshakeState.INIT || return nothing
     _tls_mark_handshake_start!(handler)
     if handler.slot !== nothing && handler.slot.adj_left !== nothing
         left_handler = handler.slot.adj_left.handler
@@ -1494,6 +1516,7 @@ function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, 
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Unexpected client hello")
             return nothing
         end
+        _tls_mark_handshake_start!(handler)
         if length(payload) != TLS_NONCE_LEN
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Invalid client hello size")
             return nothing

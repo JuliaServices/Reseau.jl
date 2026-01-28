@@ -13,6 +13,18 @@ function wait_for_flag_tls(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
     return false
 end
 
+function wait_for_handshake_status(handler::AwsIO.TlsChannelHandler, status; timeout_s::Float64 = 5.0)
+    start = Base.time_ns()
+    timeout_ns = Int(timeout_s * 1_000_000_000)
+    while (Base.time_ns() - start) < timeout_ns
+        if handler.stats.handshake_status == status
+            return true
+        end
+        sleep(0.01)
+    end
+    return false
+end
+
 const TEST_PEM_CERT = """
 -----BEGIN CERTIFICATE-----
 dGVzdA==
@@ -532,7 +544,7 @@ end
     if client_handler isa AwsIO.TlsChannelHandler
         @test client_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.NONE
         @test AwsIO.tls_client_handler_start_negotiation(client_handler) === nothing
-        @test client_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.ONGOING
+        @test wait_for_handshake_status(client_handler, AwsIO.TlsNegotiationStatus.ONGOING)
     end
 
     server_opts = AwsIO.tls_ctx_options_init_default_server(
@@ -737,7 +749,7 @@ end
     @test handler isa AwsIO.TlsChannelHandler
     if handler isa AwsIO.TlsChannelHandler
         @test left_slot.adj_right === handler.slot
-        @test handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.ONGOING
+        @test wait_for_handshake_status(handler, AwsIO.TlsNegotiationStatus.ONGOING)
     end
 
     AwsIO.event_loop_group_destroy!(elg)
