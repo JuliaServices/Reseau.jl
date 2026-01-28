@@ -51,6 +51,27 @@ end
     FAILED = 3
 end
 
+@enumx TlsHashAlgorithm::UInt8 begin
+    UNKNOWN = 0
+    SHA1 = 1
+    SHA224 = 2
+    SHA256 = 3
+    SHA384 = 4
+    SHA512 = 5
+end
+
+@enumx TlsSignatureAlgorithm::UInt8 begin
+    UNKNOWN = 0
+    RSA = 1
+    ECDSA = 2
+end
+
+@enumx TlsKeyOperationType::UInt8 begin
+    UNKNOWN = 0
+    SIGN = 1
+    DECRYPT = 2
+end
+
 struct SecItemOptions
     cert_label::Union{String, Nothing}
     key_label::Union{String, Nothing}
@@ -207,6 +228,89 @@ function tls_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorRes
     _tls_cal_init_once()
     return TlsContext(options)
 end
+
+function tls_hash_algorithm_str(hash::TlsHashAlgorithm.T)::String
+    return hash == TlsHashAlgorithm.SHA1 ? "SHA1" :
+        hash == TlsHashAlgorithm.SHA224 ? "SHA224" :
+        hash == TlsHashAlgorithm.SHA256 ? "SHA256" :
+        hash == TlsHashAlgorithm.SHA384 ? "SHA384" :
+        hash == TlsHashAlgorithm.SHA512 ? "SHA512" :
+        "UNKNOWN"
+end
+
+function tls_signature_algorithm_str(sig::TlsSignatureAlgorithm.T)::String
+    return sig == TlsSignatureAlgorithm.RSA ? "RSA" :
+        sig == TlsSignatureAlgorithm.ECDSA ? "ECDSA" :
+        "UNKNOWN"
+end
+
+function tls_key_operation_type_str(op::TlsKeyOperationType.T)::String
+    return op == TlsKeyOperationType.SIGN ? "SIGN" :
+        op == TlsKeyOperationType.DECRYPT ? "DECRYPT" :
+        "UNKNOWN"
+end
+
+mutable struct TlsKeyOperation{F, UD}
+    input::ByteCursor
+    operation_type::TlsKeyOperationType.T
+    signature_algorithm::TlsSignatureAlgorithm.T
+    digest_algorithm::TlsHashAlgorithm.T
+    on_complete::F
+    user_data::UD
+    completed::Bool
+    error_code::Int
+    output::ByteBuffer
+end
+
+function TlsKeyOperation(
+        input::ByteCursor;
+        operation_type::TlsKeyOperationType.T = TlsKeyOperationType.UNKNOWN,
+        signature_algorithm::TlsSignatureAlgorithm.T = TlsSignatureAlgorithm.UNKNOWN,
+        digest_algorithm::TlsHashAlgorithm.T = TlsHashAlgorithm.UNKNOWN,
+        on_complete = nothing,
+        user_data = nothing,
+    )
+    return TlsKeyOperation(
+        input,
+        operation_type,
+        signature_algorithm,
+        digest_algorithm,
+        on_complete,
+        user_data,
+        false,
+        0,
+        null_buffer(),
+    )
+end
+
+function tls_key_operation_complete!(operation::TlsKeyOperation, output::ByteCursor)
+    operation.output = null_buffer()
+    buf = _tls_buf_copy_from(output)
+    if buf isa ErrorResult
+        return buf
+    end
+    operation.output = buf
+    operation.completed = true
+    operation.error_code = AWS_OP_SUCCESS
+    if operation.on_complete !== nothing
+        operation.on_complete(operation, AWS_OP_SUCCESS, operation.user_data)
+    end
+    return nothing
+end
+
+function tls_key_operation_complete_with_error!(operation::TlsKeyOperation, error_code::Int)
+    operation.completed = true
+    operation.error_code = error_code
+    if operation.on_complete !== nothing
+        operation.on_complete(operation, error_code, operation.user_data)
+    end
+    return nothing
+end
+
+tls_key_operation_get_input(operation::TlsKeyOperation) = operation.input
+tls_key_operation_get_type(operation::TlsKeyOperation) = operation.operation_type
+tls_key_operation_get_signature_algorithm(operation::TlsKeyOperation) = operation.signature_algorithm
+tls_key_operation_get_digest_algorithm(operation::TlsKeyOperation) = operation.digest_algorithm
 
 function tls_ctx_options_init_default_client(;
         verify_peer::Bool = true,

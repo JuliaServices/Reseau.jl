@@ -198,6 +198,69 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+@testset "TLS key operations" begin
+    input_bytes = UInt8[0x01, 0x02, 0x03]
+    input_cursor = AwsIO.ByteCursor(input_bytes)
+
+    cb_called = Ref(false)
+    cb_err = Ref(0)
+    cb_ud = Ref(0)
+    cb_op = Ref{Any}(nothing)
+    on_complete = (operation, err, user_data) -> begin
+        cb_called[] = true
+        cb_err[] = err
+        cb_ud[] = user_data
+        cb_op[] = operation
+    end
+
+    operation = AwsIO.TlsKeyOperation(
+        input_cursor;
+        operation_type = AwsIO.TlsKeyOperationType.SIGN,
+        signature_algorithm = AwsIO.TlsSignatureAlgorithm.RSA,
+        digest_algorithm = AwsIO.TlsHashAlgorithm.SHA256,
+        on_complete = on_complete,
+        user_data = 99,
+    )
+
+    @test AwsIO.tls_key_operation_get_type(operation) == AwsIO.TlsKeyOperationType.SIGN
+    @test AwsIO.tls_key_operation_get_signature_algorithm(operation) == AwsIO.TlsSignatureAlgorithm.RSA
+    @test AwsIO.tls_key_operation_get_digest_algorithm(operation) == AwsIO.TlsHashAlgorithm.SHA256
+    @test AwsIO.byte_cursor_eq(AwsIO.tls_key_operation_get_input(operation), input_cursor)
+
+    output_cursor = AwsIO.ByteCursor(UInt8[0x0a, 0x0b])
+    @test AwsIO.tls_key_operation_complete!(operation, output_cursor) === nothing
+    @test operation.completed
+    @test operation.error_code == AwsIO.AWS_OP_SUCCESS
+    @test cb_called[]
+    @test cb_err[] == AwsIO.AWS_OP_SUCCESS
+    @test cb_ud[] == 99
+    @test cb_op[] === operation
+    @test AwsIO.byte_cursor_eq(AwsIO.byte_cursor_from_buf(operation.output), output_cursor)
+
+    cb_called[] = false
+    err_operation = AwsIO.TlsKeyOperation(
+        input_cursor;
+        on_complete = on_complete,
+        user_data = 123,
+    )
+    @test AwsIO.tls_key_operation_complete_with_error!(
+        err_operation,
+        AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE,
+    ) === nothing
+    @test err_operation.completed
+    @test err_operation.error_code == AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
+    @test cb_called[]
+    @test cb_err[] == AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
+    @test cb_ud[] == 123
+
+    @test AwsIO.tls_hash_algorithm_str(AwsIO.TlsHashAlgorithm.SHA384) == "SHA384"
+    @test AwsIO.tls_hash_algorithm_str(AwsIO.TlsHashAlgorithm.UNKNOWN) == "UNKNOWN"
+    @test AwsIO.tls_signature_algorithm_str(AwsIO.TlsSignatureAlgorithm.ECDSA) == "ECDSA"
+    @test AwsIO.tls_signature_algorithm_str(AwsIO.TlsSignatureAlgorithm.UNKNOWN) == "UNKNOWN"
+    @test AwsIO.tls_key_operation_type_str(AwsIO.TlsKeyOperationType.SIGN) == "SIGN"
+    @test AwsIO.tls_key_operation_type_str(AwsIO.TlsKeyOperationType.UNKNOWN) == "UNKNOWN"
+end
+
 mutable struct EchoHandler <: AwsIO.AbstractChannelHandler
     slot::Union{AwsIO.ChannelSlot, Nothing}
     saw_ping::Base.RefValue{Bool}
