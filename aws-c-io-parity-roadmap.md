@@ -350,6 +350,7 @@ Legend:
 - [ ] Error mapping for CKR_* to aws-c-io error codes
 - [ ] Support configuration loading (module path, token label, etc.)
 - [~] Define PKCS#11 TLS options struct + basic validation stubs
+  - [x] Add PKCS#11 error code string helper
 
 ### 13.2 TLS private key operations
 - [x] Implement TLS key operation helpers (hash/signature/op enums + completion)

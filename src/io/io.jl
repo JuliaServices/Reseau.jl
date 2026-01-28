@@ -363,6 +363,15 @@ const _pkcs11_ckr_names = (
     "FUNCTION_REJECTED",
 )
 
+function pkcs11_error_code_str(error_code::Integer)::Union{String, Nothing}
+    start_code = ERROR_IO_PKCS11_CKR_CANCEL
+    idx = Int(error_code - start_code + 1)
+    if idx >= 1 && idx <= length(_pkcs11_ckr_names)
+        return "CKR_" * _pkcs11_ckr_names[idx]
+    end
+    return nothing
+end
+
 # Error definitions for registration
 const _io_error_definitions = let defs = Vector{Tuple{String, Int, String}}()
     append!(

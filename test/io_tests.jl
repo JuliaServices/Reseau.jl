@@ -28,6 +28,13 @@ using AwsIO
     @test_throws ErrorException AwsIO.io_fatal_assert_library_initialized()
 end
 
+@testset "PKCS11 error code string" begin
+    @test AwsIO.pkcs11_error_code_str(AwsIO.ERROR_IO_PKCS11_CKR_CANCEL) == "CKR_CANCEL"
+    @test AwsIO.pkcs11_error_code_str(AwsIO.ERROR_IO_PKCS11_CKR_FUNCTION_REJECTED) ==
+        "CKR_FUNCTION_REJECTED"
+    @test AwsIO.pkcs11_error_code_str(0) === nothing
+end
+
 @testset "IO error parity" begin
     root = dirname(@__DIR__)
     header_path = joinpath(root, "aws-c-io", "include", "aws", "io", "io.h")
