@@ -323,6 +323,7 @@ Legend:
   - [x] Schedule client negotiation on event loop thread and guard double-start
   - [x] Mark server handshake start on first client hello
   - [x] Ignore inbound data after read shutdown
+- [x] BYO crypto setup options stubs (client/server)
 - [x] Ensure callbacks fire on correct thread
 - [x] Integrate ALPN handler and TLS negotiated protocol message
 

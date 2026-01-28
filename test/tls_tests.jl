@@ -292,6 +292,33 @@ end
     end
 end
 
+@testset "TLS BYO crypto setup" begin
+    new_handler = (options, slot, ud) -> nothing
+    start_negotiation = (handler, ud) -> 0
+    client_opts = AwsIO.TlsByoCryptoSetupOptions(
+        new_handler_fn = new_handler,
+        start_negotiation_fn = start_negotiation,
+        user_data = 7,
+    )
+    @test AwsIO.tls_byo_crypto_set_client_setup_options(client_opts) === nothing
+
+    server_opts = AwsIO.TlsByoCryptoSetupOptions(
+        new_handler_fn = new_handler,
+        user_data = 9,
+    )
+    @test AwsIO.tls_byo_crypto_set_server_setup_options(server_opts) === nothing
+
+    bad_client = AwsIO.TlsByoCryptoSetupOptions(
+        new_handler_fn = nothing,
+        start_negotiation_fn = nothing,
+    )
+    res = AwsIO.tls_byo_crypto_set_client_setup_options(bad_client)
+    @test res isa AwsIO.ErrorResult
+    if res isa AwsIO.ErrorResult
+        @test res.code == AwsIO.ERROR_INVALID_ARGUMENT
+    end
+end
+
 @testset "TLS timeout task" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)

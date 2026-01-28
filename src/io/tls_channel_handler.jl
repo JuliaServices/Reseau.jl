@@ -100,6 +100,41 @@ function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, op
     return nothing
 end
 
+mutable struct TlsByoCryptoSetupOptions{NewFn, StartFn, UD}
+    new_handler_fn::NewFn
+    start_negotiation_fn::StartFn
+    user_data::UD
+end
+
+function TlsByoCryptoSetupOptions(;
+        new_handler_fn,
+        start_negotiation_fn = nothing,
+        user_data = nothing,
+    )
+    return TlsByoCryptoSetupOptions(new_handler_fn, start_negotiation_fn, user_data)
+end
+
+const _tls_byo_client_setup = Ref{Union{TlsByoCryptoSetupOptions, Nothing}}(nothing)
+const _tls_byo_server_setup = Ref{Union{TlsByoCryptoSetupOptions, Nothing}}(nothing)
+
+function tls_byo_crypto_set_client_setup_options(options::TlsByoCryptoSetupOptions)
+    if options.new_handler_fn === nothing || options.start_negotiation_fn === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    _tls_byo_client_setup[] = options
+    return nothing
+end
+
+function tls_byo_crypto_set_server_setup_options(options::TlsByoCryptoSetupOptions)
+    if options.new_handler_fn === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    _tls_byo_server_setup[] = options
+    return nothing
+end
+
 struct SecItemOptions
     cert_label::Union{String, Nothing}
     key_label::Union{String, Nothing}
