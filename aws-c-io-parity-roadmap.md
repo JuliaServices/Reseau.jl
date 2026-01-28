@@ -295,7 +295,8 @@ Legend:
 - [ ] TLS 1.3 full handshake (client + server)
 - [ ] Session resumption (tickets/PSK)
 - [ ] Key update and renegotiation semantics where applicable
-- [ ] TLS alert handling parity (graceful vs abortive)
+- [~] TLS alert handling parity (graceful vs abortive)
+  - [x] Handle close_notify vs fatal alerts in stub TLS
 
 ### 12.3 Cryptographic primitives (LibAwsCal)
 - [ ] Confirm LibAwsCal exposes all required primitives

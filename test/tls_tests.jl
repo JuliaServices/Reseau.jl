@@ -775,6 +775,83 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+@testset "TLS alert handling" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    function new_alert_handler()
+        channel = AwsIO.Channel(event_loop, nothing)
+        slot = AwsIO.channel_slot_new!(channel)
+        handler = AwsIO.TlsChannelHandler(AwsIO.TlsConnectionOptions(ctx))
+        handler.negotiation_completed = true
+        handler.state = AwsIO.TlsHandshakeState.NEGOTIATED
+        handler.slot = slot
+        AwsIO.channel_slot_set_handler!(slot, handler)
+        return channel, slot, handler
+    end
+
+    function send_alert!(handler::AwsIO.TlsChannelHandler, slot::AwsIO.ChannelSlot, level::UInt8, desc::UInt8)
+        msg = AwsIO.IoMessage(2 + AwsIO.TLS_RECORD_HEADER_LEN)
+        msg_ref = Ref(msg.message_data)
+        AwsIO.byte_buf_reserve(msg_ref, 2 + AwsIO.TLS_RECORD_HEADER_LEN)
+        msg.message_data = msg_ref[]
+        buf = msg.message_data
+        GC.@preserve buf begin
+            ptr = pointer(getfield(buf, :mem))
+            unsafe_store!(ptr, AwsIO.TLS_RECORD_ALERT)
+            unsafe_store!(ptr + 1, UInt8(0))
+            unsafe_store!(ptr + 2, UInt8(0))
+            unsafe_store!(ptr + 3, UInt8(0))
+            unsafe_store!(ptr + 4, UInt8(2))
+            unsafe_store!(ptr + 5, level)
+            unsafe_store!(ptr + 6, desc)
+        end
+        setfield!(buf, :len, Csize_t(2 + AwsIO.TLS_RECORD_HEADER_LEN))
+        AwsIO.handler_process_read_message(handler, slot, msg)
+    end
+
+    channel, slot, handler = new_alert_handler()
+    send_alert!(handler, slot, AwsIO.TLS_ALERT_LEVEL_WARNING, AwsIO.TLS_ALERT_CLOSE_NOTIFY)
+    @test channel.shutdown_error_code == AwsIO.ERROR_IO_TLS_CLOSED_GRACEFUL
+
+    channel, slot, handler = new_alert_handler()
+    send_alert!(handler, slot, AwsIO.TLS_ALERT_LEVEL_FATAL, UInt8(40))
+    @test channel.shutdown_error_code == AwsIO.ERROR_IO_TLS_ALERT_NOT_GRACEFUL
+
+    channel, slot, handler = new_alert_handler()
+    msg = AwsIO.IoMessage(1 + AwsIO.TLS_RECORD_HEADER_LEN)
+    msg_ref = Ref(msg.message_data)
+    AwsIO.byte_buf_reserve(msg_ref, 1 + AwsIO.TLS_RECORD_HEADER_LEN)
+    msg.message_data = msg_ref[]
+    buf = msg.message_data
+    GC.@preserve buf begin
+        ptr = pointer(getfield(buf, :mem))
+        unsafe_store!(ptr, AwsIO.TLS_RECORD_ALERT)
+        unsafe_store!(ptr + 1, UInt8(0))
+        unsafe_store!(ptr + 2, UInt8(0))
+        unsafe_store!(ptr + 3, UInt8(0))
+        unsafe_store!(ptr + 4, UInt8(1))
+        unsafe_store!(ptr + 5, UInt8(0))
+    end
+    setfield!(buf, :len, Csize_t(1 + AwsIO.TLS_RECORD_HEADER_LEN))
+    AwsIO.handler_process_read_message(handler, slot, msg)
+    @test channel.shutdown_error_code == AwsIO.ERROR_IO_TLS_ERROR_ALERT_RECEIVED
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 @testset "tls handler" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)

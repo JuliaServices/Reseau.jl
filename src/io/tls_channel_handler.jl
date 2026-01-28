@@ -10,11 +10,15 @@ const TlsOnErrorFn = Function              # (handler, slot, error_code, message
 const TLS_HANDSHAKE_CLIENT_HELLO = 0x01
 const TLS_HANDSHAKE_SERVER_HELLO = 0x02
 const TLS_RECORD_APPLICATION = 0x03
+const TLS_RECORD_ALERT = 0x15
 const TLS_RECORD_HEADER_LEN = 5
 const TLS_DEFAULT_TIMEOUT_MS = 10_000
 const TLS_NONCE_LEN = 32
 const TLS_MAC_LEN = 32
 const TLS_SESSION_KEY_LEN = 32
+const TLS_ALERT_LEVEL_WARNING = 0x01
+const TLS_ALERT_LEVEL_FATAL = 0x02
+const TLS_ALERT_CLOSE_NOTIFY = 0x00
 
 @enumx TlsVersion::UInt8 begin
     SSLv3 = 0
@@ -1659,6 +1663,21 @@ function _tls_handle_application!(handler::TlsChannelHandler, payload::AbstractV
     return nothing
 end
 
+function _tls_handle_alert!(handler::TlsChannelHandler, payload::AbstractVector{UInt8})
+    if length(payload) < 2
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_ALERT_RECEIVED, "TLS alert received")
+        return nothing
+    end
+    level = payload[1]
+    description = payload[2]
+    if level == TLS_ALERT_LEVEL_WARNING && description == TLS_ALERT_CLOSE_NOTIFY
+        _tls_report_error!(handler, ERROR_IO_TLS_CLOSED_GRACEFUL, "TLS close notify")
+        return nothing
+    end
+    _tls_report_error!(handler, ERROR_IO_TLS_ALERT_NOT_GRACEFUL, "TLS alert")
+    return nothing
+end
+
 function _tls_process_inbound!(handler::TlsChannelHandler)
     buf = handler.inbound_buf
     while true
@@ -1685,6 +1704,8 @@ function _tls_process_inbound!(handler::TlsChannelHandler)
 
         if record_type == TLS_RECORD_APPLICATION
             _tls_handle_application!(handler, payload)
+        elseif record_type == TLS_RECORD_ALERT
+            _tls_handle_alert!(handler, payload)
         else
             _tls_handle_handshake!(handler, record_type, payload)
         end
