@@ -358,6 +358,7 @@ Legend:
   - [x] Basic lib options validation + object creation
   - [x] Shared library load + C_GetFunctionList lookup (no session ops yet)
   - [x] C_Initialize/C_Finalize behavior + version checks
+  - [x] Slot lookup + session open/close/login helpers
 - [~] Error mapping for CKR_* to aws-c-io error codes
   - [x] Add CKR->error code mapping helper (uses vendor header when present)
 - [ ] Support configuration loading (module path, token label, etc.)
