@@ -34,19 +34,19 @@ end
     @test !opts.is_server
     @test opts.verify_peer
 
-    AwsIO.tls_ctx_options_set_verify_peer!(opts, false)
+    AwsIO.tls_ctx_options_set_verify_peer(opts, false)
     @test !opts.verify_peer
 
-    AwsIO.tls_ctx_options_set_minimum_tls_version!(opts, AwsIO.TlsVersion.TLSv1_2)
+    AwsIO.tls_ctx_options_set_minimum_tls_version(opts, AwsIO.TlsVersion.TLSv1_2)
     @test opts.minimum_tls_version == AwsIO.TlsVersion.TLSv1_2
 
-    AwsIO.tls_ctx_options_set_tls_cipher_preference!(
+    AwsIO.tls_ctx_options_set_tls_cipher_preference(
         opts,
         AwsIO.TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
     )
     @test AwsIO.tls_is_cipher_pref_supported(opts.cipher_pref)
 
-    @test AwsIO.tls_ctx_options_override_default_trust_store!(
+    @test AwsIO.tls_ctx_options_override_default_trust_store(
         opts,
         AwsIO.ByteCursor(TEST_PEM_CERT),
     ) === nothing
@@ -55,14 +55,14 @@ end
     temp_dir = mktempdir()
     ca_path = joinpath(temp_dir, "ca.pem")
     write(ca_path, TEST_PEM_CERT)
-    @test AwsIO.tls_ctx_options_override_default_trust_store_from_path!(
+    @test AwsIO.tls_ctx_options_override_default_trust_store_from_path(
         opts;
         ca_path = "/tmp",
         ca_file = ca_path,
     ) isa AwsIO.ErrorResult
 
     opts2 = AwsIO.tls_ctx_options_init_default_client()
-    @test AwsIO.tls_ctx_options_override_default_trust_store_from_path!(
+    @test AwsIO.tls_ctx_options_override_default_trust_store_from_path(
         opts2;
         ca_path = "/tmp",
         ca_file = ca_path,
@@ -75,15 +75,15 @@ end
 
     conn = AwsIO.tls_connection_options_init_from_ctx(ctx)
     @test conn.timeout_ms == 0x00002710
-    AwsIO.tls_connection_options_set_server_name!(conn, "example.com")
-    AwsIO.tls_connection_options_set_alpn_list!(conn, "h2")
-    AwsIO.tls_connection_options_set_timeout_ms!(conn, 250)
-    AwsIO.tls_connection_options_set_advertise_alpn_message!(conn, true)
+    AwsIO.tls_connection_options_set_server_name(conn, "example.com")
+    AwsIO.tls_connection_options_set_alpn_list(conn, "h2")
+    AwsIO.tls_connection_options_set_timeout_ms(conn, 250)
+    AwsIO.tls_connection_options_set_advertise_alpn_message(conn, true)
 
     cb1 = (handler, slot, err, ud) -> nothing
     cb2 = (handler, slot, buf, ud) -> nothing
     cb3 = (handler, slot, err, msg, ud) -> nothing
-    AwsIO.tls_connection_options_set_callbacks!(conn, cb1, cb2, cb3, 123)
+    AwsIO.tls_connection_options_set_callbacks(conn, cb1, cb2, cb3, 123)
 
     @test conn.server_name == "example.com"
     @test conn.alpn_list == "h2"
@@ -270,7 +270,7 @@ end
     end
 
     conn = AwsIO.tls_connection_options_init_from_ctx(ctx)
-    AwsIO.tls_connection_options_set_server_name!(conn, "example.com")
+    AwsIO.tls_connection_options_set_server_name(conn, "example.com")
     handler = AwsIO.TlsChannelHandler(conn)
 
     @test _buf_to_string(AwsIO.tls_handler_server_name(handler)) == "example.com"
@@ -547,7 +547,7 @@ end
     sink.slot = left_slot
 
     opts = AwsIO.TlsConnectionOptions(ctx; timeout_ms = 1)
-    handler = AwsIO.channel_setup_client_tls!(left_slot, opts)
+    handler = AwsIO.channel_setup_client_tls(left_slot, opts)
     @test handler isa AwsIO.TlsChannelHandler
     if handler isa AwsIO.TlsChannelHandler
         @test left_slot.adj_right === handler.slot

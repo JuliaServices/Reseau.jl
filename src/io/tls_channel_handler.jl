@@ -639,6 +639,35 @@ function tls_ctx_options_set_secitem_options!(
     return nothing
 end
 
+# Non-bang API aliases for aws-c-io parity.
+tls_ctx_options_clean_up(options::TlsContextOptions) = tls_ctx_options_clean_up!(options)
+tls_ctx_options_set_alpn_list(options::TlsContextOptions, alpn_list::Union{String, Nothing}) =
+    tls_ctx_options_set_alpn_list!(options, alpn_list)
+tls_ctx_options_set_verify_peer(options::TlsContextOptions, verify_peer::Bool) =
+    tls_ctx_options_set_verify_peer!(options, verify_peer)
+tls_ctx_options_set_tls_cipher_preference(options::TlsContextOptions, cipher_pref::TlsCipherPref.T) =
+    tls_ctx_options_set_tls_cipher_preference!(options, cipher_pref)
+tls_ctx_options_set_minimum_tls_version(options::TlsContextOptions, minimum_tls_version::TlsVersion.T) =
+    tls_ctx_options_set_minimum_tls_version!(options, minimum_tls_version)
+tls_ctx_options_set_max_fragment_size(options::TlsContextOptions, max_fragment_size::Integer) =
+    tls_ctx_options_set_max_fragment_size!(options, max_fragment_size)
+tls_ctx_options_override_default_trust_store(options::TlsContextOptions, ca_file) =
+    tls_ctx_options_override_default_trust_store!(options, ca_file)
+function tls_ctx_options_override_default_trust_store_from_path(
+        options::TlsContextOptions;
+        ca_path::Union{String, Nothing} = nothing,
+        ca_file::Union{String, Nothing} = nothing,
+    )
+    return tls_ctx_options_override_default_trust_store_from_path!(options; ca_path = ca_path, ca_file = ca_file)
+end
+tls_ctx_options_set_extension_data(options::TlsContextOptions, extension_data) =
+    tls_ctx_options_set_extension_data!(options, extension_data)
+tls_ctx_options_set_keychain_path(options::TlsContextOptions, keychain_path::AbstractString) =
+    tls_ctx_options_set_keychain_path!(options, keychain_path)
+tls_ctx_options_set_secitem_options(options::TlsContextOptions, secitem_options::SecItemOptions) =
+    tls_ctx_options_set_secitem_options!(options, secitem_options)
+tls_secitem_options_clean_up(::SecItemOptions) = nothing
+
 function tls_ctx_options_init_client_mtls_with_custom_key_operations(
         custom_key_op_handler,
         cert,
@@ -738,7 +767,6 @@ function TlsConnectionOptions(
     )
 end
 
-tls_connection_options_init_from_ctx(ctx::TlsContext) = TlsConnectionOptions(ctx)
 
 tls_connection_options_clean_up!(::TlsConnectionOptions) = nothing
 
@@ -789,6 +817,32 @@ function tls_connection_options_set_advertise_alpn_message!(options::TlsConnecti
     options.advertise_alpn_message = advertise
     return nothing
 end
+
+tls_connection_options_init_from_ctx(ctx::TlsContext) = TlsConnectionOptions(ctx)
+tls_connection_options_clean_up(options::TlsConnectionOptions) = tls_connection_options_clean_up!(options)
+function tls_connection_options_set_callbacks(
+        options::TlsConnectionOptions,
+        on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing},
+        on_data_read::Union{TlsOnDataReadFn, Nothing},
+        on_error::Union{TlsOnErrorFn, Nothing},
+        user_data = options.user_data,
+    )
+    return tls_connection_options_set_callbacks!(
+        options,
+        on_negotiation_result,
+        on_data_read,
+        on_error,
+        user_data,
+    )
+end
+tls_connection_options_set_server_name(options::TlsConnectionOptions, server_name::Union{String, Nothing}) =
+    tls_connection_options_set_server_name!(options, server_name)
+tls_connection_options_set_alpn_list(options::TlsConnectionOptions, alpn_list::Union{String, Nothing}) =
+    tls_connection_options_set_alpn_list!(options, alpn_list)
+tls_connection_options_set_timeout_ms(options::TlsConnectionOptions, timeout_ms::Integer) =
+    tls_connection_options_set_timeout_ms!(options, timeout_ms)
+tls_connection_options_set_advertise_alpn_message(options::TlsConnectionOptions, advertise::Bool) =
+    tls_connection_options_set_advertise_alpn_message!(options, advertise)
 
 struct TlsNegotiatedProtocolMessage
     protocol::ByteBuffer
@@ -879,6 +933,9 @@ function channel_setup_client_tls!(right_of_slot::ChannelSlot, options::TlsConne
     tls_channel_handler_start_negotiation!(handler)
     return handler
 end
+
+channel_setup_client_tls(right_of_slot::ChannelSlot, options::TlsConnectionOptions) =
+    channel_setup_client_tls!(right_of_slot, options)
 
 function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
     _tls_mark_handshake_start!(handler)

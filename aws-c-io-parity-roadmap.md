@@ -314,6 +314,7 @@ Legend:
   - [x] Handshake timeout scheduling and stats timestamps
 - [x] `channel_setup_client_tls` helper
 - [x] `tls_handler_protocol` and `tls_handler_server_name` accessors
+- [x] Provide non-bang TLS ctx/connection option setters for API parity
 - [ ] Channel handler state machine parity
 - [ ] Ensure callbacks fire on correct thread
 - [ ] Integrate ALPN handler and TLS negotiated protocol message
