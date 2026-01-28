@@ -351,6 +351,7 @@ Legend:
 - [ ] Support configuration loading (module path, token label, etc.)
 - [~] Define PKCS#11 TLS options struct + basic validation stubs
   - [x] Add PKCS#11 error code string helper
+  - [x] Add PKCS#11 lib options + constructor stubs
 
 ### 13.2 TLS private key operations
 - [x] Implement TLS key operation helpers (hash/signature/op enums + completion)

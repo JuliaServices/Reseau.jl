@@ -35,6 +35,15 @@ end
     @test AwsIO.pkcs11_error_code_str(0) === nothing
 end
 
+@testset "PKCS11 lib stubs" begin
+    opts = AwsIO.Pkcs11LibOptions(; filename = "pkcs11.so")
+    lib = AwsIO.pkcs11_lib_new(opts)
+    @test lib isa AwsIO.ErrorResult
+    if lib isa AwsIO.ErrorResult
+        @test lib.code == AwsIO.ERROR_UNIMPLEMENTED
+    end
+end
+
 @testset "IO error parity" begin
     root = dirname(@__DIR__)
     header_path = joinpath(root, "aws-c-io", "include", "aws", "io", "io.h")
