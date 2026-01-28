@@ -218,6 +218,51 @@ end
     end
 end
 
+@testset "TLS ctx options server init" begin
+    opts = AwsIO.tls_ctx_options_init_default_server(
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+        AwsIO.ByteCursor(TEST_PEM_KEY);
+        alpn_list = "h2",
+    )
+    @test opts isa AwsIO.TlsContextOptions
+    if opts isa AwsIO.TlsContextOptions
+        @test opts.is_server
+        @test !opts.verify_peer
+        @test opts.alpn_list == "h2"
+    end
+
+    temp_dir = mktempdir()
+    cert_path = joinpath(temp_dir, "cert.pem")
+    key_path = joinpath(temp_dir, "key.pem")
+    write(cert_path, TEST_PEM_CERT)
+    write(key_path, TEST_PEM_KEY)
+
+    opts2 = AwsIO.tls_ctx_options_init_default_server_from_path(
+        cert_path,
+        key_path;
+        alpn_list = "h2",
+    )
+    @test opts2 isa AwsIO.TlsContextOptions
+    if opts2 isa AwsIO.TlsContextOptions
+        @test opts2.is_server
+        @test !opts2.verify_peer
+        @test opts2.alpn_list == "h2"
+    end
+end
+
+@testset "TLS ctx options platform hooks" begin
+    opts = AwsIO.tls_ctx_options_init_default_client()
+    if Sys.isapple()
+        @test AwsIO.tls_ctx_options_set_keychain_path(opts, "/tmp") === nothing
+        secitem = AwsIO.SecItemOptions("cert", "key")
+        @test AwsIO.tls_ctx_options_set_secitem_options(opts, secitem) === nothing
+    else
+        @test AwsIO.tls_ctx_options_set_keychain_path(opts, "/tmp") isa AwsIO.ErrorResult
+        secitem = AwsIO.SecItemOptions("cert", "key")
+        @test AwsIO.tls_ctx_options_set_secitem_options(opts, secitem) isa AwsIO.ErrorResult
+    end
+end
+
 @testset "TLS ctx options custom key ops" begin
     res = AwsIO.tls_ctx_options_init_client_mtls_with_custom_key_operations(
         nothing,
