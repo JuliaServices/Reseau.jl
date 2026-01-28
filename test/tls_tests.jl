@@ -257,6 +257,29 @@ end
     end
 end
 
+@testset "TLS ctx options pkcs11" begin
+    opts = AwsIO.TlsCtxPkcs11Options(
+        pkcs11_lib = :fake,
+        cert_file_path = "cert.pem",
+        cert_file_contents = "cert",
+    )
+    res = AwsIO.tls_ctx_options_init_client_mtls_with_pkcs11(opts)
+    @test res isa AwsIO.ErrorResult
+    if res isa AwsIO.ErrorResult
+        @test res.code == AwsIO.ERROR_INVALID_ARGUMENT
+    end
+
+    opts2 = AwsIO.TlsCtxPkcs11Options(
+        pkcs11_lib = :fake,
+        cert_file_path = "cert.pem",
+    )
+    res2 = AwsIO.tls_ctx_options_init_client_mtls_with_pkcs11(opts2)
+    @test res2 isa AwsIO.ErrorResult
+    if res2 isa AwsIO.ErrorResult
+        @test res2.code == AwsIO.ERROR_UNIMPLEMENTED
+    end
+end
+
 @testset "TLS timeout task" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)

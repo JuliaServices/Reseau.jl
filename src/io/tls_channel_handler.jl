@@ -99,6 +99,48 @@ struct SecItemOptions
     key_label::Union{String, Nothing}
 end
 
+struct TlsCtxPkcs11Options
+    pkcs11_lib::Any
+    user_pin::ByteCursor
+    slot_id::Union{UInt64, Nothing}
+    token_label::ByteCursor
+    private_key_object_label::ByteCursor
+    cert_file_path::ByteCursor
+    cert_file_contents::ByteCursor
+end
+
+function _tls_pkcs11_cursor(value)::ByteCursor
+    if value === nothing
+        return null_cursor()
+    elseif value isa ByteCursor
+        return value
+    elseif value isa AbstractString || value isa AbstractVector{UInt8}
+        return ByteCursor(value)
+    else
+        return null_cursor()
+    end
+end
+
+function TlsCtxPkcs11Options(;
+        pkcs11_lib,
+        user_pin = nothing,
+        slot_id::Union{UInt64, Nothing} = nothing,
+        token_label = nothing,
+        private_key_object_label = nothing,
+        cert_file_path = nothing,
+        cert_file_contents = nothing,
+    )
+    return TlsCtxPkcs11Options(
+        pkcs11_lib,
+        _tls_pkcs11_cursor(user_pin),
+        slot_id,
+        _tls_pkcs11_cursor(token_label),
+        _tls_pkcs11_cursor(private_key_object_label),
+        _tls_pkcs11_cursor(cert_file_path),
+        _tls_pkcs11_cursor(cert_file_contents),
+    )
+end
+
 mutable struct TlsContextOptions
     is_server::Bool
     minimum_tls_version::TlsVersion.T
@@ -803,11 +845,18 @@ function tls_ctx_options_init_client_mtls_with_custom_key_operations(
 end
 
 function tls_ctx_options_init_client_mtls_with_pkcs11(
-        pkcs11_options,
+        pkcs11_options::TlsCtxPkcs11Options,
     )::Union{TlsContextOptions, ErrorResult}
-    _ = pkcs11_options
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    if pkcs11_options.pkcs11_lib === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    if pkcs11_options.cert_file_path.len > 0 && pkcs11_options.cert_file_contents.len > 0
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    raise_error(ERROR_UNIMPLEMENTED)
+    return ErrorResult(ERROR_UNIMPLEMENTED)
 end
 
 function tls_context_new_client(;
