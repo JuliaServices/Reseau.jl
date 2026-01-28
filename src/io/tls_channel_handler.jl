@@ -340,6 +340,7 @@ end
 
 tls_ctx_acquire(ctx::TlsContext) = ctx
 tls_ctx_release(::TlsContext) = nothing
+tls_ctx_release(::Nothing) = nothing
 
 function _tls_ctx_options_copy(
         options::TlsContextOptions;

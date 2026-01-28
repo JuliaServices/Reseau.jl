@@ -125,6 +125,7 @@ end
         @test AwsIO.tls_ctx_acquire(ctx) === ctx
         @test AwsIO.tls_ctx_release(ctx) === nothing
     end
+    @test AwsIO.tls_ctx_release(nothing) === nothing
 end
 
 @testset "TLS ctx new helpers" begin
@@ -1018,4 +1019,48 @@ end
     end
 
     AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "TLS concurrent cert import" begin
+    temp_dir = mktempdir()
+    cert_path = joinpath(temp_dir, "cert.pem")
+    key_path = joinpath(temp_dir, "key.pem")
+    write(cert_path, TEST_PEM_CERT)
+    write(key_path, TEST_PEM_KEY)
+
+    function import_ctx()
+        opts = AwsIO.tls_ctx_options_init_client_mtls_from_path(cert_path, key_path)
+        opts isa AwsIO.TlsContextOptions || return opts
+        return AwsIO.tls_client_ctx_new(opts)
+    end
+
+    tasks = [Threads.@spawn import_ctx() for _ in 1:2]
+    ctxs = fetch.(tasks)
+    @test all(ctx -> ctx isa AwsIO.TlsContext, ctxs)
+    for ctx in ctxs
+        if ctx isa AwsIO.TlsContext
+            @test AwsIO.tls_ctx_release(ctx) === nothing
+        end
+    end
+end
+
+@testset "TLS duplicate cert import" begin
+    opts = AwsIO.tls_ctx_options_init_client_mtls(
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+        AwsIO.ByteCursor(TEST_PEM_KEY),
+    )
+    @test opts isa AwsIO.TlsContextOptions
+    if opts isa AwsIO.TlsContextOptions
+        ctx1 = AwsIO.tls_client_ctx_new(opts)
+        @test ctx1 isa AwsIO.TlsContext
+        if ctx1 isa AwsIO.TlsContext
+            @test AwsIO.tls_ctx_release(ctx1) === nothing
+        end
+
+        ctx2 = AwsIO.tls_client_ctx_new(opts)
+        @test ctx2 isa AwsIO.TlsContext
+        if ctx2 isa AwsIO.TlsContext
+            @test AwsIO.tls_ctx_release(ctx2) === nothing
+        end
+    end
 end

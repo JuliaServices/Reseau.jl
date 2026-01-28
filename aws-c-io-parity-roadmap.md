@@ -337,7 +337,10 @@ Legend:
 - [ ] Windows: Schannel behavior parity
 
 ### 12.7 Tests
-- [ ] Port `tls_handler_test.c` scenarios
+- [~] Port `tls_handler_test.c` scenarios
+  - [x] Null tls_ctx_release parity
+  - [x] Concurrent cert import coverage
+  - [x] Duplicate cert import coverage
 - [ ] Port `byo_crypto_test.c`
 - [ ] Port TLS server tests (use provided test certs/resources)
 - [x] Add ALPN test coverage (`alpn_handler_test.c`)
