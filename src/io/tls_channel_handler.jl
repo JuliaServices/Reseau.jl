@@ -1776,6 +1776,13 @@ function handler_process_read_message(handler::TlsChannelHandler, slot::ChannelS
 end
 
 function handler_process_write_message(handler::TlsChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
+    if handler.state == TlsHandshakeState.FAILED
+        if slot.channel !== nothing
+            channel_release_message_to_pool!(slot.channel, message)
+        end
+        raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+        return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+    end
     if !handler.negotiation_completed
         push!(handler.pending_writes, PendingWrite(message, 0))
         return nothing

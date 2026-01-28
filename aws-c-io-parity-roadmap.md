@@ -325,6 +325,7 @@ Legend:
   - [x] Ignore inbound data after read shutdown
   - [x] Clear pending writes on shutdown
   - [x] Copy connection options on handler creation
+  - [x] Reject writes after handshake failure
 - [x] BYO crypto setup options stubs (client/server)
 - [x] Ensure callbacks fire on correct thread
 - [x] Integrate ALPN handler and TLS negotiated protocol message
