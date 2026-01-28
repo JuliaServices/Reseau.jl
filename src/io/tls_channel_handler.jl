@@ -74,6 +74,12 @@ end
     DECRYPT = 2
 end
 
+@enumx TlsHandlerReadState::UInt8 begin
+    OPEN = 0
+    SHUTTING_DOWN = 1
+    SHUT_DOWN_COMPLETE = 2
+end
+
 mutable struct CustomKeyOpHandler{F, UD}
     on_key_operation::F
     user_data::UD
@@ -1033,6 +1039,7 @@ mutable struct TlsChannelHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: Abst
     max_read_size::Csize_t
     options::TlsConnectionOptions
     state::TlsHandshakeState.T
+    read_state::TlsHandlerReadState.T
     stats::TlsHandlerStatistics
     timeout_task::ChannelTask
     protocol::ByteBuffer
@@ -1056,6 +1063,7 @@ function TlsChannelHandler(
         Csize_t(max_read_size),
         options,
         TlsHandshakeState.INIT,
+        TlsHandlerReadState.OPEN,
         TlsHandlerStatistics(),
         ChannelTask(),
         null_buffer(),
@@ -1707,6 +1715,12 @@ end
 
 function handler_process_read_message(handler::TlsChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
     channel = slot.channel
+    if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+        if channel !== nothing
+            channel_release_message_to_pool!(channel, message)
+        end
+        return nothing
+    end
     buf = message.message_data
     data_len = Int(buf.len)
 
@@ -1747,6 +1761,9 @@ function handler_shutdown(
         error_code::Int,
         free_scarce_resources_immediately::Bool,
     )::Union{Nothing, ErrorResult}
+    if direction == ChannelDirection.READ && handler.read_state != TlsHandlerReadState.SHUT_DOWN_COMPLETE
+        handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
+    end
     if !handler.negotiation_completed && handler.options.on_negotiation_result !== nothing
         _tls_invoke_on_event_loop(
             handler,

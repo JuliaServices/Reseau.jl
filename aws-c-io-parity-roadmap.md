@@ -322,6 +322,7 @@ Legend:
 - [~] Channel handler state machine parity
   - [x] Schedule client negotiation on event loop thread and guard double-start
   - [x] Mark server handshake start on first client hello
+  - [x] Ignore inbound data after read shutdown
 - [x] Ensure callbacks fire on correct thread
 - [x] Integrate ALPN handler and TLS negotiated protocol message
 

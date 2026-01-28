@@ -587,6 +587,47 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+@testset "TLS read shutdown ignores data" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    slot = AwsIO.channel_slot_new!(channel)
+    saw_data = Ref(false)
+    on_data_read = (handler, slot, buf, ud) -> begin
+        saw_data[] = true
+        return nothing
+    end
+    opts = AwsIO.TlsConnectionOptions(ctx; on_data_read = on_data_read)
+    handler = AwsIO.TlsChannelHandler(opts)
+    handler.negotiation_completed = true
+    handler.slot = slot
+    AwsIO.channel_slot_set_handler!(slot, handler)
+
+    AwsIO.handler_shutdown(handler, slot, AwsIO.ChannelDirection.READ, 0, false)
+
+    msg = AwsIO.IoMessage(1)
+    msg_ref = Ref(msg.message_data)
+    AwsIO.byte_buf_write_from_whole_cursor(msg_ref, AwsIO.ByteCursor(UInt8[0x00]))
+    msg.message_data = msg_ref[]
+    AwsIO.handler_process_read_message(handler, slot, msg)
+
+    @test !saw_data[]
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 @testset "tls handler" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
