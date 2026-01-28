@@ -74,6 +74,26 @@ end
     DECRYPT = 2
 end
 
+mutable struct CustomKeyOpHandler{F, UD}
+    on_key_operation::F
+    user_data::UD
+end
+
+function CustomKeyOpHandler(on_key_operation; user_data = nothing)
+    return CustomKeyOpHandler(on_key_operation, user_data)
+end
+
+custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
+custom_key_op_handler_release(::CustomKeyOpHandler) = nothing
+custom_key_op_handler_release(::Nothing) = nothing
+
+function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)
+    if handler.on_key_operation !== nothing
+        Base.invokelatest(handler.on_key_operation, handler, operation)
+    end
+    return nothing
+end
+
 struct SecItemOptions
     cert_label::Union{String, Nothing}
     key_label::Union{String, Nothing}
@@ -430,6 +450,9 @@ function tls_ctx_options_clean_up!(options::TlsContextOptions)
     options.alpn_list = nothing
     options.system_certificate_path = nothing
     options.ctx_options_extension = nothing
+    if options.custom_key_op_handler !== nothing
+        custom_key_op_handler_release(options.custom_key_op_handler)
+    end
     options.custom_key_op_handler = nothing
     return nothing
 end
@@ -755,10 +778,28 @@ function tls_ctx_options_init_client_mtls_with_custom_key_operations(
         custom_key_op_handler,
         cert,
     )::Union{TlsContextOptions, ErrorResult}
-    _ = custom_key_op_handler
-    _ = cert
-    raise_error(ERROR_UNIMPLEMENTED)
-    return ErrorResult(ERROR_UNIMPLEMENTED)
+    if custom_key_op_handler === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    handler = custom_key_op_handler
+    if !(handler isa CustomKeyOpHandler) || handler.on_key_operation === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+
+    opts = tls_ctx_options_init_default_client()
+    cert_buf = _tls_buf_copy_from(cert)
+    cert_buf isa ErrorResult && return cert_buf
+    opts.certificate = cert_buf
+    pem_res = _tls_validate_pem(cert_buf)
+    if pem_res isa ErrorResult
+        tls_ctx_options_clean_up!(opts)
+        return pem_res
+    end
+
+    opts.custom_key_op_handler = custom_key_op_handler_acquire(handler)
+    return opts
 end
 
 function tls_ctx_options_init_client_mtls_with_pkcs11(

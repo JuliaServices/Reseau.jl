@@ -213,7 +213,47 @@ end
     )
     @test res isa AwsIO.ErrorResult
     if res isa AwsIO.ErrorResult
-        @test res.code == AwsIO.ERROR_UNIMPLEMENTED
+        @test res.code == AwsIO.ERROR_INVALID_ARGUMENT
+    end
+end
+
+@testset "TLS custom key op handler" begin
+    op = AwsIO.TlsKeyOperation(AwsIO.ByteCursor(UInt8[0x01]))
+    called = Ref(false)
+    handler = AwsIO.CustomKeyOpHandler(
+        (handler_obj, operation) -> begin
+            @test handler_obj.user_data == 7
+            @test operation === op
+            called[] = true
+        end;
+        user_data = 7,
+    )
+
+    @test AwsIO.custom_key_op_handler_acquire(handler) === handler
+    @test AwsIO.custom_key_op_handler_release(handler) === nothing
+    AwsIO.custom_key_op_handler_perform_operation(handler, op)
+    @test called[]
+end
+
+@testset "TLS ctx options custom key ops init" begin
+    handler = AwsIO.CustomKeyOpHandler((handler_obj, operation) -> nothing)
+    opts = AwsIO.tls_ctx_options_init_client_mtls_with_custom_key_operations(
+        handler,
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+    )
+    @test opts isa AwsIO.TlsContextOptions
+    if opts isa AwsIO.TlsContextOptions
+        @test opts.custom_key_op_handler === handler
+        @test _buf_to_string(opts.certificate) == TEST_PEM_CERT
+    end
+
+    bad = AwsIO.tls_ctx_options_init_client_mtls_with_custom_key_operations(
+        AwsIO.CustomKeyOpHandler(nothing),
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+    )
+    @test bad isa AwsIO.ErrorResult
+    if bad isa AwsIO.ErrorResult
+        @test bad.code == AwsIO.ERROR_INVALID_ARGUMENT
     end
 end
 

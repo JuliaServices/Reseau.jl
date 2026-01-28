@@ -345,7 +345,8 @@ Legend:
 - [ ] Support configuration loading (module path, token label, etc.)
 
 ### 13.2 TLS private key operations
-- [~] Implement TLS key operation helpers (hash/signature/op enums + completion)
+- [x] Implement TLS key operation helpers (hash/signature/op enums + completion)
+- [x] Implement custom key op handler helpers + options init (non-PKCS#11)
 - [ ] Implement `pkcs11_tls_op_handler` parity
 - [ ] Integrate with TLS handshake for mTLS
 
