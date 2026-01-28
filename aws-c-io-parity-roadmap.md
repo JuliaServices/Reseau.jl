@@ -321,7 +321,7 @@ Legend:
 - [x] `tls_client_ctx_new`/`tls_server_ctx_new` with options copy + cipher pref validation
 - [ ] Channel handler state machine parity
 - [ ] Ensure callbacks fire on correct thread
-- [ ] Integrate ALPN handler and TLS negotiated protocol message
+- [x] Integrate ALPN handler and TLS negotiated protocol message
 
 ### 12.6 TLS backends parity (platform)
 - [ ] Linux/Unix: s2n parity behavior (even if implemented in Julia)
