@@ -1,6 +1,32 @@
 using Test
 using AwsIO
 
+const _pkcs11_test_init_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
+const _pkcs11_test_finalize_called = Ref(false)
+const _pkcs11_test_get_info_called = Ref(false)
+
+function _pkcs11_test_fake_initialize(::Ptr{AwsIO.CK_C_INITIALIZE_ARGS})::AwsIO.CK_RV
+    return _pkcs11_test_init_rv[]
+end
+
+function _pkcs11_test_fake_finalize(::Ptr{Cvoid})::AwsIO.CK_RV
+    _pkcs11_test_finalize_called[] = true
+    return AwsIO.CKR_OK
+end
+
+function _pkcs11_test_fake_get_info(info_ptr::Ptr{AwsIO.CK_INFO})::AwsIO.CK_RV
+    _pkcs11_test_get_info_called[] = true
+    info = AwsIO.CK_INFO(
+        AwsIO.CK_VERSION(2, 20),
+        ntuple(_ -> UInt8(0x20), 32),
+        0,
+        ntuple(_ -> UInt8(0x20), 32),
+        AwsIO.CK_VERSION(1, 0),
+    )
+    unsafe_store!(info_ptr, info)
+    return AwsIO.CKR_OK
+end
+
 @testset "IO library init/cleanup" begin
     AwsIO.io_library_init()
     AwsIO.io_library_init()
@@ -67,6 +93,57 @@ end
         end
         @test AwsIO.pkcs11_error_from_ckr(0xffffffffffffffff) ==
             AwsIO.ERROR_IO_PKCS11_UNKNOWN_CRYPTOKI_RETURN_VALUE
+    end
+end
+
+@testset "PKCS11 init behavior" begin
+    init_fn = @cfunction(_pkcs11_test_fake_initialize, AwsIO.CK_RV, (Ptr{AwsIO.CK_C_INITIALIZE_ARGS},))
+    finalize_fn = @cfunction(_pkcs11_test_fake_finalize, AwsIO.CK_RV, (Ptr{Cvoid},))
+    get_info_fn = @cfunction(_pkcs11_test_fake_get_info, AwsIO.CK_RV, (Ptr{AwsIO.CK_INFO},))
+
+    fl = AwsIO._pkcs11_function_list_stub(
+        C_Initialize = init_fn,
+        C_Finalize = finalize_fn,
+        C_GetInfo = get_info_fn,
+    )
+    fl_ref = Ref(fl)
+
+    function build_lib(behavior)
+        lib = AwsIO.Pkcs11Lib(
+            AwsIO.Pkcs11LibOptions(
+                filename = nothing,
+                initialize_finalize_behavior = behavior,
+            ),
+        )
+        lib.function_list = Base.unsafe_convert(Ptr{Cvoid}, fl_ref)
+        return lib
+    end
+
+    GC.@preserve fl_ref begin
+        _pkcs11_test_init_rv[] = AwsIO.CKR_CRYPTOKI_ALREADY_INITIALIZED
+        _pkcs11_test_get_info_called[] = false
+        lib_default = build_lib(AwsIO.Pkcs11LibBehavior.DEFAULT_BEHAVIOR)
+        res_default = AwsIO._pkcs11_init_with_function_list!(lib_default)
+        @test res_default === nothing
+        @test _pkcs11_test_get_info_called[]
+        @test !lib_default.finalize_on_cleanup
+
+        _pkcs11_test_init_rv[] = AwsIO.CKR_CRYPTOKI_ALREADY_INITIALIZED
+        lib_strict = build_lib(AwsIO.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
+        res_strict = AwsIO._pkcs11_init_with_function_list!(lib_strict)
+        @test res_strict isa AwsIO.ErrorResult
+        if res_strict isa AwsIO.ErrorResult
+            @test res_strict.code == AwsIO.ERROR_IO_PKCS11_CKR_CRYPTOKI_ALREADY_INITIALIZED
+        end
+
+        _pkcs11_test_init_rv[] = AwsIO.CKR_OK
+        _pkcs11_test_finalize_called[] = false
+        lib_finalize = build_lib(AwsIO.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
+        res_finalize = AwsIO._pkcs11_init_with_function_list!(lib_finalize)
+        @test res_finalize === nothing
+        @test lib_finalize.finalize_on_cleanup
+        AwsIO.pkcs11_lib_release(lib_finalize)
+        @test _pkcs11_test_finalize_called[]
     end
 end
 
