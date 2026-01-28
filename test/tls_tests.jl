@@ -329,14 +329,36 @@ end
         @test res.code == AwsIO.ERROR_INVALID_ARGUMENT
     end
 
+    temp_dir = mktempdir()
+    cert_path = joinpath(temp_dir, "cert.pem")
+    write(cert_path, TEST_PEM_CERT)
+
     opts2 = AwsIO.TlsCtxPkcs11Options(
         pkcs11_lib = :fake,
-        cert_file_path = "cert.pem",
+        cert_file_path = cert_path,
     )
     res2 = AwsIO.tls_ctx_options_init_client_mtls_with_pkcs11(opts2)
-    @test res2 isa AwsIO.ErrorResult
-    if res2 isa AwsIO.ErrorResult
-        @test res2.code == AwsIO.ERROR_UNIMPLEMENTED
+    @test res2 isa AwsIO.TlsContextOptions
+    if res2 isa AwsIO.TlsContextOptions
+        @test _buf_to_string(res2.certificate) == TEST_PEM_CERT
+        @test res2.custom_key_op_handler isa AwsIO.CustomKeyOpHandler
+        if res2.custom_key_op_handler isa AwsIO.CustomKeyOpHandler
+            op = AwsIO.TlsKeyOperation(AwsIO.ByteCursor("data"))
+            AwsIO.custom_key_op_handler_perform_operation(res2.custom_key_op_handler, op)
+            @test op.completed
+            @test op.error_code == AwsIO.ERROR_UNIMPLEMENTED
+        end
+    end
+
+    opts3 = AwsIO.TlsCtxPkcs11Options(
+        pkcs11_lib = :fake,
+        cert_file_contents = TEST_PEM_CERT,
+    )
+    res3 = AwsIO.tls_ctx_options_init_client_mtls_with_pkcs11(opts3)
+    @test res3 isa AwsIO.TlsContextOptions
+    if res3 isa AwsIO.TlsContextOptions
+        @test _buf_to_string(res3.certificate) == TEST_PEM_CERT
+        @test res3.custom_key_op_handler isa AwsIO.CustomKeyOpHandler
     end
 end
 

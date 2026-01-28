@@ -365,7 +365,8 @@ Legend:
 ### 13.2 TLS private key operations
 - [x] Implement TLS key operation helpers (hash/signature/op enums + completion)
 - [x] Implement custom key op handler helpers + options init (non-PKCS#11)
-- [ ] Implement `pkcs11_tls_op_handler` parity
+- [~] Implement `pkcs11_tls_op_handler` parity
+  - [x] Stub handler wiring + unimplemented op completion
 - [ ] Integrate with TLS handshake for mTLS
 
 ### 13.3 Tests

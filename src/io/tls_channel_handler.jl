@@ -193,6 +193,14 @@ struct TlsCtxPkcs11Options
     cert_file_contents::ByteCursor
 end
 
+mutable struct Pkcs11KeyOpState
+    pkcs11_lib::Any
+    user_pin::ByteCursor
+    slot_id::Union{UInt64, Nothing}
+    token_label::ByteCursor
+    private_key_object_label::ByteCursor
+end
+
 function _tls_pkcs11_cursor(value)::ByteCursor
     if value === nothing
         return null_cursor()
@@ -203,6 +211,27 @@ function _tls_pkcs11_cursor(value)::ByteCursor
     else
         return null_cursor()
     end
+end
+
+function pkcs11_tls_op_handler_new(
+        pkcs11_lib,
+        user_pin::ByteCursor,
+        token_label::ByteCursor,
+        private_key_object_label::ByteCursor,
+        slot_id::Union{UInt64, Nothing},
+    )::Union{CustomKeyOpHandler, ErrorResult}
+    if pkcs11_lib === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+
+    state = Pkcs11KeyOpState(pkcs11_lib, user_pin, slot_id, token_label, private_key_object_label)
+    on_op = (handler, operation) -> begin
+        _ = handler
+        _ = state
+        tls_key_operation_complete_with_error!(operation, ERROR_UNIMPLEMENTED)
+    end
+    return CustomKeyOpHandler(on_op; user_data = state)
 end
 
 function TlsCtxPkcs11Options(;
@@ -941,8 +970,31 @@ function tls_ctx_options_init_client_mtls_with_pkcs11(
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    raise_error(ERROR_UNIMPLEMENTED)
-    return ErrorResult(ERROR_UNIMPLEMENTED)
+
+    handler = pkcs11_tls_op_handler_new(
+        pkcs11_options.pkcs11_lib,
+        pkcs11_options.user_pin,
+        pkcs11_options.token_label,
+        pkcs11_options.private_key_object_label,
+        pkcs11_options.slot_id,
+    )
+    handler isa ErrorResult && return handler
+
+    if pkcs11_options.cert_file_contents.len > 0
+        return tls_ctx_options_init_client_mtls_with_custom_key_operations(
+            handler,
+            pkcs11_options.cert_file_contents,
+        )
+    end
+
+    cert_path = String(pkcs11_options.cert_file_path)
+    cert_buf = _tls_buf_from_file(cert_path)
+    cert_buf isa ErrorResult && return cert_buf
+
+    cert_cursor = byte_cursor_from_buf(cert_buf)
+    opts = tls_ctx_options_init_client_mtls_with_custom_key_operations(handler, cert_cursor)
+    byte_buf_clean_up_secure(Ref(cert_buf))
+    return opts
 end
 
 function tls_context_new_client(;
