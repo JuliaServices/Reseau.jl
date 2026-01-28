@@ -341,7 +341,8 @@ Legend:
   - [x] Null tls_ctx_release parity
   - [x] Concurrent cert import coverage
   - [x] Duplicate cert import coverage
-- [ ] Port `byo_crypto_test.c`
+- [~] Port `byo_crypto_test.c`
+  - [x] BYO handler wiring + start negotiation hook
 - [ ] Port TLS server tests (use provided test certs/resources)
 - [x] Add ALPN test coverage (`alpn_handler_test.c`)
 - [x] Add TLS ctx options coverage (mTLS + PKCS#12)

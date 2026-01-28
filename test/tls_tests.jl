@@ -363,6 +363,9 @@ end
     if res isa AwsIO.ErrorResult
         @test res.code == AwsIO.ERROR_INVALID_ARGUMENT
     end
+
+    AwsIO._tls_byo_client_setup[] = nothing
+    AwsIO._tls_byo_server_setup[] = nothing
 end
 
 @testset "TLS timeout task" begin
@@ -586,6 +589,69 @@ end
 
 function AwsIO.handler_destroy(handler::SinkHandler)
     return nothing
+end
+
+@testset "TLS BYO crypto integration" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    new_called = Ref(false)
+    start_called = Ref(false)
+    seen_slot = Ref{Any}(nothing)
+    seen_new_ud = Ref{Any}(nothing)
+    seen_start_ud = Ref{Any}(nothing)
+    seen_handler = Ref{Any}(nothing)
+
+    new_handler = (options, slot, ud) -> begin
+        new_called[] = true
+        seen_slot[] = slot
+        seen_new_ud[] = ud
+        return SinkHandler()
+    end
+    start_negotiation = (handler, ud) -> begin
+        start_called[] = true
+        seen_handler[] = handler
+        seen_start_ud[] = ud
+        return AwsIO.AWS_OP_SUCCESS
+    end
+
+    client_opts = AwsIO.TlsByoCryptoSetupOptions(
+        new_handler_fn = new_handler,
+        start_negotiation_fn = start_negotiation,
+        user_data = 42,
+    )
+    @test AwsIO.tls_byo_crypto_set_client_setup_options(client_opts) === nothing
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    left_slot = AwsIO.channel_slot_new!(channel)
+    sink = SinkHandler()
+    AwsIO.channel_slot_set_handler!(left_slot, sink)
+
+    tls_opts = AwsIO.TlsConnectionOptions(ctx; server_name = "example.com")
+    handler = AwsIO.channel_setup_client_tls(left_slot, tls_opts)
+    @test handler isa AwsIO.AbstractChannelHandler
+    @test new_called[]
+    @test start_called[]
+    @test seen_slot[] === left_slot.adj_right
+    @test seen_new_ud[] == 42
+    @test seen_start_ud[] == 42
+    @test seen_handler[] === handler
+
+    AwsIO._tls_byo_client_setup[] = nothing
+    AwsIO._tls_byo_server_setup[] = nothing
+    AwsIO.event_loop_group_destroy!(elg)
 end
 
 @testset "TLS client/server handler API" begin

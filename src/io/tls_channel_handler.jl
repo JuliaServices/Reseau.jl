@@ -121,6 +121,45 @@ end
 const _tls_byo_client_setup = Ref{Union{TlsByoCryptoSetupOptions, Nothing}}(nothing)
 const _tls_byo_server_setup = Ref{Union{TlsByoCryptoSetupOptions, Nothing}}(nothing)
 
+function _tls_byo_new_handler(
+        setup::TlsByoCryptoSetupOptions,
+        options,
+        slot::ChannelSlot,
+    )::Union{AbstractChannelHandler, ErrorResult}
+    handler = setup.new_handler_fn(options, slot, setup.user_data)
+    if handler isa ErrorResult
+        return handler
+    end
+    if !(handler isa AbstractChannelHandler)
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    set_res = channel_slot_set_handler!(slot, handler)
+    if set_res isa ErrorResult
+        return set_res
+    end
+    return handler
+end
+
+function _tls_byo_start_negotiation(
+        setup::TlsByoCryptoSetupOptions,
+        handler::AbstractChannelHandler,
+    )::Union{Nothing, ErrorResult}
+    if setup.start_negotiation_fn === nothing
+        raise_error(ERROR_INVALID_STATE)
+        return ErrorResult(ERROR_INVALID_STATE)
+    end
+    res = setup.start_negotiation_fn(handler, setup.user_data)
+    if res isa ErrorResult
+        return res
+    end
+    if res isa Integer && res != AWS_OP_SUCCESS
+        raise_error(Int(res))
+        return ErrorResult(Int(res))
+    end
+    return nothing
+end
+
 function tls_byo_crypto_set_client_setup_options(options::TlsByoCryptoSetupOptions)
     if options.new_handler_fn === nothing || options.start_negotiation_fn === nothing
         raise_error(ERROR_INVALID_ARGUMENT)
@@ -1120,47 +1159,67 @@ tls_handler_protocol(handler::TlsChannelHandler) = handler.protocol
 tls_handler_server_name(handler::TlsChannelHandler) = handler.server_name
 
 function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOptions; max_read_size::Integer = 16384)
-    handler = TlsChannelHandler(tls_connection_options_copy(options); max_read_size = max_read_size)
     slot = channel_slot_new!(channel)
-    handler.slot = slot
-    channel_slot_set_handler!(slot, handler)
+
+    handler = if options.ctx.options.is_server
+        tls_server_handler_new(options, slot; max_read_size = max_read_size)
+    else
+        tls_client_handler_new(options, slot; max_read_size = max_read_size)
+    end
+
+    handler isa ErrorResult && return handler
 
     if channel.first !== slot
         channel_slot_insert_end!(channel, slot)
     end
 
-    if !handler.options.ctx.options.is_server
-        tls_client_handler_start_negotiation(handler)
+    if !options.ctx.options.is_server
+        start_res = tls_client_handler_start_negotiation(handler)
+        start_res isa ErrorResult && return start_res
     end
 
     return handler
 end
 
-function tls_client_handler_new(options::TlsConnectionOptions, slot::ChannelSlot)
+function tls_client_handler_new(
+        options::TlsConnectionOptions,
+        slot::ChannelSlot;
+        max_read_size::Integer = 16384,
+    )
     if options.ctx.options.is_server
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    handler = TlsChannelHandler(tls_connection_options_copy(options))
+    byo_setup = _tls_byo_client_setup[]
+    if byo_setup !== nothing
+        return _tls_byo_new_handler(byo_setup, options, slot)
+    end
+
+    handler = TlsChannelHandler(tls_connection_options_copy(options); max_read_size = max_read_size)
     handler.slot = slot
     set_res = channel_slot_set_handler!(slot, handler)
-    if set_res isa ErrorResult
-        return set_res
-    end
+    set_res isa ErrorResult && return set_res
     return handler
 end
 
-function tls_server_handler_new(options::TlsConnectionOptions, slot::ChannelSlot)
+function tls_server_handler_new(
+        options::TlsConnectionOptions,
+        slot::ChannelSlot;
+        max_read_size::Integer = 16384,
+    )
     if !options.ctx.options.is_server
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    handler = TlsChannelHandler(tls_connection_options_copy(options))
+    byo_setup = _tls_byo_server_setup[]
+    if byo_setup !== nothing
+        return _tls_byo_new_handler(byo_setup, options, slot)
+    end
+
+    handler = TlsChannelHandler(tls_connection_options_copy(options); max_read_size = max_read_size)
     handler.slot = slot
     set_res = channel_slot_set_handler!(slot, handler)
-    if set_res isa ErrorResult
-        return set_res
-    end
+    set_res isa ErrorResult && return set_res
     return handler
 end
 
@@ -1171,25 +1230,35 @@ function _tls_start_negotiation_task(task::ChannelTask, handler::TlsChannelHandl
     return nothing
 end
 
-function tls_client_handler_start_negotiation(handler::TlsChannelHandler)
-    if handler.options.ctx.options.is_server
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
-    end
-    slot = handler.slot
-    channel = slot === nothing ? nothing : slot.channel
-    if channel === nothing
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
-    end
-    if channel_thread_is_callers_thread(channel)
-        tls_channel_handler_start_negotiation!(handler)
+function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)
+    if handler isa TlsChannelHandler
+        if handler.options.ctx.options.is_server
+            raise_error(ERROR_INVALID_ARGUMENT)
+            return ErrorResult(ERROR_INVALID_ARGUMENT)
+        end
+        slot = handler.slot
+        channel = slot === nothing ? nothing : slot.channel
+        if channel === nothing
+            raise_error(ERROR_INVALID_STATE)
+            return ErrorResult(ERROR_INVALID_STATE)
+        end
+        if channel_thread_is_callers_thread(channel)
+            tls_channel_handler_start_negotiation!(handler)
+            return nothing
+        end
+        task = ChannelTask()
+        channel_task_init!(task, _tls_start_negotiation_task, handler, "tls_start_negotiation")
+        channel_schedule_task_now!(channel, task)
         return nothing
     end
-    task = ChannelTask()
-    channel_task_init!(task, _tls_start_negotiation_task, handler, "tls_start_negotiation")
-    channel_schedule_task_now!(channel, task)
-    return nothing
+
+    byo_setup = _tls_byo_client_setup[]
+    if byo_setup !== nothing
+        return _tls_byo_start_negotiation(byo_setup, handler)
+    end
+
+    raise_error(ERROR_INVALID_ARGUMENT)
+    return ErrorResult(ERROR_INVALID_ARGUMENT)
 end
 
 function channel_setup_client_tls!(right_of_slot::ChannelSlot, options::TlsConnectionOptions)
@@ -1199,17 +1268,13 @@ function channel_setup_client_tls!(right_of_slot::ChannelSlot, options::TlsConne
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
 
-    handler = TlsChannelHandler(tls_connection_options_copy(options))
     slot = channel_slot_new!(channel)
-    handler.slot = slot
-
-    set_res = channel_slot_set_handler!(slot, handler)
-    if set_res isa ErrorResult
-        return set_res
-    end
+    handler = tls_client_handler_new(options, slot)
+    handler isa ErrorResult && return handler
 
     channel_slot_insert_right!(right_of_slot, slot)
-    tls_client_handler_start_negotiation(handler)
+    start_res = tls_client_handler_start_negotiation(handler)
+    start_res isa ErrorResult && return start_res
     return handler
 end
 

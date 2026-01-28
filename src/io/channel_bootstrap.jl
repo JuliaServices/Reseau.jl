@@ -431,6 +431,13 @@ function _setup_client_channel(request::SocketConnectionRequest)
         )
 
         tls_handler = tls_channel_handler_new!(channel, wrapped)
+        if tls_handler isa ErrorResult
+            request.on_shutdown = nothing
+            channel_shutdown!(channel, tls_handler.code)
+            socket_close(socket)
+            _connection_request_complete(request, tls_handler.code, nothing)
+            return nothing
+        end
 
         if advertise_alpn
             alpn_slot = channel_slot_new!(channel)
@@ -878,6 +885,11 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         )
 
         tls_handler = tls_channel_handler_new!(channel, wrapped)
+        if tls_handler isa ErrorResult
+            channel_shutdown!(channel, tls_handler.code)
+            socket_close(socket)
+            return nothing
+        end
 
         if advertise_alpn
             alpn_slot = channel_slot_new!(channel)
