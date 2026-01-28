@@ -234,6 +234,84 @@ end
 tls_ctx_acquire(ctx::TlsContext) = ctx
 tls_ctx_release(::TlsContext) = nothing
 
+function _tls_ctx_options_copy(
+        options::TlsContextOptions;
+        is_server_override::Union{Bool, Nothing} = nothing,
+    )::Union{TlsContextOptions, ErrorResult}
+    ca_buf = _tls_buf_copy_from(options.ca_file)
+    ca_buf isa ErrorResult && return ca_buf
+    cert_buf = _tls_buf_copy_from(options.certificate)
+    if cert_buf isa ErrorResult
+        byte_buf_clean_up_secure(Ref(ca_buf))
+        return cert_buf
+    end
+    key_buf = _tls_buf_copy_from(options.private_key)
+    if key_buf isa ErrorResult
+        byte_buf_clean_up_secure(Ref(ca_buf))
+        byte_buf_clean_up_secure(Ref(cert_buf))
+        return key_buf
+    end
+    pkcs_buf = _tls_buf_copy_from(options.pkcs12)
+    if pkcs_buf isa ErrorResult
+        byte_buf_clean_up_secure(Ref(ca_buf))
+        byte_buf_clean_up_secure(Ref(cert_buf))
+        byte_buf_clean_up_secure(Ref(key_buf))
+        return pkcs_buf
+    end
+    pkcs_pwd_buf = _tls_buf_copy_from(options.pkcs12_password)
+    if pkcs_pwd_buf isa ErrorResult
+        byte_buf_clean_up_secure(Ref(ca_buf))
+        byte_buf_clean_up_secure(Ref(cert_buf))
+        byte_buf_clean_up_secure(Ref(key_buf))
+        byte_buf_clean_up_secure(Ref(pkcs_buf))
+        return pkcs_pwd_buf
+    end
+
+    secitem_copy = options.secitem_options === nothing ?
+        nothing :
+        SecItemOptions(options.secitem_options.cert_label, options.secitem_options.key_label)
+
+    return TlsContextOptions(
+        is_server = is_server_override === nothing ? options.is_server : is_server_override,
+        minimum_tls_version = options.minimum_tls_version,
+        cipher_pref = options.cipher_pref,
+        ca_file = ca_buf,
+        ca_path = options.ca_path,
+        alpn_list = options.alpn_list,
+        certificate = cert_buf,
+        private_key = key_buf,
+        system_certificate_path = options.system_certificate_path,
+        pkcs12 = pkcs_buf,
+        pkcs12_password = pkcs_pwd_buf,
+        secitem_options = secitem_copy,
+        keychain_path = options.keychain_path,
+        max_fragment_size = options.max_fragment_size,
+        verify_peer = options.verify_peer,
+        ctx_options_extension = options.ctx_options_extension,
+        custom_key_op_handler = options.custom_key_op_handler,
+    )
+end
+
+function tls_client_ctx_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
+    if !tls_is_cipher_pref_supported(options.cipher_pref)
+        raise_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
+        return ErrorResult(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
+    end
+    opts_copy = _tls_ctx_options_copy(options; is_server_override = false)
+    opts_copy isa ErrorResult && return opts_copy
+    return tls_context_new(opts_copy)
+end
+
+function tls_server_ctx_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
+    if !tls_is_cipher_pref_supported(options.cipher_pref)
+        raise_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
+        return ErrorResult(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
+    end
+    opts_copy = _tls_ctx_options_copy(options; is_server_override = true)
+    opts_copy isa ErrorResult && return opts_copy
+    return tls_context_new(opts_copy)
+end
+
 function tls_hash_algorithm_str(hash::TlsHashAlgorithm.T)::String
     return hash == TlsHashAlgorithm.SHA1 ? "SHA1" :
         hash == TlsHashAlgorithm.SHA224 ? "SHA224" :

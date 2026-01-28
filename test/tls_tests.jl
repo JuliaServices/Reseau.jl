@@ -115,6 +115,48 @@ end
     end
 end
 
+@testset "TLS ctx new helpers" begin
+    opts = AwsIO.tls_ctx_options_init_default_client()
+    @test AwsIO.tls_ctx_options_override_default_trust_store(opts, AwsIO.ByteCursor(TEST_PEM_CERT)) === nothing
+    ctx = AwsIO.tls_client_ctx_new(opts)
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.TlsContext
+        @test !ctx.options.is_server
+        @test ctx.options.ca_file.len == opts.ca_file.len
+        @test ctx.options.ca_file.mem !== opts.ca_file.mem
+    end
+
+    server_ctx = AwsIO.tls_server_ctx_new(opts)
+    @test server_ctx isa AwsIO.TlsContext
+    if server_ctx isa AwsIO.TlsContext
+        @test server_ctx.options.is_server
+    end
+
+    srv_opts = AwsIO.tls_ctx_options_init_default_server(
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+        AwsIO.ByteCursor(TEST_PEM_KEY),
+    )
+    @test srv_opts isa AwsIO.TlsContextOptions
+    if srv_opts isa AwsIO.TlsContextOptions
+        client_ctx = AwsIO.tls_client_ctx_new(srv_opts)
+        @test client_ctx isa AwsIO.TlsContext
+        if client_ctx isa AwsIO.TlsContext
+            @test !client_ctx.options.is_server
+        end
+    end
+
+    bad_opts = AwsIO.tls_ctx_options_init_default_client()
+    AwsIO.tls_ctx_options_set_tls_cipher_preference(
+        bad_opts,
+        AwsIO.TlsCipherPref.TLS_CIPHER_PREF_END_RANGE,
+    )
+    bad_ctx = AwsIO.tls_client_ctx_new(bad_opts)
+    @test bad_ctx isa AwsIO.ErrorResult
+    if bad_ctx isa AwsIO.ErrorResult
+        @test bad_ctx.code == AwsIO.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED
+    end
+end
+
 @testset "TLS error code predicate" begin
     @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
     @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH)

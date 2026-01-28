@@ -318,6 +318,7 @@ Legend:
 - [x] `tls_client_handler_new`/`tls_server_handler_new` + client negotiation entrypoint
 - [x] `tls_is_alpn_available` API
 - [x] `tls_ctx_acquire`/`tls_ctx_release` no-op parity
+- [x] `tls_client_ctx_new`/`tls_server_ctx_new` with options copy + cipher pref validation
 - [ ] Channel handler state machine parity
 - [ ] Ensure callbacks fire on correct thread
 - [ ] Integrate ALPN handler and TLS negotiated protocol message
