@@ -125,6 +125,7 @@ end
         @test AwsIO.tls_ctx_acquire(ctx) === ctx
         @test AwsIO.tls_ctx_release(ctx) === nothing
     end
+    @test AwsIO.tls_ctx_acquire(nothing) === nothing
     @test AwsIO.tls_ctx_release(nothing) === nothing
 end
 

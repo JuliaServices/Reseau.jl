@@ -378,6 +378,7 @@ function tls_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorRes
 end
 
 tls_ctx_acquire(ctx::TlsContext) = ctx
+tls_ctx_acquire(::Nothing) = nothing
 tls_ctx_release(::TlsContext) = nothing
 tls_ctx_release(::Nothing) = nothing
 
