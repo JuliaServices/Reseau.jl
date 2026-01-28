@@ -25,7 +25,11 @@ end
 
 mutable struct Pkcs11Lib
     options::Pkcs11LibOptions
+    shared_lib::SharedLibrary
+    function_list::Ptr{Cvoid}
 end
+
+Pkcs11Lib(options::Pkcs11LibOptions) = Pkcs11Lib(options, SharedLibrary(), C_NULL)
 
 const _pkcs11_ckr_map = Ref{Dict{UInt64, Int}}(Dict{UInt64, Int}())
 const _pkcs11_ckr_loaded = Ref(false)
@@ -67,8 +71,33 @@ function pkcs11_lib_new(options::Pkcs11LibOptions)::Union{Pkcs11Lib, ErrorResult
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    return Pkcs11Lib(options)
+
+    lib = Pkcs11Lib(options)
+    loaded = if options.filename.len == 0
+        shared_library_load_default()
+    else
+        shared_library_load(String(options.filename))
+    end
+    loaded isa ErrorResult && return loaded
+
+    lib.shared_lib = loaded
+
+    sym = shared_library_find_symbol(lib.shared_lib, "C_GetFunctionList")
+    sym isa ErrorResult && return sym
+
+    fn_list = Ref{Ptr{Cvoid}}(C_NULL)
+    rv = ccall(sym, Culong, (Ref{Ptr{Cvoid}},), fn_list)
+    if rv != 0
+        code = pkcs11_error_from_ckr(rv)
+        raise_error(code)
+        return ErrorResult(code)
+    end
+    lib.function_list = fn_list[]
+    return lib
 end
 
 pkcs11_lib_acquire(lib::Pkcs11Lib) = lib
-pkcs11_lib_release(::Pkcs11Lib) = nothing
+function pkcs11_lib_release(lib::Pkcs11Lib)
+    _ = shared_library_clean_up!(lib.shared_lib)
+    return nothing
+end

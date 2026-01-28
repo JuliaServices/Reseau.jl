@@ -36,11 +36,13 @@ end
 end
 
 @testset "PKCS11 lib stubs" begin
-    opts = AwsIO.Pkcs11LibOptions(; filename = "pkcs11.so")
+    temp_dir = mktempdir()
+    missing_path = joinpath(temp_dir, "missing_pkcs11_lib")
+    opts = AwsIO.Pkcs11LibOptions(; filename = missing_path)
     lib = AwsIO.pkcs11_lib_new(opts)
-    @test lib isa AwsIO.Pkcs11Lib
-    if lib isa AwsIO.Pkcs11Lib
-        @test lib.options.filename.len == opts.filename.len
+    @test lib isa AwsIO.ErrorResult
+    if lib isa AwsIO.ErrorResult
+        @test lib.code == AwsIO.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
     end
 end
 
