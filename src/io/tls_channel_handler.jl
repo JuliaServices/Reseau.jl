@@ -1246,12 +1246,37 @@ function _const_time_eq(a::AbstractVector{UInt8}, b::AbstractVector{UInt8})
     return acc == 0x00
 end
 
+function _tls_callback_task(task::ChannelTask, arg, status::TaskStatus.T)
+    _ = task
+    status == TaskStatus.RUN_READY || return nothing
+    fn, args = arg
+    Base.invokelatest(fn, args...)
+    return nothing
+end
+
+function _tls_invoke_on_event_loop(handler::TlsChannelHandler, fn, args...)
+    if fn === nothing
+        return nothing
+    end
+    slot = handler.slot
+    channel = slot === nothing ? nothing : slot.channel
+    if channel === nothing || channel_thread_is_callers_thread(channel)
+        Base.invokelatest(fn, args...)
+        return nothing
+    end
+    task = ChannelTask()
+    channel_task_init!(task, _tls_callback_task, (fn, args), "tls_callback")
+    channel_schedule_task_now!(channel, task)
+    return nothing
+end
+
 function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message::AbstractString)
     if !handler.negotiation_completed
         handler.state = TlsHandshakeState.FAILED
         _tls_mark_handshake_end!(handler, TlsNegotiationStatus.FAILURE)
         if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
-            Base.invokelatest(
+            _tls_invoke_on_event_loop(
+                handler,
                 handler.options.on_negotiation_result,
                 handler,
                 handler.slot,
@@ -1261,7 +1286,8 @@ function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message
         end
     else
         if handler.options.on_error !== nothing && handler.slot !== nothing
-            Base.invokelatest(
+            _tls_invoke_on_event_loop(
+                handler,
                 handler.options.on_error,
                 handler,
                 handler.slot,
@@ -1449,7 +1475,8 @@ function _tls_mark_negotiated!(handler::TlsChannelHandler)
         return nothing
     end
     if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
-        Base.invokelatest(
+        _tls_invoke_on_event_loop(
+            handler,
             handler.options.on_negotiation_result,
             handler,
             handler.slot,
@@ -1549,7 +1576,7 @@ function _tls_handle_application!(handler::TlsChannelHandler, payload::AbstractV
     setfield!(buf, :len, Csize_t(length(plaintext)))
 
     if handler.options.on_data_read !== nothing
-        Base.invokelatest(handler.options.on_data_read, handler, slot, buf, handler.options.user_data)
+        _tls_invoke_on_event_loop(handler, handler.options.on_data_read, handler, slot, buf, handler.options.user_data)
     end
 
     if slot.adj_right !== nothing
@@ -1698,7 +1725,14 @@ function handler_shutdown(
         free_scarce_resources_immediately::Bool,
     )::Union{Nothing, ErrorResult}
     if !handler.negotiation_completed && handler.options.on_negotiation_result !== nothing
-        Base.invokelatest(handler.options.on_negotiation_result, handler, slot, error_code, handler.options.user_data)
+        _tls_invoke_on_event_loop(
+            handler,
+            handler.options.on_negotiation_result,
+            handler,
+            slot,
+            error_code,
+            handler.options.user_data,
+        )
     end
     channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing

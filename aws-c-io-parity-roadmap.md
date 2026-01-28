@@ -320,7 +320,7 @@ Legend:
 - [x] `tls_ctx_acquire`/`tls_ctx_release` no-op parity
 - [x] `tls_client_ctx_new`/`tls_server_ctx_new` with options copy + cipher pref validation
 - [ ] Channel handler state machine parity
-- [ ] Ensure callbacks fire on correct thread
+- [x] Ensure callbacks fire on correct thread
 - [x] Integrate ALPN handler and TLS negotiated protocol message
 
 ### 12.6 TLS backends parity (platform)
