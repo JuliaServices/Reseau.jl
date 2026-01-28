@@ -389,6 +389,78 @@ function AwsIO.handler_destroy(handler::SinkHandler)
     return nothing
 end
 
+@testset "TLS client/server handler API" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    client_ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test client_ctx isa AwsIO.TlsContext
+    if client_ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    left_slot = AwsIO.channel_slot_new!(channel)
+    sink = SinkHandler()
+    AwsIO.channel_slot_set_handler!(left_slot, sink)
+    sink.slot = left_slot
+    tls_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(left_slot, tls_slot)
+
+    client_handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(client_ctx), tls_slot)
+    @test client_handler isa AwsIO.TlsChannelHandler
+    if client_handler isa AwsIO.TlsChannelHandler
+        @test client_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.NONE
+        @test AwsIO.tls_client_handler_start_negotiation(client_handler) === nothing
+        @test client_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.ONGOING
+    end
+
+    server_opts = AwsIO.tls_ctx_options_init_default_server(
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+        AwsIO.ByteCursor(TEST_PEM_KEY),
+    )
+    @test server_opts isa AwsIO.TlsContextOptions
+    if server_opts isa AwsIO.TlsContextOptions
+        server_ctx = AwsIO.tls_context_new(server_opts)
+        @test server_ctx isa AwsIO.TlsContext
+        if server_ctx isa AwsIO.TlsContext
+            server_channel = AwsIO.Channel(event_loop, nothing)
+            server_left = AwsIO.channel_slot_new!(server_channel)
+            server_sink = SinkHandler()
+            AwsIO.channel_slot_set_handler!(server_left, server_sink)
+            server_sink.slot = server_left
+            server_slot = AwsIO.channel_slot_new!(server_channel)
+            AwsIO.channel_slot_insert_right!(server_left, server_slot)
+
+            server_handler = AwsIO.tls_server_handler_new(
+                AwsIO.TlsConnectionOptions(server_ctx),
+                server_slot,
+            )
+            @test server_handler isa AwsIO.TlsChannelHandler
+            if server_handler isa AwsIO.TlsChannelHandler
+                @test server_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.NONE
+            end
+
+            bad_channel = AwsIO.Channel(event_loop, nothing)
+            bad_slot = AwsIO.channel_slot_new!(bad_channel)
+            bad_handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(server_ctx), bad_slot)
+            @test bad_handler isa AwsIO.ErrorResult
+            if bad_handler isa AwsIO.ErrorResult
+                @test bad_handler.code == AwsIO.ERROR_INVALID_ARGUMENT
+            end
+        end
+    end
+
+    @test AwsIO.tls_is_alpn_available()
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 @testset "tls handler" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)

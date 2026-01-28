@@ -44,6 +44,8 @@ function tls_is_cipher_pref_supported(pref::TlsCipherPref.T)::Bool
     return pref != TlsCipherPref.TLS_CIPHER_PREF_END_RANGE
 end
 
+tls_is_alpn_available() = true
+
 @enumx TlsHandshakeState::UInt8 begin
     INIT = 0
     CLIENT_HELLO_SENT = 1
@@ -911,6 +913,43 @@ function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOption
     tls_channel_handler_start_negotiation!(handler)
 
     return handler
+end
+
+function tls_client_handler_new(options::TlsConnectionOptions, slot::ChannelSlot)
+    if options.ctx.options.is_server
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    handler = TlsChannelHandler(options)
+    handler.slot = slot
+    set_res = channel_slot_set_handler!(slot, handler)
+    if set_res isa ErrorResult
+        return set_res
+    end
+    return handler
+end
+
+function tls_server_handler_new(options::TlsConnectionOptions, slot::ChannelSlot)
+    if !options.ctx.options.is_server
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    handler = TlsChannelHandler(options)
+    handler.slot = slot
+    set_res = channel_slot_set_handler!(slot, handler)
+    if set_res isa ErrorResult
+        return set_res
+    end
+    return handler
+end
+
+function tls_client_handler_start_negotiation(handler::TlsChannelHandler)
+    if handler.options.ctx.options.is_server
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    tls_channel_handler_start_negotiation!(handler)
+    return nothing
 end
 
 function channel_setup_client_tls!(right_of_slot::ChannelSlot, options::TlsConnectionOptions)

@@ -315,6 +315,8 @@ Legend:
 - [x] `channel_setup_client_tls` helper
 - [x] `tls_handler_protocol` and `tls_handler_server_name` accessors
 - [x] Provide non-bang TLS ctx/connection option setters for API parity
+- [x] `tls_client_handler_new`/`tls_server_handler_new` + client negotiation entrypoint
+- [x] `tls_is_alpn_available` API
 - [ ] Channel handler state machine parity
 - [ ] Ensure callbacks fire on correct thread
 - [ ] Integrate ALPN handler and TLS negotiated protocol message
