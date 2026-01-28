@@ -343,6 +343,7 @@ Legend:
   - [x] Duplicate cert import coverage
 - [~] Port `byo_crypto_test.c`
   - [x] BYO handler wiring + start negotiation hook
+  - [x] BYO server handler wiring
 - [ ] Port TLS server tests (use provided test certs/resources)
 - [x] Add ALPN test coverage (`alpn_handler_test.c`)
 - [x] Add TLS ctx options coverage (mTLS + PKCS#12)

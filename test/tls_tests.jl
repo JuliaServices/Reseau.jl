@@ -613,6 +613,10 @@ end
     seen_new_ud = Ref{Any}(nothing)
     seen_start_ud = Ref{Any}(nothing)
     seen_handler = Ref{Any}(nothing)
+    server_new_called = Ref(false)
+    server_seen_slot = Ref{Any}(nothing)
+    server_seen_ud = Ref{Any}(nothing)
+    server_seen_handler = Ref{Any}(nothing)
 
     new_handler = (options, slot, ud) -> begin
         new_called[] = true
@@ -626,6 +630,14 @@ end
         seen_start_ud[] = ud
         return AwsIO.AWS_OP_SUCCESS
     end
+    server_new_handler = (options, slot, ud) -> begin
+        server_new_called[] = true
+        server_seen_slot[] = slot
+        server_seen_ud[] = ud
+        handler = SinkHandler()
+        server_seen_handler[] = handler
+        return handler
+    end
 
     client_opts = AwsIO.TlsByoCryptoSetupOptions(
         new_handler_fn = new_handler,
@@ -633,6 +645,12 @@ end
         user_data = 42,
     )
     @test AwsIO.tls_byo_crypto_set_client_setup_options(client_opts) === nothing
+
+    server_setup = AwsIO.TlsByoCryptoSetupOptions(
+        new_handler_fn = server_new_handler,
+        user_data = 99,
+    )
+    @test AwsIO.tls_byo_crypto_set_server_setup_options(server_setup) === nothing
 
     channel = AwsIO.Channel(event_loop, nothing)
     left_slot = AwsIO.channel_slot_new!(channel)
@@ -648,6 +666,29 @@ end
     @test seen_new_ud[] == 42
     @test seen_start_ud[] == 42
     @test seen_handler[] === handler
+
+    server_opts = AwsIO.tls_ctx_options_init_default_server(
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+        AwsIO.ByteCursor(TEST_PEM_KEY),
+    )
+    @test server_opts isa AwsIO.TlsContextOptions
+    if server_opts isa AwsIO.TlsContextOptions
+        server_ctx = AwsIO.tls_context_new(server_opts)
+        @test server_ctx isa AwsIO.TlsContext
+        if server_ctx isa AwsIO.TlsContext
+            server_channel = AwsIO.Channel(event_loop, nothing)
+            server_slot = AwsIO.channel_slot_new!(server_channel)
+            server_handler = AwsIO.tls_server_handler_new(
+                AwsIO.TlsConnectionOptions(server_ctx),
+                server_slot,
+            )
+            @test server_handler isa AwsIO.AbstractChannelHandler
+            @test server_new_called[]
+            @test server_seen_slot[] === server_slot
+            @test server_seen_ud[] == 99
+            @test server_seen_handler[] === server_handler
+        end
+    end
 
     AwsIO._tls_byo_client_setup[] = nothing
     AwsIO._tls_byo_server_setup[] = nothing
