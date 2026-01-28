@@ -1799,6 +1799,15 @@ function handler_shutdown(
     if direction == ChannelDirection.READ && handler.read_state != TlsHandlerReadState.SHUT_DOWN_COMPLETE
         handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
     end
+    if !isempty(handler.pending_writes)
+        channel = slot.channel
+        if channel !== nothing
+            for pending in handler.pending_writes
+                channel_release_message_to_pool!(channel, pending.message)
+            end
+        end
+        empty!(handler.pending_writes)
+    end
     if !handler.negotiation_completed && handler.options.on_negotiation_result !== nothing
         _tls_invoke_on_event_loop(
             handler,

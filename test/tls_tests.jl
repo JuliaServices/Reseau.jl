@@ -655,6 +655,41 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+@testset "TLS shutdown clears pending writes" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    slot = AwsIO.channel_slot_new!(channel)
+    handler = AwsIO.TlsChannelHandler(AwsIO.TlsConnectionOptions(ctx))
+    handler.slot = slot
+    AwsIO.channel_slot_set_handler!(slot, handler)
+
+    msg = AwsIO.IoMessage(1)
+    msg_ref = Ref(msg.message_data)
+    AwsIO.byte_buf_write_from_whole_cursor(msg_ref, AwsIO.ByteCursor(UInt8[0x01]))
+    msg.message_data = msg_ref[]
+    AwsIO.handler_process_write_message(handler, slot, msg)
+    @test length(handler.pending_writes) == 1
+
+    AwsIO.handler_shutdown(handler, slot, AwsIO.ChannelDirection.WRITE, 0, false)
+    @test isempty(handler.pending_writes)
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 @testset "tls handler" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
