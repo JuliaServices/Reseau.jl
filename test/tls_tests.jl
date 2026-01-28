@@ -611,9 +611,12 @@ end
     tls_slot = AwsIO.channel_slot_new!(channel)
     AwsIO.channel_slot_insert_right!(left_slot, tls_slot)
 
-    client_handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(client_ctx), tls_slot)
+    client_opts = AwsIO.TlsConnectionOptions(client_ctx; server_name = "example.com")
+    client_handler = AwsIO.tls_client_handler_new(client_opts, tls_slot)
     @test client_handler isa AwsIO.TlsChannelHandler
     if client_handler isa AwsIO.TlsChannelHandler
+        client_opts.server_name = "changed"
+        @test client_handler.options.server_name == "example.com"
         @test client_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.NONE
         @test AwsIO.tls_client_handler_start_negotiation(client_handler) === nothing
         @test wait_for_handshake_status(client_handler, AwsIO.TlsNegotiationStatus.ONGOING)

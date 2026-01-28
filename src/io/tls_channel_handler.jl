@@ -1115,7 +1115,7 @@ tls_handler_protocol(handler::TlsChannelHandler) = handler.protocol
 tls_handler_server_name(handler::TlsChannelHandler) = handler.server_name
 
 function tls_channel_handler_new!(channel::Channel, options::TlsConnectionOptions; max_read_size::Integer = 16384)
-    handler = TlsChannelHandler(options; max_read_size = max_read_size)
+    handler = TlsChannelHandler(tls_connection_options_copy(options); max_read_size = max_read_size)
     slot = channel_slot_new!(channel)
     handler.slot = slot
     channel_slot_set_handler!(slot, handler)
@@ -1136,7 +1136,7 @@ function tls_client_handler_new(options::TlsConnectionOptions, slot::ChannelSlot
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    handler = TlsChannelHandler(options)
+    handler = TlsChannelHandler(tls_connection_options_copy(options))
     handler.slot = slot
     set_res = channel_slot_set_handler!(slot, handler)
     if set_res isa ErrorResult
@@ -1150,7 +1150,7 @@ function tls_server_handler_new(options::TlsConnectionOptions, slot::ChannelSlot
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    handler = TlsChannelHandler(options)
+    handler = TlsChannelHandler(tls_connection_options_copy(options))
     handler.slot = slot
     set_res = channel_slot_set_handler!(slot, handler)
     if set_res isa ErrorResult
@@ -1194,7 +1194,7 @@ function channel_setup_client_tls!(right_of_slot::ChannelSlot, options::TlsConne
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
 
-    handler = TlsChannelHandler(options)
+    handler = TlsChannelHandler(tls_connection_options_copy(options))
     slot = channel_slot_new!(channel)
     handler.slot = slot
 
