@@ -94,7 +94,12 @@ function CustomKeyOpHandler(on_key_operation; user_data = nothing)
 end
 
 custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
-custom_key_op_handler_release(::CustomKeyOpHandler) = nothing
+function custom_key_op_handler_release(handler::CustomKeyOpHandler)
+    if handler.user_data isa Pkcs11KeyOpState
+        _pkcs11_key_op_state_close!(handler.user_data)
+    end
+    return nothing
+end
 custom_key_op_handler_release(::Nothing) = nothing
 
 function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)
@@ -196,9 +201,25 @@ end
 mutable struct Pkcs11KeyOpState
     pkcs11_lib::Any
     user_pin::ByteCursor
-    slot_id::Union{UInt64, Nothing}
+    slot_id::UInt64
     token_label::ByteCursor
     private_key_object_label::ByteCursor
+    session_handle::CK_SESSION_HANDLE
+    private_key_handle::CK_OBJECT_HANDLE
+    private_key_type::CK_KEY_TYPE
+    lock::ReentrantLock
+    closed::Bool
+end
+
+function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)
+    state.closed && return nothing
+    state.closed = true
+    if state.session_handle != CK_SESSION_HANDLE(0)
+        _ = pkcs11_lib_close_session(state.pkcs11_lib, state.session_handle)
+    end
+    pkcs11_lib_release(state.pkcs11_lib)
+    state.session_handle = CK_SESSION_HANDLE(0)
+    return nothing
 end
 
 function _tls_pkcs11_cursor(value)::ByteCursor
@@ -225,11 +246,99 @@ function pkcs11_tls_op_handler_new(
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
 
-    state = Pkcs11KeyOpState(pkcs11_lib, user_pin, slot_id, token_label, private_key_object_label)
+    lib = pkcs11_lib_acquire(pkcs11_lib)
+
+    match_label = token_label.len > 0 ? token_label : nothing
+    slot_res = pkcs11_lib_find_slot_with_token(lib, slot_id, match_label)
+    if slot_res isa ErrorResult
+        pkcs11_lib_release(lib)
+        return slot_res
+    end
+    selected_slot = slot_res
+
+    session_res = pkcs11_lib_open_session(lib, selected_slot)
+    if session_res isa ErrorResult
+        pkcs11_lib_release(lib)
+        return session_res
+    end
+
+    pin_cursor = user_pin.len > 0 ? user_pin : nothing
+    login_res = pkcs11_lib_login_user(lib, session_res, pin_cursor)
+    if login_res isa ErrorResult
+        _ = pkcs11_lib_close_session(lib, session_res)
+        pkcs11_lib_release(lib)
+        return login_res
+    end
+
+    key_label = private_key_object_label.len > 0 ? private_key_object_label : nothing
+    key_res = pkcs11_lib_find_private_key(lib, session_res, key_label)
+    if key_res isa ErrorResult
+        _ = pkcs11_lib_close_session(lib, session_res)
+        pkcs11_lib_release(lib)
+        return key_res
+    end
+    key_handle, key_type = key_res
+
+    state = Pkcs11KeyOpState(
+        lib,
+        user_pin,
+        UInt64(selected_slot),
+        token_label,
+        private_key_object_label,
+        session_res,
+        key_handle,
+        key_type,
+        ReentrantLock(),
+        false,
+    )
+    finalizer(state) do s
+        _pkcs11_key_op_state_close!(s)
+    end
+
     on_op = (handler, operation) -> begin
         _ = handler
-        _ = state
-        tls_key_operation_complete_with_error!(operation, ERROR_UNIMPLEMENTED)
+        if state.closed
+            tls_key_operation_complete_with_error!(operation, ERROR_INVALID_STATE)
+            return
+        end
+        lock(state.lock) do
+            op_type = tls_key_operation_get_type(operation)
+            if op_type == TlsKeyOperationType.DECRYPT
+                input = tls_key_operation_get_input(operation)
+                res = pkcs11_lib_decrypt(
+                    state.pkcs11_lib,
+                    state.session_handle,
+                    state.private_key_handle,
+                    state.private_key_type,
+                    input,
+                )
+                if res isa ErrorResult
+                    tls_key_operation_complete_with_error!(operation, res.code)
+                else
+                    tls_key_operation_complete!(operation, byte_cursor_from_buf(res))
+                end
+            elseif op_type == TlsKeyOperationType.SIGN
+                input = tls_key_operation_get_input(operation)
+                digest_alg = tls_key_operation_get_digest_algorithm(operation)
+                sig_alg = tls_key_operation_get_signature_algorithm(operation)
+                res = pkcs11_lib_sign(
+                    state.pkcs11_lib,
+                    state.session_handle,
+                    state.private_key_handle,
+                    state.private_key_type,
+                    input,
+                    digest_alg,
+                    sig_alg,
+                )
+                if res isa ErrorResult
+                    tls_key_operation_complete_with_error!(operation, res.code)
+                else
+                    tls_key_operation_complete!(operation, byte_cursor_from_buf(res))
+                end
+            else
+                tls_key_operation_complete_with_error!(operation, ERROR_UNIMPLEMENTED)
+            end
+        end
     end
     return CustomKeyOpHandler(on_op; user_data = state)
 end
