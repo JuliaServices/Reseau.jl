@@ -609,7 +609,7 @@ end
 function _standard_get_bucket!(strategy::StandardRetryStrategy, partition_id)
     key = _standard_partition_key(partition_id)
     return lock(strategy.lock) do
-        return get!(strategy.buckets, key) do
+        return Base.get!(strategy.buckets, key) do
             RetryBucket(key, strategy.max_capacity)
         end
     end

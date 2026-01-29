@@ -46,6 +46,8 @@ include("common/common.jl")
 
 # --- io ---
 include("io/io.jl")
+include("io/aws_byte_helpers.jl")
+include("io/crypto_primitives.jl")
 include("io/async_stream.jl")
 include("io/tls_channel_handler.jl")
 include("io/alpn_handler.jl")

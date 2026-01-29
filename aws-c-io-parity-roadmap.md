@@ -299,9 +299,18 @@ Legend:
   - [x] Handle close_notify vs fatal alerts in stub TLS
 
 ### 12.3 Cryptographic primitives (LibAwsCal)
-- [ ] Confirm LibAwsCal exposes all required primitives
-- [ ] Implement wrappers for missing primitives (ECDHE, RSA, ECDSA, X25519, AES-GCM, CHACHA20-POLY1305, HKDF)
-- [ ] Implement constant-time operations for MAC/verify where required
+- [~] Confirm LibAwsCal exposes all required primitives
+  - [x] HKDF (SHA512), AES-GCM, ECC available
+  - [ ] RSA availability confirmed
+  - [ ] CHACHA20-POLY1305 and X25519 not exposed in LibAwsCal
+- [~] Implement wrappers for missing primitives (ECDHE, RSA, ECDSA, X25519, AES-GCM, CHACHA20-POLY1305, HKDF)
+  - [x] HKDF SHA512 wrapper (+ tests)
+  - [x] AES-GCM-256 wrapper (+ tests)
+  - [x] ECC sign/verify wrapper (+ tests)
+  - [ ] RSA wrapper + tests
+  - [ ] X25519 / CHACHA20-POLY1305 wrappers (blocked on LibAwsCal)
+- [~] Implement constant-time operations for MAC/verify where required
+  - [x] Constant-time compare helper in tls_channel_handler
 
 ### 12.4 X.509 and certificate validation
 - [ ] Certificate parsing (DER/PEM) and chain building
@@ -481,7 +490,8 @@ Legend:
 - [x] `statistics_handler_test.c` -> new `test/statistics_tests.jl`
 - [x] `alpn_handler_test.c` -> new `test/alpn_tests.jl`
 - [ ] `tls_handler_test.c` -> `test/tls_tests.jl` (extend)
-- [ ] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
+- [~] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
+  - [x] `test/crypto_primitives_tests.jl` (HKDF/AES-GCM/ECC)
 - [ ] `pkcs11_test.c` -> new `test/pkcs11_tests.jl`
 - [x] vcc suite (`tests/vcc/*`) -> new stress tests (schedule, cancel, subscribe, etc.)
 

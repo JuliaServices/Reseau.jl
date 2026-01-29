@@ -1482,17 +1482,6 @@ function tls_channel_handler_start_negotiation!(handler::TlsChannelHandler)
     return nothing
 end
 
-function _aws_byte_cursor_from_vec(vec::AbstractVector{UInt8})
-    if isempty(vec)
-        return LibAwsCommon.aws_byte_cursor(Csize_t(0), Ptr{UInt8}(C_NULL))
-    end
-    return LibAwsCommon.aws_byte_cursor(Csize_t(length(vec)), pointer(vec))
-end
-
-function _aws_byte_buf_from_vec(vec::AbstractVector{UInt8})
-    return LibAwsCommon.aws_byte_buf(Csize_t(0), pointer(vec), Csize_t(length(vec)), Ptr{LibAwsCommon.aws_allocator}(C_NULL))
-end
-
 function _derive_session_key(client_random::AbstractVector{UInt8}, server_random::AbstractVector{UInt8})
     _tls_cal_init_once()
 
