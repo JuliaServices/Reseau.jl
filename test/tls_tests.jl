@@ -338,16 +338,9 @@ end
         cert_file_path = cert_path,
     )
     res2 = AwsIO.tls_ctx_options_init_client_mtls_with_pkcs11(opts2)
-    @test res2 isa AwsIO.TlsContextOptions
-    if res2 isa AwsIO.TlsContextOptions
-        @test _buf_to_string(res2.certificate) == TEST_PEM_CERT
-        @test res2.custom_key_op_handler isa AwsIO.CustomKeyOpHandler
-        if res2.custom_key_op_handler isa AwsIO.CustomKeyOpHandler
-            op = AwsIO.TlsKeyOperation(AwsIO.ByteCursor("data"))
-            AwsIO.custom_key_op_handler_perform_operation(res2.custom_key_op_handler, op)
-            @test op.completed
-            @test op.error_code == AwsIO.ERROR_UNIMPLEMENTED
-        end
+    @test res2 isa AwsIO.ErrorResult
+    if res2 isa AwsIO.ErrorResult
+        @test res2.code == AwsIO.ERROR_INVALID_ARGUMENT
     end
 
     opts3 = AwsIO.TlsCtxPkcs11Options(
@@ -355,10 +348,9 @@ end
         cert_file_contents = TEST_PEM_CERT,
     )
     res3 = AwsIO.tls_ctx_options_init_client_mtls_with_pkcs11(opts3)
-    @test res3 isa AwsIO.TlsContextOptions
-    if res3 isa AwsIO.TlsContextOptions
-        @test _buf_to_string(res3.certificate) == TEST_PEM_CERT
-        @test res3.custom_key_op_handler isa AwsIO.CustomKeyOpHandler
+    @test res3 isa AwsIO.ErrorResult
+    if res3 isa AwsIO.ErrorResult
+        @test res3.code == AwsIO.ERROR_INVALID_ARGUMENT
     end
 end
 
@@ -1019,7 +1011,8 @@ end
         @test wait_for_handshake_status(handler, AwsIO.TlsNegotiationStatus.ONGOING)
         @test handler.stats.handshake_start_ns > 0
 
-        payload = rand(UInt8, AwsIO.TLS_NONCE_LEN)
+        payload = Memory{UInt8}(undef, AwsIO.TLS_NONCE_LEN)
+        rand!(payload)
         msg = AwsIO.IoMessage(AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN)
         msg_ref = Ref(msg.message_data)
         AwsIO.byte_buf_reserve(msg_ref, AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN)
@@ -1039,6 +1032,96 @@ end
         AwsIO.handler_process_read_message(handler, tls_slot, msg)
         @test wait_for_handshake_status(handler, AwsIO.TlsNegotiationStatus.SUCCESS)
         @test handler.stats.handshake_end_ns >= handler.stats.handshake_start_ns
+    end
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "TLS mTLS custom key op handshake" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    called = Ref(false)
+    op_ref = Ref{Any}(nothing)
+    key_handler = AwsIO.CustomKeyOpHandler(
+        (handler_obj, operation) -> begin
+            @test handler_obj isa AwsIO.CustomKeyOpHandler
+            @test AwsIO.tls_key_operation_get_type(operation) == AwsIO.TlsKeyOperationType.SIGN
+            @test AwsIO.tls_key_operation_get_digest_algorithm(operation) == AwsIO.TlsHashAlgorithm.SHA256
+            @test AwsIO.tls_key_operation_get_signature_algorithm(operation) == AwsIO.TlsSignatureAlgorithm.RSA
+            called[] = true
+            op_ref[] = operation
+        end,
+    )
+
+    opts = AwsIO.tls_ctx_options_init_client_mtls_with_custom_key_operations(
+        key_handler,
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+    )
+    @test opts isa AwsIO.TlsContextOptions
+    if opts isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(opts)
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    left_slot = AwsIO.channel_slot_new!(channel)
+    left_sink = SinkHandler()
+    AwsIO.channel_slot_set_handler!(left_slot, left_sink)
+
+    tls_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(left_slot, tls_slot)
+    right_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(tls_slot, right_slot)
+    right_sink = SinkHandler()
+    AwsIO.channel_slot_set_handler!(right_slot, right_sink)
+
+    tls_handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(ctx), tls_slot)
+    @test tls_handler isa AwsIO.TlsChannelHandler
+    if tls_handler isa AwsIO.TlsChannelHandler
+        @test AwsIO.tls_client_handler_start_negotiation(tls_handler) === nothing
+        @test wait_for_handshake_status(tls_handler, AwsIO.TlsNegotiationStatus.ONGOING)
+
+        payload = rand(UInt8, AwsIO.TLS_NONCE_LEN)
+        msg = AwsIO.IoMessage(AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN)
+        msg_ref = Ref(msg.message_data)
+        AwsIO.byte_buf_reserve(msg_ref, AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN)
+        msg.message_data = msg_ref[]
+        buf = msg.message_data
+        GC.@preserve buf payload begin
+            ptr = pointer(getfield(buf, :mem))
+            unsafe_store!(ptr, AwsIO.TLS_HANDSHAKE_SERVER_HELLO)
+            len = UInt32(AwsIO.TLS_NONCE_LEN)
+            unsafe_store!(ptr + 1, UInt8((len >> 24) & 0xFF))
+            unsafe_store!(ptr + 2, UInt8((len >> 16) & 0xFF))
+            unsafe_store!(ptr + 3, UInt8((len >> 8) & 0xFF))
+            unsafe_store!(ptr + 4, UInt8(len & 0xFF))
+            unsafe_copyto!(ptr + AwsIO.TLS_RECORD_HEADER_LEN, pointer(payload), AwsIO.TLS_NONCE_LEN)
+        end
+        setfield!(buf, :len, Csize_t(AwsIO.TLS_RECORD_HEADER_LEN + AwsIO.TLS_NONCE_LEN))
+        AwsIO.handler_process_read_message(tls_handler, tls_slot, msg)
+
+        @test wait_for_flag_tls(called)
+        @test tls_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.ONGOING
+
+        op = op_ref[]
+        @test op isa AwsIO.TlsKeyOperation
+        if op isa AwsIO.TlsKeyOperation
+            AwsIO.tls_key_operation_complete!(op, AwsIO.ByteCursor(UInt8[0x01]))
+            @test wait_for_handshake_status(tls_handler, AwsIO.TlsNegotiationStatus.SUCCESS)
+        end
     end
 
     AwsIO.event_loop_group_destroy!(elg)

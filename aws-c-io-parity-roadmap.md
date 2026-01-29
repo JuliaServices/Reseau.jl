@@ -373,7 +373,7 @@ Legend:
 - [x] Implement `pkcs11_tls_op_handler` parity
   - [x] Stub handler wiring + unimplemented op completion
   - [x] Slot/session/login/key lookup + sign/decrypt ops
-- [ ] Integrate with TLS handshake for mTLS
+- [x] Integrate with TLS handshake for mTLS
 
 ### 13.3 Tests
 - [ ] Port `pkcs11_test.c`

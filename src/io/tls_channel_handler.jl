@@ -15,6 +15,7 @@ const TLS_RECORD_HEADER_LEN = 5
 const TLS_DEFAULT_TIMEOUT_MS = 10_000
 const TLS_NONCE_LEN = 32
 const TLS_MAC_LEN = 32
+const TLS_SHA256_LEN = 32
 const TLS_SESSION_KEY_LEN = 32
 const TLS_ALERT_LEVEL_WARNING = 0x01
 const TLS_ALERT_LEVEL_FATAL = 0x02
@@ -242,6 +243,10 @@ function pkcs11_tls_op_handler_new(
         slot_id::Union{UInt64, Nothing},
     )::Union{CustomKeyOpHandler, ErrorResult}
     if pkcs11_lib === nothing
+        raise_error(ERROR_INVALID_ARGUMENT)
+        return ErrorResult(ERROR_INVALID_ARGUMENT)
+    end
+    if !(pkcs11_lib isa Pkcs11Lib)
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
@@ -1273,7 +1278,10 @@ mutable struct PendingWrite
     offset::Int
 end
 
-mutable struct TlsChannelHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
+mutable struct TlsChannelHandler{
+        SlotRef <: Union{ChannelSlot, Nothing},
+        KeyOpRef <: Union{TlsKeyOperation, Nothing},
+    } <: AbstractChannelHandler
     slot::SlotRef
     negotiation_completed::Bool
     pending_writes::Vector{PendingWrite}
@@ -1288,6 +1296,8 @@ mutable struct TlsChannelHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: Abst
     client_random::Memory{UInt8}
     server_random::Memory{UInt8}
     session_key::Memory{UInt8}
+    pending_key_operation::KeyOpRef
+    pending_key_input::Memory{UInt8}
     inbound_buf::Vector{UInt8}
     inbound_offset::Int
 end
@@ -1297,7 +1307,7 @@ function TlsChannelHandler(
         max_read_size::Integer = 16384,
     )
     server_name_buf = options.server_name === nothing ? null_buffer() : byte_buf_from_c_str(options.server_name)
-    return TlsChannelHandler{Union{ChannelSlot, Nothing}}(
+    return TlsChannelHandler{Union{ChannelSlot, Nothing}, Union{TlsKeyOperation, Nothing}}(
         nothing,
         false,
         PendingWrite[],
@@ -1311,6 +1321,8 @@ function TlsChannelHandler(
         server_name_buf,
         Memory{UInt8}(undef, 0),
         Memory{UInt8}(undef, 0),
+        Memory{UInt8}(undef, 0),
+        nothing,
         Memory{UInt8}(undef, 0),
         UInt8[],
         0,
@@ -1524,6 +1536,29 @@ function _hmac_sha256(key::AbstractVector{UInt8}, data::AbstractVector{UInt8})
     return out
 end
 
+function _sha256(data::AbstractVector{UInt8})
+    _tls_cal_init_once()
+    allocator = LibAwsCommon.default_aws_allocator()
+    input_cur = _aws_byte_cursor_from_vec(data)
+
+    out = Memory{UInt8}(undef, TLS_SHA256_LEN)
+    out_buf = _aws_byte_buf_from_vec(out)
+    if LibAwsCal.aws_sha256_compute(allocator, Ref(input_cur), Ref(out_buf), Csize_t(0)) != 0
+        return Memory{UInt8}(undef, 0)
+    end
+    return out
+end
+
+function _tls_handshake_digest(handler::TlsChannelHandler)
+    if length(handler.client_random) != TLS_NONCE_LEN || length(handler.server_random) != TLS_NONCE_LEN
+        return Memory{UInt8}(undef, 0)
+    end
+    combined = Memory{UInt8}(undef, TLS_NONCE_LEN * 2)
+    copyto!(combined, 1, handler.client_random, 1, TLS_NONCE_LEN)
+    copyto!(combined, TLS_NONCE_LEN + 1, handler.server_random, 1, TLS_NONCE_LEN)
+    return _sha256(combined)
+end
+
 function _xor_with_key(data::AbstractVector{UInt8}, key::AbstractVector{UInt8})
     out = Memory{UInt8}(undef, length(data))
     key_len = length(key)
@@ -1571,6 +1606,8 @@ function _tls_report_error!(handler::TlsChannelHandler, error_code::Int, message
     if !handler.negotiation_completed
         handler.state = TlsHandshakeState.FAILED
         _tls_mark_handshake_end!(handler, TlsNegotiationStatus.FAILURE)
+        handler.pending_key_operation = nothing
+        handler.pending_key_input = Memory{UInt8}(undef, 0)
         if handler.options.on_negotiation_result !== nothing && handler.slot !== nothing
             _tls_invoke_on_event_loop(
                 handler,
@@ -1609,6 +1646,69 @@ function _tls_timeout_task(task::ChannelTask, handler::TlsChannelHandler, status
     if handler.slot !== nothing && handler.slot.channel !== nothing
         channel_shutdown!(handler.slot.channel, ERROR_IO_TLS_NEGOTIATION_TIMEOUT)
     end
+    return nothing
+end
+
+function _tls_signature_algorithm_for_key_handler(handler::CustomKeyOpHandler)
+    if handler.user_data isa Pkcs11KeyOpState
+        return handler.user_data.private_key_type == CKK_EC ?
+            TlsSignatureAlgorithm.ECDSA :
+            TlsSignatureAlgorithm.RSA
+    end
+    return TlsSignatureAlgorithm.RSA
+end
+
+function _tls_custom_key_op_complete(handler::TlsChannelHandler, operation::TlsKeyOperation, error_code::Int)
+    if handler.pending_key_operation !== operation
+        return nothing
+    end
+    handler.pending_key_operation = nothing
+    handler.pending_key_input = Memory{UInt8}(undef, 0)
+    if error_code != AWS_OP_SUCCESS
+        _tls_report_error!(handler, error_code, "TLS key operation failed")
+        return nothing
+    end
+    if handler.state == TlsHandshakeState.FAILED || handler.negotiation_completed
+        return nothing
+    end
+    _tls_mark_negotiated!(handler)
+    return nothing
+end
+
+function _tls_custom_key_op_on_complete(operation::TlsKeyOperation, error_code::Int, user_data)
+    handler = user_data
+    if handler isa TlsChannelHandler
+        _tls_invoke_on_event_loop(handler, _tls_custom_key_op_complete, handler, operation, error_code)
+    end
+    return nothing
+end
+
+function _tls_start_custom_key_operation!(handler::TlsChannelHandler)
+    custom_handler = handler.options.ctx.options.custom_key_op_handler
+    if !(custom_handler isa CustomKeyOpHandler)
+        _tls_report_error!(handler, ERROR_INVALID_STATE, "Invalid custom key op handler")
+        return nothing
+    end
+
+    digest = _tls_handshake_digest(handler)
+    if isempty(digest)
+        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "TLS digest failed")
+        return nothing
+    end
+
+    signature_algorithm = _tls_signature_algorithm_for_key_handler(custom_handler)
+    operation = TlsKeyOperation(
+        ByteCursor(digest);
+        operation_type = TlsKeyOperationType.SIGN,
+        signature_algorithm = signature_algorithm,
+        digest_algorithm = TlsHashAlgorithm.SHA256,
+        on_complete = _tls_custom_key_op_on_complete,
+        user_data = handler,
+    )
+    handler.pending_key_operation = operation
+    handler.pending_key_input = digest
+
+    custom_key_op_handler_perform_operation(custom_handler, operation)
     return nothing
 end
 
@@ -1803,6 +1903,10 @@ function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, 
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Session key derivation failed")
             return nothing
         end
+        if handler.options.ctx.options.custom_key_op_handler !== nothing
+            _tls_start_custom_key_operation!(handler)
+            return nothing
+        end
         _tls_mark_negotiated!(handler)
         return nothing
     end
@@ -1820,6 +1924,10 @@ function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, 
         handler.session_key = _derive_session_key(handler.client_random, handler.server_random)
         if isempty(handler.session_key)
             _tls_report_error!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE, "Session key derivation failed")
+            return nothing
+        end
+        if handler.options.ctx.options.custom_key_op_handler !== nothing
+            _tls_start_custom_key_operation!(handler)
             return nothing
         end
         _tls_mark_negotiated!(handler)
@@ -2074,6 +2182,8 @@ function handler_shutdown(
             handler.options.user_data,
         )
     end
+    handler.pending_key_operation = nothing
+    handler.pending_key_input = Memory{UInt8}(undef, 0)
     channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end
