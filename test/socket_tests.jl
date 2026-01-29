@@ -978,3 +978,148 @@ end
         AwsIO.socket_close(sock_val)
     end
 end
+
+@testset "incoming udp socket errors" begin
+    if Sys.iswindows()
+        @test true
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.IPV4)
+        sock = AwsIO.socket_init(opts)
+        sock_val = sock isa AwsIO.Socket ? sock : nothing
+        @test sock_val !== nothing
+        if sock_val === nothing
+            return
+        end
+
+        endpoint = AwsIO.SocketEndpoint("127.0", 80)
+        res = AwsIO.socket_bind(sock_val, AwsIO.SocketBindOptions(endpoint))
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+        AwsIO.socket_close(sock_val)
+    end
+end
+
+@testset "outgoing local socket errors" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+        sock = AwsIO.socket_init(opts)
+        sock_val = sock isa AwsIO.Socket ? sock : nothing
+        @test sock_val !== nothing
+        if sock_val === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        endpoint = AwsIO.SocketEndpoint()
+        AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
+        # Ensure path does not exist
+        local_path = AwsIO.get_address(endpoint)
+        isfile(local_path) && rm(local_path; force = true)
+
+        err_code = Ref{Int}(0)
+        done = Ref{Bool}(false)
+        connect_opts = AwsIO.SocketConnectOptions(
+            endpoint;
+            event_loop = el_val,
+            on_connection_result = (sock, err, ud) -> begin
+                err_code[] = err
+                done[] = true
+                return nothing
+            end,
+        )
+
+        res = AwsIO.socket_connect(sock_val, connect_opts)
+        if res isa AwsIO.ErrorResult
+            err_code[] = res.code
+            done[] = true
+        end
+
+        @test wait_for_flag(done)
+        @test err_code[] == AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
+            err_code[] == AwsIO.ERROR_FILE_INVALID_PATH
+
+        AwsIO.socket_close(sock_val)
+        AwsIO.event_loop_destroy!(el_val)
+    end
+end
+
+@testset "outgoing tcp socket error" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        temp = AwsIO.socket_init(opts)
+        temp_val = temp isa AwsIO.Socket ? temp : nothing
+        @test temp_val !== nothing
+        if temp_val === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        port = 0
+        try
+            @test AwsIO.socket_bind(temp_val, AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))) === nothing
+            bound = AwsIO.socket_get_bound_address(temp_val)
+            if bound isa AwsIO.SocketEndpoint
+                port = Int(bound.port)
+            end
+        finally
+            AwsIO.socket_close(temp_val)
+        end
+
+        if port == 0
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        sock = AwsIO.socket_init(opts)
+        sock_val = sock isa AwsIO.Socket ? sock : nothing
+        @test sock_val !== nothing
+        if sock_val === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        err_code = Ref{Int}(0)
+        done = Ref{Bool}(false)
+        connect_opts = AwsIO.SocketConnectOptions(
+            AwsIO.SocketEndpoint("127.0.0.1", port);
+            event_loop = el_val,
+            on_connection_result = (sock, err, ud) -> begin
+                err_code[] = err
+                done[] = true
+                return nothing
+            end,
+        )
+
+        res = AwsIO.socket_connect(sock_val, connect_opts)
+        if res isa AwsIO.ErrorResult
+            err_code[] = res.code
+            done[] = true
+        end
+
+        @test wait_for_flag(done)
+        @test err_code[] == AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED
+
+        AwsIO.socket_close(sock_val)
+        AwsIO.event_loop_destroy!(el_val)
+    end
+end
