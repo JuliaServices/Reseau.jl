@@ -1546,6 +1546,94 @@ end
     end
 end
 
+@testset "local socket connect before accept" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+        server = AwsIO.socket_init(opts)
+        server_socket = server isa AwsIO.Socket ? server : nothing
+        @test server_socket !== nothing
+
+        client_socket = nothing
+        accepted = Ref{Any}(nothing)
+        endpoint = AwsIO.SocketEndpoint()
+        AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
+        local_path = AwsIO.get_address(endpoint)
+
+        try
+            if server_socket === nothing
+                return
+            end
+
+            bind_opts = AwsIO.SocketBindOptions(endpoint)
+            @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
+            @test AwsIO.socket_listen(server_socket, 1024) === nothing
+
+            accept_err = Ref{Int}(0)
+            accept_done = Ref(false)
+            connect_err = Ref{Int}(0)
+            connect_done = Ref(false)
+
+            client = AwsIO.socket_init(opts)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                endpoint;
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> begin
+                    connect_err[] = err
+                    connect_done[] = true
+                    return nothing
+                end,
+            )
+
+            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+
+            on_accept = (listener, err, new_sock, ud) -> begin
+                accept_err[] = err
+                accepted[] = new_sock
+                accept_done[] = true
+                return nothing
+            end
+
+            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+
+            @test wait_for_flag(connect_done)
+            @test wait_for_flag(accept_done)
+            @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+            @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_cleanup!(client_socket)
+            end
+            if accepted[] !== nothing
+                AwsIO.socket_cleanup!(accepted[])
+            end
+            if server_socket !== nothing
+                AwsIO.socket_cleanup!(server_socket)
+            end
+            AwsIO.event_loop_destroy!(el_val)
+            if !isempty(local_path) && isfile(local_path)
+                rm(local_path; force = true)
+            end
+        end
+    end
+end
+
 @testset "udp socket communication" begin
     if Sys.iswindows()
         @test true
