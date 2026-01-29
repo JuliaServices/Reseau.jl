@@ -25,17 +25,30 @@ const CKR_CRYPTOKI_ALREADY_INITIALIZED = CK_RV(0x00000191)
 const CKR_FUNCTION_NOT_SUPPORTED = CK_RV(0x00000054)
 const CKR_USER_ALREADY_LOGGED_IN = CK_RV(0x00000100)
 const CKU_USER = CK_ULONG(0x1)
+const CKU_SO = CK_ULONG(0x0)
 const CKF_OS_LOCKING_OK = CK_FLAGS(0x00000002)
 const CKF_SERIAL_SESSION = CK_FLAGS(0x00000004)
+const CKF_RW_SESSION = CK_FLAGS(0x00000002)
+const CKF_TOKEN_INITIALIZED = CK_FLAGS(0x00000400)
 const CK_TRUE = CK_BBOOL(1)
+const CK_FALSE = CK_BBOOL(0)
 const CK_INVALID_HANDLE = CK_OBJECT_HANDLE(0)
 const CKO_PRIVATE_KEY = CK_OBJECT_CLASS(0x00000003)
 const CKA_CLASS = CK_ATTRIBUTE_TYPE(0x00000000)
+const CKA_SIGN = CK_ATTRIBUTE_TYPE(0x00000108)
+const CKA_VERIFY = CK_ATTRIBUTE_TYPE(0x00000105)
+const CKA_MODULUS_BITS = CK_ATTRIBUTE_TYPE(0x00000120)
 const CKA_LABEL = CK_ATTRIBUTE_TYPE(0x00000003)
+const CKA_ID = CK_ATTRIBUTE_TYPE(0x00000102)
+const CKA_EC_PARAMS = CK_ATTRIBUTE_TYPE(0x00000180)
+const CKA_EXTRACTABLE = CK_ATTRIBUTE_TYPE(0x00000162)
 const CKA_KEY_TYPE = CK_ATTRIBUTE_TYPE(0x00000100)
 const CKK_RSA = CK_KEY_TYPE(0x00000000)
 const CKK_EC = CK_KEY_TYPE(0x00000003)
+const CKK_GENERIC_SECRET = CK_KEY_TYPE(0x00000010)
 const CKM_RSA_PKCS = CK_MECHANISM_TYPE(0x00000001)
+const CKM_RSA_PKCS_KEY_PAIR_GEN = CK_MECHANISM_TYPE(0x00000000)
+const CKM_EC_KEY_PAIR_GEN = CK_MECHANISM_TYPE(0x00001040)
 const CKM_ECDSA = CK_MECHANISM_TYPE(0x00001041)
 
 const TLS_HASH_SHA1 = UInt8(1)
@@ -1033,7 +1046,11 @@ function pkcs11_asn1_enc_ubigint(
     )::Union{Nothing, ErrorResult}
     cur = bigint
     while cur.len > 0 && cursor_getbyte(cur, 1) == 0
-        cur = ByteCursor(cur.len - 1, memref_advance(cur.ptr, 1))
+        if cur.len == 1
+            cur = null_cursor()
+        else
+            cur = ByteCursor(cur.len - 1, memref_advance(cur.ptr, 1))
+        end
     end
     add_leading_zero = cur.len == 0 || (cursor_getbyte(cur, 1) & 0x80) != 0
     actual_len = Int(cur.len) + (add_leading_zero ? 1 : 0)
