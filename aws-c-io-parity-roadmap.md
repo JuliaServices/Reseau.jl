@@ -134,7 +134,8 @@ Legend:
   - [x] Stub API returns ERROR_PLATFORM_NOT_SUPPORTED
 
 ### 3.4 Windows sockets
-- [ ] Implement winsock init/cleanup (source/windows/winsock_init.c)
+- [~] Implement winsock init/cleanup (source/windows/winsock_init.c)
+  - [x] Stub winsock init helpers return ERROR_PLATFORM_NOT_SUPPORTED
 - [ ] Implement IOCP socket backend (source/windows/iocp/socket.c)
 - [ ] Socket options parity and error mapping
 - [ ] Accept/connect/read/write parity with IOCP

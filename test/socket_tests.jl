@@ -713,6 +713,24 @@ end
     nw_sock isa AwsIO.ErrorResult && @test nw_sock.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
 end
 
+@testset "winsock stubs" begin
+    res = AwsIO.winsock_check_and_init!()
+    if Sys.iswindows()
+        @test res isa AwsIO.ErrorResult || res === nothing
+    else
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+    end
+
+    res = AwsIO.winsock_get_connectex_fn()
+    @test res isa AwsIO.ErrorResult || res isa Ptr
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+
+    res = AwsIO.winsock_get_acceptex_fn()
+    @test res isa AwsIO.ErrorResult || res isa Ptr
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+end
+
 @testset "socket nonblocking cloexec" begin
     if Sys.iswindows()
         @test true
