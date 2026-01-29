@@ -845,3 +845,76 @@ end
         end
     end
 end
+
+@testset "bind on zero port tcp ipv4" begin
+    if Sys.iswindows()
+        @test true
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        sock = AwsIO.socket_init(opts)
+        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        @test socket_val !== nothing
+        if socket_val === nothing
+            return
+        end
+
+        res = AwsIO.socket_get_bound_address(socket_val)
+        @test res isa AwsIO.ErrorResult
+
+        endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
+        @test AwsIO.socket_bind(socket_val, AwsIO.SocketBindOptions(endpoint)) === nothing
+        @test AwsIO.socket_listen(socket_val, 1024) === nothing
+
+        bound = AwsIO.socket_get_bound_address(socket_val)
+        @test bound isa AwsIO.SocketEndpoint
+        if bound isa AwsIO.SocketEndpoint
+            @test bound.port > 0
+            @test AwsIO.get_address(bound) == "127.0.0.1"
+        end
+
+        bound2 = AwsIO.socket_get_bound_address(socket_val)
+        @test bound2 isa AwsIO.SocketEndpoint
+        if bound2 isa AwsIO.SocketEndpoint && bound isa AwsIO.SocketEndpoint
+            @test bound2.port == bound.port
+            @test AwsIO.get_address(bound2) == AwsIO.get_address(bound)
+        end
+
+        AwsIO.socket_close(socket_val)
+    end
+end
+
+@testset "bind on zero port udp ipv4" begin
+    if Sys.iswindows()
+        @test true
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.IPV4)
+        sock = AwsIO.socket_init(opts)
+        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        @test socket_val !== nothing
+        if socket_val === nothing
+            return
+        end
+
+        res = AwsIO.socket_get_bound_address(socket_val)
+        @test res isa AwsIO.ErrorResult
+
+        endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
+        @test AwsIO.socket_bind(socket_val, AwsIO.SocketBindOptions(endpoint)) === nothing
+
+        bound = AwsIO.socket_get_bound_address(socket_val)
+        @test bound isa AwsIO.SocketEndpoint
+        if bound isa AwsIO.SocketEndpoint
+            @test bound.port > 0
+            @test AwsIO.get_address(bound) == "127.0.0.1"
+        end
+
+        bound2 = AwsIO.socket_get_bound_address(socket_val)
+        @test bound2 isa AwsIO.SocketEndpoint
+        if bound2 isa AwsIO.SocketEndpoint && bound isa AwsIO.SocketEndpoint
+            @test bound2.port == bound.port
+            @test AwsIO.get_address(bound2) == AwsIO.get_address(bound)
+        end
+
+        AwsIO.socket_close(socket_val)
+    end
+end
