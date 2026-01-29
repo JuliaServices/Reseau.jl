@@ -355,9 +355,10 @@ Legend:
   - [x] Echo + backpressure flow (read_write handler)
   - [x] Shutdown with cached data (window update after shutdown)
   - [x] TLS statistics handler integration
-- [~] Port `byo_crypto_test.c`
+- [x] Port `byo_crypto_test.c`
   - [x] BYO handler wiring + start negotiation hook
   - [x] BYO server handler wiring
+  - [x] Add BYO crypto integration test (`test/crypto_tests.jl`)
 - [x] Port TLS server tests (use provided test certs/resources)
 - [x] Add ALPN test coverage (`alpn_handler_test.c`)
 - [x] Add TLS ctx options coverage (mTLS + PKCS#12)
@@ -490,8 +491,8 @@ Legend:
 - [x] `statistics_handler_test.c` -> new `test/statistics_tests.jl`
 - [x] `alpn_handler_test.c` -> new `test/alpn_tests.jl`
 - [ ] `tls_handler_test.c` -> `test/tls_tests.jl` (extend)
-- [~] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
-  - [x] `test/crypto_primitives_tests.jl` (HKDF/AES-GCM/ECC)
+- [x] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
+  - [x] `test/crypto_primitives_tests.jl` (HKDF/AES-GCM/ECC/RSA)
 - [ ] `pkcs11_test.c` -> new `test/pkcs11_tests.jl`
 - [x] vcc suite (`tests/vcc/*`) -> new stress tests (schedule, cancel, subscribe, etc.)
 
