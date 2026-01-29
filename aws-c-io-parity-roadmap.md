@@ -405,7 +405,8 @@ Legend:
 ### 14.1 PKI utils
 - [~] Implement certificate + key loading helpers (pki_utils)
 - [x] Default trust store path detection (Linux/BSD)
-- [ ] Platform-specific helpers (darwin_pki_utils, windows_pki_utils)
+- [~] Platform-specific helpers (darwin_pki_utils, windows_pki_utils)
+  - [x] Stub APIs return ERROR_PLATFORM_NOT_SUPPORTED
 
 ### 14.2 Tests
 - [ ] Add PKI-focused tests (use aws-c-io test resources)
