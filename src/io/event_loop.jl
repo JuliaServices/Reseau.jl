@@ -462,7 +462,23 @@ function event_loop_group_acquire!(elg::EventLoopGroup)
     return elg
 end
 
+function _event_loop_group_called_from_loop_thread(elg::EventLoopGroup)::Bool
+    for i in 1:length(elg.event_loops)
+        loop = elg.event_loops[i]
+        loop === nothing && continue
+        if event_loop_thread_is_callers_thread(loop)
+            return true
+        end
+    end
+    return false
+end
+
 function event_loop_group_release!(elg::EventLoopGroup)
+    if _event_loop_group_called_from_loop_thread(elg)
+        Threads.@spawn event_loop_group_destroy!(elg)
+        return nothing
+    end
+    event_loop_group_destroy!(elg)
     return nothing
 end
 

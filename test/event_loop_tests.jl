@@ -1477,6 +1477,58 @@ end
         end
     end
 
+    @testset "Event loop group async shutdown" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                shutdown_ch = Channel{Bool}(1)
+                shutdown_opts = AwsIO.shutdown_callback_options(
+                    (ud) -> begin
+                        put!(shutdown_ch, true)
+                        return nothing
+                    end,
+                    nothing,
+                )
+
+                opts = AwsIO.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts)
+                elg = AwsIO.event_loop_group_new(opts)
+                @test !(elg isa AwsIO.ErrorResult)
+                if elg isa AwsIO.ErrorResult
+                    return
+                end
+
+                done = false
+                try
+                    el = AwsIO.event_loop_group_get_next_loop(elg)
+                    @test el !== nothing
+                    if el === nothing
+                        return
+                    end
+
+                    release_task = AwsIO.ScheduledTask(
+                        (ctx, status) -> begin
+                            AwsIO.event_loop_group_release!(ctx.elg)
+                            return nothing
+                        end,
+                        (elg = elg,);
+                        type_tag = "elg_release_async",
+                    )
+                    AwsIO.event_loop_schedule_task_now!(el, release_task)
+                    done = _wait_for_channel(shutdown_ch)
+                    @test done
+                finally
+                    if !done
+                        AwsIO.event_loop_group_destroy!(elg)
+                    end
+                end
+            end
+        end
+    end
+
     @testset "Event loop creation types" begin
         if Sys.iswindows()
             @test true
