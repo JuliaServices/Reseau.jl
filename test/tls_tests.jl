@@ -1966,3 +1966,153 @@ end
         AwsIO.g_aws_channel_max_fragment_size[] = prev_max
     end
 end
+
+@testset "TLS statistics handler integration" begin
+    if Sys.iswindows() || Threads.nthreads(:interactive) <= 1
+        @test true
+        return
+    end
+
+    mutable struct TestTlsStatisticsHandler <: AwsIO.StatisticsHandler
+        report_ms::UInt64
+        results::Channel{Tuple{AwsIO.StatisticsSampleInterval, Vector{Any}}}
+    end
+
+    AwsIO.report_interval_ms(handler::TestTlsStatisticsHandler) = handler.report_ms
+    AwsIO.close!(::TestTlsStatisticsHandler) = nothing
+
+    function AwsIO.process_statistics(
+            handler::TestTlsStatisticsHandler,
+            interval::AwsIO.StatisticsSampleInterval,
+            stats_list::AwsIO.ArrayList,
+        )
+        stats = Vector{Any}(undef, length(stats_list))
+        for i in 1:length(stats_list)
+            entry = stats_list.data[i]
+            if entry isa AwsIO.SocketHandlerStatistics
+                stats[i] = AwsIO.SocketHandlerStatistics(entry.category, entry.bytes_read, entry.bytes_written)
+            elseif entry isa AwsIO.TlsHandlerStatistics
+                stats[i] = AwsIO.TlsHandlerStatistics(
+                    entry.category,
+                    entry.handshake_start_ns,
+                    entry.handshake_end_ns,
+                    entry.handshake_status,
+                )
+            else
+                stats[i] = entry
+            end
+        end
+        put!(handler.results, (interval, stats))
+        return nothing
+    end
+
+    function wait_for_stats(ch::Channel; timeout_ns::Int = 5_000_000_000)
+        deadline = Base.time_ns() + timeout_ns
+        while Base.time_ns() < deadline
+            isready(ch) && return true
+            sleep(0.01)
+        end
+        return isready(ch)
+    end
+
+    mutable struct FakeSocketStatsHandler <: AwsIO.AbstractChannelHandler
+        stats::AwsIO.SocketHandlerStatistics
+    end
+
+    FakeSocketStatsHandler() = FakeSocketStatsHandler(AwsIO.SocketHandlerStatistics())
+
+    AwsIO.handler_process_read_message(::FakeSocketStatsHandler, ::AwsIO.ChannelSlot, ::AwsIO.IoMessage) = nothing
+    AwsIO.handler_process_write_message(::FakeSocketStatsHandler, ::AwsIO.ChannelSlot, ::AwsIO.IoMessage) = nothing
+    AwsIO.handler_increment_read_window(::FakeSocketStatsHandler, ::AwsIO.ChannelSlot, ::Csize_t) = nothing
+    AwsIO.handler_initial_window_size(::FakeSocketStatsHandler) = Csize_t(0)
+    AwsIO.handler_message_overhead(::FakeSocketStatsHandler) = Csize_t(0)
+    AwsIO.handler_destroy(::FakeSocketStatsHandler) = nothing
+
+    function AwsIO.handler_shutdown(
+            ::FakeSocketStatsHandler,
+            slot::AwsIO.ChannelSlot,
+            direction::AwsIO.ChannelDirection.T,
+            error_code::Int,
+            free_scarce_resources_immediately::Bool,
+        )
+        AwsIO.channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
+        return nothing
+    end
+
+    function AwsIO.handler_reset_statistics(handler::FakeSocketStatsHandler)::Nothing
+        AwsIO.crt_statistics_socket_reset!(handler.stats)
+        return nothing
+    end
+
+    AwsIO.handler_gather_statistics(handler::FakeSocketStatsHandler) = handler.stats
+
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    event_loop === nothing && return
+
+    channel = AwsIO.Channel(event_loop, nothing)
+
+    socket_handler = FakeSocketStatsHandler()
+    socket_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_set_handler!(socket_slot, socket_handler)
+
+    client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
+    @test client_ctx isa AwsIO.TlsContext
+    client_ctx isa AwsIO.TlsContext || return
+    tls_handler = AwsIO.TlsChannelHandler(AwsIO.TlsConnectionOptions(client_ctx))
+    tls_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(socket_slot, tls_slot)
+    AwsIO.channel_slot_set_handler!(tls_slot, tls_handler)
+
+    AwsIO.channel_setup_complete!(channel)
+
+    stats_results = Channel{Tuple{AwsIO.StatisticsSampleInterval, Vector{Any}}}(1)
+    stats_handler = TestTlsStatisticsHandler(UInt64(50), stats_results)
+
+    set_task = AwsIO.ScheduledTask(
+        (ch, _status) -> AwsIO.channel_set_statistics_handler!(ch, stats_handler),
+        channel;
+        type_tag = "set_tls_stats",
+    )
+    AwsIO.event_loop_schedule_task_now!(event_loop, set_task)
+
+    update_task = AwsIO.ScheduledTask(
+        (_ctx, _status) -> begin
+            socket_handler.stats.bytes_read = 111
+            socket_handler.stats.bytes_written = 222
+            tls_handler.stats.handshake_status = AwsIO.TlsNegotiationStatus.SUCCESS
+            return nothing
+        end,
+        nothing;
+        type_tag = "update_tls_stats",
+    )
+    AwsIO.event_loop_schedule_task_now!(event_loop, update_task)
+
+    @test wait_for_stats(stats_results)
+    interval, stats_vec = take!(stats_results)
+    @test interval.end_time_ms >= interval.begin_time_ms
+
+    socket_stats = nothing
+    tls_stats = nothing
+    for entry in stats_vec
+        if entry isa AwsIO.SocketHandlerStatistics
+            socket_stats = entry
+        elseif entry isa AwsIO.TlsHandlerStatistics
+            tls_stats = entry
+        end
+    end
+
+    @test socket_stats isa AwsIO.SocketHandlerStatistics
+    @test tls_stats isa AwsIO.TlsHandlerStatistics
+    if socket_stats isa AwsIO.SocketHandlerStatistics
+        @test socket_stats.bytes_read > 0
+        @test socket_stats.bytes_written > 0
+    end
+    if tls_stats isa AwsIO.TlsHandlerStatistics
+        @test tls_stats.handshake_status == AwsIO.TlsNegotiationStatus.SUCCESS
+    end
+
+    AwsIO.channel_shutdown!(channel, AwsIO.AWS_OP_SUCCESS)
+    AwsIO.event_loop_group_destroy!(elg)
+end
