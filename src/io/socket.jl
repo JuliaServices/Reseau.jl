@@ -483,8 +483,24 @@ function socket_get_default_impl_type()::SocketImplType.T
     end
 end
 
+@inline function _socket_domain_valid(domain::SocketDomain.T)::Bool
+    return domain == SocketDomain.IPV4 ||
+        domain == SocketDomain.IPV6 ||
+        domain == SocketDomain.LOCAL ||
+        domain == SocketDomain.VSOCK
+end
+
+@inline function _socket_vsock_port_any(port::Integer)::Bool
+    return port == -1 || port == typemax(UInt32)
+end
+
 # Validate port for connect operation
 function socket_validate_port_for_connect(port::Integer, domain::SocketDomain.T)::Union{Nothing, ErrorResult}
+    if !_socket_domain_valid(domain)
+        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+    end
+
     # Local domain doesn't use ports
     if domain == SocketDomain.LOCAL
         return nothing
@@ -492,6 +508,10 @@ function socket_validate_port_for_connect(port::Integer, domain::SocketDomain.T)
 
     # VSOCK domain doesn't use ports in the same way
     if domain == SocketDomain.VSOCK
+        if _socket_vsock_port_any(port) || port < 0 || port > 0x7fffffff
+            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        end
         return nothing
     end
 
@@ -507,6 +527,11 @@ end
 
 # Validate port for bind operation
 function socket_validate_port_for_bind(port::Integer, domain::SocketDomain.T)::Union{Nothing, ErrorResult}
+    if !_socket_domain_valid(domain)
+        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+    end
+
     # Local domain doesn't use ports
     if domain == SocketDomain.LOCAL
         return nothing
@@ -514,6 +539,13 @@ function socket_validate_port_for_bind(port::Integer, domain::SocketDomain.T)::U
 
     # VSOCK domain doesn't use ports in the same way
     if domain == SocketDomain.VSOCK
+        if _socket_vsock_port_any(port)
+            return nothing
+        end
+        if port < 0 || port > 0x7fffffff
+            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        end
         return nothing
     end
 
@@ -620,7 +652,55 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
     left_parts = isempty(parts[1]) ? String[] : split(parts[1], ':')
     right_parts = length(parts) == 2 && !isempty(parts[2]) ? split(parts[2], ':') : String[]
 
-    total_parts = length(left_parts) + length(right_parts)
+    if length(left_parts) > 1 && any(part -> occursin('.', part), left_parts[1:end-1])
+        logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: invalid IPv4 tail in $src")
+        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+    end
+    if length(right_parts) > 1 && any(part -> occursin('.', part), right_parts[1:end-1])
+        logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: invalid IPv4 tail in $src")
+        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+    end
+
+    ipv4_bytes = nothing
+    ipv4_in_left = !isempty(left_parts) && occursin('.', left_parts[end])
+    ipv4_in_right = !isempty(right_parts) && occursin('.', right_parts[end])
+
+    if ipv4_in_left && ipv4_in_right
+        logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: multiple IPv4 tails in $src")
+        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+    end
+
+    if ipv4_in_left
+        ipv4_res = parse_ipv4_address(left_parts[end])
+        if ipv4_res isa ErrorResult
+            return ipv4_res
+        end
+        ipv4_val = ipv4_res
+        ipv4_bytes = Memory{UInt8}(undef, 4)
+        ipv4_bytes[1] = UInt8((ipv4_val >> 24) & 0xff)
+        ipv4_bytes[2] = UInt8((ipv4_val >> 16) & 0xff)
+        ipv4_bytes[3] = UInt8((ipv4_val >> 8) & 0xff)
+        ipv4_bytes[4] = UInt8(ipv4_val & 0xff)
+        left_parts = left_parts[1:end-1]
+    elseif ipv4_in_right
+        ipv4_res = parse_ipv4_address(right_parts[end])
+        if ipv4_res isa ErrorResult
+            return ipv4_res
+        end
+        ipv4_val = ipv4_res
+        ipv4_bytes = Memory{UInt8}(undef, 4)
+        ipv4_bytes[1] = UInt8((ipv4_val >> 24) & 0xff)
+        ipv4_bytes[2] = UInt8((ipv4_val >> 16) & 0xff)
+        ipv4_bytes[3] = UInt8((ipv4_val >> 8) & 0xff)
+        ipv4_bytes[4] = UInt8(ipv4_val & 0xff)
+        right_parts = right_parts[1:end-1]
+    end
+
+    ipv4_groups = ipv4_bytes === nothing ? 0 : 2
+    total_parts = length(left_parts) + length(right_parts) + ipv4_groups
     if total_parts > 8 || (length(parts) == 1 && total_parts != 8)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: wrong number of parts in $src")
         raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
@@ -661,8 +741,18 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
         byte_idx += 2
     end
 
+    if ipv4_bytes !== nothing
+        addr[byte_idx] = ipv4_bytes[1]
+        addr[byte_idx + 1] = ipv4_bytes[2]
+        addr[byte_idx + 2] = ipv4_bytes[3]
+        addr[byte_idx + 3] = ipv4_bytes[4]
+        byte_idx += 4
+    end
+
     # Append to buffer
-    byte_buf_append!(dst, addr)
+    start_idx = Int(dst.len) + 1
+    copyto!(dst.mem, start_idx, addr, 1, 16)
+    dst.len = Csize_t(Int(dst.len) + 16)
 
     return nothing
 end

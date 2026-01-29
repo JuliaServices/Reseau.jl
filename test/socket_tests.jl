@@ -13,6 +13,163 @@ function wait_for_flag(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
     return false
 end
 
+function _mem_from_bytes(bytes::NTuple{16, UInt8})
+    mem = Memory{UInt8}(undef, 16)
+    for i in 1:16
+        mem[i] = bytes[i]
+    end
+    return mem
+end
+
+@testset "socket validate port" begin
+    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.IPV4) === nothing
+    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.IPV4) === nothing
+
+    res = AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.IPV4)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.IPV4) === nothing
+
+    res = AwsIO.socket_validate_port_for_connect(0xFFFFFFFF, AwsIO.SocketDomain.IPV4)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+
+    res = AwsIO.socket_validate_port_for_bind(0xFFFFFFFF, AwsIO.SocketDomain.IPV4)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+
+    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.IPV6) === nothing
+    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.IPV6) === nothing
+
+    res = AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.IPV6)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.IPV6) === nothing
+
+    res = AwsIO.socket_validate_port_for_connect(0xFFFFFFFF, AwsIO.SocketDomain.IPV6)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+
+    res = AwsIO.socket_validate_port_for_bind(0xFFFFFFFF, AwsIO.SocketDomain.IPV6)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+
+    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.VSOCK) === nothing
+    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.VSOCK) === nothing
+    @test AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.VSOCK) === nothing
+    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.VSOCK) === nothing
+    @test AwsIO.socket_validate_port_for_connect(0x7FFFFFFF, AwsIO.SocketDomain.VSOCK) === nothing
+    @test AwsIO.socket_validate_port_for_bind(0x7FFFFFFF, AwsIO.SocketDomain.VSOCK) === nothing
+
+    res = AwsIO.socket_validate_port_for_connect(-1, AwsIO.SocketDomain.VSOCK)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    @test AwsIO.socket_validate_port_for_bind(-1, AwsIO.SocketDomain.VSOCK) === nothing
+
+    @test AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.LOCAL) === nothing
+    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.LOCAL) === nothing
+    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.LOCAL) === nothing
+    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.LOCAL) === nothing
+    @test AwsIO.socket_validate_port_for_connect(-1, AwsIO.SocketDomain.LOCAL) === nothing
+    @test AwsIO.socket_validate_port_for_bind(-1, AwsIO.SocketDomain.LOCAL) === nothing
+
+    bad_domain = Base.bitcast(AwsIO.SocketDomain.T, UInt8(0xff))
+    res = AwsIO.socket_validate_port_for_connect(80, bad_domain)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    res = AwsIO.socket_validate_port_for_bind(80, bad_domain)
+    @test res isa AwsIO.ErrorResult
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+end
+
+@testset "parse ipv4 valid addresses" begin
+    cases = [
+        ("127.0.0.1", UInt32(0x7f000001)),
+        ("0.0.0.0", UInt32(0x00000000)),
+        ("255.255.255.255", UInt32(0xffffffff)),
+        ("192.168.1.1", UInt32(0xc0a80101)),
+        ("10.0.0.1", UInt32(0x0a000001)),
+        ("172.16.0.1", UInt32(0xac100001)),
+        ("8.8.8.8", UInt32(0x08080808)),
+        ("1.2.3.4", UInt32(0x01020304)),
+    ]
+
+    for (input, expected) in cases
+        res = AwsIO.parse_ipv4_address(input)
+        @test res isa UInt32
+        res isa UInt32 && @test res == expected
+    end
+end
+
+@testset "parse ipv4 invalid addresses" begin
+    invalid = [
+        "",
+        "256.1.1.1",
+        "1.1.1",
+        "1.1.1.1.1",
+        "1.1.1.a",
+        "1..1.1",
+        "192.168.1.-1",
+        "not.an.ip.address",
+        "2001:db8::1",
+    ]
+
+    for input in invalid
+        res = AwsIO.parse_ipv4_address(input)
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
+end
+
+@testset "parse ipv6 valid addresses" begin
+    cases = [
+        ("::", (0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)),
+        ("2001:db8:85a3::8a2e:370:7334",
+            (0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70, 0x73, 0x34)),
+        ("::ffff:192.168.1.1",
+            (0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xc0, 0xa8, 0x01, 0x01)),
+        ("fe80::1",
+            (0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01)),
+    ]
+
+    for (input, bytes) in cases
+        buf = AwsIO.ByteBuffer(16)
+        res = AwsIO.parse_ipv6_address!(input, buf)
+        @test res === nothing
+        expected = _mem_from_bytes(bytes)
+        cursor = AwsIO.ByteCursor(expected)
+        @test AwsIO.byte_cursor_eq_byte_buf(cursor, buf)
+    end
+end
+
+@testset "parse ipv6 invalid addresses" begin
+    invalid = [
+        "",
+        ":::",
+        "2001:db8:85a3::8a2e::7334",
+        "2001:db8:85a3:0000:0000:8a2e:0370:7334:extra",
+        "2001:db8:85a3:0000:0000:8a2e:0370:733g",
+        "192.168.1.1",
+        "not:an:ipv6:address",
+        "gggg::1",
+    ]
+
+    for input in invalid
+        buf = AwsIO.ByteBuffer(16)
+        res = AwsIO.parse_ipv6_address!(input, buf)
+        @test res isa AwsIO.ErrorResult
+        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
+end
+
+function _mem_from_bytes(bytes::NTuple{16, UInt8})
+    mem = Memory{UInt8}(undef, 16)
+    for i in 1:16
+        mem[i] = bytes[i]
+    end
+    return mem
+end
+
 @testset "message pool" begin
     args = AwsIO.MessagePoolCreationArgs(
         application_data_msg_data_size = 128,

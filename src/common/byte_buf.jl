@@ -99,6 +99,7 @@ end
 
 @inline capacity(buf::ByteBuffer) = Csize_t(length(buf.mem))
 @inline byte_buf_available(buf::ByteBuffer) = capacity(buf) - buf.len
+@inline byte_buf_remaining_capacity(buf::ByteBuffer) = capacity(buf) - buf.len
 
 function Base.getproperty(buf::ByteBuffer, name::Symbol)
     if name === :capacity
