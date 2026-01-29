@@ -128,6 +128,16 @@ function convert_socket_type(type::SocketType.T)::Cint
     end
 end
 
+function _set_sockaddr_family!(sockaddr_buf::Memory{UInt8}, family::Cint, len::Integer)
+    @static if Sys.isapple() || Sys.isbsd()
+        sockaddr_buf[1] = UInt8(len)
+        sockaddr_buf[2] = UInt8(family)
+    else
+        sockaddr_buf[1:2] .= reinterpret(UInt8, [Cshort(family)])
+    end
+    return nothing
+end
+
 # Convert errno to AWS error code
 function determine_socket_error(errno_val::Integer)::Int
     if errno_val == ECONNREFUSED
@@ -738,7 +748,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
-        sockaddr_buf[1:2] .= reinterpret(UInt8, [Cshort(AF_INET)])
+        _set_sockaddr_family!(sockaddr_buf, AF_INET, 16)
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         sockaddr_buf[5:8] .= reinterpret(UInt8, [addr_result])
         sockaddr_obj = sockaddr_buf
@@ -753,7 +763,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
-        sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_INET6)])
+        _set_sockaddr_family!(sockaddr_buf, AF_INET6, 28)
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         @inbounds for i in 5:8
             sockaddr_buf[i] = 0x00
@@ -1130,7 +1140,7 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
-        sockaddr_buf[1:2] .= reinterpret(UInt8, [Cshort(AF_INET)])
+        _set_sockaddr_family!(sockaddr_buf, AF_INET, 16)
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         sockaddr_buf[5:8] .= reinterpret(UInt8, [addr_result])
         sockaddr_obj = sockaddr_buf
@@ -1145,7 +1155,7 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
-        sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_INET6)])
+        _set_sockaddr_family!(sockaddr_buf, AF_INET6, 28)
         sockaddr_buf[3:4] .= reinterpret(UInt8, [htons(port)])
         @inbounds for i in 5:8
             sockaddr_buf[i] = 0x00
