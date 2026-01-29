@@ -9,12 +9,31 @@ end
     P384 = 1
 end
 
+@enumx RsaEncryptionAlgorithm::UInt8 begin
+    PKCS1_5 = 0
+    OAEP_SHA256 = 1
+    OAEP_SHA512 = 2
+end
+
+@enumx RsaSignatureAlgorithm::UInt8 begin
+    PKCS1_5_SHA256 = 0
+    PKCS1_5_SHA1 = 1
+    PSS_SHA256 = 2
+end
+
 mutable struct EccKeyPair
     handle::Ptr{LibAwsCal.aws_ecc_key_pair}
 end
 
+mutable struct RsaKeyPair
+    handle::Ptr{LibAwsCal.aws_rsa_key_pair}
+end
+
 @inline function _crypto_last_error()
-    code = last_error()
+    code = Int(LibAwsCommon.aws_last_error())
+    if code == 0
+        code = Int(last_error())
+    end
     raise_error(code)
     return ErrorResult(code)
 end
@@ -25,6 +44,27 @@ end
     end
     return LibAwsCal.AWS_CAL_ECDSA_P384
 end
+
+@inline function _rsa_encryption_native(alg::RsaEncryptionAlgorithm.T)
+    if alg == RsaEncryptionAlgorithm.PKCS1_5
+        return LibAwsCal.AWS_CAL_RSA_ENCRYPTION_PKCS1_5
+    elseif alg == RsaEncryptionAlgorithm.OAEP_SHA256
+        return LibAwsCal.AWS_CAL_RSA_ENCRYPTION_OAEP_SHA256
+    end
+    return LibAwsCal.AWS_CAL_RSA_ENCRYPTION_OAEP_SHA512
+end
+
+@inline function _rsa_signature_native(alg::RsaSignatureAlgorithm.T)
+    if alg == RsaSignatureAlgorithm.PKCS1_5_SHA256
+        return LibAwsCal.AWS_CAL_RSA_SIGNATURE_PKCS1_5_SHA256
+    elseif alg == RsaSignatureAlgorithm.PKCS1_5_SHA1
+        return LibAwsCal.AWS_CAL_RSA_SIGNATURE_PKCS1_5_SHA1
+    end
+    return LibAwsCal.AWS_CAL_RSA_SIGNATURE_PSS_SHA256
+end
+
+@inline _aws_byte_cursor_from_key(key::AbstractVector{UInt8}) = _aws_byte_cursor_from_vec(key)
+@inline _aws_byte_cursor_from_key(key::ByteBuffer) = _aws_byte_cursor_from_buf(key)
 
 function hkdf_derive(
         hmac_type::HkdfHmacType.T,
@@ -108,6 +148,185 @@ function ecc_verify(
         rv = LibAwsCal.aws_ecc_key_pair_verify_signature(pair.handle, Ref(msg_cur), Ref(sig_cur))
         rv == 0 && return true
     end
+    return _crypto_last_error()
+end
+
+function rsa_key_pair_new_from_public_key_pkcs1(
+        key::Union{AbstractVector{UInt8}, ByteBuffer},
+    )::Union{RsaKeyPair, ErrorResult}
+    _cal_init()
+    allocator = LibAwsCommon.default_aws_allocator()
+    key_cur = _aws_byte_cursor_from_key(key)
+    handle = LibAwsCal.aws_rsa_key_pair_new_from_public_key_pkcs1(allocator, key_cur)
+    handle == C_NULL && return _crypto_last_error()
+    pair = RsaKeyPair(handle)
+    finalizer(pair) do p
+        LibAwsCal.aws_rsa_key_pair_release(p.handle)
+    end
+    return pair
+end
+
+function rsa_key_pair_new_from_private_key_pkcs1(
+        key::Union{AbstractVector{UInt8}, ByteBuffer},
+    )::Union{RsaKeyPair, ErrorResult}
+    _cal_init()
+    allocator = LibAwsCommon.default_aws_allocator()
+    key_cur = _aws_byte_cursor_from_key(key)
+    handle = LibAwsCal.aws_rsa_key_pair_new_from_private_key_pkcs1(allocator, key_cur)
+    handle == C_NULL && return _crypto_last_error()
+    pair = RsaKeyPair(handle)
+    finalizer(pair) do p
+        LibAwsCal.aws_rsa_key_pair_release(p.handle)
+    end
+    return pair
+end
+
+function rsa_key_pair_new_from_private_key_pkcs8(
+        key::Union{AbstractVector{UInt8}, ByteBuffer},
+    )::Union{RsaKeyPair, ErrorResult}
+    _cal_init()
+    allocator = LibAwsCommon.default_aws_allocator()
+    key_cur = _aws_byte_cursor_from_key(key)
+    handle = LibAwsCal.aws_rsa_key_pair_new_from_private_key_pkcs8(allocator, key_cur)
+    handle == C_NULL && return _crypto_last_error()
+    pair = RsaKeyPair(handle)
+    finalizer(pair) do p
+        LibAwsCal.aws_rsa_key_pair_release(p.handle)
+    end
+    return pair
+end
+
+@inline function rsa_key_pair_block_length(pair::RsaKeyPair)::Csize_t
+    return LibAwsCal.aws_rsa_key_pair_block_length(pair.handle)
+end
+
+@inline function rsa_key_pair_signature_length(pair::RsaKeyPair)::Csize_t
+    return LibAwsCal.aws_rsa_key_pair_signature_length(pair.handle)
+end
+
+@inline function rsa_key_pair_max_encrypt_plaintext_size(
+        pair::RsaKeyPair,
+        algorithm::RsaEncryptionAlgorithm.T,
+    )::Csize_t
+    return LibAwsCal.aws_rsa_key_pair_max_encrypt_plaintext_size(pair.handle, _rsa_encryption_native(algorithm))
+end
+
+function rsa_key_pair_get_public_key(pair::RsaKeyPair)::Union{ByteBuffer, ErrorResult}
+    _cal_init()
+    allocator = LibAwsCommon.default_aws_allocator()
+    buf_ref = Ref{LibAwsCommon.aws_byte_buf}()
+    block_len = Int(rsa_key_pair_block_length(pair))
+    capacity = max(256, block_len * 4)
+    if LibAwsCommon.aws_byte_buf_init(buf_ref, allocator, Csize_t(capacity)) != 0
+        return _crypto_last_error()
+    end
+    rv = LibAwsCal.aws_rsa_key_pair_get_public_key(
+        pair.handle,
+        LibAwsCal.AWS_CAL_RSA_KEY_EXPORT_PKCS1,
+        buf_ref,
+    )
+    rv == 0 || begin
+        LibAwsCommon.aws_byte_buf_clean_up(buf_ref)
+        return _crypto_last_error()
+    end
+    buf = buf_ref[]
+    len = Int(buf.len)
+    out = ByteBuffer(len)
+    if len > 0
+        GC.@preserve out begin
+            unsafe_copyto!(pointer(out.mem), buf.buffer, len)
+        end
+    end
+    LibAwsCommon.aws_byte_buf_clean_up(buf_ref)
+    return ByteBuffer(out.mem, len)
+end
+
+function rsa_key_pair_get_private_key(pair::RsaKeyPair)::Union{ByteBuffer, ErrorResult}
+    _cal_init()
+    allocator = LibAwsCommon.default_aws_allocator()
+    buf_ref = Ref{LibAwsCommon.aws_byte_buf}()
+    block_len = Int(rsa_key_pair_block_length(pair))
+    capacity = max(256, block_len * 4)
+    if LibAwsCommon.aws_byte_buf_init(buf_ref, allocator, Csize_t(capacity)) != 0
+        return _crypto_last_error()
+    end
+    rv = LibAwsCal.aws_rsa_key_pair_get_private_key(
+        pair.handle,
+        LibAwsCal.AWS_CAL_RSA_KEY_EXPORT_PKCS1,
+        buf_ref,
+    )
+    rv == 0 || begin
+        LibAwsCommon.aws_byte_buf_clean_up(buf_ref)
+        return _crypto_last_error()
+    end
+    buf = buf_ref[]
+    len = Int(buf.len)
+    out = ByteBuffer(len)
+    if len > 0
+        GC.@preserve out begin
+            unsafe_copyto!(pointer(out.mem), buf.buffer, len)
+        end
+    end
+    LibAwsCommon.aws_byte_buf_clean_up(buf_ref)
+    return ByteBuffer(out.mem, len)
+end
+
+function rsa_key_pair_encrypt(
+        pair::RsaKeyPair,
+        algorithm::RsaEncryptionAlgorithm.T,
+        plaintext::AbstractVector{UInt8},
+    )::Union{ByteBuffer, ErrorResult}
+    _cal_init()
+    out = ByteBuffer(Int(rsa_key_pair_block_length(pair)))
+    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
+    pt_cur = _aws_byte_cursor_from_vec(plaintext)
+    rv = LibAwsCal.aws_rsa_key_pair_encrypt(pair.handle, _rsa_encryption_native(algorithm), pt_cur, out_buf_ref)
+    rv == 0 || return _crypto_last_error()
+    out_buf = out_buf_ref[]
+    return ByteBuffer(out.mem, out_buf.len)
+end
+
+function rsa_key_pair_decrypt(
+        pair::RsaKeyPair,
+        algorithm::RsaEncryptionAlgorithm.T,
+        ciphertext::AbstractVector{UInt8},
+    )::Union{ByteBuffer, ErrorResult}
+    _cal_init()
+    out = ByteBuffer(Int(rsa_key_pair_block_length(pair)))
+    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
+    ct_cur = _aws_byte_cursor_from_vec(ciphertext)
+    rv = LibAwsCal.aws_rsa_key_pair_decrypt(pair.handle, _rsa_encryption_native(algorithm), ct_cur, out_buf_ref)
+    rv == 0 || return _crypto_last_error()
+    out_buf = out_buf_ref[]
+    return ByteBuffer(out.mem, out_buf.len)
+end
+
+function rsa_key_pair_sign_message(
+        pair::RsaKeyPair,
+        algorithm::RsaSignatureAlgorithm.T,
+        digest::AbstractVector{UInt8},
+    )::Union{ByteBuffer, ErrorResult}
+    _cal_init()
+    out = ByteBuffer(Int(rsa_key_pair_signature_length(pair)))
+    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
+    dig_cur = _aws_byte_cursor_from_vec(digest)
+    rv = LibAwsCal.aws_rsa_key_pair_sign_message(pair.handle, _rsa_signature_native(algorithm), dig_cur, out_buf_ref)
+    rv == 0 || return _crypto_last_error()
+    out_buf = out_buf_ref[]
+    return ByteBuffer(out.mem, out_buf.len)
+end
+
+function rsa_key_pair_verify_signature(
+        pair::RsaKeyPair,
+        algorithm::RsaSignatureAlgorithm.T,
+        digest::AbstractVector{UInt8},
+        signature::AbstractVector{UInt8},
+    )::Union{Bool, ErrorResult}
+    _cal_init()
+    dig_cur = _aws_byte_cursor_from_vec(digest)
+    sig_cur = _aws_byte_cursor_from_vec(signature)
+    rv = LibAwsCal.aws_rsa_key_pair_verify_signature(pair.handle, _rsa_signature_native(algorithm), dig_cur, sig_cur)
+    rv == 0 && return true
     return _crypto_last_error()
 end
 

@@ -301,13 +301,13 @@ Legend:
 ### 12.3 Cryptographic primitives (LibAwsCal)
 - [~] Confirm LibAwsCal exposes all required primitives
   - [x] HKDF (SHA512), AES-GCM, ECC available
-  - [ ] RSA availability confirmed
+  - [x] RSA availability confirmed
   - [ ] CHACHA20-POLY1305 and X25519 not exposed in LibAwsCal
 - [~] Implement wrappers for missing primitives (ECDHE, RSA, ECDSA, X25519, AES-GCM, CHACHA20-POLY1305, HKDF)
   - [x] HKDF SHA512 wrapper (+ tests)
   - [x] AES-GCM-256 wrapper (+ tests)
   - [x] ECC sign/verify wrapper (+ tests)
-  - [ ] RSA wrapper + tests
+  - [x] RSA wrapper + tests (public key export may return ERROR_PLATFORM_NOT_SUPPORTED)
   - [ ] X25519 / CHACHA20-POLY1305 wrappers (blocked on LibAwsCal)
 - [~] Implement constant-time operations for MAC/verify where required
   - [x] Constant-time compare helper in tls_channel_handler
