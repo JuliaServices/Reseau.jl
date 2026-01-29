@@ -561,16 +561,15 @@ end
 
 # Initialize local address for testing (Unix domain sockets)
 function socket_endpoint_init_local_address_for_test!(endpoint::SocketEndpoint)
-    uuid_result = uuid_init()
-    if uuid_result isa ErrorResult
+    u = Ref{uuid}()
+    if uuid_init(u) != OP_SUCCESS
         error("Failed to generate UUID for test socket")
     end
-    uuid = uuid_result
-
-    uuid_str = uuid_to_str(uuid)
-    if uuid_str isa ErrorResult
+    buf = Ref(ByteBuffer(UUID_STR_LEN))
+    if uuid_to_str(u, buf) != OP_SUCCESS
         error("Failed to convert UUID to string")
     end
+    uuid_str = String(byte_cursor_from_buf(buf[]))
 
     impl_type = socket_get_default_impl_type()
     if impl_type == SocketImplType.APPLE_NETWORK_FRAMEWORK
