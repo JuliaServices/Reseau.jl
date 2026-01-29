@@ -370,6 +370,12 @@ function event_loop_new(options::EventLoopOptions)::Union{EventLoop, ErrorResult
         else
             return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
         end
+    elseif el_type == EventLoopType.IOCP
+        @static if Sys.iswindows()
+            return event_loop_new_with_iocp(options)
+        else
+            return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+        end
     elseif el_type == EventLoopType.KQUEUE
         @static if Sys.isapple() || Sys.isbsd()
             return event_loop_new_with_kqueue(options)

@@ -654,6 +654,7 @@ include("tracing.jl")
 
 # Include event loop abstractions and platform-specific implementations
 include("event_loop.jl")
+include("iocp_event_loop.jl")
 include("kqueue_event_loop.jl")
 include("epoll_event_loop.jl")
 include("dispatch_queue_event_loop.jl")

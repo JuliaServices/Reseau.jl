@@ -1566,11 +1566,16 @@ end
 
     @testset "Event loop creation types" begin
         if Sys.iswindows()
-            @test true
+            el_iocp = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.IOCP))
+            @test el_iocp isa AwsIO.EventLoop || el_iocp isa AwsIO.ErrorResult
+            el_iocp isa AwsIO.EventLoop && AwsIO.event_loop_destroy!(el_iocp)
         elseif Sys.islinux()
             el_epoll = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.EPOLL))
             @test !(el_epoll isa AwsIO.ErrorResult)
             el_epoll isa AwsIO.ErrorResult || AwsIO.event_loop_destroy!(el_epoll)
+
+            el_iocp = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.IOCP))
+            @test el_iocp isa AwsIO.ErrorResult
 
             el_kqueue = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.KQUEUE))
             @test el_kqueue isa AwsIO.ErrorResult
@@ -1578,6 +1583,9 @@ end
             el_dispatch = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.DISPATCH_QUEUE))
             @test el_dispatch isa AwsIO.ErrorResult
         elseif Sys.isapple() || Sys.isbsd()
+            el_iocp = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.IOCP))
+            @test el_iocp isa AwsIO.ErrorResult
+
             el_kqueue = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.KQUEUE))
             @test !(el_kqueue isa AwsIO.ErrorResult)
             el_kqueue isa AwsIO.ErrorResult || AwsIO.event_loop_destroy!(el_kqueue)
