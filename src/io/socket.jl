@@ -271,7 +271,7 @@ mutable struct Socket{V <: SocketVTable, I, H <: Union{AbstractChannelHandler, N
     connection_result_fn::FC  # nullable
     accept_result_fn::FA  # nullable
     connect_accept_user_data::UA
-    impl::I  # Platform-specific implementation data
+    impl::Union{I, Nothing}  # Platform-specific implementation data
 end
 
 # Vtable interface functions - must be implemented by platform-specific vtables

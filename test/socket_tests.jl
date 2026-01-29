@@ -21,6 +21,13 @@ function _mem_from_bytes(bytes::NTuple{16, UInt8})
     return mem
 end
 
+function _is_allowed_connect_error(code::Int)
+    return code == AwsIO.ERROR_IO_SOCKET_TIMEOUT ||
+        code == AwsIO.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST ||
+        code == AwsIO.ERROR_IO_SOCKET_NETWORK_DOWN ||
+        code == AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED
+end
+
 @testset "socket validate port" begin
     @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.IPV4) === nothing
     @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.IPV4) === nothing
@@ -536,6 +543,402 @@ end
             if server_socket !== nothing
                 AwsIO.socket_close(server_socket)
             end
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
+
+@testset "connect timeout" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4, connect_timeout_ms = 200)
+        sock = AwsIO.socket_init(opts)
+        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        @test socket_val !== nothing
+        if socket_val === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        connect_done = Ref(false)
+        connect_err = Ref{Int}(0)
+        endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
+        connect_opts = AwsIO.SocketConnectOptions(
+            endpoint;
+            event_loop = el_val,
+            on_connection_result = (sock, err, ud) -> begin
+                connect_err[] = err
+                connect_done[] = true
+                return nothing
+            end,
+        )
+
+        try
+            res = AwsIO.socket_connect(socket_val, connect_opts)
+            if res isa AwsIO.ErrorResult
+                @test _is_allowed_connect_error(res.code)
+            else
+                @test wait_for_flag(connect_done; timeout_s = 3.0)
+                @test _is_allowed_connect_error(connect_err[])
+            end
+        finally
+            AwsIO.socket_cleanup!(socket_val)
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
+
+@testset "connect timeout cancellation" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4, connect_timeout_ms = 10_000)
+        sock = AwsIO.socket_init(opts)
+        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        @test socket_val !== nothing
+        if socket_val === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        connect_done = Ref(false)
+        connect_err = Ref{Int}(0)
+        endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
+        connect_opts = AwsIO.SocketConnectOptions(
+            endpoint;
+            event_loop = el_val,
+            on_connection_result = (sock, err, ud) -> begin
+                connect_err[] = err
+                connect_done[] = true
+                return nothing
+            end,
+        )
+
+        destroyed = false
+        try
+            res = AwsIO.socket_connect(socket_val, connect_opts)
+            if res isa AwsIO.ErrorResult
+                @test _is_allowed_connect_error(res.code)
+            else
+                AwsIO.event_loop_destroy!(el_val)
+                destroyed = true
+                @test connect_done[]
+                @test connect_err[] == AwsIO.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
+                    _is_allowed_connect_error(connect_err[])
+            end
+        finally
+            if !destroyed
+                AwsIO.event_loop_destroy!(el_val)
+            end
+            AwsIO.socket_cleanup!(socket_val)
+        end
+    end
+end
+
+@testset "cleanup before connect or timeout" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4, connect_timeout_ms = 1000)
+        sock = AwsIO.socket_init(opts)
+        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        @test socket_val !== nothing
+        if socket_val === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        connect_done = Ref(false)
+        connect_err = Ref{Int}(0)
+        cleanup_done = Ref(false)
+        endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
+        connect_opts = AwsIO.SocketConnectOptions(
+            endpoint;
+            event_loop = el_val,
+            on_connection_result = (sock, err, ud) -> begin
+                connect_err[] = err
+                connect_done[] = true
+                return nothing
+            end,
+        )
+
+        cleanup_task = AwsIO.ScheduledTask((ctx, status) -> begin
+            AwsIO.socket_cleanup!(socket_val)
+            cleanup_done[] = true
+            return nothing
+        end, nothing; type_tag = "socket_cleanup_before_connect")
+
+        try
+            res = AwsIO.socket_connect(socket_val, connect_opts)
+            if res isa AwsIO.ErrorResult
+                @test _is_allowed_connect_error(res.code)
+            else
+                AwsIO.event_loop_schedule_task_now!(el_val, cleanup_task)
+                @test wait_for_flag(cleanup_done)
+                sleep(0.05)
+                if connect_done[]
+                    @test _is_allowed_connect_error(connect_err[])
+                else
+                    @test true
+                end
+            end
+        finally
+            AwsIO.socket_cleanup!(socket_val)
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
+
+@testset "cleanup in accept doesn't explode" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        listener = AwsIO.socket_init(opts)
+        listener_socket = listener isa AwsIO.Socket ? listener : nothing
+        @test listener_socket !== nothing
+        if listener_socket === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        incoming = Ref{Any}(nothing)
+        accept_done = Ref(false)
+        accept_err = Ref{Int}(0)
+        connect_done = Ref(false)
+        connect_err = Ref{Int}(0)
+        client_socket = nothing
+
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            @test AwsIO.socket_bind(listener_socket, bind_opts) === nothing
+            @test AwsIO.socket_listen(listener_socket, 1024) === nothing
+
+            bound = AwsIO.socket_get_bound_address(listener_socket)
+            @test bound isa AwsIO.SocketEndpoint
+            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            if port == 0
+                return
+            end
+
+            on_accept = (sock, err, new_sock, ud) -> begin
+                accept_err[] = err
+                incoming[] = new_sock
+                accept_done[] = true
+                if sock !== nothing
+                    AwsIO.socket_cleanup!(sock)
+                end
+                return nothing
+            end
+
+            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+            @test AwsIO.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+
+            client = AwsIO.socket_init(opts)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                AwsIO.SocketEndpoint("127.0.0.1", port);
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> begin
+                    connect_err[] = err
+                    connect_done[] = true
+                    return nothing
+                end,
+            )
+
+            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test wait_for_flag(accept_done)
+            @test wait_for_flag(connect_done)
+            @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+            @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_cleanup!(client_socket)
+            end
+            if incoming[] !== nothing
+                AwsIO.socket_cleanup!(incoming[])
+            end
+            AwsIO.socket_cleanup!(listener_socket)
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
+
+@testset "cleanup in write cb doesn't explode" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        listener = AwsIO.socket_init(opts)
+        listener_socket = listener isa AwsIO.Socket ? listener : nothing
+        @test listener_socket !== nothing
+        if listener_socket === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        accepted = Ref{Any}(nothing)
+        accept_done = Ref(false)
+        connect_done = Ref(false)
+        client_socket = nothing
+
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            @test AwsIO.socket_bind(listener_socket, bind_opts) === nothing
+            @test AwsIO.socket_listen(listener_socket, 1024) === nothing
+
+            bound = AwsIO.socket_get_bound_address(listener_socket)
+            @test bound isa AwsIO.SocketEndpoint
+            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            if port == 0
+                return
+            end
+
+            on_accept = (sock, err, new_sock, ud) -> begin
+                accepted[] = new_sock
+                accept_done[] = true
+                return nothing
+            end
+
+            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+            @test AwsIO.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+
+            client = AwsIO.socket_init(opts)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                AwsIO.SocketEndpoint("127.0.0.1", port);
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> begin
+                    connect_done[] = true
+                    return nothing
+                end,
+            )
+
+            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test wait_for_flag(accept_done)
+            @test wait_for_flag(connect_done)
+
+            server_sock = accepted[]
+            @test server_sock !== nothing
+            if server_sock === nothing
+                return
+            end
+
+            assign_res = AwsIO.socket_assign_to_event_loop(server_sock, el_val)
+            @test !(assign_res isa AwsIO.ErrorResult)
+
+            write_done_client = Ref(false)
+            write_err_client = Ref{Int}(0)
+            write_done_server = Ref(false)
+            write_err_server = Ref{Int}(0)
+
+            write_task_client = AwsIO.ScheduledTask((ctx, status) -> begin
+                cursor = AwsIO.ByteCursor("teapot")
+                res = AwsIO.socket_write(
+                    client_socket,
+                    cursor,
+                    (s, err, bytes, ud) -> begin
+                        write_err_client[] = err
+                        AwsIO.socket_cleanup!(client_socket)
+                        write_done_client[] = true
+                        return nothing
+                    end,
+                    nothing,
+                )
+                if res isa AwsIO.ErrorResult
+                    write_err_client[] = res.code
+                    AwsIO.socket_cleanup!(client_socket)
+                    write_done_client[] = true
+                end
+                return nothing
+            end, nothing; type_tag = "socket_write_cleanup_client")
+
+            write_task_server = AwsIO.ScheduledTask((ctx, status) -> begin
+                cursor = AwsIO.ByteCursor("spout")
+                res = AwsIO.socket_write(
+                    server_sock,
+                    cursor,
+                    (s, err, bytes, ud) -> begin
+                        write_err_server[] = err
+                        AwsIO.socket_cleanup!(server_sock)
+                        write_done_server[] = true
+                        return nothing
+                    end,
+                    nothing,
+                )
+                if res isa AwsIO.ErrorResult
+                    write_err_server[] = res.code
+                    AwsIO.socket_cleanup!(server_sock)
+                    write_done_server[] = true
+                end
+                return nothing
+            end, nothing; type_tag = "socket_write_cleanup_server")
+
+            AwsIO.event_loop_schedule_task_now!(el_val, write_task_client)
+            @test wait_for_flag(write_done_client)
+            AwsIO.event_loop_schedule_task_now!(el_val, write_task_server)
+            @test wait_for_flag(write_done_server)
+            @test write_err_client[] == AwsIO.AWS_OP_SUCCESS
+            @test write_err_server[] == AwsIO.AWS_OP_SUCCESS
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_cleanup!(client_socket)
+            end
+            if accepted[] !== nothing
+                AwsIO.socket_cleanup!(accepted[])
+            end
+            AwsIO.socket_cleanup!(listener_socket)
             AwsIO.event_loop_destroy!(el_val)
         end
     end
