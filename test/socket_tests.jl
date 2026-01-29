@@ -412,6 +412,135 @@ end
     end
 end
 
+@testset "sock write cb is async" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        server = AwsIO.socket_init(opts)
+        server_socket = server isa AwsIO.Socket ? server : nothing
+        @test server_socket !== nothing
+
+        client_socket = nothing
+        accepted = Ref{Any}(nothing)
+
+        try
+            if server_socket === nothing
+                return
+            end
+
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
+            @test AwsIO.socket_listen(server_socket, 8) === nothing
+
+            bound = AwsIO.socket_get_bound_address(server_socket)
+            @test bound isa AwsIO.SocketEndpoint
+            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            if port == 0
+                return
+            end
+
+            accept_done = Ref(false)
+            on_accept = (listener, err, new_sock, ud) -> begin
+                accepted[] = new_sock
+                accept_done[] = true
+                if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+                    return nothing
+                end
+                assign_res = AwsIO.socket_assign_to_event_loop(new_sock, el_val)
+                if assign_res isa AwsIO.ErrorResult
+                    return nothing
+                end
+                _ = AwsIO.socket_subscribe_to_readable_events(
+                    new_sock, (sock, err, ud) -> begin
+                        if err != AwsIO.AWS_OP_SUCCESS
+                            return nothing
+                        end
+                        buf = AwsIO.ByteBuffer(64)
+                        _ = AwsIO.socket_read(sock, buf)
+                        return nothing
+                    end, nothing
+                )
+                return nothing
+            end
+
+            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+
+            client = AwsIO.socket_init(opts)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_done = Ref(false)
+            write_started = Ref(false)
+            write_cb_invoked = Ref(false)
+            write_cb_sync = Ref(false)
+            write_err = Ref{Int}(0)
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                AwsIO.SocketEndpoint("127.0.0.1", port);
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> begin
+                    connect_done[] = true
+                    if err != AwsIO.AWS_OP_SUCCESS
+                        write_started[] = true
+                        return nothing
+                    end
+                    cursor = AwsIO.ByteCursor("ping")
+                    write_cb_invoked[] = false
+                    write_cb_sync[] = false
+                    write_res = AwsIO.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_cb_invoked[] = true
+                            return nothing
+                        end, nothing
+                    )
+                    if write_res isa AwsIO.ErrorResult
+                        write_err[] = write_res.code
+                        write_cb_invoked[] = true
+                    end
+                    if write_cb_invoked[]
+                        write_cb_sync[] = true
+                    end
+                    write_started[] = true
+                    return nothing
+                end,
+            )
+
+            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test wait_for_flag(connect_done)
+            @test wait_for_flag(accept_done)
+            @test wait_for_flag(write_started)
+            @test wait_for_flag(write_cb_invoked)
+            @test !write_cb_sync[]
+            @test write_err[] == AwsIO.AWS_OP_SUCCESS
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_close(client_socket)
+            end
+            if accepted[] !== nothing
+                AwsIO.socket_close(accepted[])
+            end
+            if server_socket !== nothing
+                AwsIO.socket_close(server_socket)
+            end
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
+
 @testset "local socket communication" begin
     if Sys.iswindows()
         @test true
