@@ -17,6 +17,9 @@ const TLS_NONCE_LEN = 32
 const TLS_MAC_LEN = 32
 const TLS_SHA256_LEN = 32
 const TLS_SESSION_KEY_LEN = 32
+const TLS_MAX_RECORD_SIZE = 16 * 1024
+const TLS_EST_RECORD_OVERHEAD = 53
+const TLS_EST_HANDSHAKE_SIZE = 7 * 1024
 const TLS_ALERT_LEVEL_WARNING = 0x01
 const TLS_ALERT_LEVEL_FATAL = 0x02
 const TLS_ALERT_CLOSE_NOTIFY = 0x00
@@ -2150,7 +2153,25 @@ function handler_process_write_message(handler::TlsChannelHandler, slot::Channel
 end
 
 function handler_increment_read_window(handler::TlsChannelHandler, slot::ChannelSlot, size::Csize_t)::Union{Nothing, ErrorResult}
-    return channel_slot_increment_read_window!(slot, size)
+    _ = size
+    if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+        return nothing
+    end
+
+    downstream_size = channel_slot_downstream_read_window(slot)
+    current_window_size = slot.window_size
+
+    likely_records = downstream_size == 0 ? Csize_t(0) :
+        Csize_t(cld(Int(downstream_size), TLS_MAX_RECORD_SIZE))
+    offset_size = mul_size_saturating(likely_records, Csize_t(TLS_EST_RECORD_OVERHEAD))
+    total_desired = add_size_saturating(offset_size, downstream_size)
+
+    if total_desired > current_window_size
+        window_update = total_desired - current_window_size
+        return channel_slot_increment_read_window!(slot, window_update)
+    end
+
+    return nothing
 end
 
 function handler_shutdown(
@@ -2189,11 +2210,13 @@ function handler_shutdown(
 end
 
 function handler_initial_window_size(handler::TlsChannelHandler)::Csize_t
-    return SIZE_MAX
+    _ = handler
+    return Csize_t(TLS_EST_HANDSHAKE_SIZE)
 end
 
 function handler_message_overhead(handler::TlsChannelHandler)::Csize_t
-    return Csize_t(0)
+    _ = handler
+    return Csize_t(TLS_EST_RECORD_OVERHEAD)
 end
 
 function handler_destroy(handler::TlsChannelHandler)::Nothing

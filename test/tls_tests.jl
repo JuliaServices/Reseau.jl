@@ -1533,3 +1533,64 @@ end
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)
 end
+
+@testset "TLS handler overhead + max fragment size" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    @test ctx isa AwsIO.TlsContext
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    prev_max = AwsIO.g_aws_channel_max_fragment_size[]
+    AwsIO.g_aws_channel_max_fragment_size[] = Csize_t(4096)
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    tls_slot = AwsIO.channel_slot_new!(channel)
+    handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(ctx), tls_slot)
+    @test handler isa AwsIO.TlsChannelHandler
+
+    app_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(tls_slot, app_slot)
+    app_handler = SinkHandler()
+    AwsIO.channel_slot_set_handler!(app_slot, app_handler)
+
+    results = Channel{Int}(1)
+    task = AwsIO.ScheduledTask(
+        (ctx, status) -> begin
+            status == AwsIO.TaskStatus.RUN_READY || return nothing
+            msg = AwsIO.channel_slot_acquire_max_message_for_write(ctx.slot)
+            if msg isa AwsIO.IoMessage
+                cap = length(msg.message_data.mem)
+                AwsIO.channel_release_message_to_pool!(ctx.channel, msg)
+                put!(ctx.results, cap)
+            else
+                put!(ctx.results, -1)
+            end
+            return nothing
+        end,
+        (slot = app_slot, channel = channel, results = results);
+        type_tag = "tls_overhead_test",
+    )
+    AwsIO.event_loop_schedule_task_now!(event_loop, task)
+
+    cap = take!(results)
+    expected = Int(AwsIO.g_aws_channel_max_fragment_size[] - Csize_t(AwsIO.TLS_EST_RECORD_OVERHEAD))
+    @test cap == expected
+
+    if handler isa AwsIO.TlsChannelHandler
+        @test AwsIO.handler_message_overhead(handler) == Csize_t(AwsIO.TLS_EST_RECORD_OVERHEAD)
+        @test AwsIO.handler_initial_window_size(handler) == Csize_t(AwsIO.TLS_EST_HANDSHAKE_SIZE)
+    end
+
+    AwsIO.g_aws_channel_max_fragment_size[] = prev_max
+    AwsIO.event_loop_group_destroy!(elg)
+end

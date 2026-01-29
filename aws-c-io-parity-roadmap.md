@@ -330,6 +330,7 @@ Legend:
 - [x] BYO crypto setup options stubs (client/server)
 - [x] Ensure callbacks fire on correct thread
 - [x] Integrate ALPN handler and TLS negotiated protocol message
+- [x] TLS handler message overhead + initial window size parity
 
 ### 12.6 TLS backends parity (platform)
 - [ ] Linux/Unix: s2n parity behavior (even if implemented in Julia)
