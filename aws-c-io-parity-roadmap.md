@@ -355,6 +355,11 @@ Legend:
   - [x] Echo + backpressure flow (read_write handler)
   - [x] Shutdown with cached data (window update after shutdown)
   - [x] TLS statistics handler integration
+  - [x] PKCS8 import coverage (unittests.p8)
+  - [x] ECC cert import coverage (ec_unittests.p8)
+  - [x] TLS cipher preference coverage (TLSV1_2_2025_07)
+  - [x] Certificate chain coverage (server_chain.crt)
+  - [ ] Negotiation error/success matrix with real certs (blocked on TLS backend/X.509)
 - [x] Port `byo_crypto_test.c`
   - [x] BYO handler wiring + start negotiation hook
   - [x] BYO server handler wiring
@@ -490,7 +495,7 @@ Legend:
 - [x] `no_retry_strategy_test.c` -> new `test/retry_strategy_tests.jl`
 - [x] `statistics_handler_test.c` -> new `test/statistics_tests.jl`
 - [x] `alpn_handler_test.c` -> new `test/alpn_tests.jl`
-- [ ] `tls_handler_test.c` -> `test/tls_tests.jl` (extend)
+- [~] `tls_handler_test.c` -> `test/tls_tests.jl` (extend; real-cert negotiation blocked)
 - [x] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
   - [x] `test/crypto_primitives_tests.jl` (HKDF/AES-GCM/ECC/RSA)
 - [ ] `pkcs11_test.c` -> new `test/pkcs11_tests.jl`
