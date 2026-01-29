@@ -284,11 +284,19 @@ function socket_init(options::SocketOptions)::Union{Socket, ErrorResult}
     if impl_type == SocketImplType.POSIX
         return socket_init_posix(options)
     elseif impl_type == SocketImplType.WINSOCK
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        @static if Sys.iswindows()
+            return socket_init_winsock(options)
+        else
+            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        end
     elseif impl_type == SocketImplType.APPLE_NETWORK_FRAMEWORK
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        @static if Sys.isapple()
+            return socket_init_apple_nw(options)
+        else
+            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
+            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        end
     end
 
     raise_error(ERROR_PLATFORM_NOT_SUPPORTED)

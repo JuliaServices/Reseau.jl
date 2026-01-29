@@ -131,12 +131,14 @@ Legend:
 - [ ] Support TLS-in-socket behavior (SecItem-based TLS in NW)
 - [ ] Integrate with dispatch queue event loop and io_handle.set_queue
 - [ ] Lifecycle and shutdown semantics parity
+  - [x] Stub API returns ERROR_PLATFORM_NOT_SUPPORTED
 
 ### 3.4 Windows sockets
 - [ ] Implement winsock init/cleanup (source/windows/winsock_init.c)
 - [ ] Implement IOCP socket backend (source/windows/iocp/socket.c)
 - [ ] Socket options parity and error mapping
 - [ ] Accept/connect/read/write parity with IOCP
+  - [x] Stub API returns ERROR_PLATFORM_NOT_SUPPORTED
 
 ### 3.5 Pipes
 - [x] POSIX pipe parity (source/posix/pipe.c)
