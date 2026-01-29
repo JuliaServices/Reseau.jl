@@ -918,3 +918,63 @@ end
         AwsIO.socket_close(socket_val)
     end
 end
+
+@testset "incoming duplicate tcp bind errors" begin
+    if Sys.iswindows()
+        @test true
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        sock1 = AwsIO.socket_init(opts)
+        sock1_val = sock1 isa AwsIO.Socket ? sock1 : nothing
+        @test sock1_val !== nothing
+        if sock1_val === nothing
+            return
+        end
+
+        sock2 = AwsIO.socket_init(opts)
+        sock2_val = sock2 isa AwsIO.Socket ? sock2 : nothing
+        @test sock2_val !== nothing
+
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            @test AwsIO.socket_bind(sock1_val, bind_opts) === nothing
+            @test AwsIO.socket_listen(sock1_val, 1024) === nothing
+
+            bound = AwsIO.socket_get_bound_address(sock1_val)
+            @test bound isa AwsIO.SocketEndpoint
+            if bound isa AwsIO.SocketEndpoint && sock2_val !== nothing
+                dup_endpoint = AwsIO.SocketEndpoint("127.0.0.1", Int(bound.port))
+                res = AwsIO.socket_bind(sock2_val, AwsIO.SocketBindOptions(dup_endpoint))
+                @test res isa AwsIO.ErrorResult
+                res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_ADDRESS_IN_USE
+            end
+        finally
+            sock2_val !== nothing && AwsIO.socket_close(sock2_val)
+            AwsIO.socket_close(sock1_val)
+        end
+    end
+end
+
+@testset "incoming tcp socket errors" begin
+    if Sys.iswindows()
+        @test true
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        sock = AwsIO.socket_init(opts)
+        sock_val = sock isa AwsIO.Socket ? sock : nothing
+        @test sock_val !== nothing
+        if sock_val === nothing
+            return
+        end
+
+        endpoint = AwsIO.SocketEndpoint("127.0.0.1", 80)
+        res = AwsIO.socket_bind(sock_val, AwsIO.SocketBindOptions(endpoint))
+        if res === nothing
+            # likely running with elevated privileges; skip assertion
+            @test true
+        else
+            @test res.code == AwsIO.ERROR_NO_PERMISSION
+        end
+        AwsIO.socket_close(sock_val)
+    end
+end
