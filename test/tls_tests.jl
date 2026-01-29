@@ -1,6 +1,7 @@
 using Test
 using Random
 using AwsIO
+include("read_write_test_handler.jl")
 
 function wait_for_flag_tls(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
@@ -24,6 +25,64 @@ function wait_for_handshake_status(handler::AwsIO.TlsChannelHandler, status; tim
         sleep(0.01)
     end
     return false
+end
+
+mutable struct TlsTestRwArgs
+    lock::ReentrantLock
+    invocation_happened::Bool
+    read_invocations::Int
+    received_message::AwsIO.ByteBuffer
+end
+
+function TlsTestRwArgs(; capacity::Integer = 256)
+    return TlsTestRwArgs(ReentrantLock(), false, 0, AwsIO.ByteBuffer(capacity))
+end
+
+function tls_rw_reset_flag!(args::TlsTestRwArgs)
+    lock(args.lock) do
+        args.invocation_happened = false
+    end
+    return nothing
+end
+
+function tls_wait_for_read(args::TlsTestRwArgs; timeout_s::Float64 = 5.0)
+    start = Base.time_ns()
+    timeout_ns = Int(timeout_s * 1_000_000_000)
+    while (Base.time_ns() - start) < timeout_ns
+        lock(args.lock) do
+            if args.invocation_happened
+                return true
+            end
+        end
+        sleep(0.01)
+    end
+    lock(args.lock) do
+        return args.invocation_happened
+    end
+end
+
+function tls_test_handle_read(handler, slot, data_read, user_data)
+    _ = handler
+    _ = slot
+    args = user_data::TlsTestRwArgs
+    lock(args.lock) do
+        if data_read !== nothing
+            buf_ref = Ref(args.received_message)
+            AwsIO.byte_buf_write_from_whole_buffer(buf_ref, data_read)
+            args.received_message = buf_ref[]
+        end
+        args.read_invocations += 1
+        args.invocation_happened = true
+    end
+    return args.received_message
+end
+
+function tls_test_handle_write(handler, slot, data_read, user_data)
+    _ = handler
+    _ = slot
+    _ = data_read
+    _ = user_data
+    return AwsIO.null_buffer()
 end
 
 const TEST_PEM_CERT = """
@@ -1593,4 +1652,317 @@ end
 
     AwsIO.g_aws_channel_max_fragment_size[] = prev_max
     AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "TLS echo + backpressure" begin
+    if Sys.iswindows() || Threads.nthreads(:interactive) <= 1
+        @test true
+        return
+    end
+
+    prev_max = AwsIO.g_aws_channel_max_fragment_size[]
+    AwsIO.g_aws_channel_max_fragment_size[] = 4096
+
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    server_ctx = AwsIO.tls_context_new(AwsIO.TlsContextOptions(; is_server = true, verify_peer = false))
+    client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
+    @test server_ctx isa AwsIO.TlsContext
+    @test client_ctx isa AwsIO.TlsContext
+    if !(server_ctx isa AwsIO.TlsContext) || !(client_ctx isa AwsIO.TlsContext)
+        AwsIO.host_resolver_shutdown!(resolver)
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    write_tag = AwsIO.byte_buf_from_c_str("I'm a big teapot")
+    read_tag = AwsIO.byte_buf_from_c_str("I'm a little teapot.")
+
+    client_rw_args = TlsTestRwArgs(; capacity = 256)
+    server_rw_args = TlsTestRwArgs(; capacity = 256)
+
+    client_handler_ref = Ref{Any}(nothing)
+    server_handler_ref = Ref{Any}(nothing)
+    client_slot_ref = Ref{Any}(nothing)
+    server_slot_ref = Ref{Any}(nothing)
+
+    client_ready = Ref(false)
+    server_ready = Ref(false)
+
+    server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
+        event_loop_group = elg,
+        host = "127.0.0.1",
+        port = 0,
+        enable_read_back_pressure = true,
+        tls_connection_options = AwsIO.TlsConnectionOptions(server_ctx),
+        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+            if err == AwsIO.AWS_OP_SUCCESS
+                handler = rw_handler_new(
+                    tls_test_handle_read,
+                    tls_test_handle_write,
+                    true,
+                    Int(read_tag.len ÷ 2),
+                    server_rw_args,
+                )
+                server_handler_ref[] = handler
+                slot = AwsIO.channel_slot_new!(channel)
+                if AwsIO.channel_first_slot(channel) !== slot
+                    AwsIO.channel_slot_insert_end!(channel, slot)
+                end
+                AwsIO.channel_slot_set_handler!(slot, handler)
+                server_slot_ref[] = slot
+            end
+            server_ready[] = true
+            return nothing
+        end,
+    ))
+
+    listener = server_bootstrap.listener_socket
+    @test listener !== nothing
+    bound = AwsIO.socket_get_bound_address(listener)
+    @test bound isa AwsIO.SocketEndpoint
+    port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+    @test port != 0
+
+    client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+        event_loop_group = elg,
+        host_resolver = resolver,
+    ))
+
+    client_tls_opts = AwsIO.TlsConnectionOptions(
+        client_ctx;
+        server_name = "localhost",
+    )
+
+    connect_res = AwsIO.client_bootstrap_connect!(
+        client_bootstrap,
+        "127.0.0.1",
+        port;
+        enable_read_back_pressure = true,
+        tls_connection_options = client_tls_opts,
+        on_setup = (bs, err, channel, ud) -> begin
+            if err == AwsIO.AWS_OP_SUCCESS
+                handler = rw_handler_new(
+                    tls_test_handle_read,
+                    tls_test_handle_write,
+                    true,
+                    Int(write_tag.len ÷ 2),
+                    client_rw_args,
+                )
+                client_handler_ref[] = handler
+                slot = AwsIO.channel_slot_new!(channel)
+                if AwsIO.channel_first_slot(channel) !== slot
+                    AwsIO.channel_slot_insert_end!(channel, slot)
+                end
+                AwsIO.channel_slot_set_handler!(slot, handler)
+                client_slot_ref[] = slot
+            end
+            client_ready[] = true
+            return nothing
+        end,
+    )
+    @test connect_res === nothing
+
+    @test wait_for_flag_tls(server_ready)
+    @test wait_for_flag_tls(client_ready)
+
+    @test client_handler_ref[] isa ReadWriteTestHandler
+    @test server_handler_ref[] isa ReadWriteTestHandler
+
+    rw_handler_write(client_handler_ref[], client_slot_ref[], write_tag)
+    rw_handler_write(server_handler_ref[], server_slot_ref[], read_tag)
+
+    @test tls_wait_for_read(client_rw_args)
+    @test tls_wait_for_read(server_rw_args)
+
+    tls_rw_reset_flag!(client_rw_args)
+    tls_rw_reset_flag!(server_rw_args)
+
+    @test client_rw_args.read_invocations == 1
+    @test server_rw_args.read_invocations == 1
+
+    rw_handler_trigger_increment_read_window(server_handler_ref[], server_slot_ref[], 100)
+    rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
+
+    @test tls_wait_for_read(client_rw_args)
+    @test tls_wait_for_read(server_rw_args)
+
+    @test client_rw_args.read_invocations == 2
+    @test server_rw_args.read_invocations == 2
+    @test _buf_to_string(server_rw_args.received_message) == _buf_to_string(write_tag)
+    @test _buf_to_string(client_rw_args.received_message) == _buf_to_string(read_tag)
+
+    AwsIO.server_bootstrap_shutdown!(server_bootstrap)
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+    AwsIO.g_aws_channel_max_fragment_size[] = prev_max
+end
+
+@testset "TLS shutdown with cached data" begin
+    if Sys.iswindows() || Threads.nthreads(:interactive) <= 1
+        @test true
+        return
+    end
+
+    for window_update_after_shutdown in (false, true)
+        prev_max = AwsIO.g_aws_channel_max_fragment_size[]
+        AwsIO.g_aws_channel_max_fragment_size[] = 4096
+
+        elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+        resolver = AwsIO.DefaultHostResolver(elg)
+
+        server_ctx = AwsIO.tls_context_new(AwsIO.TlsContextOptions(; is_server = true, verify_peer = false))
+        client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
+        @test server_ctx isa AwsIO.TlsContext
+        @test client_ctx isa AwsIO.TlsContext
+        if !(server_ctx isa AwsIO.TlsContext) || !(client_ctx isa AwsIO.TlsContext)
+            AwsIO.host_resolver_shutdown!(resolver)
+            AwsIO.event_loop_group_destroy!(elg)
+            AwsIO.g_aws_channel_max_fragment_size[] = prev_max
+            continue
+        end
+
+        read_tag = AwsIO.byte_buf_from_c_str("I'm a little teapot.")
+
+        client_rw_args = TlsTestRwArgs(; capacity = 256)
+        server_rw_args = TlsTestRwArgs(; capacity = 256)
+
+        client_handler_ref = Ref{Any}(nothing)
+        server_handler_ref = Ref{Any}(nothing)
+        client_slot_ref = Ref{Any}(nothing)
+        server_slot_ref = Ref{Any}(nothing)
+        client_channel_ref = Ref{Any}(nothing)
+        server_channel_ref = Ref{Any}(nothing)
+
+        server_ready = Ref(false)
+        client_ready = Ref(false)
+        server_shutdown = Ref(false)
+        client_shutdown = Ref(false)
+        shutdown_invoked = Ref(false)
+
+        function client_on_read(handler, slot, data_read, user_data)
+            args = user_data::TlsTestRwArgs
+            if !shutdown_invoked[]
+                shutdown_invoked[] = true
+                if !window_update_after_shutdown
+                    rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
+                end
+                if server_channel_ref[] !== nothing
+                    AwsIO.channel_shutdown!(server_channel_ref[], AwsIO.AWS_OP_SUCCESS)
+                end
+            end
+            lock(args.lock) do
+                if data_read !== nothing
+                    buf_ref = Ref(args.received_message)
+                    AwsIO.byte_buf_write_from_whole_buffer(buf_ref, data_read)
+                    args.received_message = buf_ref[]
+                end
+                args.read_invocations += 1
+                args.invocation_happened = true
+            end
+            return args.received_message
+        end
+
+        server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
+            event_loop_group = elg,
+            host = "127.0.0.1",
+            port = 0,
+            enable_read_back_pressure = true,
+            tls_connection_options = AwsIO.TlsConnectionOptions(server_ctx),
+            on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+                if err == AwsIO.AWS_OP_SUCCESS
+                    server_channel_ref[] = channel
+                    handler = rw_handler_new(
+                        tls_test_handle_read,
+                        tls_test_handle_write,
+                        true,
+                        typemax(Int),
+                        server_rw_args,
+                    )
+                    server_handler_ref[] = handler
+                    slot = AwsIO.channel_slot_new!(channel)
+                    if AwsIO.channel_first_slot(channel) !== slot
+                        AwsIO.channel_slot_insert_end!(channel, slot)
+                    end
+                    AwsIO.channel_slot_set_handler!(slot, handler)
+                    server_slot_ref[] = slot
+                end
+                server_ready[] = true
+                return nothing
+            end,
+            on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
+                server_shutdown[] = true
+                return nothing
+            end,
+        ))
+
+        listener = server_bootstrap.listener_socket
+        bound = AwsIO.socket_get_bound_address(listener)
+        port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+        @test port != 0
+
+        client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+            event_loop_group = elg,
+            host_resolver = resolver,
+        ))
+
+        client_tls_opts = AwsIO.TlsConnectionOptions(
+            client_ctx;
+            server_name = "localhost",
+        )
+
+        connect_res = AwsIO.client_bootstrap_connect!(
+            client_bootstrap,
+            "127.0.0.1",
+            port;
+            enable_read_back_pressure = true,
+            tls_connection_options = client_tls_opts,
+            on_setup = (bs, err, channel, ud) -> begin
+                if err == AwsIO.AWS_OP_SUCCESS
+                    client_channel_ref[] = channel
+                    handler = rw_handler_new(
+                        client_on_read,
+                        tls_test_handle_write,
+                        true,
+                        Int(read_tag.len ÷ 2),
+                        client_rw_args,
+                    )
+                    client_handler_ref[] = handler
+                    slot = AwsIO.channel_slot_new!(channel)
+                    if AwsIO.channel_first_slot(channel) !== slot
+                        AwsIO.channel_slot_insert_end!(channel, slot)
+                    end
+                    AwsIO.channel_slot_set_handler!(slot, handler)
+                    client_slot_ref[] = slot
+                end
+                client_ready[] = true
+                return nothing
+            end,
+            on_shutdown = (bs, err, channel, ud) -> begin
+                client_shutdown[] = true
+                return nothing
+            end,
+        )
+        @test connect_res === nothing
+
+        @test wait_for_flag_tls(server_ready)
+        @test wait_for_flag_tls(client_ready)
+
+        rw_handler_write(server_handler_ref[], server_slot_ref[], read_tag)
+        @test tls_wait_for_read(client_rw_args)
+
+        if window_update_after_shutdown
+            rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
+        end
+
+        @test wait_for_flag_tls(client_shutdown)
+        @test client_rw_args.read_invocations == 2
+        @test _buf_to_string(client_rw_args.received_message) == _buf_to_string(read_tag)
+
+        AwsIO.server_bootstrap_shutdown!(server_bootstrap)
+        AwsIO.host_resolver_shutdown!(resolver)
+        AwsIO.event_loop_group_destroy!(elg)
+        AwsIO.g_aws_channel_max_fragment_size[] = prev_max
+    end
 end

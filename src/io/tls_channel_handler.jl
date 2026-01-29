@@ -1303,6 +1303,10 @@ mutable struct TlsChannelHandler{
     pending_key_input::Memory{UInt8}
     inbound_buf::Vector{UInt8}
     inbound_offset::Int
+    pending_plaintext::Vector{UInt8}
+    pending_plaintext_offset::Int
+    shutdown_error_code::Int
+    shutdown_free_resources::Bool
 end
 
 function TlsChannelHandler(
@@ -1329,6 +1333,10 @@ function TlsChannelHandler(
         Memory{UInt8}(undef, 0),
         UInt8[],
         0,
+        UInt8[],
+        0,
+        AWS_OP_SUCCESS,
+        false,
     )
 end
 
@@ -1941,6 +1949,118 @@ function _tls_handle_handshake!(handler::TlsChannelHandler, record_type::UInt8, 
     return nothing
 end
 
+@inline function _tls_pending_plaintext_len(handler::TlsChannelHandler)
+    return length(handler.pending_plaintext) - handler.pending_plaintext_offset
+end
+
+@inline function _tls_has_pending_plaintext(handler::TlsChannelHandler)
+    return _tls_pending_plaintext_len(handler) > 0
+end
+
+function _tls_complete_read_shutdown!(handler::TlsChannelHandler, slot::ChannelSlot)
+    handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
+    channel_slot_on_handler_shutdown_complete!(
+        slot,
+        ChannelDirection.READ,
+        handler.shutdown_error_code,
+        handler.shutdown_free_resources,
+    )
+    return nothing
+end
+
+function _tls_flush_pending_plaintext!(handler::TlsChannelHandler)
+    if !_tls_has_pending_plaintext(handler)
+        if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN &&
+                handler.slot !== nothing && handler.slot.channel !== nothing
+            _tls_complete_read_shutdown!(handler, handler.slot)
+        end
+        return nothing
+    end
+
+    slot = handler.slot
+    if slot === nothing || slot.channel === nothing
+        return nothing
+    end
+    if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+        return nothing
+    end
+
+    channel = slot.channel
+    downstream_window = channel_slot_downstream_read_window(slot)
+    max_window = Csize_t(typemax(Int))
+    if downstream_window > max_window
+        downstream_window = max_window
+    end
+    while downstream_window > 0 && _tls_has_pending_plaintext(handler)
+        remaining = _tls_pending_plaintext_len(handler)
+        chunk = min(remaining, Int(downstream_window))
+        msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, chunk)
+        if msg === nothing
+            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read alloc failed")
+            return nothing
+        end
+
+        buf_ref = Ref(msg.message_data)
+        byte_buf_reserve(buf_ref, chunk)
+        msg.message_data = buf_ref[]
+        buf = msg.message_data
+
+        start_idx = handler.pending_plaintext_offset + 1
+        pending = handler.pending_plaintext
+        GC.@preserve buf pending begin
+            unsafe_copyto!(pointer(getfield(buf, :mem)), pointer(pending, start_idx), chunk)
+        end
+        setfield!(buf, :len, Csize_t(chunk))
+
+        if handler.options.on_data_read !== nothing
+            _tls_invoke_on_event_loop(handler, handler.options.on_data_read, handler, slot, buf, handler.options.user_data)
+        end
+
+        if slot.adj_right !== nothing
+            send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
+            if send_result isa ErrorResult
+                channel_release_message_to_pool!(channel, msg)
+                _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read send failed")
+                return nothing
+            end
+        else
+            channel_release_message_to_pool!(channel, msg)
+        end
+
+        handler.pending_plaintext_offset += chunk
+        downstream_window = sub_size_saturating(downstream_window, Csize_t(chunk))
+    end
+
+    if !_tls_has_pending_plaintext(handler)
+        empty!(handler.pending_plaintext)
+        handler.pending_plaintext_offset = 0
+    elseif handler.pending_plaintext_offset > 4096
+        handler.pending_plaintext = handler.pending_plaintext[(handler.pending_plaintext_offset + 1):end]
+        handler.pending_plaintext_offset = 0
+    end
+
+    if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN && !_tls_has_pending_plaintext(handler)
+        _tls_complete_read_shutdown!(handler, slot)
+    end
+
+    return nothing
+end
+
+function _tls_queue_plaintext!(handler::TlsChannelHandler, plaintext::AbstractVector{UInt8})
+    isempty(plaintext) && return nothing
+    if !_tls_has_pending_plaintext(handler) && handler.pending_plaintext_offset > 0
+        empty!(handler.pending_plaintext)
+        handler.pending_plaintext_offset = 0
+    end
+    if isempty(handler.pending_plaintext)
+        handler.pending_plaintext = Vector{UInt8}(plaintext)
+    else
+        append!(handler.pending_plaintext, plaintext)
+    end
+    _tls_flush_pending_plaintext!(handler)
+    return nothing
+end
+
 function _tls_handle_application!(handler::TlsChannelHandler, payload::AbstractVector{UInt8})
     if !handler.negotiation_completed
         _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "Application data before negotiation")
@@ -1962,43 +2082,7 @@ function _tls_handle_application!(handler::TlsChannelHandler, payload::AbstractV
         return nothing
     end
 
-    slot = handler.slot
-    if slot === nothing || slot.channel === nothing
-        return nothing
-    end
-
-    channel = slot.channel
-    msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, length(plaintext))
-    if msg === nothing
-        _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read alloc failed")
-        return nothing
-    end
-
-    buf_ref = Ref(msg.message_data)
-    byte_buf_reserve(buf_ref, length(plaintext))
-    msg.message_data = buf_ref[]
-    buf = msg.message_data
-
-    GC.@preserve buf begin
-        unsafe_copyto!(pointer(getfield(buf, :mem)), pointer(plaintext), length(plaintext))
-    end
-    setfield!(buf, :len, Csize_t(length(plaintext)))
-
-    if handler.options.on_data_read !== nothing
-        _tls_invoke_on_event_loop(handler, handler.options.on_data_read, handler, slot, buf, handler.options.user_data)
-    end
-
-    if slot.adj_right !== nothing
-        send_result = channel_slot_send_message(slot, msg, ChannelDirection.READ)
-        if send_result isa ErrorResult
-            channel_release_message_to_pool!(channel, msg)
-            _tls_report_error!(handler, ERROR_IO_TLS_ERROR_READ_FAILURE, "TLS read send failed")
-            return nothing
-        end
-    else
-        channel_release_message_to_pool!(channel, msg)
-    end
-
+    _tls_queue_plaintext!(handler, plaintext)
     return nothing
 end
 
@@ -2110,7 +2194,7 @@ end
 
 function handler_process_read_message(handler::TlsChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
     channel = slot.channel
-    if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+    if handler.read_state != TlsHandlerReadState.OPEN
         if channel !== nothing
             channel_release_message_to_pool!(channel, message)
         end
@@ -2168,9 +2252,11 @@ function handler_increment_read_window(handler::TlsChannelHandler, slot::Channel
 
     if total_desired > current_window_size
         window_update = total_desired - current_window_size
-        return channel_slot_increment_read_window!(slot, window_update)
+        update_res = channel_slot_increment_read_window!(slot, window_update)
+        update_res isa ErrorResult && return update_res
     end
 
+    _tls_flush_pending_plaintext!(handler)
     return nothing
 end
 
@@ -2182,7 +2268,10 @@ function handler_shutdown(
         free_scarce_resources_immediately::Bool,
     )::Union{Nothing, ErrorResult}
     if direction == ChannelDirection.READ && handler.read_state != TlsHandlerReadState.SHUT_DOWN_COMPLETE
-        handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
+        handler.read_state = TlsHandlerReadState.SHUTTING_DOWN
+        handler.shutdown_error_code = error_code
+        handler.shutdown_free_resources = free_scarce_resources_immediately
+        _tls_flush_pending_plaintext!(handler)
     end
     if !isempty(handler.pending_writes)
         channel = slot.channel
@@ -2205,6 +2294,9 @@ function handler_shutdown(
     end
     handler.pending_key_operation = nothing
     handler.pending_key_input = Memory{UInt8}(undef, 0)
+    if direction == ChannelDirection.READ
+        return nothing
+    end
     channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end

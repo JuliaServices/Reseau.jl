@@ -343,6 +343,8 @@ Legend:
   - [x] Concurrent cert import coverage
   - [x] Duplicate cert import coverage
   - [x] Handshake stats coverage
+  - [x] Echo + backpressure flow (read_write handler)
+  - [x] Shutdown with cached data (window update after shutdown)
 - [~] Port `byo_crypto_test.c`
   - [x] BYO handler wiring + start negotiation hook
   - [x] BYO server handler wiring
