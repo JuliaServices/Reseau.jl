@@ -523,13 +523,13 @@ Legend:
 ## 22) Suggested work phases (optional sequencing)
 
 Phase 1 (Core parity)
-- [ ] Event loop semantics parity (epoll/kqueue)
-- [ ] Channel + socket channel handler parity
-- [ ] Host resolver parity
-- [ ] Retry strategies (including no-retry)
-- [ ] Future + async stream + stream parity
-- [ ] Message pool parity
-- [ ] Tests for above
+- [x] Event loop semantics parity (epoll/kqueue)
+- [x] Channel + socket channel handler parity
+- [x] Host resolver parity
+- [x] Retry strategies (including no-retry)
+- [x] Future + async stream + stream parity
+- [x] Message pool parity
+- [x] Tests for above
 
 Phase 2 (TLS/ALPN + PKI)
 - [ ] TLS full implementation
