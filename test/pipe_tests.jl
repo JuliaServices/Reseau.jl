@@ -5,6 +5,16 @@ using AwsIO
 const SMALL_BUFFER_SIZE = 4
 const GIANT_BUFFER_SIZE = 1024 * 1024 * 32
 
+@testset "IOCP pipe stub" begin
+    res = AwsIO.pipe_create_iocp()
+    if Sys.iswindows()
+        @test res isa AwsIO.ErrorResult || res isa Tuple
+    else
+        @test res isa AwsIO.ErrorResult
+    end
+    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+end
+
 @enum PipeLoopSetup::UInt8 begin
     SAME_EVENT_LOOP = 0
     DIFFERENT_EVENT_LOOPS = 1

@@ -144,6 +144,7 @@ Legend:
 ### 3.5 Pipes
 - [x] POSIX pipe parity (source/posix/pipe.c)
 - [ ] Windows IOCP pipe backend (source/windows/iocp/pipe.c)
+  - [x] Stub API returns ERROR_PLATFORM_NOT_SUPPORTED
 
 ---
 
