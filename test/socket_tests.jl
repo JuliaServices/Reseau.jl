@@ -705,6 +705,12 @@ end
         @test win_sock isa AwsIO.ErrorResult
         win_sock isa AwsIO.ErrorResult && @test win_sock.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
     end
+
+    # Apple Network Framework backend not implemented yet.
+    nw_opts = AwsIO.SocketOptions(; impl_type = AwsIO.SocketImplType.APPLE_NETWORK_FRAMEWORK)
+    nw_sock = AwsIO.socket_init(nw_opts)
+    @test nw_sock isa AwsIO.ErrorResult
+    nw_sock isa AwsIO.ErrorResult && @test nw_sock.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
 end
 
 @testset "socket nonblocking cloexec" begin
