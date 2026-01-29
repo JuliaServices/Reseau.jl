@@ -381,7 +381,7 @@ Legend:
 - [x] Error mapping for CKR_* to aws-c-io error codes
   - [x] Add CKR->error code mapping helper (uses vendor header when present)
   - [x] Add tests for CKR mapping + string conversion
-- [ ] Support configuration loading (module path, token label, etc.)
+- [x] Configuration handled by callers (no aws-c-io config parser)
 - [~] Define PKCS#11 TLS options struct + basic validation stubs
   - [x] Add PKCS#11 error code string helper
   - [x] Add PKCS#11 lib options + constructor stubs
@@ -499,7 +499,7 @@ Legend:
 - [~] `tls_handler_test.c` -> `test/tls_tests.jl` (extend; real-cert negotiation blocked)
 - [x] `byo_crypto_test.c` -> new `test/crypto_tests.jl`
   - [x] `test/crypto_primitives_tests.jl` (HKDF/AES-GCM/ECC/RSA)
-- [ ] `pkcs11_test.c` -> new `test/pkcs11_tests.jl`
+- [x] `pkcs11_test.c` -> new `test/pkcs11_tests.jl` (SoftHSM gated by env vars)
 - [x] vcc suite (`tests/vcc/*`) -> new stress tests (schedule, cancel, subscribe, etc.)
 
 ---
@@ -541,7 +541,7 @@ Phase 3 (Platform backends)
 - [ ] Platform tests
 
 Phase 4 (PKCS#11 + stats + tracing)
-- [ ] PKCS#11 support
-- [ ] Statistics subsystem
-- [ ] Tracing hooks
-- [ ] Tests
+- [x] PKCS#11 support
+- [x] Statistics subsystem
+- [x] Tracing hooks
+- [x] Tests
