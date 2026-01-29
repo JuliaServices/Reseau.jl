@@ -15,6 +15,15 @@ const DEFAULT_KEY_ID = "AABBCCDD"
 
 const TIMEOUT_SEC = 10.0
 
+@testset "PKCS11 error mapping" begin
+    @test AwsIO.pkcs11_error_from_ckr(AwsIO.CKR_FUNCTION_NOT_SUPPORTED) ==
+        AwsIO.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
+    @test AwsIO.pkcs11_error_from_ckr(0xdeadbeef) ==
+        AwsIO.ERROR_IO_PKCS11_UNKNOWN_CRYPTOKI_RETURN_VALUE
+    @test AwsIO.pkcs11_ckr_str(AwsIO.CKR_FUNCTION_NOT_SUPPORTED) == "CKR_FUNCTION_NOT_SUPPORTED"
+    @test AwsIO.pkcs11_ckr_str(0xdeadbeef) == "CKR_UNKNOWN"
+end
+
 mutable struct Pkcs11Tester
     lib_path::String
     token_dir::String
