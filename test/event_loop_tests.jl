@@ -9,6 +9,51 @@ end
 const _dispatch_queue_setter_c =
     @cfunction(_dispatch_queue_setter, Cvoid, (Ptr{AwsIO.IoHandle}, Ptr{Cvoid}))
 
+const _EVENT_LOOP_TEST_TIMEOUT_NS = 2_000_000_000
+
+function _wait_for_channel(ch::Channel; timeout_ns::Int = _EVENT_LOOP_TEST_TIMEOUT_NS)
+    deadline = Base.time_ns() + timeout_ns
+    while !isready(ch) && Base.time_ns() < deadline
+        yield()
+    end
+    return isready(ch)
+end
+
+function _schedule_event_loop_task(el::AwsIO.EventLoop, fn; type_tag::AbstractString = "event_loop_task")
+    done_ch = Channel{Any}(1)
+    task_fn = (ctx, status) -> begin
+        if status != AwsIO.TaskStatus.RUN_READY
+            put!(done_ch, AwsIO.ErrorResult(AwsIO.ERROR_IO_EVENT_LOOP_SHUTDOWN))
+            return nothing
+        end
+        ok = AwsIO.event_loop_thread_is_callers_thread(el)
+        result = fn()
+        put!(done_ch, (ok, result))
+        return nothing
+    end
+    task = AwsIO.ScheduledTask(task_fn, nothing; type_tag = type_tag)
+    AwsIO.event_loop_schedule_task_now!(el, task)
+    return done_ch
+end
+
+function _payload_abc()
+    payload = Memory{UInt8}(undef, 3)
+    payload[1] = UInt8('a')
+    payload[2] = UInt8('b')
+    payload[3] = UInt8('c')
+    return payload
+end
+
+function _drain_pipe(read_end::AwsIO.PipeReadEnd)
+    buf = AwsIO.ByteBuffer(64)
+    while true
+        res = AwsIO.pipe_read!(read_end, buf)
+        if res isa AwsIO.ErrorResult
+            return res.code == AwsIO.ERROR_IO_READ_WOULD_BLOCK ? nothing : res
+        end
+    end
+end
+
 @testset "Event Loops" begin
     @testset "EventLoopType default" begin
         el_type = AwsIO.event_loop_get_default_type()
@@ -205,7 +250,11 @@ const _dispatch_queue_setter_c =
 
                         read_end, write_end = pipe_res
 
-                        payload = Vector{UInt8}("ping")
+                        payload = Memory{UInt8}(undef, 4)
+                        payload[1] = UInt8('p')
+                        payload[2] = UInt8('i')
+                        payload[3] = UInt8('n')
+                        payload[4] = UInt8('g')
                         total_writes = 50
                         expected_bytes = total_writes * length(payload)
 
@@ -257,6 +306,716 @@ const _dispatch_queue_setter_c =
                     finally
                         read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
                         write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop subscribe/unsubscribe" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+                        read_end, write_end = pipe_res
+
+                        subscribe_task = _schedule_event_loop_task(el, () -> begin
+                            res1 = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                read_end.io_handle,
+                                Int(AwsIO.IoEventType.READABLE),
+                                (loop, handle, events, data) -> nothing,
+                                nothing,
+                            )
+                            res2 = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                write_end.io_handle,
+                                Int(AwsIO.IoEventType.WRITABLE),
+                                (loop, handle, events, data) -> nothing,
+                                nothing,
+                            )
+                            res3 = AwsIO.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                            res4 = AwsIO.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
+                            return (res1, res2, res3, res4)
+                        end; type_tag = "event_loop_subscribe_unsubscribe")
+
+                        @test _wait_for_channel(subscribe_task)
+                        ok, results = take!(subscribe_task)
+                        @test ok
+                        res1, res2, res3, res4 = results
+                        @test res1 === nothing
+                        @test res2 === nothing
+                        @test res3 === nothing
+                        @test res4 === nothing
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop writable event on subscribe" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+                        read_end, write_end = pipe_res
+
+                        writable_count = Ref(0)
+                        thread_ok = Ref(true)
+                        count_lock = ReentrantLock()
+                        writable_ch = Channel{Nothing}(1)
+
+                        on_writable = (loop, handle, events, data) -> begin
+                            if !AwsIO.event_loop_thread_is_callers_thread(loop)
+                                thread_ok[] = false
+                            end
+                            if (events & Int(AwsIO.IoEventType.WRITABLE)) == 0
+                                return nothing
+                            end
+                            Base.lock(count_lock) do
+                                writable_count[] += 1
+                                if writable_count[] == 1 && !isready(writable_ch)
+                                    put!(writable_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end
+
+                        sub_task = _schedule_event_loop_task(el, () -> begin
+                            return AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                write_end.io_handle,
+                                Int(AwsIO.IoEventType.WRITABLE),
+                                on_writable,
+                                nothing,
+                            )
+                        end; type_tag = "event_loop_writable_subscribe")
+
+                        @test _wait_for_channel(sub_task)
+                        ok, sub_res = take!(sub_task)
+                        @test ok
+                        @test sub_res === nothing
+
+                        @test _wait_for_channel(writable_ch; timeout_ns = 3_000_000_000)
+                        sleep(1.0)
+
+                        Base.lock(count_lock) do
+                            @test writable_count[] == 1
+                        end
+                        @test thread_ok[]
+
+                        unsub_task = _schedule_event_loop_task(el, () -> begin
+                            return AwsIO.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
+                        end; type_tag = "event_loop_writable_unsubscribe")
+                        @test _wait_for_channel(unsub_task)
+                        ok2, unsub_res = take!(unsub_task)
+                        @test ok2
+                        @test unsub_res === nothing
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop no readable event before write" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+                        read_end, write_end = pipe_res
+
+                        readable_count = Ref(0)
+                        count_lock = ReentrantLock()
+                        on_readable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.READABLE)) == 0
+                                return nothing
+                            end
+                            Base.lock(count_lock) do
+                                readable_count[] += 1
+                            end
+                            return nothing
+                        end
+
+                        sub_task = _schedule_event_loop_task(el, () -> begin
+                            return AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                read_end.io_handle,
+                                Int(AwsIO.IoEventType.READABLE),
+                                on_readable,
+                                nothing,
+                            )
+                        end; type_tag = "event_loop_readable_subscribe")
+
+                        @test _wait_for_channel(sub_task)
+                        ok, sub_res = take!(sub_task)
+                        @test ok
+                        @test sub_res === nothing
+
+                        sleep(1.0)
+
+                        Base.lock(count_lock) do
+                            @test readable_count[] == 0
+                        end
+
+                        unsub_task = _schedule_event_loop_task(el, () -> begin
+                            return AwsIO.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                        end; type_tag = "event_loop_readable_unsubscribe")
+                        @test _wait_for_channel(unsub_task)
+                        ok2, unsub_res = take!(unsub_task)
+                        @test ok2
+                        @test unsub_res === nothing
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop readable event on subscribe if data present" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+                        read_end, write_end = pipe_res
+
+                        payload = _payload_abc()
+                        write_res = AwsIO.pipe_write_sync!(write_end, payload)
+                        @test !(write_res isa AwsIO.ErrorResult)
+
+                        readable_count = Ref(0)
+                        count_lock = ReentrantLock()
+                        readable_ch = Channel{Nothing}(1)
+
+                        on_readable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.READABLE)) == 0
+                                return nothing
+                            end
+                            drain_res = _drain_pipe(read_end)
+                            if drain_res isa AwsIO.ErrorResult
+                                return nothing
+                            end
+                            Base.lock(count_lock) do
+                                readable_count[] += 1
+                                if readable_count[] == 1 && !isready(readable_ch)
+                                    put!(readable_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end
+
+                        sub_task = _schedule_event_loop_task(el, () -> begin
+                            return AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                read_end.io_handle,
+                                Int(AwsIO.IoEventType.READABLE),
+                                on_readable,
+                                nothing,
+                            )
+                        end; type_tag = "event_loop_readable_subscribe_present")
+
+                        @test _wait_for_channel(sub_task)
+                        ok, sub_res = take!(sub_task)
+                        @test ok
+                        @test sub_res === nothing
+
+                        @test _wait_for_channel(readable_ch; timeout_ns = 3_000_000_000)
+                        sleep(1.0)
+
+                        Base.lock(count_lock) do
+                            @test readable_count[] == 1
+                        end
+
+                        unsub_task = _schedule_event_loop_task(el, () -> begin
+                            return AwsIO.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                        end; type_tag = "event_loop_readable_unsubscribe_present")
+                        @test _wait_for_channel(unsub_task)
+                        ok2, unsub_res = take!(unsub_task)
+                        @test ok2
+                        @test unsub_res === nothing
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop readable event after write" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+                        read_end, write_end = pipe_res
+
+                        writable_ch = Channel{Nothing}(1)
+                        readable_ch = Channel{Nothing}(1)
+                        readable_count = Ref(0)
+                        count_lock = ReentrantLock()
+
+                        on_writable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.WRITABLE)) == 0
+                                return nothing
+                            end
+                            if !isready(writable_ch)
+                                put!(writable_ch, nothing)
+                            end
+                            return nothing
+                        end
+
+                        on_readable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.READABLE)) == 0
+                                return nothing
+                            end
+                            drain_res = _drain_pipe(read_end)
+                            if drain_res isa AwsIO.ErrorResult
+                                return nothing
+                            end
+                            Base.lock(count_lock) do
+                                readable_count[] += 1
+                                if readable_count[] == 1 && !isready(readable_ch)
+                                    put!(readable_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end
+
+                        sub_task = _schedule_event_loop_task(el, () -> begin
+                            res1 = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                write_end.io_handle,
+                                Int(AwsIO.IoEventType.WRITABLE),
+                                on_writable,
+                                nothing,
+                            )
+                            res2 = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                read_end.io_handle,
+                                Int(AwsIO.IoEventType.READABLE),
+                                on_readable,
+                                nothing,
+                            )
+                            return (res1, res2)
+                        end; type_tag = "event_loop_readable_after_write_sub")
+
+                        @test _wait_for_channel(sub_task)
+                        ok, results = take!(sub_task)
+                        @test ok
+                        res1, res2 = results
+                        @test res1 === nothing
+                        @test res2 === nothing
+
+                        @test _wait_for_channel(writable_ch; timeout_ns = 3_000_000_000)
+                        payload = _payload_abc()
+                        write_res = AwsIO.pipe_write_sync!(write_end, payload)
+                        @test !(write_res isa AwsIO.ErrorResult)
+
+                        @test _wait_for_channel(readable_ch; timeout_ns = 3_000_000_000)
+                        sleep(1.0)
+
+                        Base.lock(count_lock) do
+                            @test readable_count[] == 1
+                        end
+
+                        unsub_task = _schedule_event_loop_task(el, () -> begin
+                            res1 = AwsIO.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
+                            res2 = AwsIO.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                            return (res1, res2)
+                        end; type_tag = "event_loop_readable_after_write_unsub")
+                        @test _wait_for_channel(unsub_task)
+                        ok2, results2 = take!(unsub_task)
+                        @test ok2
+                        r1, r2 = results2
+                        @test r1 === nothing
+                        @test r2 === nothing
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop readable event on 2nd time readable" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_end = nothing
+                    write_end = nothing
+                    try
+                        pipe_res = AwsIO.pipe_create()
+                        @test !(pipe_res isa AwsIO.ErrorResult)
+                        if pipe_res isa AwsIO.ErrorResult
+                            return
+                        end
+                        read_end, write_end = pipe_res
+
+                        writable_ch = Channel{Nothing}(1)
+                        first_readable_ch = Channel{Nothing}(1)
+                        second_readable_ch = Channel{Nothing}(1)
+                        readable_count = Ref(0)
+                        count_lock = ReentrantLock()
+
+                        on_writable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.WRITABLE)) == 0
+                                return nothing
+                            end
+                            if !isready(writable_ch)
+                                put!(writable_ch, nothing)
+                            end
+                            return nothing
+                        end
+
+                        on_readable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.READABLE)) == 0
+                                return nothing
+                            end
+                            drain_res = _drain_pipe(read_end)
+                            if drain_res isa AwsIO.ErrorResult
+                                return nothing
+                            end
+                            Base.lock(count_lock) do
+                                readable_count[] += 1
+                                if readable_count[] == 1 && !isready(first_readable_ch)
+                                    put!(first_readable_ch, nothing)
+                                elseif readable_count[] == 2 && !isready(second_readable_ch)
+                                    put!(second_readable_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end
+
+                        sub_task = _schedule_event_loop_task(el, () -> begin
+                            res1 = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                write_end.io_handle,
+                                Int(AwsIO.IoEventType.WRITABLE),
+                                on_writable,
+                                nothing,
+                            )
+                            res2 = AwsIO.event_loop_subscribe_to_io_events!(
+                                el,
+                                read_end.io_handle,
+                                Int(AwsIO.IoEventType.READABLE),
+                                on_readable,
+                                nothing,
+                            )
+                            return (res1, res2)
+                        end; type_tag = "event_loop_readable_second_sub")
+
+                        @test _wait_for_channel(sub_task)
+                        ok, results = take!(sub_task)
+                        @test ok
+                        r1, r2 = results
+                        @test r1 === nothing
+                        @test r2 === nothing
+
+                        @test _wait_for_channel(writable_ch; timeout_ns = 3_000_000_000)
+                        payload = _payload_abc()
+                        write_res = AwsIO.pipe_write_sync!(write_end, payload)
+                        @test !(write_res isa AwsIO.ErrorResult)
+
+                        @test _wait_for_channel(first_readable_ch; timeout_ns = 3_000_000_000)
+                        payload2 = _payload_abc()
+                        write_res2 = AwsIO.pipe_write_sync!(write_end, payload2)
+                        @test !(write_res2 isa AwsIO.ErrorResult)
+
+                        @test _wait_for_channel(second_readable_ch; timeout_ns = 3_000_000_000)
+
+                        Base.lock(count_lock) do
+                            @test readable_count[] == 2
+                        end
+
+                        unsub_task = _schedule_event_loop_task(el, () -> begin
+                            res1 = AwsIO.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
+                            res2 = AwsIO.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                            return (res1, res2)
+                        end; type_tag = "event_loop_readable_second_unsub")
+                        @test _wait_for_channel(unsub_task)
+                        ok2, results2 = take!(unsub_task)
+                        @test ok2
+                        r1b, r2b = results2
+                        @test r1b === nothing
+                        @test r2b === nothing
+                    finally
+                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                        AwsIO.event_loop_destroy!(el)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop no events after unsubscribe" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    read_ends = nothing
+                    write_ends = nothing
+                    try
+                        pipe1 = AwsIO.pipe_create()
+                        pipe2 = AwsIO.pipe_create()
+                        @test !(pipe1 isa AwsIO.ErrorResult)
+                        @test !(pipe2 isa AwsIO.ErrorResult)
+                        if pipe1 isa AwsIO.ErrorResult || pipe2 isa AwsIO.ErrorResult
+                            return
+                        end
+                        read_ends = (pipe1[1], pipe2[1])
+                        write_ends = (pipe1[2], pipe2[2])
+
+                        done_ch = Channel{Nothing}(1)
+                        state_lock = ReentrantLock()
+                        writable = Memory{Bool}(undef, 2)
+                        writable[1] = false
+                        writable[2] = false
+                        wrote_both = Ref(false)
+                        unsubscribed = Ref(false)
+                        error_flag = Ref(false)
+
+                        on_writable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.WRITABLE)) == 0
+                                return nothing
+                            end
+                            Base.lock(state_lock) do
+                                if unsubscribed[]
+                                    error_flag[] = true
+                                    if !isready(done_ch)
+                                        put!(done_ch, nothing)
+                                    end
+                                    return nothing
+                                end
+
+                                for i in 1:2
+                                    if handle.fd == write_ends[i].io_handle.fd
+                                        writable[i] = true
+                                    end
+                                end
+
+                                if wrote_both[] || !(writable[1] && writable[2])
+                                    return nothing
+                                end
+
+                                for i in 1:2
+                                    payload = _payload_abc()
+                                    write_res = AwsIO.pipe_write_sync!(write_ends[i], payload)
+                                    if write_res isa AwsIO.ErrorResult
+                                        error_flag[] = true
+                                        if !isready(done_ch)
+                                            put!(done_ch, nothing)
+                                        end
+                                        return nothing
+                                    end
+                                end
+                                wrote_both[] = true
+                            end
+                            return nothing
+                        end
+
+                        on_readable = (loop, handle, events, data) -> begin
+                            if (events & Int(AwsIO.IoEventType.READABLE)) == 0
+                                return nothing
+                            end
+                            Base.lock(state_lock) do
+                                if unsubscribed[]
+                                    error_flag[] = true
+                                    if !isready(done_ch)
+                                        put!(done_ch, nothing)
+                                    end
+                                    return nothing
+                                end
+
+                                for i in 1:2
+                                    _ = AwsIO.event_loop_unsubscribe_from_io_events!(el, read_ends[i].io_handle)
+                                    _ = AwsIO.event_loop_unsubscribe_from_io_events!(el, write_ends[i].io_handle)
+                                    AwsIO.pipe_read_end_close!(read_ends[i])
+                                    AwsIO.pipe_write_end_close!(write_ends[i])
+                                end
+
+                                unsubscribed[] = true
+                            end
+
+                            now = AwsIO.event_loop_current_clock_time(el)
+                            if !(now isa AwsIO.ErrorResult)
+                                run_at = now + 1_000_000_000
+                                done_task = AwsIO.ScheduledTask(
+                                    (ctx, status) -> begin
+                                        if !isready(done_ch)
+                                            put!(done_ch, nothing)
+                                        end
+                                        return nothing
+                                    end,
+                                    nothing;
+                                    type_tag = "unsubrace_done",
+                                )
+                                AwsIO.event_loop_schedule_task_future!(el, done_task, run_at)
+                            else
+                                if !isready(done_ch)
+                                    put!(done_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end
+
+                        setup_task = _schedule_event_loop_task(el, () -> begin
+                            for i in 1:2
+                                _ = AwsIO.event_loop_subscribe_to_io_events!(
+                                    el,
+                                    write_ends[i].io_handle,
+                                    Int(AwsIO.IoEventType.WRITABLE),
+                                    on_writable,
+                                    nothing,
+                                )
+                                _ = AwsIO.event_loop_subscribe_to_io_events!(
+                                    el,
+                                    read_ends[i].io_handle,
+                                    Int(AwsIO.IoEventType.READABLE),
+                                    on_readable,
+                                    nothing,
+                                )
+                            end
+                            return nothing
+                        end; type_tag = "unsubrace_setup")
+
+                        @test _wait_for_channel(setup_task)
+                        _ = take!(setup_task)
+
+                        @test _wait_for_channel(done_ch; timeout_ns = 5_000_000_000)
+                        @test !error_flag[]
+                    finally
+                        if read_ends !== nothing && write_ends !== nothing
+                            for i in 1:2
+                                AwsIO.pipe_read_end_close!(read_ends[i])
+                                AwsIO.pipe_write_end_close!(write_ends[i])
+                            end
+                        end
                         AwsIO.event_loop_destroy!(el)
                     end
                 end
@@ -714,6 +1473,176 @@ const _dispatch_queue_setter_c =
                 bad_opts = AwsIO.EventLoopGroupOptions(loop_count = interactive_threads)
                 bad_elg = AwsIO.event_loop_group_new(bad_opts)
                 @test bad_elg isa AwsIO.ErrorResult
+            end
+        end
+    end
+
+    @testset "Event loop creation types" begin
+        if Sys.iswindows()
+            @test true
+        elseif Sys.islinux()
+            el_epoll = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.EPOLL))
+            @test !(el_epoll isa AwsIO.ErrorResult)
+            el_epoll isa AwsIO.ErrorResult || AwsIO.event_loop_destroy!(el_epoll)
+
+            el_kqueue = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.KQUEUE))
+            @test el_kqueue isa AwsIO.ErrorResult
+
+            el_dispatch = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.DISPATCH_QUEUE))
+            @test el_dispatch isa AwsIO.ErrorResult
+        elseif Sys.isapple() || Sys.isbsd()
+            el_kqueue = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.KQUEUE))
+            @test !(el_kqueue isa AwsIO.ErrorResult)
+            el_kqueue isa AwsIO.ErrorResult || AwsIO.event_loop_destroy!(el_kqueue)
+
+            el_dispatch = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.DISPATCH_QUEUE))
+            if Sys.isapple()
+                @test !(el_dispatch isa AwsIO.ErrorResult)
+                el_dispatch isa AwsIO.ErrorResult || AwsIO.event_loop_destroy!(el_dispatch)
+            else
+                @test el_dispatch isa AwsIO.ErrorResult
+            end
+
+            el_epoll = AwsIO.event_loop_new(AwsIO.EventLoopOptions(type = AwsIO.EventLoopType.EPOLL))
+            @test el_epoll isa AwsIO.ErrorResult
+        else
+            @test true
+        end
+    end
+
+    @testset "Event loop stop then restart" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    done1 = Channel{Bool}(1)
+                    task1 = AwsIO.ScheduledTask((ctx, status) -> begin
+                        if status == AwsIO.TaskStatus.RUN_READY
+                            put!(done1, AwsIO.event_loop_thread_is_callers_thread(el))
+                        end
+                        return nothing
+                    end, nothing; type_tag = "event_loop_stop_restart_first")
+                    AwsIO.event_loop_schedule_task_now!(el, task1)
+                    @test _wait_for_channel(done1)
+                    @test take!(done1)
+
+                    @test AwsIO.event_loop_stop!(el) === nothing
+                    @test AwsIO.event_loop_wait_for_stop_completion!(el) === nothing
+                    @test AwsIO.event_loop_run!(el) === nothing
+
+                    done2 = Channel{Bool}(1)
+                    task2 = AwsIO.ScheduledTask((ctx, status) -> begin
+                        if status == AwsIO.TaskStatus.RUN_READY
+                            put!(done2, AwsIO.event_loop_thread_is_callers_thread(el))
+                        end
+                        return nothing
+                    end, nothing; type_tag = "event_loop_stop_restart_second")
+                    AwsIO.event_loop_schedule_task_now!(el, task2)
+                    @test _wait_for_channel(done2)
+                    @test take!(done2)
+
+                    AwsIO.event_loop_destroy!(el)
+                end
+            end
+        end
+    end
+
+    @testset "Event loop multiple stops" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+                @test !(el isa AwsIO.ErrorResult)
+
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+
+                    for _ in 1:8
+                        @test AwsIO.event_loop_stop!(el) === nothing
+                    end
+
+                    AwsIO.event_loop_destroy!(el)
+                end
+            end
+        end
+    end
+
+    @testset "Event loop group setup and shutdown" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            cpu_threads = Sys.CPU_THREADS
+            expected = cpu_threads > 1 ? cpu_threads ÷ 2 : cpu_threads
+
+            opts = AwsIO.EventLoopGroupOptions(loop_count = 0)
+            elg = AwsIO.event_loop_group_new(opts)
+
+            if interactive_threads <= 1 || expected >= interactive_threads
+                @test elg isa AwsIO.ErrorResult
+            else
+                @test !(elg isa AwsIO.ErrorResult)
+                if !(elg isa AwsIO.ErrorResult)
+                    try
+                        @test AwsIO.event_loop_group_get_loop_count(elg) == expected
+                        loop = AwsIO.event_loop_group_get_next_loop(elg)
+                        @test loop !== nothing
+                    finally
+                        AwsIO.event_loop_group_destroy!(elg)
+                    end
+                end
+            end
+        end
+    end
+
+    @testset "Event loop group shutdown callback" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                shutdown_called = Ref(false)
+                shutdown_thread = Ref(0)
+                done_ch = Channel{Nothing}(1)
+
+                shutdown_opts = AwsIO.shutdown_callback_options(
+                    (user_data) -> begin
+                        shutdown_called[] = true
+                        shutdown_thread[] = Threads.threadid()
+                        if !isready(done_ch)
+                            put!(done_ch, nothing)
+                        end
+                        return nothing
+                    end,
+                    nothing,
+                )
+
+                elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts))
+                @test !(elg isa AwsIO.ErrorResult)
+
+                if !(elg isa AwsIO.ErrorResult)
+                    AwsIO.event_loop_group_destroy!(elg)
+                    @test _wait_for_channel(done_ch)
+                    @test shutdown_called[]
+                    @test shutdown_thread[] != 0
+                end
             end
         end
     end

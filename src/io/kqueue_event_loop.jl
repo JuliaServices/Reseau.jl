@@ -547,7 +547,13 @@
 
         if num_events == -1
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to events on fd %d", task_data.owner.fd)
-            task_data.on_event(event_loop, task_data.owner, Int(IoEventType.ERROR), task_data.on_event_user_data)
+            Base.invokelatest(
+                task_data.on_event,
+                event_loop,
+                task_data.owner,
+                Int(IoEventType.ERROR),
+                task_data.on_event_user_data,
+            )
             return nothing
         end
 
@@ -571,7 +577,13 @@
                     @ccall kevent(impl.kq_fd::Cint, del_ref::Ptr{Kevent}, 1::Cint, C_NULL::Ptr{Kevent}, 0::Cint, C_NULL::Ptr{Cvoid})::Cint
                 end
             end
-            task_data.on_event(event_loop, task_data.owner, Int(IoEventType.ERROR), task_data.on_event_user_data)
+            Base.invokelatest(
+                task_data.on_event,
+                event_loop,
+                task_data.owner,
+                Int(IoEventType.ERROR),
+                task_data.on_event_user_data,
+            )
             return nothing
         end
 
@@ -861,7 +873,8 @@
                         "activity on fd %d, invoking handler",
                         handle_data.owner.fd,
                     )
-                    handle_data.on_event(
+                    Base.invokelatest(
+                        handle_data.on_event,
                         event_loop,
                         handle_data.owner,
                         handle_data.events_this_loop,

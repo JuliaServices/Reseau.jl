@@ -670,7 +670,13 @@
                             "activity on fd %d, invoking handler",
                             event_data.handle.fd,
                         )
-                        event_data.on_event(event_loop, event_data.handle, event_mask, event_data.user_data)
+                        Base.invokelatest(
+                            event_data.on_event,
+                            event_loop,
+                            event_data.handle,
+                            event_mask,
+                            event_data.user_data,
+                        )
                     end
                 finally
                     tracing_task_end(tracing_event_loop_event)

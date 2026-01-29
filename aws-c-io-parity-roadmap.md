@@ -479,7 +479,7 @@ Legend:
 
 ## 20) Test parity matrix (aws-c-io tests -> AwsIO tests)
 
-- [ ] `event_loop_test.c` -> `test/event_loop_tests.jl` (extend)
+- [~] `event_loop_test.c` -> `test/event_loop_tests.jl` (extend; IOCP + NUMA/async release gaps)
 - [ ] `socket_test.c` -> `test/socket_tests.jl` (extend)
 - [x] `socket_handler_test.c` -> new `test/socket_handler_tests.jl`
 - [x] `channel_test.c` -> new `test/channel_tests.jl`
