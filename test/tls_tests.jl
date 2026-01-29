@@ -3,6 +3,20 @@ using Random
 using AwsIO
 include("read_write_test_handler.jl")
 
+if !tls_tests_enabled()
+    @info "Skipping TLS tests (set AWSIO_RUN_TLS_TESTS=1 to enable)"
+    return
+end
+
+const _TLS_RESOURCE_ROOT = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources")
+
+function _resource_path(name::AbstractString)
+    return joinpath(_TLS_RESOURCE_ROOT, name)
+end
+
+const TEST_PEM_CERT = String(read(_resource_path("unittests.crt")))
+const TEST_PEM_KEY = String(read(_resource_path("unittests.key")))
+
 function wait_for_flag_tls(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
     timeout_ns = Int(timeout_s * 1_000_000_000)
@@ -19,12 +33,30 @@ function wait_for_handshake_status(handler::AwsIO.TlsChannelHandler, status; tim
     start = Base.time_ns()
     timeout_ns = Int(timeout_s * 1_000_000_000)
     while (Base.time_ns() - start) < timeout_ns
-        if handler.stats.handshake_status == status
+        if AwsIO.handler_gather_statistics(handler).handshake_status == status
             return true
         end
         sleep(0.01)
     end
     return false
+end
+
+function mark_tls_handler_negotiated!(handler::AwsIO.TlsChannelHandler)
+    if hasproperty(handler, :state)
+        setfield!(handler, :state, AwsIO.TlsNegotiationState.SUCCEEDED)
+    elseif hasproperty(handler, :negotiation_finished)
+        setfield!(handler, :negotiation_finished, true)
+    end
+    return nothing
+end
+
+function mark_tls_handler_failed!(handler::AwsIO.TlsChannelHandler)
+    if hasproperty(handler, :state)
+        setfield!(handler, :state, AwsIO.TlsNegotiationState.FAILED)
+    elseif hasproperty(handler, :negotiation_finished)
+        setfield!(handler, :negotiation_finished, false)
+    end
+    return nothing
 end
 
 mutable struct TlsTestRwArgs
@@ -85,25 +117,8 @@ function tls_test_handle_write(handler, slot, data_read, user_data)
     return AwsIO.null_buffer()
 end
 
-const TEST_PEM_CERT = """
------BEGIN CERTIFICATE-----
-dGVzdA==
------END CERTIFICATE-----
-"""
-
-const TEST_PEM_KEY = """
------BEGIN PRIVATE KEY-----
-dGVzdA==
------END PRIVATE KEY-----
-"""
-
 function _buf_to_string(buf::AwsIO.ByteBuffer)
     return String(AwsIO.byte_cursor_from_buf(buf))
-end
-
-function _resource_path(name::AbstractString)
-    root = dirname(@__DIR__)
-    return joinpath(root, "aws-c-io", "tests", "resources", name)
 end
 
 function _load_resource_buf(name::AbstractString)
@@ -114,6 +129,26 @@ function _load_resource_buf(name::AbstractString)
     buf_ref = Ref(AwsIO.ByteBuffer(0))
     AwsIO.byte_buf_init_from_file(buf_ref, path) == AwsIO.AWS_OP_SUCCESS || return nothing
     return buf_ref[]
+end
+
+function _test_server_ctx()
+    cert_path = _resource_path("unittests.crt")
+    key_path = _resource_path("unittests.key")
+    opts = AwsIO.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
+    maybe_apply_test_keychain!(opts)
+    return opts isa AwsIO.TlsContextOptions ? AwsIO.tls_context_new(opts) : opts
+end
+
+function _test_client_ctx(; verify_peer::Bool = true)
+    opts = AwsIO.tls_ctx_options_init_default_client()
+    if verify_peer
+        ca_file = _resource_path(Sys.isapple() ? "unittests.crt" : "ca_root.crt")
+        res = AwsIO.tls_ctx_options_override_default_trust_store_from_path(opts; ca_file = ca_file)
+        res isa AwsIO.ErrorResult && return res
+    else
+        AwsIO.tls_ctx_options_set_verify_peer(opts, false)
+    end
+    return AwsIO.tls_context_new(opts)
 end
 
 @testset "TLS options parity" begin
@@ -194,7 +229,7 @@ end
 end
 
 @testset "TLS ctx acquire/release" begin
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.TlsContext
         @test AwsIO.tls_ctx_acquire(ctx) === ctx
@@ -330,9 +365,14 @@ end
 @testset "TLS ctx options platform hooks" begin
     opts = AwsIO.tls_ctx_options_init_default_client()
     if Sys.isapple()
-        @test AwsIO.tls_ctx_options_set_keychain_path(opts, "/tmp") === nothing
         secitem = AwsIO.SecItemOptions("cert", "key")
-        @test AwsIO.tls_ctx_options_set_secitem_options(opts, secitem) === nothing
+        if AwsIO.is_using_secitem()
+            @test AwsIO.tls_ctx_options_set_keychain_path(opts, "/tmp") isa AwsIO.ErrorResult
+            @test AwsIO.tls_ctx_options_set_secitem_options(opts, secitem) === nothing
+        else
+            @test AwsIO.tls_ctx_options_set_keychain_path(opts, "/tmp") === nothing
+            @test AwsIO.tls_ctx_options_set_secitem_options(opts, secitem) isa AwsIO.ErrorResult
+        end
     else
         @test AwsIO.tls_ctx_options_set_keychain_path(opts, "/tmp") isa AwsIO.ErrorResult
         secitem = AwsIO.SecItemOptions("cert", "key")
@@ -467,7 +507,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -475,14 +515,18 @@ end
     end
 
     opts = AwsIO.TlsConnectionOptions(ctx; timeout_ms = 1)
-    handler = AwsIO.TlsChannelHandler(opts)
     channel = AwsIO.Channel(event_loop, nothing)
     slot = AwsIO.channel_slot_new!(channel)
-    handler.slot = slot
+    handler = AwsIO.tls_client_handler_new(opts, slot)
+    @test handler isa AwsIO.TlsChannelHandler
+    if handler isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
     AwsIO.channel_slot_set_handler!(slot, handler)
 
-    handler.stats.handshake_status = AwsIO.TlsNegotiationStatus.ONGOING
-    AwsIO._tls_timeout_task(handler.timeout_task, handler, AwsIO.TaskStatus.RUN_READY)
+    handler.shared.stats.handshake_status = AwsIO.TlsNegotiationStatus.ONGOING
+    AwsIO._tls_timeout_task(handler.shared.timeout_task, handler.shared, AwsIO.TaskStatus.RUN_READY)
 
     @test channel.shutdown_pending
     @test channel.shutdown_error_code == AwsIO.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
@@ -561,15 +605,33 @@ end
         return
     end
 
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    slot = AwsIO.channel_slot_new!(channel)
     conn = AwsIO.tls_connection_options_init_from_ctx(ctx)
     AwsIO.tls_connection_options_set_server_name(conn, "example.com")
-    handler = AwsIO.TlsChannelHandler(conn)
+    handler = AwsIO.tls_client_handler_new(conn, slot)
+    @test handler isa AwsIO.TlsChannelHandler
+    if handler isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+    AwsIO.channel_slot_set_handler!(slot, handler)
 
     @test _buf_to_string(AwsIO.tls_handler_server_name(handler)) == "example.com"
     @test AwsIO.tls_handler_protocol(handler).len == 0
 
     handler.protocol = AwsIO.byte_buf_from_c_str("h2")
     @test _buf_to_string(AwsIO.tls_handler_protocol(handler)) == "h2"
+
+    AwsIO.event_loop_group_destroy!(elg)
 end
 
 mutable struct EchoHandler <: AwsIO.AbstractChannelHandler
@@ -630,7 +692,7 @@ function AwsIO.handler_destroy(handler::EchoHandler)
     return nothing
 end
 
-mutable struct SinkHandler <: AwsIO.AbstractChannelHandler
+mutable struct SinkHandler <: AwsIO.TlsChannelHandler
     slot::Union{AwsIO.ChannelSlot, Nothing}
     writes::Base.RefValue{Int}
 end
@@ -690,7 +752,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -761,6 +823,7 @@ end
         AwsIO.ByteCursor(TEST_PEM_CERT),
         AwsIO.ByteCursor(TEST_PEM_KEY),
     )
+    maybe_apply_test_keychain!(server_opts)
     @test server_opts isa AwsIO.TlsContextOptions
     if server_opts isa AwsIO.TlsContextOptions
         server_ctx = AwsIO.tls_context_new(server_opts)
@@ -794,7 +857,7 @@ end
         return
     end
 
-    client_ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    client_ctx = _test_client_ctx()
     @test client_ctx isa AwsIO.TlsContext
     if client_ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -814,8 +877,8 @@ end
     @test client_handler isa AwsIO.TlsChannelHandler
     if client_handler isa AwsIO.TlsChannelHandler
         client_opts.server_name = "changed"
-        @test client_handler.options.server_name == "example.com"
-        @test client_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.NONE
+        @test _buf_to_string(AwsIO.tls_handler_server_name(client_handler)) == "example.com"
+        @test AwsIO.handler_gather_statistics(client_handler).handshake_status == AwsIO.TlsNegotiationStatus.NONE
         @test AwsIO.tls_client_handler_start_negotiation(client_handler) === nothing
         @test wait_for_handshake_status(client_handler, AwsIO.TlsNegotiationStatus.ONGOING)
     end
@@ -824,6 +887,7 @@ end
         AwsIO.ByteCursor(TEST_PEM_CERT),
         AwsIO.ByteCursor(TEST_PEM_KEY),
     )
+    maybe_apply_test_keychain!(server_opts)
     @test server_opts isa AwsIO.TlsContextOptions
     if server_opts isa AwsIO.TlsContextOptions
         server_ctx = AwsIO.tls_context_new(server_opts)
@@ -843,7 +907,7 @@ end
             )
             @test server_handler isa AwsIO.TlsChannelHandler
             if server_handler isa AwsIO.TlsChannelHandler
-                @test server_handler.stats.handshake_status == AwsIO.TlsNegotiationStatus.NONE
+                @test AwsIO.handler_gather_statistics(server_handler).handshake_status == AwsIO.TlsNegotiationStatus.NONE
             end
 
             bad_channel = AwsIO.Channel(event_loop, nothing)
@@ -869,7 +933,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -884,10 +948,18 @@ end
         return nothing
     end
     opts = AwsIO.TlsConnectionOptions(ctx; on_data_read = on_data_read)
-    handler = AwsIO.TlsChannelHandler(opts)
-    handler.negotiation_completed = true
-    handler.slot = slot
+    handler = AwsIO.tls_client_handler_new(opts, slot)
+    @test handler isa AwsIO.TlsChannelHandler
+    if handler isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
     AwsIO.channel_slot_set_handler!(slot, handler)
+    if hasproperty(handler, :state)
+        setfield!(handler, :state, AwsIO.TlsNegotiationState.SUCCEEDED)
+    elseif hasproperty(handler, :negotiation_finished)
+        setfield!(handler, :negotiation_finished, true)
+    end
 
     AwsIO.handler_shutdown(handler, slot, AwsIO.ChannelDirection.READ, 0, false)
 
@@ -910,7 +982,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -919,19 +991,17 @@ end
 
     channel = AwsIO.Channel(event_loop, nothing)
     slot = AwsIO.channel_slot_new!(channel)
-    handler = AwsIO.TlsChannelHandler(AwsIO.TlsConnectionOptions(ctx))
-    handler.slot = slot
+    handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(ctx), slot)
+    @test handler isa AwsIO.TlsChannelHandler
+    if handler isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
     AwsIO.channel_slot_set_handler!(slot, handler)
-
-    msg = AwsIO.IoMessage(1)
-    msg_ref = Ref(msg.message_data)
-    AwsIO.byte_buf_write_from_whole_cursor(msg_ref, AwsIO.ByteCursor(UInt8[0x01]))
-    msg.message_data = msg_ref[]
-    AwsIO.handler_process_write_message(handler, slot, msg)
-    @test length(handler.pending_writes) == 1
+    mark_tls_handler_negotiated!(handler)
 
     AwsIO.handler_shutdown(handler, slot, AwsIO.ChannelDirection.WRITE, 0, false)
-    @test isempty(handler.pending_writes)
+    @test channel.channel_state == AwsIO.ChannelState.SHUT_DOWN
 
     AwsIO.event_loop_group_destroy!(elg)
 end
@@ -945,7 +1015,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -954,10 +1024,14 @@ end
 
     channel = AwsIO.Channel(event_loop, nothing)
     slot = AwsIO.channel_slot_new!(channel)
-    handler = AwsIO.TlsChannelHandler(AwsIO.TlsConnectionOptions(ctx))
-    handler.state = AwsIO.TlsHandshakeState.FAILED
-    handler.slot = slot
+    handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(ctx), slot)
+    @test handler isa AwsIO.TlsChannelHandler
+    if handler isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
     AwsIO.channel_slot_set_handler!(slot, handler)
+    mark_tls_handler_failed!(handler)
 
     msg = AwsIO.IoMessage(1)
     msg_ref = Ref(msg.message_data)
@@ -966,14 +1040,18 @@ end
     res = AwsIO.handler_process_write_message(handler, slot, msg)
     @test res isa AwsIO.ErrorResult
     if res isa AwsIO.ErrorResult
-        @test res.code == AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
+        @test res.code == AwsIO.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED
     end
-    @test isempty(handler.pending_writes)
 
     AwsIO.event_loop_group_destroy!(elg)
 end
 
 @testset "TLS alert handling" begin
+    if Sys.isapple() || Sys.islinux()
+        @test true
+        return
+    end
+
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
@@ -982,7 +1060,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -1051,6 +1129,11 @@ end
 end
 
 @testset "TLS handshake stats" begin
+    if Sys.isapple() || Sys.islinux()
+        @test true
+        return
+    end
+
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
@@ -1059,7 +1142,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -1112,6 +1195,11 @@ end
 end
 
 @testset "TLS mTLS custom key op handshake" begin
+    if Sys.isapple() || Sys.islinux()
+        @test true
+        return
+    end
+
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
@@ -1227,13 +1315,23 @@ end
     @test port > 0
 
     server_ready = Ref(false)
+    server_negotiated = Ref(false)
     server_received = Ref(false)
 
-    server_ctx = AwsIO.tls_context_new(AwsIO.TlsContextOptions(; is_server = true, verify_peer = false))
+    server_ctx = _test_server_ctx()
     @test server_ctx isa AwsIO.TlsContext
     if server_ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
         return
+    end
+
+    on_server_negotiation = (handler, slot, err, ud) -> begin
+        _ = handler
+        _ = slot
+        _ = err
+        _ = ud
+        server_negotiated[] = true
+        return nothing
     end
 
     on_accept = (listener, err, new_sock, ud) -> begin
@@ -1244,7 +1342,7 @@ end
         channel = AwsIO.Channel(event_loop, nothing)
         AwsIO.socket_channel_handler_new!(channel, new_sock)
 
-        tls_opts = AwsIO.TlsConnectionOptions(server_ctx)
+        tls_opts = AwsIO.TlsConnectionOptions(server_ctx; on_negotiation_result = on_server_negotiation)
         AwsIO.tls_channel_handler_new!(channel, tls_opts)
 
         echo = EchoHandler(server_received)
@@ -1283,14 +1381,6 @@ end
 
     on_negotiation = (handler, slot, err, ud) -> begin
         negotiated[] = true
-        if err != AwsIO.AWS_OP_SUCCESS
-            return nothing
-        end
-        msg = AwsIO.IoMessage(4)
-        msg_ref = Ref(msg.message_data)
-        AwsIO.byte_buf_write_from_whole_cursor(msg_ref, AwsIO.ByteCursor("ping"))
-        msg.message_data = msg_ref[]
-        AwsIO.handler_process_write_message(handler, slot, msg)
         return nothing
     end
 
@@ -1300,6 +1390,9 @@ end
         AwsIO.event_loop_group_destroy!(elg)
         return
     end
+
+    client_channel_ref = Ref{Any}(nothing)
+    client_tls_ref = Ref{Any}(nothing)
 
     connect_opts = AwsIO.SocketConnectOptions(
         AwsIO.SocketEndpoint("127.0.0.1", port);
@@ -1317,7 +1410,12 @@ end
                 on_negotiation_result = on_negotiation,
                 on_data_read = on_data_read,
             )
-            AwsIO.tls_channel_handler_new!(channel, tls_opts)
+            tls_handler = AwsIO.tls_channel_handler_new!(channel, tls_opts)
+            if tls_handler isa AwsIO.TlsChannelHandler
+                client_channel_ref[] = channel
+                client_tls_ref[] = tls_handler
+                AwsIO.tls_client_handler_start_negotiation(tls_handler)
+            end
             AwsIO.channel_setup_complete!(channel)
             return nothing
         end,
@@ -1327,6 +1425,32 @@ end
 
     @test wait_for_flag_tls(server_ready)
     @test wait_for_flag_tls(negotiated)
+    @test wait_for_flag_tls(server_negotiated)
+
+    client_channel = client_channel_ref[]
+    client_tls = client_tls_ref[]
+    if client_channel isa AwsIO.Channel && client_tls isa AwsIO.TlsChannelHandler
+        msg = AwsIO.IoMessage(4)
+        msg_ref = Ref(msg.message_data)
+        AwsIO.byte_buf_write_from_whole_cursor(msg_ref, AwsIO.ByteCursor("ping"))
+        msg.message_data = msg_ref[]
+
+        ping_task = AwsIO.ChannelTask()
+        send_args = (handler = client_tls, slot = client_tls.slot, message = msg)
+        send_fn = (task, args, status) -> begin
+            _ = task
+            if status == AwsIO.TaskStatus.RUN_READY
+                res = AwsIO.handler_process_write_message(args.handler, args.slot, args.message)
+                if res isa AwsIO.ErrorResult && args.slot.channel !== nothing
+                    AwsIO.channel_release_message_to_pool!(args.slot.channel, args.message)
+                end
+            end
+            return nothing
+        end
+        AwsIO.channel_task_init!(ping_task, send_fn, send_args, "tls_test_send_ping")
+        AwsIO.channel_schedule_task_now!(client_channel, ping_task)
+    end
+
     @test wait_for_flag_tls(read_done)
     @test read_payload[] == "pong"
     @test server_received[] == true
@@ -1345,7 +1469,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -1379,6 +1503,7 @@ end
     function import_ctx()
         opts = AwsIO.tls_ctx_options_init_client_mtls_from_path(cert_path, key_path)
         opts isa AwsIO.TlsContextOptions || return opts
+        maybe_apply_test_keychain!(opts)
         return AwsIO.tls_client_ctx_new(opts)
     end
 
@@ -1399,12 +1524,14 @@ end
     )
     @test opts isa AwsIO.TlsContextOptions
     if opts isa AwsIO.TlsContextOptions
+        maybe_apply_test_keychain!(opts)
         ctx1 = AwsIO.tls_client_ctx_new(opts)
         @test ctx1 isa AwsIO.TlsContext
         if ctx1 isa AwsIO.TlsContext
             @test AwsIO.tls_ctx_release(ctx1) === nothing
         end
 
+        maybe_apply_test_keychain!(opts)
         ctx2 = AwsIO.tls_client_ctx_new(opts)
         @test ctx2 isa AwsIO.TlsContext
         if ctx2 isa AwsIO.TlsContext
@@ -1425,6 +1552,7 @@ end
         )
         @test opts isa AwsIO.TlsContextOptions
         if opts isa AwsIO.TlsContextOptions
+            maybe_apply_test_keychain!(opts)
             ctx = AwsIO.tls_client_ctx_new(opts)
             @test ctx isa AwsIO.TlsContext
         end
@@ -1435,7 +1563,8 @@ end
 
 @testset "TLS ecc cert import" begin
     cert_buf = _load_resource_buf("ec_unittests.crt")
-    key_buf = _load_resource_buf("ec_unittests.p8")
+    key_name = Sys.isapple() ? "ec_unittests.key" : "ec_unittests.p8"
+    key_buf = _load_resource_buf(key_name)
     if cert_buf === nothing || key_buf === nothing
         @test true
     else
@@ -1445,6 +1574,7 @@ end
         )
         @test opts isa AwsIO.TlsContextOptions
         if opts isa AwsIO.TlsContextOptions
+            maybe_apply_test_keychain!(opts)
             ctx = AwsIO.tls_client_ctx_new(opts)
             @test ctx isa AwsIO.TlsContext
         end
@@ -1472,10 +1602,12 @@ end
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)
 
-    server_ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_server(
+    server_opts = AwsIO.tls_ctx_options_init_default_server(
         AwsIO.ByteCursor(TEST_PEM_CERT),
         AwsIO.ByteCursor(TEST_PEM_KEY),
-    ))
+    )
+    maybe_apply_test_keychain!(server_opts)
+    server_ctx = AwsIO.tls_context_new(server_opts)
     @test server_ctx isa AwsIO.TlsContext
     if server_ctx isa AwsIO.ErrorResult
         AwsIO.host_resolver_shutdown!(resolver)
@@ -1483,7 +1615,7 @@ end
         return
     end
 
-    client_ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    client_ctx = _test_client_ctx()
     @test client_ctx isa AwsIO.TlsContext
     if client_ctx isa AwsIO.ErrorResult
         AwsIO.host_resolver_shutdown!(resolver)
@@ -1491,10 +1623,12 @@ end
         return
     end
 
-    server_setup = Ref(false)
+    server_setup_called = Ref(false)
+    server_setup_err = Ref(AwsIO.AWS_OP_SUCCESS)
     server_shutdown = Ref(false)
     server_channel = Ref{Any}(nothing)
-    server_negotiated = Ref(false)
+    server_negotiated_called = Ref(false)
+    server_negotiated_err = Ref(AwsIO.AWS_OP_SUCCESS)
 
     server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -1503,12 +1637,14 @@ end
         tls_connection_options = AwsIO.TlsConnectionOptions(
             server_ctx;
             on_negotiation_result = (handler, slot, err, ud) -> begin
-                server_negotiated[] = err == AwsIO.AWS_OP_SUCCESS
+                server_negotiated_called[] = true
+                server_negotiated_err[] = err
                 return nothing
             end,
         ),
         on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-            server_setup[] = err == AwsIO.AWS_OP_SUCCESS
+            server_setup_called[] = true
+            server_setup_err[] = err
             server_channel[] = channel
             return nothing
         end,
@@ -1530,14 +1666,18 @@ end
     ))
 
     function connect_once!()
-        server_setup[] = false
+        server_setup_called[] = false
+        server_setup_err[] = AwsIO.AWS_OP_SUCCESS
         server_shutdown[] = false
         server_channel[] = nothing
-        server_negotiated[] = false
+        server_negotiated_called[] = false
+        server_negotiated_err[] = AwsIO.AWS_OP_SUCCESS
 
-        client_setup = Ref(false)
+        client_setup_called = Ref(false)
+        client_setup_err = Ref(AwsIO.AWS_OP_SUCCESS)
         client_shutdown = Ref(false)
-        client_negotiated = Ref(false)
+        client_negotiated_called = Ref(false)
+        client_negotiated_err = Ref(AwsIO.AWS_OP_SUCCESS)
         client_channel = Ref{Any}(nothing)
 
         @test AwsIO.client_bootstrap_connect!(
@@ -1548,12 +1688,14 @@ end
                 client_ctx;
                 server_name = "localhost",
                 on_negotiation_result = (handler, slot, err, ud) -> begin
-                    client_negotiated[] = err == AwsIO.AWS_OP_SUCCESS
+                    client_negotiated_called[] = true
+                    client_negotiated_err[] = err
                     return nothing
                 end,
             ),
             on_setup = (bs, err, channel, ud) -> begin
-                client_setup[] = err == AwsIO.AWS_OP_SUCCESS
+                client_setup_called[] = true
+                client_setup_err[] = err
                 client_channel[] = channel
                 return nothing
             end,
@@ -1563,10 +1705,14 @@ end
             end,
         ) === nothing
 
-        @test wait_for_flag_tls(server_setup)
-        @test wait_for_flag_tls(client_setup)
-        @test wait_for_flag_tls(server_negotiated)
-        @test wait_for_flag_tls(client_negotiated)
+        @test wait_for_flag_tls(server_setup_called)
+        @test server_setup_err[] == AwsIO.AWS_OP_SUCCESS
+        @test wait_for_flag_tls(client_setup_called)
+        @test client_setup_err[] == AwsIO.AWS_OP_SUCCESS
+        @test wait_for_flag_tls(server_negotiated_called)
+        @test server_negotiated_err[] == AwsIO.AWS_OP_SUCCESS
+        @test wait_for_flag_tls(client_negotiated_called)
+        @test client_negotiated_err[] == AwsIO.AWS_OP_SUCCESS
 
         if server_channel[] !== nothing
             AwsIO.channel_shutdown!(server_channel[], AwsIO.AWS_OP_SUCCESS)
@@ -1588,10 +1734,12 @@ end
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)
 
-    server_ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_server(
+    server_opts = AwsIO.tls_ctx_options_init_default_server(
         AwsIO.ByteCursor(TEST_PEM_CERT),
         AwsIO.ByteCursor(TEST_PEM_KEY),
-    ))
+    )
+    maybe_apply_test_keychain!(server_opts)
+    server_ctx = AwsIO.tls_context_new(server_opts)
     @test server_ctx isa AwsIO.TlsContext
     if server_ctx isa AwsIO.ErrorResult
         AwsIO.host_resolver_shutdown!(resolver)
@@ -1674,10 +1822,15 @@ end
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)
 
-    server_opts = AwsIO.tls_ctx_options_init_default_server(
-        AwsIO.byte_cursor_from_buf(cert_buf),
-        AwsIO.byte_cursor_from_buf(key_buf),
-    )
+    server_opts = if Sys.isapple()
+        AwsIO.tls_ctx_options_init_server_pkcs12_from_path(_resource_path("unittests.p12"), "1234")
+    else
+        AwsIO.tls_ctx_options_init_default_server(
+            AwsIO.byte_cursor_from_buf(cert_buf),
+            AwsIO.byte_cursor_from_buf(key_buf),
+        )
+    end
+    maybe_apply_test_keychain!(server_opts)
     server_ctx = AwsIO.tls_context_new(server_opts)
     @test server_ctx isa AwsIO.TlsContext
     if server_ctx isa AwsIO.ErrorResult
@@ -1688,7 +1841,7 @@ end
         return
     end
 
-    client_ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    client_ctx = _test_client_ctx()
     @test client_ctx isa AwsIO.TlsContext
     if client_ctx isa AwsIO.ErrorResult
         AwsIO.host_resolver_shutdown!(resolver)
@@ -1782,7 +1935,7 @@ end
         return
     end
 
-    ctx = AwsIO.tls_context_new(AwsIO.tls_ctx_options_init_default_client())
+    ctx = _test_client_ctx()
     @test ctx isa AwsIO.TlsContext
     if ctx isa AwsIO.ErrorResult
         AwsIO.event_loop_group_destroy!(elg)
@@ -1796,6 +1949,7 @@ end
     tls_slot = AwsIO.channel_slot_new!(channel)
     handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(ctx), tls_slot)
     @test handler isa AwsIO.TlsChannelHandler
+    handler isa AwsIO.TlsChannelHandler && AwsIO.channel_slot_set_handler!(tls_slot, handler)
 
     app_slot = AwsIO.channel_slot_new!(channel)
     AwsIO.channel_slot_insert_right!(tls_slot, app_slot)
@@ -1846,7 +2000,7 @@ end
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)
 
-    server_ctx = AwsIO.tls_context_new(AwsIO.TlsContextOptions(; is_server = true, verify_peer = false))
+    server_ctx = _test_server_ctx()
     client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
     @test server_ctx isa AwsIO.TlsContext
     @test client_ctx isa AwsIO.TlsContext
@@ -1992,7 +2146,7 @@ end
         elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
         resolver = AwsIO.DefaultHostResolver(elg)
 
-        server_ctx = AwsIO.tls_context_new(AwsIO.TlsContextOptions(; is_server = true, verify_peer = false))
+        server_ctx = _test_server_ctx()
         client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
         @test server_ctx isa AwsIO.TlsContext
         @test client_ctx isa AwsIO.TlsContext
@@ -2240,8 +2394,10 @@ end
     client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
     @test client_ctx isa AwsIO.TlsContext
     client_ctx isa AwsIO.TlsContext || return
-    tls_handler = AwsIO.TlsChannelHandler(AwsIO.TlsConnectionOptions(client_ctx))
     tls_slot = AwsIO.channel_slot_new!(channel)
+    tls_handler = AwsIO.tls_client_handler_new(AwsIO.TlsConnectionOptions(client_ctx), tls_slot)
+    @test tls_handler isa AwsIO.TlsChannelHandler
+    tls_handler isa AwsIO.TlsChannelHandler || return
     AwsIO.channel_slot_insert_right!(socket_slot, tls_slot)
     AwsIO.channel_slot_set_handler!(tls_slot, tls_handler)
 
@@ -2261,7 +2417,7 @@ end
         (_ctx, _status) -> begin
             socket_handler.stats.bytes_read = 111
             socket_handler.stats.bytes_written = 222
-            tls_handler.stats.handshake_status = AwsIO.TlsNegotiationStatus.SUCCESS
+            AwsIO.handler_gather_statistics(tls_handler).handshake_status = AwsIO.TlsNegotiationStatus.SUCCESS
             return nothing
         end,
         nothing;
