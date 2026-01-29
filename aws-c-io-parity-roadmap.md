@@ -479,7 +479,7 @@ Legend:
 
 ## 20) Test parity matrix (aws-c-io tests -> AwsIO tests)
 
-- [~] `event_loop_test.c` -> `test/event_loop_tests.jl` (extend; IOCP + NUMA gaps)
+- [~] `event_loop_test.c` -> `test/event_loop_tests.jl` (extend; IOCP gaps)
 - [~] `socket_test.c` -> `test/socket_tests.jl` (extend; port/IP parse + local/UDP comm + wrong-thread + zero-port + bind/outgoing error cases + async write callback + timeout/cancellation + cleanup (connect/accept/write) + interface bind + vsock loopback + posix connect-before-accept done, remaining local socket pipe connected race (Windows IOCP) pending)
 - [x] `socket_handler_test.c` -> new `test/socket_handler_tests.jl`
 - [x] `channel_test.c` -> new `test/channel_tests.jl`

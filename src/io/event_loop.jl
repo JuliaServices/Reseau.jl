@@ -103,6 +103,16 @@ function EventLoopGroupOptions(;
     )
 end
 
+function _cpu_group_value(cpu_group)
+    if cpu_group === nothing
+        return nothing
+    end
+    if cpu_group isa Base.RefValue
+        return cpu_group[]
+    end
+    return cpu_group
+end
+
 # Callback type for IO events
 const OnEventCallback = Function  # signature: (event_loop, io_handle, events::Int, user_data) -> Nothing
 
@@ -387,6 +397,11 @@ end
 # Create a new event loop group (creates and runs event loops)
 function event_loop_group_new(options::EventLoopGroupOptions)
     loop_count = options.loop_count
+    cpu_group_val = _cpu_group_value(options.cpu_group)
+    if cpu_group_val !== nothing && loop_count == typemax(UInt16)
+        cpu_count = get_cpu_count_for_group(Int(cpu_group_val))
+        loop_count = UInt16(cpu_count > 0 ? min(cpu_count, typemax(UInt16)) : 1)
+    end
     if loop_count == 0
         processor_count = Sys.CPU_THREADS
         loop_count = UInt16(processor_count > 1 ? processor_count ÷ 2 : processor_count)

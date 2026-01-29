@@ -1529,6 +1529,41 @@ end
         end
     end
 
+    @testset "Event loop group NUMA setup" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            cpu_group = Ref{UInt16}(0)
+            cpu_count = AwsIO.get_cpu_count_for_group(cpu_group[])
+            opts = AwsIO.EventLoopGroupOptions(loop_count = typemax(UInt16), cpu_group = cpu_group)
+            elg = AwsIO.event_loop_group_new(opts)
+
+            if interactive_threads <= 1 || cpu_count >= interactive_threads
+                @test elg isa AwsIO.ErrorResult
+            else
+                @test !(elg isa AwsIO.ErrorResult)
+                if elg isa AwsIO.ErrorResult
+                    return
+                end
+                try
+                    el_count = AwsIO.event_loop_group_get_loop_count(elg)
+                    cpu_info = Vector{AwsIO.cpu_info}(undef, cpu_count)
+                    _ = AwsIO.get_cpu_ids_for_group(cpu_group[], cpu_info, cpu_count)
+                    hw_thread_count = 0
+                    for info in cpu_info
+                        if !info.suspected_hyper_thread
+                            hw_thread_count += 1
+                        end
+                    end
+                    @test el_count == hw_thread_count
+                finally
+                    AwsIO.event_loop_group_destroy!(elg)
+                end
+            end
+        end
+    end
+
     @testset "Event loop creation types" begin
         if Sys.iswindows()
             @test true
