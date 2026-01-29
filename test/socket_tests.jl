@@ -794,3 +794,54 @@ end
         end
     end
 end
+
+@testset "wrong thread read write fails" begin
+    if Sys.iswindows()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.IPV4)
+        sock = AwsIO.socket_init(opts)
+        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        @test socket_val !== nothing
+        if socket_val === nothing
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            @test AwsIO.socket_bind(socket_val, bind_opts) === nothing
+            @test AwsIO.socket_assign_to_event_loop(socket_val, el_val) === nothing
+            sub_res = AwsIO.socket_subscribe_to_readable_events(socket_val, (sock, err, ud) -> nothing, nothing)
+            @test !(sub_res isa AwsIO.ErrorResult)
+
+            buf = AwsIO.ByteBuffer(4)
+            read_res = AwsIO.socket_read(socket_val, buf)
+            @test read_res isa AwsIO.ErrorResult
+            read_res isa AwsIO.ErrorResult && @test read_res.code == AwsIO.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+
+            write_res = AwsIO.socket_write(socket_val, AwsIO.ByteCursor("noop"), (s, err, bytes, ud) -> nothing, nothing)
+            @test write_res isa AwsIO.ErrorResult
+            write_res isa AwsIO.ErrorResult && @test write_res.code == AwsIO.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+
+            close_done = Ref(false)
+            close_task = AwsIO.ScheduledTask((ctx, status) -> begin
+                AwsIO.socket_close(socket_val)
+                close_done[] = true
+                return nothing
+            end, nothing; type_tag = "socket_close_wrong_thread")
+            AwsIO.event_loop_schedule_task_now!(el_val, close_task)
+            @test wait_for_flag(close_done)
+        finally
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
