@@ -30,14 +30,14 @@ const SOL_SOCKET = @static Sys.isapple() ? Cint(0xFFFF) : Cint(1)
 const IPPROTO_TCP = Cint(6)
 const IPPROTO_IP = Cint(0)
 const IPPROTO_IPV6 = Cint(41)
-const IP_BOUND_IF = @static Sys.isapple() ? Cint(25) : Cint(0)
-const IPV6_BOUND_IF = @static Sys.isapple() ? Cint(125) : Cint(0)
+const IP_BOUND_IF = @static Sys.isapple() ? (isdefined(Libc, :IP_BOUND_IF) ? Cint(Libc.IP_BOUND_IF) : Cint(25)) : Cint(0)
+const IPV6_BOUND_IF = @static Sys.isapple() ? (isdefined(Libc, :IPV6_BOUND_IF) ? Cint(Libc.IPV6_BOUND_IF) : Cint(125)) : Cint(0)
 
 # Socket options
 const SO_REUSEADDR = @static Sys.isapple() ? Cint(0x04) : Cint(2)
 const SO_KEEPALIVE = @static Sys.isapple() ? Cint(0x08) : Cint(9)
 const SO_ERROR = @static Sys.isapple() ? Cint(0x1007) : Cint(4)
-const SO_BINDTODEVICE = @static Sys.isapple() ? Cint(0x1134) : Cint(25)
+const SO_BINDTODEVICE = @static Sys.islinux() ? (isdefined(Libc, :SO_BINDTODEVICE) ? Cint(Libc.SO_BINDTODEVICE) : Cint(25)) : Cint(0)
 
 # TCP keepalive options
 @static if Sys.isapple()

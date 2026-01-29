@@ -239,6 +239,460 @@ end
     end
 end
 
+@testset "socket bind to interface" begin
+    if Sys.iswindows()
+        @test true
+    else
+        iface = Sys.islinux() ? "lo" : (Sys.isapple() ? "lo0" : "")
+        if isempty(iface)
+            @test true
+            return
+        end
+        if !AwsIO.is_network_interface_name_valid(iface)
+            @test true
+            return
+        end
+
+        # IPv4 stream
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(;
+            type = AwsIO.SocketType.STREAM,
+            domain = AwsIO.SocketDomain.IPV4,
+            connect_timeout_ms = 3000,
+            keepalive = true,
+            keep_alive_interval_sec = 1000,
+            keep_alive_timeout_sec = 60000,
+            network_interface_name = iface,
+        )
+
+        server = AwsIO.socket_init(opts)
+        server_socket = server isa AwsIO.Socket ? server : nothing
+        if server isa AwsIO.ErrorResult
+            @test server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        client_socket = nothing
+        accepted = Ref{Any}(nothing)
+
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
+            if bind_res isa AwsIO.ErrorResult
+                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                    bind_res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+                return
+            end
+            listen_res = AwsIO.socket_listen(server_socket, 1024)
+            if listen_res isa AwsIO.ErrorResult
+                @test listen_res.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                    listen_res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+                return
+            end
+
+            bound = AwsIO.socket_get_bound_address(server_socket)
+            @test bound isa AwsIO.SocketEndpoint
+            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            if port == 0
+                return
+            end
+
+            accept_err = Ref{Int}(0)
+            read_err = Ref{Int}(0)
+            payload = Ref{String}("")
+            read_done = Ref{Bool}(false)
+
+            connect_err = Ref{Int}(0)
+            connect_done = Ref{Bool}(false)
+            write_err = Ref{Int}(0)
+            write_done = Ref{Bool}(false)
+
+            on_accept = (listener, err, new_sock, ud) -> begin
+                accept_err[] = err
+                accepted[] = new_sock
+                if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+                    read_done[] = true
+                    return nothing
+                end
+
+                assign_res = AwsIO.socket_assign_to_event_loop(new_sock, el_val)
+                if assign_res isa AwsIO.ErrorResult
+                    read_err[] = assign_res.code
+                    read_done[] = true
+                    return nothing
+                end
+
+                sub_res = AwsIO.socket_subscribe_to_readable_events(
+                    new_sock, (sock, err, ud) -> begin
+                        read_err[] = err
+                        if err != AwsIO.AWS_OP_SUCCESS
+                            read_done[] = true
+                            return nothing
+                        end
+
+                        buf = AwsIO.ByteBuffer(64)
+                        read_res = AwsIO.socket_read(sock, buf)
+                        if read_res isa AwsIO.ErrorResult
+                            read_err[] = read_res.code
+                        else
+                            payload[] = String(AwsIO.byte_cursor_from_buf(buf))
+                        end
+                        read_done[] = true
+                        return nothing
+                    end, nothing
+                )
+
+                if sub_res isa AwsIO.ErrorResult
+                    read_err[] = sub_res.code
+                    read_done[] = true
+                end
+                return nothing
+            end
+
+            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+
+            client = AwsIO.socket_init(opts)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                AwsIO.SocketEndpoint("127.0.0.1", port);
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> begin
+                    connect_err[] = err
+                    connect_done[] = true
+                    if err != AwsIO.AWS_OP_SUCCESS
+                        return nothing
+                    end
+
+                    cursor = AwsIO.ByteCursor("ping")
+                    write_res = AwsIO.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_done[] = true
+                            return nothing
+                        end, nothing
+                    )
+
+                    if write_res isa AwsIO.ErrorResult
+                        write_err[] = write_res.code
+                        write_done[] = true
+                    end
+                    return nothing
+                end,
+            )
+
+            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test wait_for_flag(connect_done)
+            @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+            @test wait_for_flag(write_done)
+            @test write_err[] == AwsIO.AWS_OP_SUCCESS
+            @test wait_for_flag(read_done)
+            @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+            @test read_err[] == AwsIO.AWS_OP_SUCCESS
+            @test payload[] == "ping"
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_cleanup!(client_socket)
+            end
+            if accepted[] !== nothing
+                AwsIO.socket_cleanup!(accepted[])
+            end
+            AwsIO.socket_cleanup!(server_socket)
+            AwsIO.event_loop_destroy!(el_val)
+        end
+
+        # IPv4 UDP
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts_udp = AwsIO.SocketOptions(;
+            type = AwsIO.SocketType.DGRAM,
+            domain = AwsIO.SocketDomain.IPV4,
+            connect_timeout_ms = 3000,
+            network_interface_name = iface,
+        )
+
+        server = AwsIO.socket_init(opts_udp)
+        server_socket = server isa AwsIO.Socket ? server : nothing
+        if server isa AwsIO.ErrorResult
+            @test server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        client_socket = nothing
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
+            if bind_res isa AwsIO.ErrorResult
+                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                    bind_res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+                return
+            end
+
+            bound = AwsIO.socket_get_bound_address(server_socket)
+            @test bound isa AwsIO.SocketEndpoint
+            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            if port == 0
+                return
+            end
+
+            client = AwsIO.socket_init(opts_udp)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                AwsIO.SocketEndpoint("127.0.0.1", port);
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> nothing,
+            )
+
+            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_cleanup!(client_socket)
+            end
+            AwsIO.socket_cleanup!(server_socket)
+            AwsIO.event_loop_destroy!(el_val)
+        end
+
+        # IPv6 stream
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts6 = AwsIO.SocketOptions(;
+            type = AwsIO.SocketType.STREAM,
+            domain = AwsIO.SocketDomain.IPV6,
+            connect_timeout_ms = 3000,
+            network_interface_name = iface,
+        )
+
+        server = AwsIO.socket_init(opts6)
+        server_socket = server isa AwsIO.Socket ? server : nothing
+        if server isa AwsIO.ErrorResult
+            @test server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        client_socket = nothing
+        accepted = Ref{Any}(nothing)
+
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("::1", 0))
+            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
+            if bind_res isa AwsIO.ErrorResult
+                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+                return
+            end
+            @test AwsIO.socket_listen(server_socket, 1024) === nothing
+
+            bound = AwsIO.socket_get_bound_address(server_socket)
+            @test bound isa AwsIO.SocketEndpoint
+            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            if port == 0
+                return
+            end
+
+            accept_err = Ref{Int}(0)
+            connect_err = Ref{Int}(0)
+            connect_done = Ref{Bool}(false)
+
+            on_accept = (listener, err, new_sock, ud) -> begin
+                accept_err[] = err
+                accepted[] = new_sock
+                return nothing
+            end
+
+            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+
+            client = AwsIO.socket_init(opts6)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                AwsIO.SocketEndpoint("::1", port);
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> begin
+                    connect_err[] = err
+                    connect_done[] = true
+                    return nothing
+                end,
+            )
+
+            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test wait_for_flag(connect_done)
+            @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+            @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_cleanup!(client_socket)
+            end
+            if accepted[] !== nothing
+                AwsIO.socket_cleanup!(accepted[])
+            end
+            AwsIO.socket_cleanup!(server_socket)
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
+
+@testset "socket bind to invalid interface" begin
+    if Sys.iswindows()
+        @test true
+    else
+        opts = AwsIO.SocketOptions(;
+            type = AwsIO.SocketType.STREAM,
+            domain = AwsIO.SocketDomain.IPV4,
+            connect_timeout_ms = 3000,
+            keepalive = true,
+            keep_alive_interval_sec = 1000,
+            keep_alive_timeout_sec = 60000,
+            network_interface_name = "invalid",
+        )
+
+        res = AwsIO.socket_init(opts)
+        @test res isa AwsIO.ErrorResult
+        if res isa AwsIO.ErrorResult
+            @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        end
+    end
+end
+
+@testset "vsock loopback socket communication" begin
+    if !Sys.islinux()
+        @test true
+    else
+        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+        el_val = el isa AwsIO.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            return
+        end
+        @test AwsIO.event_loop_run!(el_val) === nothing
+
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.VSOCK, connect_timeout_ms = 3000)
+        server = AwsIO.socket_init(opts)
+        server_socket = server isa AwsIO.Socket ? server : nothing
+        if server isa AwsIO.ErrorResult
+            @test server.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+            AwsIO.event_loop_destroy!(el_val)
+            return
+        end
+
+        client_socket = nothing
+        accepted = Ref{Any}(nothing)
+
+        try
+            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("1", 0))
+            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
+            if bind_res isa AwsIO.ErrorResult
+                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                    bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+                return
+            end
+            @test AwsIO.socket_listen(server_socket, 1024) === nothing
+
+            bound = AwsIO.socket_get_bound_address(server_socket)
+            @test bound isa AwsIO.SocketEndpoint
+            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            if port == 0
+                return
+            end
+
+            accept_err = Ref{Int}(0)
+            connect_err = Ref{Int}(0)
+            connect_done = Ref{Bool}(false)
+
+            on_accept = (listener, err, new_sock, ud) -> begin
+                accept_err[] = err
+                accepted[] = new_sock
+                return nothing
+            end
+
+            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+
+            client = AwsIO.socket_init(opts)
+            client_socket = client isa AwsIO.Socket ? client : nothing
+            @test client_socket !== nothing
+            if client_socket === nothing
+                return
+            end
+
+            connect_opts = AwsIO.SocketConnectOptions(
+                AwsIO.SocketEndpoint("1", port);
+                event_loop = el_val,
+                on_connection_result = (sock, err, ud) -> begin
+                    connect_err[] = err
+                    connect_done[] = true
+                    return nothing
+                end,
+            )
+
+            connect_res = AwsIO.socket_connect(client_socket, connect_opts)
+            if connect_res isa AwsIO.ErrorResult
+                @test _is_allowed_connect_error(connect_res.code) ||
+                    connect_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS ||
+                    connect_res.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
+                return
+            end
+            @test wait_for_flag(connect_done)
+            if connect_err[] != AwsIO.AWS_OP_SUCCESS
+                @test _is_allowed_connect_error(connect_err[]) ||
+                    connect_err[] == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+            else
+                @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+            end
+        finally
+            if client_socket !== nothing
+                AwsIO.socket_cleanup!(client_socket)
+            end
+            if accepted[] !== nothing
+                AwsIO.socket_cleanup!(accepted[])
+            end
+            AwsIO.socket_cleanup!(server_socket)
+            AwsIO.event_loop_destroy!(el_val)
+        end
+    end
+end
+
 @testset "socket init impl type" begin
     opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
     sock = AwsIO.socket_init(opts)
