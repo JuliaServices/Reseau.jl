@@ -471,8 +471,8 @@
         ccall(
             handle.set_queue,
             Cvoid,
-            (Ref{IoHandle}, Ptr{Cvoid}),
-            handle,
+            (Ptr{IoHandle}, Ptr{Cvoid}),
+            Ref(handle),
             dispatch_loop.dispatch_queue,
         )
         return nothing

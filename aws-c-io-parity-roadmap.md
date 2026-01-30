@@ -127,11 +127,10 @@ Legend:
 - [x] Edge-triggered behavior and read/write semantics parity
 
 ### 3.3 Apple Network Framework sockets
-- [ ] Implement NW socket (source/darwin/nw_socket.c)
-- [ ] Support TLS-in-socket behavior (SecItem-based TLS in NW)
-- [ ] Integrate with dispatch queue event loop and io_handle.set_queue
-- [ ] Lifecycle and shutdown semantics parity
-  - [x] Stub API returns ERROR_PLATFORM_NOT_SUPPORTED
+- [x] Implement NW socket (source/darwin/nw_socket.c)
+- [x] Support TLS-in-socket behavior (SecItem-based TLS in NW)
+- [x] Integrate with dispatch queue event loop and io_handle.set_queue
+- [x] Lifecycle and shutdown semantics parity
 
 ### 3.4 Windows sockets
 - [~] Implement winsock init/cleanup (source/windows/winsock_init.c)
