@@ -357,10 +357,80 @@ end
     end
 end
 
-@testset "TLS error code predicate" begin
-    @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-    @test AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH)
+@testset "TLS error code predicate - comprehensive" begin
+    # All 26 TLS error codes must be recognized by the predicate
+    tls_errors = [
+        AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE,
+        AwsIO.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED,
+        AwsIO.ERROR_IO_TLS_ERROR_WRITE_FAILURE,
+        AwsIO.ERROR_IO_TLS_ERROR_ALERT_RECEIVED,
+        AwsIO.ERROR_IO_TLS_CTX_ERROR,
+        AwsIO.ERROR_IO_TLS_VERSION_UNSUPPORTED,
+        AwsIO.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED,
+        AwsIO.ERROR_IO_TLS_NEGOTIATION_TIMEOUT,
+        AwsIO.ERROR_IO_TLS_ALERT_NOT_GRACEFUL,
+        AwsIO.ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED,
+        AwsIO.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED,
+        AwsIO.ERROR_IO_TLS_ERROR_READ_FAILURE,
+        AwsIO.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE,
+        AwsIO.ERROR_IO_TLS_NO_ROOT_CERTIFICATE_FOUND,
+        AwsIO.ERROR_IO_TLS_CERTIFICATE_EXPIRED,
+        AwsIO.ERROR_IO_TLS_CERTIFICATE_NOT_YET_VALID,
+        AwsIO.ERROR_IO_TLS_BAD_CERTIFICATE,
+        AwsIO.ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED,
+        AwsIO.ERROR_IO_TLS_BAD_PEER_CERTIFICATE,
+        AwsIO.ERROR_IO_TLS_PEER_CERTIFICATE_REVOKED,
+        AwsIO.ERROR_IO_TLS_PEER_CERTIFICATE_UNKNOWN,
+        AwsIO.ERROR_IO_TLS_INTERNAL_ERROR,
+        AwsIO.ERROR_IO_TLS_CLOSED_GRACEFUL,
+        AwsIO.ERROR_IO_TLS_CLOSED_ABORT,
+        AwsIO.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN,
+        AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH,
+    ]
+    for code in tls_errors
+        @test AwsIO.io_error_code_is_tls(code)
+    end
+    # Non-TLS error codes must not be recognized
     @test !AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_SOCKET_TIMEOUT)
+    @test !AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_DNS_QUERY_FAILED)
+    @test !AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_EVENT_LOOP_SHUTDOWN)
+    @test !AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_BROKEN_PIPE)
+    @test !AwsIO.io_error_code_is_tls(0)
+    # DEFAULT_TRUST_STORE_NOT_FOUND is a config error, not classified as TLS
+    # (matches aws-c-io aws_error_code_is_tls predicate)
+    @test !AwsIO.io_error_code_is_tls(AwsIO.ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND)
+end
+
+@testset "NW socket TLS error translation" begin
+    if !Sys.isapple()
+        @test true
+        return
+    end
+    # Test that _nw_determine_socket_error maps errSSL* codes to the correct TLS error codes.
+    # These mappings match aws-c-io source/darwin/nw_socket.c:s_determine_socket_error()
+    errSSL_map = [
+        (Int32(-9812), AwsIO.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE),      # errSSLUnknownRootCert
+        (Int32(-9813), AwsIO.ERROR_IO_TLS_NO_ROOT_CERTIFICATE_FOUND),     # errSSLNoRootCert
+        (Int32(-9814), AwsIO.ERROR_IO_TLS_CERTIFICATE_EXPIRED),           # errSSLCertExpired
+        (Int32(-9815), AwsIO.ERROR_IO_TLS_CERTIFICATE_NOT_YET_VALID),     # errSSLCertNotYetValid
+        (Int32(-9824), AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),     # errSSLPeerHandshakeFail
+        (Int32(-9808), AwsIO.ERROR_IO_TLS_BAD_CERTIFICATE),              # errSSLBadCert
+        (Int32(-9828), AwsIO.ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED),     # errSSLPeerCertExpired
+        (Int32(-9825), AwsIO.ERROR_IO_TLS_BAD_PEER_CERTIFICATE),         # errSSLPeerBadCert
+        (Int32(-9827), AwsIO.ERROR_IO_TLS_PEER_CERTIFICATE_REVOKED),     # errSSLPeerCertRevoked
+        (Int32(-9829), AwsIO.ERROR_IO_TLS_PEER_CERTIFICATE_UNKNOWN),     # errSSLPeerCertUnknown
+        (Int32(-9810), AwsIO.ERROR_IO_TLS_INTERNAL_ERROR),               # errSSLInternal
+        (Int32(-9805), AwsIO.ERROR_IO_TLS_CLOSED_GRACEFUL),              # errSSLClosedGraceful
+        (Int32(-9806), AwsIO.ERROR_IO_TLS_CLOSED_ABORT),                 # errSSLClosedAbort
+        (Int32(-9807), AwsIO.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN),    # errSSLXCertChainInvalid
+        (Int32(-9843), AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH),           # errSSLHostNameMismatch
+        (Int32(-67843), AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),   # errSecNotTrusted
+        (Int32(-9836), AwsIO.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),    # errSSLPeerProtocolVersion
+    ]
+    for (osstatus, expected_error) in errSSL_map
+        result = AwsIO._nw_determine_socket_error(Int(osstatus))
+        @test result == expected_error
+    end
 end
 
 @testset "TLS ctx options mtls" begin

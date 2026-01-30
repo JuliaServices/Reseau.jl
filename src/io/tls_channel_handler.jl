@@ -3365,6 +3365,11 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
     elseif status == _errSSLWouldBlock
         return nothing
     else
+        logf(
+            LogLevel.WARN,
+            LS_IO_TLS,
+            "SecureTransport SSLHandshake failed with OSStatus $status",
+        )
         handler.negotiation_finished = false
         _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
@@ -3649,6 +3654,11 @@ function handler_process_read_message(
         elseif status == _errSecSuccess
             continue
         else
+            logf(
+                LogLevel.ERROR,
+                LS_IO_TLS,
+                "SecureTransport SSLRead failed with OSStatus $status",
+            )
             raise_error(ERROR_IO_TLS_ERROR_READ_FAILURE)
             shutdown_error_code = ERROR_IO_TLS_ERROR_READ_FAILURE
             break

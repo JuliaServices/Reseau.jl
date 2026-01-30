@@ -60,7 +60,7 @@ Legend:
   - [~] Event loop error propagation parity
     - [x] Unsubscribe without subscription reports `ERROR_IO_NOT_SUBSCRIBED`
     - [x] Syscall failure mapping parity (kevent/epoll)
-  - [ ] TLS error translation parity
+  - [x] TLS error translation parity
 
 ### 1.3 IO handle parity
 - [~] Match `aws_io_handle` semantics, including platform data and set_queue hooks
