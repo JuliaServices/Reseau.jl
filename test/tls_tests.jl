@@ -541,6 +541,32 @@ end
     end
 end
 
+@testset "TLS custom key ops TLSv1_3 unsupported (s2n)" begin
+    if !Sys.islinux()
+        @test true
+        return
+    end
+    if !AwsIO.tls_is_alpn_available()
+        @info "Skipping TLS custom key ops TLSv1_3 test (s2n unavailable)"
+        return
+    end
+
+    handler = AwsIO.CustomKeyOpHandler((handler_obj, operation) -> nothing)
+    opts = AwsIO.tls_ctx_options_init_client_mtls_with_custom_key_operations(
+        handler,
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+    )
+    @test opts isa AwsIO.TlsContextOptions
+    opts isa AwsIO.ErrorResult && return
+
+    AwsIO.tls_ctx_options_set_minimum_tls_version(opts, AwsIO.TlsVersion.TLSv1_3)
+    ctx = AwsIO.tls_context_new(opts)
+    @test ctx isa AwsIO.ErrorResult
+    if ctx isa AwsIO.ErrorResult
+        @test ctx.code == AwsIO.ERROR_IO_TLS_VERSION_UNSUPPORTED
+    end
+end
+
 @testset "TLS ctx options pkcs11" begin
     opts = AwsIO.TlsCtxPkcs11Options(
         pkcs11_lib = :fake,

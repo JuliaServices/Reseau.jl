@@ -2592,8 +2592,10 @@ function _s2n_security_policy(options::TlsContextOptions)::Union{String, ErrorRe
             options.minimum_tls_version == TlsVersion.TLSv1 ? "CloudFront-TLS-1-0-2014" :
             options.minimum_tls_version == TlsVersion.TLSv1_1 ? "ELBSecurityPolicy-TLS-1-1-2017-01" :
             options.minimum_tls_version == TlsVersion.TLSv1_2 ? "ELBSecurityPolicy-TLS-1-2-Ext-2018-06" :
-            options.minimum_tls_version == TlsVersion.TLSv1_3 ?
-                ErrorResult(raise_error(ERROR_IO_TLS_VERSION_UNSUPPORTED)) :
+            options.minimum_tls_version == TlsVersion.TLSv1_3 ? begin
+                logf(LogLevel.ERROR, LS_IO_TLS, "TLS 1.3 with PKCS#11 is not supported yet.")
+                ErrorResult(raise_error(ERROR_IO_TLS_VERSION_UNSUPPORTED))
+            end :
                 "ELBSecurityPolicy-TLS-1-1-2017-01"
     end
 

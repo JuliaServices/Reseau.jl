@@ -349,6 +349,7 @@ Legend:
 
 ### 12.6 TLS backends parity (platform)
 - [ ] Linux/Unix: s2n parity behavior (even if implemented in Julia)
+  - [x] Custom key ops block TLS 1.3 (s2n policy parity)
 - [~] macOS/iOS: Secure Transport/SecItem semantics parity where required
   - [x] SecureTransport handler parity (macOS)
   - [x] macOS defaults to SecureTransport; SecItem only via build-time enable
