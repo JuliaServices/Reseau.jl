@@ -3593,6 +3593,7 @@ function handler_process_read_message(
     end
     processed = Csize_t(0)
     shutdown_error_code = 0
+    force_shutdown = false
 
     while processed < downstream_window
         outgoing = channel_acquire_message_from_pool(
@@ -3641,6 +3642,7 @@ function handler_process_read_message(
             end
             break
         elseif status == _errSSLClosedGraceful
+            force_shutdown = true
             break
         elseif status == _errSecSuccess
             continue
@@ -3651,7 +3653,8 @@ function handler_process_read_message(
         end
     end
 
-    if shutdown_error_code != 0 || (handler.read_state == TlsHandlerReadState.SHUTTING_DOWN && processed < downstream_window)
+    if force_shutdown || shutdown_error_code != 0 ||
+            (handler.read_state == TlsHandlerReadState.SHUTTING_DOWN && processed < downstream_window)
         if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
             if handler.delay_shutdown_error_code != 0
                 shutdown_error_code = handler.delay_shutdown_error_code

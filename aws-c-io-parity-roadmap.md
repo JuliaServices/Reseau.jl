@@ -341,6 +341,7 @@ Legend:
   - [x] Clear pending writes on shutdown
   - [x] Copy connection options on handler creation
   - [x] Reject writes after handshake failure
+  - [x] SecureTransport graceful close triggers channel shutdown
 - [x] BYO crypto setup options stubs (client/server)
 - [x] Ensure callbacks fire on correct thread
 - [x] Integrate ALPN handler and TLS negotiated protocol message
