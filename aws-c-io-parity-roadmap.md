@@ -412,7 +412,10 @@ Legend:
 ## 14) PKI utilities
 
 ### 14.1 PKI utils
-- [~] Implement certificate + key loading helpers (pki_utils)
+- [x] Implement certificate + key loading helpers (pki_utils)
+  - [x] macOS keychain identity import (cert+key, pkcs12)
+  - [x] macOS trusted cert import
+  - [ ] SecItem/iOS parity (deferred)
 - [x] Default trust store path detection (Linux/BSD)
 - [~] Platform-specific helpers (darwin_pki_utils, windows_pki_utils)
   - [x] Stub APIs return ERROR_PLATFORM_NOT_SUPPORTED
@@ -476,7 +479,7 @@ Legend:
 - [ ] dispatch queue event loop parity
 - [ ] Apple Network Framework socket parity
 - [x] Secure Transport TLS parity
-- [ ] PKI utils parity
+- [x] PKI utils parity
 
 ### 19.3 Windows
 - [ ] Winsock init/cleanup parity

@@ -987,9 +987,15 @@ function secitem_import_pkcs12(
         return ErrorResult(ERROR_SYS_CALL_FAILURE)
     end
 
-    _cf_retain(identity)
+    values = Memory{Ptr{Cvoid}}(undef, 1)
+    values[1] = identity
+    identity_array = _pki_cf_array_create(values, 1)
     _cf_release(items_ref[])
-    return identity
+    if identity_array == C_NULL
+        raise_error(ERROR_SYS_CALL_FAILURE)
+        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+    end
+    return identity_array
 end
 
 function load_cert_from_system_cert_store(

@@ -2,6 +2,11 @@ using Test
 using AwsIO
 
 const _PKI_RESOURCE_ROOT = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources")
+const _CF_LIB = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+
+function _cf_array_count(array_ref::Ptr{Cvoid})::Int
+    return Int(ccall((:CFArrayGetCount, _CF_LIB), Clong, (Ptr{Cvoid},), array_ref))
+end
 
 function _pki_resource_path(name::AbstractString)
     return joinpath(_PKI_RESOURCE_ROOT, name)
@@ -43,19 +48,33 @@ end
         res = AwsIO.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
         @test !(res isa AwsIO.ErrorResult)
         if res isa Ptr{Cvoid}
+            @test _cf_array_count(res) == 1
+            AwsIO._cf_release(res)
+        end
+
+        res = AwsIO.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
+        @test !(res isa AwsIO.ErrorResult)
+        if res isa Ptr{Cvoid}
+            @test _cf_array_count(res) == 1
             AwsIO._cf_release(res)
         end
 
         res = AwsIO.import_pkcs12_to_identity(pkcs12, pwd)
         @test !(res isa AwsIO.ErrorResult)
         if res isa Ptr{Cvoid}
+            @test _cf_array_count(res) == 1
             AwsIO._cf_release(res)
         end
 
-        ca = _pki_load_cursor("ca_root.crt")
+        ca = _pki_load_cursor("server_chain.crt")
+        pem_objs = AwsIO.pem_parse(read(_pki_resource_path("server_chain.crt")))
+        @test !(pem_objs isa AwsIO.ErrorResult)
         res = AwsIO.import_trusted_certificates(ca)
         @test !(res isa AwsIO.ErrorResult)
         if res isa Ptr{Cvoid}
+            if pem_objs isa Vector
+                @test _cf_array_count(res) == length(pem_objs)
+            end
             AwsIO._cf_release(res)
         end
 
