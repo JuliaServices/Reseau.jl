@@ -137,11 +137,17 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+if tls_tests_enabled()
 @testset "bootstrap tls negotiation" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)
 
-    server_ctx = AwsIO.tls_context_new(AwsIO.TlsContextOptions(; is_server = true, verify_peer = false))
+    cert_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.crt")
+    key_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.key")
+    server_opts = AwsIO.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
+    maybe_apply_test_keychain!(server_opts)
+    @test server_opts isa AwsIO.TlsContextOptions
+    server_ctx = server_opts isa AwsIO.TlsContextOptions ? AwsIO.tls_context_new(server_opts) : server_opts
     @test server_ctx isa AwsIO.TlsContext
     client_ctx = AwsIO.tls_context_new_client(; verify_peer = false)
     @test client_ctx isa AwsIO.TlsContext
@@ -221,6 +227,9 @@ end
     AwsIO.server_bootstrap_shutdown!(server_bootstrap)
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)
+end
+else
+    @info "Skipping bootstrap TLS negotiation (set AWSIO_RUN_TLS_TESTS=1 to enable)"
 end
 
 @testset "server bootstrap destroy callback waits for channels" begin

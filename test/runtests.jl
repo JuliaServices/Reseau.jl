@@ -1,6 +1,15 @@
 using Test
 using AwsIO
 
+include("test_utils.jl")
+setup_test_keychain!()
+atexit(cleanup_test_keychain!)
+
+if Sys.islinux()
+    using aws_lc_jll
+    using s2n_tls_jll
+end
+
 include("common_tests.jl")
 include("event_loop_tests.jl")
 include("socket_tests.jl")

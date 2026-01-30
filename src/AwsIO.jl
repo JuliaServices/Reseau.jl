@@ -6,6 +6,13 @@ using ScopedValues
 # Debug flag for internal asserts
 const DEBUG_BUILD = Ref(false)
 
+const _deps_path = joinpath(@__DIR__, "..", "deps", "deps.jl")
+if isfile(_deps_path)
+    include(_deps_path)
+else
+    const libawsio_nw_shim = ""
+end
+
 # --- common ---
 include("common/platform.jl")
 include("common/macros.jl")

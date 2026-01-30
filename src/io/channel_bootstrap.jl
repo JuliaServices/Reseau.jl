@@ -446,6 +446,36 @@ function _setup_client_channel(request::SocketConnectionRequest)
             channel_slot_set_handler!(alpn_slot, alpn_handler)
             alpn_handler.slot = alpn_slot
         end
+
+        start_res = tls_client_handler_start_negotiation(tls_handler)
+        if start_res isa ErrorResult
+            request.on_shutdown = nothing
+            channel_shutdown!(channel, start_res.code)
+            socket_close(socket)
+            _connection_request_complete(request, start_res.code, nothing)
+            return nothing
+        end
+
+        # Ensure we don't miss early readable events before the socket handler is fully set up.
+        if channel_thread_is_callers_thread(channel)
+            trigger_res = channel_trigger_read(channel)
+            if trigger_res isa ErrorResult
+                request.on_shutdown = nothing
+                channel_shutdown!(channel, trigger_res.code)
+                socket_close(socket)
+                _connection_request_complete(request, trigger_res.code, nothing)
+                return nothing
+            end
+        else
+            trigger_task = ChannelTask((task, ctx, status) -> begin
+                _ = task
+                status == TaskStatus.RUN_READY || return nothing
+                trigger_res = channel_trigger_read(ctx.channel)
+                trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
+                return nothing
+            end, (channel = channel,), "client_tls_trigger_read")
+            channel_schedule_task_now!(channel, trigger_task)
+        end
         return nothing
     end
 
@@ -897,6 +927,23 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated, bootstrap.user_data)
             channel_slot_set_handler!(alpn_slot, alpn_handler)
             alpn_handler.slot = alpn_slot
+        end
+
+        if channel_thread_is_callers_thread(channel)
+            trigger_res = channel_trigger_read(channel)
+            if trigger_res isa ErrorResult
+                channel_shutdown!(channel, trigger_res.code)
+                return nothing
+            end
+        else
+            trigger_task = ChannelTask((task, ctx, status) -> begin
+                _ = task
+                status == TaskStatus.RUN_READY || return nothing
+                trigger_res = channel_trigger_read(ctx.channel)
+                trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
+                return nothing
+            end, (channel = channel,), "server_tls_trigger_read")
+            channel_schedule_task_now!(channel, trigger_task)
         end
 
         return nothing

@@ -460,6 +460,28 @@ function vtable_socket_set_cleanup_callback(vtable::SocketVTable, socket::Socket
     return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 
+# Get negotiated protocol (ALPN) for socket-based TLS (SecItem/NW)
+function socket_get_protocol(socket::Socket)::ByteBuffer
+    return vtable_socket_get_protocol(socket.vtable, socket)
+end
+
+function vtable_socket_get_protocol(vtable::SocketVTable, socket::Socket)::ByteBuffer
+    _ = vtable
+    _ = socket
+    return null_buffer()
+end
+
+# Get server name for socket-based TLS (SecItem/NW)
+function socket_get_server_name(socket::Socket)::ByteBuffer
+    return vtable_socket_get_server_name(socket.vtable, socket)
+end
+
+function vtable_socket_get_server_name(vtable::SocketVTable, socket::Socket)::ByteBuffer
+    _ = vtable
+    _ = socket
+    return null_buffer()
+end
+
 # Non-vtable helper functions
 
 # Get event loop from socket
@@ -482,7 +504,13 @@ end
 
 # Get default socket implementation type
 function socket_get_default_impl_type()::SocketImplType.T
-    @static if Sys.islinux() || Sys.isbsd() || Sys.isapple()
+    @static if Sys.islinux() || Sys.isbsd()
+        return SocketImplType.POSIX
+    elseif Sys.isapple()
+        val = lowercase(get(ENV, "AWSIO_USE_APPLE_NETWORK_FRAMEWORK", ""))
+        if !isempty(val) && (val == "1" || val == "true" || val == "yes" || val == "y" || val == "on")
+            return SocketImplType.APPLE_NETWORK_FRAMEWORK
+        end
         return SocketImplType.POSIX
     elseif Sys.iswindows()
         return SocketImplType.WINSOCK

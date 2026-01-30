@@ -3,6 +3,11 @@ using AwsIO
 
 include("read_write_test_handler.jl")
 
+if !tls_tests_enabled()
+    @info "Skipping TLS crypto tests (set AWSIO_RUN_TLS_TESTS=1 to enable)"
+    return
+end
+
 function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
     timeout_ns = Int(timeout_s * 1_000_000_000)

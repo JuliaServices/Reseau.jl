@@ -6,3 +6,5 @@
 /docs/Manifest.toml
 /Manifest.toml
 /aws-c-io
+/deps/usr/
+/deps/deps.jl

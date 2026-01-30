@@ -1079,6 +1079,7 @@ end
             resolver = AwsIO.DefaultHostResolver(elg)
 
             server_tls_opts = AwsIO.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
+            maybe_apply_test_keychain!(server_tls_opts)
             @test server_tls_opts isa AwsIO.TlsContextOptions
             if server_tls_opts isa AwsIO.TlsContextOptions
                 _ = AwsIO.tls_ctx_options_override_default_trust_store_from_path(
@@ -1194,6 +1195,7 @@ end
             resolver = AwsIO.DefaultHostResolver(elg)
 
             server_tls_opts = AwsIO.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
+            maybe_apply_test_keychain!(server_tls_opts)
             @test server_tls_opts isa AwsIO.TlsContextOptions
             if server_tls_opts isa AwsIO.TlsContextOptions
                 _ = AwsIO.tls_ctx_options_override_default_trust_store_from_path(

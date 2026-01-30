@@ -1178,7 +1178,16 @@ end
 function channel_acquire_message_from_pool(channel::Channel, message_type::IoMessageType.T, size_hint::Integer)::Union{IoMessage, Nothing}
     if channel.message_pool === nothing
         # No pool, create directly
-        message = IoMessage(size_hint)
+        effective_size = size_hint
+        if size_hint isa Signed && size_hint < 0
+            effective_size = 0
+        end
+        max_size = Csize_t(g_aws_channel_max_fragment_size[])
+        effective_csize = Csize_t(effective_size)
+        if effective_csize > max_size
+            effective_csize = max_size
+        end
+        message = IoMessage(Int(effective_csize))
         message.owning_channel = channel
         return message
     end
