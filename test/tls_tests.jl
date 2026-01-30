@@ -29,6 +29,18 @@ function wait_for_flag_tls(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
     return false
 end
 
+function wait_for_pred_tls(pred::Function; timeout_s::Float64 = 10.0)
+    start = Base.time_ns()
+    timeout_ns = Int(timeout_s * 1_000_000_000)
+    while (Base.time_ns() - start) < timeout_ns
+        if pred()
+            return true
+        end
+        sleep(0.01)
+    end
+    return pred()
+end
+
 function wait_for_handshake_status(handler::AwsIO.TlsChannelHandler, status; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
     timeout_ns = Int(timeout_s * 1_000_000_000)
@@ -129,6 +141,70 @@ function _load_resource_buf(name::AbstractString)
     buf_ref = Ref(AwsIO.ByteBuffer(0))
     AwsIO.byte_buf_init_from_file(buf_ref, path) == AwsIO.AWS_OP_SUCCESS || return nothing
     return buf_ref[]
+end
+
+function _tls_network_connect(
+        host::AbstractString,
+        port::Integer;
+        ctx_options_override::Union{Function, Nothing} = nothing,
+    )
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    ctx_opts = AwsIO.tls_ctx_options_init_default_client()
+    if ctx_options_override !== nothing
+        ctx_options_override(ctx_opts)
+    end
+    ctx = AwsIO.tls_context_new(ctx_opts)
+    if ctx isa AwsIO.ErrorResult
+        AwsIO.host_resolver_shutdown!(resolver)
+        AwsIO.event_loop_group_destroy!(elg)
+        return ctx
+    end
+
+    setup_err = Ref{Union{Nothing, Int}}(nothing)
+    channel_ref = Ref{Any}(nothing)
+
+    tls_conn_opts = AwsIO.TlsConnectionOptions(
+        ctx;
+        server_name = host,
+        on_negotiation_result = (handler, slot, err, ud) -> begin
+            _ = handler
+            _ = slot
+            _ = ud
+            return nothing
+        end,
+    )
+
+    client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+        event_loop_group = elg,
+        host_resolver = resolver,
+    ))
+
+    _ = AwsIO.client_bootstrap_connect!(
+        client_bootstrap,
+        host,
+        port;
+        tls_connection_options = tls_conn_opts,
+        on_setup = (bs, err, channel, ud) -> begin
+            _ = bs
+            _ = ud
+            setup_err[] = err
+            channel_ref[] = channel
+            return nothing
+        end,
+    )
+
+    wait_for_pred_tls(() -> setup_err[] !== nothing; timeout_s = 20.0)
+
+    if channel_ref[] !== nothing
+        AwsIO.channel_shutdown!(channel_ref[], 0)
+    end
+
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+
+    return setup_err[]
 end
 
 function _test_server_ctx()
@@ -2451,4 +2527,82 @@ end
 
     AwsIO.channel_shutdown!(channel, AwsIO.AWS_OP_SUCCESS)
     AwsIO.event_loop_group_destroy!(elg)
+end
+
+if get(ENV, "AWSIO_RUN_NETWORK_TESTS", "0") == "1"
+    @testset "TLS network negotiation (requires network)" begin
+        disable_verify_peer = opts -> AwsIO.tls_ctx_options_set_verify_peer(opts, false)
+
+        set_tls13 = opts -> AwsIO.tls_ctx_options_set_minimum_tls_version(opts, AwsIO.TlsVersion.TLSv1_3)
+
+        function override_ca_file(path::AbstractString)
+            return opts -> AwsIO.tls_ctx_options_override_default_trust_store_from_path(opts; ca_file = path)
+        end
+
+        @test _tls_network_connect("www.amazon.com", 443) == AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect("ecc256.badssl.com", 443) == AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect("ecc384.badssl.com", 443) == AwsIO.AWS_OP_SUCCESS
+        if !Sys.isapple()
+            @test _tls_network_connect("sha384.badssl.com", 443) == AwsIO.AWS_OP_SUCCESS
+            @test _tls_network_connect("sha512.badssl.com", 443) == AwsIO.AWS_OP_SUCCESS
+            @test _tls_network_connect("rsa8192.badssl.com", 443) == AwsIO.AWS_OP_SUCCESS
+        end
+
+        @test _tls_network_connect("expired.badssl.com", 443) != AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect("wrong.host.badssl.com", 443) != AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect("self-signed.badssl.com", 443) != AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect("untrusted-root.badssl.com", 443) != AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect("rc4.badssl.com", 443) != AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect("rc4-md5.badssl.com", 443) != AwsIO.AWS_OP_SUCCESS
+
+        digicert_path = _resource_path("DigiCertGlobalRootCA.crt.pem")
+        @test _tls_network_connect(
+            "wrong.host.badssl.com",
+            443;
+            ctx_options_override = override_ca_file(digicert_path),
+        ) != AwsIO.AWS_OP_SUCCESS
+
+        ca_override_path = _resource_path("ca_root.crt")
+        @test _tls_network_connect(
+            "www.amazon.com",
+            443;
+            ctx_options_override = override_ca_file(ca_override_path),
+        ) != AwsIO.AWS_OP_SUCCESS
+
+        @test _tls_network_connect(
+            "www.amazon.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        ) == AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect(
+            "expired.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        ) == AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect(
+            "wrong.host.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        ) == AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect(
+            "self-signed.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        ) == AwsIO.AWS_OP_SUCCESS
+        @test _tls_network_connect(
+            "untrusted-root.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        ) == AwsIO.AWS_OP_SUCCESS
+
+        if Sys.isapple()
+            @test _tls_network_connect(
+                "ecc256.badssl.com",
+                443;
+                ctx_options_override = set_tls13,
+            ) != AwsIO.AWS_OP_SUCCESS
+        end
+    end
+else
+    @info "Skipping TLS network tests (set AWSIO_RUN_NETWORK_TESTS=1 to enable)"
 end

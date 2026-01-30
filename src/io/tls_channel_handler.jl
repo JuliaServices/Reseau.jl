@@ -3282,12 +3282,6 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             "SecureTransport SSLHandshake peer auth completed",
         )
         if handler.verify_peer
-            handler.ca_certs == C_NULL && begin
-                _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-            end
-
             trust_ref = Ref{SecTrustRef}(C_NULL)
             if ccall((:SSLCopyPeerTrust, _SECURITY_LIB), OSStatus, (SSLContextRef, Ref{SecTrustRef}), handler.ctx, trust_ref) !=
                     _errSecSuccess
@@ -3317,30 +3311,32 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             end
             _cf_release(policy)
 
-            if ccall(
-                    (:SecTrustSetAnchorCertificates, _SECURITY_LIB),
-                    OSStatus,
-                    (SecTrustRef, CFArrayRef),
-                    trust_ref[],
-                    handler.ca_certs,
-                ) != _errSecSuccess
-                _cf_release(trust_ref[])
-                _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-            end
+            if handler.ca_certs != C_NULL
+                if ccall(
+                        (:SecTrustSetAnchorCertificates, _SECURITY_LIB),
+                        OSStatus,
+                        (SecTrustRef, CFArrayRef),
+                        trust_ref[],
+                        handler.ca_certs,
+                    ) != _errSecSuccess
+                    _cf_release(trust_ref[])
+                    _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                    raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                    return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                end
 
-            if ccall(
-                    (:SecTrustSetAnchorCertificatesOnly, _SECURITY_LIB),
-                    OSStatus,
-                    (SecTrustRef, UInt8),
-                    trust_ref[],
-                    1,
-                ) != _errSecSuccess
-                _cf_release(trust_ref[])
-                _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                if ccall(
+                        (:SecTrustSetAnchorCertificatesOnly, _SECURITY_LIB),
+                        OSStatus,
+                        (SecTrustRef, UInt8),
+                        trust_ref[],
+                        1,
+                    ) != _errSecSuccess
+                    _cf_release(trust_ref[])
+                    _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                    raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                    return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                end
             end
 
             trust_eval = Ref{Cint}(0)

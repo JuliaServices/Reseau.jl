@@ -318,7 +318,8 @@ Legend:
 
 ### 12.4 X.509 and certificate validation
 - [ ] Certificate parsing (DER/PEM) and chain building
-- [ ] Trust store: system store + custom CA bundles
+- [~] Trust store: system store + custom CA bundles
+  - [x] SecureTransport uses system trust store when no custom CA
 - [ ] Hostname verification (SAN/CN rules) parity
 - [ ] Expiry and revocation handling parity (where aws-c-io checks)
 - [ ] Error mapping to aws-c-io error codes
@@ -364,7 +365,7 @@ Legend:
   - [x] ECC cert import coverage (ec_unittests.p8)
   - [x] TLS cipher preference coverage (TLSV1_2_2025_07)
   - [x] Certificate chain coverage (server_chain.crt)
-  - [ ] Negotiation error/success matrix with real certs (blocked on TLS backend/X.509)
+  - [x] Negotiation error/success matrix with real certs (network-gated; mac skips some alg-specific hosts)
 - [x] Port `byo_crypto_test.c`
   - [x] BYO handler wiring + start negotiation hook
   - [x] BYO server handler wiring
