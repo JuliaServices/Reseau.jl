@@ -111,3 +111,40 @@ end
         AwsIO.close_cert_store(C_NULL)
     end
 end
+
+@testset "X509 helpers (aws-lc)" begin
+    if !AwsIO.aws_lc_available()
+        @info "Skipping X509 helper tests (aws_lc_jll not available)"
+        return
+    end
+
+    chain_pem = AwsIO.ByteCursor(read(_pki_resource_path("server_chain.crt")))
+    ca_pem = AwsIO.ByteCursor(read(_pki_resource_path("ca_root.crt")))
+
+    @test AwsIO.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "localhost") === nothing
+
+    res = AwsIO.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "example.com")
+    @test res isa AwsIO.ErrorResult
+    if res isa AwsIO.ErrorResult
+        @test res.code == AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH
+    end
+
+    wrong_ca = AwsIO.ByteCursor(read(_pki_resource_path("DigiCertGlobalRootCA.crt.pem")))
+    res = AwsIO.x509_verify_chain(chain_pem; trust_store_cursor = wrong_ca)
+    @test res isa AwsIO.ErrorResult
+    if res isa AwsIO.ErrorResult
+        @test res.code in (AwsIO.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE, AwsIO.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN)
+    end
+
+    chain = AwsIO.x509_parse_pem_chain(chain_pem)
+    @test chain isa Vector
+    chain isa Vector && @test length(chain) == 2
+
+    pem_objs = AwsIO.pem_parse(read(_pki_resource_path("unittests.crt")))
+    @test !(pem_objs isa AwsIO.ErrorResult)
+    if pem_objs isa Vector && !isempty(pem_objs)
+        der_cursor = AwsIO.byte_cursor_from_buf(pem_objs[1].data)
+        x509 = AwsIO.x509_load_der(der_cursor)
+        @test x509 isa AwsIO.X509Ref
+    end
+end

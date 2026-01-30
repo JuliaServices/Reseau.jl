@@ -317,12 +317,13 @@ Legend:
   - [x] Constant-time compare helper in tls_channel_handler
 
 ### 12.4 X.509 and certificate validation
-- [ ] Certificate parsing (DER/PEM) and chain building
+- [x] Certificate parsing (DER/PEM) and chain building
 - [~] Trust store: system store + custom CA bundles
   - [x] SecureTransport uses system trust store when no custom CA
-- [ ] Hostname verification (SAN/CN rules) parity
-- [ ] Expiry and revocation handling parity (where aws-c-io checks)
-- [ ] Error mapping to aws-c-io error codes
+  - [x] aws-lc chain verify supports custom CA bundles
+- [x] Hostname verification (SAN/CN rules) parity
+- [x] Expiry and revocation handling parity (where aws-c-io checks)
+- [x] Error mapping to aws-c-io error codes
 
 ### 12.5 TLS channel handler integration
 - [~] Implement tls_channel_handler_shared semantics
@@ -415,7 +416,7 @@ Legend:
   - [x] Stub APIs return ERROR_PLATFORM_NOT_SUPPORTED
 
 ### 14.2 Tests
-- [ ] Add PKI-focused tests (use aws-c-io test resources)
+- [x] Add PKI-focused tests (use aws-c-io test resources)
 
 ---
 
