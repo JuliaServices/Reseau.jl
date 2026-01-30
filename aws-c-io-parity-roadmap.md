@@ -368,6 +368,7 @@ Legend:
   - [x] TLS cipher preference coverage (TLSV1_2_2025_07)
   - [x] Certificate chain coverage (server_chain.crt)
   - [x] Negotiation error/success matrix with real certs (network-gated; mac skips some alg-specific hosts)
+  - [x] macOS TLSv1_3 minimum version failure (non-network)
 - [x] Port `byo_crypto_test.c`
   - [x] BYO handler wiring + start negotiation hook
   - [x] BYO server handler wiring

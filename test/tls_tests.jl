@@ -456,6 +456,40 @@ end
     end
 end
 
+@testset "TLS minimum version TLSv1_3 unsupported on macOS" begin
+    if !Sys.isapple()
+        @test true
+        return
+    end
+
+    opts = AwsIO.tls_ctx_options_init_default_client()
+    AwsIO.tls_ctx_options_set_minimum_tls_version(opts, AwsIO.TlsVersion.TLSv1_3)
+    ctx = AwsIO.tls_context_new(opts)
+    @test ctx isa AwsIO.TlsContext
+    if !(ctx isa AwsIO.TlsContext)
+        return
+    end
+
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    channel = AwsIO.Channel(event_loop, nothing)
+    slot = AwsIO.channel_slot_new!(channel)
+    conn = AwsIO.tls_connection_options_init_from_ctx(ctx)
+    res = AwsIO.tls_client_handler_new(conn, slot)
+    @test res isa AwsIO.ErrorResult
+    if res isa AwsIO.ErrorResult
+        @test res.code == AwsIO.ERROR_IO_TLS_CTX_ERROR
+    end
+
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 @testset "TLS ctx options custom key ops" begin
     res = AwsIO.tls_ctx_options_init_client_mtls_with_custom_key_operations(
         nothing,

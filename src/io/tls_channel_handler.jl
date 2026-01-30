@@ -2226,9 +2226,6 @@ function handler_process_read_message(
         downstream_window = SIZE_MAX
     else
         downstream_window = channel_slot_downstream_read_window(slot)
-        if downstream_window == SIZE_MAX
-            downstream_window = Csize_t(TLS_MAX_RECORD_SIZE)
-        end
     end
     processed = Csize_t(0)
     shutdown_error_code = 0
@@ -3353,7 +3350,11 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                 return _secure_transport_drive_negotiation(handler)
             end
 
-            _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+            logf(
+                LogLevel.WARN,
+                LS_IO_TLS,
+                "SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])",
+            )
             raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
@@ -3589,9 +3590,6 @@ function handler_process_read_message(
         downstream_window = SIZE_MAX
     else
         downstream_window = channel_slot_downstream_read_window(slot)
-        if downstream_window == SIZE_MAX
-            downstream_window = Csize_t(TLS_MAX_RECORD_SIZE)
-        end
     end
     processed = Csize_t(0)
     shutdown_error_code = 0
