@@ -1734,6 +1734,159 @@ end
     end
 end
 
+function _tls_local_handshake_with_min_version(min_version::AwsIO.TlsVersion.T)
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+
+    server_opts = AwsIO.tls_ctx_options_init_default_server(
+        AwsIO.ByteCursor(TEST_PEM_CERT),
+        AwsIO.ByteCursor(TEST_PEM_KEY),
+    )
+    server_opts isa AwsIO.ErrorResult && return server_opts
+    AwsIO.tls_ctx_options_set_minimum_tls_version(server_opts, min_version)
+    maybe_apply_test_keychain!(server_opts)
+    server_ctx = AwsIO.tls_context_new(server_opts)
+    @test server_ctx isa AwsIO.TlsContext
+    if server_ctx isa AwsIO.ErrorResult
+        AwsIO.host_resolver_shutdown!(resolver)
+        AwsIO.event_loop_group_destroy!(elg)
+        return server_ctx
+    end
+
+    client_opts = AwsIO.tls_ctx_options_init_default_client()
+    AwsIO.tls_ctx_options_set_minimum_tls_version(client_opts, min_version)
+    res = AwsIO.tls_ctx_options_override_default_trust_store_from_path(
+        client_opts;
+        ca_file = _resource_path("unittests.crt"),
+    )
+    res isa AwsIO.ErrorResult && begin
+        AwsIO.host_resolver_shutdown!(resolver)
+        AwsIO.event_loop_group_destroy!(elg)
+        return res
+    end
+    client_ctx = AwsIO.tls_context_new(client_opts)
+    @test client_ctx isa AwsIO.TlsContext
+    if client_ctx isa AwsIO.ErrorResult
+        AwsIO.host_resolver_shutdown!(resolver)
+        AwsIO.event_loop_group_destroy!(elg)
+        return client_ctx
+    end
+
+    server_setup_called = Ref(false)
+    server_setup_err = Ref(AwsIO.AWS_OP_SUCCESS)
+    server_shutdown = Ref(false)
+    server_channel = Ref{Any}(nothing)
+    server_negotiated_called = Ref(false)
+    server_negotiated_err = Ref(AwsIO.AWS_OP_SUCCESS)
+
+    server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
+        event_loop_group = elg,
+        host = "127.0.0.1",
+        port = 0,
+        tls_connection_options = AwsIO.TlsConnectionOptions(
+            server_ctx;
+            on_negotiation_result = (handler, slot, err, ud) -> begin
+                server_negotiated_called[] = true
+                server_negotiated_err[] = err
+                return nothing
+            end,
+        ),
+        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+            server_setup_called[] = true
+            server_setup_err[] = err
+            server_channel[] = channel
+            return nothing
+        end,
+        on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
+            server_shutdown[] = true
+            return nothing
+        end,
+    ))
+
+    listener = server_bootstrap.listener_socket
+    @test listener !== nothing
+    bound = AwsIO.socket_get_bound_address(listener)
+    port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+    @test port != 0
+
+    client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+        event_loop_group = elg,
+        host_resolver = resolver,
+    ))
+
+    client_setup_called = Ref(false)
+    client_setup_err = Ref(AwsIO.AWS_OP_SUCCESS)
+    client_shutdown = Ref(false)
+    client_negotiated_called = Ref(false)
+    client_negotiated_err = Ref(AwsIO.AWS_OP_SUCCESS)
+    client_channel = Ref{Any}(nothing)
+
+    @test AwsIO.client_bootstrap_connect!(
+        client_bootstrap,
+        "127.0.0.1",
+        port;
+        tls_connection_options = AwsIO.TlsConnectionOptions(
+            client_ctx;
+            server_name = "localhost",
+            on_negotiation_result = (handler, slot, err, ud) -> begin
+                client_negotiated_called[] = true
+                client_negotiated_err[] = err
+                return nothing
+            end,
+        ),
+        on_setup = (bs, err, channel, ud) -> begin
+            client_setup_called[] = true
+            client_setup_err[] = err
+            client_channel[] = channel
+            return nothing
+        end,
+        on_shutdown = (bs, err, channel, ud) -> begin
+            client_shutdown[] = true
+            return nothing
+        end,
+    ) === nothing
+
+    @test wait_for_flag_tls(server_setup_called)
+    @test server_setup_err[] == AwsIO.AWS_OP_SUCCESS
+    @test wait_for_flag_tls(client_setup_called)
+    @test client_setup_err[] == AwsIO.AWS_OP_SUCCESS
+    @test wait_for_flag_tls(server_negotiated_called)
+    @test server_negotiated_err[] == AwsIO.AWS_OP_SUCCESS
+    @test wait_for_flag_tls(client_negotiated_called)
+    @test client_negotiated_err[] == AwsIO.AWS_OP_SUCCESS
+
+    if server_channel[] !== nothing
+        AwsIO.channel_shutdown!(server_channel[], AwsIO.AWS_OP_SUCCESS)
+    end
+    if client_channel[] !== nothing
+        AwsIO.channel_shutdown!(client_channel[], AwsIO.AWS_OP_SUCCESS)
+    end
+
+    @test wait_for_flag_tls(server_shutdown)
+    @test wait_for_flag_tls(client_shutdown)
+
+    AwsIO.server_bootstrap_shutdown!(server_bootstrap)
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+    return nothing
+end
+
+@testset "TLS minimum version handshake (TLSv1_2)" begin
+    _tls_local_handshake_with_min_version(AwsIO.TlsVersion.TLSv1_2)
+end
+
+@testset "TLS minimum version handshake (TLSv1_3, linux s2n)" begin
+    if !Sys.islinux()
+        @test true
+        return
+    end
+    if !AwsIO.tls_is_alpn_available()
+        @info "Skipping TLSv1_3 handshake test (s2n unavailable)"
+        return
+    end
+    _tls_local_handshake_with_min_version(AwsIO.TlsVersion.TLSv1_3)
+end
+
 @testset "TLS server multiple connections" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)

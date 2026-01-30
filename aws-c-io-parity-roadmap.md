@@ -294,8 +294,10 @@ Legend:
 - [x] Support `advertise_alpn_message` semantics
 
 ### 12.2 TLS protocol support
-- [ ] TLS 1.2 full handshake (client + server)
-- [ ] TLS 1.3 full handshake (client + server)
+- [~] TLS 1.2 full handshake (client + server)
+  - [x] Local server/client TLSv1_2 min-version handshake test
+- [~] TLS 1.3 full handshake (client + server)
+  - [x] Linux s2n TLSv1_3 min-version handshake test
 - [ ] Session resumption (tickets/PSK)
 - [ ] Key update and renegotiation semantics where applicable
 - [~] TLS alert handling parity (graceful vs abortive)
