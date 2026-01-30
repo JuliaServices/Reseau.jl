@@ -582,6 +582,7 @@ function io_library_init()
     _init_io_error_list!()
     register_error_info(Base.unsafe_convert(Ptr{error_info_list}, _io_error_list_ref))
     register_log_subject_info_list(_io_log_subject_list)
+    tls_init_static_state()
     io_tracing_init()
     return nothing
 end
@@ -589,6 +590,7 @@ end
 function io_library_clean_up()
     !_io_library_initialized[] && return nothing
     _io_library_initialized[] = false
+    tls_clean_up_static_state()
     unregister_log_subject_info_list(_io_log_subject_list)
     unregister_error_info(Base.unsafe_convert(Ptr{error_info_list}, _io_error_list_ref))
     _cal_cleanup()

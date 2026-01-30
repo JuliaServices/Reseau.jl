@@ -349,8 +349,10 @@ Legend:
 
 ### 12.6 TLS backends parity (platform)
 - [ ] Linux/Unix: s2n parity behavior (even if implemented in Julia)
-- [ ] macOS/iOS: Secure Transport/SecItem semantics parity where required
+- [~] macOS/iOS: Secure Transport/SecItem semantics parity where required
+  - [x] SecureTransport handler parity (macOS)
   - [x] macOS defaults to SecureTransport; SecItem only via build-time enable
+  - [ ] SecItem backend parity (iOS/Network Framework)
 - [ ] Windows: Schannel behavior parity
 
 ### 12.7 Tests
@@ -473,7 +475,7 @@ Legend:
 - [ ] kqueue event loop parity
 - [ ] dispatch queue event loop parity
 - [ ] Apple Network Framework socket parity
-- [ ] Secure Transport TLS parity
+- [x] Secure Transport TLS parity
 - [ ] PKI utils parity
 
 ### 19.3 Windows
@@ -543,7 +545,7 @@ Phase 2 (TLS/ALPN + PKI)
 Phase 3 (Platform backends)
 - [ ] Dispatch queue event loop
 - [ ] Apple Network Framework sockets
-- [ ] Secure Transport TLS parity
+- [x] Secure Transport TLS parity
 - [ ] IOCP event loop + Winsock sockets + pipe
 - [ ] Schannel TLS parity
 - [ ] Platform tests

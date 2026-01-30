@@ -2223,7 +2223,7 @@ function handler_process_read_message(
     lib isa ErrorResult && return lib
 
     if slot.adj_right === nothing
-        downstream_window = Csize_t(TLS_MAX_RECORD_SIZE)
+        downstream_window = SIZE_MAX
     else
         downstream_window = channel_slot_downstream_read_window(slot)
         if downstream_window == SIZE_MAX
@@ -3282,6 +3282,11 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             "SecureTransport SSLHandshake peer auth completed",
         )
         if handler.verify_peer
+            if handler.ca_certs == C_NULL
+                _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+            end
             trust_ref = Ref{SecTrustRef}(C_NULL)
             if ccall((:SSLCopyPeerTrust, _SECURITY_LIB), OSStatus, (SSLContextRef, Ref{SecTrustRef}), handler.ctx, trust_ref) !=
                     _errSecSuccess
@@ -3581,7 +3586,7 @@ function handler_process_read_message(
     end
 
     if slot.adj_right === nothing
-        downstream_window = Csize_t(TLS_MAX_RECORD_SIZE)
+        downstream_window = SIZE_MAX
     else
         downstream_window = channel_slot_downstream_read_window(slot)
         if downstream_window == SIZE_MAX
