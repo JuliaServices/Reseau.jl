@@ -4041,7 +4041,7 @@ end
 function tls_client_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::Union{TlsChannelHandler, ErrorResult}
+    )::Union{AbstractChannelHandler, ErrorResult}
     if options.ctx.options.is_server
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
@@ -4064,7 +4064,7 @@ end
 function tls_server_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::Union{TlsChannelHandler, ErrorResult}
+    )::Union{AbstractChannelHandler, ErrorResult}
     if !options.ctx.options.is_server
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
@@ -4084,7 +4084,7 @@ function tls_server_handler_new(
     end
 end
 
-function tls_client_handler_start_negotiation(handler::TlsChannelHandler)
+function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)
     if _tls_byo_client_setup[] !== nothing
         return _tls_byo_start_negotiation(_tls_byo_client_setup[], handler)
     end
@@ -4141,7 +4141,7 @@ end
 function tls_channel_handler_new!(
         channel::Channel,
         options::TlsConnectionOptions,
-    )::Union{TlsChannelHandler, ErrorResult}
+    )::Union{AbstractChannelHandler, ErrorResult}
     channel.last === nothing && return ErrorResult(raise_error(ERROR_INVALID_STATE))
 
     tls_slot = ChannelSlot()
@@ -4162,7 +4162,7 @@ end
 function channel_setup_client_tls(
         right_of_slot::ChannelSlot,
         options::TlsConnectionOptions,
-    )::Union{TlsChannelHandler, ErrorResult}
+    )::Union{AbstractChannelHandler, ErrorResult}
     channel = right_of_slot.channel
     channel === nothing && return ErrorResult(raise_error(ERROR_INVALID_STATE))
 
