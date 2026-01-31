@@ -1766,6 +1766,30 @@ function is_space(ch::UInt8)
 end
 
 #==========================================================================
+  ByteBuffer to Vector Conversion
+==========================================================================#
+
+function byte_buffer_as_vector(buf::ByteBuffer)::Vector{UInt8}
+    n = Int(buf.len)
+    if n == 0
+        return UInt8[]
+    end
+    vec = Vector{UInt8}(undef, n)
+    @inbounds for i in 1:n
+        vec[i] = buf.mem[i]
+    end
+    return vec
+end
+
+function byte_buffer_as_string(buf::ByteBuffer)::String
+    n = Int(buf.len)
+    if n == 0
+        return ""
+    end
+    return unsafe_string(pointer(buf.mem), n)
+end
+
+#==========================================================================
   Cursor to String Conversion
 ==========================================================================#
 
