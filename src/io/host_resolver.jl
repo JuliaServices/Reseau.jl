@@ -62,27 +62,27 @@ const OnHostResolveCompleteFn = Function  # (resolver, user_data) -> nothing
     SHUTTING_DOWN = 1
 end
 
-mutable struct PendingCallback
-    callback::OnHostResolvedFn
-    user_data::Any
+mutable struct PendingCallback{F <: OnHostResolvedFn, UD}
+    callback::F
+    user_data::UD
 end
 
 # Host resolver configuration
-struct HostResolverConfig
+struct HostResolverConfig{CO <: Union{Function, Nothing}}
     max_entries::UInt64
     max_ttl_secs::UInt64
     min_ttl_secs::UInt64
     max_addresses_per_host::UInt64
     resolve_frequency_ns::UInt64  # How often to re-resolve
     background_refresh::Bool  # retained for compatibility
-    clock_override::Union{Function, Nothing}
+    clock_override::CO
 end
 
-struct HostResolutionConfig
-    impl::Union{Function, Nothing}
+struct HostResolutionConfig{Impl <: Union{Function, Nothing}, ID}
+    impl::Impl
     max_ttl_secs::UInt64
     resolve_frequency_ns::UInt64
-    impl_data::Any
+    impl_data::ID
 end
 
 function HostResolutionConfig(;
@@ -169,10 +169,10 @@ function DefaultHostResolver(
     return resolver
 end
 
-mutable struct HostEntry
-    resolver::DefaultHostResolver
+mutable struct HostEntry{HR <: DefaultHostResolver, RC <: HostResolutionConfig, TH <: ThreadHandle}
+    resolver::HR
     host_name::String
-    resolution_config::HostResolutionConfig
+    resolution_config::RC
     resolve_frequency_ns::UInt64
     entry_lock::Mutex
     entry_signal::ConditionVariable
@@ -186,9 +186,9 @@ mutable struct HostEntry
     @atomic state::DefaultResolverState.T
     new_addresses::Vector{HostAddress}
     expired_addresses::Vector{HostAddress}
-    on_host_purge_complete::Union{Function, Nothing}
-    on_host_purge_complete_user_data::Any
-    resolver_thread::ThreadHandle
+    on_host_purge_complete::Union{Function, Nothing}  # late-init: nothing → Function
+    on_host_purge_complete_user_data::Any              # late-init
+    resolver_thread::TH
 end
 
 function _entry_cache_capacity(resolver::DefaultHostResolver, config::HostResolutionConfig)

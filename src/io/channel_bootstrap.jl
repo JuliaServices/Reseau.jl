@@ -22,10 +22,11 @@ struct ClientBootstrapOptions{
     FS <: Union{OnBootstrapChannelSetupFn, Nothing},
     FD <: Union{OnBootstrapChannelShutdownFn, Nothing},
     U,
+    HRC <: Union{HostResolutionConfig, Nothing},
 }
     event_loop_group::ELG
     host_resolver::HR
-    host_resolution_config::Union{HostResolutionConfig, Nothing}
+    host_resolution_config::HRC
     socket_options::SO
     tls_connection_options::TO
     on_protocol_negotiated::FP
@@ -71,10 +72,11 @@ mutable struct ClientBootstrap{
     FS <: Union{OnBootstrapChannelSetupFn, Nothing},
     FD <: Union{OnBootstrapChannelShutdownFn, Nothing},
     U,
+    HRC <: Union{HostResolutionConfig, Nothing},
 }
     event_loop_group::ELG
     host_resolver::HR
-    host_resolution_config::Union{HostResolutionConfig, Nothing}
+    host_resolution_config::HRC
     socket_options::SocketOptions
     tls_connection_options::TO
     on_protocol_negotiated::FP
@@ -86,9 +88,9 @@ mutable struct ClientBootstrap{
 end
 
 function ClientBootstrap(
-        options::ClientBootstrapOptions{ELG, HR, SO, TO, FP, FC, FS, FD, U},
-    ) where {ELG, HR, SO, TO, FP, FC, FS, FD, U}
-    CBT = ClientBootstrap{ELG, HR, TO, FP, FC, FS, FD, U}
+        options::ClientBootstrapOptions{ELG, HR, SO, TO, FP, FC, FS, FD, U, HRC},
+    ) where {ELG, HR, SO, TO, FP, FC, FS, FD, U, HRC}
+    CBT = ClientBootstrap{ELG, HR, TO, FP, FC, FS, FD, U, HRC}
     bootstrap = CBT(
         options.event_loop_group,
         options.host_resolver,

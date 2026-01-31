@@ -84,8 +84,8 @@
         offset::Csize_t
     end
 
-    mutable struct NWParametersContext
-        socket::Any
+    mutable struct NWParametersContext{S}
+        socket::S
         options::SocketOptions
     end
 
@@ -162,10 +162,10 @@
     const _nw_socket_registry = Dict{Ptr{Cvoid}, NWSocket}()
     const _nw_socket_registry_lock = Mutex()
 
-    mutable struct NWSendContext
+    mutable struct NWSendContext{UD}
         socket::NWSocket
         written_fn::SocketOnWriteCompletedFn
-        user_data::Any
+        user_data::UD
     end
 
     const _nw_send_registry = Dict{Ptr{Cvoid}, NWSendContext}()

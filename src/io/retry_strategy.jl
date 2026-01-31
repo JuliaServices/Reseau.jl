@@ -39,14 +39,14 @@ const OnRetryReadyFn = Function  # (retry_token, error_code, user_data) -> nothi
 # Retry token - represents a single retry attempt
 # Note: user_data is parameterized as U (typically Any) since it can hold any user-provided value
 # and is set dynamically after token creation via retry_token_schedule_retry
-mutable struct RetryToken{S, U}
+mutable struct RetryToken{S, U, BL <: Union{Nothing, EventLoop}}
     strategy::S
     error_type::RetryErrorType.T
     original_error::Int
     @atomic retry_count::UInt32
     @atomic last_backoff::UInt64
     last_error::Int
-    bound_loop::Union{Nothing, EventLoop}
+    bound_loop::BL
     lock::ReentrantLock
     # For scheduled retry
     scheduled_retry_task::Union{ScheduledTask, Nothing}  # nullable
@@ -148,14 +148,14 @@ end
 # =============================================================================
 
 # Exponential backoff configuration (matches aws-c-io options)
-struct ExponentialBackoffConfig
+struct ExponentialBackoffConfig{GR <: Union{Nothing, Function}, GRI <: Union{Nothing, Function}, UD}
     backoff_scale_factor_ms::UInt64
     max_backoff_secs::UInt64
     max_retries::UInt32
     jitter_mode::Symbol  # :default, :none, :full, :decorrelated
-    generate_random::Union{Nothing, Function}
-    generate_random_impl::Union{Nothing, Function}
-    generate_random_user_data::Any
+    generate_random::GR
+    generate_random_impl::GRI
+    generate_random_user_data::UD
 end
 
 function _default_generate_random(_user_data)
@@ -247,7 +247,7 @@ function retry_strategy_acquire_token!(
     end
 
     # Create token with Any for user_data to allow dynamic assignment
-    token = RetryToken{typeof(strategy), Any}(
+    token = RetryToken{typeof(strategy), Any, typeof(event_loop)}(
         strategy,
         RetryErrorType.TRANSIENT,
         0,

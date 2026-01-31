@@ -12,12 +12,12 @@ const g_aws_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX
 const _CHANNEL_MESSAGE_POOL_KEY = Ref{UInt8}(0)
 const _CHANNEL_MESSAGE_POOL_KEY_PTR = pointer_from_objref(_CHANNEL_MESSAGE_POOL_KEY)
 
-struct ChannelOptions{EL}
+struct ChannelOptions{EL, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, SUD, SDUD}
     event_loop::EL
-    on_setup_completed::Union{ChannelOnSetupCompletedFn, Nothing}
-    on_shutdown_completed::Union{ChannelOnShutdownCompletedFn, Nothing}
-    setup_user_data::Any
-    shutdown_user_data::Any
+    on_setup_completed::FS
+    on_shutdown_completed::FD
+    setup_user_data::SUD
+    shutdown_user_data::SDUD
     enable_read_back_pressure::Bool
 end
 
@@ -41,8 +41,8 @@ end
 
 # Channel task wrapper (aws_channel_task)
 mutable struct ChannelTaskContext
-    channel::Any
-    task::Any
+    channel::Any  # late-initialized: nothing → Channel
+    task::Any     # late-initialized: nothing → ChannelTask
 end
 
 mutable struct ChannelTask
@@ -252,7 +252,7 @@ mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, No
     window_update_scheduled::Bool
     window_update_task::ChannelTask
     # Channel task tracking
-    pending_tasks::IdDict{Any, Bool}
+    pending_tasks::IdDict{ChannelTask, Bool}
     pending_tasks_lock::ReentrantLock
     # Shutdown tracking
     shutdown_pending::Bool
@@ -371,8 +371,8 @@ channel_put_local_object!(channel::Channel, obj::EventLoopLocalObject) = event_l
 channel_remove_local_object!(channel::Channel, key::Ptr{Cvoid}) = event_loop_remove_local_object!(channel.event_loop, key)
 
 # Channel creation API matching aws_channel_new
-mutable struct ChannelSetupArgs
-    channel::Channel
+mutable struct ChannelSetupArgs{C <: Channel}
+    channel::C
 end
 
 function _channel_message_pool_on_removed(obj::EventLoopLocalObject)
@@ -1005,8 +1005,8 @@ function channel_setup_complete!(channel::Channel)::Union{Nothing, ErrorResult}
     return nothing
 end
 
-mutable struct ChannelShutdownWriteArgs
-    slot::ChannelSlot
+mutable struct ChannelShutdownWriteArgs{S <: ChannelSlot}
+    slot::S
     error_code::Int
     shutdown_immediately::Bool
 end

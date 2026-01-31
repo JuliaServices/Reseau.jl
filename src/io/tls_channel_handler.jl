@@ -174,8 +174,8 @@ struct SecItemOptions
     key_label::Union{String, Nothing}
 end
 
-struct TlsCtxPkcs11Options
-    pkcs11_lib::Any
+struct TlsCtxPkcs11Options{PL}
+    pkcs11_lib::PL
     user_pin::ByteCursor
     slot_id::Union{UInt64, Nothing}
     token_label::ByteCursor
@@ -184,8 +184,8 @@ struct TlsCtxPkcs11Options
     cert_file_contents::ByteCursor
 end
 
-mutable struct Pkcs11KeyOpState
-    pkcs11_lib::Any
+mutable struct Pkcs11KeyOpState{PL}
+    pkcs11_lib::PL
     user_pin::ByteCursor
     slot_id::UInt64
     token_label::ByteCursor
@@ -374,6 +374,7 @@ mutable struct TlsContextOptions
     keychain_path::Union{String, Nothing}
     max_fragment_size::Csize_t
     verify_peer::Bool
+    # late-init: starts nothing, mutated to extension data or CustomKeyOpHandler
     ctx_options_extension::Any
     custom_key_op_handler::Union{CustomKeyOpHandler, Nothing}
 end
