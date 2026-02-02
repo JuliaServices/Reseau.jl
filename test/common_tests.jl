@@ -61,6 +61,29 @@ end
     AwsIO.mutex_clean_up(m)
 end
 
+@testset "Managed thread join" begin
+    started = Channel{Nothing}(2)
+    stop_flag = Ref(false)
+    opts = AwsIO.ThreadOptions(; join_strategy = AwsIO.ThreadJoinStrategy.MANAGED)
+    handles = AwsIO.ThreadHandle[]
+    for _ in 1:2
+        handle = AwsIO.ThreadHandle()
+        push!(handles, handle)
+        @test AwsIO.thread_launch(handle, _ -> begin
+            put!(started, nothing)
+            while !stop_flag[]
+                sleep(0.001)
+            end
+            return nothing
+        end, nothing, opts) == AwsIO.OP_SUCCESS
+    end
+    take!(started)
+    take!(started)
+    stop_flag[] = true
+    @test AwsIO.thread_join_all_managed() == AwsIO.OP_SUCCESS
+    @test AwsIO.thread_get_managed_thread_count() == 0
+end
+
 @testset "Byte buffers" begin
     buf_ref = Ref(AwsIO.ByteBuffer(8))
     cur = AwsIO.ByteCursor("hi")
