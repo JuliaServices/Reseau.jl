@@ -1,6 +1,6 @@
 mutable struct ThreadScheduler
     scheduler::TaskScheduler
-    lock::Mutex
+    lock::ReentrantLock
     cond::ConditionVariable
     @atomic should_exit::Bool
     worker::Union{Task, Nothing}
@@ -29,7 +29,7 @@ end
 function thread_scheduler_new(options::Union{ThreadOptions, Nothing} = nothing)
     _ = options
     scheduler = TaskScheduler()
-    ts = ThreadScheduler(scheduler, Mutex(), ConditionVariable(), false, nothing)
+    ts = ThreadScheduler(scheduler, ReentrantLock(), ConditionVariable(), false, nothing)
     ts.worker = Threads.@spawn _thread_scheduler_loop(ts)
     return ts
 end
@@ -46,9 +46,9 @@ function thread_scheduler_release(scheduler::ThreadScheduler)
 end
 
 function thread_scheduler_schedule_future(scheduler::ThreadScheduler, task::ScheduledTask, time_to_run::UInt64)
-    mutex_lock(scheduler.lock)
+    lock(scheduler.lock)
     task_scheduler_schedule_future!(scheduler.scheduler, task, time_to_run)
-    mutex_unlock(scheduler.lock)
+    unlock(scheduler.lock)
     condition_variable_notify_one(scheduler.cond)
     return nothing
 end
@@ -58,9 +58,9 @@ function thread_scheduler_schedule_now(scheduler::ThreadScheduler, task::Schedul
 end
 
 function thread_scheduler_cancel_task(scheduler::ThreadScheduler, task::ScheduledTask)
-    mutex_lock(scheduler.lock)
+    lock(scheduler.lock)
     task_scheduler_cancel!(scheduler.scheduler, task)
-    mutex_unlock(scheduler.lock)
+    unlock(scheduler.lock)
     condition_variable_notify_one(scheduler.cond)
     return nothing
 end

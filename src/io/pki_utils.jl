@@ -476,8 +476,24 @@ function import_pkcs12_to_identity(
     dict = _pki_cf_dict_create()
     dict == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
 
-    pass_ref = password.len == 0 ? _cf_string_create(C_NULL, Csize_t(0), _kCFStringEncodingUTF8) :
+    pass_ref = if password.len == 0
+        ccall(
+            (:CFStringCreateWithCString, _COREFOUNDATION_LIB),
+            CFStringRef,
+            (CFAllocatorRef, Cstring, UInt32),
+            C_NULL,
+            "",
+            _kCFStringEncodingUTF8,
+        )
+    else
         _cf_string_create(_cursor_ptr(password), Csize_t(password.len), _kCFStringEncodingUTF8)
+    end
+    if pass_ref == C_NULL
+        _cf_release(pkcs12_data)
+        _cf_release(dict)
+        raise_error(ERROR_SYS_CALL_FAILURE)
+        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+    end
     _pki_cf_dict_add_value(dict, _kSecImportExportPassphrase, pass_ref)
 
     items_ref = Ref{Ptr{Cvoid}}(C_NULL)
@@ -979,6 +995,13 @@ function secitem_import_pkcs12(
         return ErrorResult(ERROR_SYS_CALL_FAILURE)
     end
 
+    count = ccall((:CFArrayGetCount, _COREFOUNDATION_LIB), Clong, (Ptr{Cvoid},), items_ref[])
+    if count == 0
+        _cf_release(items_ref[])
+        raise_error(ERROR_SYS_CALL_FAILURE)
+        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+    end
+
     item = ccall((:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Clong), items_ref[], 0)
     identity = ccall((:CFDictionaryGetValue, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}), item, _kSecImportItemIdentity)
     if identity == C_NULL
@@ -986,16 +1009,9 @@ function secitem_import_pkcs12(
         raise_error(ERROR_SYS_CALL_FAILURE)
         return ErrorResult(ERROR_SYS_CALL_FAILURE)
     end
-
-    values = Memory{Ptr{Cvoid}}(undef, 1)
-    values[1] = identity
-    identity_array = _pki_cf_array_create(values, 1)
+    _cf_retain(identity)
     _cf_release(items_ref[])
-    if identity_array == C_NULL
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
-    end
-    return identity_array
+    return identity
 end
 
 function load_cert_from_system_cert_store(

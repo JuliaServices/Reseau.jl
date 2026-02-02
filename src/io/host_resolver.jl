@@ -141,7 +141,7 @@ mutable struct DefaultHostResolver{ELG} <: AbstractHostResolver
     event_loop_group::ELG
     config::HostResolverConfig
     cache::HostResolverCache
-    resolver_lock::Mutex
+    resolver_lock::ReentrantLock
     @atomic shutdown::Bool
 end
 
@@ -163,7 +163,7 @@ function DefaultHostResolver(
         event_loop_group,
         config,
         cache,
-        Mutex(),
+        ReentrantLock(),
         false,
     )
     return resolver
@@ -174,7 +174,7 @@ mutable struct HostEntry{HR <: DefaultHostResolver, RC <: HostResolutionConfig, 
     host_name::String
     resolution_config::RC
     resolve_frequency_ns::UInt64
-    entry_lock::Mutex
+    entry_lock::ReentrantLock
     entry_signal::ConditionVariable
     a_records::LRUCache{String, HostAddress}
     aaaa_records::LRUCache{String, HostAddress}
@@ -213,7 +213,7 @@ function HostEntry(
         String(host_name),
         normalized,
         normalized.resolve_frequency_ns == 0 ? HOST_RESOLVER_DEFAULT_RESOLVE_FREQUENCY_NS : normalized.resolve_frequency_ns,
-        Mutex(),
+        ReentrantLock(),
         ConditionVariable(),
         a_records,
         aaaa_records,
@@ -477,7 +477,7 @@ function _host_resolver_thread(entry::HostEntry)
             new_expiry = timestamp + entry.resolution_config.max_ttl_secs * UInt64(1_000_000_000)
 
             pending = Deque{PendingCallback}(0)
-            mutex_lock(entry.entry_lock)
+            lock(entry.entry_lock)
             try
                 if err_code == AWS_OP_SUCCESS
                     _update_address_cache!(entry, addresses, new_expiry)
@@ -488,17 +488,17 @@ function _host_resolver_thread(entry::HostEntry)
                 pending = entry.pending_callbacks
                 entry.pending_callbacks = Deque{PendingCallback}(0)
             finally
-                mutex_unlock(entry.entry_lock)
+                unlock(entry.entry_lock)
             end
 
             while !isempty(pending)
                 pending_callback = pop_front!(pending)
                 callback_addresses = HostAddress[]
-                mutex_lock(entry.entry_lock)
+                lock(entry.entry_lock)
                 try
                     callback_addresses = _collect_callback_addresses(entry)
                 finally
-                    mutex_unlock(entry.entry_lock)
+                    unlock(entry.entry_lock)
                 end
 
                 if isempty(callback_addresses)
@@ -540,7 +540,7 @@ function _host_resolver_thread(entry::HostEntry)
             empty!(entry.new_addresses)
             empty!(entry.expired_addresses)
 
-            mutex_lock(entry.entry_lock)
+            lock(entry.entry_lock)
             try
                 entry.resolves_since_last_request += 1
 
@@ -562,13 +562,13 @@ function _host_resolver_thread(entry::HostEntry)
                     )
                 end
             finally
-                mutex_unlock(entry.entry_lock)
+                unlock(entry.entry_lock)
             end
 
             resolver = entry.resolver
-            mutex_lock(resolver.resolver_lock)
+            lock(resolver.resolver_lock)
             try
-                mutex_lock(entry.entry_lock)
+                lock(entry.entry_lock)
                 try
                     now = _resolver_clock(resolver)
                     if resolver.shutdown || (
@@ -581,10 +581,10 @@ function _host_resolver_thread(entry::HostEntry)
 
                     keep_going = (@atomic entry.state) == DefaultResolverState.ACTIVE
                 finally
-                    mutex_unlock(entry.entry_lock)
+                    unlock(entry.entry_lock)
                 end
             finally
-                mutex_unlock(resolver.resolver_lock)
+                unlock(resolver.resolver_lock)
             end
 
             keep_going || break
@@ -603,10 +603,10 @@ function _host_resolver_thread(entry::HostEntry)
 end
 
 function _host_entry_shutdown!(entry::HostEntry)
-    mutex_lock(entry.entry_lock)
+    lock(entry.entry_lock)
     @atomic entry.state = DefaultResolverState.SHUTTING_DOWN
     condition_variable_notify_all(entry.entry_signal)
-    mutex_unlock(entry.entry_lock)
+    unlock(entry.entry_lock)
     return nothing
 end
 
@@ -627,7 +627,7 @@ function host_resolver_resolve!(
     host = String(host_name)
     timestamp = _resolver_clock(resolver)
 
-    mutex_lock(resolver.resolver_lock)
+    lock(resolver.resolver_lock)
     entry = hash_table_get(resolver.cache, host)
     if entry === nothing
         new_entry = HostEntry(resolver, host, resolution_config, timestamp)
@@ -644,22 +644,22 @@ function host_resolver_resolve!(
         launch_result = thread_launch(new_entry.resolver_thread, _host_resolver_thread, new_entry, thread_options)
         if launch_result != OP_SUCCESS
             hash_table_remove!(resolver.cache, host)
-            mutex_unlock(resolver.resolver_lock)
+            unlock(resolver.resolver_lock)
             return ErrorResult(last_error())
         end
-        mutex_unlock(resolver.resolver_lock)
+        unlock(resolver.resolver_lock)
         return nothing
     end
 
-    mutex_lock(entry.entry_lock)
-    mutex_unlock(resolver.resolver_lock)
+    lock(entry.entry_lock)
+    unlock(resolver.resolver_lock)
 
     entry.last_resolve_request_time = timestamp
     entry.resolves_since_last_request = 0
     cached_addresses = _collect_callback_addresses(entry)
 
     if !isempty(cached_addresses)
-        mutex_unlock(entry.entry_lock)
+        unlock(entry.entry_lock)
         Base.invokelatest(on_resolved, resolver, host, AWS_OP_SUCCESS, cached_addresses)
         return nothing
     end
@@ -669,20 +669,20 @@ function host_resolver_resolve!(
         PendingCallback(on_resolved, user_data),
     )
     condition_variable_notify_all(entry.entry_signal)
-    mutex_unlock(entry.entry_lock)
+    unlock(entry.entry_lock)
 
     return nothing
 end
 
 # Purge the entire cache
 function host_resolver_purge_cache!(resolver::DefaultHostResolver)
-    mutex_lock(resolver.resolver_lock)
+    lock(resolver.resolver_lock)
     for (_, entry_any) in resolver.cache
         entry = entry_any::HostEntry
         _host_entry_shutdown!(entry)
     end
     hash_table_clear!(resolver.cache)
-    mutex_unlock(resolver.resolver_lock)
+    unlock(resolver.resolver_lock)
 
     logf(LogLevel.DEBUG, LS_IO_DNS, "Host resolver: cache purged")
     return nothing
@@ -706,21 +706,21 @@ function host_resolver_purge_host_cache!(
     )::Union{Nothing, ErrorResult}
     host = String(host_name)
 
-    mutex_lock(resolver.resolver_lock)
+    lock(resolver.resolver_lock)
     entry = hash_table_get(resolver.cache, host)
     if entry === nothing
-        mutex_unlock(resolver.resolver_lock)
+        unlock(resolver.resolver_lock)
         _dispatch_simple_callback(resolver, on_host_purge_complete, user_data)
         return nothing
     end
 
-    mutex_lock(entry.entry_lock)
+    lock(entry.entry_lock)
     entry.on_host_purge_complete = on_host_purge_complete
     entry.on_host_purge_complete_user_data = user_data
-    mutex_unlock(entry.entry_lock)
+    unlock(entry.entry_lock)
 
     hash_table_remove!(resolver.cache, host)
-    mutex_unlock(resolver.resolver_lock)
+    unlock(resolver.resolver_lock)
 
     _host_entry_shutdown!(entry)
 
@@ -735,19 +735,19 @@ function host_resolver_get_host_address_count(
     host = String(host_name)
     count = 0
 
-    mutex_lock(resolver.resolver_lock)
+    lock(resolver.resolver_lock)
     entry = hash_table_get(resolver.cache, host)
     if entry !== nothing
-        mutex_lock(entry.entry_lock)
+        lock(entry.entry_lock)
         if (flags & GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A) != 0
             count += cache_count(entry.a_records)
         end
         if (flags & GET_HOST_ADDRESS_COUNT_RECORD_TYPE_AAAA) != 0
             count += cache_count(entry.aaaa_records)
         end
-        mutex_unlock(entry.entry_lock)
+        unlock(entry.entry_lock)
     end
-    mutex_unlock(resolver.resolver_lock)
+    unlock(resolver.resolver_lock)
 
     return Csize_t(count)
 end
@@ -760,20 +760,20 @@ function host_resolver_get_address!(
     )::Union{HostAddress, Nothing}
     host = String(host_name)
 
-    mutex_lock(resolver.resolver_lock)
+    lock(resolver.resolver_lock)
     entry = hash_table_get(resolver.cache, host)
     if entry === nothing
-        mutex_unlock(resolver.resolver_lock)
+        unlock(resolver.resolver_lock)
         return nothing
     end
-    mutex_lock(entry.entry_lock)
-    mutex_unlock(resolver.resolver_lock)
+    lock(entry.entry_lock)
+    unlock(resolver.resolver_lock)
 
     cache = address_type == HostAddressType.A ? entry.a_records : entry.aaaa_records
     addr = use_lru!(cache)
     result = addr === nothing ? nothing : copy(addr)
 
-    mutex_unlock(entry.entry_lock)
+    unlock(entry.entry_lock)
     return result
 end
 
@@ -782,15 +782,15 @@ function host_resolver_record_connection_failure!(
         resolver::DefaultHostResolver,
         address::HostAddress,
     )
-    mutex_lock(resolver.resolver_lock)
+    lock(resolver.resolver_lock)
     entry = hash_table_get(resolver.cache, address.host)
     if entry === nothing
-        mutex_unlock(resolver.resolver_lock)
+        unlock(resolver.resolver_lock)
         return nothing
     end
 
-    mutex_lock(entry.entry_lock)
-    mutex_unlock(resolver.resolver_lock)
+    lock(entry.entry_lock)
+    unlock(resolver.resolver_lock)
 
     if address.address_type == HostAddressType.A
         primary = entry.a_records
@@ -813,7 +813,7 @@ function host_resolver_record_connection_failure!(
         end
     end
 
-    mutex_unlock(entry.entry_lock)
+    unlock(entry.entry_lock)
     return nothing
 end
 
@@ -821,13 +821,13 @@ end
 function host_resolver_shutdown!(resolver::DefaultHostResolver)
     @atomic resolver.shutdown = true
     entries = HostEntry[]
-    mutex_lock(resolver.resolver_lock)
+    lock(resolver.resolver_lock)
     for (_, entry_any) in resolver.cache
         entry = entry_any::HostEntry
         push!(entries, entry)
     end
     hash_table_clear!(resolver.cache)
-    mutex_unlock(resolver.resolver_lock)
+    unlock(resolver.resolver_lock)
 
     for entry in entries
         _host_entry_shutdown!(entry)

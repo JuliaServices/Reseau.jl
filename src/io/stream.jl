@@ -22,6 +22,8 @@ end
 # Abstract stream interface
 abstract type AbstractInputStream end
 
+import Base: readbytes!, eof
+
 # Stream vtable interface methods
 
 # Read from stream into buffer, returns (bytes_read, status)
@@ -53,6 +55,26 @@ end
 function stream_destroy!(stream::AbstractInputStream)::Nothing
     # Default: do nothing
     return nothing
+end
+
+function readbytes!(stream::AbstractInputStream, buf::Vector{UInt8}, nb::Int)
+    nb <= 0 && return 0
+    to_read = min(nb, length(buf))
+    to_read == 0 && return 0
+    byte_buf = byte_buf_from_empty_array(buf, to_read)
+    result = stream_read(stream, byte_buf, to_read)
+    if result isa ErrorResult
+        raise_error(result.code)
+        error("stream_read failed with error code $(result.code)")
+    end
+    read_len, _ = result
+    return Int(read_len)
+end
+
+function eof(stream::AbstractInputStream)::Bool
+    status = stream_get_status(stream)
+    status isa ErrorResult && return true
+    return status.is_end_of_stream
 end
 
 # Acquire/release hooks for API parity (no refcount in Julia)

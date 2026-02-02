@@ -105,7 +105,7 @@
 
     # Cross-thread data protected by mutex
     mutable struct KqueueCrossThreadData
-        mutex::Mutex
+        mutex::ReentrantLock
         thread_signaled::Bool
         tasks_to_schedule::Deque{ScheduledTask}
         state::EventThreadState.T
@@ -113,7 +113,7 @@
 
     function KqueueCrossThreadData()
         return KqueueCrossThreadData(
-            Mutex(),
+            ReentrantLock(),
             false,
             Deque{ScheduledTask}(16),
             EventThreadState.READY_TO_RUN,
@@ -271,7 +271,7 @@
             return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
         end
 
-        # Mutex is initialized automatically in KqueueCrossThreadData constructor
+        # ReentrantLock is initialized automatically in KqueueCrossThreadData constructor
 
         # Create the event loop
         event_loop = EventLoop(options.clock, impl)
@@ -351,13 +351,13 @@
         end
 
         signal_thread = false
-        mutex_lock(impl.cross_thread_data.mutex)
+        lock(impl.cross_thread_data.mutex)
         if impl.cross_thread_data.state == EventThreadState.RUNNING
             impl.cross_thread_data.state = EventThreadState.STOPPING
             impl.cross_thread_data.thread_signaled = true
             signal_thread = true
         end
-        mutex_unlock(impl.cross_thread_data.mutex)
+        unlock(impl.cross_thread_data.mutex)
         if signal_thread
             signal_cross_thread_data_changed(event_loop)
         end
@@ -398,14 +398,14 @@
         task.scheduled = true
         should_signal_thread = false
 
-        mutex_lock(impl.cross_thread_data.mutex)
+        lock(impl.cross_thread_data.mutex)
         push_back!(impl.cross_thread_data.tasks_to_schedule, task)
 
         if !impl.cross_thread_data.thread_signaled
             should_signal_thread = true
             impl.cross_thread_data.thread_signaled = true
         end
-        mutex_unlock(impl.cross_thread_data.mutex)
+        unlock(impl.cross_thread_data.mutex)
 
         if should_signal_thread
             signal_cross_thread_data_changed(event_loop)
@@ -464,11 +464,11 @@
         end
 
         removed = false
-        mutex_lock(impl.cross_thread_data.mutex)
+        lock(impl.cross_thread_data.mutex)
         if !isempty(impl.cross_thread_data.tasks_to_schedule)
             removed = remove!(impl.cross_thread_data.tasks_to_schedule, task; eq = (===))
         end
-        mutex_unlock(impl.cross_thread_data.mutex)
+        unlock(impl.cross_thread_data.mutex)
 
         if removed
             task_run!(task, TaskStatus.CANCELED)
@@ -732,7 +732,7 @@
 
         tasks_to_schedule = Vector{ScheduledTask}()
 
-        mutex_lock(impl.cross_thread_data.mutex)
+        lock(impl.cross_thread_data.mutex)
         impl.cross_thread_data.thread_signaled = false
 
         initiate_stop = impl.cross_thread_data.state == EventThreadState.STOPPING &&
@@ -749,7 +749,7 @@
             end
         end
 
-        mutex_unlock(impl.cross_thread_data.mutex)
+        unlock(impl.cross_thread_data.mutex)
 
         process_tasks_to_schedule(event_loop, tasks_to_schedule)
     end
@@ -971,7 +971,7 @@
             end
         end
 
-        # Mutex doesn't need cleanup in Julia (SpinLock is GC'd)
+        # ReentrantLock doesn't need cleanup in Julia
 
         # Remove signal kevent
         del_kevent = Kevent(

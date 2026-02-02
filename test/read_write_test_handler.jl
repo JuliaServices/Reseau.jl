@@ -50,6 +50,11 @@ function rw_handler_new(on_read, on_write, event_loop_driven::Bool, window::Inte
     )
 end
 
+function AwsIO.setchannelslot!(handler::ReadWriteTestHandler, slot::AwsIO.ChannelSlot)::Nothing
+    handler.slot = slot
+    return nothing
+end
+
 function rw_handler_enable_wait_on_destroy(
         handler::ReadWriteTestHandler,
         destroy_called::Base.RefValue{Bool},

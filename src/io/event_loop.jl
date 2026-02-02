@@ -88,7 +88,7 @@ struct EventLoopGroupOptions{S, C, Clock}
 end
 
 function EventLoopGroupOptions(;
-        loop_count::Integer = 1,
+        loop_count::Integer = 0,
         type::EventLoopType.T = EventLoopType.PLATFORM_DEFAULT,
         shutdown_options = nothing,
         cpu_group = nothing,
@@ -398,6 +398,7 @@ mutable struct EventLoopGroup{EL, S}
     event_loops::ArrayList{EL}
     shutdown_options::S
     event_loop_type::EventLoopType.T
+    @atomic ref_count::Int
 end
 
 # Create a new event loop group (creates and runs event loops)
@@ -408,12 +409,20 @@ function event_loop_group_new(options::EventLoopGroupOptions)
         cpu_count = get_cpu_count_for_group(Int(cpu_group_val))
         loop_count = UInt16(cpu_count > 0 ? min(cpu_count, typemax(UInt16)) : 1)
     end
-    if loop_count == 0
-        processor_count = Sys.CPU_THREADS
-        loop_count = UInt16(processor_count > 1 ? processor_count ÷ 2 : processor_count)
-    end
-
     interactive_threads = Threads.nthreads(:interactive)
+    if loop_count == 0
+        if interactive_threads <= 1
+            logf(
+                LogLevel.ERROR,
+                LS_IO_EVENT_LOOP,
+                "Default event loop group requires >=2 interactive threads (interactive=%d). Restart Julia with more interactive threads.",
+                interactive_threads,
+            )
+            raise_error(ERROR_THREAD_INVALID_SETTINGS)
+            return ErrorResult(ERROR_THREAD_INVALID_SETTINGS)
+        end
+        loop_count = UInt16(interactive_threads - 1)
+    end
     if Int(loop_count) >= interactive_threads
         logf(
             LogLevel.ERROR,
@@ -445,6 +454,7 @@ function event_loop_group_new(options::EventLoopGroupOptions)
         ArrayList{EL}(Int(loop_count)),
         options.shutdown_options,
         el_type,
+        1,
     )
     parent_ptr = pointer_from_objref(elg)
 
@@ -480,6 +490,7 @@ function EventLoopGroup(options::EventLoopGroupOptions)
 end
 
 function event_loop_group_acquire!(elg::EventLoopGroup)
+    @atomic elg.ref_count += 1
     return elg
 end
 
@@ -495,11 +506,24 @@ function _event_loop_group_called_from_loop_thread(elg::EventLoopGroup)::Bool
 end
 
 function event_loop_group_release!(elg::EventLoopGroup)
-    if _event_loop_group_called_from_loop_thread(elg)
-        Threads.@spawn event_loop_group_destroy!(elg)
+    new_count = @atomic elg.ref_count -= 1
+    if new_count > 0
+        return nothing
+    elseif new_count < 0
+        logf(
+            LogLevel.ERROR,
+            LS_IO_EVENT_LOOP,
+            "Event loop group ref_count underflow (ref_count=%d)",
+            new_count,
+        )
         return nothing
     end
-    event_loop_group_destroy!(elg)
+
+    if _event_loop_group_called_from_loop_thread(elg)
+        Threads.@spawn event_loop_group_destroy!(elg)
+    else
+        event_loop_group_destroy!(elg)
+    end
     return nothing
 end
 

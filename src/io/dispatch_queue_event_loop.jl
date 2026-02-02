@@ -25,7 +25,7 @@
     end
 
     mutable struct DispatchLoopSyncedData
-        synced_data_lock::Mutex
+        synced_data_lock::ReentrantLock
         signal::ConditionVariable
         is_executing::Bool
         current_thread_id::thread_id_t
@@ -36,7 +36,7 @@
 
     function DispatchLoopSyncedData()
         return DispatchLoopSyncedData(
-            Mutex(),
+            ReentrantLock(),
             ConditionVariable(),
             false,
             thread_id_t(0),
@@ -60,11 +60,11 @@
     const DispatchQueueEventLoop = EventLoop{DispatchLoop, LD, Clock} where {LD, Clock}
 
     @inline function _dispatch_lock(loop::DispatchLoop)
-        return mutex_lock(loop.synced_data.synced_data_lock)
+        return lock(loop.synced_data.synced_data_lock)
     end
 
     @inline function _dispatch_unlock(loop::DispatchLoop)
-        return mutex_unlock(loop.synced_data.synced_data_lock)
+        return unlock(loop.synced_data.synced_data_lock)
     end
 
     function _dispatch_queue_id()

@@ -194,9 +194,9 @@ function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptio
     end
     if opts.pool == :interactive
         target_tid = _next_interactive_thread_id()
-        handle.task = _spawn_on_interactive_thread(handle, fn, ctx, target_tid)
+        handle.task = Base.errormonitor(_spawn_on_interactive_thread(handle, fn, ctx, target_tid))
     else
-        handle.task = Threads.@spawn _thread_task_entry(handle, fn, ctx)
+        handle.task = Base.errormonitor(Threads.@spawn _thread_task_entry(handle, fn, ctx))
     end
     return OP_SUCCESS
 end

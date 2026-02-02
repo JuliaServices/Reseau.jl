@@ -1,21 +1,17 @@
-mutable struct Mutex
-    lock::Threads.SpinLock
-end
-
-Mutex() = Mutex(Threads.SpinLock())
+const Mutex = Base.ReentrantLock
 
 function mutex_init(mutex_ref::Base.RefValue{Mutex})
-    mutex_ref[] = Mutex()
+    mutex_ref[] = ReentrantLock()
     return OP_SUCCESS
 end
 
 function mutex_clean_up(mutex_ref::Base.RefValue{Mutex})
-    mutex_ref[] = Mutex()
+    mutex_ref[] = ReentrantLock()
     return nothing
 end
 
 function mutex_lock(mutex::Mutex)
-    lock(mutex.lock)
+    lock(mutex)
     return OP_SUCCESS
 end
 
@@ -24,7 +20,7 @@ function mutex_lock(mutex_ref::Base.RefValue{Mutex})
 end
 
 function mutex_try_lock(mutex::Mutex)
-    if trylock(mutex.lock)
+    if trylock(mutex)
         return OP_SUCCESS
     end
     return raise_error(ERROR_MUTEX_TIMEOUT)
@@ -35,7 +31,7 @@ function mutex_try_lock(mutex_ref::Base.RefValue{Mutex})
 end
 
 function mutex_unlock(mutex::Mutex)
-    unlock(mutex.lock)
+    unlock(mutex)
     return OP_SUCCESS
 end
 

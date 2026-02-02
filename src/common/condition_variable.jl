@@ -50,13 +50,13 @@ end
 
 function condition_variable_wait_pred(
         cond::ConditionVariable,
-        mutex::Mutex,
+        mutex::ReentrantLock,
         pred,
         pred_ctx,
     )
     local_seq = @atomic cond.seq
     while !_cond_predicate(pred, pred_ctx)
-        mutex_unlock(mutex)
+        unlock(mutex)
         lock(cond.cond)
         try
             while (@atomic cond.seq) == local_seq
@@ -66,14 +66,14 @@ function condition_variable_wait_pred(
         finally
             unlock(cond.cond)
         end
-        mutex_lock(mutex)
+        lock(mutex)
     end
     return OP_SUCCESS
 end
 
 function condition_variable_wait_pred(
         cond_ref::Base.RefValue{ConditionVariable},
-        mutex_ref::Base.RefValue{Mutex},
+        mutex_ref::Base.RefValue{ReentrantLock},
         pred,
         pred_ctx,
     )
@@ -82,7 +82,7 @@ end
 
 function condition_variable_wait_for_pred(
         cond::ConditionVariable,
-        mutex::Mutex,
+        mutex::ReentrantLock,
         time_to_wait::Integer,
         pred,
         pred_ctx,
@@ -103,9 +103,9 @@ function condition_variable_wait_for_pred(
             return raise_error(ERROR_COND_VARIABLE_TIMED_OUT)
         end
         remaining = deadline - now_ref[]
-        mutex_unlock(mutex)
+        unlock(mutex)
         ok = Base.timedwait(() -> (@atomic cond.seq) != local_seq, remaining / 1_000_000_000)
-        mutex_lock(mutex)
+        lock(mutex)
         if ok == false || ok == :timed_out
             return raise_error(ERROR_COND_VARIABLE_TIMED_OUT)
         end
@@ -116,7 +116,7 @@ end
 
 function condition_variable_wait_for_pred(
         cond_ref::Base.RefValue{ConditionVariable},
-        mutex_ref::Base.RefValue{Mutex},
+        mutex_ref::Base.RefValue{ReentrantLock},
         time_to_wait::Integer,
         pred,
         pred_ctx,

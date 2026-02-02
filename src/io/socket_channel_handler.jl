@@ -36,6 +36,11 @@ function SocketChannelHandler(
     )
 end
 
+function setchannelslot!(handler::SocketChannelHandler, slot::ChannelSlot)::Nothing
+    handler.slot = slot
+    return nothing
+end
+
 # Handler interface implementations
 
 function handler_initial_window_size(handler::SocketChannelHandler)::Csize_t
@@ -349,6 +354,10 @@ function _on_socket_readable(socket, error_code::Int, user_data)
     if handler.shutdown_in_progress
         return nothing
     end
+    slot = handler.slot
+    if slot === nothing || slot.adj_right === nothing || slot.adj_right.handler === nothing
+        return nothing
+    end
 
     # Read data from socket regardless of error
     _socket_handler_do_read(handler)
@@ -476,7 +485,6 @@ function socket_channel_handler_new!(
         channel_slot_insert_front!(channel, slot)
     end
     channel_slot_set_handler!(slot, handler)
-    handler.slot = slot
 
     # Link handler to the socket
     socket.handler = handler

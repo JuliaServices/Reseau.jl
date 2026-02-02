@@ -174,6 +174,21 @@ struct SecItemOptions
     key_label::Union{String, Nothing}
 end
 
+function _tls_generate_secitem_labels()::Union{SecItemOptions, ErrorResult}
+    u = Ref{uuid}()
+    if uuid_init(u) != OP_SUCCESS
+        raise_error(ERROR_SYS_CALL_FAILURE)
+        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+    end
+    buf = Ref(ByteBuffer(UUID_STR_LEN))
+    if uuid_to_str(u, buf) != OP_SUCCESS
+        raise_error(ERROR_SYS_CALL_FAILURE)
+        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+    end
+    uuid_str = String(byte_cursor_from_buf(buf[]))
+    return SecItemOptions("awsio-cert-$uuid_str", "awsio-key-$uuid_str")
+end
+
 struct TlsCtxPkcs11Options{PL}
     pkcs11_lib::PL
     user_pin::ByteCursor
@@ -449,20 +464,45 @@ end
 const _tls_cal_init_lock = ReentrantLock()
 const _tls_cal_initialized = Ref(false)
 const _tls_use_secitem = Ref(false)
+const _tls_use_secitem_override = Ref{Union{Bool, Nothing}}(nothing)
+
+@inline function _env_truthy(val::AbstractString)::Bool
+    isempty(val) && return false
+    return val == "1" || val == "true" || val == "yes" || val == "y" || val == "on"
+end
 
 function _tls_set_use_secitem_from_env()
     @static if Sys.isapple()
-        # aws-c-io enables SecItem via compile-time AWS_USE_SECITEM (typically iOS-only).
-        # On macOS we default to SecureTransport and ignore runtime toggles.
-        val = lowercase(get(ENV, "AWSIO_USE_SECITEM", ""))
-        if !isempty(val) && (val == "1" || val == "true" || val == "yes" || val == "y" || val == "on")
-            logf(
-                LogLevel.WARN,
-                LS_IO_TLS,
-                "AWSIO_USE_SECITEM is ignored on macOS; SecItem requires AWS_USE_SECITEM at build time.",
-            )
+        if _tls_use_secitem_override[] !== nothing
+            _tls_use_secitem[] = _tls_use_secitem_override[]
+            return nothing
         end
+        val = lowercase(get(ENV, "AWSIO_USE_SECITEM", ""))
+        nw_val = lowercase(get(ENV, "AWSIO_USE_APPLE_NETWORK_FRAMEWORK", ""))
+        enabled = if !isempty(val)
+            _env_truthy(val)
+        elseif !isempty(nw_val)
+            _env_truthy(nw_val)
+        else
+            false
+        end
+        _tls_use_secitem[] = enabled
+        if enabled
+            logf(LogLevel.INFO, LS_IO_TLS, "SecItem support enabled on Apple platforms.")
+        end
+    else
         _tls_use_secitem[] = false
+    end
+    return nothing
+end
+
+function tls_set_use_secitem!(flag::Bool)::Nothing
+    @static if Sys.isapple()
+        _tls_use_secitem_override[] = flag
+        _tls_use_secitem[] = flag
+        if flag
+            logf(LogLevel.INFO, LS_IO_TLS, "SecItem support enabled on Apple platforms.")
+        end
     else
         _tls_use_secitem[] = false
     end
@@ -1787,6 +1827,11 @@ mutable struct S2nTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: TlsChann
     negotiation_task::ChannelTask
 end
 
+function setchannelslot!(handler::S2nTlsHandler, slot::ChannelSlot)::Nothing
+    handler.slot = slot
+    return nothing
+end
+
 function _byte_buf_from_c_str(ptr::Ptr{Cchar})::ByteBuffer
     ptr == C_NULL && return null_buffer()
     len = ccall(:strlen, Csize_t, (Cstring,), ptr)
@@ -1924,7 +1969,6 @@ function _s2n_send_alpn_message(handler::S2nTlsHandler)
     slot === nothing && return nothing
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
-    handler.protocol.len == 0 && return nothing
     channel = slot.channel
     channel === nothing && return nothing
 
@@ -2070,7 +2114,7 @@ function _parse_alpn_list(alpn_list::String)::Union{Vector{String}, ErrorResult}
     if length(parts) > 4
         parts = parts[1:4]
     end
-    return parts
+    return String.(parts)
 end
 
 function _s2n_set_protocol_preferences_config(config::Ptr{Cvoid}, alpn_list::String)::Union{Nothing, ErrorResult}
@@ -2213,10 +2257,12 @@ function handler_process_read_message(
             res = _s2n_drive_negotiation(handler)
             if res isa ErrorResult
                 channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-            else
-                channel_slot_increment_read_window!(slot, message_len)
+                return nothing
             end
-            return nothing
+            channel_slot_increment_read_window!(slot, message_len)
+            if handler.state == TlsNegotiationState.ONGOING
+                return nothing
+            end
         end
     end
 
@@ -2954,6 +3000,12 @@ const _kSSLStreamType = Cint(0)
 const _kSSLSessionOptionBreakOnServerAuth = Cint(0)
 const _kSSLSessionOptionBreakOnClientAuth = Cint(2)
 
+const _kSSLIdle = Cint(0)
+const _kSSLHandshake = Cint(1)
+const _kSSLConnected = Cint(2)
+const _kSSLClosed = Cint(3)
+const _kSSLAborted = Cint(4)
+
 const _errSSLWouldBlock = OSStatus(-9803)
 const _errSSLClosedGraceful = OSStatus(-9805)
 const _errSSLPeerAuthCompleted = OSStatus(-9841)
@@ -3007,6 +3059,7 @@ mutable struct SecureTransportTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}}
     input_queue::Deque{IoMessage}
     protocol::ByteBuffer
     server_name::ByteBuffer
+    alpn_list::Union{String, Nothing}
     latest_message_on_completion::Any
     latest_message_completion_user_data::Any
     ca_certs::CFArrayRef
@@ -3022,6 +3075,11 @@ mutable struct SecureTransportTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}}
     read_state::TlsHandlerReadState.T
     delay_shutdown_error_code::Int
     negotiation_task::ChannelTask
+end
+
+function setchannelslot!(handler::SecureTransportTlsHandler, slot::ChannelSlot)::Nothing
+    handler.slot = slot
+    return nothing
 end
 
 @inline function _cf_release(obj::Ptr{Cvoid})
@@ -3169,13 +3227,16 @@ function _secure_transport_set_protocols(handler::SecureTransportTlsHandler, alp
         _cf_release(str_ref)
     end
 
-    _ = ccall(
+    status = ccall(
         _ssl_set_alpn_protocols[],
         OSStatus,
         (SSLContextRef, CFArrayRef),
         handler.ctx,
         alpn_array,
     )
+    if status != _errSecSuccess
+        logf(LogLevel.WARN, LS_IO_TLS, "SecureTransport SSLSetALPNProtocols failed with OSStatus $status")
+    end
 
     _cf_release(alpn_array)
     return nothing
@@ -3186,6 +3247,7 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
         return null_buffer()
     end
     _ssl_copy_alpn_protocols[] == C_NULL && return null_buffer()
+    is_server = handler.ctx_obj !== nothing && handler.ctx_obj.options.is_server
 
     protocols_ref = Ref{CFArrayRef}(C_NULL)
     status = ccall(
@@ -3195,27 +3257,80 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
         handler.ctx,
         protocols_ref,
     )
-    status != _errSecSuccess && return null_buffer()
-    protocols_ref[] == C_NULL && return null_buffer()
+    local_list = handler.alpn_list
+    local_protocols = local_list === nothing ? nothing : _parse_alpn_list(local_list)
 
-    count = ccall((:CFArrayGetCount, _COREFOUNDATION_LIB), Clong, (CFArrayRef,), protocols_ref[])
-    if count <= 0
-        _cf_release(protocols_ref[])
+    if protocols_ref[] == C_NULL
+        if local_protocols !== nothing && !(local_protocols isa ErrorResult) && length(local_protocols) == 1
+            return _byte_buf_from_string(local_protocols[1])
+        end
+        logf(
+            LogLevel.DEBUG,
+            LS_IO_TLS,
+            "SecureTransport SSLCopyALPNProtocols unavailable (server=%s status=%d)",
+            is_server ? "true" : "false",
+            status,
+        )
         return null_buffer()
     end
 
-    protocol_ref = ccall(
-        (:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB),
-        CFTypeRef,
-        (CFArrayRef, Clong),
-        protocols_ref[],
-        0,
-    )
-    _cf_retain(protocol_ref)
+    count = ccall((:CFArrayGetCount, _COREFOUNDATION_LIB), Clong, (CFArrayRef,), protocols_ref[])
+    peer_protocols = String[]
+    for idx in 0:(count - 1)
+        protocol_ref = ccall(
+            (:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB),
+            CFTypeRef,
+            (CFArrayRef, Clong),
+            protocols_ref[],
+            idx,
+        )
+        _cf_retain(protocol_ref)
+        buf = _cf_string_to_bytebuffer(protocol_ref)
+        _cf_release(protocol_ref)
+        push!(peer_protocols, byte_buffer_as_string(buf))
+    end
     _cf_release(protocols_ref[])
-    buf = _cf_string_to_bytebuffer(protocol_ref)
-    _cf_release(protocol_ref)
-    return buf
+
+    local_protocols === nothing && return null_buffer()
+    local_protocols isa ErrorResult && return null_buffer()
+
+    if !isempty(peer_protocols)
+        logf(
+            LogLevel.DEBUG,
+            LS_IO_TLS,
+            "SecureTransport ALPN peer protocols (server=%s): %s",
+            is_server ? "true" : "false",
+            join(peer_protocols, ","),
+        )
+    end
+
+    if isempty(peer_protocols)
+        length(local_protocols) == 1 || return null_buffer()
+        return _byte_buf_from_string(local_protocols[1])
+    end
+
+    selected = ""
+    if handler.ctx_obj !== nothing && handler.ctx_obj.options.is_server
+        for proto in local_protocols
+            if proto in peer_protocols
+                selected = proto
+                break
+            end
+        end
+    else
+        for proto in peer_protocols
+            if proto in local_protocols
+                selected = proto
+                break
+            end
+        end
+    end
+
+    if isempty(selected)
+        length(local_protocols) == 1 || return null_buffer()
+        return _byte_buf_from_string(local_protocols[1])
+    end
+    return _byte_buf_from_string(selected)
 end
 
 function _secure_transport_on_negotiation_result(handler::SecureTransportTlsHandler, error_code::Int)
@@ -3231,7 +3346,6 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     slot === nothing && return nothing
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
-    handler.protocol.len == 0 && return nothing
     channel = slot.channel
     channel === nothing && return nothing
 
@@ -3260,12 +3374,14 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
 
     tls_on_drive_negotiation(handler.shared)
 
+    is_server = handler.ctx_obj !== nothing && handler.ctx_obj.options.is_server
     status = ccall((:SSLHandshake, _SECURITY_LIB), OSStatus, (SSLContextRef,), handler.ctx)
     if status == _errSecSuccess
         logf(
             LogLevel.DEBUG,
             LS_IO_TLS,
-            "SecureTransport SSLHandshake success",
+            "SecureTransport SSLHandshake success (server=%s)",
+            is_server ? "true" : "false",
         )
         handler.negotiation_finished = true
         handler.protocol = _secure_transport_get_protocol(handler)
@@ -3364,6 +3480,36 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
 
         return _secure_transport_drive_negotiation(handler)
     elseif status == _errSSLWouldBlock
+        state_ref = Ref{Cint}(0)
+        state_status = ccall(
+            (:SSLGetSessionState, _SECURITY_LIB),
+            OSStatus,
+            (SSLContextRef, Ref{Cint}),
+            handler.ctx,
+            state_ref,
+        )
+        if state_status == _errSecSuccess && state_ref[] == _kSSLConnected
+            logf(
+                LogLevel.DEBUG,
+                LS_IO_TLS,
+                "SecureTransport SSLHandshake reported would-block but session is connected (server=%s)",
+                is_server ? "true" : "false",
+            )
+            handler.negotiation_finished = true
+            handler.protocol = _secure_transport_get_protocol(handler)
+            if handler.protocol.len > 0
+                logf(LogLevel.DEBUG, LS_IO_TLS, "negotiated protocol: $(String(byte_cursor_from_buf(handler.protocol)))")
+            end
+            _secure_transport_send_alpn_message(handler)
+            _secure_transport_on_negotiation_result(handler, AWS_OP_SUCCESS)
+            return nothing
+        end
+        logf(
+            LogLevel.DEBUG,
+            LS_IO_TLS,
+            "SecureTransport SSLHandshake would block (server=%s)",
+            is_server ? "true" : "false",
+        )
         return nothing
     else
         logf(
@@ -3383,6 +3529,24 @@ function _secure_transport_negotiation_task(task::ChannelTask, handler::SecureTr
     status == TaskStatus.RUN_READY || return nothing
     _ = _secure_transport_drive_negotiation(handler)
     return nothing
+end
+
+function _tls_pending_input_bytes(queue::Deque{IoMessage})::Int
+    total = 0
+    queue.length == 0 && return total
+    idx = queue.head
+    cap = capacity(queue)
+    for _ in 1:queue.length
+        msg = queue.data[idx]
+        if msg !== nothing
+            total += Int(msg.message_data.len) - Int(msg.copy_mark)
+        end
+        idx += 1
+        if idx > cap
+            idx = 1
+        end
+    end
+    return total
 end
 
 function _secure_transport_read_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len_ptr::Ptr{Csize_t})::OSStatus
@@ -3587,10 +3751,12 @@ function handler_process_read_message(
             res = _secure_transport_drive_negotiation(handler)
             if res isa ErrorResult
                 channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-            else
-                channel_slot_increment_read_window!(slot, message_len)
+                return nothing
             end
-            return nothing
+            channel_slot_increment_read_window!(slot, message_len)
+            if !handler.negotiation_finished
+                return nothing
+            end
         end
     end
 
@@ -3829,17 +3995,19 @@ function _secure_transport_context_new(options::TlsContextOptions)::Union{TlsCon
             return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
         end
         if is_using_secitem()
-            if options.secitem_options === nothing ||
-                    options.secitem_options.cert_label === nothing ||
-                    options.secitem_options.key_label === nothing
-                raise_error(ERROR_INVALID_ARGUMENT)
-                return ErrorResult(ERROR_INVALID_ARGUMENT)
+            secitem_opts = options.secitem_options
+            if secitem_opts === nothing ||
+                    secitem_opts.cert_label === nothing ||
+                    secitem_opts.key_label === nothing
+                secitem_opts = _tls_generate_secitem_labels()
+                secitem_opts isa ErrorResult && return secitem_opts
+                options.secitem_options = secitem_opts
             end
             res = secitem_import_cert_and_key(
                 cert_cursor,
                 key_cursor;
-                cert_label = options.secitem_options.cert_label,
-                key_label = options.secitem_options.key_label,
+                cert_label = secitem_opts.cert_label,
+                key_label = secitem_opts.key_label,
             )
             if res isa ErrorResult
                 return res
@@ -3913,6 +4081,7 @@ function _secure_transport_handler_new(
         linked_list_init(IoMessage),
         null_buffer(),
         null_buffer(),
+        options.alpn_list === nothing ? st_ctx.alpn_list : options.alpn_list,
         nothing,
         nothing,
         C_NULL,
@@ -3951,7 +4120,6 @@ function _secure_transport_handler_new(
     else
         _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kSSLProtocolUnknown)
     end
-
     if ccall((:SSLSetIOFuncs, _SECURITY_LIB), OSStatus, (SSLContextRef, Ptr{Cvoid}, Ptr{Cvoid}), handler.ctx, _secure_transport_read_cb_c[], _secure_transport_write_cb_c[]) != _errSecSuccess ||
             ccall((:SSLSetConnection, _SECURITY_LIB), OSStatus, (SSLContextRef, SSLConnectionRef), handler.ctx, pointer_from_objref(handler)) != _errSecSuccess
         raise_error(ERROR_IO_TLS_CTX_ERROR)
@@ -3961,6 +4129,11 @@ function _secure_transport_handler_new(
     handler.verify_peer = st_ctx.verify_peer
 
     if !st_ctx.verify_peer && protocol_side == _kSSLClientSide
+        logf(
+            LogLevel.WARN,
+            LS_IO_TLS,
+            "x.509 validation has been disabled. This is unsafe outside of test environments.",
+        )
         _ = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
     end
 
@@ -3993,7 +4166,13 @@ end
 
 # === Generic TLS API ===
 
+function _ensure_io_library_initialized()::Nothing
+    _io_library_initialized[] || io_library_init()
+    return nothing
+end
+
 function tls_is_alpn_available()::Bool
+    _ensure_io_library_initialized()
     @static if Sys.isapple()
         return _ssl_copy_alpn_protocols[] != C_NULL
     elseif Sys.islinux()
@@ -4004,6 +4183,7 @@ function tls_is_alpn_available()::Bool
 end
 
 function tls_is_cipher_pref_supported(pref::TlsCipherPref.T)::Bool
+    _ensure_io_library_initialized()
     @static if Sys.isapple()
         return pref == TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT
     elseif Sys.islinux()

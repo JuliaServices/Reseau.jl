@@ -15,6 +15,11 @@ function tls_alpn_handler_new(on_protocol_negotiated::ChannelOnProtocolNegotiate
     return AlpnHandler(on_protocol_negotiated, user_data)
 end
 
+function setchannelslot!(handler::AlpnHandler, slot::ChannelSlot)::Nothing
+    handler.slot = slot
+    return nothing
+end
+
 function _alpn_extract_protocol(message::IoMessage)::Union{ByteBuffer, Nothing}
     if message.user_data isa TlsNegotiatedProtocolMessage
         return (message.user_data::TlsNegotiatedProtocolMessage).protocol
@@ -33,6 +38,16 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
         raise_error(ERROR_IO_MISSING_ALPN_MESSAGE)
         return ErrorResult(ERROR_IO_MISSING_ALPN_MESSAGE)
     end
+    protocol_str = byte_buffer_as_string(protocol)
+    chan = slot.channel
+    chan_id = chan === nothing ? -1 : chan.channel_id
+    logf(
+        LogLevel.DEBUG,
+        LS_IO_ALPN,
+        "ALPN negotiated protocol: %s (channel %d)",
+        isempty(protocol_str) ? "<empty>" : protocol_str,
+        chan_id,
+    )
 
     channel = slot.channel
     if channel === nothing
@@ -51,12 +66,6 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
 
     channel_slot_replace!(slot, new_slot)
     channel_slot_set_handler!(new_slot, new_handler)
-    if hasproperty(new_handler, :slot)
-        try
-            setfield!(new_handler, :slot, new_slot)
-        catch
-        end
-    end
     _channel_calculate_message_overheads!(channel)
     channel_release_message_to_pool!(channel, message)
     return nothing

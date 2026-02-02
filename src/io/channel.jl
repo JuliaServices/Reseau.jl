@@ -216,6 +216,12 @@ function handler_trigger_read(handler::AbstractChannelHandler)::Nothing
     return nothing
 end
 
+function setchannelslot!(handler::AbstractChannelHandler, slot::ChannelSlot)::Nothing
+    _ = handler
+    _ = slot
+    return nothing
+end
+
 # Channel state tracking
 @enumx ChannelState::UInt8 begin
     NOT_INITIALIZED = 0
@@ -788,12 +794,7 @@ end
 # Set the handler for a slot
 function channel_slot_set_handler!(slot::ChannelSlot, handler::AbstractChannelHandler)
     slot.handler = handler
-    if hasproperty(handler, :slot)
-        try
-            setfield!(handler, :slot, slot)
-        catch
-        end
-    end
+    setchannelslot!(handler, slot)
     if slot.channel !== nothing
         _channel_calculate_message_overheads!(slot.channel)
     end
@@ -1285,6 +1286,11 @@ function PassthroughHandler(;
         Csize_t(initial_window_size),
         Csize_t(message_overhead),
     )
+end
+
+function setchannelslot!(handler::PassthroughHandler, slot::ChannelSlot)::Nothing
+    handler.slot = slot
+    return nothing
 end
 
 function handler_process_read_message(handler::PassthroughHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}

@@ -1682,13 +1682,12 @@ end
             @test true
         else
             interactive_threads = Threads.nthreads(:interactive)
-            cpu_threads = Sys.CPU_THREADS
-            expected = cpu_threads > 1 ? cpu_threads ÷ 2 : cpu_threads
+            expected = interactive_threads > 1 ? interactive_threads - 1 : 0
 
             opts = AwsIO.EventLoopGroupOptions(loop_count = 0)
             elg = AwsIO.event_loop_group_new(opts)
 
-            if interactive_threads <= 1 || expected >= interactive_threads
+            if interactive_threads <= 1
                 @test elg isa AwsIO.ErrorResult
             else
                 @test !(elg isa AwsIO.ErrorResult)

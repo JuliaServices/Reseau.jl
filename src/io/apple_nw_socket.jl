@@ -94,6 +94,7 @@
         connection::nw_connection_t
         listener::nw_listener_t
         parameters::nw_parameters_t
+        parameters_context::Union{NWParametersContext, Nothing}
         mode::NWSocketMode.T
         read_queue::Deque{ReadQueueNode}
         on_readable::Union{SocketOnReadableFn, Nothing}
@@ -114,10 +115,10 @@
         alpn_list::Union{String, Nothing}
         tls_ctx::Union{Any, Nothing}
         protocol_buf::ByteBuffer
-        synced_lock::Mutex
+        synced_lock::ReentrantLock
         read_scheduled::Bool
         state::UInt16
-        base_socket_lock::Mutex
+        base_socket_lock::ReentrantLock
         base_socket::Union{Socket, Nothing}
         pending_writes::Int
         registry_key::Ptr{Cvoid}
@@ -129,6 +130,7 @@
             C_NULL,
             C_NULL,
             C_NULL,
+            nothing,
             NWSocketMode.CONNECTION,
             Deque{ReadQueueNode}(16),
             nothing,
@@ -149,10 +151,10 @@
             nothing,
             nothing,
             null_buffer(),
-            Mutex(),
+            ReentrantLock(),
             false,
             UInt16(NWSocketState.INIT),
-            Mutex(),
+            ReentrantLock(),
             nothing,
             0,
             C_NULL,
@@ -160,7 +162,7 @@
     end
 
     const _nw_socket_registry = Dict{Ptr{Cvoid}, NWSocket}()
-    const _nw_socket_registry_lock = Mutex()
+    const _nw_socket_registry_lock = ReentrantLock()
 
     mutable struct NWSendContext{UD}
         socket::NWSocket
@@ -169,13 +171,13 @@
     end
 
     const _nw_send_registry = Dict{Ptr{Cvoid}, NWSendContext}()
-    const _nw_send_registry_lock = Mutex()
+    const _nw_send_registry_lock = ReentrantLock()
 
     function _nw_register_socket!(sock::NWSocket)
         key = pointer_from_objref(sock)
-        mutex_lock(_nw_socket_registry_lock)
+        lock(_nw_socket_registry_lock)
         _nw_socket_registry[key] = sock
-        mutex_unlock(_nw_socket_registry_lock)
+        unlock(_nw_socket_registry_lock)
         sock.registry_key = key
         return key
     end
@@ -183,9 +185,9 @@
     function _nw_unregister_socket!(sock::NWSocket)
         key = sock.registry_key
         if key != C_NULL
-            mutex_lock(_nw_socket_registry_lock)
+            lock(_nw_socket_registry_lock)
             delete!(_nw_socket_registry, key)
-            mutex_unlock(_nw_socket_registry_lock)
+            unlock(_nw_socket_registry_lock)
             sock.registry_key = C_NULL
         end
         return nothing
@@ -193,40 +195,44 @@
 
     function _nw_register_send!(ctx::NWSendContext)::Ptr{Cvoid}
         key = pointer_from_objref(ctx)
-        mutex_lock(_nw_send_registry_lock)
+        lock(_nw_send_registry_lock)
         _nw_send_registry[key] = ctx
-        mutex_unlock(_nw_send_registry_lock)
+        unlock(_nw_send_registry_lock)
         return key
     end
 
     function _nw_unregister_send!(ctx::NWSendContext)
         key = pointer_from_objref(ctx)
-        mutex_lock(_nw_send_registry_lock)
+        lock(_nw_send_registry_lock)
         delete!(_nw_send_registry, key)
-        mutex_unlock(_nw_send_registry_lock)
+        unlock(_nw_send_registry_lock)
         return nothing
     end
 
     function _nw_lookup_socket(ctx::Ptr{Cvoid})::Union{NWSocket, Nothing}
         ctx == C_NULL && return nothing
-        mutex_lock(_nw_socket_registry_lock)
+        lock(_nw_socket_registry_lock)
         sock = get(_nw_socket_registry, ctx, nothing)
-        mutex_unlock(_nw_socket_registry_lock)
+        unlock(_nw_socket_registry_lock)
         return sock
     end
 
     function _nw_lookup_send(ctx::Ptr{Cvoid})::Union{NWSendContext, Nothing}
         ctx == C_NULL && return nothing
-        mutex_lock(_nw_send_registry_lock)
+        lock(_nw_send_registry_lock)
         send_ctx = get(_nw_send_registry, ctx, nothing)
-        mutex_unlock(_nw_send_registry_lock)
+        unlock(_nw_send_registry_lock)
         return send_ctx
     end
 
-    @inline _nw_lock_synced(sock::NWSocket) = mutex_lock(sock.synced_lock)
-    @inline _nw_unlock_synced(sock::NWSocket) = mutex_unlock(sock.synced_lock)
-    @inline _nw_lock_base(sock::NWSocket) = mutex_lock(sock.base_socket_lock)
-    @inline _nw_unlock_base(sock::NWSocket) = mutex_unlock(sock.base_socket_lock)
+    @inline _nw_lock_synced(sock::NWSocket) = lock(sock.synced_lock)
+    @inline _nw_unlock_synced(sock::NWSocket) = unlock(sock.synced_lock)
+    @inline _nw_lock_base(sock::NWSocket) = lock(sock.base_socket_lock)
+    @inline _nw_unlock_base(sock::NWSocket) = unlock(sock.base_socket_lock)
+    @inline function _nw_socket_ptr(sock::NWSocket)::Ptr{Cvoid}
+        key = sock.registry_key
+        return key == C_NULL ? pointer_from_objref(sock) : key
+    end
 
     function _nw_validate_event_loop(event_loop::Union{EventLoop, Nothing})::Bool
         return event_loop !== nothing
@@ -237,7 +243,7 @@
         nw_socket = socket.impl::NWSocket
         nw_socket.event_loop !== nothing && return ErrorResult(raise_error(ERROR_INVALID_STATE))
         if event_loop_group_acquire_from_event_loop(event_loop) === nothing
-            logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket=%p: failed to acquire event loop group.", nw_socket)
+            logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket=%p: failed to acquire event loop group.", _nw_socket_ptr(nw_socket))
             return ErrorResult(raise_error(ERROR_INVALID_STATE))
         end
         nw_socket.event_loop = event_loop
@@ -298,7 +304,7 @@
             LogLevel.DEBUG,
             LS_IO_SOCKET,
             "nw_socket=%p: set state from %s to %s",
-            nw_socket,
+            _nw_socket_ptr(nw_socket),
             _nw_state_string(nw_socket.state),
             _nw_state_string(state_masked),
         )
@@ -325,7 +331,7 @@
             LogLevel.DEBUG,
             LS_IO_SOCKET,
             "nw_socket=%p: state now %s",
-            nw_socket,
+            _nw_socket_ptr(nw_socket),
             _nw_state_string(nw_socket.state),
         )
         return nothing
@@ -494,7 +500,7 @@
                 LogLevel.WARN,
                 LS_IO_TLS,
                 "nw_socket=%p: x.509 validation has been disabled. If this is not running in a test environment, this is likely a security vulnerability.",
-                nw_socket,
+                _nw_socket_ptr(nw_socket),
             )
             return true
         end
@@ -515,7 +521,7 @@
                     LogLevel.ERROR,
                     LS_IO_TLS,
                     "nw_socket=%p: SecTrustSetAnchorCertificates failed with OSStatus %d",
-                    nw_socket,
+                    _nw_socket_ptr(nw_socket),
                     Int(status),
                 )
                 raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
@@ -528,8 +534,8 @@
             name_ref = ccall(
                 (:CFStringCreateWithCString, _COREFOUNDATION_LIB),
                 CFStringRef,
-                (CFAllocatorRef, Cstring, UInt32),
-                C_NULL,
+                (Ptr{Cvoid}, Cstring, UInt32),
+                Ptr{Cvoid}(C_NULL),
                 nw_socket.host_name,
                 UInt32(0x08000100),
             )
@@ -549,7 +555,7 @@
                 policy,
             )
             if status != 0
-                logf(LogLevel.ERROR, LS_IO_TLS, "nw_socket=%p: SecTrustSetPolicies failed %d", nw_socket, Int(status))
+                logf(LogLevel.ERROR, LS_IO_TLS, "nw_socket=%p: SecTrustSetPolicies failed %d", _nw_socket_ptr(nw_socket), Int(status))
                 raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), policy)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), trust_ref)
@@ -588,7 +594,7 @@
                 LogLevel.DEBUG,
                 LS_IO_TLS,
                 "nw_socket=%p: SecTrustEvaluateWithError failed with crt error %d: %s (CF error %d: %s)",
-                nw_socket,
+                _nw_socket_ptr(nw_socket),
                 crt_error,
                 aws_error_name(crt_error),
                 err_code,
@@ -614,13 +620,25 @@
         transport_ctx = nw_socket.tls_ctx === nothing ? nothing : nw_socket.tls_ctx.impl
         transport_ctx === nothing && return nothing
 
-        ccall(
-            (:sec_protocol_options_set_local_identity, _NW_SECURITY_LIB),
-            Cvoid,
-            (sec_protocol_options_t, SecIdentityRef),
-            sec_options,
-            transport_ctx.secitem_identity,
-        )
+        local_identity = transport_ctx.secitem_identity
+        if local_identity == C_NULL && transport_ctx.certs != C_NULL
+            local_identity = ccall(
+                (:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB),
+                Ptr{Cvoid},
+                (Ptr{Cvoid}, Clong),
+                transport_ctx.certs,
+                0,
+            )
+        end
+        if local_identity != C_NULL
+            ccall(
+                (:sec_protocol_options_set_local_identity, _NW_SECURITY_LIB),
+                Cvoid,
+                (sec_protocol_options_t, SecIdentityRef),
+                sec_options,
+                local_identity,
+            )
+        end
 
         if transport_ctx.minimum_tls_version == TlsVersion.TLSv1_2
             ccall(
@@ -677,7 +695,7 @@
                 LogLevel.ERROR,
                 LS_IO_TLS,
                 "nw_socket=%p: TLS verify block requires event loop with dispatch queue",
-                nw_socket,
+                _nw_socket_ptr(nw_socket),
             )
         else
             dispatch_queue = nw_socket.event_loop.impl_data.dispatch_queue
@@ -763,6 +781,7 @@
         if nw_socket.parameters != C_NULL
             ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.parameters)
             nw_socket.parameters = C_NULL
+            nw_socket.parameters_context = nothing
         end
 
         setup_tls = false
@@ -783,6 +802,7 @@
 
                 if options.domain == SocketDomain.IPV4 || options.domain == SocketDomain.IPV6 || options.domain == SocketDomain.LOCAL
                     ctx = NWParametersContext(nw_socket, options)
+                    nw_socket.parameters_context = ctx
                     params = GC.@preserve ctx ccall(
                         (:awsio_nw_parameters_create_secure_tcp, _NW_SHIM_LIB),
                         nw_parameters_t,
@@ -800,6 +820,7 @@
             else
                 if options.domain == SocketDomain.IPV4 || options.domain == SocketDomain.IPV6 || options.domain == SocketDomain.LOCAL
                     ctx = NWParametersContext(nw_socket, options)
+                    nw_socket.parameters_context = ctx
                     params = GC.@preserve ctx ccall(
                         (:awsio_nw_parameters_create_secure_tcp, _NW_SHIM_LIB),
                         nw_parameters_t,
@@ -831,6 +852,7 @@
                 return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
             ctx = NWParametersContext(nw_socket, options)
+            nw_socket.parameters_context = ctx
             params = GC.@preserve ctx ccall(
                 (:awsio_nw_parameters_create_secure_udp, _NW_SHIM_LIB),
                 nw_parameters_t,
@@ -1045,6 +1067,17 @@
             complete = ccall((:nw_content_context_get_is_final, _NW_NETWORK_LIB), UInt8, (nw_content_context_t,), context) != 0
         end
 
+        if nw_socket.base_socket !== nothing
+            logf(
+                LogLevel.TRACE,
+                LS_IO_SOCKET,
+                "NW receive complete: is_complete=%d is_final=%d err=%d",
+                is_complete ? 1 : 0,
+                complete ? 1 : 0,
+                err_code,
+            )
+        end
+
         _nw_handle_incoming_data(nw_socket, err_code, data, complete)
         _nw_schedule_next_read!(nw_socket)
         return nothing
@@ -1119,28 +1152,26 @@
                 socket.local_endpoint.port = port
             end
 
-            if nw_socket.tls_ctx !== nothing
-                tls_def = ccall((:nw_protocol_copy_tls_definition, _NW_NETWORK_LIB), nw_protocol_definition_t, ())
-                metadata = ccall(
-                    (:nw_connection_copy_protocol_metadata, _NW_NETWORK_LIB),
-                    nw_protocol_metadata_t,
-                    (nw_connection_t, nw_protocol_definition_t),
-                    connection,
-                    tls_def,
+            tls_def = ccall((:nw_protocol_copy_tls_definition, _NW_NETWORK_LIB), nw_protocol_definition_t, ())
+            metadata = ccall(
+                (:nw_connection_copy_protocol_metadata, _NW_NETWORK_LIB),
+                nw_protocol_metadata_t,
+                (nw_connection_t, nw_protocol_definition_t),
+                connection,
+                tls_def,
+            )
+            tls_def != C_NULL && ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), tls_def)
+            if metadata != C_NULL
+                negotiated = ccall(
+                    (:sec_protocol_metadata_get_negotiated_protocol, _NW_SECURITY_LIB),
+                    Cstring,
+                    (sec_protocol_metadata_t,),
+                    metadata,
                 )
-                tls_def != C_NULL && ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), tls_def)
-                if metadata != C_NULL
-                    negotiated = ccall(
-                        (:sec_protocol_metadata_get_negotiated_protocol, _NW_SECURITY_LIB),
-                        Cstring,
-                        (sec_protocol_metadata_t,),
-                        metadata,
-                    )
-                    if negotiated != C_NULL
-                        nw_socket.protocol_buf = byte_buf_from_c_str(unsafe_string(negotiated))
-                    end
-                    ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), metadata)
+                if negotiated != C_NULL
+                    nw_socket.protocol_buf = byte_buf_from_c_str(unsafe_string(negotiated))
                 end
+                ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), metadata)
             end
         end
         _nw_unlock_base(nw_socket)
@@ -1159,6 +1190,13 @@
             socket = nw_socket.base_socket
             nw_socket.on_connection_result(socket, 0, nw_socket.connect_result_user_data)
             _nw_unlock_base(nw_socket)
+        else
+            logf(
+                LogLevel.TRACE,
+                LS_IO_SOCKET,
+                "nw_socket=%p: connection ready but no connect callback set",
+                _nw_socket_ptr(nw_socket),
+            )
         end
         return nothing
     end
@@ -1168,6 +1206,9 @@
         if nw_socket.event_loop === nothing
             return nothing
         end
+
+        raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
+        raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
         task_fn = (ctx, status) -> begin
             _ = ctx
@@ -1196,6 +1237,14 @@
             end
 
             if err_code != 0
+                logf(
+                    LogLevel.ERROR,
+                    LS_IO_SOCKET,
+                    "nw_connection error (domain=%d raw=%d mapped=%d)",
+                    Int(raw_domain),
+                    Int(raw_code),
+                    err_code,
+                )
                 nw_socket.last_error = err_code
                 _nw_lock_synced(nw_socket)
                 _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
@@ -1228,6 +1277,9 @@
         err_code = _nw_convert_nw_error(error)
         nw_socket.event_loop === nothing && return nothing
 
+        raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
+        raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
+
         task_fn = (ctx, status) -> begin
             _ = ctx
             if status == TaskStatus.CANCELED
@@ -1245,6 +1297,14 @@
                 end
                 _nw_unlock_base(nw_socket)
             elseif state == 3 # nw_listener_state_failed
+                logf(
+                    LogLevel.ERROR,
+                    LS_IO_SOCKET,
+                    "nw_listener failed (domain=%d raw=%d mapped=%d)",
+                    Int(raw_domain),
+                    Int(raw_code),
+                    err_code,
+                )
                 _nw_lock_synced(nw_socket)
                 _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
                 _nw_unlock_synced(nw_socket)
@@ -1320,6 +1380,9 @@
             new_socket.io_handle.handle = connection
             new_socket.io_handle.set_queue = _nw_client_set_queue_c[]
             new_nw_socket = new_socket.impl::NWSocket
+            new_nw_socket.tls_ctx = nw_socket.tls_ctx
+            new_nw_socket.host_name = nw_socket.host_name
+            new_nw_socket.alpn_list = nw_socket.alpn_list
             new_nw_socket.connection = connection
             new_nw_socket.connection_setup = true
             _nw_set_socket_state!(new_nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTED_READ)) | Int(_nw_state_mask(NWSocketState.CONNECTED_WRITE)))
@@ -1376,6 +1439,7 @@
         if nw_socket.parameters != C_NULL
             ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.parameters)
             nw_socket.parameters = C_NULL
+            nw_socket.parameters_context = nothing
         end
 
         nw_socket.protocol_buf = null_buffer()
@@ -1557,6 +1621,19 @@
         if options.on_connection_result !== nothing
             nw_socket.on_connection_result = options.on_connection_result
             nw_socket.connect_result_user_data = options.user_data
+            logf(
+                LogLevel.TRACE,
+                LS_IO_SOCKET,
+                "nw_socket=%p: connect callback set",
+                _nw_socket_ptr(nw_socket),
+            )
+        else
+            logf(
+                LogLevel.TRACE,
+                LS_IO_SOCKET,
+                "nw_socket=%p: connect callback missing",
+                _nw_socket_ptr(nw_socket),
+            )
         end
 
         if event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle) isa ErrorResult

@@ -79,7 +79,7 @@
         @atomic running_thread_id::UInt64
         read_task_handle::IoHandle
         write_task_handle::IoHandle
-        task_pre_queue_mutex::Mutex
+        task_pre_queue_mutex::ReentrantLock
         task_pre_queue::Deque{ScheduledTask}
         stop_task::Union{Nothing, ScheduledTask}
         @atomic stop_task_scheduled::Bool
@@ -98,7 +98,7 @@
             UInt64(0),
             IoHandle(),
             IoHandle(),
-            Mutex(),
+            ReentrantLock(),
             Deque{ScheduledTask}(16),
             nothing,
             false,
@@ -174,7 +174,7 @@
         end
         impl.epoll_fd = Int32(epoll_fd)
 
-        # Mutex is initialized automatically in the EpollLoopImpl constructor
+        # ReentrantLock is initialized automatically in the EpollLoopImpl constructor
 
         # Try to use eventfd first, fall back to pipe
         eventfd_result = try_create_eventfd()
@@ -315,7 +315,7 @@
         task.timestamp = run_at_nanos
         task.scheduled = true
 
-        mutex_lock(impl.task_pre_queue_mutex)
+        lock(impl.task_pre_queue_mutex)
 
         is_first_task = isempty(impl.task_pre_queue)
         push_back!(impl.task_pre_queue, task)
@@ -328,7 +328,7 @@
             @ccall write(impl.write_task_handle.fd::Cint, counter::Ptr{UInt64}, sizeof(UInt64)::Csize_t)::Cssize_t
         end
 
-        mutex_unlock(impl.task_pre_queue_mutex)
+        unlock(impl.task_pre_queue_mutex)
 
         return nothing
     end
@@ -384,11 +384,11 @@
         end
 
         removed = false
-        mutex_lock(impl.task_pre_queue_mutex)
+        lock(impl.task_pre_queue_mutex)
         if !isempty(impl.task_pre_queue)
             removed = remove!(impl.task_pre_queue, task; eq = (===))
         end
-        mutex_unlock(impl.task_pre_queue_mutex)
+        unlock(impl.task_pre_queue_mutex)
 
         if removed
             task_run!(task, TaskStatus.CANCELED)
@@ -537,7 +537,7 @@
 
         count_ignore = Ref(UInt64(0))
 
-        mutex_lock(impl.task_pre_queue_mutex)
+        lock(impl.task_pre_queue_mutex)
 
         # Drain the eventfd/pipe
         while true
@@ -553,7 +553,7 @@
         tasks_to_schedule = impl.task_pre_queue
         impl.task_pre_queue = Deque{ScheduledTask}(16)
 
-        mutex_unlock(impl.task_pre_queue_mutex)
+        unlock(impl.task_pre_queue_mutex)
 
         # Schedule the tasks
         while !isempty(tasks_to_schedule)
@@ -776,7 +776,7 @@
             end
         end
 
-        # Mutex doesn't need cleanup in Julia (SpinLock is GC'd)
+        # ReentrantLock doesn't need cleanup in Julia
 
         # Close file descriptors
         if impl.use_eventfd

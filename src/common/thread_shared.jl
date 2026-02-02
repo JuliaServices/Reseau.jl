@@ -1,28 +1,28 @@
-const _managed_thread_lock = Ref{Mutex}(Mutex())
+const _managed_thread_lock = Ref{ReentrantLock}(ReentrantLock())
 const _managed_thread_signal = Ref{ConditionVariable}(ConditionVariable())
 const _default_managed_join_timeout_ns = Ref{UInt64}(0)
 const _unjoined_thread_count = Ref{UInt32}(0)
 const _pending_join_managed_threads = Ref{Deque{ThreadHandle}}(Deque{ThreadHandle}())
 
 function thread_increment_unjoined_count()
-    mutex_lock(_managed_thread_lock)
+    lock(_managed_thread_lock[])
     _unjoined_thread_count[] += UInt32(1)
-    mutex_unlock(_managed_thread_lock)
+    unlock(_managed_thread_lock[])
     return nothing
 end
 
 function thread_decrement_unjoined_count()
-    mutex_lock(_managed_thread_lock)
+    lock(_managed_thread_lock[])
     _unjoined_thread_count[] -= UInt32(1)
     condition_variable_notify_one(_managed_thread_signal)
-    mutex_unlock(_managed_thread_lock)
+    unlock(_managed_thread_lock[])
     return nothing
 end
 
 function thread_get_managed_thread_count()
-    mutex_lock(_managed_thread_lock)
+    lock(_managed_thread_lock[])
     count = _unjoined_thread_count[]
-    mutex_unlock(_managed_thread_lock)
+    unlock(_managed_thread_lock[])
     return Csize_t(count)
 end
 
@@ -32,9 +32,9 @@ function _pending_join_ready(ctx)
 end
 
 function thread_set_managed_join_timeout_ns(timeout_in_ns::UInt64)
-    mutex_lock(_managed_thread_lock)
+    lock(_managed_thread_lock[])
     _default_managed_join_timeout_ns[] = timeout_in_ns
-    mutex_unlock(_managed_thread_lock)
+    unlock(_managed_thread_lock[])
     if thread_get_managed_thread_count() > 0
         thread_join_all_managed()
     end
@@ -43,13 +43,13 @@ end
 
 function _drain_pending_joins()
     done = Deque{ThreadHandle}()
-    mutex_lock(_managed_thread_lock)
+    lock(_managed_thread_lock[])
     while !isempty(_pending_join_managed_threads[])
         handle = pop_front!(_pending_join_managed_threads[])
         handle === nothing && break
         push_back!(done, handle)
     end
-    mutex_unlock(_managed_thread_lock)
+    unlock(_managed_thread_lock[])
 
     for handle in done
         handle.task === nothing && continue
@@ -93,10 +93,10 @@ function thread_join_all_managed()
 end
 
 function thread_pending_join_add(handle::ThreadHandle)
-    mutex_lock(_managed_thread_lock)
+    lock(_managed_thread_lock[])
     push_back!(_pending_join_managed_threads[], handle)
     condition_variable_notify_one(_managed_thread_signal)
-    mutex_unlock(_managed_thread_lock)
+    unlock(_managed_thread_lock[])
     return nothing
 end
 
