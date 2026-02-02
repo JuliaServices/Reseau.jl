@@ -51,6 +51,16 @@ using AwsIO
     end
 end
 
+@testset "Mutex" begin
+    m = Ref{AwsIO.Mutex}()
+    @test AwsIO.mutex_init(m) == AwsIO.OP_SUCCESS
+    @test AwsIO.mutex_lock(m) == AwsIO.OP_SUCCESS
+    @test AwsIO.mutex_try_lock(m) == AwsIO.OP_ERR
+    @test AwsIO.last_error() == AwsIO.ERROR_MUTEX_TIMEOUT
+    @test AwsIO.mutex_unlock(m) == AwsIO.OP_SUCCESS
+    AwsIO.mutex_clean_up(m)
+end
+
 @testset "Byte buffers" begin
     buf_ref = Ref(AwsIO.ByteBuffer(8))
     cur = AwsIO.ByteCursor("hi")

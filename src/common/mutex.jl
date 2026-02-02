@@ -1,12 +1,12 @@
-const Mutex = Base.ReentrantLock
+const Mutex = Base.Threads.SpinLock
 
 function mutex_init(mutex_ref::Base.RefValue{Mutex})
-    mutex_ref[] = ReentrantLock()
+    mutex_ref[] = Mutex()
     return OP_SUCCESS
 end
 
 function mutex_clean_up(mutex_ref::Base.RefValue{Mutex})
-    mutex_ref[] = ReentrantLock()
+    mutex_ref[] = Mutex()
     return nothing
 end
 
