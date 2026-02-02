@@ -16,6 +16,7 @@ mutable struct SocketChannelHandler{S, SlotRef <: Union{ChannelSlot, Nothing}} <
     stats::SocketHandlerStatistics
     shutdown_error_code::Int
     shutdown_in_progress::Bool
+    pending_read::Bool
 end
 
 function SocketChannelHandler(
@@ -32,6 +33,7 @@ function SocketChannelHandler(
         ChannelTask(),
         stats,
         0,
+        false,
         false,
     )
 end
@@ -156,29 +158,12 @@ function handler_increment_read_window(handler::SocketChannelHandler, slot::Chan
     if handler.shutdown_in_progress
         return nothing
     end
-
-    if handler.read_task_storage.wrapper_task.scheduled
-        return nothing
-    end
-
-    channel = slot.channel
-    if channel === nothing
-        return nothing
-    end
-
+    handler.pending_read && (handler.pending_read = false)
     logf(
         LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
         "Socket handler: increment read window message received, scheduling read"
     )
-
-    channel_task_init!(
-        handler.read_task_storage,
-        _socket_handler_read_task,
-        handler,
-        "socket_handler_read_on_window_increment",
-    )
-    channel_schedule_task_now!(channel, handler.read_task_storage)
-
+    _socket_handler_trigger_read(handler)
     return nothing
 end
 
@@ -302,7 +287,13 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)
         return nothing
     end
 
-    channel = handler.slot.channel
+    slot = handler.slot
+    if slot.adj_right === nothing || slot.adj_right.handler === nothing
+        handler.pending_read = true
+        return nothing
+    end
+
+    channel = slot.channel
     if channel === nothing
         return nothing
     end
@@ -318,7 +309,7 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)
         return nothing
     end
 
-    channel = handler.slot.channel
+    channel = slot.channel
     if channel === nothing
         return nothing
     end
@@ -351,16 +342,8 @@ function _on_socket_readable(socket, error_code::Int, user_data)
         "Socket handler: readable event with error $error_code"
     )
 
-    if handler.shutdown_in_progress
-        return nothing
-    end
-    slot = handler.slot
-    if slot === nothing || slot.adj_right === nothing || slot.adj_right.handler === nothing
-        return nothing
-    end
-
-    # Read data from socket regardless of error
-    _socket_handler_do_read(handler)
+    _ = error_code
+    _socket_handler_trigger_read(handler)
 
     return nothing
 end
@@ -463,6 +446,24 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
     return nothing
 end
 
+function _socket_handler_wrap_channel_setup!(handler::SocketChannelHandler, channel::Channel)
+    original_cb = channel.on_setup_completed
+    channel.on_setup_completed = (ch, err, ud) -> begin
+        if original_cb !== nothing
+            Base.invokelatest(original_cb, ch, err, ud)
+        end
+        if err == AWS_OP_SUCCESS &&
+                ch.channel_state == ChannelState.ACTIVE &&
+                handler.pending_read &&
+                !handler.shutdown_in_progress
+            handler.pending_read = false
+            _socket_handler_trigger_read(handler)
+        end
+        return nothing
+    end
+    return nothing
+end
+
 # Create and set up a socket channel handler in a channel
 function socket_channel_handler_new!(
         channel::Channel,
@@ -488,6 +489,8 @@ function socket_channel_handler_new!(
 
     # Link handler to the socket
     socket.handler = handler
+
+    _socket_handler_wrap_channel_setup!(handler, channel)
 
     sub_result = _socket_handler_subscribe_to_read(handler)
     if sub_result isa ErrorResult

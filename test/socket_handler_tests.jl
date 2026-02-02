@@ -412,3 +412,139 @@ end
     AwsIO.socket_close(server)
     AwsIO.event_loop_group_destroy!(elg)
 end
+
+@testset "socket handler pending read before downstream setup" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    server = AwsIO.socket_init(opts)
+    @test server isa AwsIO.Socket
+    if server isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+    @test AwsIO.socket_bind(server, bind_opts) === nothing
+    @test AwsIO.socket_listen(server, 8) === nothing
+    bound = AwsIO.socket_get_bound_address(server)
+    @test bound isa AwsIO.SocketEndpoint
+    port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
+    @test port > 0
+
+    accept_done = Ref(false)
+    accept_err = Ref(0)
+    accepted_socket = Ref{Any}(nothing)
+    channel_ref = Ref{Any}(nothing)
+    socket_handler_ref = Ref{Any}(nothing)
+
+    on_accept = (listener, err, new_sock, ud) -> begin
+        accept_err[] = err
+        if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+            accept_done[] = true
+            return nothing
+        end
+        AwsIO.socket_assign_to_event_loop(new_sock, event_loop)
+        channel = AwsIO.Channel(event_loop; enable_read_back_pressure = false)
+        handler = AwsIO.socket_channel_handler_new!(channel, new_sock; max_read_size = 16)
+        if handler isa AwsIO.ErrorResult
+            accept_done[] = true
+            return nothing
+        end
+        accepted_socket[] = new_sock
+        channel_ref[] = channel
+        socket_handler_ref[] = handler
+        accept_done[] = true
+        return nothing
+    end
+
+    accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
+    @test AwsIO.socket_start_accept(server, event_loop, accept_opts) === nothing
+
+    client = AwsIO.socket_init(opts)
+    @test client isa AwsIO.Socket
+    if client isa AwsIO.ErrorResult
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    connect_done = Ref(false)
+    connect_err = Ref(0)
+    connect_opts = AwsIO.SocketConnectOptions(
+        AwsIO.SocketEndpoint("127.0.0.1", port);
+        event_loop = event_loop,
+        on_connection_result = (sock, err, ud) -> begin
+            connect_err[] = err
+            connect_done[] = true
+            return nothing
+        end,
+    )
+    @test AwsIO.socket_connect(client, connect_opts) === nothing
+    @test wait_for(() -> connect_done[] && accept_done[])
+    @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+    @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+
+    socket_handler = socket_handler_ref[]
+    @test socket_handler isa AwsIO.SocketChannelHandler
+    if !(socket_handler isa AwsIO.SocketChannelHandler)
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    payload = "pending"
+    bytes = Vector{UInt8}(codeunits(payload))
+    offset = 0
+    write_err = Ref(AwsIO.AWS_OP_SUCCESS)
+    while offset < length(bytes)
+        sent = ccall(
+            :send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
+            client.io_handle.fd, pointer(bytes, offset + 1), length(bytes) - offset, AwsIO.NO_SIGNAL_SEND
+        )
+        if sent < 0
+            errno_val = AwsIO.get_errno()
+            if errno_val == AwsIO.EAGAIN || errno_val == AwsIO.EWOULDBLOCK
+                sleep(0.01)
+                continue
+            end
+            write_err[] = AwsIO.determine_socket_error(errno_val)
+            break
+        end
+        offset += sent
+    end
+    @test write_err[] == AwsIO.AWS_OP_SUCCESS
+    @test wait_for(() -> socket_handler.pending_read)
+
+    channel = channel_ref[]
+    @test channel isa AwsIO.Channel
+    if !(channel isa AwsIO.Channel)
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+
+    app_handler = TestReadHandler(64)
+    app_slot = AwsIO.channel_slot_new!(channel)
+    if AwsIO.channel_first_slot(channel) !== app_slot
+        AwsIO.channel_slot_insert_end!(channel, app_slot)
+    end
+    AwsIO.channel_slot_set_handler!(app_slot, app_handler)
+    app_handler.slot = app_slot
+    @test AwsIO.channel_setup_complete!(channel) === nothing
+    @test wait_for(() -> String(app_handler.received) == payload)
+
+    if client isa AwsIO.Socket
+        AwsIO.socket_close(client)
+    end
+    if accepted_socket[] !== nothing
+        AwsIO.socket_close(accepted_socket[])
+    end
+    if server isa AwsIO.Socket
+        AwsIO.socket_close(server)
+    end
+    AwsIO.event_loop_group_destroy!(elg)
+end
