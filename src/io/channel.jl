@@ -1150,18 +1150,25 @@ end
 
 # Shutdown the channel
 function channel_shutdown!(channel::Channel, error_code::Int = 0; shutdown_immediately::Bool = false)::Union{Nothing, ErrorResult}
-    if channel.channel_state == ChannelState.SHUT_DOWN ||
-            channel.channel_state == ChannelState.SHUTTING_DOWN_READ ||
-            channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE ||
-            channel.shutdown_pending
+    schedule_task = false
+    lock(channel.shutdown_lock) do
+        if channel.channel_state == ChannelState.SHUT_DOWN ||
+                channel.channel_state == ChannelState.SHUTTING_DOWN_READ ||
+                channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE ||
+                channel.shutdown_pending
+            return nothing
+        end
+
+        channel.shutdown_error_code = error_code
+        channel.shutdown_immediately = shutdown_immediately
+        channel.shutdown_pending = true
+
+        channel_task_init!(channel.shutdown_task, _channel_shutdown_task, channel, "channel_shutdown")
+        schedule_task = true
         return nothing
     end
 
-    channel.shutdown_error_code = error_code
-    channel.shutdown_immediately = shutdown_immediately
-    channel.shutdown_pending = true
-
-    channel_task_init!(channel.shutdown_task, _channel_shutdown_task, channel, "channel_shutdown")
+    schedule_task || return nothing
     channel_schedule_task_now!(channel, channel.shutdown_task)
     return nothing
 end

@@ -405,5 +405,58 @@ end
                 AwsIO.event_loop_destroy!(el)
             end
         end
+
+        @testset "concurrent shutdown schedules once" begin
+            setup = _setup_channel(with_shutdown_cb = true)
+            if setup isa AwsIO.ErrorResult
+                @test false
+            else
+                el = setup.el
+                channel = setup.channel
+                shutdown_ch = setup.shutdown_ch
+
+                ready = Threads.Atomic{Int}(0)
+                go = Threads.Atomic{Bool}(false)
+
+                t1 = errormonitor(Threads.@spawn begin
+                    Threads.atomic_add!(ready, 1)
+                    while !go[]
+                        yield()
+                    end
+                    AwsIO.channel_shutdown!(channel, AwsIO.AWS_OP_SUCCESS)
+                    return nothing
+                end)
+                t2 = errormonitor(Threads.@spawn begin
+                    Threads.atomic_add!(ready, 1)
+                    while !go[]
+                        yield()
+                    end
+                    AwsIO.channel_shutdown!(channel, AwsIO.ERROR_INVALID_STATE)
+                    return nothing
+                end)
+
+                deadline = Base.time_ns() + 1_000_000_000
+                while ready[] < 2 && Base.time_ns() < deadline
+                    yield()
+                end
+                @test ready[] == 2
+                go[] = true
+                wait(t1)
+                wait(t2)
+
+                @test _wait_ready_channel(shutdown_ch)
+                err = take!(shutdown_ch)
+                @test err == AwsIO.AWS_OP_SUCCESS || err == AwsIO.ERROR_INVALID_STATE
+
+                extra_deadline = Base.time_ns() + 500_000_000
+                while Base.time_ns() < extra_deadline && !isready(shutdown_ch)
+                    yield()
+                end
+                @test !isready(shutdown_ch)
+
+                AwsIO.channel_destroy!(channel)
+                AwsIO.event_loop_destroy!(el)
+            end
+        end
     end
 end
