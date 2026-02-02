@@ -260,6 +260,10 @@ mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, No
     # Channel task tracking
     pending_tasks::IdDict{ChannelTask, Bool}
     pending_tasks_lock::ReentrantLock
+    cross_thread_tasks::Deque{ChannelTask}
+    cross_thread_tasks_lock::ReentrantLock
+    cross_thread_tasks_scheduled::Bool
+    cross_thread_task::ScheduledTask
     # Shutdown tracking
     shutdown_pending::Bool
     shutdown_immediately::Bool
@@ -284,7 +288,7 @@ function Channel(
     channel_id = _next_channel_id()
     window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
 
-    return Channel{EL, Union{ChannelSlot, Nothing}}(
+    channel = Channel{EL, Union{ChannelSlot, Nothing}}(
         event_loop,
         nothing,  # first
         nothing,  # last
@@ -308,11 +312,21 @@ function Channel(
         ChannelTask(),
         IdDict{ChannelTask, Bool}(),
         ReentrantLock(),
+        Deque{ChannelTask}(0),
+        ReentrantLock(),
+        false,
+        ScheduledTask((_channel, _status) -> nothing, nothing; type_tag = "channel_cross_thread_placeholder"),
         false,    # shutdown_pending
         false,    # shutdown_immediately
         ChannelTask(),
         ReentrantLock(),
     )
+    channel.cross_thread_task = ScheduledTask(
+        _channel_schedule_cross_thread_tasks,
+        channel;
+        type_tag = "channel_cross_thread_tasks",
+    )
+    return channel
 end
 
 function _channel_add_pending_task!(channel::Channel, task::ChannelTask)
@@ -340,6 +354,54 @@ function _channel_task_wrapper(ctx::ChannelTaskContext, status::TaskStatus.T)
         return nothing
     end
     task.task_fn(task, task.arg, status)
+    return nothing
+end
+
+function _channel_schedule_cross_thread_tasks(channel::Channel, status::TaskStatus.T)
+    tasks = ChannelTask[]
+    lock(channel.cross_thread_tasks_lock) do
+        while !isempty(channel.cross_thread_tasks)
+            task = pop_front!(channel.cross_thread_tasks)
+            task === nothing && break
+            push!(tasks, task)
+        end
+        channel.cross_thread_tasks_scheduled = false
+    end
+
+    final_status = (status == TaskStatus.CANCELED || channel.channel_state == ChannelState.SHUT_DOWN) ?
+        TaskStatus.CANCELED : TaskStatus.RUN_READY
+
+    for task in tasks
+        if task.wrapper_task.timestamp == 0 || final_status == TaskStatus.CANCELED
+            _channel_task_wrapper(task.ctx, final_status)
+        else
+            event_loop_schedule_task_future!(channel.event_loop, task.wrapper_task, task.wrapper_task.timestamp)
+        end
+    end
+    return nothing
+end
+
+function _channel_register_task_cross_thread!(channel::Channel, task::ChannelTask)
+    schedule_now = false
+    lock(channel.cross_thread_tasks_lock) do
+        if channel.channel_state == ChannelState.SHUT_DOWN
+            schedule_now = true
+        else
+            push_back!(channel.cross_thread_tasks, task)
+            if !channel.cross_thread_tasks_scheduled
+                channel.cross_thread_tasks_scheduled = true
+                schedule_now = true
+            end
+        end
+    end
+
+    if schedule_now
+        if channel.channel_state == ChannelState.SHUT_DOWN
+            _channel_task_wrapper(task.ctx, TaskStatus.CANCELED)
+        else
+            event_loop_schedule_task_now!(channel.event_loop, channel.cross_thread_task)
+        end
+    end
     return nothing
 end
 
@@ -491,16 +553,22 @@ function _channel_register_task!(
     end
 
     task.ctx.channel = channel
+    task.wrapper_task.timestamp = run_at_nanos
+    task.wrapper_task.scheduled = false
     _channel_add_pending_task!(channel, task)
 
-    if run_at_nanos == 0
-        if serialized
-            event_loop_schedule_task_now_serialized!(channel.event_loop, task.wrapper_task)
+    if channel_thread_is_callers_thread(channel)
+        if run_at_nanos == 0
+            if serialized
+                event_loop_schedule_task_now_serialized!(channel.event_loop, task.wrapper_task)
+            else
+                event_loop_schedule_task_now!(channel.event_loop, task.wrapper_task)
+            end
         else
-            event_loop_schedule_task_now!(channel.event_loop, task.wrapper_task)
+            event_loop_schedule_task_future!(channel.event_loop, task.wrapper_task, run_at_nanos)
         end
     else
-        event_loop_schedule_task_future!(channel.event_loop, task.wrapper_task, run_at_nanos)
+        _channel_register_task_cross_thread!(channel, task)
     end
 
     return nothing

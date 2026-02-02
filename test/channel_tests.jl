@@ -146,6 +146,59 @@ end
             end
         end
 
+        @testset "channel tasks run cross-thread" begin
+            setup = _setup_channel()
+            if setup isa AwsIO.ErrorResult
+                @test false
+            else
+                el = setup.el
+                channel = setup.channel
+
+                task_count = 4
+                status_ch = Channel{Tuple{Int, AwsIO.TaskStatus.T}}(task_count)
+
+                task_fn = (task, arg, status) -> begin
+                    put!(status_ch, (Int(arg), status))
+                    return nothing
+                end
+
+                tasks = [AwsIO.ChannelTask() for _ in 1:task_count]
+                for i in 1:task_count
+                    AwsIO.channel_task_init!(tasks[i], task_fn, i, "test_channel_task_cross_thread")
+                end
+
+                t1 = errormonitor(Threads.@spawn begin
+                    AwsIO.channel_schedule_task_now!(channel, tasks[1])
+                    AwsIO.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
+                end)
+                t2 = errormonitor(Threads.@spawn begin
+                    AwsIO.channel_schedule_task_now!(channel, tasks[3])
+                    AwsIO.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
+                end)
+                wait(t1)
+                wait(t2)
+
+                deadline = Base.time_ns() + 2_000_000_000
+                results = Dict{Int, AwsIO.TaskStatus.T}()
+                while length(results) < task_count && Base.time_ns() < deadline
+                    if isready(status_ch)
+                        id, status = take!(status_ch)
+                        results[id] = status
+                    else
+                        yield()
+                    end
+                end
+
+                @test length(results) == task_count
+                for status in values(results)
+                    @test status == AwsIO.TaskStatus.RUN_READY
+                end
+
+                AwsIO.channel_destroy!(channel)
+                AwsIO.event_loop_destroy!(el)
+            end
+        end
+
         @testset "channel tasks serialized run" begin
             setup = _setup_channel()
             if setup isa AwsIO.ErrorResult
