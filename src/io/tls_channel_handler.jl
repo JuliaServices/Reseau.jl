@@ -3323,6 +3323,17 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     return nothing
 end
 
+function _secure_transport_handle_would_block(handler::SecureTransportTlsHandler, is_server::Bool)
+    _ = handler
+    logf(
+        LogLevel.DEBUG,
+        LS_IO_TLS,
+        "SecureTransport SSLHandshake would block (server=%s)",
+        is_server ? "true" : "false",
+    )
+    return nothing
+end
+
 function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
     @static if !Sys.isapple()
         raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -3437,36 +3448,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
 
         return _secure_transport_drive_negotiation(handler)
     elseif status == _errSSLWouldBlock
-        state_ref = Ref{Cint}(0)
-        state_status = ccall(
-            (:SSLGetSessionState, _SECURITY_LIB),
-            OSStatus,
-            (SSLContextRef, Ref{Cint}),
-            handler.ctx,
-            state_ref,
-        )
-        if state_status == _errSecSuccess && state_ref[] == _kSSLConnected
-            logf(
-                LogLevel.DEBUG,
-                LS_IO_TLS,
-                "SecureTransport SSLHandshake reported would-block but session is connected (server=%s)",
-                is_server ? "true" : "false",
-            )
-            handler.negotiation_finished = true
-            handler.protocol = _secure_transport_get_protocol(handler)
-            if handler.protocol.len > 0
-                logf(LogLevel.DEBUG, LS_IO_TLS, "negotiated protocol: $(String(byte_cursor_from_buf(handler.protocol)))")
-            end
-            _secure_transport_send_alpn_message(handler)
-            _secure_transport_on_negotiation_result(handler, AWS_OP_SUCCESS)
-            return nothing
-        end
-        logf(
-            LogLevel.DEBUG,
-            LS_IO_TLS,
-            "SecureTransport SSLHandshake would block (server=%s)",
-            is_server ? "true" : "false",
-        )
+        _secure_transport_handle_would_block(handler, is_server)
         return nothing
     else
         logf(

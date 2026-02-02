@@ -224,6 +224,42 @@ end
     @test protocol.len == 0
 end
 
+@testset "secure transport would-block does not finish negotiation" begin
+    if !Sys.isapple()
+        @test true
+        return
+    end
+    shared = AwsIO.TlsHandlerShared{Any}(nothing, UInt32(0), AwsIO.TlsHandlerStatistics(), AwsIO.ChannelTask())
+    handler = AwsIO.SecureTransportTlsHandler(
+        nothing,
+        shared,
+        C_NULL,
+        nothing,
+        AwsIO.Deque{AwsIO.IoMessage}(16),
+        AwsIO.null_buffer(),
+        AwsIO.null_buffer(),
+        nothing,
+        nothing,
+        nothing,
+        C_NULL,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        true,
+        false,
+        false,
+        AwsIO.ChannelTask(),
+        false,
+        AwsIO.TlsHandlerReadState.OPEN,
+        0,
+        AwsIO.ChannelTask(),
+    )
+    shared.handler = handler
+    AwsIO._secure_transport_handle_would_block(handler, false)
+    @test handler.negotiation_finished == false
+end
+
 @testset "alpn error creating handler" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     event_loop = AwsIO.event_loop_group_get_next_loop(elg)
