@@ -92,6 +92,53 @@ end
             end
         end
 
+        @testset "destroy before setup completes waits for setup" begin
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            el_val = el isa AwsIO.EventLoop ? el : nothing
+            @test el_val !== nothing
+            if el_val === nothing
+                return
+            end
+
+            setup_ch = Channel{Int}(1)
+            on_setup = (ch, err, _ud) -> begin
+                put!(setup_ch, err)
+                return nothing
+            end
+
+            channel_opts = AwsIO.ChannelOptions(
+                event_loop = el_val,
+                on_setup_completed = on_setup,
+                on_shutdown_completed = nothing,
+                setup_user_data = nothing,
+                shutdown_user_data = nothing,
+            )
+
+            channel = AwsIO.channel_new(channel_opts)
+            if channel isa AwsIO.ErrorResult
+                @test false
+                AwsIO.event_loop_destroy!(el_val)
+                return
+            end
+
+            AwsIO.channel_destroy!(channel)
+            @test AwsIO.event_loop_run!(el_val) === nothing
+
+            @test _wait_ready_channel(setup_ch)
+            if isready(setup_ch)
+                @test take!(setup_ch) == AwsIO.AWS_OP_SUCCESS
+            end
+
+            deadline = Base.time_ns() + 1_000_000_000
+            while channel.channel_state != AwsIO.ChannelState.SHUT_DOWN && Base.time_ns() < deadline
+                yield()
+            end
+            @test channel.channel_state == AwsIO.ChannelState.SHUT_DOWN
+
+            AwsIO.event_loop_destroy!(el_val)
+        end
+
         @testset "channel tasks run" begin
             setup = _setup_channel()
             if setup isa AwsIO.ErrorResult

@@ -240,6 +240,8 @@ mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, No
     channel_state::ChannelState.T
     read_back_pressure_enabled::Bool
     channel_id::UInt64
+    setup_pending::Bool
+    destroy_pending::Bool
     message_pool::Union{MessagePool, Nothing}  # nullable
     on_setup_completed::Union{ChannelOnSetupCompletedFn, Nothing}  # nullable
     on_shutdown_completed::Union{ChannelOnShutdownCompletedFn, Nothing}  # nullable
@@ -295,6 +297,8 @@ function Channel(
         ChannelState.NOT_INITIALIZED,
         enable_read_back_pressure,
         channel_id,
+        false,  # setup_pending
+        false,  # destroy_pending
         message_pool,
         nothing,  # on_setup_completed
         nothing,  # on_shutdown_completed
@@ -483,9 +487,14 @@ end
 
 function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
     channel = args.channel
+    channel.setup_pending = false
     if status != TaskStatus.RUN_READY
         if channel.on_setup_completed !== nothing
             Base.invokelatest(channel.on_setup_completed, channel, ERROR_SYS_CALL_FAILURE, channel.setup_user_data)
+        end
+        if channel.destroy_pending
+            channel.destroy_pending = false
+            channel_destroy!(channel)
         end
         return nothing
     end
@@ -495,6 +504,10 @@ function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
         if channel.on_setup_completed !== nothing
             Base.invokelatest(channel.on_setup_completed, channel, pool.code, channel.setup_user_data)
         end
+        if channel.destroy_pending
+            channel.destroy_pending = false
+            channel_destroy!(channel)
+        end
         return nothing
     end
 
@@ -503,6 +516,10 @@ function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
 
     if channel.on_setup_completed !== nothing
         Base.invokelatest(channel.on_setup_completed, channel, AWS_OP_SUCCESS, channel.setup_user_data)
+    end
+    if channel.destroy_pending
+        channel.destroy_pending = false
+        channel_destroy!(channel)
     end
     return nothing
 end
@@ -522,6 +539,8 @@ function channel_new(options::ChannelOptions)::Union{Channel, ErrorResult}
     channel.setup_user_data = options.setup_user_data
     channel.shutdown_user_data = options.shutdown_user_data
     channel.channel_state = ChannelState.SETTING_UP
+    channel.setup_pending = true
+    channel.destroy_pending = false
 
     event_loop_group_acquire_from_event_loop(options.event_loop)
 
@@ -1336,9 +1355,15 @@ function _channel_destroy_task(channel::Channel, status::TaskStatus.T)
 end
 
 function channel_destroy!(channel::Channel)
+    if channel.setup_pending
+        channel.destroy_pending = true
+        return nothing
+    end
+
     if channel_thread_is_callers_thread(channel)
         return _channel_destroy_impl!(channel)
     end
+
     task = ScheduledTask(_channel_destroy_task, channel; type_tag = "channel_destroy")
     event_loop_schedule_task_now!(channel.event_loop, task)
     return nothing
