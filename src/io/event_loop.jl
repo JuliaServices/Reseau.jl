@@ -521,7 +521,7 @@ function event_loop_group_release!(elg::EventLoopGroup)
     end
 
     if _event_loop_group_called_from_loop_thread(elg)
-        Threads.@spawn event_loop_group_destroy!(elg)
+        errormonitor(Threads.@spawn event_loop_group_destroy!(elg))
     else
         event_loop_group_destroy!(elg)
     end
