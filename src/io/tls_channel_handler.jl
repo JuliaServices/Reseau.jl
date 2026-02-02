@@ -1969,6 +1969,7 @@ function _s2n_send_alpn_message(handler::S2nTlsHandler)
     slot === nothing && return nothing
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
+    handler.protocol.len == 0 && return nothing
     channel = slot.channel
     channel === nothing && return nothing
 
@@ -3346,6 +3347,7 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     slot === nothing && return nothing
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
+    handler.protocol.len == 0 && return nothing
     channel = slot.channel
     channel === nothing && return nothing
 

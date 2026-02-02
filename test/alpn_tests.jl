@@ -1,5 +1,6 @@
 using Test
 using AwsIO
+include("read_write_test_handler.jl")
 
 function wait_for_flag_alpn(flag::Base.RefValue{Bool}; timeout_s::Float64 = 2.0)
     start = Base.time_ns()
@@ -122,6 +123,68 @@ end
     res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_MISSING_ALPN_MESSAGE
 
     AwsIO.channel_shutdown!(channel, AwsIO.AWS_OP_SUCCESS)
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
+@testset "alpn empty protocol does not send message" begin
+    if !Sys.isapple()
+        @test true
+        return
+    end
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        AwsIO.event_loop_group_destroy!(elg)
+        return
+    end
+    channel = AwsIO.Channel(event_loop, nothing)
+    left_slot = AwsIO.channel_slot_new!(channel)
+    right_slot = AwsIO.channel_slot_new!(channel)
+    AwsIO.channel_slot_insert_right!(left_slot, right_slot)
+    message_count = Ref(0)
+    handler = ReadWriteTestHandler(
+        (_, _, _, _) -> begin
+            message_count[] += 1
+            return nothing
+        end,
+        (_, _, _, _) -> nothing;
+        event_loop_driven = false,
+        window = sizeof(AwsIO.TlsNegotiatedProtocolMessage),
+    )
+    AwsIO.channel_slot_set_handler!(right_slot, handler)
+    shared = AwsIO.TlsHandlerShared{Any}(nothing, UInt32(0), AwsIO.TlsHandlerStatistics(), AwsIO.ChannelTask())
+    tls_handler = AwsIO.SecureTransportTlsHandler(
+        left_slot,
+        shared,
+        C_NULL,
+        nothing,
+        AwsIO.Deque{AwsIO.IoMessage}(16),
+        AwsIO.null_buffer(),
+        AwsIO.null_buffer(),
+        nothing,
+        nothing,
+        nothing,
+        C_NULL,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        true,
+        false,
+        false,
+        AwsIO.ChannelTask(),
+        false,
+        AwsIO.TlsHandlerReadState.OPEN,
+        0,
+        AwsIO.ChannelTask(),
+    )
+    shared.handler = tls_handler
+    AwsIO._secure_transport_send_alpn_message(tls_handler)
+    @test message_count[] == 0
+    tls_handler.protocol = AwsIO.byte_buf_from_c_str("h2")
+    AwsIO._secure_transport_send_alpn_message(tls_handler)
+    @test message_count[] == 1
     AwsIO.event_loop_group_destroy!(elg)
 end
 
