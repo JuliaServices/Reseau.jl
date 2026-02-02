@@ -557,13 +557,14 @@ function _channel_register_task!(
     task.wrapper_task.scheduled = false
     _channel_add_pending_task!(channel, task)
 
+    if serialized
+        _channel_register_task_cross_thread!(channel, task)
+        return nothing
+    end
+
     if channel_thread_is_callers_thread(channel)
         if run_at_nanos == 0
-            if serialized
-                event_loop_schedule_task_now_serialized!(channel.event_loop, task.wrapper_task)
-            else
-                event_loop_schedule_task_now!(channel.event_loop, task.wrapper_task)
-            end
+            event_loop_schedule_task_now!(channel.event_loop, task.wrapper_task)
         else
             event_loop_schedule_task_future!(channel.event_loop, task.wrapper_task, run_at_nanos)
         end

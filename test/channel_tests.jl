@@ -253,6 +253,80 @@ end
             end
         end
 
+        @testset "channel serialized tasks queued via cross-thread list" begin
+            setup = _setup_channel()
+            if setup isa AwsIO.ErrorResult
+                @test false
+            else
+                el = setup.el
+                channel = setup.channel
+
+                status_ch = Channel{AwsIO.TaskStatus.T}(1)
+                task = AwsIO.ChannelTask()
+                AwsIO.channel_task_init!(
+                    task,
+                    (task, arg, status) -> begin
+                        put!(status_ch, status)
+                        return nothing
+                    end,
+                    nothing,
+                    "test_channel_task_serialized_queue",
+                )
+
+                ready_ch = Channel{Bool}(1)
+                block_ch = Channel{Bool}(1)
+                released = Ref(false)
+
+                blocker = AwsIO.ScheduledTask(
+                    (ctx, status) -> begin
+                        status == AwsIO.TaskStatus.RUN_READY || return nothing
+                        AwsIO.channel_schedule_task_now_serialized!(ctx.channel, ctx.task)
+                        put!(ctx.ready_ch, true)
+                        take!(ctx.block_ch)
+                        return nothing
+                    end,
+                    (channel = channel, task = task, ready_ch = ready_ch, block_ch = block_ch);
+                    type_tag = "block_serialized_queue",
+                )
+
+                try
+                    AwsIO.event_loop_schedule_task_now!(el, blocker)
+                    @test take!(ready_ch)
+
+                    queued = false
+                    lock(channel.cross_thread_tasks_lock) do
+                        queued = !isempty(channel.cross_thread_tasks)
+                    end
+                    @test queued
+
+                    put!(block_ch, true)
+                    released[] = true
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    got_status = false
+                    while !got_status && Base.time_ns() < deadline
+                        if isready(status_ch)
+                            status = take!(status_ch)
+                            @test status == AwsIO.TaskStatus.RUN_READY
+                            got_status = true
+                        else
+                            yield()
+                        end
+                    end
+                    @test got_status
+                finally
+                    if !released[]
+                        try
+                            put!(block_ch, true)
+                        catch
+                        end
+                    end
+                    AwsIO.channel_destroy!(channel)
+                    AwsIO.event_loop_destroy!(el)
+                end
+            end
+        end
+
         @testset "post shutdown tasks canceled" begin
             setup = _setup_channel(with_shutdown_cb = true)
             if setup isa AwsIO.ErrorResult
