@@ -1441,6 +1441,49 @@ end
         end
     end
 
+    @testset "Event loop destroy on loop thread throws" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                opts = AwsIO.EventLoopOptions()
+                el = AwsIO.event_loop_new(opts)
+                @test !(el isa AwsIO.ErrorResult)
+                if !(el isa AwsIO.ErrorResult)
+                    run_res = AwsIO.event_loop_run!(el)
+                    @test run_res === nothing
+                    destroy_called = Ref(false)
+                    destroy_threw = Ref(false)
+                    task = AwsIO.ScheduledTask(
+                        (ctx, status) -> begin
+                            status == AwsIO.TaskStatus.RUN_READY || return nothing
+                            ctx.destroy_called[] = true
+                            try
+                                AwsIO.event_loop_destroy!(ctx.el)
+                            catch err
+                                ctx.destroy_threw[] = err isa ErrorException
+                            end
+                            return nothing
+                        end,
+                        (el = el, destroy_called = destroy_called, destroy_threw = destroy_threw);
+                        type_tag = "destroy_on_loop",
+                    )
+                    AwsIO.event_loop_schedule_task_now!(el, task)
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !destroy_called[] && Base.time_ns() < deadline
+                        sleep(0.01)
+                    end
+                    @test destroy_called[]
+                    @test destroy_threw[]
+                    AwsIO.event_loop_destroy!(el)
+                end
+            end
+        end
+    end
+
     @testset "Event loop group" begin
         if Sys.iswindows()
             @test true

@@ -180,6 +180,7 @@ end
 
 # Destroy an event loop (blocking)
 function event_loop_destroy!(event_loop::EventLoop)
+    fatal_assert_bool(!event_loop_thread_is_callers_thread(event_loop), "destroy on loop thread", "<unknown>", 0)
     event_loop_start_destroy!(event_loop)
     event_loop_complete_destroy!(event_loop)
     return nothing
