@@ -157,6 +157,16 @@ mutable struct SocketConnectionRequest{
     user_data::U
     enable_read_back_pressure::Bool
     requested_event_loop::EL
+    event_loop::Union{AbstractEventLoop, Nothing}
+    addresses::Vector{HostAddress}
+    addresses_count::Int
+    failed_count::Int
+    connection_chosen::Bool
+end
+
+mutable struct SocketConnectionAttempt{R <: SocketConnectionRequest}
+    request::R
+    host_address::HostAddress
 end
 
 # Initiate a connection to a host
@@ -209,6 +219,11 @@ function client_bootstrap_connect!(
         user_data,
         enable_read_back_pressure,
         requested_event_loop,
+        nothing,
+        HostAddress[],
+        0,
+        0,
+        false,
     )
 
     # Resolve host
@@ -242,10 +257,16 @@ function _event_loop_group_contains_loop(elg, event_loop::AbstractEventLoop)::Bo
     return false
 end
 
+function _get_connection_event_loop(request::SocketConnectionRequest)::Union{AbstractEventLoop, Nothing}
+    request.event_loop !== nothing && return request.event_loop
+    request.event_loop = request.requested_event_loop === nothing ?
+        event_loop_group_get_next_loop(request.bootstrap.event_loop_group) :
+        request.requested_event_loop
+    return request.event_loop
+end
+
 # Callback when host resolution completes
 function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, addresses::Vector{HostAddress})
-    bootstrap = request.bootstrap
-
     if error_code != AWS_OP_SUCCESS
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
@@ -264,59 +285,104 @@ function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, ad
         return nothing
     end
 
-    # Prefer address matching socket domain
-    preferred_type = request.socket_options.domain == SocketDomain.IPV6 ?
-        HostAddressType.AAAA :
-        HostAddressType.A
-    address = nothing
-    for addr in addresses
-        if addr.address_type == preferred_type
-            address = addr
-            break
-        end
+    event_loop = _get_connection_event_loop(request)
+    if event_loop === nothing
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: no event loop available"
+        )
+        _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
+        return nothing
     end
-    address === nothing && (address = addresses[1])
 
     logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: resolved $(request.host) to $(address.address)"
+        LogLevel.TRACE, LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: DNS resolution completed. Kicking off connections on $(length(addresses)) addresses. First one back wins."
     )
 
-    # Create socket and connect
-    _initiate_socket_connect(request, address.address)
+    task = ScheduledTask(
+        (ctx, status) -> begin
+            status == TaskStatus.RUN_READY || return nothing
+            _start_connection_attempts(ctx.request, ctx.addresses, ctx.event_loop)
+            return nothing
+        end,
+        (request = request, addresses = addresses, event_loop = event_loop);
+        type_tag = "client_bootstrap_attempts",
+    )
+    event_loop_schedule_task_now!(event_loop, task)
 
     return nothing
 end
 
+# Start connection attempts for all resolved addresses
+function _start_connection_attempts(
+        request::SocketConnectionRequest,
+        addresses::Vector{HostAddress},
+        event_loop::AbstractEventLoop,
+    )
+    request.event_loop = event_loop
+    request.addresses = addresses
+    request.addresses_count = length(addresses)
+    request.failed_count = 0
+    request.connection_chosen = false
+    for address in addresses
+        _initiate_socket_connect(request, address)
+    end
+    return nothing
+end
+
+function _record_connection_failure(request::SocketConnectionRequest, address::HostAddress)
+    resolver = request.bootstrap.host_resolver
+    resolver isa DefaultHostResolver || return nothing
+    host_resolver_record_connection_failure!(resolver, address)
+    return nothing
+end
+
+function _note_connection_attempt_failure(request::SocketConnectionRequest, error_code::Int)
+    request.connection_chosen && return nothing
+    request.failed_count += 1
+    if request.failed_count == request.addresses_count
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: last attempt failed with error $error_code"
+        )
+        request.connection_chosen = true
+        _connection_request_complete(request, error_code, nothing)
+        return nothing
+    end
+    logf(
+        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: socket connect attempt $(request.failed_count)/$(request.addresses_count) failed with error $error_code. More attempts ongoing..."
+    )
+    return nothing
+end
+
 # Initiate socket connection
-function _initiate_socket_connect(request::SocketConnectionRequest, address::String)
-    bootstrap = request.bootstrap
+function _initiate_socket_connect(request::SocketConnectionRequest, address::HostAddress)
+    event_loop = request.event_loop
 
     # Create socket
-    sock_result = socket_init(request.socket_options)
+    options = copy(request.socket_options)
+    options.domain = address.address_type == HostAddressType.AAAA ? SocketDomain.IPV6 : SocketDomain.IPV4
+    sock_result = socket_init(options)
 
     if sock_result isa ErrorResult
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: failed to create socket"
         )
-        _connection_request_complete(request, sock_result.code, nothing)
+        _note_connection_attempt_failure(request, sock_result.code)
         return nothing
     end
 
     socket = sock_result
-    request.socket = socket
 
     # Create remote endpoint
     remote_endpoint = SocketEndpoint()
-    set_address!(remote_endpoint, address)
+    set_address!(remote_endpoint, address.address)
     remote_endpoint.port = request.port
 
     # Get event loop
-    event_loop = request.requested_event_loop === nothing ?
-        event_loop_group_get_next_loop(bootstrap.event_loop_group) :
-        request.requested_event_loop
-
     if event_loop === nothing
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
@@ -327,11 +393,12 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
         return nothing
     end
 
+    attempt = SocketConnectionAttempt(request, address)
     connect_opts = SocketConnectOptions(
         remote_endpoint;
         event_loop = event_loop,
-        on_connection_result = (sock, err, ud) -> _on_socket_connect_complete(ud, err),
-        user_data = request,
+        on_connection_result = (sock, err, ud) -> _on_socket_connect_complete(sock, err, ud),
+        user_data = attempt,
         tls_connection_options = request.tls_connection_options,
     )
 
@@ -343,8 +410,9 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: failed to initiate connection"
         )
+        _record_connection_failure(request, address)
         socket_close(socket)
-        _connection_request_complete(request, connect_result.code, nothing)
+        _note_connection_attempt_failure(request, connect_result.code)
         return nothing
     end
 
@@ -352,17 +420,33 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Str
 end
 
 # Callback when socket connect completes
-function _on_socket_connect_complete(request::SocketConnectionRequest, error_code::Int)
-    bootstrap = request.bootstrap
-    socket = request.socket
+function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::SocketConnectionAttempt)
+    request = attempt.request
 
     if error_code != AWS_OP_SUCCESS
         logf(
             LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: connection failed with error $error_code"
         )
+        _record_connection_failure(request, attempt.host_address)
+        if _socket_uses_network_framework_tls(socket, request.tls_connection_options) &&
+                io_error_code_is_tls(error_code)
+            if request.connection_chosen
+                socket_close(socket)
+                return nothing
+            end
+            request.connection_chosen = true
+            socket_close(socket)
+            _connection_request_complete(request, error_code, nothing)
+            return nothing
+        end
         socket_close(socket)
-        _connection_request_complete(request, error_code, nothing)
+        _note_connection_attempt_failure(request, error_code)
+        return nothing
+    end
+
+    if request.connection_chosen
+        socket_close(socket)
         return nothing
     end
 
@@ -370,6 +454,8 @@ function _on_socket_connect_complete(request::SocketConnectionRequest, error_cod
         LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
         "ClientBootstrap: connection established to $(request.host):$(request.port)"
     )
+    request.connection_chosen = true
+    request.socket = socket
 
     # Create channel for this connection
     _setup_client_channel(request)

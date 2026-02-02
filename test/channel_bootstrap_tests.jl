@@ -116,6 +116,91 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+@testset "client bootstrap attempts multiple resolved addresses" begin
+    if Sys.iswindows()
+        @test true
+    else
+        elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+        resolver = AwsIO.DefaultHostResolver(elg)
+
+        server_setup_called = Ref(false)
+        server_channel = Ref{Any}(nothing)
+
+        server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
+            event_loop_group = elg,
+            host = "127.0.0.1",
+            port = 0,
+            on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+                server_setup_called[] = true
+                server_channel[] = channel
+                return nothing
+            end,
+        ))
+
+        listener = server_bootstrap.listener_socket
+        @test listener !== nothing
+        bound = AwsIO.socket_get_bound_address(listener)
+        @test bound isa AwsIO.SocketEndpoint
+        port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+        @test port != 0
+
+        client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+            event_loop_group = elg,
+            host_resolver = resolver,
+        ))
+
+        setup_called = Ref(false)
+        setup_error = Ref{Int}(-1)
+        setup_channel = Ref{Any}(nothing)
+        shutdown_called = Ref(false)
+
+        resolve_impl = (host, impl_data) -> begin
+            _ = impl_data
+            return [
+                AwsIO.HostAddress("::1", AwsIO.HostAddressType.AAAA, host, UInt64(0)),
+                AwsIO.HostAddress("127.0.0.1", AwsIO.HostAddressType.A, host, UInt64(0)),
+            ]
+        end
+        resolution_config = AwsIO.HostResolutionConfig(impl = resolve_impl)
+
+        res = AwsIO.client_bootstrap_connect!(
+            client_bootstrap,
+            "example.com",
+            port;
+            host_resolution_config = resolution_config,
+            on_setup = (bs, err, channel, ud) -> begin
+                setup_called[] = true
+                setup_error[] = err
+                setup_channel[] = channel
+                return nothing
+            end,
+            on_shutdown = (bs, err, channel, ud) -> begin
+                shutdown_called[] = true
+                return nothing
+            end,
+        )
+
+        @test res === nothing
+        @test wait_for_pred(() -> setup_called[])
+        @test setup_error[] == AwsIO.AWS_OP_SUCCESS
+        @test setup_channel[] !== nothing
+        @test wait_for_pred(() -> server_setup_called[])
+
+        if setup_channel[] !== nothing
+            AwsIO.channel_shutdown!(setup_channel[], 0)
+            @test wait_for_pred(() -> shutdown_called[])
+        end
+
+        if server_channel[] !== nothing
+            AwsIO.channel_shutdown!(server_channel[], 0)
+        end
+
+        AwsIO.server_bootstrap_shutdown!(server_bootstrap)
+        AwsIO.host_resolver_shutdown!(resolver)
+        AwsIO.event_loop_group_destroy!(elg)
+    end
+end
+
 @testset "client bootstrap requested event loop mismatch" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
     resolver = AwsIO.DefaultHostResolver(elg)
@@ -173,6 +258,11 @@ end
         nothing,
         false,
         requested_loop,
+        nothing,
+        AwsIO.HostAddress[],
+        0,
+        0,
+        false,
     )
     AwsIO._connection_request_complete(request, AwsIO.ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
     @test wait_for_pred(() -> setup_called[])
@@ -283,7 +373,7 @@ end
     destroy_called = Ref(false)
     server_setup = Ref(false)
     server_shutdown = Ref(false)
-    server_channel = Ref{Any}(nothing)
+    server_channels = Any[]
     client_channel = Ref{Any}(nothing)
 
     server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
@@ -292,7 +382,12 @@ end
         port = 0,
         on_incoming_channel_setup = (bs, err, channel, ud) -> begin
             server_setup[] = err == AwsIO.AWS_OP_SUCCESS
-            server_channel[] = channel
+            if channel !== nothing
+                push!(server_channels, channel)
+                if @atomic bs.shutdown
+                    AwsIO.channel_shutdown!(channel, 0)
+                end
+            end
             return nothing
         end,
         on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
@@ -335,8 +430,8 @@ end
     sleep(0.05)
     @test !destroy_called[]
 
-    if server_channel[] !== nothing
-        AwsIO.channel_shutdown!(server_channel[], 0)
+    for channel in server_channels
+        AwsIO.channel_shutdown!(channel, 0)
     end
     if client_channel[] !== nothing
         AwsIO.channel_shutdown!(client_channel[], 0)

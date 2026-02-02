@@ -398,27 +398,21 @@ function _default_dns_resolve(host::String, impl_data)
     max_addresses = impl_data isa Integer ? Int(impl_data) : 0
     addresses = HostAddress[]
     error_code = AWS_OP_SUCCESS
-
-    addrs6 = _native_getaddrinfo(host, AF_INET6)
-    for addr in addrs6
-        push!(addresses, HostAddress(addr, HostAddressType.AAAA, host, UInt64(0)))
+    flags = @static Sys.isopenbsd() ? Cint(0) : (AI_ALL | AI_V4MAPPED)
+    raw_addresses = _native_getaddrinfo(host; flags = flags)
+    for (addr, family) in raw_addresses
+        if family == AF_INET6
+            push!(addresses, HostAddress(addr, HostAddressType.AAAA, host, UInt64(0)))
+        elseif family == AF_INET
+            push!(addresses, HostAddress(addr, HostAddressType.A, host, UInt64(0)))
+        end
         if max_addresses > 0 && length(addresses) >= max_addresses
             return addresses, AWS_OP_SUCCESS
         end
     end
-
-    addrs4 = _native_getaddrinfo(host, AF_INET)
-    for addr in addrs4
-        push!(addresses, HostAddress(addr, HostAddressType.A, host, UInt64(0)))
-        if max_addresses > 0 && length(addresses) >= max_addresses
-            return addresses, AWS_OP_SUCCESS
-        end
-    end
-
     if isempty(addresses)
         error_code = ERROR_IO_DNS_NO_ADDRESS_FOR_HOST
     end
-
     return addresses, error_code
 end
 
@@ -867,27 +861,29 @@ end
 
 # Constants for getaddrinfo hints
 const AI_PASSIVE = Cint(0x0001)
+const AI_ALL = @static Sys.isapple() ? Cint(0x00000100) : Sys.islinux() ? Cint(0x0010) : Cint(0)
+const AI_V4MAPPED = @static Sys.isapple() ? Cint(0x00000800) : Sys.islinux() ? Cint(0x0008) : Cint(0)
+const AF_UNSPEC = Cint(0)
 const SOCK_STREAM = Cint(1)
 const NI_NUMERICHOST = Cint(0x00000002)
 
 """
-Native getaddrinfo wrapper - returns a vector of IP address strings.
+Native getaddrinfo wrapper - returns a vector of address/family pairs.
 """
-function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
-    addresses = String[]
-
+function _native_getaddrinfo(hostname::String; flags::Cint = Cint(0))::Vector{Tuple{String, Cint}}
+    addresses = Tuple{String, Cint}[]
     hints = Ref{addrinfo}()
     hints_ptr = Base.unsafe_convert(Ptr{addrinfo}, hints)
     Base.Libc.memset(hints_ptr, 0, sizeof(addrinfo))
-
     hints_bytes = Ptr{UInt8}(hints_ptr)
     GC.@preserve hints begin
+        # ai_flags
+        unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(addrinfo, 1)), flags)
         # ai_family
-        unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(addrinfo, 2)), family)
+        unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(addrinfo, 2)), AF_UNSPEC)
         # ai_socktype
         unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(addrinfo, 3)), SOCK_STREAM)
     end
-
     result_ptr = Ref{Ptr{addrinfo}}(C_NULL)
     ret = GC.@preserve hints begin
         ccall(
@@ -896,9 +892,7 @@ function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
             hostname, C_NULL, hints_ptr, result_ptr
         )
     end
-
     ret != 0 && return addresses
-
     current = result_ptr[]
     while current != C_NULL
         ai = unsafe_load(current)
@@ -913,18 +907,15 @@ function _native_getaddrinfo(hostname::String, family::Cint)::Vector{String}
             end
             if gi == 0
                 addr = unsafe_string(pointer(buf))
-                if (family == AF_INET && ai.ai_family == AF_INET) ||
-                        (family == AF_INET6 && ai.ai_family == AF_INET6)
-                    push!(addresses, addr)
+                if ai.ai_family == AF_INET || ai.ai_family == AF_INET6
+                    push!(addresses, (addr, ai.ai_family))
                 end
             end
         end
         current = ai.ai_next
     end
-
     if result_ptr[] != C_NULL
         ccall(:freeaddrinfo, Cvoid, (Ptr{addrinfo},), result_ptr[])
     end
-
     return addresses
 end

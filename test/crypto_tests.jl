@@ -236,10 +236,16 @@ end
         host_resolver = resolver,
     ))
 
+    resolution_config = AwsIO.HostResolutionConfig(impl = (host, impl_data) -> begin
+        _ = impl_data
+        return [AwsIO.HostAddress("127.0.0.1", AwsIO.HostAddressType.A, host, UInt64(0))]
+    end)
+
     @test AwsIO.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port;
+        host_resolution_config = resolution_config,
         tls_connection_options = outgoing_args.tls_options,
         enable_read_back_pressure = false,
         on_setup = (bs, err, channel, ud) -> begin
