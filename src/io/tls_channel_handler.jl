@@ -3248,7 +3248,6 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
         return null_buffer()
     end
     _ssl_copy_alpn_protocols[] == C_NULL && return null_buffer()
-    is_server = handler.ctx_obj !== nothing && handler.ctx_obj.options.is_server
 
     protocols_ref = Ref{CFArrayRef}(C_NULL)
     status = ccall(
@@ -3258,13 +3257,8 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
         handler.ctx,
         protocols_ref,
     )
-    local_list = handler.alpn_list
-    local_protocols = local_list === nothing ? nothing : _parse_alpn_list(local_list)
-
     if protocols_ref[] == C_NULL
-        if local_protocols !== nothing && !(local_protocols isa ErrorResult) && length(local_protocols) == 1
-            return _byte_buf_from_string(local_protocols[1])
-        end
+        is_server = handler.ctx_obj !== nothing && handler.ctx_obj.options.is_server
         logf(
             LogLevel.DEBUG,
             LS_IO_TLS,
@@ -3276,62 +3270,23 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
     end
 
     count = ccall((:CFArrayGetCount, _COREFOUNDATION_LIB), Clong, (CFArrayRef,), protocols_ref[])
-    peer_protocols = String[]
-    for idx in 0:(count - 1)
-        protocol_ref = ccall(
-            (:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB),
-            CFTypeRef,
-            (CFArrayRef, Clong),
-            protocols_ref[],
-            idx,
-        )
-        _cf_retain(protocol_ref)
-        buf = _cf_string_to_bytebuffer(protocol_ref)
-        _cf_release(protocol_ref)
-        push!(peer_protocols, byte_buffer_as_string(buf))
+    if count <= 0
+        _cf_release(protocols_ref[])
+        return null_buffer()
     end
+
+    protocol_ref = ccall(
+        (:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB),
+        CFTypeRef,
+        (CFArrayRef, Clong),
+        protocols_ref[],
+        0,
+    )
+    _cf_retain(protocol_ref)
+    buf = _cf_string_to_bytebuffer(protocol_ref)
+    _cf_release(protocol_ref)
     _cf_release(protocols_ref[])
-
-    local_protocols === nothing && return null_buffer()
-    local_protocols isa ErrorResult && return null_buffer()
-
-    if !isempty(peer_protocols)
-        logf(
-            LogLevel.DEBUG,
-            LS_IO_TLS,
-            "SecureTransport ALPN peer protocols (server=%s): %s",
-            is_server ? "true" : "false",
-            join(peer_protocols, ","),
-        )
-    end
-
-    if isempty(peer_protocols)
-        length(local_protocols) == 1 || return null_buffer()
-        return _byte_buf_from_string(local_protocols[1])
-    end
-
-    selected = ""
-    if handler.ctx_obj !== nothing && handler.ctx_obj.options.is_server
-        for proto in local_protocols
-            if proto in peer_protocols
-                selected = proto
-                break
-            end
-        end
-    else
-        for proto in peer_protocols
-            if proto in local_protocols
-                selected = proto
-                break
-            end
-        end
-    end
-
-    if isempty(selected)
-        length(local_protocols) == 1 || return null_buffer()
-        return _byte_buf_from_string(local_protocols[1])
-    end
-    return _byte_buf_from_string(selected)
+    return buf
 end
 
 function _secure_transport_on_negotiation_result(handler::SecureTransportTlsHandler, error_code::Int)
