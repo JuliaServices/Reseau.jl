@@ -20,6 +20,7 @@ end
     server_setup_called = Ref(false)
     server_setup_error = Ref{Int}(-1)
     server_channel = Ref{Any}(nothing)
+    server_setup_has_pool = Ref(false)
 
     server_bootstrap = AwsIO.ServerBootstrap(AwsIO.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -29,6 +30,7 @@ end
             server_setup_called[] = true
             server_setup_error[] = err
             server_channel[] = channel
+            server_setup_has_pool[] = channel !== nothing && channel.message_pool !== nothing
             return nothing
         end,
     ))
@@ -55,6 +57,7 @@ end
     order = Ref(0)
     creation_backpressure = Ref(false)
     setup_channel = Ref{Any}(nothing)
+    setup_has_pool = Ref(false)
 
     res = AwsIO.client_bootstrap_connect!(
         client_bootstrap,
@@ -75,6 +78,7 @@ end
             setup_called[] = true
             setup_error[] = err
             setup_channel[] = channel
+            setup_has_pool[] = channel !== nothing && channel.message_pool !== nothing
             return nothing
         end,
         on_shutdown = (bs, err, channel, ud) -> begin
@@ -91,10 +95,12 @@ end
     @test setup_order[] > creation_order[]
     @test creation_backpressure[]
     @test setup_channel[] !== nothing
+    @test setup_has_pool[]
     @test setup_channel[].read_back_pressure_enabled
 
     @test wait_for_pred(() -> server_setup_called[])
     @test server_setup_error[] == AwsIO.AWS_OP_SUCCESS
+    @test server_setup_has_pool[]
 
     if setup_channel[] !== nothing
         AwsIO.channel_shutdown!(setup_channel[], 0)

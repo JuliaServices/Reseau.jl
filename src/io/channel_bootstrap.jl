@@ -381,200 +381,187 @@ end
 function _setup_client_channel(request::SocketConnectionRequest)
     bootstrap = request.bootstrap
     socket = request.socket
-
-    # Get event loop from socket
     event_loop = socket.event_loop
-
-    # Create channel
-    channel = Channel(event_loop, nothing; enable_read_back_pressure = request.enable_read_back_pressure)
+    if event_loop === nothing
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: no event loop available for channel setup"
+        )
+        socket_close(socket)
+        _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
+        return nothing
+    end
+    on_shutdown = (ch, err, ud) -> begin
+        if request.on_shutdown !== nothing
+            Base.invokelatest(request.on_shutdown, bootstrap, err, ch, request.user_data)
+        end
+        return nothing
+    end
+    on_setup = (channel, error_code, ud) -> begin
+        if error_code != AWS_OP_SUCCESS
+            logf(
+                LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+                "ClientBootstrap: channel setup failed"
+            )
+            request.on_shutdown = nothing
+            channel_shutdown!(channel, error_code)
+            socket_close(socket)
+            _connection_request_complete(request, error_code, nothing)
+            return nothing
+        end
+        handler_result = socket_channel_handler_new!(channel, socket)
+        if handler_result isa ErrorResult
+            logf(
+                LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+                "ClientBootstrap: failed to create socket channel handler"
+            )
+            request.on_shutdown = nothing
+            socket_close(socket)
+            _connection_request_complete(request, handler_result.code, nothing)
+            return nothing
+        end
+        if request.tls_connection_options !== nothing && _socket_uses_network_framework_tls(socket, request.tls_connection_options)
+            tls_options = request.tls_connection_options
+            if request.on_protocol_negotiated !== nothing
+                proto_res = _install_protocol_handler_from_socket(channel, socket, request.on_protocol_negotiated, request.user_data)
+                if proto_res isa ErrorResult
+                    request.on_shutdown = nothing
+                    channel_shutdown!(channel, proto_res.code)
+                    socket_close(socket)
+                    _connection_request_complete(request, proto_res.code, nothing)
+                    return nothing
+                end
+            end
+            if tls_options.on_negotiation_result !== nothing
+                Base.invokelatest(
+                    tls_options.on_negotiation_result,
+                    handler_result,
+                    channel.first,
+                    AWS_OP_SUCCESS,
+                    tls_options.user_data,
+                )
+            end
+            _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+            if channel_thread_is_callers_thread(channel)
+                trigger_res = channel_trigger_read(channel)
+                if trigger_res isa ErrorResult
+                    request.on_shutdown = nothing
+                    channel_shutdown!(channel, trigger_res.code)
+                    socket_close(socket)
+                    _connection_request_complete(request, trigger_res.code, nothing)
+                    return nothing
+                end
+            else
+                trigger_task = ChannelTask((task, ctx, status) -> begin
+                    _ = task
+                    status == TaskStatus.RUN_READY || return nothing
+                    trigger_res = channel_trigger_read(ctx.channel)
+                    trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
+                    return nothing
+                end, (channel = channel,), "client_tls_trigger_read")
+                channel_schedule_task_now!(channel, trigger_task)
+            end
+            return nothing
+        elseif request.tls_connection_options !== nothing
+            tls_options = request.tls_connection_options
+            advertise_alpn = request.on_protocol_negotiated !== nothing && tls_is_alpn_available()
+            on_negotiation = (handler, slot, err, ud) -> begin
+                if tls_options.on_negotiation_result !== nothing
+                    Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
+                end
+                if err == AWS_OP_SUCCESS
+                    _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+                else
+                    request.on_shutdown = nothing
+                    channel_shutdown!(channel, err)
+                    socket_close(socket)
+                    _connection_request_complete(request, err, nothing)
+                end
+                return nothing
+            end
+            wrapped = TlsConnectionOptions(
+                tls_options.ctx;
+                server_name = tls_options.server_name,
+                alpn_list = tls_options.alpn_list,
+                advertise_alpn_message = tls_options.advertise_alpn_message || advertise_alpn,
+                on_negotiation_result = on_negotiation,
+                on_data_read = tls_options.on_data_read,
+                on_error = tls_options.on_error,
+                user_data = tls_options.user_data,
+                timeout_ms = tls_options.timeout_ms,
+            )
+            tls_handler = tls_channel_handler_new!(channel, wrapped)
+            if tls_handler isa ErrorResult
+                request.on_shutdown = nothing
+                channel_shutdown!(channel, tls_handler.code)
+                socket_close(socket)
+                _connection_request_complete(request, tls_handler.code, nothing)
+                return nothing
+            end
+            if advertise_alpn
+                alpn_slot = channel_slot_new!(channel)
+                channel_slot_insert_right!(tls_handler.slot, alpn_slot)
+                alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated, request.user_data)
+                channel_slot_set_handler!(alpn_slot, alpn_handler)
+            end
+            start_res = tls_client_handler_start_negotiation(tls_handler)
+            if start_res isa ErrorResult
+                request.on_shutdown = nothing
+                channel_shutdown!(channel, start_res.code)
+                socket_close(socket)
+                _connection_request_complete(request, start_res.code, nothing)
+                return nothing
+            end
+            if channel_thread_is_callers_thread(channel)
+                trigger_res = channel_trigger_read(channel)
+                if trigger_res isa ErrorResult
+                    request.on_shutdown = nothing
+                    channel_shutdown!(channel, trigger_res.code)
+                    socket_close(socket)
+                    _connection_request_complete(request, trigger_res.code, nothing)
+                    return nothing
+                end
+            else
+                trigger_task = ChannelTask((task, ctx, status) -> begin
+                    _ = task
+                    status == TaskStatus.RUN_READY || return nothing
+                    trigger_res = channel_trigger_read(ctx.channel)
+                    trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
+                    return nothing
+                end, (channel = channel,), "client_tls_trigger_read")
+                channel_schedule_task_now!(channel, trigger_task)
+            end
+            return nothing
+        end
+        logf(
+            LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)"
+        )
+        _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+        return nothing
+    end
+    options = ChannelOptions(
+        event_loop = event_loop,
+        on_setup_completed = on_setup,
+        on_shutdown_completed = on_shutdown,
+        setup_user_data = request,
+        shutdown_user_data = request,
+        enable_read_back_pressure = request.enable_read_back_pressure,
+    )
+    channel = channel_new(options)
+    if channel isa ErrorResult
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: failed to create channel"
+        )
+        socket_close(socket)
+        _connection_request_complete(request, channel.code, nothing)
+        return nothing
+    end
     request.channel = channel
-
     if request.on_creation !== nothing
         Base.invokelatest(request.on_creation, bootstrap, AWS_OP_SUCCESS, channel, request.user_data)
     end
-
-    # Set shutdown callback
-    channel_set_shutdown_callback!(
-        channel, (ch, err, ud) -> begin
-            if request.on_shutdown !== nothing
-                Base.invokelatest(request.on_shutdown, bootstrap, err, ch, request.user_data)
-            end
-        end, request
-    )
-
-    # Add socket handler to channel
-    handler_result = socket_channel_handler_new!(channel, socket)
-
-    if handler_result isa ErrorResult
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create socket channel handler"
-        )
-        request.on_shutdown = nothing
-        socket_close(socket)
-        _connection_request_complete(request, handler_result.code, nothing)
-        return nothing
-    end
-
-    # If TLS requested, insert TLS handler and defer setup completion
-    if request.tls_connection_options !== nothing && _socket_uses_network_framework_tls(socket, request.tls_connection_options)
-        tls_options = request.tls_connection_options
-
-        if request.on_protocol_negotiated !== nothing
-            proto_res = _install_protocol_handler_from_socket(channel, socket, request.on_protocol_negotiated, request.user_data)
-            if proto_res isa ErrorResult
-                request.on_shutdown = nothing
-                channel_shutdown!(channel, proto_res.code)
-                socket_close(socket)
-                _connection_request_complete(request, proto_res.code, nothing)
-                return nothing
-            end
-        end
-
-        if tls_options.on_negotiation_result !== nothing
-            Base.invokelatest(tls_options.on_negotiation_result, handler_result, channel.first, AWS_OP_SUCCESS, tls_options.user_data)
-        end
-
-        setup_result = channel_setup_complete!(channel)
-        if setup_result isa ErrorResult
-            request.on_shutdown = nothing
-            channel_shutdown!(channel, setup_result.code)
-            socket_close(socket)
-            _connection_request_complete(request, setup_result.code, nothing)
-            return nothing
-        end
-
-        _connection_request_complete(request, AWS_OP_SUCCESS, channel)
-
-        if channel_thread_is_callers_thread(channel)
-            trigger_res = channel_trigger_read(channel)
-            if trigger_res isa ErrorResult
-                request.on_shutdown = nothing
-                channel_shutdown!(channel, trigger_res.code)
-                socket_close(socket)
-                _connection_request_complete(request, trigger_res.code, nothing)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask((task, ctx, status) -> begin
-                _ = task
-                status == TaskStatus.RUN_READY || return nothing
-                trigger_res = channel_trigger_read(ctx.channel)
-                trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
-                return nothing
-            end, (channel = channel,), "client_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
-        return nothing
-    elseif request.tls_connection_options !== nothing
-        tls_options = request.tls_connection_options
-        advertise_alpn = request.on_protocol_negotiated !== nothing && tls_is_alpn_available()
-
-        on_negotiation = (handler, slot, err, ud) -> begin
-            if tls_options.on_negotiation_result !== nothing
-                Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
-            end
-
-            if err == AWS_OP_SUCCESS
-                setup_result = channel_setup_complete!(channel)
-                if setup_result isa ErrorResult
-                    request.on_shutdown = nothing
-                    socket_close(socket)
-                    _connection_request_complete(request, setup_result.code, nothing)
-                    return nothing
-                end
-                _connection_request_complete(request, AWS_OP_SUCCESS, channel)
-            else
-                request.on_shutdown = nothing
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                _connection_request_complete(request, err, nothing)
-            end
-
-            return nothing
-        end
-
-        wrapped = TlsConnectionOptions(
-            tls_options.ctx;
-            server_name = tls_options.server_name,
-            alpn_list = tls_options.alpn_list,
-            advertise_alpn_message = tls_options.advertise_alpn_message || advertise_alpn,
-            on_negotiation_result = on_negotiation,
-            on_data_read = tls_options.on_data_read,
-            on_error = tls_options.on_error,
-            user_data = tls_options.user_data,
-            timeout_ms = tls_options.timeout_ms,
-        )
-
-        tls_handler = tls_channel_handler_new!(channel, wrapped)
-        if tls_handler isa ErrorResult
-            request.on_shutdown = nothing
-            channel_shutdown!(channel, tls_handler.code)
-            socket_close(socket)
-            _connection_request_complete(request, tls_handler.code, nothing)
-            return nothing
-        end
-
-        if advertise_alpn
-            alpn_slot = channel_slot_new!(channel)
-            channel_slot_insert_right!(tls_handler.slot, alpn_slot)
-            alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated, request.user_data)
-            channel_slot_set_handler!(alpn_slot, alpn_handler)
-        end
-
-        start_res = tls_client_handler_start_negotiation(tls_handler)
-        if start_res isa ErrorResult
-            request.on_shutdown = nothing
-            channel_shutdown!(channel, start_res.code)
-            socket_close(socket)
-            _connection_request_complete(request, start_res.code, nothing)
-            return nothing
-        end
-
-        # Ensure we don't miss early readable events before the socket handler is fully set up.
-        if channel_thread_is_callers_thread(channel)
-            trigger_res = channel_trigger_read(channel)
-            if trigger_res isa ErrorResult
-                request.on_shutdown = nothing
-                channel_shutdown!(channel, trigger_res.code)
-                socket_close(socket)
-                _connection_request_complete(request, trigger_res.code, nothing)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask((task, ctx, status) -> begin
-                _ = task
-                status == TaskStatus.RUN_READY || return nothing
-                trigger_res = channel_trigger_read(ctx.channel)
-                trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
-                return nothing
-            end, (channel = channel,), "client_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
-        return nothing
-    end
-
-    # Complete channel setup
-    setup_result = channel_setup_complete!(channel)
-
-    if setup_result isa ErrorResult
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: channel setup failed"
-        )
-        request.on_shutdown = nothing
-        socket_close(socket)
-        _connection_request_complete(request, setup_result.code, nothing)
-        return nothing
-    end
-
-    logf(
-        LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)"
-    )
-
-    _connection_request_complete(request, AWS_OP_SUCCESS, channel)
-
     return nothing
 end
 
@@ -900,7 +887,6 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
     _server_bootstrap_incoming_started!(bootstrap)
     incoming_called = Ref(false)
     setup_succeeded = Ref(false)
-
     function invoke_incoming_callback(err, channel)
         if incoming_called[]
             return nothing
@@ -911,7 +897,6 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         end
         return nothing
     end
-
     event_loop = event_loop_group_get_next_loop(bootstrap.event_loop_group)
     if event_loop === nothing
         logf(
@@ -924,7 +909,6 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
-
     assign_result = socket_assign_to_event_loop(socket, event_loop)
     if assign_result isa ErrorResult
         logf(
@@ -937,176 +921,161 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
-
-    # Create channel
-    channel = Channel(event_loop, nothing; enable_read_back_pressure = bootstrap.enable_read_back_pressure)
-
-    # Set shutdown callback
-    channel_set_shutdown_callback!(
-        channel, (ch, err, ud) -> begin
-            shutdown_err = err
-            if !incoming_called[]
-                if shutdown_err == AWS_OP_SUCCESS
-                    shutdown_err = ERROR_UNKNOWN
-                end
-                invoke_incoming_callback(shutdown_err, nothing)
+    on_shutdown = (ch, err, ud) -> begin
+        shutdown_err = err
+        if !incoming_called[]
+            if shutdown_err == AWS_OP_SUCCESS
+                shutdown_err = ERROR_UNKNOWN
             end
-
-            if setup_succeeded[] && bootstrap.on_incoming_channel_shutdown !== nothing
-                bootstrap.on_incoming_channel_shutdown(bootstrap, err, ch, bootstrap.user_data)
-            end
-
-            _server_bootstrap_incoming_finished!(bootstrap)
-            return nothing
-        end, bootstrap
-    )
-
-    # Add socket handler to channel
-    handler_result = socket_channel_handler_new!(channel, socket)
-
-    if handler_result isa ErrorResult
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to create socket handler for incoming connection"
-        )
-        channel_shutdown!(channel, handler_result.code)
-        socket_close(socket)
+            invoke_incoming_callback(shutdown_err, nothing)
+        end
+        if setup_succeeded[] && bootstrap.on_incoming_channel_shutdown !== nothing
+            bootstrap.on_incoming_channel_shutdown(bootstrap, err, ch, bootstrap.user_data)
+        end
+        _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
-
-    if bootstrap.tls_connection_options !== nothing && _socket_uses_network_framework_tls(socket, bootstrap.tls_connection_options)
-        tls_options = bootstrap.tls_connection_options
-
-        if bootstrap.on_protocol_negotiated !== nothing
-            proto_res = _install_protocol_handler_from_socket(channel, socket, bootstrap.on_protocol_negotiated, bootstrap.user_data)
-            if proto_res isa ErrorResult
-                channel_shutdown!(channel, proto_res.code)
-                socket_close(socket)
-                return nothing
-            end
-        end
-
-        if tls_options.on_negotiation_result !== nothing
-            Base.invokelatest(tls_options.on_negotiation_result, handler_result, channel.first, AWS_OP_SUCCESS, tls_options.user_data)
-        end
-
-        setup_result = channel_setup_complete!(channel)
-        if setup_result isa ErrorResult
-            channel_shutdown!(channel, setup_result.code)
-            return nothing
-        end
-
-        setup_succeeded[] = true
-        invoke_incoming_callback(AWS_OP_SUCCESS, channel)
-
-        if channel_thread_is_callers_thread(channel)
-            trigger_res = channel_trigger_read(channel)
-            if trigger_res isa ErrorResult
-                channel_shutdown!(channel, trigger_res.code)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask((task, ctx, status) -> begin
-                _ = task
-                status == TaskStatus.RUN_READY || return nothing
-                trigger_res = channel_trigger_read(ctx.channel)
-                trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
-                return nothing
-            end, (channel = channel,), "server_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
-
-        return nothing
-    elseif bootstrap.tls_connection_options !== nothing
-        tls_options = bootstrap.tls_connection_options
-        advertise_alpn = bootstrap.on_protocol_negotiated !== nothing && tls_is_alpn_available()
-
-        on_negotiation = (handler, slot, err, ud) -> begin
-            if tls_options.on_negotiation_result !== nothing
-                Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
-            end
-
-            if err == AWS_OP_SUCCESS
-                setup_result = channel_setup_complete!(channel)
-                if setup_result isa ErrorResult
-                    channel_shutdown!(channel, setup_result.code)
-                    return nothing
-                end
-                setup_succeeded[] = true
-                invoke_incoming_callback(AWS_OP_SUCCESS, channel)
-            else
-                channel_shutdown!(channel, err)
-            end
-            return nothing
-        end
-
-        wrapped = TlsConnectionOptions(
-            tls_options.ctx;
-            server_name = tls_options.server_name,
-            alpn_list = tls_options.alpn_list,
-            advertise_alpn_message = tls_options.advertise_alpn_message || advertise_alpn,
-            on_negotiation_result = on_negotiation,
-            on_data_read = tls_options.on_data_read,
-            on_error = tls_options.on_error,
-            user_data = tls_options.user_data,
-            timeout_ms = tls_options.timeout_ms,
-        )
-
-        tls_handler = tls_channel_handler_new!(channel, wrapped)
-        if tls_handler isa ErrorResult
-            channel_shutdown!(channel, tls_handler.code)
+    on_setup = (channel, error_code, ud) -> begin
+        if error_code != AWS_OP_SUCCESS
+            logf(
+                LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+                "ServerBootstrap: incoming channel setup failed"
+            )
+            channel_shutdown!(channel, error_code)
             socket_close(socket)
             return nothing
         end
-
-        if advertise_alpn
-            alpn_slot = channel_slot_new!(channel)
-            channel_slot_insert_right!(tls_handler.slot, alpn_slot)
-            alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated, bootstrap.user_data)
-            channel_slot_set_handler!(alpn_slot, alpn_handler)
+        handler_result = socket_channel_handler_new!(channel, socket)
+        if handler_result isa ErrorResult
+            logf(
+                LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+                "ServerBootstrap: failed to create socket handler for incoming connection"
+            )
+            channel_shutdown!(channel, handler_result.code)
+            socket_close(socket)
+            return nothing
         end
-
-        if channel_thread_is_callers_thread(channel)
-            trigger_res = channel_trigger_read(channel)
-            if trigger_res isa ErrorResult
-                channel_shutdown!(channel, trigger_res.code)
+        if bootstrap.tls_connection_options !== nothing && _socket_uses_network_framework_tls(socket, bootstrap.tls_connection_options)
+            tls_options = bootstrap.tls_connection_options
+            if bootstrap.on_protocol_negotiated !== nothing
+                proto_res = _install_protocol_handler_from_socket(channel, socket, bootstrap.on_protocol_negotiated, bootstrap.user_data)
+                if proto_res isa ErrorResult
+                    channel_shutdown!(channel, proto_res.code)
+                    socket_close(socket)
+                    return nothing
+                end
+            end
+            if tls_options.on_negotiation_result !== nothing
+                Base.invokelatest(
+                    tls_options.on_negotiation_result,
+                    handler_result,
+                    channel.first,
+                    AWS_OP_SUCCESS,
+                    tls_options.user_data,
+                )
+            end
+            setup_succeeded[] = true
+            invoke_incoming_callback(AWS_OP_SUCCESS, channel)
+            if channel_thread_is_callers_thread(channel)
+                trigger_res = channel_trigger_read(channel)
+                if trigger_res isa ErrorResult
+                    channel_shutdown!(channel, trigger_res.code)
+                    return nothing
+                end
+            else
+                trigger_task = ChannelTask((task, ctx, status) -> begin
+                    _ = task
+                    status == TaskStatus.RUN_READY || return nothing
+                    trigger_res = channel_trigger_read(ctx.channel)
+                    trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
+                    return nothing
+                end, (channel = channel,), "server_tls_trigger_read")
+                channel_schedule_task_now!(channel, trigger_task)
+            end
+            return nothing
+        elseif bootstrap.tls_connection_options !== nothing
+            tls_options = bootstrap.tls_connection_options
+            advertise_alpn = bootstrap.on_protocol_negotiated !== nothing && tls_is_alpn_available()
+            on_negotiation = (handler, slot, err, ud) -> begin
+                if tls_options.on_negotiation_result !== nothing
+                    Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
+                end
+                if err == AWS_OP_SUCCESS
+                    setup_succeeded[] = true
+                    invoke_incoming_callback(AWS_OP_SUCCESS, channel)
+                else
+                    channel_shutdown!(channel, err)
+                end
                 return nothing
             end
-        else
-            trigger_task = ChannelTask((task, ctx, status) -> begin
-                _ = task
-                status == TaskStatus.RUN_READY || return nothing
-                trigger_res = channel_trigger_read(ctx.channel)
-                trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
+            wrapped = TlsConnectionOptions(
+                tls_options.ctx;
+                server_name = tls_options.server_name,
+                alpn_list = tls_options.alpn_list,
+                advertise_alpn_message = tls_options.advertise_alpn_message || advertise_alpn,
+                on_negotiation_result = on_negotiation,
+                on_data_read = tls_options.on_data_read,
+                on_error = tls_options.on_error,
+                user_data = tls_options.user_data,
+                timeout_ms = tls_options.timeout_ms,
+            )
+            tls_handler = tls_channel_handler_new!(channel, wrapped)
+            if tls_handler isa ErrorResult
+                channel_shutdown!(channel, tls_handler.code)
+                socket_close(socket)
                 return nothing
-            end, (channel = channel,), "server_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
+            end
+            if advertise_alpn
+                alpn_slot = channel_slot_new!(channel)
+                channel_slot_insert_right!(tls_handler.slot, alpn_slot)
+                alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated, bootstrap.user_data)
+                channel_slot_set_handler!(alpn_slot, alpn_handler)
+            end
+            if channel_thread_is_callers_thread(channel)
+                trigger_res = channel_trigger_read(channel)
+                if trigger_res isa ErrorResult
+                    channel_shutdown!(channel, trigger_res.code)
+                    return nothing
+                end
+            else
+                trigger_task = ChannelTask((task, ctx, status) -> begin
+                    _ = task
+                    status == TaskStatus.RUN_READY || return nothing
+                    trigger_res = channel_trigger_read(ctx.channel)
+                    trigger_res isa ErrorResult && channel_shutdown!(ctx.channel, trigger_res.code)
+                    return nothing
+                end, (channel = channel,), "server_tls_trigger_read")
+                channel_schedule_task_now!(channel, trigger_task)
+            end
+            return nothing
         end
-
+        setup_succeeded[] = true
+        logf(
+            LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: incoming channel $(channel.channel_id) setup complete"
+        )
+        invoke_incoming_callback(AWS_OP_SUCCESS, channel)
         return nothing
     end
-
-    # Complete channel setup
-    setup_result = channel_setup_complete!(channel)
-
-    if setup_result isa ErrorResult
+    options = ChannelOptions(
+        event_loop = event_loop,
+        on_setup_completed = on_setup,
+        on_shutdown_completed = on_shutdown,
+        setup_user_data = nothing,
+        shutdown_user_data = nothing,
+        enable_read_back_pressure = bootstrap.enable_read_back_pressure,
+    )
+    channel = channel_new(options)
+    if channel isa ErrorResult
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: incoming channel setup failed"
+            "ServerBootstrap: failed to create channel for incoming connection"
         )
-        channel_shutdown!(channel, setup_result.code)
+        invoke_incoming_callback(channel.code, nothing)
+        socket_close(socket)
+        _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
-
-    setup_succeeded[] = true
-
-    logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ServerBootstrap: incoming channel $(channel.channel_id) setup complete"
-    )
-
-    invoke_incoming_callback(AWS_OP_SUCCESS, channel)
-
     return nothing
 end
 
