@@ -84,6 +84,36 @@ end
     @test AwsIO.thread_get_managed_thread_count() == 0
 end
 
+@testset "TaskScheduler cancel" begin
+    scheduler = AwsIO.TaskScheduler()
+    status_ch = Channel{AwsIO.TaskStatus.T}(1)
+    task = AwsIO.ScheduledTask((_, status) -> put!(status_ch, status), nothing; type_tag = "task_cancel")
+    AwsIO.task_scheduler_cancel!(scheduler, task)
+    @test Base.timedwait(() -> isready(status_ch), 5.0) == :ok
+    @test take!(status_ch) == AwsIO.TaskStatus.CANCELED
+end
+
+@testset "ThreadScheduler" begin
+    scheduler = AwsIO.thread_scheduler_new()
+    try
+        run_status = Channel{AwsIO.TaskStatus.T}(1)
+        run_task = AwsIO.ScheduledTask((_, status) -> put!(run_status, status), nothing; type_tag = "thread_scheduler_run")
+        AwsIO.thread_scheduler_schedule_now(scheduler, run_task)
+        @test Base.timedwait(() -> isready(run_status), 5.0) == :ok
+        @test take!(run_status) == AwsIO.TaskStatus.RUN_READY
+        cancel_status = Channel{AwsIO.TaskStatus.T}(1)
+        cancel_task = AwsIO.ScheduledTask((_, status) -> put!(cancel_status, status), nothing; type_tag = "thread_scheduler_cancel")
+        now_ref = Ref{UInt64}(0)
+        @test AwsIO.high_res_clock_get_ticks(now_ref) == AwsIO.OP_SUCCESS
+        AwsIO.thread_scheduler_schedule_future(scheduler, cancel_task, now_ref[] + UInt64(50_000_000))
+        AwsIO.thread_scheduler_cancel_task(scheduler, cancel_task)
+        @test Base.timedwait(() -> isready(cancel_status), 5.0) == :ok
+        @test take!(cancel_status) == AwsIO.TaskStatus.CANCELED
+    finally
+        AwsIO.thread_scheduler_release(scheduler)
+    end
+end
+
 @testset "Byte buffers" begin
     buf_ref = Ref(AwsIO.ByteBuffer(8))
     cur = AwsIO.ByteCursor("hi")

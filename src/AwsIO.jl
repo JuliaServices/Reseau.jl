@@ -50,6 +50,7 @@ include("common/condition_variable.jl")
 include("common/thread.jl")
 include("common/thread_shared.jl")
 include("common/task_scheduler.jl")
+include("common/thread_scheduler.jl")
 include("common/common.jl")
 
 # --- io ---
