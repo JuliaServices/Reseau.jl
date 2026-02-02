@@ -143,7 +143,19 @@
                 @ccall close(write_fd::Cint)::Cint
                 return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
             end
-            ret = _fcntl(fd, Cint(4), (flags | O_NONBLOCK | O_CLOEXEC))  # F_SETFL = 4
+            ret = _fcntl(fd, Cint(4), (flags | O_NONBLOCK))  # F_SETFL = 4
+            if ret == -1
+                @ccall close(read_fd::Cint)::Cint
+                @ccall close(write_fd::Cint)::Cint
+                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            end
+            fd_flags = _fcntl(fd, Cint(1))  # F_GETFD = 1
+            if fd_flags == -1
+                @ccall close(read_fd::Cint)::Cint
+                @ccall close(write_fd::Cint)::Cint
+                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            end
+            ret = _fcntl(fd, Cint(2), (fd_flags | Cint(1)))  # F_SETFD = 2, FD_CLOEXEC = 1
             if ret == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint

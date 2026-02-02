@@ -65,6 +65,31 @@ end
         end
     end
 
+    @testset "Epoll pipe cloexec flags" begin
+        if Sys.islinux()
+            pipe_res = AwsIO.open_nonblocking_posix_pipe()
+            @test !(pipe_res isa AwsIO.ErrorResult)
+            if !(pipe_res isa AwsIO.ErrorResult)
+                read_fd, write_fd = pipe_res
+                try
+                    for fd in (read_fd, write_fd)
+                        fd_flags = AwsIO._fcntl(Cint(fd), AwsIO.F_GETFD)
+                        @test fd_flags != -1
+                        @test (fd_flags & AwsIO.FD_CLOEXEC) != 0
+                        status_flags = AwsIO._fcntl(Cint(fd), AwsIO.F_GETFL)
+                        @test status_flags != -1
+                        @test (status_flags & AwsIO.O_NONBLOCK) != 0
+                    end
+                finally
+                    @ccall close(read_fd::Cint)::Cint
+                    @ccall close(write_fd::Cint)::Cint
+                end
+            end
+        else
+            @test true
+        end
+    end
+
     @testset "Event loop scheduling" begin
         if Sys.iswindows()
             @test true
