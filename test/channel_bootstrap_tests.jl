@@ -143,6 +143,44 @@ end
     AwsIO.event_loop_group_destroy!(elg)
 end
 
+@testset "client bootstrap on_setup runs on requested event loop" begin
+    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
+    resolver = AwsIO.DefaultHostResolver(elg)
+    client_bootstrap = AwsIO.ClientBootstrap(AwsIO.ClientBootstrapOptions(
+        event_loop_group = elg,
+        host_resolver = resolver,
+    ))
+    requested_loop = AwsIO.event_loop_group_get_loop_at(elg, 0)
+    @test requested_loop !== nothing
+    setup_called = Ref(false)
+    setup_on_loop = Ref(false)
+    request = AwsIO.SocketConnectionRequest(
+        client_bootstrap,
+        "example.com",
+        UInt32(443),
+        client_bootstrap.socket_options,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        (bs, err, channel, ud) -> begin
+            setup_called[] = true
+            setup_on_loop[] = AwsIO.event_loop_thread_is_callers_thread(requested_loop)
+            return nothing
+        end,
+        nothing,
+        nothing,
+        false,
+        requested_loop,
+    )
+    AwsIO._connection_request_complete(request, AwsIO.ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
+    @test wait_for_pred(() -> setup_called[])
+    @test setup_on_loop[]
+    AwsIO.host_resolver_shutdown!(resolver)
+    AwsIO.event_loop_group_destroy!(elg)
+end
+
 if tls_tests_enabled()
 @testset "bootstrap tls negotiation" begin
     elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))

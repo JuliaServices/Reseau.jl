@@ -566,6 +566,24 @@ function _setup_client_channel(request::SocketConnectionRequest)
 end
 
 # Complete connection request and invoke callback
+function _connection_request_invoke_on_setup(
+        request::SocketConnectionRequest,
+        error_code::Int,
+        channel::Union{Channel, Nothing},
+    )
+    request.on_setup === nothing && return nothing
+    try
+        Base.invokelatest(request.on_setup, request.bootstrap, error_code, channel, request.user_data)
+    catch err
+        logf(
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: on_setup callback threw: %s",
+            sprint(showerror, err, catch_backtrace()),
+        )
+    end
+    return nothing
+end
+
 function _connection_request_complete(request::SocketConnectionRequest, error_code::Int, channel::Union{Channel, Nothing})
     if error_code != AWS_OP_SUCCESS
         request.on_shutdown = nothing
@@ -577,14 +595,20 @@ function _connection_request_complete(request::SocketConnectionRequest, error_co
         request.on_setup === nothing ? "nothing" : "set",
     )
     if request.on_setup !== nothing
-        try
-            Base.invokelatest(request.on_setup, request.bootstrap, error_code, channel, request.user_data)
-        catch err
-            logf(
-                LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-                "ClientBootstrap: on_setup callback threw: %s",
-                sprint(showerror, err, catch_backtrace()),
+        requested_loop = request.requested_event_loop
+        if requested_loop !== nothing && !event_loop_thread_is_callers_thread(requested_loop)
+            task = ScheduledTask(
+                (ctx, status) -> begin
+                    status == TaskStatus.RUN_READY || return nothing
+                    _connection_request_invoke_on_setup(ctx.request, ctx.error_code, ctx.channel)
+                    return nothing
+                end,
+                (request = request, error_code = error_code, channel = channel);
+                type_tag = "client_bootstrap_on_setup",
             )
+            event_loop_schedule_task_now!(requested_loop, task)
+        else
+            _connection_request_invoke_on_setup(request, error_code, channel)
         end
     end
     return nothing
