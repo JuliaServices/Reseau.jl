@@ -89,6 +89,17 @@ function _wait_until(pred; timeout_ns::Int = 2_000_000_000)
     return pred()
 end
 
+function _drain_channel_tasks(channel::AwsIO.Channel; timeout_ns::Int = 2_000_000_000)
+    done = Ref(false)
+    task = AwsIO.ChannelTask((_, arg, status) -> begin
+        status == AwsIO.TaskStatus.RUN_READY || return nothing
+        arg[] = true
+        return nothing
+    end, done, "drain_channel_tasks")
+    AwsIO.channel_schedule_task_now!(channel, task)
+    return _wait_until(() -> done[]; timeout_ns = timeout_ns)
+end
+
 function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
     return _wait_until(() -> isready(ch); timeout_ns = timeout_ns)
 end
@@ -167,6 +178,7 @@ end
             @test length(left_handler.messages) == 1
             @test left_handler.messages[1] === write_msg
 
+            @test _drain_channel_tasks(channel)
             @test AwsIO.channel_slot_increment_read_window!(right_slot, Csize_t(12345)) === nothing
             @test _wait_until(() -> left_handler.latest_window_update == Csize_t(12345))
             @test left_handler.latest_window_update == Csize_t(12345)
