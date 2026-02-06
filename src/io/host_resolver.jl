@@ -122,16 +122,7 @@ end
 const HOST_RESOLVER_DEFAULT_RESOLVE_FREQUENCY_NS = UInt64(1_000_000_000)
 const HOST_RESOLVER_MIN_WAIT_BETWEEN_RESOLVE_NS = UInt64(100_000_000) # 100ms
 
-# Cache hash helpers
-host_string_hash(key::String) = hash(key)
-host_string_eq(a::String, b::String) = a == b
-const HostResolverCache = HashTable{
-    String,
-    Any,
-    HashEq{typeof(host_string_hash), typeof(host_string_eq)},
-    NoopDestroy,
-    NoopDestroy,
-}
+const HostResolverCache = Dict{String, Any}
 
 # Abstract resolver interface
 abstract type AbstractHostResolver end
@@ -154,11 +145,8 @@ function DefaultHostResolver(
         event_loop_group::ELG,
         config::HostResolverConfig = HostResolverConfig(),
     ) where {ELG}
-    cache = HashTable{String, Any}(
-        host_string_hash,
-        host_string_eq;
-        capacity = Int(config.max_entries),
-    )
+    cache = Dict{String, Any}()
+    sizehint!(cache, Int(config.max_entries))
     resolver = DefaultHostResolver{ELG}(
         event_loop_group,
         config,
@@ -280,7 +268,7 @@ function _dispatch_simple_callback(
 end
 
 function _cache_find(cache::LRUCache{String, HostAddress}, key::String)
-    return hash_table_get(cache.data, key)
+    return get(cache.data, key, nothing)
 end
 
 function _cache_remove_good!(entry::HostEntry, cache::LRUCache{String, HostAddress}, key::String)
@@ -396,23 +384,47 @@ end
 
 function _default_dns_resolve(host::String, impl_data)
     max_addresses = impl_data isa Integer ? Int(impl_data) : 0
-    addresses = HostAddress[]
+    # We want a stable mix of A/AAAA results. `getaddrinfo()` ordering is platform-dependent and can
+    # yield long runs of one family (e.g. AAAA first). If we hard-cap by "first N" we may end up
+    # with only one family even when both exist (e.g. dualstack endpoints).
+    ipv6 = HostAddress[]
+    ipv4 = HostAddress[]
     error_code = AWS_OP_SUCCESS
     flags = @static Sys.isopenbsd() ? Cint(0) : (AI_ALL | AI_V4MAPPED)
     raw_addresses = _native_getaddrinfo(host; flags = flags)
     for (addr, family) in raw_addresses
         if family == AF_INET6
-            push!(addresses, HostAddress(addr, HostAddressType.AAAA, host, UInt64(0)))
+            push!(ipv6, HostAddress(addr, HostAddressType.AAAA, host, UInt64(0)))
         elseif family == AF_INET
-            push!(addresses, HostAddress(addr, HostAddressType.A, host, UInt64(0)))
-        end
-        if max_addresses > 0 && length(addresses) >= max_addresses
-            return addresses, AWS_OP_SUCCESS
+            push!(ipv4, HostAddress(addr, HostAddressType.A, host, UInt64(0)))
         end
     end
+
+    addresses = HostAddress[]
+    if max_addresses > 0
+        # Interleave IPv6/IPv4 to keep both families represented when possible.
+        i6 = 1
+        i4 = 1
+        while length(addresses) < max_addresses && (i6 <= length(ipv6) || i4 <= length(ipv4))
+            if i6 <= length(ipv6)
+                push!(addresses, ipv6[i6])
+                i6 += 1
+                length(addresses) >= max_addresses && break
+            end
+            if i4 <= length(ipv4)
+                push!(addresses, ipv4[i4])
+                i4 += 1
+            end
+        end
+    else
+        append!(addresses, ipv6)
+        append!(addresses, ipv4)
+    end
+
     if isempty(addresses)
         error_code = ERROR_IO_DNS_NO_ADDRESS_FOR_HOST
     end
+
     return addresses, error_code
 end
 
@@ -570,7 +582,7 @@ function _host_resolver_thread(entry::HostEntry)
                             entry.last_resolve_request_time + max_no_solicitation_interval < now
                         )
                         @atomic entry.state = DefaultResolverState.SHUTTING_DOWN
-                        hash_table_remove!(resolver.cache, entry.host_name)
+                        delete!(resolver.cache, entry.host_name)
                     end
 
                     keep_going = (@atomic entry.state) == DefaultResolverState.ACTIVE
@@ -622,22 +634,22 @@ function host_resolver_resolve!(
     timestamp = _resolver_clock(resolver)
 
     lock(resolver.resolver_lock)
-    entry = hash_table_get(resolver.cache, host)
+    entry = get(resolver.cache, host, nothing)
     if entry === nothing
         new_entry = HostEntry(resolver, host, resolution_config, timestamp)
         push_back!(
             new_entry.pending_callbacks,
             PendingCallback(on_resolved, user_data),
         )
-        hash_table_put!(resolver.cache, host, new_entry)
+        resolver.cache[host] = new_entry
         thread_options = ThreadOptions(;
             join_strategy = ThreadJoinStrategy.MANAGED,
             name = "AwsHostResolver",
-            pool = :default,
+            pool = :os,
         )
         launch_result = thread_launch(new_entry.resolver_thread, _host_resolver_thread, new_entry, thread_options)
         if launch_result != OP_SUCCESS
-            hash_table_remove!(resolver.cache, host)
+            delete!(resolver.cache, host)
             unlock(resolver.resolver_lock)
             return ErrorResult(last_error())
         end
@@ -675,7 +687,7 @@ function host_resolver_purge_cache!(resolver::DefaultHostResolver)
         entry = entry_any::HostEntry
         _host_entry_shutdown!(entry)
     end
-    hash_table_clear!(resolver.cache)
+    empty!(resolver.cache)
     unlock(resolver.resolver_lock)
 
     logf(LogLevel.DEBUG, LS_IO_DNS, "Host resolver: cache purged")
@@ -701,7 +713,7 @@ function host_resolver_purge_host_cache!(
     host = String(host_name)
 
     lock(resolver.resolver_lock)
-    entry = hash_table_get(resolver.cache, host)
+    entry = get(resolver.cache, host, nothing)
     if entry === nothing
         unlock(resolver.resolver_lock)
         _dispatch_simple_callback(resolver, on_host_purge_complete, user_data)
@@ -713,7 +725,7 @@ function host_resolver_purge_host_cache!(
     entry.on_host_purge_complete_user_data = user_data
     unlock(entry.entry_lock)
 
-    hash_table_remove!(resolver.cache, host)
+    delete!(resolver.cache, host)
     unlock(resolver.resolver_lock)
 
     _host_entry_shutdown!(entry)
@@ -730,7 +742,7 @@ function host_resolver_get_host_address_count(
     count = 0
 
     lock(resolver.resolver_lock)
-    entry = hash_table_get(resolver.cache, host)
+    entry = get(resolver.cache, host, nothing)
     if entry !== nothing
         lock(entry.entry_lock)
         if (flags & GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A) != 0
@@ -755,7 +767,7 @@ function host_resolver_get_address!(
     host = String(host_name)
 
     lock(resolver.resolver_lock)
-    entry = hash_table_get(resolver.cache, host)
+    entry = get(resolver.cache, host, nothing)
     if entry === nothing
         unlock(resolver.resolver_lock)
         return nothing
@@ -777,7 +789,7 @@ function host_resolver_record_connection_failure!(
         address::HostAddress,
     )
     lock(resolver.resolver_lock)
-    entry = hash_table_get(resolver.cache, address.host)
+    entry = get(resolver.cache, address.host, nothing)
     if entry === nothing
         unlock(resolver.resolver_lock)
         return nothing
@@ -820,7 +832,7 @@ function host_resolver_shutdown!(resolver::DefaultHostResolver)
         entry = entry_any::HostEntry
         push!(entries, entry)
     end
-    hash_table_clear!(resolver.cache)
+    empty!(resolver.cache)
     unlock(resolver.resolver_lock)
 
     for entry in entries
@@ -886,11 +898,12 @@ function _native_getaddrinfo(hostname::String; flags::Cint = Cint(0))::Vector{Tu
     end
     result_ptr = Ref{Ptr{addrinfo}}(C_NULL)
     ret = GC.@preserve hints begin
-        ccall(
-            :getaddrinfo, Cint,
-            (Cstring, Ptr{Cvoid}, Ptr{addrinfo}, Ptr{Ptr{addrinfo}}),
-            hostname, C_NULL, hints_ptr, result_ptr
-        )
+        @ccall gc_safe = true getaddrinfo(
+            hostname::Cstring,
+            C_NULL::Cstring,
+            hints_ptr::Ptr{addrinfo},
+            result_ptr::Ptr{Ptr{addrinfo}},
+        )::Cint
     end
     ret != 0 && return addresses
     current = result_ptr[]

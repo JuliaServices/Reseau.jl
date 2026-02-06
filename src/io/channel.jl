@@ -10,14 +10,13 @@ const ChannelOnShutdownCompletedFn = Function  # (channel, error_code, user_data
 const DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE = 16 * 1024
 const g_aws_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE))
 const _CHANNEL_MESSAGE_POOL_KEY = Ref{UInt8}(0)
-const _CHANNEL_MESSAGE_POOL_KEY_PTR = pointer_from_objref(_CHANNEL_MESSAGE_POOL_KEY)
 
-struct ChannelOptions{EL, FS <: Union{ChannelOnSetupCompletedFn, Nothing}, FD <: Union{ChannelOnShutdownCompletedFn, Nothing}, SUD, SDUD}
-    event_loop::EL
-    on_setup_completed::FS
-    on_shutdown_completed::FD
-    setup_user_data::SUD
-    shutdown_user_data::SDUD
+struct ChannelOptions
+    event_loop::EventLoop
+    on_setup_completed::Union{Function, Nothing}
+    on_shutdown_completed::Union{Function, Nothing}
+    setup_user_data::Any
+    shutdown_user_data::Any
     enable_read_back_pressure::Bool
 end
 
@@ -41,8 +40,8 @@ end
 
 # Channel task wrapper (aws_channel_task)
 mutable struct ChannelTaskContext
-    channel::Any  # late-initialized: nothing → Channel
-    task::Any     # late-initialized: nothing → ChannelTask
+    channel::Union{AbstractChannel, Nothing}  # late-initialized: nothing → Channel
+    task::Any  # late-initialized: nothing → ChannelTask (forward ref)
 end
 
 mutable struct ChannelTask
@@ -233,8 +232,8 @@ end
 end
 
 # Channel - a bidirectional pipeline of handlers
-mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannel
-    event_loop::EL
+mutable struct Channel{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannel
+    event_loop::EventLoop
     first::SlotRef  # nullable - Socket side (leftmost)
     last::SlotRef   # nullable - Application side (rightmost)
     channel_state::ChannelState.T
@@ -254,7 +253,7 @@ mutable struct Channel{EL <: AbstractEventLoop, SlotRef <: Union{ChannelSlot, No
     statistics_handler::Union{StatisticsHandler, Nothing}  # nullable
     statistics_task::Union{ScheduledTask, Nothing}  # nullable
     statistics_interval_start_time_ms::UInt64
-    statistics_list::ArrayList{Any}
+    statistics_list::Vector{Any}
     # Window/backpressure tracking
     window_update_batch_emit_threshold::Csize_t
     window_update_scheduled::Bool
@@ -283,14 +282,14 @@ function _next_channel_id()::UInt64
 end
 
 function Channel(
-        event_loop::EL,
+        event_loop::EventLoop,
         message_pool::Union{MessagePool, Nothing} = nothing;
         enable_read_back_pressure::Bool = false,
-    ) where {EL <: AbstractEventLoop}
+    )
     channel_id = _next_channel_id()
     window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
 
-    channel = Channel{EL, Union{ChannelSlot, Nothing}}(
+    channel = Channel{Union{ChannelSlot, Nothing}}(
         event_loop,
         nothing,  # first
         nothing,  # last
@@ -310,7 +309,7 @@ function Channel(
         nothing,  # statistics_handler
         nothing,  # statistics_task
         UInt64(0),  # statistics_interval_start_time_ms
-        ArrayList{Any}(16),
+        Any[],
         window_threshold,
         false,       # window_update_scheduled
         ChannelTask(),
@@ -438,9 +437,9 @@ function channel_trigger_read(channel::Channel)::Union{Nothing, ErrorResult}
 end
 
 # Event loop local object wrappers
-channel_fetch_local_object(channel::Channel, key::Ptr{Cvoid}) = event_loop_fetch_local_object(channel.event_loop, key)
+channel_fetch_local_object(channel::Channel, key) = event_loop_fetch_local_object(channel.event_loop, key)
 channel_put_local_object!(channel::Channel, obj::EventLoopLocalObject) = event_loop_put_local_object!(channel.event_loop, obj)
-channel_remove_local_object!(channel::Channel, key::Ptr{Cvoid}) = event_loop_remove_local_object!(channel.event_loop, key)
+channel_remove_local_object!(channel::Channel, key) = event_loop_remove_local_object!(channel.event_loop, key)
 
 # Channel creation API matching aws_channel_new
 mutable struct ChannelSetupArgs{C <: Channel}
@@ -456,7 +455,7 @@ function _channel_message_pool_on_removed(obj::EventLoopLocalObject)
 end
 
 function _channel_get_or_create_message_pool(channel::Channel)::Union{MessagePool, ErrorResult}
-    local_obj = channel_fetch_local_object(channel, _CHANNEL_MESSAGE_POOL_KEY_PTR)
+    local_obj = channel_fetch_local_object(channel, _CHANNEL_MESSAGE_POOL_KEY)
     if !(local_obj isa ErrorResult)
         obj = local_obj::EventLoopLocalObject
         pool = obj.object
@@ -477,7 +476,7 @@ function _channel_get_or_create_message_pool(channel::Channel)::Union{MessagePoo
         return pool
     end
 
-    local_object = EventLoopLocalObject(_CHANNEL_MESSAGE_POOL_KEY_PTR, pool, _channel_message_pool_on_removed)
+    local_object = EventLoopLocalObject(_CHANNEL_MESSAGE_POOL_KEY, pool, _channel_message_pool_on_removed)
     put_res = channel_put_local_object!(channel, local_object)
     if put_res isa ErrorResult
         return put_res
@@ -647,13 +646,13 @@ function _channel_gather_statistics_task(channel::Channel, status::TaskStatus.T)
     now_ns isa ErrorResult && return nothing
     now_ms = timestamp_convert(now_ns, TIMESTAMP_NANOS, TIMESTAMP_MILLIS, nothing)
 
-    clear!(channel.statistics_list)
+    empty!(channel.statistics_list)
     current = channel.first
     while current !== nothing
         handler = current.handler
         if handler !== nothing
             stats = handler_gather_statistics(handler)
-            stats !== nothing && push_back!(channel.statistics_list, stats)
+            stats !== nothing && push!(channel.statistics_list, stats)
         end
         current = current.adj_right
     end
@@ -1336,7 +1335,7 @@ function _channel_destroy_impl!(channel::Channel)
         slot = next
     end
 
-    clear!(channel.statistics_list)
+    empty!(channel.statistics_list)
     if channel.statistics_handler !== nothing
         close!(channel.statistics_handler)
         channel.statistics_handler = nothing

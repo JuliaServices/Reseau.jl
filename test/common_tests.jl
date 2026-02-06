@@ -123,7 +123,6 @@ end
 end
 
 @testset "Error handling" begin
-    AwsIO._common_init()
     AwsIO.raise_error(AwsIO.ERROR_INVALID_ARGUMENT)
     @test AwsIO.last_error() == AwsIO.ERROR_INVALID_ARGUMENT
 end

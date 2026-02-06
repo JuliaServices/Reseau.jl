@@ -3,7 +3,7 @@
 
 # Memory pool - stack of fixed-size segments
 mutable struct MemoryPool
-    stack::ArrayList{Memory{UInt8}}
+    stack::Vector{Memory{UInt8}}
     segment_size::Csize_t
     ideal_segment_count::UInt16
 end
@@ -11,10 +11,11 @@ end
 function MemoryPool(ideal_segment_count::Integer, segment_size::Integer)
     count = UInt16(ideal_segment_count)
     seg_size = Csize_t(segment_size)
-    stack = ArrayList{Memory{UInt8}}(Int(count))
+    stack = Vector{Memory{UInt8}}()
+    sizehint!(stack, Int(count))
 
     for _ in 1:count
-        push_back!(stack, Memory{UInt8}(undef, Int(seg_size)))
+        push!(stack, Memory{UInt8}(undef, Int(seg_size)))
     end
 
     return MemoryPool(stack, seg_size, count)
@@ -24,13 +25,13 @@ Base.length(pool::MemoryPool) = length(pool.stack)
 Base.isempty(pool::MemoryPool) = isempty(pool.stack)
 
 function memory_pool_clean_up!(pool::MemoryPool)
-    clear!(pool.stack)
+    empty!(pool.stack)
     return nothing
 end
 
 function memory_pool_acquire(pool::MemoryPool)::Memory{UInt8}
     if !isempty(pool.stack)
-        return pop_back!(pool.stack)
+        return pop!(pool.stack)
     end
     return Memory{UInt8}(undef, Int(pool.segment_size))
 end
@@ -39,7 +40,7 @@ function memory_pool_release!(pool::MemoryPool, segment::Memory{UInt8})
     if length(pool.stack) >= pool.ideal_segment_count
         return nothing
     end
-    push_back!(pool.stack, segment)
+    push!(pool.stack, segment)
     return nothing
 end
 

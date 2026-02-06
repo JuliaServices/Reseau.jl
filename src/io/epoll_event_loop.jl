@@ -1,121 +1,12 @@
 # AWS IO Library - Epoll Event Loop Implementation
 # Port of aws-c-io/source/linux/epoll_event_loop.c
+# Type definitions are in epoll_event_loop_types.jl
 
-# Only define on Linux
 @static if Sys.islinux()
     using LibAwsCal
 
-    # Constants from sys/epoll.h
-    const EPOLLIN = UInt32(0x0001)
-    const EPOLLOUT = UInt32(0x0004)
-    const EPOLLRDHUP = UInt32(0x2000)
-    const EPOLLHUP = UInt32(0x0010)
-    const EPOLLERR = UInt32(0x0008)
-    const EPOLLET = UInt32(1 << 31)  # Edge-triggered
-
-    const EPOLL_CTL_ADD = Cint(1)
-    const EPOLL_CTL_DEL = Cint(2)
-    const EPOLL_CTL_MOD = Cint(3)
-
-    # epoll_event structure - must match C layout
-    struct EpollEventData
-        ptr::Ptr{Cvoid}
-    end
-
-    struct EpollEvent
-        events::UInt32
-        data::EpollEventData
-    end
-
-    function EpollEvent(events::UInt32, ptr::Ptr{Cvoid})
-        return EpollEvent(events, EpollEventData(ptr))
-    end
-
-    # Constants for eventfd
-    const EFD_CLOEXEC = Cint(0o2000000)
-    const EFD_NONBLOCK = Cint(0o4000)
-
-    # Configuration constants
-    const DEFAULT_TIMEOUT_MS = 100 * 1000  # 100 seconds in milliseconds
-    const MAX_EVENTS = 100
-
-    # Pipe fd indices
-    const READ_FD = 1
-    const WRITE_FD = 2
-
-    # fcntl flags (Linux)
-    const O_NONBLOCK = Cint(0x0800)
-    const O_CLOEXEC = Cint(0o2000000)
-
-    # Handle data attached to IoHandle while subscribed
-    # Note: user_data is parameterized as U (typically Any) since it can hold any user-provided value
-    mutable struct EpollEventHandleData{F <: OnEventCallback, U}
-        handle::IoHandle
-        on_event::F
-        user_data::U
-        cleanup_task::Union{Nothing, ScheduledTask}  # nullable
-        is_subscribed::Bool  # false when handle is unsubscribed but struct not cleaned up yet
-    end
-
-    function EpollEventHandleData(
-            handle::IoHandle,
-            on_event::F,
-            user_data::U,
-        ) where {F <: OnEventCallback, U}
-        return EpollEventHandleData{F, U}(
-            handle,
-            on_event,
-            user_data,
-            nothing,
-            true,
-        )
-    end
-
-    # Epoll event loop implementation data
-    mutable struct EpollLoopImpl
-        scheduler::TaskScheduler
-        thread_created_on::Union{Nothing, ThreadHandle}
-        thread_joined_to::UInt64
-        @atomic running_thread_id::UInt64
-        read_task_handle::IoHandle
-        write_task_handle::IoHandle
-        task_pre_queue_mutex::ReentrantLock
-        task_pre_queue::Deque{ScheduledTask}
-        stop_task::Union{Nothing, ScheduledTask}
-        @atomic stop_task_scheduled::Bool
-        epoll_fd::Int32
-        should_process_task_pre_queue::Bool
-        should_continue::Bool
-        thread_options::ThreadOptions
-        use_eventfd::Bool  # true if using eventfd, false if using pipe
-    end
-
-    function EpollLoopImpl()
-        return EpollLoopImpl(
-            TaskScheduler(),
-            nothing,
-            UInt64(0),
-            UInt64(0),
-            IoHandle(),
-            IoHandle(),
-            ReentrantLock(),
-            Deque{ScheduledTask}(16),
-            nothing,
-            false,
-            Int32(-1),
-            false,
-            false,
-            ThreadOptions(),
-            false,
-        )
-    end
-
-    # Epoll event loop concrete type
-    const EpollEventLoop = EventLoop{EpollLoopImpl, LD, Clock} where {LD, Clock}
-
     # Helper to check if eventfd is available and create one
     function try_create_eventfd()::Union{Int32, Nothing}
-        # Try to create eventfd
         fd = @ccall eventfd(0::Cuint, (EFD_CLOEXEC | EFD_NONBLOCK)::Cint)::Cint
         if fd >= 0
             return Int32(fd)
@@ -172,7 +63,7 @@
         )::Union{EventLoop, ErrorResult}
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered epoll event loop")
 
-        impl = EpollLoopImpl()
+        impl = EpollEventLoop()
 
         if options.thread_options !== nothing
             impl.thread_options = options.thread_options
@@ -185,8 +76,6 @@
             return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
         end
         impl.epoll_fd = Int32(epoll_fd)
-
-        # ReentrantLock is initialized automatically in the EpollLoopImpl constructor
 
         # Try to use eventfd first, fall back to pipe
         eventfd_result = try_create_eventfd()
@@ -228,7 +117,7 @@
     end
 
     # Stop task callback
-    function epoll_stop_task_callback(event_loop::EpollEventLoop, status::TaskStatus.T)
+    function epoll_stop_task_callback(event_loop::EventLoop, status::TaskStatus.T)
         impl = event_loop.impl_data
 
         # Now okay to reschedule stop tasks
@@ -242,7 +131,7 @@
     end
 
     # Run the event loop
-    function event_loop_run!(event_loop::EpollEventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_run!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Starting event-loop thread")
@@ -252,7 +141,7 @@
         # Launch the event loop thread
         thread_fn = el -> epoll_event_loop_thread(el)
         impl.thread_created_on = ThreadHandle()
-        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-epoll", pool = :interactive)
+        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-epoll", pool = :os)
 
         result = thread_launch(impl.thread_created_on, thread_fn, event_loop, thread_options)
         if result != OP_SUCCESS
@@ -265,7 +154,7 @@
         @atomic event_loop.running = true
 
         wait_start = time_ns()
-        while impl.thread_data.state != EventThreadState.RUNNING
+        while (@atomic impl.running_thread_id) == 0
             if time_ns() - wait_start > 1_000_000_000
                 return ErrorResult(raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN))
             end
@@ -276,7 +165,7 @@
     end
 
     # Stop the event loop
-    function event_loop_stop!(event_loop::EpollEventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_stop!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
 
         # Use atomic CAS to ensure stop task is only scheduled once
@@ -297,7 +186,7 @@
     end
 
     # Wait for the event loop to stop
-    function event_loop_wait_for_stop_completion!(event_loop::EpollEventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
@@ -313,7 +202,7 @@
     end
 
     # Schedule task cross-thread
-    function schedule_task_cross_thread(event_loop::EpollEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
 
         logf(
@@ -346,7 +235,7 @@
     end
 
     # Schedule task common implementation
-    function schedule_task_common(event_loop::EpollEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function schedule_task_common(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
 
         # If we're on the event thread, schedule directly
@@ -372,22 +261,22 @@
     end
 
     # Schedule task now
-    function event_loop_schedule_task_now!(event_loop::EpollEventLoop, task::ScheduledTask)
+    function event_loop_schedule_task_now!(event_loop::EventLoop, task::ScheduledTask)
         schedule_task_common(event_loop, task, UInt64(0))
     end
 
     # Schedule task now (serialized - always goes cross-thread)
-    function event_loop_schedule_task_now_serialized!(event_loop::EpollEventLoop, task::ScheduledTask)
+    function event_loop_schedule_task_now_serialized!(event_loop::EventLoop, task::ScheduledTask)
         schedule_task_cross_thread(event_loop, task, UInt64(0))
     end
 
     # Schedule task future
-    function event_loop_schedule_task_future!(event_loop::EpollEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function event_loop_schedule_task_future!(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         schedule_task_common(event_loop, task, run_at_nanos)
     end
 
     # Cancel task
-    function event_loop_cancel_task!(event_loop::EpollEventLoop, task::ScheduledTask)
+    function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "cancelling %s task", task.type_tag)
@@ -411,7 +300,7 @@
     end
 
     # Check if on event thread
-    function event_loop_thread_is_callers_thread(event_loop::EpollEventLoop)::Bool
+    function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         impl = event_loop.impl_data
         running_id = @atomic impl.running_thread_id
         return running_id != 0 && running_id == thread_current_thread_id()
@@ -419,7 +308,7 @@
 
     # Subscribe to IO events
     function event_loop_subscribe_to_io_events!(
-            event_loop::EpollEventLoop,
+            event_loop::EventLoop,
             handle::IoHandle,
             events::Int,
             on_event::OnEventCallback,
@@ -468,20 +357,18 @@
     end
 
     # Free IO event resources
-    function event_loop_free_io_event_resources!(event_loop::EpollEventLoop, handle::IoHandle)
-        # The cleanup happens in the cleanup task
+    function event_loop_free_io_event_resources!(event_loop::EventLoop, handle::IoHandle)
         return nothing
     end
 
     # Cleanup task callback
     function epoll_unsubscribe_cleanup_task_callback(event_data::EpollEventHandleData, status::TaskStatus.T)
-        # Just release the memory - in Julia this is handled by GC
         return nothing
     end
 
     # Unsubscribe from IO events
     function event_loop_unsubscribe_from_io_events!(
-            event_loop::EpollEventLoop,
+            event_loop::EventLoop,
             handle::IoHandle,
         )::Union{Nothing, ErrorResult}
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
@@ -525,7 +412,7 @@
     end
 
     # Callback for cross-thread task pipe/eventfd
-    function on_tasks_to_schedule(event_loop::EpollEventLoop, handle::IoHandle, events::Int, user_data)
+    function on_tasks_to_schedule(event_loop::EventLoop, handle::IoHandle, events::Int, user_data)
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread tasks to schedule")
         impl = event_loop.impl_data
 
@@ -537,7 +424,7 @@
     end
 
     # Process cross-thread task queue
-    function process_task_pre_queue(event_loop::EpollEventLoop)
+    function process_task_pre_queue(event_loop::EventLoop)
         impl = event_loop.impl_data
 
         if !impl.should_process_task_pre_queue
@@ -588,7 +475,7 @@
     end
 
     # Main event loop thread function
-    function epoll_event_loop_thread(event_loop::EpollEventLoop)
+    function epoll_event_loop_thread(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "main loop started")
         impl = event_loop.impl_data
 
@@ -765,7 +652,7 @@
     end
 
     # Destroy epoll event loop
-    function event_loop_complete_destroy!(event_loop::EpollEventLoop)
+    function event_loop_complete_destroy!(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "destroying event_loop")
         impl = event_loop.impl_data
 
@@ -788,11 +675,8 @@
             end
         end
 
-        # ReentrantLock doesn't need cleanup in Julia
-
         # Close file descriptors
         if impl.use_eventfd
-            # eventfd uses the same fd for read and write
             @ccall close(impl.write_task_handle.fd::Cint)::Cint
         else
             @ccall close(impl.read_task_handle.fd::Cint)::Cint
@@ -802,7 +686,10 @@
         @ccall close(impl.epoll_fd::Cint)::Cint
 
         # Clean up local data (invokes on_object_removed callbacks)
-        hash_table_clear!(event_loop.local_data)
+        for (_, obj) in event_loop.local_data
+            _event_loop_local_object_destroy(obj)
+        end
+        empty!(event_loop.local_data)
 
         return nothing
     end

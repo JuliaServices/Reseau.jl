@@ -1,7 +1,7 @@
 using Test
 using AwsIO
 
-function wait_for_flag(flag::Base.RefValue{Bool}; timeout_s::Float64 = 5.0)
+function wait_for_flag(flag; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
     timeout_ns = Int(timeout_s * 1_000_000_000)
     while (Base.time_ns() - start) < timeout_ns
@@ -309,12 +309,12 @@ end
             accept_err = Ref{Int}(0)
             read_err = Ref{Int}(0)
             payload = Ref{String}("")
-            read_done = Ref{Bool}(false)
+            read_done = Threads.Atomic{Bool}(false)
 
             connect_err = Ref{Int}(0)
-            connect_done = Ref{Bool}(false)
+            connect_done = Threads.Atomic{Bool}(false)
             write_err = Ref{Int}(0)
-            write_done = Ref{Bool}(false)
+            write_done = Threads.Atomic{Bool}(false)
 
             on_accept = (listener, err, new_sock, ud) -> begin
                 accept_err[] = err
@@ -525,7 +525,7 @@ end
 
             accept_err = Ref{Int}(0)
             connect_err = Ref{Int}(0)
-            connect_done = Ref{Bool}(false)
+            connect_done = Threads.Atomic{Bool}(false)
 
             on_accept = (listener, err, new_sock, ud) -> begin
                 accept_err[] = err
@@ -638,7 +638,7 @@ end
 
             accept_err = Ref{Int}(0)
             connect_err = Ref{Int}(0)
-            connect_done = Ref{Bool}(false)
+            connect_done = Threads.Atomic{Bool}(false)
 
             on_accept = (listener, err, new_sock, ud) -> begin
                 accept_err[] = err
@@ -759,8 +759,7 @@ end
 end
 
 @testset "socket connect read write" begin
-    el_type = AwsIO.event_loop_get_default_type()
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions(; type = el_type))
+    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
     el_val = el isa AwsIO.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -794,12 +793,12 @@ end
         accept_err = Ref{Int}(0)
         read_err = Ref{Int}(0)
         payload = Ref{String}("")
-        read_done = Ref{Bool}(false)
+        read_done = Threads.Atomic{Bool}(false)
 
         connect_err = Ref{Int}(0)
-        connect_done = Ref{Bool}(false)
+        connect_done = Threads.Atomic{Bool}(false)
         write_err = Ref{Int}(0)
-        write_done = Ref{Bool}(false)
+        write_done = Threads.Atomic{Bool}(false)
 
         on_accept = (listener, err, new_sock, ud) -> begin
             accept_err[] = err
@@ -909,10 +908,8 @@ end
         return
     end
 
-    @test AwsIO._NW_SHIM_LIB != ""
     elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(;
         loop_count = 1,
-        type = AwsIO.EventLoopType.DISPATCH_QUEUE,
     ))
     elg_val = elg isa AwsIO.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
@@ -938,15 +935,15 @@ end
     accept_err = Ref{Int}(0)
     read_err = Ref{Int}(0)
     payload = Ref{String}("")
-    read_done = Ref{Bool}(false)
+    read_done = Threads.Atomic{Bool}(false)
 
     connect_err = Ref{Int}(0)
-    connect_done = Ref{Bool}(false)
+    connect_done = Threads.Atomic{Bool}(false)
     write_err = Ref{Int}(0)
-    write_done = Ref{Bool}(false)
+    write_done = Threads.Atomic{Bool}(false)
 
     port_ref = Ref{Int}(0)
-    accept_started = Ref(false)
+    accept_started = Threads.Atomic{Bool}(false)
 
     try
         if server_socket === nothing
@@ -1112,7 +1109,7 @@ end
                 return
             end
 
-            accept_done = Ref(false)
+            accept_done = Threads.Atomic{Bool}(false)
             on_accept = (listener, err, new_sock, ud) -> begin
                 accepted[] = new_sock
                 accept_done[] = true
@@ -1146,10 +1143,10 @@ end
                 return
             end
 
-            connect_done = Ref(false)
-            write_started = Ref(false)
-            write_cb_invoked = Ref(false)
-            write_cb_sync = Ref(false)
+            connect_done = Threads.Atomic{Bool}(false)
+            write_started = Threads.Atomic{Bool}(false)
+            write_cb_invoked = Threads.Atomic{Bool}(false)
+            write_cb_sync = Threads.Atomic{Bool}(false)
             write_err = Ref{Int}(0)
 
             connect_opts = AwsIO.SocketConnectOptions(
@@ -1226,7 +1223,7 @@ end
             return
         end
 
-        connect_done = Ref(false)
+        connect_done = Threads.Atomic{Bool}(false)
         connect_err = Ref{Int}(0)
         endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
         connect_opts = AwsIO.SocketConnectOptions(
@@ -1275,7 +1272,7 @@ end
             return
         end
 
-        connect_done = Ref(false)
+        connect_done = Threads.Atomic{Bool}(false)
         connect_err = Ref{Int}(0)
         endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
         connect_opts = AwsIO.SocketConnectOptions(
@@ -1330,9 +1327,9 @@ end
             return
         end
 
-        connect_done = Ref(false)
+        connect_done = Threads.Atomic{Bool}(false)
         connect_err = Ref{Int}(0)
-        cleanup_done = Ref(false)
+        cleanup_done = Threads.Atomic{Bool}(false)
         endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
         connect_opts = AwsIO.SocketConnectOptions(
             endpoint;
@@ -1393,9 +1390,9 @@ end
         end
 
         incoming = Ref{Any}(nothing)
-        accept_done = Ref(false)
+        accept_done = Threads.Atomic{Bool}(false)
         accept_err = Ref{Int}(0)
-        connect_done = Ref(false)
+        connect_done = Threads.Atomic{Bool}(false)
         connect_err = Ref{Int}(0)
         client_socket = nothing
 
@@ -1481,8 +1478,8 @@ end
         end
 
         accepted = Ref{Any}(nothing)
-        accept_done = Ref(false)
-        connect_done = Ref(false)
+        accept_done = Threads.Atomic{Bool}(false)
+        connect_done = Threads.Atomic{Bool}(false)
         client_socket = nothing
 
         try
@@ -1535,9 +1532,9 @@ end
             assign_res = AwsIO.socket_assign_to_event_loop(server_sock, el_val)
             @test !(assign_res isa AwsIO.ErrorResult)
 
-            write_done_client = Ref(false)
+            write_done_client = Threads.Atomic{Bool}(false)
             write_err_client = Ref{Int}(0)
-            write_done_server = Ref(false)
+            write_done_server = Threads.Atomic{Bool}(false)
             write_err_server = Ref{Int}(0)
 
             write_task_client = AwsIO.ScheduledTask((ctx, status) -> begin
@@ -1636,12 +1633,12 @@ end
             accept_err = Ref{Int}(0)
             read_err = Ref{Int}(0)
             payload = Ref{String}("")
-            read_done = Ref{Bool}(false)
+            read_done = Threads.Atomic{Bool}(false)
 
             connect_err = Ref{Int}(0)
-            connect_done = Ref{Bool}(false)
+            connect_done = Threads.Atomic{Bool}(false)
             write_err = Ref{Int}(0)
-            write_done = Ref{Bool}(false)
+            write_done = Threads.Atomic{Bool}(false)
 
             on_accept = (listener, err, new_sock, ud) -> begin
                 accept_err[] = err
@@ -1782,9 +1779,9 @@ end
             @test AwsIO.socket_listen(server_socket, 1024) === nothing
 
             accept_err = Ref{Int}(0)
-            accept_done = Ref(false)
+            accept_done = Threads.Atomic{Bool}(false)
             connect_err = Ref{Int}(0)
-            connect_done = Ref(false)
+            connect_done = Threads.Atomic{Bool}(false)
 
             client = AwsIO.socket_init(opts)
             client_socket = client isa AwsIO.Socket ? client : nothing
@@ -1874,7 +1871,7 @@ end
             @test !(assign_res isa AwsIO.ErrorResult)
 
             read_err = Ref{Int}(0)
-            read_done = Ref{Bool}(false)
+            read_done = Threads.Atomic{Bool}(false)
             payload = Ref{String}("")
             sub_res = AwsIO.socket_subscribe_to_readable_events(
                 server_socket, (sock, err, ud) -> begin
@@ -1904,9 +1901,9 @@ end
             end
 
             connect_err = Ref{Int}(0)
-            connect_done = Ref{Bool}(false)
+            connect_done = Threads.Atomic{Bool}(false)
             write_err = Ref{Int}(0)
-            write_done = Ref{Bool}(false)
+            write_done = Threads.Atomic{Bool}(false)
 
             connect_opts = AwsIO.SocketConnectOptions(
                 AwsIO.SocketEndpoint("127.0.0.1", port);
@@ -1990,7 +1987,7 @@ end
             @test !(assign_res isa AwsIO.ErrorResult)
 
             read_err = Ref{Int}(0)
-            read_done = Ref{Bool}(false)
+            read_done = Threads.Atomic{Bool}(false)
             payload = Ref{String}("")
             sub_res = AwsIO.socket_subscribe_to_readable_events(
                 server_socket, (sock, err, ud) -> begin
@@ -2023,9 +2020,9 @@ end
             @test AwsIO.socket_bind(client_socket, local_bind) === nothing
 
             connect_err = Ref{Int}(0)
-            connect_done = Ref{Bool}(false)
+            connect_done = Threads.Atomic{Bool}(false)
             write_err = Ref{Int}(0)
-            write_done = Ref{Bool}(false)
+            write_done = Threads.Atomic{Bool}(false)
 
             connect_opts = AwsIO.SocketConnectOptions(
                 AwsIO.SocketEndpoint("127.0.0.1", port);
@@ -2109,7 +2106,7 @@ end
             @test write_res isa AwsIO.ErrorResult
             write_res isa AwsIO.ErrorResult && @test write_res.code == AwsIO.ERROR_IO_EVENT_LOOP_THREAD_ONLY
 
-            close_done = Ref(false)
+            close_done = Threads.Atomic{Bool}(false)
             close_task = AwsIO.ScheduledTask((ctx, status) -> begin
                 AwsIO.socket_close(socket_val)
                 close_done[] = true
@@ -2304,7 +2301,7 @@ end
         isfile(local_path) && rm(local_path; force = true)
 
         err_code = Ref{Int}(0)
-        done = Ref{Bool}(false)
+        done = Threads.Atomic{Bool}(false)
         connect_opts = AwsIO.SocketConnectOptions(
             endpoint;
             event_loop = el_val,
@@ -2376,7 +2373,7 @@ end
         end
 
         err_code = Ref{Int}(0)
-        done = Ref{Bool}(false)
+        done = Threads.Atomic{Bool}(false)
         connect_opts = AwsIO.SocketConnectOptions(
             AwsIO.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,

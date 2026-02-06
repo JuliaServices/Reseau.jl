@@ -185,18 +185,18 @@ abstract type AbstractSocket end
 abstract type AbstractTlsConnectionOptions end
 
 # Socket connect options
-struct SocketConnectOptions{E <: Union{AbstractEventLoop, Nothing}, T <: Union{AbstractTlsConnectionOptions, Nothing}, F <: Union{SocketOnConnectionResultFn, Nothing}, U}
+struct SocketConnectOptions
     remote_endpoint::SocketEndpoint
-    event_loop::E  # nullable
-    on_connection_result::F  # nullable
-    user_data::U
-    tls_connection_options::T  # nullable
+    event_loop::Union{EventLoop, Nothing}
+    on_connection_result::Union{Function, Nothing}
+    user_data::Any
+    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
 end
 
 function SocketConnectOptions(
         remote_endpoint::SocketEndpoint;
-        event_loop::Union{AbstractEventLoop, Nothing} = nothing,
-        on_connection_result::Union{SocketOnConnectionResultFn, Nothing} = nothing,
+        event_loop = nothing,
+        on_connection_result = nothing,
         user_data = nothing,
         tls_connection_options = nothing,
     )
@@ -210,17 +210,17 @@ function SocketConnectOptions(
 end
 
 # Socket bind options
-struct SocketBindOptions{E <: Union{AbstractEventLoop, Nothing}, T <: Union{AbstractTlsConnectionOptions, Nothing}, U}
+struct SocketBindOptions
     local_endpoint::SocketEndpoint
-    user_data::U
-    event_loop::E  # nullable
-    tls_connection_options::T  # nullable
+    user_data::Any
+    event_loop::Union{EventLoop, Nothing}
+    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
 end
 
 function SocketBindOptions(
         local_endpoint::SocketEndpoint;
         user_data = nothing,
-        event_loop::Union{AbstractEventLoop, Nothing} = nothing,
+        event_loop = nothing,
         tls_connection_options = nothing,
     )
     return SocketBindOptions(
@@ -232,17 +232,17 @@ function SocketBindOptions(
 end
 
 # Socket listener options
-struct SocketListenerOptions{FR <: Union{SocketOnAcceptResultFn, Nothing}, UR, FS <: Union{SocketOnAcceptStartedFn, Nothing}, US}
-    on_accept_result::FR  # nullable
-    on_accept_result_user_data::UR
-    on_accept_start::FS  # nullable
-    on_accept_start_user_data::US
+struct SocketListenerOptions
+    on_accept_result::Union{Function, Nothing}
+    on_accept_result_user_data::Any
+    on_accept_start::Union{Function, Nothing}
+    on_accept_start_user_data::Any
 end
 
 function SocketListenerOptions(;
-        on_accept_result::Union{SocketOnAcceptResultFn, Nothing} = nothing,
+        on_accept_result = nothing,
         on_accept_result_user_data = nothing,
-        on_accept_start::Union{SocketOnAcceptStartedFn, Nothing} = nothing,
+        on_accept_start = nothing,
         on_accept_start_user_data = nothing,
     )
     return SocketListenerOptions(
@@ -257,21 +257,21 @@ end
 abstract type SocketVTable end
 
 # Socket struct - polymorphic socket with vtable dispatch
-mutable struct Socket{V <: SocketVTable, I, H <: Union{AbstractChannelHandler, Nothing}, FR <: Union{SocketOnReadableFn, Nothing}, UR, FC <: Union{SocketOnConnectionResultFn, Nothing}, FA <: Union{SocketOnAcceptResultFn, Nothing}, UA} <: AbstractSocket
+mutable struct Socket{V <: SocketVTable} <: AbstractSocket
     vtable::V
     local_endpoint::SocketEndpoint
     remote_endpoint::SocketEndpoint
     options::SocketOptions
     io_handle::IoHandle
-    event_loop::Union{EventLoop, Nothing}  # nullable
-    handler::H  # nullable
+    event_loop::Union{EventLoop, Nothing}
+    handler::Union{AbstractChannelHandler, Nothing}
     state::SocketState.T
-    readable_fn::FR  # nullable
-    readable_user_data::UR
-    connection_result_fn::FC  # nullable
-    accept_result_fn::FA  # nullable
-    connect_accept_user_data::UA
-    impl::Union{I, Nothing}  # Platform-specific implementation data
+    readable_fn::Union{Function, Nothing}
+    readable_user_data::Any
+    connection_result_fn::Union{Function, Nothing}
+    accept_result_fn::Union{Function, Nothing}
+    connect_accept_user_data::Any
+    impl::Any  # Platform-specific implementation data
 end
 
 # Vtable interface functions - must be implemented by platform-specific vtables

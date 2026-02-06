@@ -12,28 +12,17 @@ const OnServerListenerDestroyFn = Function     # (server_bootstrap, user_data) -
 const ChannelOnProtocolNegotiatedFn = Function # (new_slot, protocol::ByteBuffer, user_data) -> AbstractChannelHandler
 
 # Client bootstrap options
-struct ClientBootstrapOptions{
-    ELG,
-    HR,
-    SO,
-    TO,
-    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
-    FC <: Union{OnBootstrapChannelCreationFn, Nothing},
-    FS <: Union{OnBootstrapChannelSetupFn, Nothing},
-    FD <: Union{OnBootstrapChannelShutdownFn, Nothing},
-    U,
-    HRC <: Union{HostResolutionConfig, Nothing},
-}
-    event_loop_group::ELG
-    host_resolver::HR
-    host_resolution_config::HRC
-    socket_options::SO
-    tls_connection_options::TO
-    on_protocol_negotiated::FP
-    on_creation_callback::FC
-    on_setup_callback::FS  # nullable
-    on_shutdown_callback::FD  # nullable
-    user_data::U
+struct ClientBootstrapOptions
+    event_loop_group::EventLoopGroup
+    host_resolver::AbstractHostResolver
+    host_resolution_config::Union{HostResolutionConfig, Nothing}
+    socket_options::SocketOptions
+    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    on_protocol_negotiated::Union{Function, Nothing}
+    on_creation_callback::Union{Function, Nothing}
+    on_setup_callback::Union{Function, Nothing}
+    on_shutdown_callback::Union{Function, Nothing}
+    user_data::Any
 end
 
 function ClientBootstrapOptions(;
@@ -63,35 +52,22 @@ function ClientBootstrapOptions(;
 end
 
 # Client bootstrap - for creating outgoing connections
-mutable struct ClientBootstrap{
-    ELG,
-    HR,
-    TO,
-    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
-    FC <: Union{OnBootstrapChannelCreationFn, Nothing},
-    FS <: Union{OnBootstrapChannelSetupFn, Nothing},
-    FD <: Union{OnBootstrapChannelShutdownFn, Nothing},
-    U,
-    HRC <: Union{HostResolutionConfig, Nothing},
-}
-    event_loop_group::ELG
-    host_resolver::HR
-    host_resolution_config::HRC
+mutable struct ClientBootstrap
+    event_loop_group::EventLoopGroup
+    host_resolver::AbstractHostResolver
+    host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
-    tls_connection_options::TO
-    on_protocol_negotiated::FP
-    on_creation_callback::FC
-    on_setup_callback::FS  # nullable
-    on_shutdown_callback::FD  # nullable
-    user_data::U
+    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    on_protocol_negotiated::Union{Function, Nothing}
+    on_creation_callback::Union{Function, Nothing}
+    on_setup_callback::Union{Function, Nothing}
+    on_shutdown_callback::Union{Function, Nothing}
+    user_data::Any
     @atomic shutdown::Bool
 end
 
-function ClientBootstrap(
-        options::ClientBootstrapOptions{ELG, HR, SO, TO, FP, FC, FS, FD, U, HRC},
-    ) where {ELG, HR, SO, TO, FP, FC, FS, FD, U, HRC}
-    CBT = ClientBootstrap{ELG, HR, TO, FP, FC, FS, FD, U, HRC}
-    bootstrap = CBT(
+function ClientBootstrap(options::ClientBootstrapOptions)
+    bootstrap = ClientBootstrap(
         options.event_loop_group,
         options.host_resolver,
         options.host_resolution_config,
@@ -137,12 +113,7 @@ function _install_protocol_handler_from_socket(
 end
 
 # Connection request tracking
-mutable struct SocketConnectionRequest{
-    CB,
-    TO,
-    U,
-    EL <: Union{AbstractEventLoop, Nothing},
-}
+mutable struct SocketConnectionRequest{CB, TO, U}
     bootstrap::CB
     host::String
     port::UInt32
@@ -156,8 +127,8 @@ mutable struct SocketConnectionRequest{
     on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing}  # nullable
     user_data::U
     enable_read_back_pressure::Bool
-    requested_event_loop::EL
-    event_loop::Union{AbstractEventLoop, Nothing}
+    requested_event_loop::Union{EventLoop, Nothing}
+    event_loop::Union{EventLoop, Nothing}
     addresses::Vector{HostAddress}
     addresses_count::Int
     failed_count::Int
@@ -182,7 +153,7 @@ function client_bootstrap_connect!(
         on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing} = bootstrap.on_shutdown_callback,
         user_data = bootstrap.user_data,
         enable_read_back_pressure::Bool = false,
-        requested_event_loop::Union{AbstractEventLoop, Nothing} = nothing,
+        requested_event_loop::Union{EventLoop, Nothing} = nothing,
         host_resolution_config::Union{HostResolutionConfig, Nothing} = bootstrap.host_resolution_config,
     )::Union{Nothing, ErrorResult}
     if @atomic bootstrap.shutdown
@@ -246,7 +217,7 @@ function client_bootstrap_connect!(
     return nothing
 end
 
-function _event_loop_group_contains_loop(elg, event_loop::AbstractEventLoop)::Bool
+function _event_loop_group_contains_loop(elg, event_loop::EventLoop)::Bool
     count = Int(event_loop_group_get_loop_count(elg))
     for idx in 0:(count - 1)
         loop = event_loop_group_get_loop_at(elg, idx)
@@ -257,7 +228,7 @@ function _event_loop_group_contains_loop(elg, event_loop::AbstractEventLoop)::Bo
     return false
 end
 
-function _get_connection_event_loop(request::SocketConnectionRequest)::Union{AbstractEventLoop, Nothing}
+function _get_connection_event_loop(request::SocketConnectionRequest)::Union{EventLoop, Nothing}
     request.event_loop !== nothing && return request.event_loop
     request.event_loop = request.requested_event_loop === nothing ?
         event_loop_group_get_next_loop(request.bootstrap.event_loop_group) :
@@ -318,7 +289,7 @@ end
 function _start_connection_attempts(
         request::SocketConnectionRequest,
         addresses::Vector{HostAddress},
-        event_loop::AbstractEventLoop,
+        event_loop::EventLoop,
     )
     request.event_loop = event_loop
     request.addresses = addresses
@@ -705,28 +676,18 @@ end
 # =============================================================================
 
 # Server bootstrap options
-struct ServerBootstrapOptions{
-    ELG,
-    SO,
-    TO,
-    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
-    FL <: Union{OnServerListenerSetupFn, Nothing},
-    FS <: Union{OnIncomingChannelSetupFn, Nothing},
-    FD <: Union{OnIncomingChannelShutdownFn, Nothing},
-    FDest <: Union{OnServerListenerDestroyFn, Nothing},
-    U,
-}
-    event_loop_group::ELG
-    socket_options::SO
+struct ServerBootstrapOptions
+    event_loop_group::EventLoopGroup
+    socket_options::SocketOptions
     host::String
     port::UInt32
-    tls_connection_options::TO
-    on_protocol_negotiated::FP
-    on_listener_setup::FL  # nullable
-    on_incoming_channel_setup::FS  # nullable
-    on_incoming_channel_shutdown::FD  # nullable
-    on_listener_destroy::FDest  # nullable
-    user_data::U
+    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    on_protocol_negotiated::Union{Function, Nothing}
+    on_listener_setup::Union{Function, Nothing}
+    on_incoming_channel_setup::Union{Function, Nothing}
+    on_incoming_channel_shutdown::Union{Function, Nothing}
+    on_listener_destroy::Union{Function, Nothing}
+    user_data::Any
     enable_read_back_pressure::Bool
 end
 
@@ -761,27 +722,18 @@ function ServerBootstrapOptions(;
 end
 
 # Server bootstrap - for accepting incoming connections
-mutable struct ServerBootstrap{
-    ELG,
-    TO,
-    FP <: Union{ChannelOnProtocolNegotiatedFn, Nothing},
-    FL <: Union{OnServerListenerSetupFn, Nothing},
-    FS <: Union{OnIncomingChannelSetupFn, Nothing},
-    FD <: Union{OnIncomingChannelShutdownFn, Nothing},
-    FDest <: Union{OnServerListenerDestroyFn, Nothing},
-    U,
-}
-    event_loop_group::ELG
+mutable struct ServerBootstrap
+    event_loop_group::EventLoopGroup
     socket_options::SocketOptions
-    listener_socket::Union{Socket, Nothing}  # nullable
-    listener_event_loop::Union{EventLoop, Nothing}  # nullable
-    tls_connection_options::TO
-    on_protocol_negotiated::FP
-    on_listener_setup::FL  # nullable
-    on_incoming_channel_setup::FS  # nullable
-    on_incoming_channel_shutdown::FD  # nullable
-    on_listener_destroy::FDest  # nullable
-    user_data::U
+    listener_socket::Union{Socket, Nothing}
+    listener_event_loop::Union{EventLoop, Nothing}
+    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    on_protocol_negotiated::Union{Function, Nothing}
+    on_listener_setup::Union{Function, Nothing}
+    on_incoming_channel_setup::Union{Function, Nothing}
+    on_incoming_channel_shutdown::Union{Function, Nothing}
+    on_listener_destroy::Union{Function, Nothing}
+    user_data::Any
     enable_read_back_pressure::Bool
     @atomic inflight_channels::Int
     @atomic listener_closed::Bool
@@ -789,11 +741,8 @@ mutable struct ServerBootstrap{
     @atomic shutdown::Bool
 end
 
-function ServerBootstrap(
-        options::ServerBootstrapOptions{ELG, SO, TO, FP, FL, FS, FD, FDest, U},
-    ) where {ELG, SO, TO, FP, FL, FS, FD, FDest, U}
-    SBT = ServerBootstrap{ELG, TO, FP, FL, FS, FD, FDest, U}
-    bootstrap = SBT(
+function ServerBootstrap(options::ServerBootstrapOptions)
+    bootstrap = ServerBootstrap(
         options.event_loop_group,
         options.socket_options,
         nothing,

@@ -39,10 +39,6 @@ struct LogSubjectInfo
     subject_description::String
 end
 
-struct LogSubjectInfoList
-    subject_list::Memory{LogSubjectInfo}
-end
-
 const LS_COMMON_GENERAL = LOG_SUBJECT_BEGIN_RANGE(COMMON_PACKAGE_ID)
 const LS_COMMON_TASK_SCHEDULER = LS_COMMON_GENERAL + 1
 const LS_COMMON_THREAD = LS_COMMON_GENERAL + 2

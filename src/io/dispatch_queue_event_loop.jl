@@ -57,7 +57,7 @@
         return DispatchLoop(C_NULL, TaskScheduler(), nothing, DispatchLoopSyncedData())
     end
 
-    const DispatchQueueEventLoop = EventLoop{DispatchLoop, LD, Clock} where {LD, Clock}
+    const DispatchQueueEventLoop = EventLoop{DispatchLoop}
 
     @inline function _dispatch_lock(loop::DispatchLoop)
         return lock(loop.synced_data.synced_data_lock)
@@ -239,20 +239,21 @@
     end
 
     function _dispatch_run_iteration_c(entry_ptr::Ptr{Cvoid})
-        entry = unsafe_pointer_to_objref(entry_ptr)::ScheduledIterationEntry
-        _dispatch_run_iteration(entry)
+        try
+            entry = unsafe_pointer_to_objref(entry_ptr)::ScheduledIterationEntry
+            _dispatch_run_iteration(entry)
+        catch ex
+            try
+                @error "Fatal error in dispatch queue iteration" exception=(ex, catch_backtrace())
+            catch; end
+        end
         return nothing
     end
 
     const DISPATCH_RUN_ITERATION_C = Ref{dispatch_function_t}(C_NULL)
 
     function _dispatch_run_iteration_ptr()
-        ptr = DISPATCH_RUN_ITERATION_C[]
-        if ptr == C_NULL
-            DISPATCH_RUN_ITERATION_C[] = @cfunction(_dispatch_run_iteration_c, Cvoid, (Ptr{Cvoid},))
-            ptr = DISPATCH_RUN_ITERATION_C[]
-        end
-        return ptr
+        return DISPATCH_RUN_ITERATION_C[]
     end
 
     function _dispatch_queue_purge_cross_thread_tasks!(dispatch_loop::DispatchLoop)

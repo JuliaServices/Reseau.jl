@@ -1,3 +1,5 @@
+begin
+
 using Test
 using AwsIO
 
@@ -298,3 +300,5 @@ end
     AwsIO.host_resolver_shutdown!(resolver)
     AwsIO.event_loop_group_destroy!(elg)
 end
+
+end # begin

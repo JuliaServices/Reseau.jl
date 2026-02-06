@@ -1,15 +1,8 @@
-struct HashEq{H, Eq}
-    hash::H
-    eq::Eq
-end
-
-struct NoopDestroy end
-(::NoopDestroy)(_) = nothing
-
-mutable struct HashTable{K, V, HE, OnKeyDestroy, OnValDestroy}
-    hash_eq::HE
-    on_key_destroy::OnKeyDestroy
-    on_val_destroy::OnValDestroy
+mutable struct HashTable{K, V}
+    hash_fn::Function
+    eq_fn::Function
+    on_key_destroy::Union{Function, Nothing}
+    on_val_destroy::Union{Function, Nothing}
     keys::Memory{K}
     values::Memory{V}
     hashes::Memory{UInt64}
@@ -36,12 +29,12 @@ end
 end
 
 function HashTable{K, V}(
-        hash_eq::HashEq{H, Eq};
+        hash_fn, eq_fn;
         capacity::Integer = 16,
         max_load_factor::Real = 0.75,
-        on_key_destroy::OnKeyDestroy = NoopDestroy(),
-        on_val_destroy::OnValDestroy = NoopDestroy(),
-    ) where {K, V, H, Eq, OnKeyDestroy, OnValDestroy}
+        on_key_destroy = nothing,
+        on_val_destroy = nothing,
+    ) where {K, V}
     cap = max(2, _next_pow2(Int(capacity)))
     keys = Memory{K}(undef, cap)
     values = Memory{V}(undef, cap)
@@ -51,8 +44,9 @@ function HashTable{K, V}(
         states[i] = _HASH_EMPTY
     end
     max_load = floor(Int, cap * float(max_load_factor))
-    return HashTable{K, V, HashEq{H, Eq}, OnKeyDestroy, OnValDestroy}(
-        hash_eq,
+    return HashTable{K, V}(
+        hash_fn,
+        eq_fn,
         on_key_destroy,
         on_val_destroy,
         keys,
@@ -66,14 +60,10 @@ function HashTable{K, V}(
     )
 end
 
-function HashTable{K, V}(hash_fn, eq_fn; kwargs...) where {K, V}
-    return HashTable{K, V}(HashEq(hash_fn, eq_fn); kwargs...)
-end
-
 @inline Base.length(table::HashTable) = table.size
 
 function _find_slot(table::HashTable{K, V}, key) where {K, V}
-    hash = UInt64(table.hash_eq.hash(key))
+    hash = UInt64(table.hash_fn(key))
     cap = table.capacity
     idx = _hash_index(hash, cap)
     first_tombstone = 0
@@ -87,7 +77,7 @@ function _find_slot(table::HashTable{K, V}, key) where {K, V}
         elseif state == _HASH_TOMBSTONE
             first_tombstone == 0 && (first_tombstone = slot)
         else
-            if table.hashes[slot] == hash && table.hash_eq.eq(table.keys[slot], key)
+            if table.hashes[slot] == hash && table.eq_fn(table.keys[slot], key)
                 return true, slot, hash
             end
         end
@@ -161,9 +151,9 @@ function hash_table_put!(table::HashTable{K, V}, key::K, value::V) where {K, V}
     if found
         existing_key = table.keys[slot]
         existing_val = table.values[slot]
-        table.on_val_destroy(existing_val)
+        table.on_val_destroy !== nothing && table.on_val_destroy(existing_val)
         if key !== existing_key
-            table.on_key_destroy(existing_key)
+            table.on_key_destroy !== nothing && table.on_key_destroy(existing_key)
         end
         table.keys[slot] = key
         table.values[slot] = value
@@ -218,8 +208,8 @@ end
 function hash_table_remove!(table::HashTable, key)
     found, slot, _ = _find_slot(table, key)
     found || return nothing
-    table.on_key_destroy(table.keys[slot])
-    table.on_val_destroy(table.values[slot])
+    table.on_key_destroy !== nothing && table.on_key_destroy(table.keys[slot])
+    table.on_val_destroy !== nothing && table.on_val_destroy(table.values[slot])
     table.states[slot] = _HASH_TOMBSTONE
     table.size -= 1
     return OP_SUCCESS
@@ -228,8 +218,8 @@ end
 function hash_table_clear!(table::HashTable)
     for i in 1:table.capacity
         if table.states[i] == _HASH_FILLED
-            table.on_key_destroy(table.keys[i])
-            table.on_val_destroy(table.values[i])
+            table.on_key_destroy !== nothing && table.on_key_destroy(table.keys[i])
+            table.on_val_destroy !== nothing && table.on_val_destroy(table.values[i])
         end
         table.states[i] = _HASH_EMPTY
     end

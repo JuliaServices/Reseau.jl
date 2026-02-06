@@ -66,11 +66,11 @@ AwsIO.close!(::TestStatisticsHandler) = nothing
 function AwsIO.process_statistics(
         handler::TestStatisticsHandler,
         interval::AwsIO.StatisticsSampleInterval,
-        stats_list::AwsIO.ArrayList,
+        stats_list::AbstractVector,
     )
     stats = Vector{Any}(undef, length(stats_list))
     for i in 1:length(stats_list)
-        entry = stats_list.data[i]
+        entry = stats_list[i]
         if entry isa AwsIO.SocketHandlerStatistics
             copy_entry = AwsIO.SocketHandlerStatistics()
             copy_entry.category = entry.category

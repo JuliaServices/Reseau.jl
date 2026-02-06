@@ -126,7 +126,7 @@ end
 # Always schedules the callback asynchronously.
 function future_on_event_loop!(
         future::Future,
-        event_loop::AbstractEventLoop,
+        event_loop::EventLoop,
         callback::OnFutureCompleteFn,
         user_data = nothing,
     )

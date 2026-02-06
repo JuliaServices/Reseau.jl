@@ -8,49 +8,28 @@ const ERROR_ENUM_STRIDE = 1 << ERROR_ENUM_STRIDE_BITS
 ERROR_ENUM_BEGIN_RANGE(x) = x * ERROR_ENUM_STRIDE
 ERROR_ENUM_END_RANGE(x) = ((x + 1) * ERROR_ENUM_STRIDE) - 1
 
-const PACKAGE_SLOTS = 32
 const COMMON_PACKAGE_ID = 0
 
 struct ErrorResult
     code::Int
 end
 
-struct error_info
-    error_code::Cint
-    literal_name::Ptr{UInt8}
-    error_str::Ptr{UInt8}
-    lib_name::Ptr{UInt8}
-    formatted_name::Ptr{UInt8}
+struct ErrorInfo
+    literal_name::String
+    error_str::String
+    lib_name::String
+    formatted_name::String
 end
 
-struct error_info_list
-    error_list::Ptr{error_info}
-    count::UInt16
-end
+const _error_registry = Dict{Int, ErrorInfo}()
+const _unknown_error_str = "Unknown Error Code"
 
-function _cstring(str::AbstractString)
-    bytes = codeunits(str)
-    storage = Libc.malloc(length(bytes) + 1)
-    panic_oom(storage, "Out of memory allocating error string")
-    ptr = Ptr{UInt8}(storage)
-    GC.@preserve bytes begin
-        Base.unsafe_copyto!(ptr, pointer(bytes), length(bytes))
+function _register_errors!(defs, lib_name::AbstractString)
+    for (name, code, msg) in defs
+        formatted = string(lib_name, ": ", name, ", ", msg)
+        _error_registry[Int(code)] = ErrorInfo(name, msg, lib_name, formatted)
     end
-    unsafe_store!(ptr + length(bytes), 0x00)
-    return ptr
-end
-
-const _unknown_error_ptr = _cstring("Unknown Error Code")
-
-function _define_error_info(code::Integer, literal::AbstractString, err_str::AbstractString, lib_name::AbstractString)
-    formatted = string(lib_name, ": ", literal, ", ", err_str)
-    return error_info(
-        Cint(code),
-        _cstring(literal),
-        _cstring(err_str),
-        _cstring(lib_name),
-        _cstring(formatted),
-    )
+    return nothing
 end
 
 const ERROR_SUCCESS = ERROR_ENUM_BEGIN_RANGE(COMMON_PACKAGE_ID)
@@ -123,13 +102,6 @@ const _thread_handler = SmallRegistry{UInt64, Function}()
 
 const _global_handler = Ref{Union{Nothing, Function}}(nothing)
 
-const _error_slots = let slots = Memory{Ptr{error_info_list}}(undef, PACKAGE_SLOTS)
-    for i in 1:PACKAGE_SLOTS
-        slots[i] = Ptr{error_info_list}(C_NULL)
-    end
-    slots
-end
-
 @inline function _error_thread_key()
     return UInt64(thread_current_thread_id())
 end
@@ -148,42 +120,24 @@ function _set_last_error(err::Int)
     return nothing
 end
 
-function _get_error_by_code(err::Int)
-    if err < 0 || err >= ERROR_ENUM_STRIDE * PACKAGE_SLOTS
-        return Ptr{error_info}(C_NULL)
-    end
-    slot_index = (err >>> ERROR_ENUM_STRIDE_BITS) + 1
-    error_index = err & (ERROR_ENUM_STRIDE - 1)
-    slot = _error_slots[slot_index]
-    if slot == C_NULL
-        return Ptr{error_info}(C_NULL)
-    end
-    list = unsafe_load(slot)
-    count = Int(list.count)
-    if error_index >= count
-        return Ptr{error_info}(C_NULL)
-    end
-    return list.error_list + error_index * sizeof(error_info)
-end
-
 function error_str(err::Int)
-    info = _get_error_by_code(err)
-    return info == C_NULL ? _unknown_error_ptr : unsafe_load(info).error_str
+    info = get(_error_registry, err, nothing)
+    return info === nothing ? _unknown_error_str : info.error_str
 end
 
 function error_name(err::Int)
-    info = _get_error_by_code(err)
-    return info == C_NULL ? _unknown_error_ptr : unsafe_load(info).literal_name
+    info = get(_error_registry, err, nothing)
+    return info === nothing ? _unknown_error_str : info.literal_name
 end
 
 function error_lib_name(err::Int)
-    info = _get_error_by_code(err)
-    return info == C_NULL ? _unknown_error_ptr : unsafe_load(info).lib_name
+    info = get(_error_registry, err, nothing)
+    return info === nothing ? _unknown_error_str : info.lib_name
 end
 
 function error_debug_str(err::Int)
-    info = _get_error_by_code(err)
-    return info == C_NULL ? _unknown_error_ptr : unsafe_load(info).formatted_name
+    info = get(_error_registry, err, nothing)
+    return info === nothing ? _unknown_error_str : info.formatted_name
 end
 
 function raise_error_private(err::Int)
@@ -229,50 +183,6 @@ function set_thread_local_error_handler(handler)
         registry_set!(_thread_handler, tid, handler)
     end
     return old
-end
-
-function register_error_info(error_info::Ptr{error_info_list})
-    fatal_assert_bool(error_info != C_NULL, "error_info", "<unknown>", 0)
-    info_val = unsafe_load(error_info)
-    fatal_assert_bool(info_val.error_list != C_NULL, "error_list", "<unknown>", 0)
-    fatal_assert_bool(info_val.count > 0, "count", "<unknown>", 0)
-
-    min_range = Int(unsafe_load(info_val.error_list).error_code)
-    slot_index = (min_range >>> ERROR_ENUM_STRIDE_BITS) + 1
-    if slot_index < 1 || slot_index > PACKAGE_SLOTS
-        fatal_assert("Bad error slot index", "<unknown>", 0)
-    end
-
-    if DEBUG_BUILD[]
-        expected_first = (slot_index - 1) << ERROR_ENUM_STRIDE_BITS
-        if min_range != expected_first
-            fatal_assert("Missing info: first error out of sync", "<unknown>", 0)
-        end
-        for i in 0:(Int(info_val.count) - 1)
-            expected = min_range + i
-            info = unsafe_load(info_val.error_list, i + 1)
-            if Int(info.error_code) != expected
-                fatal_assert("Error info out of sync", "<unknown>", 0)
-            end
-        end
-    end
-
-    _error_slots[slot_index] = error_info
-    return nothing
-end
-
-function unregister_error_info(error_info::Ptr{error_info_list})
-    fatal_assert_bool(error_info != C_NULL, "error_info", "<unknown>", 0)
-    info_val = unsafe_load(error_info)
-    fatal_assert_bool(info_val.error_list != C_NULL, "error_list", "<unknown>", 0)
-    fatal_assert_bool(info_val.count > 0, "count", "<unknown>", 0)
-    min_range = Int(unsafe_load(info_val.error_list).error_code)
-    slot_index = (min_range >>> ERROR_ENUM_STRIDE_BITS) + 1
-    if slot_index < 1 || slot_index > PACKAGE_SLOTS
-        fatal_assert("Bad error slot index", "<unknown>", 0)
-    end
-    _error_slots[slot_index] = Ptr{error_info_list}(C_NULL)
-    return nothing
 end
 
 function translate_and_raise_io_error_or(error_no::Integer, fallback_error_code::Integer)

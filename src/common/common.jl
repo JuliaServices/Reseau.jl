@@ -1,5 +1,3 @@
-const _common_library_initialized = Ref{Bool}(false)
-
 const _common_error_definitions = [
     ("ERROR_SUCCESS", ERROR_SUCCESS, "Success."),
     ("ERROR_OOM", ERROR_OOM, "Out of memory."),
@@ -65,105 +63,33 @@ const _common_error_definitions = [
     ("ERROR_CBOR_UNEXPECTED_TYPE", ERROR_CBOR_UNEXPECTED_TYPE, "Unexpected cbor type encountered."),
 ]
 
-const _common_error_entries = let
-    count = ERROR_CBOR_UNEXPECTED_TYPE - ERROR_SUCCESS + 1
-    # Use Vector here to keep stable pointers for the error registry.
-    entries = Vector{error_info}(undef, count)
-    for (name, code, msg) in _common_error_definitions
-        idx = code - ERROR_SUCCESS + 1
-        entries[idx] = _define_error_info(code, name, msg, "aws-c-common")
-    end
-    entries
+# Register common errors at module load time
+_register_errors!(_common_error_definitions, "aws-c-common")
+
+const _common_log_subject_infos = (
+    LogSubjectInfo(LS_COMMON_GENERAL, "aws-c-common", "Subject for aws-c-common logging that doesn't belong to any particular category"),
+    LogSubjectInfo(LS_COMMON_TASK_SCHEDULER, "task-scheduler", "Subject for task scheduler or task specific logging."),
+    LogSubjectInfo(LS_COMMON_THREAD, "thread", "Subject for logging thread related functions."),
+    LogSubjectInfo(LS_COMMON_MEMTRACE, "memtrace", "Output from the mem_trace_dump function"),
+    LogSubjectInfo(LS_COMMON_XML_PARSER, "xml-parser", "Subject for xml parser specific logging."),
+    LogSubjectInfo(LS_COMMON_IO, "common-io", "Common IO utilities"),
+    LogSubjectInfo(LS_COMMON_BUS, "bus", "Message bus"),
+    LogSubjectInfo(LS_COMMON_TEST, "test", "Unit/integration testing"),
+    LogSubjectInfo(LS_COMMON_JSON_PARSER, "json-parser", "Subject for json parser specific logging"),
+    LogSubjectInfo(LS_COMMON_CBOR, "cbor", "Subject for CBOR encode and decode"),
+)
+
+# Register common log subjects at module load time
+for info in _common_log_subject_infos
+    registry_set!(_log_subject_registry, info.subject_id, info)
 end
-
-const _common_error_list_ref = Ref{error_info_list}()
-
-function _init_common_error_list!()
-    _common_error_list_ref[] = error_info_list(
-        pointer(_common_error_entries),
-        UInt16(length(_common_error_entries)),
-    )
-    return nothing
-end
-
-const _common_log_subject_infos = let infos = Memory{LogSubjectInfo}(undef, 10)
-    infos[1] = LogSubjectInfo(
-        LS_COMMON_GENERAL,
-        "aws-c-common",
-        "Subject for aws-c-common logging that doesn't belong to any particular category",
-    )
-    infos[2] = LogSubjectInfo(
-        LS_COMMON_TASK_SCHEDULER,
-        "task-scheduler",
-        "Subject for task scheduler or task specific logging.",
-    )
-    infos[3] = LogSubjectInfo(
-        LS_COMMON_THREAD,
-        "thread",
-        "Subject for logging thread related functions.",
-    )
-    infos[4] = LogSubjectInfo(
-        LS_COMMON_MEMTRACE,
-        "memtrace",
-        "Output from the mem_trace_dump function",
-    )
-    infos[5] = LogSubjectInfo(
-        LS_COMMON_XML_PARSER,
-        "xml-parser",
-        "Subject for xml parser specific logging.",
-    )
-    infos[6] = LogSubjectInfo(
-        LS_COMMON_IO,
-        "common-io",
-        "Common IO utilities",
-    )
-    infos[7] = LogSubjectInfo(
-        LS_COMMON_BUS,
-        "bus",
-        "Message bus",
-    )
-    infos[8] = LogSubjectInfo(
-        LS_COMMON_TEST,
-        "test",
-        "Unit/integration testing",
-    )
-    infos[9] = LogSubjectInfo(
-        LS_COMMON_JSON_PARSER,
-        "json-parser",
-        "Subject for json parser specific logging",
-    )
-    infos[10] = LogSubjectInfo(
-        LS_COMMON_CBOR,
-        "cbor",
-        "Subject for CBOR encode and decode",
-    )
-    infos
-end
-
-const _common_log_subject_list = LogSubjectInfoList(_common_log_subject_infos)
 
 function _common_init()
-    _common_library_initialized[] && return nothing
-    _init_common_error_list!()
-    register_error_info(Base.unsafe_convert(Ptr{error_info_list}, _common_error_list_ref))
-    register_log_subject_info_list(_common_log_subject_list)
     thread_initialize_thread_management()
-    _common_library_initialized[] = true
     return nothing
 end
 
 function _common_cleanup()
-    !_common_library_initialized[] && return nothing
     thread_join_all_managed()
-    unregister_error_info(Base.unsafe_convert(Ptr{error_info_list}, _common_error_list_ref))
-    unregister_log_subject_info_list(_common_log_subject_list)
-    _common_library_initialized[] = false
-    return nothing
-end
-
-function common_fatal_assert_library_initialized()
-    if !_common_library_initialized[]
-        fatal_assert("common init must be called first", "<unknown>", 0)
-    end
     return nothing
 end

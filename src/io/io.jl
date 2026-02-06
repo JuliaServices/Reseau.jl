@@ -231,7 +231,6 @@ io_handle_is_valid(handle::IoHandle) = handle.fd >= 0 || handle.handle != C_NULL
 # Forward declarations for types defined in other io files
 abstract type AbstractChannel end
 abstract type AbstractChannelHandler end
-abstract type AbstractEventLoop end
 
 # IO Message - data unit flowing through channel pipeline
 mutable struct IoMessage
@@ -240,7 +239,7 @@ mutable struct IoMessage
     message_tag::Int32
     copy_mark::Csize_t
     owning_channel::Union{AbstractChannel, Nothing}  # nullable
-    on_completion::Any
+    on_completion::Union{Function, Nothing}
     user_data::Any
     # Intrusive list node for queueing
     queueing_handle_next::Union{IoMessage, Nothing}  # nullable
@@ -492,66 +491,32 @@ end
 using LibAwsCal
 using LibAwsCommon
 
-const _io_error_entries_ref = Ref{Union{Nothing, Memory{error_info}}}(nothing)
+# Register IO errors at module load time
+_register_errors!(_io_error_definitions, "aws-c-io")
 
-const _io_error_list_ref = Ref{error_info_list}()
+const _io_log_subject_infos = (
+    LogSubjectInfo(LS_IO_GENERAL, "aws-c-io", "Subject for IO logging that doesn't belong to any particular category"),
+    LogSubjectInfo(LS_IO_EVENT_LOOP, "event-loop", "Subject for Event-loop specific logging."),
+    LogSubjectInfo(LS_IO_SOCKET, "socket", "Subject for Socket specific logging."),
+    LogSubjectInfo(LS_IO_SOCKET_HANDLER, "socket-handler", "Subject for a socket channel handler."),
+    LogSubjectInfo(LS_IO_TLS, "tls-handler", "Subject for TLS-related logging"),
+    LogSubjectInfo(LS_IO_ALPN, "alpn", "Subject for ALPN-related logging"),
+    LogSubjectInfo(LS_IO_DNS, "dns", "Subject for DNS-related logging"),
+    LogSubjectInfo(LS_IO_PKI, "pki-utils", "Subject for Pki utilities."),
+    LogSubjectInfo(LS_IO_CHANNEL, "channel", "Subject for Channels"),
+    LogSubjectInfo(LS_IO_CHANNEL_BOOTSTRAP, "channel-bootstrap", "Subject for channel bootstrap (client and server modes)"),
+    LogSubjectInfo(LS_IO_FILE_UTILS, "file-utils", "Subject for file operations"),
+    LogSubjectInfo(LS_IO_SHARED_LIBRARY, "shared-library", "Subject for shared library operations"),
+    LogSubjectInfo(LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY, "exp-backoff-strategy", "Subject for exponential backoff retry strategy"),
+    LogSubjectInfo(LS_IO_STANDARD_RETRY_STRATEGY, "standard-retry-strategy", "Subject for standard retry strategy"),
+    LogSubjectInfo(LS_IO_PKCS11, "pkcs11", "Subject for PKCS#11 library operations"),
+    LogSubjectInfo(LS_IO_PEM, "pem", "Subject for pem operations"),
+)
 
-function _init_io_error_list!()
-    entries = _io_error_entries_ref[]
-    if entries === nothing
-        count = ERROR_IO_DNS_QUERY_AGAIN - ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT + 1
-        # Use Memory here for fixed-size storage and stable pointers for the error registry.
-        entries = Memory{error_info}(undef, count)
-        for (name, code, msg) in _io_error_definitions
-            idx = code - ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT + 1
-            entries[idx] = _define_error_info(code, name, msg, "aws-c-io")
-        end
-        _io_error_entries_ref[] = entries
-    end
-    _io_error_list_ref[] = error_info_list(
-        pointer(entries),
-        UInt16(length(entries)),
-    )
-    return nothing
+# Register IO log subjects at module load time
+for info in _io_log_subject_infos
+    registry_set!(_log_subject_registry, info.subject_id, info)
 end
-
-const _io_log_subject_infos = let infos = Memory{LogSubjectInfo}(undef, 16)
-    infos[1] = LogSubjectInfo(
-        LS_IO_GENERAL,
-        "aws-c-io",
-        "Subject for IO logging that doesn't belong to any particular category",
-    )
-    infos[2] = LogSubjectInfo(LS_IO_EVENT_LOOP, "event-loop", "Subject for Event-loop specific logging.")
-    infos[3] = LogSubjectInfo(LS_IO_SOCKET, "socket", "Subject for Socket specific logging.")
-    infos[4] = LogSubjectInfo(LS_IO_SOCKET_HANDLER, "socket-handler", "Subject for a socket channel handler.")
-    infos[5] = LogSubjectInfo(LS_IO_TLS, "tls-handler", "Subject for TLS-related logging")
-    infos[6] = LogSubjectInfo(LS_IO_ALPN, "alpn", "Subject for ALPN-related logging")
-    infos[7] = LogSubjectInfo(LS_IO_DNS, "dns", "Subject for DNS-related logging")
-    infos[8] = LogSubjectInfo(LS_IO_PKI, "pki-utils", "Subject for Pki utilities.")
-    infos[9] = LogSubjectInfo(LS_IO_CHANNEL, "channel", "Subject for Channels")
-    infos[10] = LogSubjectInfo(
-        LS_IO_CHANNEL_BOOTSTRAP,
-        "channel-bootstrap",
-        "Subject for channel bootstrap (client and server modes)",
-    )
-    infos[11] = LogSubjectInfo(LS_IO_FILE_UTILS, "file-utils", "Subject for file operations")
-    infos[12] = LogSubjectInfo(LS_IO_SHARED_LIBRARY, "shared-library", "Subject for shared library operations")
-    infos[13] = LogSubjectInfo(
-        LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "exp-backoff-strategy",
-        "Subject for exponential backoff retry strategy",
-    )
-    infos[14] = LogSubjectInfo(
-        LS_IO_STANDARD_RETRY_STRATEGY,
-        "standard-retry-strategy",
-        "Subject for standard retry strategy",
-    )
-    infos[15] = LogSubjectInfo(LS_IO_PKCS11, "pkcs11", "Subject for PKCS#11 library operations")
-    infos[16] = LogSubjectInfo(LS_IO_PEM, "pem", "Subject for pem operations")
-    infos
-end
-
-const _io_log_subject_list = LogSubjectInfoList(_io_log_subject_infos)
 
 const _cal_library_initialized = Ref(false)
 
@@ -579,9 +544,6 @@ function io_library_init()
     _io_library_initialized[] = true
     _common_init()
     _cal_init()
-    _init_io_error_list!()
-    register_error_info(Base.unsafe_convert(Ptr{error_info_list}, _io_error_list_ref))
-    register_log_subject_info_list(_io_log_subject_list)
     tls_init_static_state()
     io_tracing_init()
     return nothing
@@ -591,22 +553,7 @@ function io_library_clean_up()
     !_io_library_initialized[] && return nothing
     _io_library_initialized[] = false
     tls_clean_up_static_state()
-    unregister_log_subject_info_list(_io_log_subject_list)
-    unregister_error_info(Base.unsafe_convert(Ptr{error_info_list}, _io_error_list_ref))
-    _cal_cleanup()
     _common_cleanup()
-    return nothing
-end
-
-function io_fatal_assert_library_initialized()
-    if !_io_library_initialized[]
-        logf(
-            LogLevel.FATAL,
-            LS_IO_GENERAL,
-            "aws_io_library_init() must be called before using any functionality in aws-c-io.",
-        )
-        fatal_assert("io library init must be called first", "<unknown>", 0)
-    end
     return nothing
 end
 
@@ -655,16 +602,19 @@ end
 include("tracing.jl")
 
 # Include event loop abstractions and platform-specific implementations
-include("event_loop.jl")
+include("event_loop_types.jl")
+include("kqueue_event_loop_types.jl")
+include("epoll_event_loop_types.jl")
 include("iocp_event_loop.jl")
+include("event_loop.jl")
 include("kqueue_event_loop.jl")
 include("epoll_event_loop.jl")
-include("dispatch_queue_event_loop.jl")
 include("message_pool.jl")
 include("socket.jl")
 include("posix_socket.jl")
 include("winsock_socket.jl")
 include("winsock_init.jl")
+include("blocks_abi.jl")
 include("apple_nw_socket.jl")
 include("channel.jl")
 include("statistics.jl")

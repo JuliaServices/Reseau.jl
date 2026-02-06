@@ -7,7 +7,11 @@
     const _NW_DISPATCH_LIB = "libSystem"
     const _COREFOUNDATION_LIB = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 
-    const _NW_SHIM_LIB = libawsio_nw_shim
+    # Backwards-compat feature flag:
+    # Downstream packages historically checked `AwsIO._NW_SHIM_LIB != ""` to
+    # decide whether Apple Network.framework sockets were available. The shim
+    # shared library has been removed; keep a non-empty sentinel on macOS.
+    const _NW_SHIM_LIB = "<builtin>"
 
     const nw_connection_t = Ptr{Cvoid}
     const nw_listener_t = Ptr{Cvoid}
@@ -34,6 +38,26 @@
     const OSStatus = Int32
 
     const KB_16 = Csize_t(16 * 1024)
+
+    # Network.framework exports some "constants" (e.g. NW_PARAMETERS_DISABLE_PROTOCOL) as
+    # globals whose value is already a pointer type. We must load the pointer value from
+    # the global's storage (i.e. dereference `cglobal`).
+    @noinline function _nw_global_ptr(sym::Symbol)::Ptr{Cvoid}
+        return unsafe_load(cglobal((sym, _NW_NETWORK_LIB), Ptr{Cvoid}))
+    end
+
+    const _NW_DISABLE_PROTOCOL_BLOCK = Ref{Ptr{Cvoid}}(C_NULL)
+    const _NW_DEFAULT_MESSAGE_CONTEXT = Ref{nw_content_context_t}(C_NULL)
+
+    function _nw_ensure_globals!()
+        if _NW_DISABLE_PROTOCOL_BLOCK[] == C_NULL
+            _NW_DISABLE_PROTOCOL_BLOCK[] = _nw_global_ptr(:_nw_parameters_configure_protocol_disable)
+        end
+        if _NW_DEFAULT_MESSAGE_CONTEXT[] == C_NULL
+            _NW_DEFAULT_MESSAGE_CONTEXT[] = nw_content_context_t(_nw_global_ptr(:_nw_content_context_default_message))
+        end
+        return nothing
+    end
 
     # OSStatus TLS errors (Security.framework)
     const errSSLUnknownRootCert = -9812
@@ -84,8 +108,8 @@
         offset::Csize_t
     end
 
-    mutable struct NWParametersContext{S}
-        socket::S
+    mutable struct NWParametersContext
+        socket::Any
         options::SocketOptions
     end
 
@@ -164,10 +188,10 @@
     const _nw_socket_registry = Dict{Ptr{Cvoid}, NWSocket}()
     const _nw_socket_registry_lock = ReentrantLock()
 
-    mutable struct NWSendContext{UD}
+    mutable struct NWSendContext
         socket::NWSocket
-        written_fn::SocketOnWriteCompletedFn
-        user_data::UD
+        written_fn::Union{Function, Nothing}
+        user_data::Any
     end
 
     const _nw_send_registry = Dict{Ptr{Cvoid}, NWSendContext}()
@@ -596,7 +620,7 @@
                 "nw_socket=%p: SecTrustEvaluateWithError failed with crt error %d: %s (CF error %d: %s)",
                 _nw_socket_ptr(nw_socket),
                 crt_error,
-                aws_error_name(crt_error),
+                error_name(crt_error),
                 err_code,
                 err_desc,
             )
@@ -698,16 +722,22 @@
                 _nw_socket_ptr(nw_socket),
             )
         else
+            _nw_ensure_callbacks!()
             dispatch_queue = nw_socket.event_loop.impl_data.dispatch_queue
-            ccall(
-                (:awsio_sec_protocol_options_set_verify_block, _NW_SHIM_LIB),
-                Cvoid,
-                (sec_protocol_options_t, Ptr{Cvoid}, Ptr{Cvoid}, dispatch_queue_t),
-                sec_options,
-                pointer_from_objref(nw_socket),
-                _nw_tls_verify_cb[],
-                dispatch_queue,
-            )
+            verify_ctx = pointer_from_objref(nw_socket)
+            blk = BlocksABI.make_stack_block_ctx(_nw_tls_verify_cb[], verify_ctx)
+            try
+                ccall(
+                    (:sec_protocol_options_set_verify_block, _NW_SECURITY_LIB),
+                    Cvoid,
+                    (sec_protocol_options_t, Ptr{Cvoid}, dispatch_queue_t),
+                    sec_options,
+                    blk.ptr,
+                    dispatch_queue,
+                )
+            finally
+                BlocksABI.free!(blk)
+            end
         end
 
         ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), sec_options)
@@ -778,6 +808,7 @@
 
     function _nw_setup_socket_params!(nw_socket::NWSocket, options::SocketOptions)::Union{Nothing, ErrorResult}
         _nw_ensure_callbacks!()
+        _nw_ensure_globals!()
         if nw_socket.parameters != C_NULL
             ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.parameters)
             nw_socket.parameters = C_NULL
@@ -803,16 +834,22 @@
                 if options.domain == SocketDomain.IPV4 || options.domain == SocketDomain.IPV6 || options.domain == SocketDomain.LOCAL
                     ctx = NWParametersContext(nw_socket, options)
                     nw_socket.parameters_context = ctx
-                    params = GC.@preserve ctx ccall(
-                        (:awsio_nw_parameters_create_secure_tcp, _NW_SHIM_LIB),
-                        nw_parameters_t,
-                        (Ptr{Cvoid}, UInt8, Ptr{Cvoid}, Ptr{Cvoid}),
-                        pointer_from_objref(ctx),
-                        1,
-                        _nw_tls_options_cb[],
-                        _nw_tcp_options_cb[],
-                    )
-                    nw_socket.parameters = params
+                    ctx_ptr = pointer_from_objref(ctx)
+                    tls_blk = BlocksABI.make_stack_block_ctx(_nw_tls_options_cb[], ctx_ptr)
+                    tcp_blk = BlocksABI.make_stack_block_ctx(_nw_tcp_options_cb[], ctx_ptr)
+                    try
+                        params = GC.@preserve ctx ccall(
+                            (:nw_parameters_create_secure_tcp, _NW_NETWORK_LIB),
+                            nw_parameters_t,
+                            (Ptr{Cvoid}, Ptr{Cvoid}),
+                            tls_blk.ptr,
+                            tcp_blk.ptr,
+                        )
+                        nw_socket.parameters = params
+                    finally
+                        BlocksABI.free!(tls_blk)
+                        BlocksABI.free!(tcp_blk)
+                    end
                 else
                     raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
                     return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
@@ -821,16 +858,20 @@
                 if options.domain == SocketDomain.IPV4 || options.domain == SocketDomain.IPV6 || options.domain == SocketDomain.LOCAL
                     ctx = NWParametersContext(nw_socket, options)
                     nw_socket.parameters_context = ctx
-                    params = GC.@preserve ctx ccall(
-                        (:awsio_nw_parameters_create_secure_tcp, _NW_SHIM_LIB),
-                        nw_parameters_t,
-                        (Ptr{Cvoid}, UInt8, Ptr{Cvoid}, Ptr{Cvoid}),
-                        pointer_from_objref(ctx),
-                        0,
-                        _nw_tls_options_cb[],
-                        _nw_tcp_options_cb[],
-                    )
-                    nw_socket.parameters = params
+                    ctx_ptr = pointer_from_objref(ctx)
+                    tcp_blk = BlocksABI.make_stack_block_ctx(_nw_tcp_options_cb[], ctx_ptr)
+                    try
+                        params = GC.@preserve ctx ccall(
+                            (:nw_parameters_create_secure_tcp, _NW_NETWORK_LIB),
+                            nw_parameters_t,
+                            (Ptr{Cvoid}, Ptr{Cvoid}),
+                            _NW_DISABLE_PROTOCOL_BLOCK[],
+                            tcp_blk.ptr,
+                        )
+                        nw_socket.parameters = params
+                    finally
+                        BlocksABI.free!(tcp_blk)
+                    end
                 else
                     raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
                     return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
@@ -853,16 +894,20 @@
             end
             ctx = NWParametersContext(nw_socket, options)
             nw_socket.parameters_context = ctx
-            params = GC.@preserve ctx ccall(
-                (:awsio_nw_parameters_create_secure_udp, _NW_SHIM_LIB),
-                nw_parameters_t,
-                (Ptr{Cvoid}, UInt8, Ptr{Cvoid}, Ptr{Cvoid}),
-                pointer_from_objref(ctx),
-                0,
-                _nw_tls_options_cb[],
-                _nw_tcp_options_cb[],
-            )
-            nw_socket.parameters = params
+            ctx_ptr = pointer_from_objref(ctx)
+            udp_blk = BlocksABI.make_stack_block_ctx(_nw_tcp_options_cb[], ctx_ptr)
+            try
+                params = GC.@preserve ctx ccall(
+                    (:nw_parameters_create_secure_udp, _NW_NETWORK_LIB),
+                    nw_parameters_t,
+                    (Ptr{Cvoid}, Ptr{Cvoid}),
+                    _NW_DISABLE_PROTOCOL_BLOCK[],
+                    udp_blk.ptr,
+                )
+                nw_socket.parameters = params
+            finally
+                BlocksABI.free!(udp_blk)
+            end
         end
 
         if nw_socket.parameters == C_NULL
@@ -936,6 +981,144 @@
         return nothing
     end
 
+    # --- Clang Blocks ABI invokers (no C shim) ---
+    #
+    # Network.framework APIs accept blocks, where the invoke function receives
+    # the block pointer as its first argument. We capture our callback context
+    # pointer in the block, extract it here, and then call the existing handlers.
+
+    function _nw_connection_state_changed_invoke(block_ptr::Ptr{Cvoid}, state::Cint, error::nw_error_t)::Cvoid
+        try
+            ctx = BlocksABI.captured_ctx(block_ptr)
+            _nw_socket_state_changed(ctx, state, error)
+        catch ex
+            try
+                @error "Fatal error in nw_connection state handler" exception = (ex, catch_backtrace())
+            catch
+            end
+        end
+        return
+    end
+
+    function _nw_listener_state_changed_invoke(block_ptr::Ptr{Cvoid}, state::Cint, error::nw_error_t)::Cvoid
+        try
+            ctx = BlocksABI.captured_ctx(block_ptr)
+            _nw_listener_state_changed(ctx, state, error)
+        catch ex
+            try
+                @error "Fatal error in nw_listener state handler" exception = (ex, catch_backtrace())
+            catch
+            end
+        end
+        return
+    end
+
+    function _nw_listener_new_connection_invoke(block_ptr::Ptr{Cvoid}, connection::nw_connection_t)::Cvoid
+        try
+            ctx = BlocksABI.captured_ctx(block_ptr)
+            _nw_listener_new_connection(ctx, connection)
+        catch ex
+            try
+                @error "Fatal error in nw_listener new connection handler" exception = (ex, catch_backtrace())
+            catch
+            end
+        end
+        return
+    end
+
+    function _nw_receive_completion_invoke(
+            block_ptr::Ptr{Cvoid},
+            data::dispatch_data_t,
+            context::nw_content_context_t,
+            is_complete::UInt8,
+            error::nw_error_t,
+        )::Cvoid
+        try
+            ctx = BlocksABI.captured_ctx(block_ptr)
+            _nw_receive_completion(ctx, data, context, is_complete, error)
+        catch ex
+            try
+                @error "Fatal error in nw_connection receive completion" exception = (ex, catch_backtrace())
+            catch
+            end
+        end
+        return
+    end
+
+    function _nw_send_completion_invoke(block_ptr::Ptr{Cvoid}, error::nw_error_t)::Cvoid
+        ctx_mem = BlocksABI.captured_ctx(block_ptr)
+        try
+            ctx_u8 = Ptr{UInt8}(ctx_mem)
+            send_ctx_ptr = unsafe_load(Ptr{Ptr{Cvoid}}(ctx_u8))
+            data = dispatch_data_t(unsafe_load(Ptr{Ptr{Cvoid}}(ctx_u8 + sizeof(Ptr{Cvoid}))))
+            _nw_send_completion(send_ctx_ptr, error, data)
+        catch ex
+            try
+                @error "Fatal error in nw_connection send completion" exception = (ex, catch_backtrace())
+            catch
+            end
+        finally
+            ctx_mem != C_NULL && Base.Libc.free(ctx_mem)
+        end
+        return
+    end
+
+    function _nw_tls_verify_invoke(
+            block_ptr::Ptr{Cvoid},
+            metadata::sec_protocol_metadata_t,
+            trust::sec_trust_t,
+            complete::Ptr{Cvoid},
+        )::Cvoid
+        verified = false
+        try
+            ctx = BlocksABI.captured_ctx(block_ptr)
+            verified = _nw_tls_verify_callback(ctx, metadata, trust) != 0
+        catch ex
+            try
+                @error "Fatal error in sec_protocol verify callback" exception = (ex, catch_backtrace())
+            catch
+            end
+            verified = false
+        end
+
+        # Always call `complete(...)` or the handshake can stall.
+        try
+            complete != C_NULL && BlocksABI.call_block_void_bool(complete, verified)
+        catch ex
+            try
+                @error "Fatal error calling sec_protocol verify completion block" exception = (ex, catch_backtrace())
+            catch
+            end
+        end
+        return
+    end
+
+    function _nw_tls_options_invoke(block_ptr::Ptr{Cvoid}, options::nw_protocol_options_t)::Cvoid
+        try
+            ctx = BlocksABI.captured_ctx(block_ptr)
+            _nw_tls_options_callback(ctx, options)
+        catch ex
+            try
+                @error "Fatal error in nw_parameters TLS options block" exception = (ex, catch_backtrace())
+            catch
+            end
+        end
+        return
+    end
+
+    function _nw_tcp_options_invoke(block_ptr::Ptr{Cvoid}, options::nw_protocol_options_t)::Cvoid
+        try
+            ctx = BlocksABI.captured_ctx(block_ptr)
+            _nw_tcp_options_callback(ctx, options)
+        catch ex
+            try
+                @error "Fatal error in nw_parameters TCP/UDP options block" exception = (ex, catch_backtrace())
+            catch
+            end
+        end
+        return
+    end
+
     function _nw_client_set_queue(handle_ptr::Ptr{IoHandle}, queue::Ptr{Cvoid})
         handle = unsafe_load(handle_ptr)
         ccall((:nw_connection_set_queue, _NW_NETWORK_LIB), Cvoid, (nw_connection_t, dispatch_queue_t), handle.handle, queue)
@@ -961,14 +1144,14 @@
 
     function _nw_ensure_callbacks!()
         _nw_state_changed_cb[] != C_NULL && return nothing
-        _nw_state_changed_cb[] = @cfunction(_nw_socket_state_changed, Cvoid, (Ptr{Cvoid}, Cint, nw_error_t))
-        _nw_listener_state_changed_cb[] = @cfunction(_nw_listener_state_changed, Cvoid, (Ptr{Cvoid}, Cint, nw_error_t))
-        _nw_listener_new_conn_cb[] = @cfunction(_nw_listener_new_connection, Cvoid, (Ptr{Cvoid}, nw_connection_t))
-        _nw_receive_cb[] = @cfunction(_nw_receive_completion, Cvoid, (Ptr{Cvoid}, dispatch_data_t, nw_content_context_t, UInt8, nw_error_t))
-        _nw_send_cb[] = @cfunction(_nw_send_completion, Cvoid, (Ptr{Cvoid}, nw_error_t, dispatch_data_t))
-        _nw_tls_verify_cb[] = @cfunction(_nw_tls_verify_callback, UInt8, (Ptr{Cvoid}, sec_protocol_metadata_t, sec_trust_t))
-        _nw_tls_options_cb[] = @cfunction(_nw_tls_options_callback, Cvoid, (Ptr{Cvoid}, nw_protocol_options_t))
-        _nw_tcp_options_cb[] = @cfunction(_nw_tcp_options_callback, Cvoid, (Ptr{Cvoid}, nw_protocol_options_t))
+        _nw_state_changed_cb[] = @cfunction(_nw_connection_state_changed_invoke, Cvoid, (Ptr{Cvoid}, Cint, nw_error_t))
+        _nw_listener_state_changed_cb[] = @cfunction(_nw_listener_state_changed_invoke, Cvoid, (Ptr{Cvoid}, Cint, nw_error_t))
+        _nw_listener_new_conn_cb[] = @cfunction(_nw_listener_new_connection_invoke, Cvoid, (Ptr{Cvoid}, nw_connection_t))
+        _nw_receive_cb[] = @cfunction(_nw_receive_completion_invoke, Cvoid, (Ptr{Cvoid}, dispatch_data_t, nw_content_context_t, UInt8, nw_error_t))
+        _nw_send_cb[] = @cfunction(_nw_send_completion_invoke, Cvoid, (Ptr{Cvoid}, nw_error_t))
+        _nw_tls_verify_cb[] = @cfunction(_nw_tls_verify_invoke, Cvoid, (Ptr{Cvoid}, sec_protocol_metadata_t, sec_trust_t, Ptr{Cvoid}))
+        _nw_tls_options_cb[] = @cfunction(_nw_tls_options_invoke, Cvoid, (Ptr{Cvoid}, nw_protocol_options_t))
+        _nw_tcp_options_cb[] = @cfunction(_nw_tcp_options_invoke, Cvoid, (Ptr{Cvoid}, nw_protocol_options_t))
         _nw_client_set_queue_c[] = @cfunction(_nw_client_set_queue, Cvoid, (Ptr{IoHandle}, Ptr{Cvoid}))
         _nw_listener_set_queue_c[] = @cfunction(_nw_listener_set_queue, Cvoid, (Ptr{IoHandle}, Ptr{Cvoid}))
         return nothing
@@ -994,16 +1177,22 @@
             return ErrorResult(raise_error(ERROR_IO_SOCKET_NOT_CONNECTED))
         end
 
-        ccall(
-            (:awsio_nw_connection_receive, _NW_SHIM_LIB),
-            Cvoid,
-            (nw_connection_t, Csize_t, Csize_t, Ptr{Cvoid}, Ptr{Cvoid}),
-            connection,
-            Csize_t(1),
-            KB_16,
-            pointer_from_objref(nw_socket),
-            _nw_receive_cb[],
-        )
+        _nw_ensure_callbacks!()
+        recv_ctx = pointer_from_objref(nw_socket)
+        blk = BlocksABI.make_stack_block_ctx(_nw_receive_cb[], recv_ctx)
+        try
+            ccall(
+                (:nw_connection_receive, _NW_NETWORK_LIB),
+                Cvoid,
+                (nw_connection_t, UInt32, UInt32, Ptr{Cvoid}),
+                connection,
+                UInt32(1),
+                UInt32(KB_16),
+                blk.ptr,
+            )
+        finally
+            BlocksABI.free!(blk)
+        end
         return nothing
     end
 
@@ -1387,14 +1576,20 @@
             new_nw_socket.connection_setup = true
             _nw_set_socket_state!(new_nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTED_READ)) | Int(_nw_state_mask(NWSocketState.CONNECTED_WRITE)))
 
-            ccall(
-                (:awsio_nw_connection_set_state_changed_handler, _NW_SHIM_LIB),
-                Cvoid,
-                (nw_connection_t, Ptr{Cvoid}, Ptr{Cvoid}),
-                connection,
-                pointer_from_objref(new_nw_socket),
-                _nw_state_changed_cb[],
-            )
+            _nw_ensure_callbacks!()
+            st_ctx = pointer_from_objref(new_nw_socket)
+            st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
+            try
+                ccall(
+                    (:nw_connection_set_state_changed_handler, _NW_NETWORK_LIB),
+                    Cvoid,
+                    (nw_connection_t, Ptr{Cvoid}),
+                    connection,
+                    st_blk.ptr,
+                )
+            finally
+                BlocksABI.free!(st_blk)
+            end
 
             listener.accept_result_fn(listener, 0, new_socket, listener.connect_accept_user_data)
             _nw_unlock_base(nw_socket)
@@ -1486,14 +1681,9 @@
     struct AppleNWSocketVTable <: SocketVTable end
     const APPLE_NW_SOCKET_VTABLE = AppleNWSocketVTable()
 
-    const AppleNWSocketType = Socket{AppleNWSocketVTable, NWSocket}
+    const AppleNWSocketType = Socket{AppleNWSocketVTable}
 
     function socket_init_apple_nw(options::SocketOptions)::Union{AppleNWSocketType, ErrorResult}
-        if _NW_SHIM_LIB == ""
-            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
-        end
-
         if options.network_interface_name[1] != 0
             raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
             return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -1503,7 +1693,7 @@
         nw_socket = NWSocket()
         _nw_register_socket!(nw_socket)
 
-        sock = Socket{AppleNWSocketVTable, NWSocket, Union{AbstractChannelHandler, Nothing}, Union{SocketOnReadableFn, Nothing}, Any, Union{SocketOnConnectionResultFn, Nothing}, Union{SocketOnAcceptResultFn, Nothing}, Any}(
+        sock = Socket{AppleNWSocketVTable}(
             APPLE_NW_SOCKET_VTABLE,
             SocketEndpoint(),
             SocketEndpoint(),
@@ -1606,14 +1796,20 @@
         nw_socket.connection = connection
         nw_socket.mode = NWSocketMode.CONNECTION
 
-        ccall(
-            (:awsio_nw_connection_set_state_changed_handler, _NW_SHIM_LIB),
-            Cvoid,
-            (nw_connection_t, Ptr{Cvoid}, Ptr{Cvoid}),
-            connection,
-            pointer_from_objref(nw_socket),
-            _nw_state_changed_cb[],
-        )
+        _nw_ensure_callbacks!()
+        st_ctx = pointer_from_objref(nw_socket)
+        st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
+        try
+            ccall(
+                (:nw_connection_set_state_changed_handler, _NW_NETWORK_LIB),
+                Cvoid,
+                (nw_connection_t, Ptr{Cvoid}),
+                connection,
+                st_blk.ptr,
+            )
+        finally
+            BlocksABI.free!(st_blk)
+        end
 
         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTING)))
         _nw_unlock_synced(nw_socket)
@@ -1786,22 +1982,29 @@
             return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
 
-        ccall(
-            (:awsio_nw_listener_set_state_changed_handler, _NW_SHIM_LIB),
-            Cvoid,
-            (nw_listener_t, Ptr{Cvoid}, Ptr{Cvoid}),
-            nw_socket.listener,
-            pointer_from_objref(nw_socket),
-            _nw_listener_state_changed_cb[],
-        )
-        ccall(
-            (:awsio_nw_listener_set_new_connection_handler, _NW_SHIM_LIB),
-            Cvoid,
-            (nw_listener_t, Ptr{Cvoid}, Ptr{Cvoid}),
-            nw_socket.listener,
-            pointer_from_objref(nw_socket),
-            _nw_listener_new_conn_cb[],
-        )
+        _nw_ensure_callbacks!()
+        lctx = pointer_from_objref(nw_socket)
+        state_blk = BlocksABI.make_stack_block_ctx(_nw_listener_state_changed_cb[], lctx)
+        conn_blk = BlocksABI.make_stack_block_ctx(_nw_listener_new_conn_cb[], lctx)
+        try
+            ccall(
+                (:nw_listener_set_state_changed_handler, _NW_NETWORK_LIB),
+                Cvoid,
+                (nw_listener_t, Ptr{Cvoid}),
+                nw_socket.listener,
+                state_blk.ptr,
+            )
+            ccall(
+                (:nw_listener_set_new_connection_handler, _NW_NETWORK_LIB),
+                Cvoid,
+                (nw_listener_t, Ptr{Cvoid}),
+                nw_socket.listener,
+                conn_blk.ptr,
+            )
+        finally
+            BlocksABI.free!(state_blk)
+            BlocksABI.free!(conn_blk)
+        end
 
         ccall((:nw_listener_start, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
         _nw_unlock_synced(nw_socket)
@@ -1989,16 +2192,32 @@
 
         send_ctx = NWSendContext(nw_socket, written_fn, user_data)
         send_ctx_ptr = _nw_register_send!(send_ctx)
-        ccall(
-            (:awsio_nw_connection_send, _NW_SHIM_LIB),
-            Cvoid,
-            (nw_connection_t, dispatch_data_t, UInt8, Ptr{Cvoid}, Ptr{Cvoid}),
-            socket.io_handle.handle,
-            data,
-            1,
-            send_ctx_ptr,
-            _nw_send_cb[],
-        )
+        _nw_ensure_callbacks!()
+        _nw_ensure_globals!()
+
+        # The NW send completion block only receives `nw_error_t`. Capture both the
+        # send ctx pointer and the dispatch_data_t in a malloc'd context.
+        send_block_ctx = Base.Libc.malloc(Csize_t(2 * sizeof(Ptr{Cvoid})))
+        send_block_ctx == C_NULL && error("malloc failed for send block ctx")
+        send_block_ctx_u8 = Ptr{UInt8}(send_block_ctx)
+        unsafe_store!(Ptr{Ptr{Cvoid}}(send_block_ctx_u8), send_ctx_ptr)
+        unsafe_store!(Ptr{Ptr{Cvoid}}(send_block_ctx_u8 + sizeof(Ptr{Cvoid})), Ptr{Cvoid}(data))
+
+        blk = BlocksABI.make_stack_block_ctx(_nw_send_cb[], Ptr{Cvoid}(send_block_ctx))
+        try
+            ccall(
+                (:nw_connection_send, _NW_NETWORK_LIB),
+                Cvoid,
+                (nw_connection_t, dispatch_data_t, nw_content_context_t, UInt8, Ptr{Cvoid}),
+                socket.io_handle.handle,
+                data,
+                _NW_DEFAULT_MESSAGE_CONTEXT[],
+                UInt8(1),
+                blk.ptr,
+            )
+        finally
+            BlocksABI.free!(blk)
+        end
         return nothing
     end
 

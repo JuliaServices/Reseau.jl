@@ -1,169 +1,28 @@
 # AWS IO Library - KQueue Event Loop Implementation
 # Port of aws-c-io/source/bsd/kqueue_event_loop.c
+# Type definitions are in kqueue_event_loop_types.jl
 
-# Only define on BSD/macOS
 @static if Sys.isapple() || Sys.isbsd()
     using LibAwsCal
 
-    # Constants from sys/event.h
-    const EVFILT_READ = Int16(-1)
-    const EVFILT_WRITE = Int16(-2)
-    const EV_ADD = UInt16(0x0001)
-    const EV_DELETE = UInt16(0x0002)
-    const EV_ENABLE = UInt16(0x0004)
-    const EV_DISABLE = UInt16(0x0008)
-    const EV_ONESHOT = UInt16(0x0010)
-    const EV_CLEAR = UInt16(0x0020)
-    const EV_RECEIPT = UInt16(0x0040)
-    const EV_DISPATCH = UInt16(0x0080)
-    const EV_EOF = UInt16(0x8000)
-    const EV_ERROR = UInt16(0x4000)
-    const READ_FD = 1
-    const WRITE_FD = 2
-    const O_NONBLOCK = Cint(0x0004)
-    const FD_CLOEXEC = Cint(0x0001)
+    # libdispatch helpers for NW socket support (Apple only)
+    @static if Sys.isapple()
+        const _libdispatch = "libSystem"
+        const _dispatch_queue_t = Ptr{Cvoid}
+        const _dispatch_queue_attr_t = Ptr{Cvoid}
+        const _DISPATCH_QUEUE_SERIAL = _dispatch_queue_attr_t(C_NULL)
 
-    # kevent structure - must match C struct layout
-    # Note: ident is uintptr_t (pointer-sized unsigned), data is intptr_t (pointer-sized signed)
-    struct Kevent
-        ident::UInt         # identifier for this event (uintptr_t)
-        filter::Int16       # filter for event
-        flags::UInt16       # action flags for kqueue
-        fflags::UInt32      # filter flag value
-        data::Int           # filter data value (intptr_t)
-        udata::Ptr{Cvoid}   # opaque user data identifier
+        @inline function _kqueue_dispatch_queue_create(label::AbstractString)
+            return @ccall _libdispatch.dispatch_queue_create(
+                label::Cstring,
+                _DISPATCH_QUEUE_SERIAL::_dispatch_queue_attr_t,
+            )::_dispatch_queue_t
+        end
+
+        @inline function _kqueue_dispatch_release(queue::Ptr{Cvoid})
+            @ccall _libdispatch.dispatch_release(queue::Ptr{Cvoid})::Cvoid
+        end
     end
-
-    function Kevent(fd::Integer, filter::Int16, flags::UInt16, udata::Ptr{Cvoid} = C_NULL)
-        return Kevent(UInt(fd), filter, flags, UInt32(0), Int(0), udata)
-    end
-
-    function Kevent(
-            fd::Integer,
-            filter::Int16,
-            flags::UInt16,
-            fflags::UInt32,
-            data::Int,
-            udata::Ptr{Cvoid},
-        )
-        return Kevent(UInt(fd), filter, flags, fflags, data, udata)
-    end
-
-    # Event thread state
-    @enumx EventThreadState::UInt8 begin
-        READY_TO_RUN = 0
-        RUNNING = 1
-        STOPPING = 2
-    end
-
-    # Configuration constants
-    const DEFAULT_TIMEOUT_SEC = 100
-    const MAX_EVENTS = 100
-
-    # Handle state for subscribed handles
-    @enumx HandleState::UInt8 begin
-        SUBSCRIBING = 0
-        SUBSCRIBED = 1
-        UNSUBSCRIBED = 2
-    end
-
-    # Handle data attached to IoHandle while subscribed
-    # Note: EL is the event loop type (will be KqueueEventLoop), U is user_data type
-    mutable struct KqueueHandleData{EL, F <: OnEventCallback, U}
-        owner::IoHandle
-        event_loop::EL
-        on_event::F
-        on_event_user_data::U
-        events_subscribed::Int  # IoEventType bitmask
-        events_this_loop::Int   # Events received during current loop iteration
-        state::HandleState.T
-        subscribe_task::Union{Nothing, ScheduledTask}  # nullable
-        cleanup_task::Union{Nothing, ScheduledTask}  # nullable
-        registry_key::Ptr{Cvoid}
-    end
-
-    function KqueueHandleData(
-            owner::IoHandle,
-            event_loop::EL,
-            on_event::F,
-            user_data::U,
-            events::Int,
-        ) where {EL, F <: OnEventCallback, U}
-        return KqueueHandleData{EL, F, U}(
-            owner,
-            event_loop,
-            on_event,
-            user_data,
-            events,
-            0,
-            HandleState.SUBSCRIBING,
-            nothing,
-            nothing,
-            C_NULL,
-        )
-    end
-
-    # Cross-thread data protected by mutex
-    mutable struct KqueueCrossThreadData
-        mutex::ReentrantLock
-        thread_signaled::Bool
-        tasks_to_schedule::Deque{ScheduledTask}
-        state::EventThreadState.T
-    end
-
-    function KqueueCrossThreadData()
-        return KqueueCrossThreadData(
-            ReentrantLock(),
-            false,
-            Deque{ScheduledTask}(16),
-            EventThreadState.READY_TO_RUN,
-        )
-    end
-
-    # Thread-local data
-    mutable struct KqueueThreadData
-        scheduler::TaskScheduler
-        connected_handle_count::Int
-        state::EventThreadState.T
-    end
-
-    function KqueueThreadData()
-        return KqueueThreadData(
-            TaskScheduler(),
-            0,
-            EventThreadState.READY_TO_RUN,
-        )
-    end
-
-    # KQueue event loop implementation data
-    mutable struct KqueueLoopImpl
-        thread_created_on::Union{Nothing, ThreadHandle}
-        thread_joined_to::UInt64
-        @atomic running_thread_id::UInt64
-        kq_fd::Int32
-        cross_thread_signal_pipe::NTuple{2, Int32}
-        cross_thread_data::KqueueCrossThreadData
-        thread_data::KqueueThreadData
-        thread_options::ThreadOptions
-        handle_registry::Dict{Ptr{Cvoid}, Any}
-    end
-
-    function KqueueLoopImpl()
-        return KqueueLoopImpl(
-            nothing,
-            UInt64(0),
-            UInt64(0),
-            Int32(-1),
-            (Int32(-1), Int32(-1)),
-            KqueueCrossThreadData(),
-            KqueueThreadData(),
-            ThreadOptions(),
-            Dict{Ptr{Cvoid}, Any}(),
-        )
-    end
-
-    # KQueue event loop concrete type
-    const KqueueEventLoop = EventLoop{KqueueLoopImpl, LD, Clock} where {LD, Clock}
 
     function open_nonblocking_posix_pipe()::Union{NTuple{2, Int32}, ErrorResult}
         pipe_fds = Ref{NTuple{2, Int32}}((Int32(-1), Int32(-1)))
@@ -212,7 +71,7 @@
         )::Union{EventLoop, ErrorResult}
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered kqueue event loop")
 
-        impl = KqueueLoopImpl()
+        impl = KqueueEventLoop()
 
         if options.thread_options !== nothing
             impl.thread_options = options.thread_options
@@ -271,7 +130,13 @@
             return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
         end
 
-        # ReentrantLock is initialized automatically in KqueueCrossThreadData constructor
+        # Create dispatch queue for NW sockets (Apple only)
+        @static if Sys.isapple()
+            nw_queue = _kqueue_dispatch_queue_create("com.amazonaws.commonruntime.kqueue-nw")
+            if nw_queue != C_NULL
+                impl.nw_queue = nw_queue
+            end
+        end
 
         # Create the event loop
         event_loop = EventLoop(options.clock, impl)
@@ -280,8 +145,29 @@
         return event_loop
     end
 
+    # Connect an IO handle to the event loop's completion port (for NW sockets)
+    @static if Sys.isapple()
+        function event_loop_connect_to_io_completion_port!(
+                event_loop::EventLoop,
+                handle::IoHandle,
+            )::Union{Nothing, ErrorResult}
+            if handle.set_queue == C_NULL
+                return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
+            end
+            impl = event_loop.impl_data
+            ccall(
+                handle.set_queue,
+                Cvoid,
+                (Ptr{IoHandle}, Ptr{Cvoid}),
+                Ref(handle),
+                impl.nw_queue,
+            )
+            return nothing
+        end
+    end
+
     # Signal that cross-thread data has changed
-    function signal_cross_thread_data_changed(event_loop::KqueueEventLoop)
+    function signal_cross_thread_data_changed(event_loop::EventLoop)
         impl = event_loop.impl_data
         logf(
             LogLevel.TRACE,
@@ -290,16 +176,34 @@
         )
         write_val = Ref{UInt32}(0x00C0FFEE)
         write_size = Csize_t(sizeof(UInt32))
-        _ = @ccall write(
-            impl.cross_thread_signal_pipe[WRITE_FD]::Cint,
-            write_val::Ptr{UInt32},
-            write_size::Csize_t,
-        )::Cssize_t
+        # Best-effort. Writes may fail if pipe is full (EAGAIN) or interrupted (EINTR).
+        while true
+            wrote = @ccall gc_safe = true write(
+                impl.cross_thread_signal_pipe[WRITE_FD]::Cint,
+                write_val::Ptr{UInt32},
+                write_size::Csize_t,
+            )::Cssize_t
+            if wrote == -1
+                errno_val = get_errno()
+                if errno_val == Libc.EINTR
+                    continue
+                end
+                if errno_val != EAGAIN && errno_val != EWOULDBLOCK
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_EVENT_LOOP,
+                        "failed to signal event-loop via pipe (errno=%d)",
+                        errno_val,
+                    )
+                end
+            end
+            break
+        end
         return nothing
     end
 
     # Run the event loop
-    function event_loop_run!(event_loop::KqueueEventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_run!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
@@ -317,7 +221,7 @@
         # Launch the event loop thread
         thread_fn = el -> kqueue_event_loop_thread(el)
         impl.thread_created_on = ThreadHandle()
-        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-kqueue", pool = :interactive)
+        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-kqueue", pool = :os)
 
         result = thread_launch(impl.thread_created_on, thread_fn, event_loop, thread_options)
         if result != OP_SUCCESS
@@ -330,7 +234,7 @@
         @atomic event_loop.running = true
 
         wait_start = time_ns()
-        while impl.thread_data.state != EventThreadState.RUNNING
+        while (@atomic impl.running_thread_id) == 0
             if time_ns() - wait_start > 1_000_000_000
                 return ErrorResult(raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN))
             end
@@ -341,7 +245,7 @@
     end
 
     # Stop the event loop
-    function event_loop_stop!(event_loop::KqueueEventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_stop!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
         @atomic event_loop.should_stop = true
 
@@ -366,7 +270,7 @@
     end
 
     # Wait for the event loop to stop
-    function event_loop_wait_for_stop_completion!(event_loop::KqueueEventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
@@ -384,7 +288,7 @@
     end
 
     # Schedule task cross-thread
-    function schedule_task_cross_thread(event_loop::KqueueEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
 
         logf(
@@ -415,7 +319,7 @@
     end
 
     # Schedule task common implementation
-    function schedule_task_common(event_loop::KqueueEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function schedule_task_common(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
 
         # If we're on the event thread, schedule directly
@@ -440,22 +344,22 @@
     end
 
     # Schedule task now
-    function event_loop_schedule_task_now!(event_loop::KqueueEventLoop, task::ScheduledTask)
+    function event_loop_schedule_task_now!(event_loop::EventLoop, task::ScheduledTask)
         schedule_task_common(event_loop, task, UInt64(0))
     end
 
     # Schedule task now (serialized)
-    function event_loop_schedule_task_now_serialized!(event_loop::KqueueEventLoop, task::ScheduledTask)
+    function event_loop_schedule_task_now_serialized!(event_loop::EventLoop, task::ScheduledTask)
         schedule_task_cross_thread(event_loop, task, UInt64(0))
     end
 
     # Schedule task future
-    function event_loop_schedule_task_future!(event_loop::KqueueEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function event_loop_schedule_task_future!(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         schedule_task_common(event_loop, task, run_at_nanos)
     end
 
     # Cancel task
-    function event_loop_cancel_task!(event_loop::KqueueEventLoop, task::ScheduledTask)
+    function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "cancelling task %s", task.type_tag)
@@ -479,7 +383,7 @@
     end
 
     # Check if on event thread
-    function event_loop_thread_is_callers_thread(event_loop::KqueueEventLoop)::Bool
+    function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         impl = event_loop.impl_data
         running_id = @atomic impl.running_thread_id
         return running_id != 0 && running_id == thread_current_thread_id()
@@ -536,13 +440,14 @@
 
         # Call kevent with EV_RECEIPT to get results
         eventlist = similar(changelist)
-        num_events = @ccall kevent(
+        timeout_ref = Ref(Timespec(0, 0))
+        num_events = @ccall gc_safe = true kevent(
             impl.kq_fd::Cint,
             changelist::Ptr{Kevent},
             length(changelist)::Cint,
             eventlist::Ptr{Kevent},
-            length(changelist)::Cint,
-            C_NULL::Ptr{Cvoid},
+            length(eventlist)::Cint,
+            timeout_ref::Ptr{Timespec},
         )::Cint
 
         if num_events == -1
@@ -593,7 +498,7 @@
 
     # Subscribe to IO events
     function event_loop_subscribe_to_io_events!(
-            event_loop::KqueueEventLoop,
+            event_loop::EventLoop,
             handle::IoHandle,
             events::Int,
             on_event::OnEventCallback,
@@ -637,7 +542,7 @@
 
     # Unsubscribe from IO events
     function event_loop_unsubscribe_from_io_events!(
-            event_loop::KqueueEventLoop,
+            event_loop::EventLoop,
             handle::IoHandle,
         )::Union{Nothing, ErrorResult}
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
@@ -711,7 +616,7 @@
     end
 
     # Process tasks from cross-thread queue
-    function process_tasks_to_schedule(event_loop::KqueueEventLoop, tasks::Vector{ScheduledTask})
+    function process_tasks_to_schedule(event_loop::EventLoop, tasks::Vector{ScheduledTask})
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
 
@@ -726,7 +631,7 @@
     end
 
     # Process cross-thread data
-    function process_cross_thread_data(event_loop::KqueueEventLoop)
+    function process_cross_thread_data(event_loop::EventLoop)
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread data to process")
 
@@ -754,14 +659,8 @@
         process_tasks_to_schedule(event_loop, tasks_to_schedule)
     end
 
-    # timespec structure for kevent timeout
-    struct Timespec
-        tv_sec::Clong
-        tv_nsec::Clong
-    end
-
     # Main event loop thread function
-    function kqueue_event_loop_thread(event_loop::KqueueEventLoop)
+    function kqueue_event_loop_thread(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "main loop started")
         impl = event_loop.impl_data
 
@@ -884,7 +783,15 @@
                 handle_data.events_this_loop = 0
             end
 
-            # Process cross-thread data
+            # Process cross-thread data.
+            if !should_process_cross_thread_data
+                pending = false
+                lock(impl.cross_thread_data.mutex)
+                pending = impl.cross_thread_data.thread_signaled ||
+                    (impl.cross_thread_data.state != EventThreadState.RUNNING)
+                unlock(impl.cross_thread_data.mutex)
+                should_process_cross_thread_data = pending
+            end
             if should_process_cross_thread_data
                 process_cross_thread_data(event_loop)
             end
@@ -948,7 +855,7 @@
     end
 
     # Destroy kqueue event loop
-    function event_loop_complete_destroy!(event_loop::KqueueEventLoop)
+    function event_loop_complete_destroy!(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "destroying event_loop")
         impl = event_loop.impl_data
 
@@ -971,8 +878,6 @@
             end
         end
 
-        # ReentrantLock doesn't need cleanup in Julia
-
         # Remove signal kevent
         del_kevent = Kevent(
             impl.cross_thread_signal_pipe[READ_FD],
@@ -988,8 +893,19 @@
         @ccall close(impl.cross_thread_signal_pipe[WRITE_FD]::Cint)::Cint
         @ccall close(impl.kq_fd::Cint)::Cint
 
+        # Release dispatch queue for NW sockets (Apple only)
+        @static if Sys.isapple()
+            if impl.nw_queue != C_NULL
+                _kqueue_dispatch_release(impl.nw_queue)
+                impl.nw_queue = C_NULL
+            end
+        end
+
         # Clean up local data (invokes on_object_removed callbacks)
-        hash_table_clear!(event_loop.local_data)
+        for (_, obj) in event_loop.local_data
+            _event_loop_local_object_destroy(obj)
+        end
+        empty!(event_loop.local_data)
 
         return nothing
     end

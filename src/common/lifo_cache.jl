@@ -1,5 +1,5 @@
-mutable struct LIFOCache{K, V, HE} <: AbstractCache{K, V}
-    data::HashTable{K, V, HE, NoopDestroy, NoopDestroy}
+mutable struct LIFOCache{K, V} <: AbstractCache{K, V}
+    data::HashTable{K, V}
     order::ArrayList{K}
     max_items::Int
 end
@@ -8,7 +8,7 @@ function LIFOCache{K, V}(max_items::Integer) where {K, V}
     cap = max(Int(max_items), 2)
     table = HashTable{K, V}(hash, isequal; capacity = cap)
     order = ArrayList{K}()
-    return LIFOCache{K, V, typeof(table.hash_eq)}(table, order, Int(max_items))
+    return LIFOCache{K, V}(table, order, Int(max_items))
 end
 
 function get!(cache::LIFOCache{K, V}, key::K, default::V) where {K, V}
@@ -17,7 +17,7 @@ function get!(cache::LIFOCache{K, V}, key::K, default::V) where {K, V}
 end
 
 function put!(cache::LIFOCache{K, V}, key::K, value::V) where {K, V}
-    _order_remove!(cache.order, key, cache.data.hash_eq.eq)
+    _order_remove!(cache.order, key, cache.data.eq_fn)
     push_back!(cache.order, key)
     hash_table_put!(cache.data, key, value)
     if cache.order.length > cache.max_items
@@ -30,7 +30,7 @@ end
 
 function remove!(cache::LIFOCache{K, V}, key::K) where {K, V}
     hash_table_remove!(cache.data, key)
-    _order_remove!(cache.order, key, cache.data.hash_eq.eq)
+    _order_remove!(cache.order, key, cache.data.eq_fn)
     return nothing
 end
 

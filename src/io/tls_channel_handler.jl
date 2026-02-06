@@ -70,9 +70,9 @@ end
     SHUT_DOWN_COMPLETE = 2
 end
 
-mutable struct CustomKeyOpHandler{F, UD}
-    on_key_operation::F
-    user_data::UD
+mutable struct CustomKeyOpHandler
+    on_key_operation::Union{Function, Nothing}
+    user_data::Any
 end
 
 function CustomKeyOpHandler(on_key_operation; user_data = nothing)
@@ -95,10 +95,10 @@ function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, op
     return nothing
 end
 
-mutable struct TlsByoCryptoSetupOptions{NewFn, StartFn, UD}
-    new_handler_fn::NewFn
-    start_negotiation_fn::StartFn
-    user_data::UD
+mutable struct TlsByoCryptoSetupOptions
+    new_handler_fn::Function
+    start_negotiation_fn::Union{Function, Nothing}
+    user_data::Any
 end
 
 function TlsByoCryptoSetupOptions(;
@@ -1778,15 +1778,14 @@ const _s2n_monotonic_clock_time_nanoseconds_c =
     @cfunction(_s2n_monotonic_clock_time_nanoseconds, Cint, (Ptr{Cvoid}, Ptr{UInt64}))
 
 const _s2n_tls_cleanup_key = Ref{UInt8}(0)
-const _s2n_tls_cleanup_key_ptr = pointer_from_objref(_s2n_tls_cleanup_key)
 
 function _s2n_schedule_thread_cleanup(slot::ChannelSlot)
     channel = slot.channel
     channel === nothing && return ErrorResult(raise_error(ERROR_INVALID_STATE))
-    existing = channel_fetch_local_object(channel, _s2n_tls_cleanup_key_ptr)
+    existing = channel_fetch_local_object(channel, _s2n_tls_cleanup_key)
     if existing isa ErrorResult
         reset_error()
-        local_obj = EventLoopLocalObject(_s2n_tls_cleanup_key_ptr, nothing)
+        local_obj = EventLoopLocalObject(_s2n_tls_cleanup_key, nothing)
         put_res = channel_put_local_object!(channel, local_obj)
         put_res isa ErrorResult && return put_res
         _ = thread_current_at_exit(_s2n_cleanup_thread)
@@ -1811,7 +1810,7 @@ mutable struct S2nTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: TlsChann
     input_queue::Deque{IoMessage}
     protocol::ByteBuffer
     server_name::ByteBuffer
-    latest_message_on_completion::Any
+    latest_message_on_completion::Union{Function, Nothing}
     latest_message_completion_user_data::Any
     on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing}
     on_data_read::Union{TlsOnDataReadFn, Nothing}
@@ -2656,7 +2655,6 @@ function _s2n_security_policy(options::TlsContextOptions)::Union{String, ErrorRe
 end
 
 function _s2n_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
-    io_fatal_assert_library_initialized()
     init_res = _s2n_init_once()
     init_res isa ErrorResult && return init_res
 
@@ -3061,7 +3059,7 @@ mutable struct SecureTransportTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}}
     protocol::ByteBuffer
     server_name::ByteBuffer
     alpn_list::Union{String, Nothing}
-    latest_message_on_completion::Any
+    latest_message_on_completion::Union{Function, Nothing}
     latest_message_completion_user_data::Any
     ca_certs::CFArrayRef
     on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing}
@@ -4105,13 +4103,7 @@ end
 
 # === Generic TLS API ===
 
-function _ensure_io_library_initialized()::Nothing
-    _io_library_initialized[] || io_library_init()
-    return nothing
-end
-
 function tls_is_alpn_available()::Bool
-    _ensure_io_library_initialized()
     @static if Sys.isapple()
         return _ssl_copy_alpn_protocols[] != C_NULL
     elseif Sys.islinux()
@@ -4122,7 +4114,6 @@ function tls_is_alpn_available()::Bool
 end
 
 function tls_is_cipher_pref_supported(pref::TlsCipherPref.T)::Bool
-    _ensure_io_library_initialized()
     @static if Sys.isapple()
         return pref == TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT
     elseif Sys.islinux()

@@ -19,6 +19,6 @@ end
 
 abstract type StatisticsHandler end
 
-process_statistics(::StatisticsHandler, ::StatisticsSampleInterval, ::ArrayList) = nothing
+process_statistics(::StatisticsHandler, ::StatisticsSampleInterval, ::AbstractVector) = nothing
 report_interval_ms(::StatisticsHandler) = UInt64(0)
 close!(::StatisticsHandler) = nothing

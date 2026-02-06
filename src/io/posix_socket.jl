@@ -201,24 +201,24 @@ function _parse_vsock_cid(address::AbstractString)::Union{UInt32, ErrorResult}
 end
 
 # Socket write request for queued writes
-mutable struct SocketWriteRequest{F <: Union{SocketOnWriteCompletedFn, Nothing}, U}
+mutable struct SocketWriteRequest
     cursor::ByteCursor
     original_len::Csize_t
-    written_fn::F  # nullable
-    user_data::U
+    written_fn::Union{Function, Nothing}
+    user_data::Any
     error_code::Int
     node_next::Union{SocketWriteRequest, Nothing}  # nullable
     node_prev::Union{SocketWriteRequest, Nothing}  # nullable
 end
 
 # POSIX socket connect args
-mutable struct PosixSocketConnectArgs{S}
+mutable struct PosixSocketConnectArgs
     task::Union{ScheduledTask, Nothing}
-    socket::Union{S, Nothing}
+    socket::Union{Socket, Nothing}
 end
 
 # POSIX socket implementation data
-mutable struct PosixSocket{FC <: Union{SocketOnShutdownCompleteFn, Nothing}, UC, FK <: Union{SocketOnShutdownCompleteFn, Nothing}, UK}
+mutable struct PosixSocket
     write_queue::Deque{SocketWriteRequest}
     written_queue::Deque{SocketWriteRequest}
     written_task::Union{ScheduledTask, Nothing}  # nullable
@@ -227,14 +227,14 @@ mutable struct PosixSocket{FC <: Union{SocketOnShutdownCompleteFn, Nothing}, UC,
     currently_subscribed::Bool
     continue_accept::Bool
     close_happened::Union{Ref{Bool}, Nothing}  # nullable
-    on_close_complete::FC  # nullable
-    close_user_data::UC
-    on_cleanup_complete::FK  # nullable
-    cleanup_user_data::UK
+    on_close_complete::Union{Function, Nothing}
+    close_user_data::Any
+    on_cleanup_complete::Union{Function, Nothing}
+    cleanup_user_data::Any
 end
 
 function PosixSocket()
-    return PosixSocket{Union{SocketOnShutdownCompleteFn, Nothing}, Any, Union{SocketOnShutdownCompleteFn, Nothing}, Any}(
+    return PosixSocket(
         Deque{SocketWriteRequest}(),
         Deque{SocketWriteRequest}(),
         nothing,
@@ -266,7 +266,7 @@ struct PosixSocketVTable <: SocketVTable end
 const POSIX_SOCKET_VTABLE = PosixSocketVTable()
 
 # Type alias for POSIX socket
-const PosixSocketType = Socket{PosixSocketVTable, PosixSocket}
+const PosixSocketType = Socket{PosixSocketVTable}
 
 # Internal helper to get errno
 function get_errno()::Cint
@@ -330,7 +330,7 @@ function socket_init_posix(
         io_handle.fd = existing_fd
     end
 
-    sock = Socket{PosixSocketVTable, PosixSocket, Union{AbstractChannelHandler, Nothing}, Union{SocketOnReadableFn, Nothing}, Any, Union{SocketOnConnectionResultFn, Nothing}, Union{SocketOnAcceptResultFn, Nothing}, Any}(
+    sock = Socket{PosixSocketVTable}(
         POSIX_SOCKET_VTABLE,
         SocketEndpoint(),
         SocketEndpoint(),
@@ -778,15 +778,17 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
     elseif sock.options.domain == SocketDomain.LOCAL
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
-        sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_UNIX)])
+        sockaddr_len = @static (Sys.isapple() || Sys.isbsd()) ? Cuint(106) : Cuint(110)  # sizeof(sockaddr_un)
+        _set_sockaddr_family!(sockaddr_buf, AF_UNIX, sockaddr_len)
         addr_bytes = Memory{UInt8}(codeunits(address))
-        copy_len = min(length(addr_bytes), 106)
+        max_path_len = @static (Sys.isapple() || Sys.isbsd()) ? 104 : 108
+        copy_len = min(length(addr_bytes), max_path_len)
         for i in 1:copy_len
             sockaddr_buf[2 + i] = addr_bytes[i]
         end
         sockaddr_obj = sockaddr_buf
         sockaddr_ptr = pointer(sockaddr_buf)
-        sockaddr_len = Cuint(110)  # sizeof(sockaddr_un)
+        # `sockaddr_len` already set above.
     elseif sock.options.domain == SocketDomain.VSOCK
         cid_result = _parse_vsock_cid(address)
         if cid_result isa ErrorResult
@@ -816,7 +818,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
     socket_impl = sock.impl
 
     # Create connect args
-    connect_args = PosixSocketConnectArgs{typeof(sock)}(nothing, sock)
+    connect_args = PosixSocketConnectArgs(nothing, sock)
     socket_impl.connect_args = connect_args
 
     # Attempt to connect
@@ -1170,15 +1172,17 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
     elseif sock.options.domain == SocketDomain.LOCAL
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
-        sockaddr_buf[1:2] .= reinterpret(UInt8, [Cushort(AF_UNIX)])
+        sockaddr_len = @static (Sys.isapple() || Sys.isbsd()) ? Cuint(106) : Cuint(110)  # sizeof(sockaddr_un)
+        _set_sockaddr_family!(sockaddr_buf, AF_UNIX, sockaddr_len)
         addr_bytes = Memory{UInt8}(codeunits(address))
-        copy_len = min(length(addr_bytes), 106)
+        max_path_len = @static (Sys.isapple() || Sys.isbsd()) ? 104 : 108
+        copy_len = min(length(addr_bytes), max_path_len)
         for i in 1:copy_len
             sockaddr_buf[2 + i] = addr_bytes[i]
         end
         sockaddr_obj = sockaddr_buf
         sockaddr_ptr = pointer(sockaddr_buf)
-        sockaddr_len = Cuint(110)
+        # `sockaddr_len` already set above.
     elseif sock.options.domain == SocketDomain.VSOCK
         cid_result = _parse_vsock_cid(address)
         if cid_result isa ErrorResult

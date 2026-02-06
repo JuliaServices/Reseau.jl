@@ -209,7 +209,7 @@ end
         host_resolver = resolver,
     ))
 
-    bad_loop = AwsIO.event_loop_new(AwsIO.EventLoopOptions(; type = AwsIO.event_loop_get_default_type()))
+    bad_loop = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
     if bad_loop isa AwsIO.ErrorResult
         @test true
     else

@@ -135,22 +135,6 @@ end
 
 const _log_subject_registry = SmallRegistry{LogSubject, LogSubjectInfo}()
 
-function register_log_subject_info_list(list::LogSubjectInfoList)
-    for i in 1:length(list.subject_list)
-        info = list.subject_list[i]
-        registry_set!(_log_subject_registry, info.subject_id, info)
-    end
-    return nothing
-end
-
-function unregister_log_subject_info_list(list::LogSubjectInfoList)
-    for i in 1:length(list.subject_list)
-        info = list.subject_list[i]
-        registry_delete!(_log_subject_registry, info.subject_id)
-    end
-    return nothing
-end
-
 function log_subject_name(subject::LogSubject)
     info = registry_get(_log_subject_registry, subject, nothing)
     return info === nothing ? "" : info.subject_name

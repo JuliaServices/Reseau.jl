@@ -58,7 +58,14 @@ include("io/io.jl")
 include("io/aws_byte_helpers.jl")
 include("io/crypto_primitives.jl")
 include("io/async_stream.jl")
+include("io/channel_buffer.jl")
+include("io/bufferio.jl")
 include("io/tls_channel_handler.jl")
 include("io/alpn_handler.jl")
+
+function __init__()
+    _init_os_thread_cfunc!()
+    io_library_init()
+end
 
 end # module AwsIO

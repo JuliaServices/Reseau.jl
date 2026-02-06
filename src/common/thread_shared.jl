@@ -26,9 +26,24 @@ function thread_get_managed_thread_count()
     return Csize_t(count)
 end
 
-function _one_or_fewer_managed_threads_unjoined(ctx)
-    _ = ctx
-    return _unjoined_thread_count[] <= 1
+function _managed_thread_join_threshold()::UInt32
+    # If called from a managed thread we can never join ourselves, so consider "done" when only one
+    # managed thread remains.
+    handle = _thread_tls_handle()
+    return (handle !== nothing && handle.managed) ? UInt32(1) : UInt32(0)
+end
+
+struct _JoinAllManagedCtx
+    threshold::UInt32
+end
+
+function _managed_threads_done_or_pending_pred(ctx::_JoinAllManagedCtx)
+    # Called with `_managed_thread_lock` held.
+    #
+    # Wake up when either:
+    # - there are thread handles ready to join, or
+    # - the remaining managed-thread count is at/below the "done" threshold.
+    return !isempty(_pending_join_managed_threads[]) || (_unjoined_thread_count[] <= ctx.threshold)
 end
 
 function thread_set_managed_join_timeout_ns(timeout_in_ns::UInt64)
@@ -44,6 +59,7 @@ end
 function thread_join_all_managed()
     lock(_managed_thread_lock[])
     timeout_in_ns = _default_managed_join_timeout_ns[]
+    threshold = _managed_thread_join_threshold()
     unlock(_managed_thread_lock[])
     now_in_ns = UInt64(0)
     timeout_timestamp_ns = UInt64(0)
@@ -55,6 +71,7 @@ function thread_join_all_managed()
         now_in_ns = now_ref[]
         timeout_timestamp_ns = now_in_ns + timeout_in_ns
     end
+    ctx = _JoinAllManagedCtx(threshold)
     successful = true
     done = false
     while !done
@@ -68,18 +85,18 @@ function thread_join_all_managed()
                 _managed_thread_signal,
                 _managed_thread_lock,
                 wait_ns,
-                _one_or_fewer_managed_threads_unjoined,
-                nothing,
+                _managed_threads_done_or_pending_pred,
+                ctx,
             )
         else
             condition_variable_wait_pred(
                 _managed_thread_signal,
                 _managed_thread_lock,
-                _one_or_fewer_managed_threads_unjoined,
-                nothing,
+                _managed_threads_done_or_pending_pred,
+                ctx,
             )
         end
-        done = _unjoined_thread_count[] == 0
+        # Pull any threads that have finished into a local join list.
         if timeout_timestamp_ns > 0
             now_ref = Ref{UInt64}(0)
             if sys_clock_get_ticks(now_ref) != OP_SUCCESS
@@ -98,10 +115,14 @@ function thread_join_all_managed()
             handle === nothing && break
             push_back!(join_list, handle)
         end
+        done = done || (_unjoined_thread_count[] <= threshold && isempty(_pending_join_managed_threads[]))
         unlock(_managed_thread_lock[])
         for handle in join_list
-            handle.task === nothing && continue
-            wait(handle.task)
+            if handle.os_thread != 0
+                @ccall gc_safe = true pthread_join(handle.os_thread::pthread_t, C_NULL::Ptr{Ptr{Cvoid}})::Cint
+            elseif handle.task !== nothing
+                wait(handle.task)
+            end
             handle.detach_state = ThreadDetachState.JOIN_COMPLETED
             thread_clean_up(handle)
         end

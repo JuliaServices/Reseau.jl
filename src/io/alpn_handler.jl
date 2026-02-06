@@ -1,14 +1,14 @@
 # AWS IO Library - ALPN Handler
 # Port of aws-c-io/source/alpn_handler.c
 
-mutable struct AlpnHandler{F <: Union{ChannelOnProtocolNegotiatedFn, Nothing}, U, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
-    slot::SlotRef
-    on_protocol_negotiated::F
-    user_data::U
+mutable struct AlpnHandler <: AbstractChannelHandler
+    slot::Union{ChannelSlot, Nothing}
+    on_protocol_negotiated::Union{Function, Nothing}
+    user_data::Any
 end
 
-function AlpnHandler(on_protocol_negotiated::F, user_data) where {F}
-    return AlpnHandler{F, typeof(user_data), Union{ChannelSlot, Nothing}}(nothing, on_protocol_negotiated, user_data)
+function AlpnHandler(on_protocol_negotiated, user_data)
+    return AlpnHandler(nothing, on_protocol_negotiated, user_data)
 end
 
 function tls_alpn_handler_new(on_protocol_negotiated::ChannelOnProtocolNegotiatedFn, user_data = nothing)
