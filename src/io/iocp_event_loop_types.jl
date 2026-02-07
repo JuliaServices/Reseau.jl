@@ -43,6 +43,8 @@
         thread_created_on::Union{Nothing, ThreadHandle}
         thread_joined_to::UInt64
         @atomic running_thread_id::UInt64
+        startup_event::Threads.Event
+        @atomic startup_error::Int
         synced_data::IocpSyncedData
         thread_data::IocpThreadData
         thread_options::ThreadOptions
@@ -54,6 +56,8 @@
             nothing,
             UInt64(0),
             UInt64(0),
+            Threads.Event(),
+            0,
             IocpSyncedData(),
             IocpThreadData(),
             ThreadOptions(),
@@ -61,4 +65,3 @@
     end
 
 end # @static if Sys.iswindows()
-

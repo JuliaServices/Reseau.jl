@@ -138,6 +138,11 @@
 
         impl.should_continue = true
 
+        # Thread startup synchronization (avoid libuv-backed `sleep`/`time_ns` polling).
+        impl.startup_event = Threads.Event()
+        @atomic impl.startup_error = 0
+        @atomic impl.running_thread_id = UInt64(0)
+
         # Launch the event loop thread
         thread_fn = el -> epoll_event_loop_thread(el)
         impl.thread_created_on = ThreadHandle()
@@ -153,12 +158,10 @@
         event_loop.thread = impl.thread_created_on
         @atomic event_loop.running = true
 
-        wait_start = time_ns()
-        while (@atomic impl.running_thread_id) == 0
-            if time_ns() - wait_start > 1_000_000_000
-                return ErrorResult(raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN))
-            end
-            sleep(0.001)
+        wait(impl.startup_event)
+        startup_error = @atomic impl.startup_error
+        if startup_error != 0 || (@atomic impl.running_thread_id) == 0
+            return ErrorResult(raise_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN))
         end
 
         return nothing
@@ -486,7 +489,8 @@
         # Set running thread ID
         @atomic impl.running_thread_id = thread_current_thread_id()
 
-        # Subscribe to events on the read task handle for cross-thread notifications
+        # Subscribe to events on the read task handle for cross-thread notifications.
+        # Signal `startup_event` once subscription is complete.
         err = event_loop_subscribe_to_io_events!(
             event_loop,
             impl.read_task_handle,
@@ -496,8 +500,12 @@
         )
         if err isa ErrorResult
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to task notification events")
+            @atomic impl.startup_error = ERROR_SYS_CALL_FAILURE
+            notify(impl.startup_event)
+            @atomic impl.running_thread_id = UInt64(0)
             return nothing
         end
+        notify(impl.startup_event)
 
         _ = thread_current_at_exit(() -> LibAwsCal.aws_cal_thread_clean_up())
 

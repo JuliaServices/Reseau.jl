@@ -78,6 +78,8 @@
         thread_created_on::Union{Nothing, ThreadHandle}
         thread_joined_to::UInt64
         @atomic running_thread_id::UInt64
+        startup_event::Threads.Event
+        @atomic startup_error::Int
         read_task_handle::IoHandle
         write_task_handle::IoHandle
         task_pre_queue_mutex::ReentrantLock
@@ -97,6 +99,8 @@
             nothing,
             UInt64(0),
             UInt64(0),
+            Threads.Event(),
+            0,
             IoHandle(),
             IoHandle(),
             ReentrantLock(),

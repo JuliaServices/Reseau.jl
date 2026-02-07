@@ -2,19 +2,43 @@
 
 Goal: make `Reseau`, `AwsHTTP`, and `HTTP` avoid libuv for the network/IO stack (directly or via Base/stdlib helpers).
 
-Hard requirement: `HTTP` must not import or depend on the `Sockets` stdlib at all (directly or indirectly).
+Hard requirement: `HTTP` package source (`src/`) must not import or depend on the `Sockets` stdlib.
 
 Current scope: we are OK (for now) with Julia task/sync primitives that may drive libuv internally:
 `Threads.@spawn`, `Threads.Event`, `Threads.Condition`, `wait`/`notify`, `@async`, `Channel`, and `ReentrantLock`.
 The replacement work below focuses on libuv-backed *timers/clocks/filesystem helpers* and any `Sockets` stdlib usage.
 
 This document has 2 parts:
-1. What currently still touches libuv (with exact call sites).
-2. The minimal replacement surface to implement so the stack can run without using the libuv-backed APIs in scope.
+1. What touched libuv pre-fix (exact call sites; kept for provenance).
+2. The replacement surface implemented so the stack can run without using the libuv-backed APIs in scope.
 
 Implementation note:
 - We can reintroduce code from `src/common/unused/` where it helps (some functionality was moved there as dead/unused).
 - When re-implementing behavior, treat the C implementations in `~/aws-c-common` as the reference for semantics/edge cases.
+
+## Status (2026-02-07)
+
+Completed the replacement surface and updated all call sites in `Reseau`, `AwsHTTP`, and `HTTP`.
+
+Local verification (macOS):
+- `Reseau` tests pass
+- `AwsHTTP` tests pass
+- `HTTP` tests pass
+
+Invariant checks:
+- `Reseau/src/` has no `sleep(` / `time_ns` / `Base.timedwait` / `stat(` call sites (comments/docstrings may still mention them).
+- `AwsHTTP/src/` has no `time_ns(` call sites.
+- `HTTP/src/` has no `Sockets` usage and no `sleep(` call sites.
+
+Quick checks:
+```sh
+cd /Users/jacob.quinn/.julia/dev/Reseau && rg -n "\\bsleep\\(|\\btime_ns\\b|Base\\.timedwait|\\bstat\\(" -S src
+cd /Users/jacob.quinn/.julia/dev/AwsHTTP && rg -n "\\btime_ns\\(" -S src
+cd /Users/jacob.quinn/.julia/dev/HTTP && rg -n "\\b(using|import)\\s+Sockets\\b|\\bSockets\\.|\\bsleep\\(" -S src
+```
+
+Test-only `Sockets` in HTTP:
+- `Sockets` is allowed in `HTTP/test/` and is declared in `HTTP/Project.toml` under `[extras]` + `[targets].test`.
 
 ## Julia Source Proof Points (Why These Hit libuv)
 
@@ -46,9 +70,10 @@ These are the key Base/stdlib APIs that invoke libuv under the hood:
 5. `Sockets` stdlib:
    - `~/julia/stdlib/Sockets/src/*`: uses `ccall(:uv_...)` for sockets + DNS (`uv_tcp_*`, `uv_getaddrinfo`, etc).
 
-## Current libuv Touchpoints (Exact Call Sites)
+## Former libuv Touchpoints (Pre-Fix Call Sites)
 
-This is intentionally exhaustive for the current working trees.
+The call site lists in this section were intentionally exhaustive for the *pre-fix* working trees.
+They are kept for provenance; see the Status section above for how to verify the current state.
 
 ### Reseau (`/Users/jacob.quinn/.julia/dev/Reseau`)
 
@@ -347,6 +372,8 @@ Implement these in `Reseau` to allow `Reseau`/`AwsHTTP`/`HTTP` to stop using the
 
 ### 1. Monotonic Clock (Replace `time_ns()`)
 
+Status: implemented in `Reseau/src/common/clock.jl` and call sites updated in `Reseau/src/io/*` + `AwsHTTP/src/*`.
+
 Provide:
 - `Reseau.monotonic_time_ns()::UInt64` in common/clock.jl
 
@@ -356,23 +383,44 @@ Implementation:
 Replace call sites:
 - All `time_ns()` usage in `Reseau` event loops and in `AwsHTTP` timestamping/culling/RTT calculations.
 
-### 2. Thread Sleep (Replace `sleep(...)`)
+### 2. Sleep/Delay (Replace `sleep(...)` Without Blocking Julia Threads)
+
+Status: implemented in `Reseau/src/common/clock.jl` (thread sleep) and `Reseau/src/io/event_loop.jl` (task sleep), with call sites updated in `Reseau` + `HTTP`.
 
 Provide:
-- `Reseau.thread_sleep_ns(ns::Integer)::Nothing`  in common/clock.jl
+- `Reseau.thread_sleep_ns(ns::Integer)::Nothing`  in common/clock.jl (blocking; for dedicated threads only)
 - `Reseau.thread_sleep_s(seconds::Real)::Nothing` (thin wrapper)  in common/clock.jl
+- `Reseau.task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing`  (non-blocking; parks the *task*, not the thread)
+- `Reseau.task_sleep_s(event_loop::EventLoop, seconds::Real)::Nothing` (thin wrapper)
+
+Why two APIs:
+- A straight replacement of Base `sleep(...)` with OS-level `nanosleep`/`Sleep` **blocks the Julia thread**.
+  That is not equivalent to Julia's current `sleep`, which parks the *task* and lets other tasks run on that thread.
+  Blocking a thread can reduce throughput and can deadlock if the work that completes the wait needs time on that thread.
+- For libuv replacement, we want to avoid libuv-backed `Timer` usage, but we still want *task-friendly* sleeps for
+  timeout/backoff logic in `HTTP`, `AwsHTTP`, and `Reseau` user-facing blocking APIs.
 
 Implementation:
-- POSIX: `nanosleep` (or `clock_nanosleep`) via `@ccall gc_safe=true ...`.
-- Windows: `Sleep(ms)` or a waitable timer for sub-ms.
+- `thread_sleep_*` (blocking):
+  - POSIX: `nanosleep` (or `clock_nanosleep`) via `@ccall gc_safe=true ...`.
+  - Windows: `Sleep(ms)` or a waitable timer for sub-ms.
+- `task_sleep_*` (non-blocking):
+  - Use `event_loop_schedule_task_future!(event_loop, ScheduledTask(...), run_at_nanos)` to schedule a wake-up.
+  - Park the current task on a `Threads.Event`/`Threads.Condition` and `wait(...)` until the scheduled task fires.
+  - This avoids libuv `Timer` while keeping "sleep parks tasks, not threads" semantics.
 
 Replace call sites:
-- `Reseau` event loop "short sleep" backoff
-- `Reseau` `Future` polling sleeps
-- `Reseau.thread_current_sleep`
-- `HTTP` timeout tasks and retry backoffs (if those remain thread-based)
+- Prefer removing polling sleeps entirely where possible:
+  - `Reseau` event loop startup: signal readiness with an event/condition (avoid `sleep(0.001)` polling loop).
+  - `Reseau` `Future` waits: use wait/notify (avoid `yield` + `sleep` polling loops).
+- Where a delay is truly needed:
+  - Use `task_sleep_*` for timeouts/backoffs in `HTTP`/`AwsHTTP` (and any user-facing blocking APIs).
+  - Reserve `thread_sleep_*` for dedicated low-level worker threads that run no other Julia tasks.
+
 
 ### 3. Replace `Base.timedwait(...)` (Avoid libuv `Timer`)
+
+Status: implemented in `Reseau/src/common/clock.jl` + `Reseau/src/common/condition_variable.jl`.
 
 Provide:
 - `Reseau.timedwait_poll(testcb, timeout_s; poll_s=...) -> (:ok | :timed_out)`  in common/clock.jl
@@ -384,6 +432,8 @@ Replace call sites:
 - `Reseau` `src/common/condition_variable.jl` (uses `Base.timedwait`)
 
 ### 4. Non-libuv Filesystem Helpers (Replace `open`, `stat`, `homedir`, `tempdir`, `tempname`, `isdir`) in common/file.jl
+
+Status: implemented in `Reseau/src/common/file.jl` (libc wrappers) + `Reseau/src/common/log_writer.jl` (no `Base.open`), with call sites updated in `HTTP/src/download.jl`.
 
 Provide:
 - `Reseau.fs_open_*` wrappers for file open/append without `Base.Filesystem.open`
@@ -403,6 +453,8 @@ Replace call sites:
 - `HTTP` `src/download.jl` (`tempdir`, `isdir`, `tempname`, `Base.open`)
 
 ### 5. Hard Requirement: Remove `Sockets` From HTTP
+
+Status: implemented. `HTTP/src/` has no `Sockets` usage; `Sockets` is used in `HTTP/test/` only.
 
 Provide (either in `Reseau` or in `HTTP` without importing `Sockets`):
 - Minimal IP parser for cookie domain checks:

@@ -415,3 +415,45 @@ function event_loop_group_release_from_event_loop!(event_loop::EventLoop)
     end
     return nothing
 end
+
+# -----------------------------------------------------------------------------
+# Task-friendly sleep without libuv-backed `Timer`
+#
+# Base `sleep()` uses libuv timers. We implement a task-friendly delay by
+# scheduling a wake-up task on an aws event loop and parking the current task.
+# -----------------------------------------------------------------------------
+
+function task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing
+    ns <= 0 && return nothing
+
+    # Avoid deadlocking the event-loop thread.
+    if event_loop_thread_is_callers_thread(event_loop)
+        thread_sleep_ns(ns)
+        return nothing
+    end
+
+    wake = Threads.Event()
+    ctx = (wake = wake,)
+    task = ScheduledTask(
+        (ctx, _status) -> (notify(ctx.wake); nothing),
+        ctx;
+        type_tag = "task_sleep",
+    )
+
+    now = event_loop.clock()
+    run_at = add_u64_saturating(now isa ErrorResult ? monotonic_time_ns() : now, UInt64(ns))
+    event_loop_schedule_task_future!(event_loop, task, run_at)
+
+    wait(wake)
+    return nothing
+end
+
+function task_sleep_s(event_loop::EventLoop, seconds::Real)::Nothing
+    seconds <= 0 && return nothing
+    isfinite(seconds) || return (raise_error(ERROR_INVALID_ARGUMENT); nothing)
+    ns_f = Float64(seconds) * Float64(TIMESTAMP_NANOS)
+    ns_f <= 0 && return nothing
+    ns = ns_f >= Float64(typemax(UInt64)) ? typemax(UInt64) : UInt64(round(ns_f))
+    task_sleep_ns(event_loop, ns)
+    return nothing
+end

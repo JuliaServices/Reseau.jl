@@ -104,9 +104,9 @@ function condition_variable_wait_for_pred(
         end
         remaining = deadline - now_ref[]
         unlock(mutex)
-        ok = Base.timedwait(() -> (@atomic cond.seq) != local_seq, remaining / 1_000_000_000)
+        ok = timedwait_poll_ns(() -> (@atomic cond.seq) != local_seq, remaining)
         lock(mutex)
-        if ok == false || ok == :timed_out
+        if ok == :timed_out
             return raise_error(ERROR_COND_VARIABLE_TIMED_OUT)
         end
         local_seq = @atomic cond.seq

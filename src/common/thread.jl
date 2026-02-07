@@ -164,7 +164,7 @@ end
 
 function thread_current_sleep(nanos::Integer)
     nanos <= 0 && return nothing
-    sleep(nanos / 1_000_000_000)
+    thread_sleep_ns(nanos)
     return nothing
 end
 

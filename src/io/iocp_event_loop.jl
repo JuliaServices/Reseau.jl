@@ -270,6 +270,7 @@
 
         @atomic impl.running_thread_id = thread_current_thread_id()
         impl.thread_data.state = IocpEventThreadState.RUNNING
+        notify(impl.startup_event)
 
         _ = thread_current_at_exit(() -> LibAwsCal.aws_cal_thread_clean_up())
 
@@ -372,6 +373,11 @@
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
 
+        # Thread startup synchronization (avoid libuv-backed `sleep`/`time_ns` polling).
+        impl.startup_event = Threads.Event()
+        @atomic impl.startup_error = 0
+        @atomic impl.running_thread_id = UInt64(0)
+
         if impl.synced_data.state != IocpEventThreadState.READY_TO_RUN
             return ErrorResult(raise_error(ERROR_INVALID_STATE))
         end
@@ -395,12 +401,10 @@
         event_loop.thread = impl.thread_created_on
         @atomic event_loop.running = true
 
-        wait_start = time_ns()
-        while (@atomic impl.running_thread_id) == 0
-            if time_ns() - wait_start > 1_000_000_000
-                return ErrorResult(raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN))
-            end
-            sleep(0.001)
+        wait(impl.startup_event)
+        startup_error = @atomic impl.startup_error
+        if startup_error != 0 || (@atomic impl.running_thread_id) == 0
+            return ErrorResult(raise_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN))
         end
 
         return nothing
