@@ -26,7 +26,7 @@ Local verification (macOS):
 - `HTTP` tests pass
 
 CI verification:
-- `Reseau` PR #1 CI is green on macOS/Linux/Windows (`gh` run `21787880109`).
+- `Reseau` PR #1 CI is green on macOS/Linux/Windows (last checked 2026-02-07).
 
 Invariant checks:
 - `Reseau/src/` has no `sleep(` / `time_ns` / `Base.timedwait` / `stat(` call sites (comments/docstrings may still mention them).
