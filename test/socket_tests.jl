@@ -628,6 +628,8 @@ end
             bind_res = Reseau.socket_bind(server_socket, bind_opts)
             if bind_res isa Reseau.ErrorResult
                 @test bind_res.code == Reseau.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                    bind_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                    bind_res.code == Reseau.ERROR_NO_PERMISSION ||
                     bind_res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
                 return
             end

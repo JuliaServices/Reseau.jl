@@ -79,7 +79,9 @@ const ENFILE = 23
 const ENOENT = 2
 const EINVAL = 22
 const EAFNOSUPPORT = @static Sys.isapple() ? 47 : 97
+const EPERM = 1
 const EACCES = 13
+const ENODEV = 19
 const EPIPE = @static Sys.isapple() ? 32 : 32
 
 # Shutdown directions
@@ -166,7 +168,9 @@ function determine_socket_error(errno_val::Integer)::Int
         return ERROR_FILE_INVALID_PATH
     elseif errno_val == EAFNOSUPPORT
         return ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
-    elseif errno_val == EACCES
+    elseif errno_val == ENODEV
+        return ERROR_PLATFORM_NOT_SUPPORTED
+    elseif errno_val == EACCES || errno_val == EPERM
         return ERROR_NO_PERMISSION
     else
         return ERROR_IO_SOCKET_NOT_CONNECTED

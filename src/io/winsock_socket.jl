@@ -190,6 +190,26 @@
         return Tuple(mem)
     end
 
+    @inline function _winsock_inet_ntop_ipv4(addr_ptr::Ptr{UInt8})::String
+        b1 = unsafe_load(addr_ptr, 1)
+        b2 = unsafe_load(addr_ptr, 2)
+        b3 = unsafe_load(addr_ptr, 3)
+        b4 = unsafe_load(addr_ptr, 4)
+        return string(b1, ".", b2, ".", b3, ".", b4)
+    end
+
+    function _winsock_inet_ntop_ipv6(addr_ptr::Ptr{UInt8})::String
+        # Uncompressed form is fine; parse_ipv6_address! accepts it.
+        parts = Vector{String}(undef, 8)
+        @inbounds for i in 0:7
+            hi = unsafe_load(addr_ptr, 2 * i + 1)
+            lo = unsafe_load(addr_ptr, 2 * i + 2)
+            val = (UInt16(hi) << 8) | UInt16(lo)
+            parts[i + 1] = string(val; base = 16)
+        end
+        return join(parts, ":")
+    end
+
     function _winsock_update_local_endpoint_ipv4_ipv6!(sock::Socket)::Union{Nothing, ErrorResult}
         handle = _winsock_socket_handle(sock)
         handle == 0 && return ErrorResult(raise_error(ERROR_INVALID_STATE))
@@ -216,46 +236,14 @@
         family = unsafe_load(Ptr{Cushort}(pointer(address))) |> Cint
         if family == WS_AF_INET
             port = ntohs(unsafe_load(Ptr{Cushort}(pointer(address) + 2)))
-            addr_ptr = Ptr{Cvoid}(pointer(address) + 4)
-            buf = Memory{UInt8}(undef, 16)
-            fill!(buf, 0x00)
-            res = GC.@preserve buf ccall(
-                (:InetNtopA, _WS2_32),
-                Cstring,
-                (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-                WS_AF_INET,
-                addr_ptr,
-                pointer(buf),
-                Csize_t(length(buf)),
-            )
-            if res == C_NULL
-                aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
-            end
-            set_address!(sock.local_endpoint, unsafe_string(res))
+            addr_ptr = Ptr{UInt8}(pointer(address) + 4)
+            set_address!(sock.local_endpoint, _winsock_inet_ntop_ipv4(addr_ptr))
             sock.local_endpoint.port = UInt32(port)
             return nothing
         elseif family == WS_AF_INET6
             port = ntohs(unsafe_load(Ptr{Cushort}(pointer(address) + 2)))
-            addr_ptr = Ptr{Cvoid}(pointer(address) + 8)
-            buf = Memory{UInt8}(undef, 46)
-            fill!(buf, 0x00)
-            res = GC.@preserve buf ccall(
-                (:InetNtopA, _WS2_32),
-                Cstring,
-                (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-                WS_AF_INET6,
-                addr_ptr,
-                pointer(buf),
-                Csize_t(length(buf)),
-            )
-            if res == C_NULL
-                aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
-            end
-            set_address!(sock.local_endpoint, unsafe_string(res))
+            addr_ptr = Ptr{UInt8}(pointer(address) + 8)
+            set_address!(sock.local_endpoint, _winsock_inet_ntop_ipv6(addr_ptr))
             sock.local_endpoint.port = UInt32(port)
             return nothing
         end
@@ -1073,35 +1061,13 @@
         port = UInt32(0)
         if family == WS_AF_INET
             port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
-            addr_ptr = Ptr{Cvoid}(pointer(addr_mem) + 4)
-            buf = Memory{UInt8}(undef, 16)
-            fill!(buf, 0x00)
-            res = GC.@preserve buf ccall(
-                (:InetNtopA, _WS2_32),
-                Cstring,
-                (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-                WS_AF_INET,
-                addr_ptr,
-                pointer(buf),
-                Csize_t(length(buf)),
-            )
-            res != C_NULL && set_address!(incoming.remote_endpoint, unsafe_string(res))
+            addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 4)
+            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv4(addr_ptr))
             incoming.options.domain = SocketDomain.IPV4
         elseif family == WS_AF_INET6
             port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
-            addr_ptr = Ptr{Cvoid}(pointer(addr_mem) + 8)
-            buf = Memory{UInt8}(undef, 46)
-            fill!(buf, 0x00)
-            res = GC.@preserve buf ccall(
-                (:InetNtopA, _WS2_32),
-                Cstring,
-                (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-                WS_AF_INET6,
-                addr_ptr,
-                pointer(buf),
-                Csize_t(length(buf)),
-            )
-            res != C_NULL && set_address!(incoming.remote_endpoint, unsafe_string(res))
+            addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 8)
+            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv6(addr_ptr))
             incoming.options.domain = SocketDomain.IPV6
         end
         incoming.remote_endpoint.port = port
