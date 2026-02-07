@@ -18,46 +18,6 @@ const _SEEK_END = Cint(2)
 @static if _PLATFORM_WINDOWS
     const _WIN_FILE_ATTRIBUTE_DIRECTORY = UInt32(0x10)
     const _WIN_INVALID_FILE_ATTRIBUTES = UInt32(0xffffffff)
-
-    # Windows CRT functions may not be imported into the Julia binary. Prefer the CRT dlls
-    # explicitly, falling back to the default search if needed.
-    @inline function _win_ftelli64(file_ptr::Ptr{Cvoid})::Int64
-        try
-            return ccall((:_ftelli64, "ucrtbase"), Int64, (Ptr{Cvoid},), file_ptr)
-        catch err
-            if !(err isa ErrorException && occursin("could not load", err.msg))
-                rethrow()
-            end
-        end
-
-        try
-            return ccall((:_ftelli64, "msvcrt"), Int64, (Ptr{Cvoid},), file_ptr)
-        catch err
-            if err isa ErrorException && occursin("could not load", err.msg)
-                return ccall(:_ftelli64, Int64, (Ptr{Cvoid},), file_ptr)
-            end
-            rethrow()
-        end
-    end
-
-    @inline function _win_fseeki64(file_ptr::Ptr{Cvoid}, offset::Int64, whence::Cint)::Cint
-        try
-            return ccall((:_fseeki64, "ucrtbase"), Cint, (Ptr{Cvoid}, Int64, Cint), file_ptr, offset, whence)
-        catch err
-            if !(err isa ErrorException && occursin("could not load", err.msg))
-                rethrow()
-            end
-        end
-
-        try
-            return ccall((:_fseeki64, "msvcrt"), Cint, (Ptr{Cvoid}, Int64, Cint), file_ptr, offset, whence)
-        catch err
-            if err isa ErrorException && occursin("could not load", err.msg)
-                return ccall(:_fseeki64, Cint, (Ptr{Cvoid}, Int64, Cint), file_ptr, offset, whence)
-            end
-            rethrow()
-        end
-    end
 end
 
 @inline function _c_str_is_empty(c_str::Ptr{UInt8})
@@ -74,20 +34,10 @@ end
 
 function _fs_file_length(file::Libc.FILE)::Union{Int64, Nothing}
     @static if _PLATFORM_WINDOWS
-        try
-            pos = _win_ftelli64(file.ptr)
-            pos < 0 && return nothing
-            _win_fseeki64(file.ptr, 0, _SEEK_END) == 0 || return nothing
-            len = _win_ftelli64(file.ptr)
-            _ = _win_fseeki64(file.ptr, pos, _SEEK_SET)
-            len < 0 && return nothing
-            return len
-        catch err
-            if err isa ErrorException && occursin("could not load", err.msg)
-                return nothing
-            end
-            rethrow()
-        end
+        # Size hint isn't required: the read loop grows the buffer as needed.
+        # Avoid calling into the Windows CRT here, since the `FILE*` came from whatever
+        # C runtime Julia imported `fopen` from, and mixing CRTs can crash.
+        return nothing
     else
         pos = ccall(:ftello, Int64, (Ptr{Cvoid},), file.ptr)
         pos < 0 && return nothing
