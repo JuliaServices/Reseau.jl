@@ -1211,7 +1211,7 @@ end
   ByteBuffer Cat
 ==========================================================================#
 
-function byte_buf_cat(dest::Base.RefValue{ByteBuffer}, bufs::Vararg{<:Union{ByteBuffer, Base.RefValue{ByteBuffer}}})
+function byte_buf_cat(dest::Base.RefValue{ByteBuffer}, bufs::Vararg{Union{ByteBuffer, Base.RefValue{ByteBuffer}}})
     for buf in bufs
         b = buf isa Base.RefValue ? buf[] : buf
         cursor = byte_cursor_from_buf(b)
