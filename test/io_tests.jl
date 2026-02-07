@@ -1,49 +1,49 @@
 using Test
-using AwsIO
+using Reseau
 
-const _pkcs11_test_init_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
+const _pkcs11_test_init_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
 const _pkcs11_test_finalize_called = Ref(false)
 const _pkcs11_test_get_info_called = Ref(false)
-const _pkcs11_test_slots = Ref{Vector{AwsIO.CK_SLOT_ID}}(AwsIO.CK_SLOT_ID[])
-const _pkcs11_test_token_labels = Ref{Dict{AwsIO.CK_SLOT_ID, String}}(Dict{AwsIO.CK_SLOT_ID, String}())
-const _pkcs11_test_open_session_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_close_session_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_login_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_session_handle = Ref{AwsIO.CK_SESSION_HANDLE}(AwsIO.CK_SESSION_HANDLE(0x1234))
-const _pkcs11_test_find_init_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_find_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_find_final_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_get_attr_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_find_objects = Ref{Vector{AwsIO.CK_OBJECT_HANDLE}}(AwsIO.CK_OBJECT_HANDLE[])
-const _pkcs11_test_key_type = Ref{AwsIO.CK_KEY_TYPE}(AwsIO.CKK_RSA)
-const _pkcs11_test_decrypt_init_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_decrypt_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
+const _pkcs11_test_slots = Ref{Vector{Reseau.CK_SLOT_ID}}(Reseau.CK_SLOT_ID[])
+const _pkcs11_test_token_labels = Ref{Dict{Reseau.CK_SLOT_ID, String}}(Dict{Reseau.CK_SLOT_ID, String}())
+const _pkcs11_test_open_session_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_close_session_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_login_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_session_handle = Ref{Reseau.CK_SESSION_HANDLE}(Reseau.CK_SESSION_HANDLE(0x1234))
+const _pkcs11_test_find_init_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_find_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_find_final_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_get_attr_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_find_objects = Ref{Vector{Reseau.CK_OBJECT_HANDLE}}(Reseau.CK_OBJECT_HANDLE[])
+const _pkcs11_test_key_type = Ref{Reseau.CK_KEY_TYPE}(Reseau.CKK_RSA)
+const _pkcs11_test_decrypt_init_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_decrypt_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
 const _pkcs11_test_decrypt_output = Ref{Vector{UInt8}}(UInt8[])
-const _pkcs11_test_sign_init_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
-const _pkcs11_test_sign_rv = Ref{AwsIO.CK_RV}(AwsIO.CKR_OK)
+const _pkcs11_test_sign_init_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
+const _pkcs11_test_sign_rv = Ref{Reseau.CK_RV}(Reseau.CKR_OK)
 const _pkcs11_test_sign_output = Ref{Vector{UInt8}}(UInt8[])
 const _pkcs11_test_sign_input = Ref{Vector{UInt8}}(UInt8[])
 
-function _pkcs11_test_fake_initialize(::Ptr{AwsIO.CK_C_INITIALIZE_ARGS})::AwsIO.CK_RV
+function _pkcs11_test_fake_initialize(::Ptr{Reseau.CK_C_INITIALIZE_ARGS})::Reseau.CK_RV
     return _pkcs11_test_init_rv[]
 end
 
-function _pkcs11_test_fake_finalize(::Ptr{Cvoid})::AwsIO.CK_RV
+function _pkcs11_test_fake_finalize(::Ptr{Cvoid})::Reseau.CK_RV
     _pkcs11_test_finalize_called[] = true
-    return AwsIO.CKR_OK
+    return Reseau.CKR_OK
 end
 
-function _pkcs11_test_fake_get_info(info_ptr::Ptr{AwsIO.CK_INFO})::AwsIO.CK_RV
+function _pkcs11_test_fake_get_info(info_ptr::Ptr{Reseau.CK_INFO})::Reseau.CK_RV
     _pkcs11_test_get_info_called[] = true
-    info = AwsIO.CK_INFO(
-        AwsIO.CK_VERSION(2, 20),
+    info = Reseau.CK_INFO(
+        Reseau.CK_VERSION(2, 20),
         ntuple(_ -> UInt8(0x20), 32),
         0,
         ntuple(_ -> UInt8(0x20), 32),
-        AwsIO.CK_VERSION(1, 0),
+        Reseau.CK_VERSION(1, 0),
     )
     unsafe_store!(info_ptr, info)
-    return AwsIO.CKR_OK
+    return Reseau.CKR_OK
 end
 
 function _pkcs11_test_label_bytes(label::AbstractString)
@@ -57,90 +57,90 @@ function _pkcs11_test_label_bytes(label::AbstractString)
 end
 
 function _pkcs11_test_fake_get_slot_list(
-        ::AwsIO.CK_BBOOL,
-        slot_list::Ptr{AwsIO.CK_SLOT_ID},
-        count_ptr::Ptr{AwsIO.CK_ULONG},
-    )::AwsIO.CK_RV
+        ::Reseau.CK_BBOOL,
+        slot_list::Ptr{Reseau.CK_SLOT_ID},
+        count_ptr::Ptr{Reseau.CK_ULONG},
+    )::Reseau.CK_RV
     slots = _pkcs11_test_slots[]
-    unsafe_store!(count_ptr, AwsIO.CK_ULONG(length(slots)))
+    unsafe_store!(count_ptr, Reseau.CK_ULONG(length(slots)))
     if slot_list != C_NULL
         for i in 1:length(slots)
             unsafe_store!(slot_list, slots[i], i)
         end
     end
-    return AwsIO.CKR_OK
+    return Reseau.CKR_OK
 end
 
 function _pkcs11_test_fake_get_token_info(
-        slot_id::AwsIO.CK_SLOT_ID,
-        info_ptr::Ptr{AwsIO.CK_TOKEN_INFO},
-    )::AwsIO.CK_RV
+        slot_id::Reseau.CK_SLOT_ID,
+        info_ptr::Ptr{Reseau.CK_TOKEN_INFO},
+    )::Reseau.CK_RV
     label = get(_pkcs11_test_token_labels[], slot_id, "")
-    info = AwsIO.CK_TOKEN_INFO(
+    info = Reseau.CK_TOKEN_INFO(
         _pkcs11_test_label_bytes(label),
         ntuple(_ -> UInt8(0x20), 32),
         ntuple(_ -> UInt8(0x20), 16),
         ntuple(_ -> UInt8(0x20), 16),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_ULONG(0),
-        AwsIO.CK_VERSION(0, 0),
-        AwsIO.CK_VERSION(0, 0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_ULONG(0),
+        Reseau.CK_VERSION(0, 0),
+        Reseau.CK_VERSION(0, 0),
         ntuple(_ -> UInt8(0x20), 16),
     )
     unsafe_store!(info_ptr, info)
-    return AwsIO.CKR_OK
+    return Reseau.CKR_OK
 end
 
 function _pkcs11_test_fake_open_session(
-        ::AwsIO.CK_SLOT_ID,
-        ::AwsIO.CK_FLAGS,
+        ::Reseau.CK_SLOT_ID,
+        ::Reseau.CK_FLAGS,
         ::Ptr{Cvoid},
         ::Ptr{Cvoid},
-        session_ptr::Ptr{AwsIO.CK_SESSION_HANDLE},
-    )::AwsIO.CK_RV
+        session_ptr::Ptr{Reseau.CK_SESSION_HANDLE},
+    )::Reseau.CK_RV
     unsafe_store!(session_ptr, _pkcs11_test_session_handle[])
     return _pkcs11_test_open_session_rv[]
 end
 
-function _pkcs11_test_fake_close_session(::AwsIO.CK_SESSION_HANDLE)::AwsIO.CK_RV
+function _pkcs11_test_fake_close_session(::Reseau.CK_SESSION_HANDLE)::Reseau.CK_RV
     return _pkcs11_test_close_session_rv[]
 end
 
 function _pkcs11_test_fake_login(
-        ::AwsIO.CK_SESSION_HANDLE,
-        ::AwsIO.CK_ULONG,
+        ::Reseau.CK_SESSION_HANDLE,
+        ::Reseau.CK_ULONG,
         ::Ptr{UInt8},
-        ::AwsIO.CK_ULONG,
-    )::AwsIO.CK_RV
+        ::Reseau.CK_ULONG,
+    )::Reseau.CK_RV
     return _pkcs11_test_login_rv[]
 end
 
 function _pkcs11_test_fake_find_objects_init(
-        ::AwsIO.CK_SESSION_HANDLE,
-        ::Ptr{AwsIO.CK_ATTRIBUTE},
-        ::AwsIO.CK_ULONG,
-    )::AwsIO.CK_RV
+        ::Reseau.CK_SESSION_HANDLE,
+        ::Ptr{Reseau.CK_ATTRIBUTE},
+        ::Reseau.CK_ULONG,
+    )::Reseau.CK_RV
     return _pkcs11_test_find_init_rv[]
 end
 
 function _pkcs11_test_fake_find_objects(
-        ::AwsIO.CK_SESSION_HANDLE,
-        objects_ptr::Ptr{AwsIO.CK_OBJECT_HANDLE},
-        max_objects::AwsIO.CK_ULONG,
-        count_ptr::Ptr{AwsIO.CK_ULONG},
-    )::AwsIO.CK_RV
+        ::Reseau.CK_SESSION_HANDLE,
+        objects_ptr::Ptr{Reseau.CK_OBJECT_HANDLE},
+        max_objects::Reseau.CK_ULONG,
+        count_ptr::Ptr{Reseau.CK_ULONG},
+    )::Reseau.CK_RV
     handles = _pkcs11_test_find_objects[]
     count = min(length(handles), Int(max_objects))
-    unsafe_store!(count_ptr, AwsIO.CK_ULONG(count))
+    unsafe_store!(count_ptr, Reseau.CK_ULONG(count))
     if objects_ptr != C_NULL
         for i in 1:count
             unsafe_store!(objects_ptr, handles[i], i)
@@ -149,42 +149,42 @@ function _pkcs11_test_fake_find_objects(
     return _pkcs11_test_find_rv[]
 end
 
-function _pkcs11_test_fake_find_objects_final(::AwsIO.CK_SESSION_HANDLE)::AwsIO.CK_RV
+function _pkcs11_test_fake_find_objects_final(::Reseau.CK_SESSION_HANDLE)::Reseau.CK_RV
     return _pkcs11_test_find_final_rv[]
 end
 
 function _pkcs11_test_fake_get_attribute_value(
-        ::AwsIO.CK_SESSION_HANDLE,
-        ::AwsIO.CK_OBJECT_HANDLE,
-        attrs_ptr::Ptr{AwsIO.CK_ATTRIBUTE},
-        attr_count::AwsIO.CK_ULONG,
-    )::AwsIO.CK_RV
+        ::Reseau.CK_SESSION_HANDLE,
+        ::Reseau.CK_OBJECT_HANDLE,
+        attrs_ptr::Ptr{Reseau.CK_ATTRIBUTE},
+        attr_count::Reseau.CK_ULONG,
+    )::Reseau.CK_RV
     if attrs_ptr != C_NULL && attr_count > 0
         attr = unsafe_load(attrs_ptr)
-        if attr.type == AwsIO.CKA_KEY_TYPE && attr.pValue != C_NULL
-            unsafe_store!(Ptr{AwsIO.CK_KEY_TYPE}(attr.pValue), _pkcs11_test_key_type[])
+        if attr.type == Reseau.CKA_KEY_TYPE && attr.pValue != C_NULL
+            unsafe_store!(Ptr{Reseau.CK_KEY_TYPE}(attr.pValue), _pkcs11_test_key_type[])
         end
     end
     return _pkcs11_test_get_attr_rv[]
 end
 
 function _pkcs11_test_fake_decrypt_init(
-        ::AwsIO.CK_SESSION_HANDLE,
-        ::Ptr{AwsIO.CK_MECHANISM},
-        ::AwsIO.CK_OBJECT_HANDLE,
-    )::AwsIO.CK_RV
+        ::Reseau.CK_SESSION_HANDLE,
+        ::Ptr{Reseau.CK_MECHANISM},
+        ::Reseau.CK_OBJECT_HANDLE,
+    )::Reseau.CK_RV
     return _pkcs11_test_decrypt_init_rv[]
 end
 
 function _pkcs11_test_fake_decrypt(
-        ::AwsIO.CK_SESSION_HANDLE,
+        ::Reseau.CK_SESSION_HANDLE,
         ::Ptr{UInt8},
-        ::AwsIO.CK_ULONG,
+        ::Reseau.CK_ULONG,
         out_ptr::Ptr{UInt8},
-        out_len_ptr::Ptr{AwsIO.CK_ULONG},
-    )::AwsIO.CK_RV
+        out_len_ptr::Ptr{Reseau.CK_ULONG},
+    )::Reseau.CK_RV
     data = _pkcs11_test_decrypt_output[]
-    unsafe_store!(out_len_ptr, AwsIO.CK_ULONG(length(data)))
+    unsafe_store!(out_len_ptr, Reseau.CK_ULONG(length(data)))
     if out_ptr != C_NULL
         for i in 1:length(data)
             unsafe_store!(out_ptr, data[i], i)
@@ -194,20 +194,20 @@ function _pkcs11_test_fake_decrypt(
 end
 
 function _pkcs11_test_fake_sign_init(
-        ::AwsIO.CK_SESSION_HANDLE,
-        ::Ptr{AwsIO.CK_MECHANISM},
-        ::AwsIO.CK_OBJECT_HANDLE,
-    )::AwsIO.CK_RV
+        ::Reseau.CK_SESSION_HANDLE,
+        ::Ptr{Reseau.CK_MECHANISM},
+        ::Reseau.CK_OBJECT_HANDLE,
+    )::Reseau.CK_RV
     return _pkcs11_test_sign_init_rv[]
 end
 
 function _pkcs11_test_fake_sign(
-        ::AwsIO.CK_SESSION_HANDLE,
+        ::Reseau.CK_SESSION_HANDLE,
         input_ptr::Ptr{UInt8},
-        input_len::AwsIO.CK_ULONG,
+        input_len::Reseau.CK_ULONG,
         sig_ptr::Ptr{UInt8},
-        sig_len_ptr::Ptr{AwsIO.CK_ULONG},
-    )::AwsIO.CK_RV
+        sig_len_ptr::Ptr{Reseau.CK_ULONG},
+    )::Reseau.CK_RV
     if input_ptr == C_NULL || input_len == 0
         _pkcs11_test_sign_input[] = UInt8[]
     else
@@ -218,7 +218,7 @@ function _pkcs11_test_fake_sign(
         _pkcs11_test_sign_input[] = data
     end
     sig = _pkcs11_test_sign_output[]
-    unsafe_store!(sig_len_ptr, AwsIO.CK_ULONG(length(sig)))
+    unsafe_store!(sig_len_ptr, Reseau.CK_ULONG(length(sig)))
     if sig_ptr != C_NULL
         for i in 1:length(sig)
             unsafe_store!(sig_ptr, sig[i], i)
@@ -228,41 +228,41 @@ function _pkcs11_test_fake_sign(
 end
 
 @testset "IO error and log subject registry" begin
-    @test AwsIO.error_name(AwsIO.ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT) ==
+    @test Reseau.error_name(Reseau.ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT) ==
         "ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT"
-    @test AwsIO.error_str(AwsIO.ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT) ==
+    @test Reseau.error_str(Reseau.ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT) ==
         "Channel cannot accept input"
-    @test AwsIO.error_str(AwsIO.ERROR_IO_PKCS11_CKR_CANCEL) ==
+    @test Reseau.error_str(Reseau.ERROR_IO_PKCS11_CKR_CANCEL) ==
         "A PKCS#11 (Cryptoki) library function failed with return value CKR_CANCEL"
-    @test AwsIO.error_str(AwsIO.ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND) ==
+    @test Reseau.error_str(Reseau.ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND) ==
         "Default TLS trust store not found on this system. Trusted CA certificates must be installed, or \"override default trust store\" must be used while creating the TLS context."
 
-    @test AwsIO.log_subject_name(AwsIO.LS_IO_GENERAL) == "aws-c-io"
-    @test AwsIO.log_subject_description(AwsIO.LS_IO_GENERAL) ==
+    @test Reseau.log_subject_name(Reseau.LS_IO_GENERAL) == "aws-c-io"
+    @test Reseau.log_subject_description(Reseau.LS_IO_GENERAL) ==
         "Subject for IO logging that doesn't belong to any particular category"
-    @test AwsIO.log_subject_name(AwsIO.LS_IO_TLS) == "tls-handler"
+    @test Reseau.log_subject_name(Reseau.LS_IO_TLS) == "tls-handler"
 
-    @test AwsIO.io_error_code_is_retryable(AwsIO.ERROR_IO_SOCKET_TIMEOUT)
-    @test !AwsIO.io_error_code_is_retryable(AwsIO.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST)
+    @test Reseau.io_error_code_is_retryable(Reseau.ERROR_IO_SOCKET_TIMEOUT)
+    @test !Reseau.io_error_code_is_retryable(Reseau.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST)
 end
 
 @testset "PKCS11 error code string" begin
-    @test AwsIO.pkcs11_error_code_str(AwsIO.ERROR_IO_PKCS11_CKR_CANCEL) == "CKR_CANCEL"
-    @test AwsIO.pkcs11_error_code_str(AwsIO.ERROR_IO_PKCS11_CKR_FUNCTION_REJECTED) ==
+    @test Reseau.pkcs11_error_code_str(Reseau.ERROR_IO_PKCS11_CKR_CANCEL) == "CKR_CANCEL"
+    @test Reseau.pkcs11_error_code_str(Reseau.ERROR_IO_PKCS11_CKR_FUNCTION_REJECTED) ==
           "CKR_FUNCTION_REJECTED"
-    @test AwsIO.pkcs11_error_code_str(0) === nothing
-    @test AwsIO.pkcs11_ckr_str(AwsIO.CKR_OK) == "CKR_OK"
-    @test AwsIO.pkcs11_ckr_str(0xffff) == "CKR_UNKNOWN"
+    @test Reseau.pkcs11_error_code_str(0) === nothing
+    @test Reseau.pkcs11_ckr_str(Reseau.CKR_OK) == "CKR_OK"
+    @test Reseau.pkcs11_ckr_str(0xffff) == "CKR_UNKNOWN"
 end
 
 @testset "PKCS11 lib stubs" begin
     temp_dir = mktempdir()
     missing_path = joinpath(temp_dir, "missing_pkcs11_lib")
-    opts = AwsIO.Pkcs11LibOptions(; filename = missing_path)
-    lib = AwsIO.pkcs11_lib_new(opts)
-    @test lib isa AwsIO.ErrorResult
-    if lib isa AwsIO.ErrorResult
-        @test lib.code == AwsIO.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
+    opts = Reseau.Pkcs11LibOptions(; filename = missing_path)
+    lib = Reseau.pkcs11_lib_new(opts)
+    @test lib isa Reseau.ErrorResult
+    if lib isa Reseau.ErrorResult
+        @test lib.code == Reseau.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
     end
 end
 
@@ -283,19 +283,19 @@ end
         end
         @test rv_cancel !== nothing
         if rv_cancel !== nothing
-            @test AwsIO.pkcs11_error_from_ckr(rv_cancel) == AwsIO.ERROR_IO_PKCS11_CKR_CANCEL
+            @test Reseau.pkcs11_error_from_ckr(rv_cancel) == Reseau.ERROR_IO_PKCS11_CKR_CANCEL
         end
-        @test AwsIO.pkcs11_error_from_ckr(0xffffffffffffffff) ==
-            AwsIO.ERROR_IO_PKCS11_UNKNOWN_CRYPTOKI_RETURN_VALUE
+        @test Reseau.pkcs11_error_from_ckr(0xffffffffffffffff) ==
+            Reseau.ERROR_IO_PKCS11_UNKNOWN_CRYPTOKI_RETURN_VALUE
     end
 end
 
 @testset "PKCS11 init behavior" begin
-    init_fn = @cfunction(_pkcs11_test_fake_initialize, AwsIO.CK_RV, (Ptr{AwsIO.CK_C_INITIALIZE_ARGS},))
-    finalize_fn = @cfunction(_pkcs11_test_fake_finalize, AwsIO.CK_RV, (Ptr{Cvoid},))
-    get_info_fn = @cfunction(_pkcs11_test_fake_get_info, AwsIO.CK_RV, (Ptr{AwsIO.CK_INFO},))
+    init_fn = @cfunction(_pkcs11_test_fake_initialize, Reseau.CK_RV, (Ptr{Reseau.CK_C_INITIALIZE_ARGS},))
+    finalize_fn = @cfunction(_pkcs11_test_fake_finalize, Reseau.CK_RV, (Ptr{Cvoid},))
+    get_info_fn = @cfunction(_pkcs11_test_fake_get_info, Reseau.CK_RV, (Ptr{Reseau.CK_INFO},))
 
-    fl = AwsIO._pkcs11_function_list_stub(
+    fl = Reseau._pkcs11_function_list_stub(
         C_Initialize = init_fn,
         C_Finalize = finalize_fn,
         C_GetInfo = get_info_fn,
@@ -303,8 +303,8 @@ end
     fl_ref = Ref(fl)
 
     function build_lib(behavior)
-        lib = AwsIO.Pkcs11Lib(
-            AwsIO.Pkcs11LibOptions(
+        lib = Reseau.Pkcs11Lib(
+            Reseau.Pkcs11LibOptions(
                 filename = nothing,
                 initialize_finalize_behavior = behavior,
             ),
@@ -314,29 +314,29 @@ end
     end
 
     GC.@preserve fl_ref begin
-        _pkcs11_test_init_rv[] = AwsIO.CKR_CRYPTOKI_ALREADY_INITIALIZED
+        _pkcs11_test_init_rv[] = Reseau.CKR_CRYPTOKI_ALREADY_INITIALIZED
         _pkcs11_test_get_info_called[] = false
-        lib_default = build_lib(AwsIO.Pkcs11LibBehavior.DEFAULT_BEHAVIOR)
-        res_default = AwsIO._pkcs11_init_with_function_list!(lib_default)
+        lib_default = build_lib(Reseau.Pkcs11LibBehavior.DEFAULT_BEHAVIOR)
+        res_default = Reseau._pkcs11_init_with_function_list!(lib_default)
         @test res_default === nothing
         @test _pkcs11_test_get_info_called[]
         @test !lib_default.finalize_on_cleanup
 
-        _pkcs11_test_init_rv[] = AwsIO.CKR_CRYPTOKI_ALREADY_INITIALIZED
-        lib_strict = build_lib(AwsIO.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
-        res_strict = AwsIO._pkcs11_init_with_function_list!(lib_strict)
-        @test res_strict isa AwsIO.ErrorResult
-        if res_strict isa AwsIO.ErrorResult
-            @test res_strict.code == AwsIO.ERROR_IO_PKCS11_CKR_CRYPTOKI_ALREADY_INITIALIZED
+        _pkcs11_test_init_rv[] = Reseau.CKR_CRYPTOKI_ALREADY_INITIALIZED
+        lib_strict = build_lib(Reseau.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
+        res_strict = Reseau._pkcs11_init_with_function_list!(lib_strict)
+        @test res_strict isa Reseau.ErrorResult
+        if res_strict isa Reseau.ErrorResult
+            @test res_strict.code == Reseau.ERROR_IO_PKCS11_CKR_CRYPTOKI_ALREADY_INITIALIZED
         end
 
-        _pkcs11_test_init_rv[] = AwsIO.CKR_OK
+        _pkcs11_test_init_rv[] = Reseau.CKR_OK
         _pkcs11_test_finalize_called[] = false
-        lib_finalize = build_lib(AwsIO.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
-        res_finalize = AwsIO._pkcs11_init_with_function_list!(lib_finalize)
+        lib_finalize = build_lib(Reseau.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
+        res_finalize = Reseau._pkcs11_init_with_function_list!(lib_finalize)
         @test res_finalize === nothing
         @test lib_finalize.finalize_on_cleanup
-        AwsIO.pkcs11_lib_release(lib_finalize)
+        Reseau.pkcs11_lib_release(lib_finalize)
         @test _pkcs11_test_finalize_called[]
     end
 end
@@ -344,31 +344,31 @@ end
 @testset "PKCS11 slot/session helpers" begin
     get_slot_fn = @cfunction(
         _pkcs11_test_fake_get_slot_list,
-        AwsIO.CK_RV,
-        (AwsIO.CK_BBOOL, Ptr{AwsIO.CK_SLOT_ID}, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_BBOOL, Ptr{Reseau.CK_SLOT_ID}, Ptr{Reseau.CK_ULONG}),
     )
     get_token_fn = @cfunction(
         _pkcs11_test_fake_get_token_info,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SLOT_ID, Ptr{AwsIO.CK_TOKEN_INFO}),
+        Reseau.CK_RV,
+        (Reseau.CK_SLOT_ID, Ptr{Reseau.CK_TOKEN_INFO}),
     )
     open_fn = @cfunction(
         _pkcs11_test_fake_open_session,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SLOT_ID, AwsIO.CK_FLAGS, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{AwsIO.CK_SESSION_HANDLE}),
+        Reseau.CK_RV,
+        (Reseau.CK_SLOT_ID, Reseau.CK_FLAGS, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Reseau.CK_SESSION_HANDLE}),
     )
     close_fn = @cfunction(
         _pkcs11_test_fake_close_session,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE,),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE,),
     )
     login_fn = @cfunction(
         _pkcs11_test_fake_login,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, AwsIO.CK_ULONG, Ptr{UInt8}, AwsIO.CK_ULONG),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Reseau.CK_ULONG, Ptr{UInt8}, Reseau.CK_ULONG),
     )
 
-    fl = AwsIO._pkcs11_function_list_stub(
+    fl = Reseau._pkcs11_function_list_stub(
         C_GetSlotList = get_slot_fn,
         C_GetTokenInfo = get_token_fn,
         C_OpenSession = open_fn,
@@ -377,62 +377,62 @@ end
     )
     fl_ref = Ref(fl)
 
-    lib = AwsIO.Pkcs11Lib(AwsIO.Pkcs11LibOptions(filename = nothing))
+    lib = Reseau.Pkcs11Lib(Reseau.Pkcs11LibOptions(filename = nothing))
     lib.function_list = Base.unsafe_convert(Ptr{Cvoid}, fl_ref)
 
     GC.@preserve fl_ref begin
-        _pkcs11_test_slots[] = AwsIO.CK_SLOT_ID[]
-        res_empty = AwsIO.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
-        @test res_empty isa AwsIO.ErrorResult
-        if res_empty isa AwsIO.ErrorResult
-            @test res_empty.code == AwsIO.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
+        _pkcs11_test_slots[] = Reseau.CK_SLOT_ID[]
+        res_empty = Reseau.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
+        @test res_empty isa Reseau.ErrorResult
+        if res_empty isa Reseau.ErrorResult
+            @test res_empty.code == Reseau.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
         end
 
-        _pkcs11_test_slots[] = AwsIO.CK_SLOT_ID[1, 2]
-        res_multi = AwsIO.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
-        @test res_multi isa AwsIO.ErrorResult
-        if res_multi isa AwsIO.ErrorResult
-            @test res_multi.code == AwsIO.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
+        _pkcs11_test_slots[] = Reseau.CK_SLOT_ID[1, 2]
+        res_multi = Reseau.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
+        @test res_multi isa Reseau.ErrorResult
+        if res_multi isa Reseau.ErrorResult
+            @test res_multi.code == Reseau.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
         end
 
-        res_match = AwsIO.pkcs11_lib_find_slot_with_token(lib, UInt64(2), nothing)
+        res_match = Reseau.pkcs11_lib_find_slot_with_token(lib, UInt64(2), nothing)
         @test res_match == 2
 
-        _pkcs11_test_token_labels[] = Dict{AwsIO.CK_SLOT_ID, String}(1 => "alpha", 2 => "beta")
-        res_label = AwsIO.pkcs11_lib_find_slot_with_token(lib, nothing, AwsIO.ByteCursor("beta"))
+        _pkcs11_test_token_labels[] = Dict{Reseau.CK_SLOT_ID, String}(1 => "alpha", 2 => "beta")
+        res_label = Reseau.pkcs11_lib_find_slot_with_token(lib, nothing, Reseau.ByteCursor("beta"))
         @test res_label == 2
 
-        _pkcs11_test_open_session_rv[] = AwsIO.CKR_OK
-        _pkcs11_test_session_handle[] = AwsIO.CK_SESSION_HANDLE(0x55)
-        session = AwsIO.pkcs11_lib_open_session(lib, UInt64(1))
-        @test session == AwsIO.CK_SESSION_HANDLE(0x55)
+        _pkcs11_test_open_session_rv[] = Reseau.CKR_OK
+        _pkcs11_test_session_handle[] = Reseau.CK_SESSION_HANDLE(0x55)
+        session = Reseau.pkcs11_lib_open_session(lib, UInt64(1))
+        @test session == Reseau.CK_SESSION_HANDLE(0x55)
 
-        _pkcs11_test_open_session_rv[] = AwsIO.CKR_FUNCTION_NOT_SUPPORTED
-        bad_session = AwsIO.pkcs11_lib_open_session(lib, UInt64(1))
-        @test bad_session isa AwsIO.ErrorResult
-        if bad_session isa AwsIO.ErrorResult
-            @test bad_session.code == AwsIO.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
+        _pkcs11_test_open_session_rv[] = Reseau.CKR_FUNCTION_NOT_SUPPORTED
+        bad_session = Reseau.pkcs11_lib_open_session(lib, UInt64(1))
+        @test bad_session isa Reseau.ErrorResult
+        if bad_session isa Reseau.ErrorResult
+            @test bad_session.code == Reseau.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
         end
 
-        _pkcs11_test_close_session_rv[] = AwsIO.CKR_OK
-        @test AwsIO.pkcs11_lib_close_session(lib, AwsIO.CK_SESSION_HANDLE(0x55)) === nothing
+        _pkcs11_test_close_session_rv[] = Reseau.CKR_OK
+        @test Reseau.pkcs11_lib_close_session(lib, Reseau.CK_SESSION_HANDLE(0x55)) === nothing
 
-        _pkcs11_test_close_session_rv[] = AwsIO.CKR_FUNCTION_NOT_SUPPORTED
-        bad_close = AwsIO.pkcs11_lib_close_session(lib, AwsIO.CK_SESSION_HANDLE(0x55))
-        @test bad_close isa AwsIO.ErrorResult
-        if bad_close isa AwsIO.ErrorResult
-            @test bad_close.code == AwsIO.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
+        _pkcs11_test_close_session_rv[] = Reseau.CKR_FUNCTION_NOT_SUPPORTED
+        bad_close = Reseau.pkcs11_lib_close_session(lib, Reseau.CK_SESSION_HANDLE(0x55))
+        @test bad_close isa Reseau.ErrorResult
+        if bad_close isa Reseau.ErrorResult
+            @test bad_close.code == Reseau.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
         end
 
-        _pkcs11_test_login_rv[] = AwsIO.CKR_USER_ALREADY_LOGGED_IN
-        @test AwsIO.pkcs11_lib_login_user(lib, AwsIO.CK_SESSION_HANDLE(0x55), AwsIO.ByteCursor("1234")) ===
+        _pkcs11_test_login_rv[] = Reseau.CKR_USER_ALREADY_LOGGED_IN
+        @test Reseau.pkcs11_lib_login_user(lib, Reseau.CK_SESSION_HANDLE(0x55), Reseau.ByteCursor("1234")) ===
               nothing
 
-        _pkcs11_test_login_rv[] = AwsIO.CKR_FUNCTION_NOT_SUPPORTED
-        bad_login = AwsIO.pkcs11_lib_login_user(lib, AwsIO.CK_SESSION_HANDLE(0x55), AwsIO.ByteCursor("1234"))
-        @test bad_login isa AwsIO.ErrorResult
-        if bad_login isa AwsIO.ErrorResult
-            @test bad_login.code == AwsIO.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
+        _pkcs11_test_login_rv[] = Reseau.CKR_FUNCTION_NOT_SUPPORTED
+        bad_login = Reseau.pkcs11_lib_login_user(lib, Reseau.CK_SESSION_HANDLE(0x55), Reseau.ByteCursor("1234"))
+        @test bad_login isa Reseau.ErrorResult
+        if bad_login isa Reseau.ErrorResult
+            @test bad_login.code == Reseau.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
         end
     end
 end
@@ -440,46 +440,46 @@ end
 @testset "PKCS11 private key operations" begin
     find_init_fn = @cfunction(
         _pkcs11_test_fake_find_objects_init,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_ATTRIBUTE}, AwsIO.CK_ULONG),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG),
     )
     find_fn = @cfunction(
         _pkcs11_test_fake_find_objects,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_OBJECT_HANDLE}, AwsIO.CK_ULONG, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_OBJECT_HANDLE}, Reseau.CK_ULONG, Ptr{Reseau.CK_ULONG}),
     )
     find_final_fn = @cfunction(
         _pkcs11_test_fake_find_objects_final,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE,),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE,),
     )
     get_attr_fn = @cfunction(
         _pkcs11_test_fake_get_attribute_value,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, AwsIO.CK_OBJECT_HANDLE, Ptr{AwsIO.CK_ATTRIBUTE}, AwsIO.CK_ULONG),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Reseau.CK_OBJECT_HANDLE, Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG),
     )
     decrypt_init_fn = @cfunction(
         _pkcs11_test_fake_decrypt_init,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_MECHANISM}, AwsIO.CK_OBJECT_HANDLE),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_MECHANISM}, Reseau.CK_OBJECT_HANDLE),
     )
     decrypt_fn = @cfunction(
         _pkcs11_test_fake_decrypt,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{UInt8}, AwsIO.CK_ULONG, Ptr{UInt8}, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}, Ptr{Reseau.CK_ULONG}),
     )
     sign_init_fn = @cfunction(
         _pkcs11_test_fake_sign_init,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_MECHANISM}, AwsIO.CK_OBJECT_HANDLE),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_MECHANISM}, Reseau.CK_OBJECT_HANDLE),
     )
     sign_fn = @cfunction(
         _pkcs11_test_fake_sign,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{UInt8}, AwsIO.CK_ULONG, Ptr{UInt8}, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}, Ptr{Reseau.CK_ULONG}),
     )
 
-    fl = AwsIO._pkcs11_function_list_stub(
+    fl = Reseau._pkcs11_function_list_stub(
         C_FindObjectsInit = find_init_fn,
         C_FindObjects = find_fn,
         C_FindObjectsFinal = find_final_fn,
@@ -491,75 +491,75 @@ end
     )
     fl_ref = Ref(fl)
 
-    lib = AwsIO.Pkcs11Lib(AwsIO.Pkcs11LibOptions(filename = nothing))
+    lib = Reseau.Pkcs11Lib(Reseau.Pkcs11LibOptions(filename = nothing))
     lib.function_list = Base.unsafe_convert(Ptr{Cvoid}, fl_ref)
 
     GC.@preserve fl_ref begin
-        _pkcs11_test_find_objects[] = AwsIO.CK_OBJECT_HANDLE[]
-        res_none = AwsIO.pkcs11_lib_find_private_key(lib, AwsIO.CK_SESSION_HANDLE(1), nothing)
-        @test res_none isa AwsIO.ErrorResult
-        if res_none isa AwsIO.ErrorResult
-            @test res_none.code == AwsIO.ERROR_IO_PKCS11_KEY_NOT_FOUND
+        _pkcs11_test_find_objects[] = Reseau.CK_OBJECT_HANDLE[]
+        res_none = Reseau.pkcs11_lib_find_private_key(lib, Reseau.CK_SESSION_HANDLE(1), nothing)
+        @test res_none isa Reseau.ErrorResult
+        if res_none isa Reseau.ErrorResult
+            @test res_none.code == Reseau.ERROR_IO_PKCS11_KEY_NOT_FOUND
         end
 
-        _pkcs11_test_find_objects[] = AwsIO.CK_OBJECT_HANDLE[1, 2]
-        res_multi = AwsIO.pkcs11_lib_find_private_key(lib, AwsIO.CK_SESSION_HANDLE(1), nothing)
-        @test res_multi isa AwsIO.ErrorResult
-        if res_multi isa AwsIO.ErrorResult
-            @test res_multi.code == AwsIO.ERROR_IO_PKCS11_KEY_NOT_FOUND
+        _pkcs11_test_find_objects[] = Reseau.CK_OBJECT_HANDLE[1, 2]
+        res_multi = Reseau.pkcs11_lib_find_private_key(lib, Reseau.CK_SESSION_HANDLE(1), nothing)
+        @test res_multi isa Reseau.ErrorResult
+        if res_multi isa Reseau.ErrorResult
+            @test res_multi.code == Reseau.ERROR_IO_PKCS11_KEY_NOT_FOUND
         end
 
-        _pkcs11_test_find_objects[] = AwsIO.CK_OBJECT_HANDLE[3]
-        _pkcs11_test_key_type[] = AwsIO.CK_KEY_TYPE(0xdead)
-        res_bad_type = AwsIO.pkcs11_lib_find_private_key(lib, AwsIO.CK_SESSION_HANDLE(1), nothing)
-        @test res_bad_type isa AwsIO.ErrorResult
-        if res_bad_type isa AwsIO.ErrorResult
-            @test res_bad_type.code == AwsIO.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
+        _pkcs11_test_find_objects[] = Reseau.CK_OBJECT_HANDLE[3]
+        _pkcs11_test_key_type[] = Reseau.CK_KEY_TYPE(0xdead)
+        res_bad_type = Reseau.pkcs11_lib_find_private_key(lib, Reseau.CK_SESSION_HANDLE(1), nothing)
+        @test res_bad_type isa Reseau.ErrorResult
+        if res_bad_type isa Reseau.ErrorResult
+            @test res_bad_type.code == Reseau.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
         end
 
-        _pkcs11_test_key_type[] = AwsIO.CKK_RSA
-        res_ok = AwsIO.pkcs11_lib_find_private_key(lib, AwsIO.CK_SESSION_HANDLE(1), AwsIO.ByteCursor("key"))
-        @test res_ok == (AwsIO.CK_OBJECT_HANDLE(3), AwsIO.CKK_RSA)
+        _pkcs11_test_key_type[] = Reseau.CKK_RSA
+        res_ok = Reseau.pkcs11_lib_find_private_key(lib, Reseau.CK_SESSION_HANDLE(1), Reseau.ByteCursor("key"))
+        @test res_ok == (Reseau.CK_OBJECT_HANDLE(3), Reseau.CKK_RSA)
 
         _pkcs11_test_decrypt_output[] = UInt8[0x01, 0x02, 0x03]
-        _pkcs11_test_decrypt_rv[] = AwsIO.CKR_OK
-        dec = AwsIO.pkcs11_lib_decrypt(
+        _pkcs11_test_decrypt_rv[] = Reseau.CKR_OK
+        dec = Reseau.pkcs11_lib_decrypt(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_RSA,
-            AwsIO.ByteCursor("cipher"),
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_RSA,
+            Reseau.ByteCursor("cipher"),
         )
-        @test dec isa AwsIO.ByteBuffer
-        if dec isa AwsIO.ByteBuffer
+        @test dec isa Reseau.ByteBuffer
+        if dec isa Reseau.ByteBuffer
             @test collect(dec.mem[1:Int(dec.len)]) == _pkcs11_test_decrypt_output[]
         end
 
-        bad_dec = AwsIO.pkcs11_lib_decrypt(
+        bad_dec = Reseau.pkcs11_lib_decrypt(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_EC,
-            AwsIO.ByteCursor("cipher"),
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_EC,
+            Reseau.ByteCursor("cipher"),
         )
-        @test bad_dec isa AwsIO.ErrorResult
-        if bad_dec isa AwsIO.ErrorResult
-            @test bad_dec.code == AwsIO.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
+        @test bad_dec isa Reseau.ErrorResult
+        if bad_dec isa Reseau.ErrorResult
+            @test bad_dec.code == Reseau.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
         end
 
-        _pkcs11_test_decrypt_rv[] = AwsIO.CKR_FUNCTION_NOT_SUPPORTED
-        bad_dec_rv = AwsIO.pkcs11_lib_decrypt(
+        _pkcs11_test_decrypt_rv[] = Reseau.CKR_FUNCTION_NOT_SUPPORTED
+        bad_dec_rv = Reseau.pkcs11_lib_decrypt(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_RSA,
-            AwsIO.ByteCursor("cipher"),
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_RSA,
+            Reseau.ByteCursor("cipher"),
         )
-        @test bad_dec_rv isa AwsIO.ErrorResult
-        if bad_dec_rv isa AwsIO.ErrorResult
-            @test bad_dec_rv.code == AwsIO.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
+        @test bad_dec_rv isa Reseau.ErrorResult
+        if bad_dec_rv isa Reseau.ErrorResult
+            @test bad_dec_rv.code == Reseau.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
         end
-        _pkcs11_test_decrypt_rv[] = AwsIO.CKR_OK
+        _pkcs11_test_decrypt_rv[] = Reseau.CKR_OK
 
         rsa_prefix = UInt8[
             0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
@@ -567,93 +567,93 @@ end
         ]
         digest = UInt8[0xaa, 0xbb]
         _pkcs11_test_sign_output[] = UInt8[0x11, 0x22]
-        _pkcs11_test_sign_rv[] = AwsIO.CKR_OK
+        _pkcs11_test_sign_rv[] = Reseau.CKR_OK
         _pkcs11_test_sign_input[] = UInt8[]
-        sig = AwsIO.pkcs11_lib_sign(
+        sig = Reseau.pkcs11_lib_sign(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_RSA,
-            AwsIO.ByteCursor(digest),
-            AwsIO.TlsHashAlgorithm.SHA256,
-            AwsIO.TlsSignatureAlgorithm.RSA,
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_RSA,
+            Reseau.ByteCursor(digest),
+            Reseau.TlsHashAlgorithm.SHA256,
+            Reseau.TlsSignatureAlgorithm.RSA,
         )
-        @test sig isa AwsIO.ByteBuffer
-        if sig isa AwsIO.ByteBuffer
+        @test sig isa Reseau.ByteBuffer
+        if sig isa Reseau.ByteBuffer
             @test collect(sig.mem[1:Int(sig.len)]) == _pkcs11_test_sign_output[]
         end
         @test _pkcs11_test_sign_input[] == vcat(rsa_prefix, digest)
 
-        bad_sig_alg = AwsIO.pkcs11_lib_sign(
+        bad_sig_alg = Reseau.pkcs11_lib_sign(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_RSA,
-            AwsIO.ByteCursor(digest),
-            AwsIO.TlsHashAlgorithm.SHA256,
-            AwsIO.TlsSignatureAlgorithm.ECDSA,
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_RSA,
+            Reseau.ByteCursor(digest),
+            Reseau.TlsHashAlgorithm.SHA256,
+            Reseau.TlsSignatureAlgorithm.ECDSA,
         )
-        @test bad_sig_alg isa AwsIO.ErrorResult
-        if bad_sig_alg isa AwsIO.ErrorResult
-            @test bad_sig_alg.code == AwsIO.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
+        @test bad_sig_alg isa Reseau.ErrorResult
+        if bad_sig_alg isa Reseau.ErrorResult
+            @test bad_sig_alg.code == Reseau.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
         end
 
-        bad_digest = AwsIO.pkcs11_lib_sign(
+        bad_digest = Reseau.pkcs11_lib_sign(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_RSA,
-            AwsIO.ByteCursor(digest),
-            AwsIO.TlsHashAlgorithm.UNKNOWN,
-            AwsIO.TlsSignatureAlgorithm.RSA,
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_RSA,
+            Reseau.ByteCursor(digest),
+            Reseau.TlsHashAlgorithm.UNKNOWN,
+            Reseau.TlsSignatureAlgorithm.RSA,
         )
-        @test bad_digest isa AwsIO.ErrorResult
-        if bad_digest isa AwsIO.ErrorResult
-            @test bad_digest.code == AwsIO.ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED
+        @test bad_digest isa Reseau.ErrorResult
+        if bad_digest isa Reseau.ErrorResult
+            @test bad_digest.code == Reseau.ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED
         end
 
         _pkcs11_test_sign_output[] = UInt8[0x01, 0x02, 0x03, 0x04]
-        sig_ec = AwsIO.pkcs11_lib_sign(
+        sig_ec = Reseau.pkcs11_lib_sign(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_EC,
-            AwsIO.ByteCursor(digest),
-            AwsIO.TlsHashAlgorithm.SHA256,
-            AwsIO.TlsSignatureAlgorithm.ECDSA,
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_EC,
+            Reseau.ByteCursor(digest),
+            Reseau.TlsHashAlgorithm.SHA256,
+            Reseau.TlsSignatureAlgorithm.ECDSA,
         )
-        @test sig_ec isa AwsIO.ByteBuffer
-        if sig_ec isa AwsIO.ByteBuffer
+        @test sig_ec isa Reseau.ByteBuffer
+        if sig_ec isa Reseau.ByteBuffer
             @test collect(sig_ec.mem[1:Int(sig_ec.len)]) ==
                   UInt8[0x30, 0x08, 0x02, 0x02, 0x01, 0x02, 0x02, 0x02, 0x03, 0x04]
         end
 
-        bad_ec_sig_alg = AwsIO.pkcs11_lib_sign(
+        bad_ec_sig_alg = Reseau.pkcs11_lib_sign(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CKK_EC,
-            AwsIO.ByteCursor(digest),
-            AwsIO.TlsHashAlgorithm.SHA256,
-            AwsIO.TlsSignatureAlgorithm.RSA,
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CKK_EC,
+            Reseau.ByteCursor(digest),
+            Reseau.TlsHashAlgorithm.SHA256,
+            Reseau.TlsSignatureAlgorithm.RSA,
         )
-        @test bad_ec_sig_alg isa AwsIO.ErrorResult
-        if bad_ec_sig_alg isa AwsIO.ErrorResult
-            @test bad_ec_sig_alg.code == AwsIO.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
+        @test bad_ec_sig_alg isa Reseau.ErrorResult
+        if bad_ec_sig_alg isa Reseau.ErrorResult
+            @test bad_ec_sig_alg.code == Reseau.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
         end
 
-        bad_key = AwsIO.pkcs11_lib_sign(
+        bad_key = Reseau.pkcs11_lib_sign(
             lib,
-            AwsIO.CK_SESSION_HANDLE(1),
-            AwsIO.CK_OBJECT_HANDLE(3),
-            AwsIO.CK_KEY_TYPE(0xdead),
-            AwsIO.ByteCursor(digest),
-            AwsIO.TlsHashAlgorithm.SHA256,
-            AwsIO.TlsSignatureAlgorithm.RSA,
+            Reseau.CK_SESSION_HANDLE(1),
+            Reseau.CK_OBJECT_HANDLE(3),
+            Reseau.CK_KEY_TYPE(0xdead),
+            Reseau.ByteCursor(digest),
+            Reseau.TlsHashAlgorithm.SHA256,
+            Reseau.TlsSignatureAlgorithm.RSA,
         )
-        @test bad_key isa AwsIO.ErrorResult
-        if bad_key isa AwsIO.ErrorResult
-            @test bad_key.code == AwsIO.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
+        @test bad_key isa Reseau.ErrorResult
+        if bad_key isa Reseau.ErrorResult
+            @test bad_key.code == Reseau.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
         end
     end
 end
@@ -661,71 +661,71 @@ end
 @testset "PKCS11 TLS op handler" begin
     get_slot_fn = @cfunction(
         _pkcs11_test_fake_get_slot_list,
-        AwsIO.CK_RV,
-        (AwsIO.CK_BBOOL, Ptr{AwsIO.CK_SLOT_ID}, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_BBOOL, Ptr{Reseau.CK_SLOT_ID}, Ptr{Reseau.CK_ULONG}),
     )
     get_token_fn = @cfunction(
         _pkcs11_test_fake_get_token_info,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SLOT_ID, Ptr{AwsIO.CK_TOKEN_INFO}),
+        Reseau.CK_RV,
+        (Reseau.CK_SLOT_ID, Ptr{Reseau.CK_TOKEN_INFO}),
     )
     open_fn = @cfunction(
         _pkcs11_test_fake_open_session,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SLOT_ID, AwsIO.CK_FLAGS, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{AwsIO.CK_SESSION_HANDLE}),
+        Reseau.CK_RV,
+        (Reseau.CK_SLOT_ID, Reseau.CK_FLAGS, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Reseau.CK_SESSION_HANDLE}),
     )
     close_fn = @cfunction(
         _pkcs11_test_fake_close_session,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE,),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE,),
     )
     login_fn = @cfunction(
         _pkcs11_test_fake_login,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, AwsIO.CK_ULONG, Ptr{UInt8}, AwsIO.CK_ULONG),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Reseau.CK_ULONG, Ptr{UInt8}, Reseau.CK_ULONG),
     )
     find_init_fn = @cfunction(
         _pkcs11_test_fake_find_objects_init,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_ATTRIBUTE}, AwsIO.CK_ULONG),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG),
     )
     find_fn = @cfunction(
         _pkcs11_test_fake_find_objects,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_OBJECT_HANDLE}, AwsIO.CK_ULONG, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_OBJECT_HANDLE}, Reseau.CK_ULONG, Ptr{Reseau.CK_ULONG}),
     )
     find_final_fn = @cfunction(
         _pkcs11_test_fake_find_objects_final,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE,),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE,),
     )
     get_attr_fn = @cfunction(
         _pkcs11_test_fake_get_attribute_value,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, AwsIO.CK_OBJECT_HANDLE, Ptr{AwsIO.CK_ATTRIBUTE}, AwsIO.CK_ULONG),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Reseau.CK_OBJECT_HANDLE, Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG),
     )
     decrypt_init_fn = @cfunction(
         _pkcs11_test_fake_decrypt_init,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_MECHANISM}, AwsIO.CK_OBJECT_HANDLE),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_MECHANISM}, Reseau.CK_OBJECT_HANDLE),
     )
     decrypt_fn = @cfunction(
         _pkcs11_test_fake_decrypt,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{UInt8}, AwsIO.CK_ULONG, Ptr{UInt8}, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}, Ptr{Reseau.CK_ULONG}),
     )
     sign_init_fn = @cfunction(
         _pkcs11_test_fake_sign_init,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{AwsIO.CK_MECHANISM}, AwsIO.CK_OBJECT_HANDLE),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{Reseau.CK_MECHANISM}, Reseau.CK_OBJECT_HANDLE),
     )
     sign_fn = @cfunction(
         _pkcs11_test_fake_sign,
-        AwsIO.CK_RV,
-        (AwsIO.CK_SESSION_HANDLE, Ptr{UInt8}, AwsIO.CK_ULONG, Ptr{UInt8}, Ptr{AwsIO.CK_ULONG}),
+        Reseau.CK_RV,
+        (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}, Ptr{Reseau.CK_ULONG}),
     )
 
-    fl = AwsIO._pkcs11_function_list_stub(
+    fl = Reseau._pkcs11_function_list_stub(
         C_GetSlotList = get_slot_fn,
         C_GetTokenInfo = get_token_fn,
         C_OpenSession = open_fn,
@@ -742,49 +742,49 @@ end
     )
     fl_ref = Ref(fl)
 
-    lib = AwsIO.Pkcs11Lib(AwsIO.Pkcs11LibOptions(filename = nothing))
+    lib = Reseau.Pkcs11Lib(Reseau.Pkcs11LibOptions(filename = nothing))
     lib.function_list = Base.unsafe_convert(Ptr{Cvoid}, fl_ref)
 
     GC.@preserve fl_ref begin
-        _pkcs11_test_slots[] = AwsIO.CK_SLOT_ID[1]
-        _pkcs11_test_open_session_rv[] = AwsIO.CKR_OK
-        _pkcs11_test_session_handle[] = AwsIO.CK_SESSION_HANDLE(0x99)
-        _pkcs11_test_login_rv[] = AwsIO.CKR_OK
-        _pkcs11_test_find_objects[] = AwsIO.CK_OBJECT_HANDLE[0x55]
-        _pkcs11_test_key_type[] = AwsIO.CKK_RSA
+        _pkcs11_test_slots[] = Reseau.CK_SLOT_ID[1]
+        _pkcs11_test_open_session_rv[] = Reseau.CKR_OK
+        _pkcs11_test_session_handle[] = Reseau.CK_SESSION_HANDLE(0x99)
+        _pkcs11_test_login_rv[] = Reseau.CKR_OK
+        _pkcs11_test_find_objects[] = Reseau.CK_OBJECT_HANDLE[0x55]
+        _pkcs11_test_key_type[] = Reseau.CKK_RSA
 
-        handler = AwsIO.pkcs11_tls_op_handler_new(
+        handler = Reseau.pkcs11_tls_op_handler_new(
             lib,
-            AwsIO.ByteCursor("1234"),
-            AwsIO.null_cursor(),
-            AwsIO.null_cursor(),
+            Reseau.ByteCursor("1234"),
+            Reseau.null_cursor(),
+            Reseau.null_cursor(),
             UInt64(1),
         )
-        @test handler isa AwsIO.CustomKeyOpHandler
+        @test handler isa Reseau.CustomKeyOpHandler
 
         _pkcs11_test_decrypt_output[] = UInt8[0x0a, 0x0b]
-        op_dec = AwsIO.TlsKeyOperation(
-            AwsIO.ByteCursor("cipher");
-            operation_type = AwsIO.TlsKeyOperationType.DECRYPT,
+        op_dec = Reseau.TlsKeyOperation(
+            Reseau.ByteCursor("cipher");
+            operation_type = Reseau.TlsKeyOperationType.DECRYPT,
         )
-        AwsIO.custom_key_op_handler_perform_operation(handler, op_dec)
+        Reseau.custom_key_op_handler_perform_operation(handler, op_dec)
         @test op_dec.completed
-        @test op_dec.error_code == AwsIO.AWS_OP_SUCCESS
+        @test op_dec.error_code == Reseau.AWS_OP_SUCCESS
         @test collect(op_dec.output.mem[1:Int(op_dec.output.len)]) == _pkcs11_test_decrypt_output[]
 
         _pkcs11_test_sign_output[] = UInt8[0x55]
-        op_sig = AwsIO.TlsKeyOperation(
-            AwsIO.ByteCursor(UInt8[0x01, 0x02]);
-            operation_type = AwsIO.TlsKeyOperationType.SIGN,
-            signature_algorithm = AwsIO.TlsSignatureAlgorithm.RSA,
-            digest_algorithm = AwsIO.TlsHashAlgorithm.SHA256,
+        op_sig = Reseau.TlsKeyOperation(
+            Reseau.ByteCursor(UInt8[0x01, 0x02]);
+            operation_type = Reseau.TlsKeyOperationType.SIGN,
+            signature_algorithm = Reseau.TlsSignatureAlgorithm.RSA,
+            digest_algorithm = Reseau.TlsHashAlgorithm.SHA256,
         )
-        AwsIO.custom_key_op_handler_perform_operation(handler, op_sig)
+        Reseau.custom_key_op_handler_perform_operation(handler, op_sig)
         @test op_sig.completed
-        @test op_sig.error_code == AwsIO.AWS_OP_SUCCESS
+        @test op_sig.error_code == Reseau.AWS_OP_SUCCESS
         @test collect(op_sig.output.mem[1:Int(op_sig.output.len)]) == _pkcs11_test_sign_output[]
 
-        AwsIO.custom_key_op_handler_release(handler)
+        Reseau.custom_key_op_handler_release(handler)
     end
 end
 
@@ -843,7 +843,7 @@ end
         missing = String[]
         for name in parse_aws_io_errors(header_path)
             mapped = Symbol(map_aws_error_name(name))
-            if !isdefined(AwsIO, mapped)
+            if !isdefined(Reseau, mapped)
                 push!(missing, String(mapped))
             end
         end
@@ -856,45 +856,45 @@ end
     if Sys.iswindows()
         @test true
     else
-        @test AwsIO.determine_socket_error(AwsIO.ECONNREFUSED) ==
-            AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED
-        @test AwsIO.determine_socket_error(AwsIO.ECONNRESET) ==
-            AwsIO.ERROR_IO_SOCKET_CLOSED
-        @test AwsIO.determine_socket_error(AwsIO.ETIMEDOUT) ==
-            AwsIO.ERROR_IO_SOCKET_TIMEOUT
-        @test AwsIO.determine_socket_error(AwsIO.EHOSTUNREACH) ==
-            AwsIO.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST
-        @test AwsIO.determine_socket_error(AwsIO.ENETUNREACH) ==
-            AwsIO.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST
-        @test AwsIO.determine_socket_error(AwsIO.EADDRNOTAVAIL) ==
-            AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
-        @test AwsIO.determine_socket_error(AwsIO.ENETDOWN) ==
-            AwsIO.ERROR_IO_SOCKET_NETWORK_DOWN
-        @test AwsIO.determine_socket_error(AwsIO.ECONNABORTED) ==
-            AwsIO.ERROR_IO_SOCKET_CONNECT_ABORTED
-        @test AwsIO.determine_socket_error(AwsIO.EADDRINUSE) ==
-            AwsIO.ERROR_IO_SOCKET_ADDRESS_IN_USE
-        @test AwsIO.determine_socket_error(AwsIO.ENOBUFS) ==
-            AwsIO.ERROR_OOM
-        @test AwsIO.determine_socket_error(AwsIO.ENOMEM) ==
-            AwsIO.ERROR_OOM
-        @test AwsIO.determine_socket_error(AwsIO.EAGAIN) ==
-            AwsIO.ERROR_IO_READ_WOULD_BLOCK
-        @test AwsIO.determine_socket_error(AwsIO.EWOULDBLOCK) ==
-            AwsIO.ERROR_IO_READ_WOULD_BLOCK
-        @test AwsIO.determine_socket_error(AwsIO.EMFILE) ==
-            AwsIO.ERROR_MAX_FDS_EXCEEDED
-        @test AwsIO.determine_socket_error(AwsIO.ENFILE) ==
-            AwsIO.ERROR_MAX_FDS_EXCEEDED
-        @test AwsIO.determine_socket_error(AwsIO.ENOENT) ==
-            AwsIO.ERROR_FILE_INVALID_PATH
-        @test AwsIO.determine_socket_error(AwsIO.EINVAL) ==
-            AwsIO.ERROR_FILE_INVALID_PATH
-        @test AwsIO.determine_socket_error(AwsIO.EAFNOSUPPORT) ==
-            AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
-        @test AwsIO.determine_socket_error(AwsIO.EACCES) ==
-            AwsIO.ERROR_NO_PERMISSION
-        @test AwsIO.determine_socket_error(9999) ==
-            AwsIO.ERROR_IO_SOCKET_NOT_CONNECTED
+        @test Reseau.determine_socket_error(Reseau.ECONNREFUSED) ==
+            Reseau.ERROR_IO_SOCKET_CONNECTION_REFUSED
+        @test Reseau.determine_socket_error(Reseau.ECONNRESET) ==
+            Reseau.ERROR_IO_SOCKET_CLOSED
+        @test Reseau.determine_socket_error(Reseau.ETIMEDOUT) ==
+            Reseau.ERROR_IO_SOCKET_TIMEOUT
+        @test Reseau.determine_socket_error(Reseau.EHOSTUNREACH) ==
+            Reseau.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST
+        @test Reseau.determine_socket_error(Reseau.ENETUNREACH) ==
+            Reseau.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST
+        @test Reseau.determine_socket_error(Reseau.EADDRNOTAVAIL) ==
+            Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
+        @test Reseau.determine_socket_error(Reseau.ENETDOWN) ==
+            Reseau.ERROR_IO_SOCKET_NETWORK_DOWN
+        @test Reseau.determine_socket_error(Reseau.ECONNABORTED) ==
+            Reseau.ERROR_IO_SOCKET_CONNECT_ABORTED
+        @test Reseau.determine_socket_error(Reseau.EADDRINUSE) ==
+            Reseau.ERROR_IO_SOCKET_ADDRESS_IN_USE
+        @test Reseau.determine_socket_error(Reseau.ENOBUFS) ==
+            Reseau.ERROR_OOM
+        @test Reseau.determine_socket_error(Reseau.ENOMEM) ==
+            Reseau.ERROR_OOM
+        @test Reseau.determine_socket_error(Reseau.EAGAIN) ==
+            Reseau.ERROR_IO_READ_WOULD_BLOCK
+        @test Reseau.determine_socket_error(Reseau.EWOULDBLOCK) ==
+            Reseau.ERROR_IO_READ_WOULD_BLOCK
+        @test Reseau.determine_socket_error(Reseau.EMFILE) ==
+            Reseau.ERROR_MAX_FDS_EXCEEDED
+        @test Reseau.determine_socket_error(Reseau.ENFILE) ==
+            Reseau.ERROR_MAX_FDS_EXCEEDED
+        @test Reseau.determine_socket_error(Reseau.ENOENT) ==
+            Reseau.ERROR_FILE_INVALID_PATH
+        @test Reseau.determine_socket_error(Reseau.EINVAL) ==
+            Reseau.ERROR_FILE_INVALID_PATH
+        @test Reseau.determine_socket_error(Reseau.EAFNOSUPPORT) ==
+            Reseau.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
+        @test Reseau.determine_socket_error(Reseau.EACCES) ==
+            Reseau.ERROR_NO_PERMISSION
+        @test Reseau.determine_socket_error(9999) ==
+            Reseau.ERROR_IO_SOCKET_NOT_CONNECTED
     end
 end

@@ -219,7 +219,7 @@ mutable struct S2nTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: TlsChann
     connection::Ptr{Cvoid}
     ctx::Union{TlsContext, Nothing}
     s2n_ctx::Union{S2nTlsCtx, Nothing}
-    input_queue::Deque{IoMessage}
+    input_queue::Vector{IoMessage}
     protocol::ByteBuffer
     server_name::ByteBuffer
     latest_message_on_completion::Union{Function, Nothing}
@@ -269,8 +269,8 @@ end
 function _s2n_generic_read(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UInt32)::Cint
     written = 0
     queue = handler.input_queue
-    while !linked_list_empty(queue) && written < len
-        message = linked_list_pop_front(queue)
+    while !isempty(queue) && written < len
+        message = popfirst!(queue)
         message === nothing && break
         msg = message::IoMessage
         remaining_message_len = Int(msg.message_data.len) - Int(msg.copy_mark)
@@ -289,7 +289,7 @@ function _s2n_generic_read(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
                 channel_release_message_to_pool!(msg.owning_channel, msg)
             end
         else
-            linked_list_push_front(queue, msg)
+            pushfirst!(queue, msg)
         end
     end
 
@@ -617,8 +617,8 @@ function handler_message_overhead(handler::S2nTlsHandler)::Csize_t
 end
 
 function handler_destroy(handler::S2nTlsHandler)::Nothing
-    while !linked_list_empty(handler.input_queue)
-        msg = linked_list_pop_front(handler.input_queue)
+    while !isempty(handler.input_queue)
+        msg = popfirst!(handler.input_queue)
         if msg isa IoMessage && msg.owning_channel isa Channel
             channel_release_message_to_pool!(msg.owning_channel, msg)
         end
@@ -663,7 +663,7 @@ function handler_process_read_message(
     end
 
     if message !== nothing
-        linked_list_push_back(handler.input_queue, message)
+        push!(handler.input_queue, message)
 
         if handler.state == TlsNegotiationState.ONGOING
             message_len = message.message_data.len
@@ -835,7 +835,7 @@ function handler_shutdown(
         end
         if !abort_immediately &&
                 handler.state == TlsNegotiationState.SUCCEEDED &&
-                !linked_list_empty(handler.input_queue) &&
+                !isempty(handler.input_queue) &&
                 slot.adj_right !== nothing
             _s2n_initialize_read_delay_shutdown(handler, slot, error_code)
             return nothing
@@ -848,8 +848,8 @@ function handler_shutdown(
         end
     end
 
-    while !linked_list_empty(handler.input_queue)
-        msg = linked_list_pop_front(handler.input_queue)
+    while !isempty(handler.input_queue)
+        msg = popfirst!(handler.input_queue)
         if msg isa IoMessage && msg.owning_channel isa Channel
             channel_release_message_to_pool!(msg.owning_channel, msg)
         end
@@ -1312,7 +1312,7 @@ function _s2n_handler_new(
         C_NULL,
         ctx,
         s2n_ctx,
-        linked_list_init(IoMessage),
+        IoMessage[],
         null_buffer(),
         null_buffer(),
         nothing,

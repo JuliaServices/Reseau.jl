@@ -13,7 +13,7 @@
     mutable struct IocpSyncedData
         mutex::ReentrantLock
         thread_signaled::Bool
-        tasks_to_schedule::Deque{ScheduledTask}
+        tasks_to_schedule::Vector{ScheduledTask}
         state::IocpEventThreadState.T
     end
 
@@ -21,7 +21,7 @@
         return IocpSyncedData(
             ReentrantLock(),
             false,
-            Deque{ScheduledTask}(16),
+            ScheduledTask[],
             IocpEventThreadState.READY_TO_RUN,
         )
     end

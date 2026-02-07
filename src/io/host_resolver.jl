@@ -168,7 +168,7 @@ mutable struct HostEntry
     aaaa_records::LRUCache{String, HostAddress}
     failed_a_records::LRUCache{String, HostAddress}
     failed_aaaa_records::LRUCache{String, HostAddress}
-    pending_callbacks::Deque{PendingCallback}
+    pending_callbacks::Vector{PendingCallback}
     last_resolve_request_time::UInt64
     resolves_since_last_request::UInt32
     @atomic state::DefaultResolverState.T
@@ -207,7 +207,7 @@ function HostEntry(
         aaaa_records,
         failed_a_records,
         failed_aaaa_records,
-        Deque{PendingCallback}(0),
+        PendingCallback[],
         timestamp,
         UInt32(0),
         DefaultResolverState.ACTIVE,
@@ -482,7 +482,7 @@ function _host_resolver_thread(entry::HostEntry)
             timestamp = _resolver_clock(entry.resolver)
             new_expiry = timestamp + entry.resolution_config.max_ttl_secs * UInt64(1_000_000_000)
 
-            pending = Deque{PendingCallback}(0)
+            pending = PendingCallback[]
             lock(entry.entry_lock)
             try
                 if err_code == AWS_OP_SUCCESS
@@ -492,13 +492,13 @@ function _host_resolver_thread(entry::HostEntry)
                 _process_records!(entry, entry.a_records, entry.failed_a_records, timestamp)
 
                 pending = entry.pending_callbacks
-                entry.pending_callbacks = Deque{PendingCallback}(0)
+                entry.pending_callbacks = PendingCallback[]
             finally
                 unlock(entry.entry_lock)
             end
 
             while !isempty(pending)
-                pending_callback = pop_front!(pending)
+                pending_callback = popfirst!(pending)
                 callback_addresses = HostAddress[]
                 lock(entry.entry_lock)
                 try
@@ -637,7 +637,7 @@ function host_resolver_resolve!(
     entry = get(resolver.cache, host, nothing)
     if entry === nothing
         new_entry = HostEntry(resolver, host, resolution_config, timestamp)
-        push_back!(
+        push!(
             new_entry.pending_callbacks,
             PendingCallback(on_resolved, user_data),
         )
@@ -669,7 +669,7 @@ function host_resolver_resolve!(
         return nothing
     end
 
-    push_back!(
+    push!(
         entry.pending_callbacks,
         PendingCallback(on_resolved, user_data),
     )

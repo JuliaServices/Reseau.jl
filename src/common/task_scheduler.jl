@@ -30,13 +30,13 @@ end
 
 mutable struct TaskScheduler{Less}
     timed::PriorityQueue{ScheduledTask, Less}
-    asap::Deque{ScheduledTask}
+    asap::Vector{ScheduledTask}
 end
 
 function TaskScheduler(; capacity::Integer = 8)
     less = (a::ScheduledTask, b::ScheduledTask) -> a.timestamp < b.timestamp
     timed = PriorityQueue{ScheduledTask}(less; capacity = capacity)
-    asap = Deque{ScheduledTask}(capacity)
+    asap = ScheduledTask[]
     return TaskScheduler{typeof(less)}(timed, asap)
 end
 
@@ -80,7 +80,7 @@ function task_scheduler_schedule_now!(scheduler::TaskScheduler, task::ScheduledT
     )
     task.timestamp = UInt64(0)
     task.scheduled = true
-    push_back!(scheduler.asap, task)
+    push!(scheduler.asap, task)
     return nothing
 end
 
@@ -102,7 +102,11 @@ end
 function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)
     removed = false
     if !isempty(scheduler.asap)
-        removed = remove!(scheduler.asap, task; eq = (===))
+        idx = findfirst(x -> x === task, scheduler.asap)
+        if idx !== nothing
+            deleteat!(scheduler.asap, idx)
+            removed = true
+        end
     end
     if !removed
         removed = remove!(scheduler.timed, task; eq = (===))
@@ -113,7 +117,7 @@ end
 
 function _run_due!(scheduler::TaskScheduler, current_time::UInt64, status::TaskStatus.T)
     while !isempty(scheduler.asap)
-        task = pop_front!(scheduler.asap)
+        task = popfirst!(scheduler.asap)
         task === nothing && break
         task_run!(task, status)
     end
@@ -142,7 +146,7 @@ function task_scheduler_clean_up!(scheduler::TaskScheduler)
         has_tasks || break
         _run_due!(scheduler, typemax(UInt64), TaskStatus.CANCELED)
     end
-    clear!(scheduler.asap)
+    empty!(scheduler.asap)
     clear!(scheduler.timed)
     return nothing
 end

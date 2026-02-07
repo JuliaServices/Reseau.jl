@@ -1,10 +1,10 @@
 using Test
-using AwsIO
+using Reseau
 
 mutable struct AsyncStreamTestState
     data::Vector{UInt8}
     offset::Int
-    event_loop::Union{AwsIO.EventLoop, Nothing}
+    event_loop::Union{Reseau.EventLoop, Nothing}
     completion_strategy::Symbol
     max_bytes_per_read::Int
     fail_on_nth_read::Int
@@ -16,7 +16,7 @@ end
 
 function AsyncStreamTestState(;
         data::Vector{UInt8},
-        event_loop::Union{AwsIO.EventLoop, Nothing} = nothing,
+        event_loop::Union{Reseau.EventLoop, Nothing} = nothing,
         completion_strategy::Symbol = :immediate,
         max_bytes_per_read::Int = 0,
         fail_on_nth_read::Int = 0,
@@ -37,29 +37,29 @@ function AsyncStreamTestState(;
     )
 end
 
-function _async_test_read(stream::AwsIO.AsyncInputStream, dest::AwsIO.ByteBuffer)
+function _async_test_read(stream::Reseau.AsyncInputStream, dest::Reseau.ByteBuffer)
     state = stream.impl
-    future = AwsIO.Future{Bool}()
+    future = Reseau.Future{Bool}()
 
     function do_read!()
         state.read_count += 1
         if state.fail_on_nth_read > 0 && state.read_count == state.fail_on_nth_read
-            AwsIO.future_fail!(future, state.fail_error_code)
+            Reseau.future_fail!(future, state.fail_error_code)
             return nothing
         end
 
         if state.offset >= length(state.data)
             if state.eof_requires_extra_read && !state.pending_eof
                 state.pending_eof = true
-                AwsIO.future_complete!(future, false)
+                Reseau.future_complete!(future, false)
                 return nothing
             end
             state.pending_eof = false
-            AwsIO.future_complete!(future, true)
+            Reseau.future_complete!(future, true)
             return nothing
         end
 
-        available = Int(AwsIO.capacity(dest) - dest.len)
+        available = Int(Reseau.capacity(dest) - dest.len)
         remaining = length(state.data) - state.offset
         limit = state.max_bytes_per_read > 0 ? state.max_bytes_per_read : remaining
         to_copy = min(available, remaining, limit)
@@ -75,30 +75,30 @@ function _async_test_read(stream::AwsIO.AsyncInputStream, dest::AwsIO.ByteBuffer
             state.pending_eof = true
             eof = false
         end
-        AwsIO.future_complete!(future, eof)
+        Reseau.future_complete!(future, eof)
         return nothing
     end
 
     if state.completion_strategy == :event_loop
         if state.event_loop !== nothing
-            task = AwsIO.ScheduledTask(
+            task = Reseau.ScheduledTask(
                 (t, status) -> do_read!(),
                 nothing;
                 type_tag = "async_stream_test_read",
             )
-            AwsIO.event_loop_schedule_task_now!(state.event_loop, task)
+            Reseau.event_loop_schedule_task_now!(state.event_loop, task)
         else
             do_read!()
         end
     elseif state.completion_strategy == :random
         next_read = state.read_count + 1
         if isodd(next_read) && state.event_loop !== nothing
-            task = AwsIO.ScheduledTask(
+            task = Reseau.ScheduledTask(
                 (t, status) -> do_read!(),
                 nothing;
                 type_tag = "async_stream_test_read",
             )
-            AwsIO.event_loop_schedule_task_now!(state.event_loop, task)
+            Reseau.event_loop_schedule_task_now!(state.event_loop, task)
         else
             do_read!()
         end
@@ -111,70 +111,70 @@ end
 
 @testset "async input stream read_to_fill sync" begin
     state = AsyncStreamTestState(data = collect(codeunits("hello world")))
-    stream = AwsIO.AsyncInputStream(_async_test_read, s -> nothing, state)
+    stream = Reseau.AsyncInputStream(_async_test_read, s -> nothing, state)
 
-    dest = AwsIO.ByteBuffer(5)
-    fut = AwsIO.async_input_stream_read_to_fill(stream, dest)
-    @test AwsIO.future_wait(fut)
-    @test AwsIO.future_is_success(fut)
-    @test AwsIO.future_get_result(fut) == false
-    @test String(AwsIO.byte_cursor_from_buf(dest)) == "hello"
+    dest = Reseau.ByteBuffer(5)
+    fut = Reseau.async_input_stream_read_to_fill(stream, dest)
+    @test Reseau.future_wait(fut)
+    @test Reseau.future_is_success(fut)
+    @test Reseau.future_get_result(fut) == false
+    @test String(Reseau.byte_cursor_from_buf(dest)) == "hello"
 
-    dest2 = AwsIO.ByteBuffer(6)
-    fut2 = AwsIO.async_input_stream_read_to_fill(stream, dest2)
-    @test AwsIO.future_wait(fut2)
-    @test AwsIO.future_is_success(fut2)
-    @test AwsIO.future_get_result(fut2) == true
-    @test String(AwsIO.byte_cursor_from_buf(dest2)) == " world"
+    dest2 = Reseau.ByteBuffer(6)
+    fut2 = Reseau.async_input_stream_read_to_fill(stream, dest2)
+    @test Reseau.future_wait(fut2)
+    @test Reseau.future_is_success(fut2)
+    @test Reseau.future_get_result(fut2) == true
+    @test String(Reseau.byte_cursor_from_buf(dest2)) == " world"
 
-    dest_full = AwsIO.ByteBuffer(0)
-    fut3 = AwsIO.async_input_stream_read(stream, dest_full)
-    @test AwsIO.future_is_failed(fut3)
-    @test AwsIO.future_get_error(fut3) == AwsIO.ERROR_SHORT_BUFFER
+    dest_full = Reseau.ByteBuffer(0)
+    fut3 = Reseau.async_input_stream_read(stream, dest_full)
+    @test Reseau.future_is_failed(fut3)
+    @test Reseau.future_get_error(fut3) == Reseau.ERROR_SHORT_BUFFER
 end
 
 @testset "async input stream read_to_fill async" begin
-    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = Reseau.event_loop_group_get_next_loop(elg)
     state = AsyncStreamTestState(data = collect(codeunits("abcd")), event_loop = event_loop, completion_strategy = :event_loop)
-    stream = AwsIO.AsyncInputStream(_async_test_read, s -> nothing, state)
+    stream = Reseau.AsyncInputStream(_async_test_read, s -> nothing, state)
 
-    dest = AwsIO.ByteBuffer(4)
-    fut = AwsIO.async_input_stream_read_to_fill(stream, dest)
-    @test AwsIO.future_wait(fut)
-    @test AwsIO.future_is_success(fut)
-    @test AwsIO.future_get_result(fut) == true
-    @test String(AwsIO.byte_cursor_from_buf(dest)) == "abcd"
+    dest = Reseau.ByteBuffer(4)
+    fut = Reseau.async_input_stream_read_to_fill(stream, dest)
+    @test Reseau.future_wait(fut)
+    @test Reseau.future_is_success(fut)
+    @test Reseau.future_get_result(fut) == true
+    @test String(Reseau.byte_cursor_from_buf(dest)) == "abcd"
 
-    AwsIO.event_loop_group_destroy!(elg)
+    Reseau.event_loop_group_destroy!(elg)
 end
 
 @testset "async input stream fill completes on thread" begin
-    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = Reseau.event_loop_group_get_next_loop(elg)
     state = AsyncStreamTestState(
         data = collect(codeunits("123456789")),
         event_loop = event_loop,
         completion_strategy = :event_loop,
         max_bytes_per_read = 1,
     )
-    stream = AwsIO.AsyncInputStream(_async_test_read, s -> nothing, state)
+    stream = Reseau.AsyncInputStream(_async_test_read, s -> nothing, state)
 
-    buf = AwsIO.ByteBuffer(5)
-    fut = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut)
-    @test AwsIO.future_is_success(fut)
-    @test AwsIO.future_get_result(fut) == false
-    @test String(AwsIO.byte_cursor_from_buf(buf)) == "12345"
+    buf = Reseau.ByteBuffer(5)
+    fut = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut)
+    @test Reseau.future_is_success(fut)
+    @test Reseau.future_get_result(fut) == false
+    @test String(Reseau.byte_cursor_from_buf(buf)) == "12345"
 
     buf.len = 0
-    fut2 = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut2)
-    @test AwsIO.future_is_success(fut2)
-    @test AwsIO.future_get_result(fut2) == true
-    @test String(AwsIO.byte_cursor_from_buf(buf)) == "6789"
+    fut2 = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut2)
+    @test Reseau.future_is_success(fut2)
+    @test Reseau.future_get_result(fut2) == true
+    @test String(Reseau.byte_cursor_from_buf(buf)) == "6789"
 
-    AwsIO.event_loop_group_destroy!(elg)
+    Reseau.event_loop_group_destroy!(elg)
 end
 
 @testset "async input stream fill completes immediately" begin
@@ -183,49 +183,49 @@ end
         completion_strategy = :immediate,
         max_bytes_per_read = 1,
     )
-    stream = AwsIO.AsyncInputStream(_async_test_read, s -> nothing, state)
+    stream = Reseau.AsyncInputStream(_async_test_read, s -> nothing, state)
 
-    buf = AwsIO.ByteBuffer(5)
-    fut = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut)
-    @test AwsIO.future_is_success(fut)
-    @test AwsIO.future_get_result(fut) == false
-    @test String(AwsIO.byte_cursor_from_buf(buf)) == "12345"
+    buf = Reseau.ByteBuffer(5)
+    fut = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut)
+    @test Reseau.future_is_success(fut)
+    @test Reseau.future_get_result(fut) == false
+    @test String(Reseau.byte_cursor_from_buf(buf)) == "12345"
 
     buf.len = 0
-    fut2 = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut2)
-    @test AwsIO.future_is_success(fut2)
-    @test AwsIO.future_get_result(fut2) == true
-    @test String(AwsIO.byte_cursor_from_buf(buf)) == "6789"
+    fut2 = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut2)
+    @test Reseau.future_is_success(fut2)
+    @test Reseau.future_get_result(fut2) == true
+    @test String(Reseau.byte_cursor_from_buf(buf)) == "6789"
 end
 
 @testset "async input stream fill completes randomly" begin
-    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = Reseau.event_loop_group_get_next_loop(elg)
     state = AsyncStreamTestState(
         data = collect(codeunits("123456789")),
         event_loop = event_loop,
         completion_strategy = :random,
         max_bytes_per_read = 1,
     )
-    stream = AwsIO.AsyncInputStream(_async_test_read, s -> nothing, state)
+    stream = Reseau.AsyncInputStream(_async_test_read, s -> nothing, state)
 
-    buf = AwsIO.ByteBuffer(5)
-    fut = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut)
-    @test AwsIO.future_is_success(fut)
-    @test AwsIO.future_get_result(fut) == false
-    @test String(AwsIO.byte_cursor_from_buf(buf)) == "12345"
+    buf = Reseau.ByteBuffer(5)
+    fut = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut)
+    @test Reseau.future_is_success(fut)
+    @test Reseau.future_get_result(fut) == false
+    @test String(Reseau.byte_cursor_from_buf(buf)) == "12345"
 
     buf.len = 0
-    fut2 = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut2)
-    @test AwsIO.future_is_success(fut2)
-    @test AwsIO.future_get_result(fut2) == true
-    @test String(AwsIO.byte_cursor_from_buf(buf)) == "6789"
+    fut2 = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut2)
+    @test Reseau.future_is_success(fut2)
+    @test Reseau.future_get_result(fut2) == true
+    @test String(Reseau.byte_cursor_from_buf(buf)) == "6789"
 
-    AwsIO.event_loop_group_destroy!(elg)
+    Reseau.event_loop_group_destroy!(elg)
 end
 
 @testset "async input stream fill eof requires extra read" begin
@@ -234,20 +234,20 @@ end
         completion_strategy = :immediate,
         eof_requires_extra_read = true,
     )
-    stream = AwsIO.AsyncInputStream(_async_test_read, s -> nothing, state)
+    stream = Reseau.AsyncInputStream(_async_test_read, s -> nothing, state)
 
-    buf = AwsIO.ByteBuffer(9)
-    fut = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut)
-    @test AwsIO.future_is_success(fut)
-    @test AwsIO.future_get_result(fut) == false
-    @test String(AwsIO.byte_cursor_from_buf(buf)) == "123456789"
+    buf = Reseau.ByteBuffer(9)
+    fut = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut)
+    @test Reseau.future_is_success(fut)
+    @test Reseau.future_get_result(fut) == false
+    @test String(Reseau.byte_cursor_from_buf(buf)) == "123456789"
 
     buf.len = 0
-    fut2 = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut2)
-    @test AwsIO.future_is_success(fut2)
-    @test AwsIO.future_get_result(fut2) == true
+    fut2 = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut2)
+    @test Reseau.future_is_success(fut2)
+    @test Reseau.future_get_result(fut2) == true
     @test buf.len == 0
 end
 
@@ -259,10 +259,10 @@ end
         fail_on_nth_read = 2,
         fail_error_code = 999,
     )
-    stream = AwsIO.AsyncInputStream(_async_test_read, s -> nothing, state)
+    stream = Reseau.AsyncInputStream(_async_test_read, s -> nothing, state)
 
-    buf = AwsIO.ByteBuffer(512)
-    fut = AwsIO.async_input_stream_read_to_fill(stream, buf)
-    @test AwsIO.future_wait(fut)
-    @test AwsIO.future_get_error(fut) == 999
+    buf = Reseau.ByteBuffer(512)
+    fut = Reseau.async_input_stream_read_to_fill(stream, buf)
+    @test Reseau.future_wait(fut)
+    @test Reseau.future_get_error(fut) == 999
 end

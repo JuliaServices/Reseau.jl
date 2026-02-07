@@ -1,4 +1,4 @@
-# AwsIO Agent Notes
+# Reseau Agent Notes
 
 This repo is a Julia package (`Project.toml`). Tests live under `test/` and are driven by `test/runtests.jl`.
 
@@ -36,26 +36,26 @@ JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'us
 Network-only:
 
 ```sh
-AWSIO_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
+RESEAU_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
 ```
 
 TLS-only:
 
 ```sh
-AWSIO_RUN_TLS_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
+RESEAU_RUN_TLS_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
 ```
 
 TLS + network (includes the TLS network negotiation tests):
 
 ```sh
-AWSIO_RUN_TLS_TESTS=1 AWSIO_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
+RESEAU_RUN_TLS_TESTS=1 RESEAU_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
 ```
 
 Note: the `TLS network negotiation (requires network)` testset can take ~45s with no output.
 
 ### Downstream Packages (AwsHTTP + HTTP)
 
-When making changes in `AwsIO`, also run the tests for downstream packages that depend on it:
+When making changes in `Reseau`, also run the tests for downstream packages that depend on it:
 
 AwsHTTP:
 
@@ -84,10 +84,10 @@ If this feels “hung”, give it a couple minutes; if it is still not producing
 ## Optional Test Suites / Env Vars
 
 - TLS tests are disabled by default.
-  - Enable: `AWSIO_RUN_TLS_TESTS=1`
+  - Enable: `RESEAU_RUN_TLS_TESTS=1`
   - macOS: tests may create a temporary keychain (see `test/test_utils.jl`)
 - Network-heavy tests are disabled by default.
-  - Enable: `AWSIO_RUN_NETWORK_TESTS=1`
+  - Enable: `RESEAU_RUN_NETWORK_TESTS=1`
   - Requires functional outbound network/DNS or tests may be slow/flaky.
 - PKCS11 (SoftHSM) tests are skipped unless configured.
   - Requires `TEST_PKCS11_LIB` and `TEST_PKCS11_TOKEN_DIR`
@@ -111,7 +111,7 @@ julia -t auto --project=. --startup-file=no --history-file=no -e 'include("test/
 Find the child PID:
 
 ```sh
-ps -ax -o pid=,command= | rg 'AwsIO/test/runtests\\.jl'
+ps -ax -o pid=,command= | rg 'Reseau/test/runtests\\.jl'
 ```
 
 Then request a stack dump:

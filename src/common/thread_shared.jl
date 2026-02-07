@@ -2,7 +2,7 @@ const _managed_thread_lock = Ref{ReentrantLock}(ReentrantLock())
 const _managed_thread_signal = Ref{ConditionVariable}(ConditionVariable())
 const _default_managed_join_timeout_ns = Ref{UInt64}(0)
 const _unjoined_thread_count = Ref{UInt32}(0)
-const _pending_join_managed_threads = Ref{Deque{ThreadHandle}}(Deque{ThreadHandle}())
+const _pending_join_managed_threads = Ref{Vector{ThreadHandle}}(ThreadHandle[])
 
 function thread_increment_unjoined_count()
     lock(_managed_thread_lock[])
@@ -109,11 +109,11 @@ function thread_join_all_managed()
                 successful = false
             end
         end
-        join_list = Deque{ThreadHandle}()
+        join_list = ThreadHandle[]
         while !isempty(_pending_join_managed_threads[])
-            handle = pop_front!(_pending_join_managed_threads[])
+            handle = popfirst!(_pending_join_managed_threads[])
             handle === nothing && break
-            push_back!(join_list, handle)
+            push!(join_list, handle)
         end
         done = done || (_unjoined_thread_count[] <= threshold && isempty(_pending_join_managed_threads[]))
         unlock(_managed_thread_lock[])
@@ -128,13 +128,13 @@ end
 
 function thread_pending_join_add(handle::ThreadHandle)
     lock(_managed_thread_lock[])
-    push_back!(_pending_join_managed_threads[], handle)
+    push!(_pending_join_managed_threads[], handle)
     condition_variable_notify_one(_managed_thread_signal)
     unlock(_managed_thread_lock[])
     return nothing
 end
 
 function thread_initialize_thread_management()
-    clear!(_pending_join_managed_threads[])
+    empty!(_pending_join_managed_threads[])
     return nothing
 end

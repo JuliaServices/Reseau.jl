@@ -73,12 +73,14 @@ function ByteCursor(ref::MemoryRef{UInt8}, len::Integer)
 end
 
 function ByteCursor(vec::Vector{UInt8}, len::Integer = length(vec))
-    if len == 0
+    len < 0 && throw(ArgumentError("len must be >= 0"))
+    if len == 0 || isempty(vec)
         return ByteCursor(Csize_t(0), memoryref(_null_cursor_mem))
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(vec), Int(len); own = false)
+    actual_len = len > length(vec) ? length(vec) : Int(len)
+    mem = unsafe_wrap(Memory{UInt8}, pointer(vec), actual_len; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = vec
-    return ByteCursor(Csize_t(len), memoryref(mem))
+    return ByteCursor(Csize_t(actual_len), memoryref(mem))
 end
 
 #==========================================================================
@@ -514,7 +516,10 @@ function byte_buf_from_array(bytes::Memory{UInt8}, len::Integer = length(bytes))
 end
 
 function byte_buf_from_array(bytes::AbstractVector{UInt8}, len::Integer = length(bytes))
-    cap = min(Int(len), length(bytes))
+    len < 0 && throw(ArgumentError("len must be >= 0"))
+    bytes isa SubArray && !Base.iscontiguous(bytes) &&
+        throw(ArgumentError("byte_buf_from_array requires a contiguous array"))
+    cap = len > length(bytes) ? length(bytes) : Int(len)
     if cap == 0
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
@@ -524,21 +529,15 @@ function byte_buf_from_array(bytes::AbstractVector{UInt8}, len::Integer = length
 end
 
 function byte_buf_from_empty_array(bytes::AbstractVector{UInt8}, len::Integer = length(bytes))
-    cap = min(Int(len), length(bytes))
+    len < 0 && throw(ArgumentError("len must be >= 0"))
+    bytes isa SubArray && !Base.iscontiguous(bytes) &&
+        throw(ArgumentError("byte_buf_from_empty_array requires a contiguous array"))
+    cap = len > length(bytes) ? length(bytes) : Int(len)
     if cap == 0
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
     mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), cap; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = bytes
-    return ByteBuffer(mem, Csize_t(0))
-end
-
-function byte_buf_from_empty_array(ptr::Ptr{UInt8}, len::Integer)
-    cap = Int(len)
-    if cap == 0 || ptr == Ptr{UInt8}(0)
-        return ByteBuffer(Memory{UInt8}(undef, 0), 0)
-    end
-    mem = unsafe_wrap(Memory{UInt8}, ptr, cap; own = false)
     return ByteBuffer(mem, Csize_t(0))
 end
 
@@ -560,21 +559,29 @@ function byte_cursor_from_array(bytes::AbstractVector{UInt8}, len::Integer = len
     if len == 0 || length(bytes) == 0
         return null_cursor()
     end
-    actual_len = min(Int(len), length(bytes))
+    len < 0 && throw(ArgumentError("len must be >= 0"))
+    bytes isa SubArray && !Base.iscontiguous(bytes) &&
+        throw(ArgumentError("byte_cursor_from_array requires a contiguous array"))
+    actual_len = len > length(bytes) ? length(bytes) : Int(len)
+    actual_len == 0 && return null_cursor()
     mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), actual_len; own = false)
     _BUFFER_VIEW_REGISTRY[mem] = bytes
-    return ByteCursor(Csize_t(len), memoryref(mem))
+    return ByteCursor(Csize_t(actual_len), memoryref(mem))
 end
 
 function byte_cursor_from_array(bytes::AbstractVector{UInt8}, offset::Integer, len::Integer)
     if len == 0 || length(bytes) == 0
         return null_cursor()
     end
+    len < 0 && throw(ArgumentError("len must be >= 0"))
+    bytes isa SubArray && !Base.iscontiguous(bytes) &&
+        throw(ArgumentError("byte_cursor_from_array requires a contiguous array"))
     start = Int(offset)
     start < 0 && return null_cursor()
     start >= length(bytes) && return null_cursor()
     max_len = length(bytes) - start
-    actual_len = min(Int(len), max_len)
+    actual_len = len > max_len ? max_len : Int(len)
+    actual_len == 0 && return null_cursor()
     mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), length(bytes); own = false)
     _BUFFER_VIEW_REGISTRY[mem] = bytes
     return ByteCursor(Csize_t(actual_len), memoryref(mem, start + 1))
@@ -1594,7 +1601,7 @@ function byte_cursor_next_split(input_str, split_on::Char, substr)
 end
 
 function byte_cursor_split_on_char_n(input_str::ByteCursor, split_on::UInt8, n::Integer, output)
-    output_list = output isa Base.RefValue ? output[] : output isa ArrayList ? output : nothing
+    output_list = output isa Base.RefValue ? output[] : output
     output_list === nothing && return OP_ERR
     max_splits = n > 0 ? n : typemax(Int)
     split_count = 0
@@ -1611,10 +1618,9 @@ function byte_cursor_split_on_char_n(input_str::ByteCursor, split_on::UInt8, n::
                 substr_ref[] = ByteCursor(new_len, substr_val.ptr)
             end
         end
-        if array_list_is_static(output_list) && output_list.length == capacity(output_list)
-            return raise_error(ERROR_LIST_EXCEEDS_MAX_SIZE)
-        end
-        if push_back!(output_list, substr_ref[]) != OP_SUCCESS
+        try
+            push!(output_list, substr_ref[])
+        catch
             return OP_ERR
         end
         split_count += 1

@@ -1,5 +1,5 @@
 using Test
-using AwsIO
+using Reseau
 
 function _wait_ready_stats(ch::Channel; timeout_ns::Integer = 5_000_000_000)
     deadline = Base.time_ns() + timeout_ns
@@ -9,70 +9,70 @@ function _wait_ready_stats(ch::Channel; timeout_ns::Integer = 5_000_000_000)
     return isready(ch)
 end
 
-mutable struct TestStatsChannelHandler <: AwsIO.AbstractChannelHandler
-    stats::AwsIO.SocketHandlerStatistics
+mutable struct TestStatsChannelHandler <: Reseau.AbstractChannelHandler
+    stats::Reseau.SocketHandlerStatistics
 end
 
-TestStatsChannelHandler() = TestStatsChannelHandler(AwsIO.SocketHandlerStatistics())
+TestStatsChannelHandler() = TestStatsChannelHandler(Reseau.SocketHandlerStatistics())
 
-AwsIO.handler_process_read_message(
+Reseau.handler_process_read_message(
     ::TestStatsChannelHandler,
-    ::AwsIO.ChannelSlot,
-    ::AwsIO.IoMessage,
+    ::Reseau.ChannelSlot,
+    ::Reseau.IoMessage,
 ) = nothing
 
-AwsIO.handler_process_write_message(
+Reseau.handler_process_write_message(
     ::TestStatsChannelHandler,
-    ::AwsIO.ChannelSlot,
-    ::AwsIO.IoMessage,
+    ::Reseau.ChannelSlot,
+    ::Reseau.IoMessage,
 ) = nothing
 
-AwsIO.handler_increment_read_window(
+Reseau.handler_increment_read_window(
     ::TestStatsChannelHandler,
-    ::AwsIO.ChannelSlot,
+    ::Reseau.ChannelSlot,
     ::Csize_t,
 ) = nothing
 
-function AwsIO.handler_shutdown(
+function Reseau.handler_shutdown(
         ::TestStatsChannelHandler,
-        slot::AwsIO.ChannelSlot,
-        direction::AwsIO.ChannelDirection.T,
+        slot::Reseau.ChannelSlot,
+        direction::Reseau.ChannelDirection.T,
         _error_code::Int,
     )
-    AwsIO.channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
+    Reseau.channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
     return nothing
 end
 
-AwsIO.handler_initial_window_size(::TestStatsChannelHandler) = Csize_t(0)
-AwsIO.handler_message_overhead(::TestStatsChannelHandler) = Csize_t(0)
-AwsIO.handler_destroy(::TestStatsChannelHandler) = nothing
-AwsIO.handler_trigger_write(::TestStatsChannelHandler) = nothing
+Reseau.handler_initial_window_size(::TestStatsChannelHandler) = Csize_t(0)
+Reseau.handler_message_overhead(::TestStatsChannelHandler) = Csize_t(0)
+Reseau.handler_destroy(::TestStatsChannelHandler) = nothing
+Reseau.handler_trigger_write(::TestStatsChannelHandler) = nothing
 
-function AwsIO.handler_reset_statistics(handler::TestStatsChannelHandler)::Nothing
-    AwsIO.crt_statistics_socket_reset!(handler.stats)
+function Reseau.handler_reset_statistics(handler::TestStatsChannelHandler)::Nothing
+    Reseau.crt_statistics_socket_reset!(handler.stats)
     return nothing
 end
 
-AwsIO.handler_gather_statistics(handler::TestStatsChannelHandler) = handler.stats
+Reseau.handler_gather_statistics(handler::TestStatsChannelHandler) = handler.stats
 
-mutable struct TestStatisticsHandler <: AwsIO.StatisticsHandler
+mutable struct TestStatisticsHandler <: Reseau.StatisticsHandler
     report_ms::UInt64
-    results::Channel{Tuple{AwsIO.StatisticsSampleInterval, Vector{Any}}}
+    results::Channel{Tuple{Reseau.StatisticsSampleInterval, Vector{Any}}}
 end
 
-AwsIO.report_interval_ms(handler::TestStatisticsHandler) = handler.report_ms
-AwsIO.close!(::TestStatisticsHandler) = nothing
+Reseau.report_interval_ms(handler::TestStatisticsHandler) = handler.report_ms
+Reseau.close!(::TestStatisticsHandler) = nothing
 
-function AwsIO.process_statistics(
+function Reseau.process_statistics(
         handler::TestStatisticsHandler,
-        interval::AwsIO.StatisticsSampleInterval,
+        interval::Reseau.StatisticsSampleInterval,
         stats_list::AbstractVector,
     )
     stats = Vector{Any}(undef, length(stats_list))
     for i in 1:length(stats_list)
         entry = stats_list[i]
-        if entry isa AwsIO.SocketHandlerStatistics
-            copy_entry = AwsIO.SocketHandlerStatistics()
+        if entry isa Reseau.SocketHandlerStatistics
+            copy_entry = Reseau.SocketHandlerStatistics()
             copy_entry.category = entry.category
             copy_entry.bytes_read = entry.bytes_read
             copy_entry.bytes_written = entry.bytes_written
@@ -89,36 +89,36 @@ end
     if Threads.nthreads(:interactive) <= 1
         @test true
     else
-        AwsIO.io_library_init()
+        Reseau.io_library_init()
 
-        elg_opts = AwsIO.EventLoopGroupOptions(; loop_count = 1)
-        elg = AwsIO.event_loop_group_new(elg_opts)
-        @test !(elg isa AwsIO.ErrorResult)
-        elg isa AwsIO.ErrorResult && return
+        elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
+        elg = Reseau.event_loop_group_new(elg_opts)
+        @test !(elg isa Reseau.ErrorResult)
+        elg isa Reseau.ErrorResult && return
 
-        event_loop = AwsIO.event_loop_group_get_next_loop(elg)
+        event_loop = Reseau.event_loop_group_get_next_loop(elg)
         @test event_loop !== nothing
         event_loop === nothing && return
 
-        channel = AwsIO.Channel(event_loop, nothing)
+        channel = Reseau.Channel(event_loop, nothing)
         handler = TestStatsChannelHandler()
-        slot = AwsIO.channel_slot_new!(channel)
-        AwsIO.channel_slot_set_handler!(slot, handler)
-        if AwsIO.channel_first_slot(channel) !== slot
-            AwsIO.channel_slot_insert_end!(channel, slot)
+        slot = Reseau.channel_slot_new!(channel)
+        Reseau.channel_slot_set_handler!(slot, handler)
+        if Reseau.channel_first_slot(channel) !== slot
+            Reseau.channel_slot_insert_end!(channel, slot)
         end
 
-        results = Channel{Tuple{AwsIO.StatisticsSampleInterval, Vector{Any}}}(1)
+        results = Channel{Tuple{Reseau.StatisticsSampleInterval, Vector{Any}}}(1)
         stats_handler = TestStatisticsHandler(UInt64(50), results)
 
-        set_task = AwsIO.ScheduledTask(
-            (ch, _status) -> AwsIO.channel_set_statistics_handler!(ch, stats_handler),
+        set_task = Reseau.ScheduledTask(
+            (ch, _status) -> Reseau.channel_set_statistics_handler!(ch, stats_handler),
             channel;
             type_tag = "set_stats_handler",
         )
-        AwsIO.event_loop_schedule_task_now!(event_loop, set_task)
+        Reseau.event_loop_schedule_task_now!(event_loop, set_task)
 
-        update_task = AwsIO.ScheduledTask(
+        update_task = Reseau.ScheduledTask(
             (h, _status) -> begin
                 h.stats.bytes_read = 111
                 h.stats.bytes_written = 222
@@ -127,28 +127,28 @@ end
             handler;
             type_tag = "update_stats",
         )
-        AwsIO.event_loop_schedule_task_now!(event_loop, update_task)
+        Reseau.event_loop_schedule_task_now!(event_loop, update_task)
 
         @test _wait_ready_stats(results; timeout_ns = 5_000_000_000)
         interval, stats_vec = take!(results)
         @test interval.end_time_ms >= interval.begin_time_ms
         @test length(stats_vec) == 1
         stats = stats_vec[1]
-        @test stats isa AwsIO.SocketHandlerStatistics
+        @test stats isa Reseau.SocketHandlerStatistics
         @test stats.bytes_read == 111
         @test stats.bytes_written == 222
 
         @test handler.stats.bytes_read == 0
         @test handler.stats.bytes_written == 0
 
-        clear_task = AwsIO.ScheduledTask(
-            (ch, _status) -> AwsIO.channel_set_statistics_handler!(ch, nothing),
+        clear_task = Reseau.ScheduledTask(
+            (ch, _status) -> Reseau.channel_set_statistics_handler!(ch, nothing),
             channel;
             type_tag = "clear_stats_handler",
         )
-        AwsIO.event_loop_schedule_task_now!(event_loop, clear_task)
+        Reseau.event_loop_schedule_task_now!(event_loop, clear_task)
 
-        AwsIO.event_loop_group_destroy!(elg)
-        AwsIO.io_library_clean_up()
+        Reseau.event_loop_group_destroy!(elg)
+        Reseau.io_library_clean_up()
     end
 end

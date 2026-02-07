@@ -1,5 +1,5 @@
 using Test
-using AwsIO
+using Reseau
 
 function wait_for_flag(flag; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
@@ -22,71 +22,71 @@ function _mem_from_bytes(bytes::NTuple{16, UInt8})
 end
 
 function _is_allowed_connect_error(code::Int)
-    return code == AwsIO.ERROR_IO_SOCKET_TIMEOUT ||
-        code == AwsIO.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST ||
-        code == AwsIO.ERROR_IO_SOCKET_NETWORK_DOWN ||
-        code == AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED
+    return code == Reseau.ERROR_IO_SOCKET_TIMEOUT ||
+        code == Reseau.ERROR_IO_SOCKET_NO_ROUTE_TO_HOST ||
+        code == Reseau.ERROR_IO_SOCKET_NETWORK_DOWN ||
+        code == Reseau.ERROR_IO_SOCKET_CONNECTION_REFUSED
 end
 
 @testset "socket validate port" begin
-    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.IPV4) === nothing
-    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.IPV4) === nothing
+    @test Reseau.socket_validate_port_for_connect(80, Reseau.SocketDomain.IPV4) === nothing
+    @test Reseau.socket_validate_port_for_bind(80, Reseau.SocketDomain.IPV4) === nothing
 
-    res = AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.IPV4)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
-    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.IPV4) === nothing
+    res = Reseau.socket_validate_port_for_connect(0, Reseau.SocketDomain.IPV4)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
+    @test Reseau.socket_validate_port_for_bind(0, Reseau.SocketDomain.IPV4) === nothing
 
-    res = AwsIO.socket_validate_port_for_connect(0xFFFFFFFF, AwsIO.SocketDomain.IPV4)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    res = Reseau.socket_validate_port_for_connect(0xFFFFFFFF, Reseau.SocketDomain.IPV4)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
 
-    res = AwsIO.socket_validate_port_for_bind(0xFFFFFFFF, AwsIO.SocketDomain.IPV4)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    res = Reseau.socket_validate_port_for_bind(0xFFFFFFFF, Reseau.SocketDomain.IPV4)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
 
-    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.IPV6) === nothing
-    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.IPV6) === nothing
+    @test Reseau.socket_validate_port_for_connect(80, Reseau.SocketDomain.IPV6) === nothing
+    @test Reseau.socket_validate_port_for_bind(80, Reseau.SocketDomain.IPV6) === nothing
 
-    res = AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.IPV6)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
-    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.IPV6) === nothing
+    res = Reseau.socket_validate_port_for_connect(0, Reseau.SocketDomain.IPV6)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
+    @test Reseau.socket_validate_port_for_bind(0, Reseau.SocketDomain.IPV6) === nothing
 
-    res = AwsIO.socket_validate_port_for_connect(0xFFFFFFFF, AwsIO.SocketDomain.IPV6)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    res = Reseau.socket_validate_port_for_connect(0xFFFFFFFF, Reseau.SocketDomain.IPV6)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
 
-    res = AwsIO.socket_validate_port_for_bind(0xFFFFFFFF, AwsIO.SocketDomain.IPV6)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    res = Reseau.socket_validate_port_for_bind(0xFFFFFFFF, Reseau.SocketDomain.IPV6)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
 
-    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.VSOCK) === nothing
-    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.VSOCK) === nothing
-    @test AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.VSOCK) === nothing
-    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.VSOCK) === nothing
-    @test AwsIO.socket_validate_port_for_connect(0x7FFFFFFF, AwsIO.SocketDomain.VSOCK) === nothing
-    @test AwsIO.socket_validate_port_for_bind(0x7FFFFFFF, AwsIO.SocketDomain.VSOCK) === nothing
+    @test Reseau.socket_validate_port_for_connect(80, Reseau.SocketDomain.VSOCK) === nothing
+    @test Reseau.socket_validate_port_for_bind(80, Reseau.SocketDomain.VSOCK) === nothing
+    @test Reseau.socket_validate_port_for_connect(0, Reseau.SocketDomain.VSOCK) === nothing
+    @test Reseau.socket_validate_port_for_bind(0, Reseau.SocketDomain.VSOCK) === nothing
+    @test Reseau.socket_validate_port_for_connect(0x7FFFFFFF, Reseau.SocketDomain.VSOCK) === nothing
+    @test Reseau.socket_validate_port_for_bind(0x7FFFFFFF, Reseau.SocketDomain.VSOCK) === nothing
 
-    res = AwsIO.socket_validate_port_for_connect(-1, AwsIO.SocketDomain.VSOCK)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
-    @test AwsIO.socket_validate_port_for_bind(-1, AwsIO.SocketDomain.VSOCK) === nothing
+    res = Reseau.socket_validate_port_for_connect(-1, Reseau.SocketDomain.VSOCK)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
+    @test Reseau.socket_validate_port_for_bind(-1, Reseau.SocketDomain.VSOCK) === nothing
 
-    @test AwsIO.socket_validate_port_for_connect(0, AwsIO.SocketDomain.LOCAL) === nothing
-    @test AwsIO.socket_validate_port_for_bind(0, AwsIO.SocketDomain.LOCAL) === nothing
-    @test AwsIO.socket_validate_port_for_connect(80, AwsIO.SocketDomain.LOCAL) === nothing
-    @test AwsIO.socket_validate_port_for_bind(80, AwsIO.SocketDomain.LOCAL) === nothing
-    @test AwsIO.socket_validate_port_for_connect(-1, AwsIO.SocketDomain.LOCAL) === nothing
-    @test AwsIO.socket_validate_port_for_bind(-1, AwsIO.SocketDomain.LOCAL) === nothing
+    @test Reseau.socket_validate_port_for_connect(0, Reseau.SocketDomain.LOCAL) === nothing
+    @test Reseau.socket_validate_port_for_bind(0, Reseau.SocketDomain.LOCAL) === nothing
+    @test Reseau.socket_validate_port_for_connect(80, Reseau.SocketDomain.LOCAL) === nothing
+    @test Reseau.socket_validate_port_for_bind(80, Reseau.SocketDomain.LOCAL) === nothing
+    @test Reseau.socket_validate_port_for_connect(-1, Reseau.SocketDomain.LOCAL) === nothing
+    @test Reseau.socket_validate_port_for_bind(-1, Reseau.SocketDomain.LOCAL) === nothing
 
-    bad_domain = Base.bitcast(AwsIO.SocketDomain.T, UInt8(0xff))
-    res = AwsIO.socket_validate_port_for_connect(80, bad_domain)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
-    res = AwsIO.socket_validate_port_for_bind(80, bad_domain)
-    @test res isa AwsIO.ErrorResult
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+    bad_domain = Base.bitcast(Reseau.SocketDomain.T, UInt8(0xff))
+    res = Reseau.socket_validate_port_for_connect(80, bad_domain)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
+    res = Reseau.socket_validate_port_for_bind(80, bad_domain)
+    @test res isa Reseau.ErrorResult
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
 end
 
 @testset "parse ipv4 valid addresses" begin
@@ -102,7 +102,7 @@ end
     ]
 
     for (input, expected) in cases
-        res = AwsIO.parse_ipv4_address(input)
+        res = Reseau.parse_ipv4_address(input)
         @test res isa UInt32
         res isa UInt32 && @test res == expected
     end
@@ -122,9 +122,9 @@ end
     ]
 
     for input in invalid
-        res = AwsIO.parse_ipv4_address(input)
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+        res = Reseau.parse_ipv4_address(input)
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
     end
 end
 
@@ -140,12 +140,12 @@ end
     ]
 
     for (input, bytes) in cases
-        buf = AwsIO.ByteBuffer(16)
-        res = AwsIO.parse_ipv6_address!(input, buf)
+        buf = Reseau.ByteBuffer(16)
+        res = Reseau.parse_ipv6_address!(input, buf)
         @test res === nothing
         expected = _mem_from_bytes(bytes)
-        cursor = AwsIO.ByteCursor(expected)
-        @test AwsIO.byte_cursor_eq_byte_buf(cursor, buf)
+        cursor = Reseau.ByteCursor(expected)
+        @test Reseau.byte_cursor_eq_byte_buf(cursor, buf)
     end
 end
 
@@ -162,10 +162,10 @@ end
     ]
 
     for input in invalid
-        buf = AwsIO.ByteBuffer(16)
-        res = AwsIO.parse_ipv6_address!(input, buf)
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+        buf = Reseau.ByteBuffer(16)
+        res = Reseau.parse_ipv6_address!(input, buf)
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
     end
 end
 
@@ -178,67 +178,67 @@ function _mem_from_bytes(bytes::NTuple{16, UInt8})
 end
 
 @testset "message pool" begin
-    args = AwsIO.MessagePoolCreationArgs(
+    args = Reseau.MessagePoolCreationArgs(
         application_data_msg_data_size = 128,
         application_data_msg_count = 2,
         small_block_msg_data_size = 16,
         small_block_msg_count = 2,
     )
-    pool = AwsIO.MessagePool(args)
-    @test pool isa AwsIO.MessagePool
+    pool = Reseau.MessagePool(args)
+    @test pool isa Reseau.MessagePool
     @test length(pool.application_data_pool) == 2
     @test length(pool.small_block_pool) == 2
 
-    msg = AwsIO.message_pool_acquire(pool, AwsIO.IoMessageType.APPLICATION_DATA, 8)
-    @test msg isa AwsIO.IoMessage
+    msg = Reseau.message_pool_acquire(pool, Reseau.IoMessageType.APPLICATION_DATA, 8)
+    @test msg isa Reseau.IoMessage
     @test length(pool.small_block_pool) == 1
-    @test AwsIO.capacity(msg.message_data) == Csize_t(8)
+    @test Reseau.capacity(msg.message_data) == Csize_t(8)
 
-    AwsIO.message_pool_release!(pool, msg)
+    Reseau.message_pool_release!(pool, msg)
     @test length(pool.small_block_pool) == 2
 end
 
 @testset "memory pool" begin
-    pool = AwsIO.MemoryPool(2, 32)
+    pool = Reseau.MemoryPool(2, 32)
     @test length(pool) == 2
 
-    seg1 = AwsIO.memory_pool_acquire(pool)
-    seg2 = AwsIO.memory_pool_acquire(pool)
+    seg1 = Reseau.memory_pool_acquire(pool)
+    seg2 = Reseau.memory_pool_acquire(pool)
     @test length(pool) == 0
     @test length(seg1) == 32
     @test length(seg2) == 32
 
-    seg3 = AwsIO.memory_pool_acquire(pool)
+    seg3 = Reseau.memory_pool_acquire(pool)
     @test length(pool) == 0
     @test length(seg3) == 32
 
-    AwsIO.memory_pool_release!(pool, seg1)
+    Reseau.memory_pool_release!(pool, seg1)
     @test length(pool) == 1
-    AwsIO.memory_pool_release!(pool, seg2)
+    Reseau.memory_pool_release!(pool, seg2)
     @test length(pool) == 2
-    AwsIO.memory_pool_release!(pool, seg3)
+    Reseau.memory_pool_release!(pool, seg3)
     @test length(pool) == 2
 end
 
 @testset "socket interface options" begin
     if Sys.iswindows()
-        @test !AwsIO.is_network_interface_name_valid("lo")
+        @test !Reseau.is_network_interface_name_valid("lo")
     else
-        long_name = repeat("a", AwsIO.NETWORK_INTERFACE_NAME_MAX)
-        @test !AwsIO.is_network_interface_name_valid(long_name)
-        @test !AwsIO.is_network_interface_name_valid("definitely_not_an_iface")
+        long_name = repeat("a", Reseau.NETWORK_INTERFACE_NAME_MAX)
+        @test !Reseau.is_network_interface_name_valid(long_name)
+        @test !Reseau.is_network_interface_name_valid("definitely_not_an_iface")
 
-        opts = AwsIO.SocketOptions(;
-            type = AwsIO.SocketType.STREAM,
-            domain = AwsIO.SocketDomain.IPV4,
+        opts = Reseau.SocketOptions(;
+            type = Reseau.SocketType.STREAM,
+            domain = Reseau.SocketDomain.IPV4,
             network_interface_name = long_name,
         )
-        res = AwsIO.socket_init(opts)
-        @test res isa AwsIO.ErrorResult
-        if res isa AwsIO.ErrorResult
+        res = Reseau.socket_init(opts)
+        @test res isa Reseau.ErrorResult
+        if res isa Reseau.ErrorResult
             # POSIX path returns INVALID_OPTIONS for bad interface name length;
             # NW path (macOS IPV4/IPV6) returns PLATFORM_NOT_SUPPORTED for any interface name
-            @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS || res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+            @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_OPTIONS || res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
         end
     end
 end
@@ -252,23 +252,23 @@ end
             @test true
             return
         end
-        if !AwsIO.is_network_interface_name_valid(iface)
+        if !Reseau.is_network_interface_name_valid(iface)
             @test true
             return
         end
 
         # IPv4 stream
-        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-        el_val = el isa AwsIO.EventLoop ? el : nothing
+        el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+        el_val = el isa Reseau.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test AwsIO.event_loop_run!(el_val) === nothing
+        @test Reseau.event_loop_run!(el_val) === nothing
 
-        opts = AwsIO.SocketOptions(;
-            type = AwsIO.SocketType.STREAM,
-            domain = AwsIO.SocketDomain.IPV4,
+        opts = Reseau.SocketOptions(;
+            type = Reseau.SocketType.STREAM,
+            domain = Reseau.SocketDomain.IPV4,
             connect_timeout_ms = 3000,
             keepalive = true,
             keep_alive_interval_sec = 1000,
@@ -276,12 +276,12 @@ end
             network_interface_name = iface,
         )
 
-        server = AwsIO.socket_init(opts)
-        server_socket = server isa AwsIO.Socket ? server : nothing
-        if server isa AwsIO.ErrorResult
-            @test server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
-            AwsIO.event_loop_destroy!(el_val)
+        server = Reseau.socket_init(opts)
+        server_socket = server isa Reseau.Socket ? server : nothing
+        if server isa Reseau.ErrorResult
+            @test server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == Reseau.ERROR_IO_SOCKET_INVALID_OPTIONS
+            Reseau.event_loop_destroy!(el_val)
             return
         end
 
@@ -289,23 +289,23 @@ end
         accepted = Ref{Any}(nothing)
 
         try
-            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
-            if bind_res isa AwsIO.ErrorResult
-                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS ||
-                    bind_res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+            bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+            bind_res = Reseau.socket_bind(server_socket, bind_opts)
+            if bind_res isa Reseau.ErrorResult
+                @test bind_res.code == Reseau.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                    bind_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
                 return
             end
-            listen_res = AwsIO.socket_listen(server_socket, 1024)
-            if listen_res isa AwsIO.ErrorResult
-                @test listen_res.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
-                    listen_res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+            listen_res = Reseau.socket_listen(server_socket, 1024)
+            if listen_res isa Reseau.ErrorResult
+                @test listen_res.code == Reseau.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                    listen_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
                 return
             end
 
-            bound = AwsIO.socket_get_bound_address(server_socket)
-            @test bound isa AwsIO.SocketEndpoint
-            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            bound = Reseau.socket_get_bound_address(server_socket)
+            @test bound isa Reseau.SocketEndpoint
+            port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
                 return
             end
@@ -323,67 +323,67 @@ end
             on_accept = (listener, err, new_sock, ud) -> begin
                 accept_err[] = err
                 accepted[] = new_sock
-                if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+                if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
                     read_done[] = true
                     return nothing
                 end
 
-                assign_res = AwsIO.socket_assign_to_event_loop(new_sock, el_val)
-                if assign_res isa AwsIO.ErrorResult
+                assign_res = Reseau.socket_assign_to_event_loop(new_sock, el_val)
+                if assign_res isa Reseau.ErrorResult
                     read_err[] = assign_res.code
                     read_done[] = true
                     return nothing
                 end
 
-                sub_res = AwsIO.socket_subscribe_to_readable_events(
+                sub_res = Reseau.socket_subscribe_to_readable_events(
                     new_sock, (sock, err, ud) -> begin
                         read_err[] = err
-                        if err != AwsIO.AWS_OP_SUCCESS
+                        if err != Reseau.AWS_OP_SUCCESS
                             read_done[] = true
                             return nothing
                         end
 
-                        buf = AwsIO.ByteBuffer(64)
-                        read_res = AwsIO.socket_read(sock, buf)
-                        if read_res isa AwsIO.ErrorResult
+                        buf = Reseau.ByteBuffer(64)
+                        read_res = Reseau.socket_read(sock, buf)
+                        if read_res isa Reseau.ErrorResult
                             read_err[] = read_res.code
                         else
-                            payload[] = String(AwsIO.byte_cursor_from_buf(buf))
+                            payload[] = String(Reseau.byte_cursor_from_buf(buf))
                         end
                         read_done[] = true
                         return nothing
                     end, nothing
                 )
 
-                if sub_res isa AwsIO.ErrorResult
+                if sub_res isa Reseau.ErrorResult
                     read_err[] = sub_res.code
                     read_done[] = true
                 end
                 return nothing
             end
 
-            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+            accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+            @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-            client = AwsIO.socket_init(opts)
-            client_socket = client isa AwsIO.Socket ? client : nothing
+            client = Reseau.socket_init(opts)
+            client_socket = client isa Reseau.Socket ? client : nothing
             @test client_socket !== nothing
             if client_socket === nothing
                 return
             end
 
-            connect_opts = AwsIO.SocketConnectOptions(
-                AwsIO.SocketEndpoint("127.0.0.1", port);
+            connect_opts = Reseau.SocketConnectOptions(
+                Reseau.SocketEndpoint("127.0.0.1", port);
                 event_loop = el_val,
                 on_connection_result = (sock, err, ud) -> begin
                     connect_err[] = err
                     connect_done[] = true
-                    if err != AwsIO.AWS_OP_SUCCESS
+                    if err != Reseau.AWS_OP_SUCCESS
                         return nothing
                     end
 
-                    cursor = AwsIO.ByteCursor("ping")
-                    write_res = AwsIO.socket_write(
+                    cursor = Reseau.ByteCursor("ping")
+                    write_res = Reseau.socket_write(
                         sock, cursor, (s, err, bytes, ud) -> begin
                             write_err[] = err
                             write_done[] = true
@@ -391,7 +391,7 @@ end
                         end, nothing
                     )
 
-                    if write_res isa AwsIO.ErrorResult
+                    if write_res isa Reseau.ErrorResult
                         write_err[] = write_res.code
                         write_done[] = true
                     end
@@ -399,112 +399,112 @@ end
                 end,
             )
 
-            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test Reseau.socket_connect(client_socket, connect_opts) === nothing
             @test wait_for_flag(connect_done)
-            @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+            @test connect_err[] == Reseau.AWS_OP_SUCCESS
             @test wait_for_flag(write_done)
-            @test write_err[] == AwsIO.AWS_OP_SUCCESS
+            @test write_err[] == Reseau.AWS_OP_SUCCESS
             @test wait_for_flag(read_done)
-            @test accept_err[] == AwsIO.AWS_OP_SUCCESS
-            @test read_err[] == AwsIO.AWS_OP_SUCCESS
+            @test accept_err[] == Reseau.AWS_OP_SUCCESS
+            @test read_err[] == Reseau.AWS_OP_SUCCESS
             @test payload[] == "ping"
         finally
             if client_socket !== nothing
-                AwsIO.socket_cleanup!(client_socket)
+                Reseau.socket_cleanup!(client_socket)
             end
             if accepted[] !== nothing
-                AwsIO.socket_cleanup!(accepted[])
+                Reseau.socket_cleanup!(accepted[])
             end
-            AwsIO.socket_cleanup!(server_socket)
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.socket_cleanup!(server_socket)
+            Reseau.event_loop_destroy!(el_val)
         end
 
         # IPv4 UDP
-        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-        el_val = el isa AwsIO.EventLoop ? el : nothing
+        el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+        el_val = el isa Reseau.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test AwsIO.event_loop_run!(el_val) === nothing
+        @test Reseau.event_loop_run!(el_val) === nothing
 
-        opts_udp = AwsIO.SocketOptions(;
-            type = AwsIO.SocketType.DGRAM,
-            domain = AwsIO.SocketDomain.IPV4,
+        opts_udp = Reseau.SocketOptions(;
+            type = Reseau.SocketType.DGRAM,
+            domain = Reseau.SocketDomain.IPV4,
             connect_timeout_ms = 3000,
             network_interface_name = iface,
         )
 
-        server = AwsIO.socket_init(opts_udp)
-        server_socket = server isa AwsIO.Socket ? server : nothing
-        if server isa AwsIO.ErrorResult
-            @test server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
-            AwsIO.event_loop_destroy!(el_val)
+        server = Reseau.socket_init(opts_udp)
+        server_socket = server isa Reseau.Socket ? server : nothing
+        if server isa Reseau.ErrorResult
+            @test server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == Reseau.ERROR_IO_SOCKET_INVALID_OPTIONS
+            Reseau.event_loop_destroy!(el_val)
             return
         end
 
         client_socket = nothing
         try
-            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
-            if bind_res isa AwsIO.ErrorResult
-                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS ||
-                    bind_res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+            bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+            bind_res = Reseau.socket_bind(server_socket, bind_opts)
+            if bind_res isa Reseau.ErrorResult
+                @test bind_res.code == Reseau.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                    bind_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
                 return
             end
 
-            bound = AwsIO.socket_get_bound_address(server_socket)
-            @test bound isa AwsIO.SocketEndpoint
-            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            bound = Reseau.socket_get_bound_address(server_socket)
+            @test bound isa Reseau.SocketEndpoint
+            port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
                 return
             end
 
-            client = AwsIO.socket_init(opts_udp)
-            client_socket = client isa AwsIO.Socket ? client : nothing
+            client = Reseau.socket_init(opts_udp)
+            client_socket = client isa Reseau.Socket ? client : nothing
             @test client_socket !== nothing
             if client_socket === nothing
                 return
             end
 
-            connect_opts = AwsIO.SocketConnectOptions(
-                AwsIO.SocketEndpoint("127.0.0.1", port);
+            connect_opts = Reseau.SocketConnectOptions(
+                Reseau.SocketEndpoint("127.0.0.1", port);
                 event_loop = el_val,
                 on_connection_result = (sock, err, ud) -> nothing,
             )
 
-            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         finally
             if client_socket !== nothing
-                AwsIO.socket_cleanup!(client_socket)
+                Reseau.socket_cleanup!(client_socket)
             end
-            AwsIO.socket_cleanup!(server_socket)
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.socket_cleanup!(server_socket)
+            Reseau.event_loop_destroy!(el_val)
         end
 
         # IPv6 stream
-        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-        el_val = el isa AwsIO.EventLoop ? el : nothing
+        el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+        el_val = el isa Reseau.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test AwsIO.event_loop_run!(el_val) === nothing
+        @test Reseau.event_loop_run!(el_val) === nothing
 
-        opts6 = AwsIO.SocketOptions(;
-            type = AwsIO.SocketType.STREAM,
-            domain = AwsIO.SocketDomain.IPV6,
+        opts6 = Reseau.SocketOptions(;
+            type = Reseau.SocketType.STREAM,
+            domain = Reseau.SocketDomain.IPV6,
             connect_timeout_ms = 3000,
             network_interface_name = iface,
         )
 
-        server = AwsIO.socket_init(opts6)
-        server_socket = server isa AwsIO.Socket ? server : nothing
-        if server isa AwsIO.ErrorResult
-            @test server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS
-            AwsIO.event_loop_destroy!(el_val)
+        server = Reseau.socket_init(opts6)
+        server_socket = server isa Reseau.Socket ? server : nothing
+        if server isa Reseau.ErrorResult
+            @test server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == Reseau.ERROR_IO_SOCKET_INVALID_OPTIONS
+            Reseau.event_loop_destroy!(el_val)
             return
         end
 
@@ -512,17 +512,17 @@ end
         accepted = Ref{Any}(nothing)
 
         try
-            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("::1", 0))
-            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
-            if bind_res isa AwsIO.ErrorResult
-                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+            bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("::1", 0))
+            bind_res = Reseau.socket_bind(server_socket, bind_opts)
+            if bind_res isa Reseau.ErrorResult
+                @test bind_res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
                 return
             end
-            @test AwsIO.socket_listen(server_socket, 1024) === nothing
+            @test Reseau.socket_listen(server_socket, 1024) === nothing
 
-            bound = AwsIO.socket_get_bound_address(server_socket)
-            @test bound isa AwsIO.SocketEndpoint
-            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            bound = Reseau.socket_get_bound_address(server_socket)
+            @test bound isa Reseau.SocketEndpoint
+            port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
                 return
             end
@@ -537,18 +537,18 @@ end
                 return nothing
             end
 
-            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+            accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+            @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-            client = AwsIO.socket_init(opts6)
-            client_socket = client isa AwsIO.Socket ? client : nothing
+            client = Reseau.socket_init(opts6)
+            client_socket = client isa Reseau.Socket ? client : nothing
             @test client_socket !== nothing
             if client_socket === nothing
                 return
             end
 
-            connect_opts = AwsIO.SocketConnectOptions(
-                AwsIO.SocketEndpoint("::1", port);
+            connect_opts = Reseau.SocketConnectOptions(
+                Reseau.SocketEndpoint("::1", port);
                 event_loop = el_val,
                 on_connection_result = (sock, err, ud) -> begin
                     connect_err[] = err
@@ -557,19 +557,19 @@ end
                 end,
             )
 
-            @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+            @test Reseau.socket_connect(client_socket, connect_opts) === nothing
             @test wait_for_flag(connect_done)
-            @test connect_err[] == AwsIO.AWS_OP_SUCCESS
-            @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+            @test connect_err[] == Reseau.AWS_OP_SUCCESS
+            @test accept_err[] == Reseau.AWS_OP_SUCCESS
         finally
             if client_socket !== nothing
-                AwsIO.socket_cleanup!(client_socket)
+                Reseau.socket_cleanup!(client_socket)
             end
             if accepted[] !== nothing
-                AwsIO.socket_cleanup!(accepted[])
+                Reseau.socket_cleanup!(accepted[])
             end
-            AwsIO.socket_cleanup!(server_socket)
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.socket_cleanup!(server_socket)
+            Reseau.event_loop_destroy!(el_val)
         end
     end
 end
@@ -578,9 +578,9 @@ end
     if Sys.iswindows()
         @test true
     else
-        opts = AwsIO.SocketOptions(;
-            type = AwsIO.SocketType.STREAM,
-            domain = AwsIO.SocketDomain.IPV4,
+        opts = Reseau.SocketOptions(;
+            type = Reseau.SocketType.STREAM,
+            domain = Reseau.SocketDomain.IPV4,
             connect_timeout_ms = 3000,
             keepalive = true,
             keep_alive_interval_sec = 1000,
@@ -588,11 +588,11 @@ end
             network_interface_name = "invalid",
         )
 
-        res = AwsIO.socket_init(opts)
-        @test res isa AwsIO.ErrorResult
-        if res isa AwsIO.ErrorResult
-            @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_OPTIONS ||
-                res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.socket_init(opts)
+        @test res isa Reseau.ErrorResult
+        if res isa Reseau.ErrorResult
+            @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
         end
     end
 end
@@ -601,22 +601,22 @@ end
     if !Sys.islinux()
         @test true
     else
-        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-        el_val = el isa AwsIO.EventLoop ? el : nothing
+        el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+        el_val = el isa Reseau.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test AwsIO.event_loop_run!(el_val) === nothing
+        @test Reseau.event_loop_run!(el_val) === nothing
 
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.VSOCK, connect_timeout_ms = 3000)
-        server = AwsIO.socket_init(opts)
-        server_socket = server isa AwsIO.Socket ? server : nothing
-        if server isa AwsIO.ErrorResult
-            @test server.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
-                server.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
-            AwsIO.event_loop_destroy!(el_val)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.VSOCK, connect_timeout_ms = 3000)
+        server = Reseau.socket_init(opts)
+        server_socket = server isa Reseau.Socket ? server : nothing
+        if server isa Reseau.ErrorResult
+            @test server.code == Reseau.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                server.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
+            Reseau.event_loop_destroy!(el_val)
             return
         end
 
@@ -624,18 +624,18 @@ end
         accepted = Ref{Any}(nothing)
 
         try
-            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("1", 0))
-            bind_res = AwsIO.socket_bind(server_socket, bind_opts)
-            if bind_res isa AwsIO.ErrorResult
-                @test bind_res.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
-                    bind_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+            bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("1", 0))
+            bind_res = Reseau.socket_bind(server_socket, bind_opts)
+            if bind_res isa Reseau.ErrorResult
+                @test bind_res.code == Reseau.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                    bind_res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
                 return
             end
-            @test AwsIO.socket_listen(server_socket, 1024) === nothing
+            @test Reseau.socket_listen(server_socket, 1024) === nothing
 
-            bound = AwsIO.socket_get_bound_address(server_socket)
-            @test bound isa AwsIO.SocketEndpoint
-            port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+            bound = Reseau.socket_get_bound_address(server_socket)
+            @test bound isa Reseau.SocketEndpoint
+            port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
                 return
             end
@@ -650,18 +650,18 @@ end
                 return nothing
             end
 
-            accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-            @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+            accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+            @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-            client = AwsIO.socket_init(opts)
-            client_socket = client isa AwsIO.Socket ? client : nothing
+            client = Reseau.socket_init(opts)
+            client_socket = client isa Reseau.Socket ? client : nothing
             @test client_socket !== nothing
             if client_socket === nothing
                 return
             end
 
-            connect_opts = AwsIO.SocketConnectOptions(
-                AwsIO.SocketEndpoint("1", port);
+            connect_opts = Reseau.SocketConnectOptions(
+                Reseau.SocketEndpoint("1", port);
                 event_loop = el_val,
                 on_connection_result = (sock, err, ud) -> begin
                     connect_err[] = err
@@ -670,130 +670,130 @@ end
                 end,
             )
 
-            connect_res = AwsIO.socket_connect(client_socket, connect_opts)
-            if connect_res isa AwsIO.ErrorResult
+            connect_res = Reseau.socket_connect(client_socket, connect_opts)
+            if connect_res isa Reseau.ErrorResult
                 @test _is_allowed_connect_error(connect_res.code) ||
-                    connect_res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS ||
-                    connect_res.code == AwsIO.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
+                    connect_res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS ||
+                    connect_res.code == Reseau.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
                 return
             end
             @test wait_for_flag(connect_done)
-            if connect_err[] != AwsIO.AWS_OP_SUCCESS
+            if connect_err[] != Reseau.AWS_OP_SUCCESS
                 @test _is_allowed_connect_error(connect_err[]) ||
-                    connect_err[] == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+                    connect_err[] == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
             else
-                @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+                @test accept_err[] == Reseau.AWS_OP_SUCCESS
             end
         finally
             if client_socket !== nothing
-                AwsIO.socket_cleanup!(client_socket)
+                Reseau.socket_cleanup!(client_socket)
             end
             if accepted[] !== nothing
-                AwsIO.socket_cleanup!(accepted[])
+                Reseau.socket_cleanup!(accepted[])
             end
-            AwsIO.socket_cleanup!(server_socket)
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.socket_cleanup!(server_socket)
+            Reseau.event_loop_destroy!(el_val)
         end
     end
 end
 
 @testset "socket init domain-based selection" begin
     # IPV4 socket
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    sock = AwsIO.socket_init(opts)
-    @test sock isa AwsIO.Socket
-    if sock isa AwsIO.Socket
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
+    sock = Reseau.socket_init(opts)
+    @test sock isa Reseau.Socket
+    if sock isa Reseau.Socket
         @static if Sys.isapple()
-            @test sock.impl isa AwsIO.NWSocket
+            @test sock.impl isa Reseau.NWSocket
         elseif Sys.iswindows()
-            @test sock.impl isa AwsIO.WinsockSocket
+            @test sock.impl isa Reseau.WinsockSocket
         else
-            @test sock.impl isa AwsIO.PosixSocket
+            @test sock.impl isa Reseau.PosixSocket
         end
-        AwsIO.socket_close(sock)
+        Reseau.socket_close(sock)
     end
 
     # LOCAL domain
-    local_opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
-    local_sock = AwsIO.socket_init(local_opts)
-    @test local_sock isa AwsIO.Socket
-    if local_sock isa AwsIO.Socket
+    local_opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
+    local_sock = Reseau.socket_init(local_opts)
+    @test local_sock isa Reseau.Socket
+    if local_sock isa Reseau.Socket
         @static if Sys.iswindows()
-            @test local_sock.impl isa AwsIO.WinsockSocket
+            @test local_sock.impl isa Reseau.WinsockSocket
         else
-            @test local_sock.impl isa AwsIO.PosixSocket
+            @test local_sock.impl isa Reseau.PosixSocket
         end
-        AwsIO.socket_close(local_sock)
+        Reseau.socket_close(local_sock)
     end
 end
 
 @testset "winsock stubs" begin
-    res = AwsIO.winsock_check_and_init!()
+    res = Reseau.winsock_check_and_init!()
     if Sys.iswindows()
-        @test res isa AwsIO.ErrorResult || res === nothing
+        @test res isa Reseau.ErrorResult || res === nothing
     else
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
     end
 
-    res = AwsIO.winsock_get_connectex_fn()
-    @test res isa AwsIO.ErrorResult || res isa Ptr
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+    res = Reseau.winsock_get_connectex_fn()
+    @test res isa Reseau.ErrorResult || res isa Ptr
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-    res = AwsIO.winsock_get_acceptex_fn()
-    @test res isa AwsIO.ErrorResult || res isa Ptr
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+    res = Reseau.winsock_get_acceptex_fn()
+    @test res isa Reseau.ErrorResult || res isa Ptr
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 end
 
 @testset "socket nonblocking cloexec" begin
     if Sys.iswindows()
         @test true
     else
-        opts = AwsIO.SocketOptions(;
-            type = AwsIO.SocketType.STREAM,
-            domain = AwsIO.SocketDomain.IPV4,
+        opts = Reseau.SocketOptions(;
+            type = Reseau.SocketType.STREAM,
+            domain = Reseau.SocketDomain.IPV4,
         )
-        sock = AwsIO.socket_init(opts)
-        @test sock isa AwsIO.Socket
-        if sock isa AwsIO.Socket
+        sock = Reseau.socket_init(opts)
+        @test sock isa Reseau.Socket
+        if sock isa Reseau.Socket
             fd = sock.io_handle.fd
-            flags = AwsIO._fcntl(fd, AwsIO.F_GETFL)
-            @test (flags & AwsIO.O_NONBLOCK) != 0
-            fd_flags = AwsIO._fcntl(fd, AwsIO.F_GETFD)
-            @test (fd_flags & AwsIO.FD_CLOEXEC) != 0
-            AwsIO.socket_close(sock)
+            flags = Reseau._fcntl(fd, Reseau.F_GETFL)
+            @test (flags & Reseau.O_NONBLOCK) != 0
+            fd_flags = Reseau._fcntl(fd, Reseau.F_GETFD)
+            @test (fd_flags & Reseau.FD_CLOEXEC) != 0
+            Reseau.socket_close(sock)
         end
     end
 end
 
 @testset "socket connect read write" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
     # Use LOCAL domain to ensure POSIX path (standalone event loop, no ELG)
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
-    server = AwsIO.socket_init(opts)
-    server_socket = server isa AwsIO.Socket ? server : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
+    server = Reseau.socket_init(opts)
+    server_socket = server isa Reseau.Socket ? server : nothing
     @test server_socket !== nothing
 
     client_socket = nothing
     accepted = Ref{Any}(nothing)
 
-    local_endpoint = AwsIO.SocketEndpoint()
-    AwsIO.socket_endpoint_init_local_address_for_test!(local_endpoint)
+    local_endpoint = Reseau.SocketEndpoint()
+    Reseau.socket_endpoint_init_local_address_for_test!(local_endpoint)
 
     try
         if server_socket === nothing
             return
         end
 
-        bind_opts = AwsIO.SocketBindOptions(local_endpoint)
-        @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
-        @test AwsIO.socket_listen(server_socket, 8) === nothing
+        bind_opts = Reseau.SocketBindOptions(local_endpoint)
+        @test Reseau.socket_bind(server_socket, bind_opts) === nothing
+        @test Reseau.socket_listen(server_socket, 8) === nothing
 
         accept_err = Ref{Int}(0)
         read_err = Ref{Int}(0)
@@ -808,66 +808,66 @@ end
         on_accept = (listener, err, new_sock, ud) -> begin
             accept_err[] = err
             accepted[] = new_sock
-            if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
                 read_done[] = true
                 return nothing
             end
 
-            assign_res = AwsIO.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa AwsIO.ErrorResult
+            assign_res = Reseau.socket_assign_to_event_loop(new_sock, el_val)
+            if assign_res isa Reseau.ErrorResult
                 read_err[] = assign_res.code
                 read_done[] = true
                 return nothing
             end
 
-            sub_res = AwsIO.socket_subscribe_to_readable_events(
+            sub_res = Reseau.socket_subscribe_to_readable_events(
                 new_sock, (sock, err, ud) -> begin
                     read_err[] = err
-                    if err != AwsIO.AWS_OP_SUCCESS
+                    if err != Reseau.AWS_OP_SUCCESS
                         read_done[] = true
                         return nothing
                     end
 
-                    buf = AwsIO.ByteBuffer(64)
-                    read_res = AwsIO.socket_read(sock, buf)
-                    if read_res isa AwsIO.ErrorResult
+                    buf = Reseau.ByteBuffer(64)
+                    read_res = Reseau.socket_read(sock, buf)
+                    if read_res isa Reseau.ErrorResult
                         read_err[] = read_res.code
                     else
-                        payload[] = String(AwsIO.byte_cursor_from_buf(buf))
+                        payload[] = String(Reseau.byte_cursor_from_buf(buf))
                     end
                     read_done[] = true
                     return nothing
                 end, nothing
             )
 
-            if sub_res isa AwsIO.ErrorResult
+            if sub_res isa Reseau.ErrorResult
                 read_err[] = sub_res.code
                 read_done[] = true
             end
             return nothing
         end
 
-        accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-        @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+        @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
         end
-        connect_opts = AwsIO.SocketConnectOptions(
+        connect_opts = Reseau.SocketConnectOptions(
             local_endpoint;
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     return nothing
                 end
 
-                cursor = AwsIO.ByteCursor("ping")
-                write_res = AwsIO.socket_write(
+                cursor = Reseau.ByteCursor("ping")
+                write_res = Reseau.socket_write(
                     sock, cursor, (s, err, bytes, ud) -> begin
                         write_err[] = err
                         write_done[] = true
@@ -875,7 +875,7 @@ end
                     end, nothing
                 )
 
-                if write_res isa AwsIO.ErrorResult
+                if write_res isa Reseau.ErrorResult
                     write_err[] = write_res.code
                     write_done[] = true
                 end
@@ -884,28 +884,28 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == AwsIO.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test accept_err[] == AwsIO.AWS_OP_SUCCESS
-        @test read_err[] == AwsIO.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.AWS_OP_SUCCESS
+        @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
-            AwsIO.socket_close(client_socket)
+            Reseau.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            AwsIO.socket_close(accepted[])
+            Reseau.socket_close(accepted[])
         end
         if server_socket !== nothing
-            AwsIO.socket_close(server_socket)
+            Reseau.socket_close(server_socket)
         end
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
         # Clean up Unix domain socket file
-        sock_path = AwsIO.get_address(local_endpoint)
+        sock_path = Reseau.get_address(local_endpoint)
         isfile(sock_path) && rm(sock_path; force=true)
     end
 end
@@ -916,24 +916,24 @@ end
         return
     end
 
-    elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(;
+    elg = Reseau.event_loop_group_new(Reseau.EventLoopGroupOptions(;
         loop_count = 1,
     ))
-    elg_val = elg isa AwsIO.EventLoopGroup ? elg : nothing
+    elg_val = elg isa Reseau.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
     if elg_val === nothing
         return
     end
-    el_val = AwsIO.event_loop_group_get_next_loop(elg_val)
-    @test el_val isa AwsIO.EventLoop
-    if !(el_val isa AwsIO.EventLoop)
-        AwsIO.event_loop_group_destroy!(elg_val)
+    el_val = Reseau.event_loop_group_get_next_loop(elg_val)
+    @test el_val isa Reseau.EventLoop
+    if !(el_val isa Reseau.EventLoop)
+        Reseau.event_loop_group_destroy!(elg_val)
         return
     end
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    server = AwsIO.socket_init(opts)
-    server_socket = server isa AwsIO.Socket ? server : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
+    server = Reseau.socket_init(opts)
+    server_socket = server isa Reseau.Socket ? server : nothing
     @test server_socket !== nothing
 
     client_socket = nothing
@@ -957,15 +957,15 @@ end
             return
         end
 
-        bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-        @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
-        @test AwsIO.socket_listen(server_socket, 8) === nothing
+        bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+        @test Reseau.socket_bind(server_socket, bind_opts) === nothing
+        @test Reseau.socket_listen(server_socket, 8) === nothing
 
         on_accept_started = (listener, err, ud) -> begin
             accept_started[] = true
-            if err == AwsIO.AWS_OP_SUCCESS && listener !== nothing
-                bound = AwsIO.socket_get_bound_address(listener)
-                if bound isa AwsIO.SocketEndpoint
+            if err == Reseau.AWS_OP_SUCCESS && listener !== nothing
+                bound = Reseau.socket_get_bound_address(listener)
+                if bound isa Reseau.SocketEndpoint
                     port_ref[] = Int(bound.port)
                 end
             end
@@ -975,73 +975,73 @@ end
         on_accept = (listener, err, new_sock, ud) -> begin
             accept_err[] = err
             accepted[] = new_sock
-            if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
                 read_done[] = true
                 return nothing
             end
 
-            assign_res = AwsIO.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa AwsIO.ErrorResult
+            assign_res = Reseau.socket_assign_to_event_loop(new_sock, el_val)
+            if assign_res isa Reseau.ErrorResult
                 read_err[] = assign_res.code
                 read_done[] = true
                 return nothing
             end
 
-            sub_res = AwsIO.socket_subscribe_to_readable_events(
+            sub_res = Reseau.socket_subscribe_to_readable_events(
                 new_sock, (sock, err, ud) -> begin
                     read_err[] = err
-                    if err != AwsIO.AWS_OP_SUCCESS
+                    if err != Reseau.AWS_OP_SUCCESS
                         read_done[] = true
                         return nothing
                     end
 
-                    buf = AwsIO.ByteBuffer(64)
-                    read_res = AwsIO.socket_read(sock, buf)
-                    if read_res isa AwsIO.ErrorResult
+                    buf = Reseau.ByteBuffer(64)
+                    read_res = Reseau.socket_read(sock, buf)
+                    if read_res isa Reseau.ErrorResult
                         read_err[] = read_res.code
                     else
-                        payload[] = String(AwsIO.byte_cursor_from_buf(buf))
+                        payload[] = String(Reseau.byte_cursor_from_buf(buf))
                     end
                     read_done[] = true
                     return nothing
                 end, nothing
             )
 
-            if sub_res isa AwsIO.ErrorResult
+            if sub_res isa Reseau.ErrorResult
                 read_err[] = sub_res.code
                 read_done[] = true
             end
             return nothing
         end
 
-        accept_opts = AwsIO.SocketListenerOptions(
+        accept_opts = Reseau.SocketListenerOptions(
             on_accept_result = on_accept,
             on_accept_start = on_accept_started,
         )
-        @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
         @test wait_for_flag(accept_started)
         @test port_ref[] != 0
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
         end
 
-        connect_opts = AwsIO.SocketConnectOptions(
-            AwsIO.SocketEndpoint("127.0.0.1", port_ref[]);
+        connect_opts = Reseau.SocketConnectOptions(
+            Reseau.SocketEndpoint("127.0.0.1", port_ref[]);
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     return nothing
                 end
 
-                cursor = AwsIO.ByteCursor("ping")
-                write_res = AwsIO.socket_write(
+                cursor = Reseau.ByteCursor("ping")
+                write_res = Reseau.socket_write(
                     sock, cursor, (s, err, bytes, ud) -> begin
                         write_err[] = err
                         write_done[] = true
@@ -1049,7 +1049,7 @@ end
                     end, nothing
                 )
 
-                if write_res isa AwsIO.ErrorResult
+                if write_res isa Reseau.ErrorResult
                     write_err[] = write_res.code
                     write_done[] = true
                 end
@@ -1057,41 +1057,41 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == AwsIO.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test accept_err[] == AwsIO.AWS_OP_SUCCESS
-        @test read_err[] == AwsIO.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.AWS_OP_SUCCESS
+        @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
-            AwsIO.socket_close(client_socket)
+            Reseau.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            AwsIO.socket_close(accepted[])
+            Reseau.socket_close(accepted[])
         end
         if server_socket !== nothing
-            AwsIO.socket_close(server_socket)
+            Reseau.socket_close(server_socket)
         end
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
     end
 end
 
 @testset "sock write cb is async" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    server = AwsIO.socket_init(opts)
-    server_socket = server isa AwsIO.Socket ? server : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
+    server = Reseau.socket_init(opts)
+    server_socket = server isa Reseau.Socket ? server : nothing
     @test server_socket !== nothing
 
     client_socket = nothing
@@ -1102,13 +1102,13 @@ end
             return
         end
 
-        bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-        @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
-        @test AwsIO.socket_listen(server_socket, 8) === nothing
+        bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+        @test Reseau.socket_bind(server_socket, bind_opts) === nothing
+        @test Reseau.socket_listen(server_socket, 8) === nothing
 
-        bound = AwsIO.socket_get_bound_address(server_socket)
-        @test bound isa AwsIO.SocketEndpoint
-        port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+        bound = Reseau.socket_get_bound_address(server_socket)
+        @test bound isa Reseau.SocketEndpoint
+        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
         if port == 0
             return
         end
@@ -1117,31 +1117,31 @@ end
         on_accept = (listener, err, new_sock, ud) -> begin
             accepted[] = new_sock
             accept_done[] = true
-            if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
                 return nothing
             end
-            assign_res = AwsIO.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa AwsIO.ErrorResult
+            assign_res = Reseau.socket_assign_to_event_loop(new_sock, el_val)
+            if assign_res isa Reseau.ErrorResult
                 return nothing
             end
-            _ = AwsIO.socket_subscribe_to_readable_events(
+            _ = Reseau.socket_subscribe_to_readable_events(
                 new_sock, (sock, err, ud) -> begin
-                    if err != AwsIO.AWS_OP_SUCCESS
+                    if err != Reseau.AWS_OP_SUCCESS
                         return nothing
                     end
-                    buf = AwsIO.ByteBuffer(64)
-                    _ = AwsIO.socket_read(sock, buf)
+                    buf = Reseau.ByteBuffer(64)
+                    _ = Reseau.socket_read(sock, buf)
                     return nothing
                 end, nothing
             )
             return nothing
         end
 
-        accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-        @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+        @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
@@ -1153,26 +1153,26 @@ end
         write_cb_sync = Threads.Atomic{Bool}(false)
         write_err = Ref{Int}(0)
 
-        connect_opts = AwsIO.SocketConnectOptions(
-            AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_opts = Reseau.SocketConnectOptions(
+            Reseau.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_done[] = true
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     write_started[] = true
                     return nothing
                 end
-                cursor = AwsIO.ByteCursor("ping")
+                cursor = Reseau.ByteCursor("ping")
                 write_cb_invoked[] = false
                 write_cb_sync[] = false
-                write_res = AwsIO.socket_write(
+                write_res = Reseau.socket_write(
                     sock, cursor, (s, err, bytes, ud) -> begin
                         write_err[] = err
                         write_cb_invoked[] = true
                         return nothing
                     end, nothing
                 )
-                if write_res isa AwsIO.ErrorResult
+                if write_res isa Reseau.ErrorResult
                     write_err[] = write_res.code
                     write_cb_invoked[] = true
                 end
@@ -1184,54 +1184,54 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(connect_done)
         @test wait_for_flag(accept_done)
         @test wait_for_flag(write_started)
         @test wait_for_flag(write_cb_invoked)
         @test !write_cb_sync[]
-        @test write_err[] == AwsIO.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.AWS_OP_SUCCESS
     finally
         if client_socket !== nothing
-            AwsIO.socket_close(client_socket)
+            Reseau.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            AwsIO.socket_close(accepted[])
+            Reseau.socket_close(accepted[])
         end
         if server_socket !== nothing
-            AwsIO.socket_close(server_socket)
+            Reseau.socket_close(server_socket)
         end
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
     end
 end
 
 @testset "connect timeout" begin
-    elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    elg_val = elg isa AwsIO.EventLoopGroup ? elg : nothing
+    elg = Reseau.event_loop_group_new(Reseau.EventLoopGroupOptions(; loop_count = 1))
+    elg_val = elg isa Reseau.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
     if elg_val === nothing
         return
     end
-    el_val = AwsIO.event_loop_group_get_next_loop(elg_val)
-    @test el_val isa AwsIO.EventLoop
-    if !(el_val isa AwsIO.EventLoop)
-        AwsIO.event_loop_group_destroy!(elg_val)
+    el_val = Reseau.event_loop_group_get_next_loop(elg_val)
+    @test el_val isa Reseau.EventLoop
+    if !(el_val isa Reseau.EventLoop)
+        Reseau.event_loop_group_destroy!(elg_val)
         return
     end
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4, connect_timeout_ms = 200)
-    sock = AwsIO.socket_init(opts)
-    socket_val = sock isa AwsIO.Socket ? sock : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4, connect_timeout_ms = 200)
+    sock = Reseau.socket_init(opts)
+    socket_val = sock isa Reseau.Socket ? sock : nothing
     @test socket_val !== nothing
     if socket_val === nothing
-        AwsIO.event_loop_group_destroy!(elg_val)
+        Reseau.event_loop_group_destroy!(elg_val)
         return
     end
 
     connect_done = Threads.Atomic{Bool}(false)
     connect_err = Ref{Int}(0)
-    endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
-    connect_opts = AwsIO.SocketConnectOptions(
+    endpoint = Reseau.SocketEndpoint("10.255.255.1", 81)
+    connect_opts = Reseau.SocketConnectOptions(
         endpoint;
         event_loop = el_val,
         on_connection_result = (sock, err, ud) -> begin
@@ -1242,46 +1242,46 @@ end
     )
 
     try
-        res = AwsIO.socket_connect(socket_val, connect_opts)
-        if res isa AwsIO.ErrorResult
+        res = Reseau.socket_connect(socket_val, connect_opts)
+        if res isa Reseau.ErrorResult
             @test _is_allowed_connect_error(res.code)
         else
             @test wait_for_flag(connect_done; timeout_s = 3.0)
             @test _is_allowed_connect_error(connect_err[])
         end
     finally
-        AwsIO.socket_cleanup!(socket_val)
-        AwsIO.event_loop_group_destroy!(elg_val)
+        Reseau.socket_cleanup!(socket_val)
+        Reseau.event_loop_group_destroy!(elg_val)
     end
 end
 
 @testset "connect timeout cancellation" begin
-    elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    elg_val = elg isa AwsIO.EventLoopGroup ? elg : nothing
+    elg = Reseau.event_loop_group_new(Reseau.EventLoopGroupOptions(; loop_count = 1))
+    elg_val = elg isa Reseau.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
     if elg_val === nothing
         return
     end
-    el_val = AwsIO.event_loop_group_get_next_loop(elg_val)
-    @test el_val isa AwsIO.EventLoop
-    if !(el_val isa AwsIO.EventLoop)
-        AwsIO.event_loop_group_destroy!(elg_val)
+    el_val = Reseau.event_loop_group_get_next_loop(elg_val)
+    @test el_val isa Reseau.EventLoop
+    if !(el_val isa Reseau.EventLoop)
+        Reseau.event_loop_group_destroy!(elg_val)
         return
     end
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4, connect_timeout_ms = 10_000)
-    sock = AwsIO.socket_init(opts)
-    socket_val = sock isa AwsIO.Socket ? sock : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4, connect_timeout_ms = 10_000)
+    sock = Reseau.socket_init(opts)
+    socket_val = sock isa Reseau.Socket ? sock : nothing
     @test socket_val !== nothing
     if socket_val === nothing
-        AwsIO.event_loop_group_destroy!(elg_val)
+        Reseau.event_loop_group_destroy!(elg_val)
         return
     end
 
     connect_done = Threads.Atomic{Bool}(false)
     connect_err = Ref{Int}(0)
-    endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
-    connect_opts = AwsIO.SocketConnectOptions(
+    endpoint = Reseau.SocketEndpoint("10.255.255.1", 81)
+    connect_opts = Reseau.SocketConnectOptions(
         endpoint;
         event_loop = el_val,
         on_connection_result = (sock, err, ud) -> begin
@@ -1292,48 +1292,48 @@ end
     )
 
     try
-        res = AwsIO.socket_connect(socket_val, connect_opts)
-        if res isa AwsIO.ErrorResult
+        res = Reseau.socket_connect(socket_val, connect_opts)
+        if res isa Reseau.ErrorResult
             @test _is_allowed_connect_error(res.code)
         else
-            AwsIO.event_loop_group_destroy!(elg_val)
+            Reseau.event_loop_group_destroy!(elg_val)
             @test connect_done[]
-            @test connect_err[] == AwsIO.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
+            @test connect_err[] == Reseau.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
                 _is_allowed_connect_error(connect_err[])
         end
     finally
-        AwsIO.socket_cleanup!(socket_val)
+        Reseau.socket_cleanup!(socket_val)
     end
 end
 
 @testset "cleanup before connect or timeout" begin
-    elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-        elg_val = elg isa AwsIO.EventLoopGroup ? elg : nothing
+    elg = Reseau.event_loop_group_new(Reseau.EventLoopGroupOptions(; loop_count = 1))
+        elg_val = elg isa Reseau.EventLoopGroup ? elg : nothing
         @test elg_val !== nothing
         if elg_val === nothing
             return
         end
-        el_val = AwsIO.event_loop_group_get_next_loop(elg_val)
-        @test el_val isa AwsIO.EventLoop
-        if !(el_val isa AwsIO.EventLoop)
-            AwsIO.event_loop_group_destroy!(elg_val)
+        el_val = Reseau.event_loop_group_get_next_loop(elg_val)
+        @test el_val isa Reseau.EventLoop
+        if !(el_val isa Reseau.EventLoop)
+            Reseau.event_loop_group_destroy!(elg_val)
             return
         end
 
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4, connect_timeout_ms = 1000)
-        sock = AwsIO.socket_init(opts)
-        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4, connect_timeout_ms = 1000)
+        sock = Reseau.socket_init(opts)
+        socket_val = sock isa Reseau.Socket ? sock : nothing
         @test socket_val !== nothing
         if socket_val === nothing
-            AwsIO.event_loop_group_destroy!(elg_val)
+            Reseau.event_loop_group_destroy!(elg_val)
             return
         end
 
         connect_done = Threads.Atomic{Bool}(false)
         connect_err = Ref{Int}(0)
         cleanup_done = Threads.Atomic{Bool}(false)
-        endpoint = AwsIO.SocketEndpoint("10.255.255.1", 81)
-        connect_opts = AwsIO.SocketConnectOptions(
+        endpoint = Reseau.SocketEndpoint("10.255.255.1", 81)
+        connect_opts = Reseau.SocketConnectOptions(
             endpoint;
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
@@ -1343,18 +1343,18 @@ end
             end,
         )
 
-        cleanup_task = AwsIO.ScheduledTask((ctx, status) -> begin
-            AwsIO.socket_cleanup!(socket_val)
+        cleanup_task = Reseau.ScheduledTask((ctx, status) -> begin
+            Reseau.socket_cleanup!(socket_val)
             cleanup_done[] = true
             return nothing
         end, nothing; type_tag = "socket_cleanup_before_connect")
 
         try
-            res = AwsIO.socket_connect(socket_val, connect_opts)
-            if res isa AwsIO.ErrorResult
+            res = Reseau.socket_connect(socket_val, connect_opts)
+            if res isa Reseau.ErrorResult
                 @test _is_allowed_connect_error(res.code)
             else
-                AwsIO.event_loop_schedule_task_now!(el_val, cleanup_task)
+                Reseau.event_loop_schedule_task_now!(el_val, cleanup_task)
                 @test wait_for_flag(cleanup_done)
                 sleep(0.05)
                 if connect_done[]
@@ -1364,26 +1364,26 @@ end
                 end
             end
         finally
-            AwsIO.socket_cleanup!(socket_val)
-            AwsIO.event_loop_group_destroy!(elg_val)
+            Reseau.socket_cleanup!(socket_val)
+            Reseau.event_loop_group_destroy!(elg_val)
         end
 end
 
 @testset "cleanup in accept doesn't explode" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    listener = AwsIO.socket_init(opts)
-    listener_socket = listener isa AwsIO.Socket ? listener : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
+    listener = Reseau.socket_init(opts)
+    listener_socket = listener isa Reseau.Socket ? listener : nothing
     @test listener_socket !== nothing
     if listener_socket === nothing
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
         return
     end
 
@@ -1395,13 +1395,13 @@ end
     client_socket = nothing
 
     try
-        bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-        @test AwsIO.socket_bind(listener_socket, bind_opts) === nothing
-        @test AwsIO.socket_listen(listener_socket, 1024) === nothing
+        bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+        @test Reseau.socket_bind(listener_socket, bind_opts) === nothing
+        @test Reseau.socket_listen(listener_socket, 1024) === nothing
 
-        bound = AwsIO.socket_get_bound_address(listener_socket)
-        @test bound isa AwsIO.SocketEndpoint
-        port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+        bound = Reseau.socket_get_bound_address(listener_socket)
+        @test bound isa Reseau.SocketEndpoint
+        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
         if port == 0
             return
         end
@@ -1411,23 +1411,23 @@ end
             incoming[] = new_sock
             accept_done[] = true
             if sock !== nothing
-                AwsIO.socket_cleanup!(sock)
+                Reseau.socket_cleanup!(sock)
             end
             return nothing
         end
 
-        accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-        @test AwsIO.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+        accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+        @test Reseau.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
         end
 
-        connect_opts = AwsIO.SocketConnectOptions(
-            AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_opts = Reseau.SocketConnectOptions(
+            Reseau.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_err[] = err
@@ -1436,38 +1436,38 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(accept_done)
         @test wait_for_flag(connect_done)
-        @test accept_err[] == AwsIO.AWS_OP_SUCCESS
-        @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.AWS_OP_SUCCESS
     finally
         if client_socket !== nothing
-            AwsIO.socket_cleanup!(client_socket)
+            Reseau.socket_cleanup!(client_socket)
         end
         if incoming[] !== nothing
-            AwsIO.socket_cleanup!(incoming[])
+            Reseau.socket_cleanup!(incoming[])
         end
-        AwsIO.socket_cleanup!(listener_socket)
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.socket_cleanup!(listener_socket)
+        Reseau.event_loop_destroy!(el_val)
     end
 end
 
 @testset "cleanup in write cb doesn't explode" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-    listener = AwsIO.socket_init(opts)
-    listener_socket = listener isa AwsIO.Socket ? listener : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
+    listener = Reseau.socket_init(opts)
+    listener_socket = listener isa Reseau.Socket ? listener : nothing
     @test listener_socket !== nothing
     if listener_socket === nothing
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
         return
     end
 
@@ -1477,13 +1477,13 @@ end
     client_socket = nothing
 
     try
-        bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-        @test AwsIO.socket_bind(listener_socket, bind_opts) === nothing
-        @test AwsIO.socket_listen(listener_socket, 1024) === nothing
+        bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+        @test Reseau.socket_bind(listener_socket, bind_opts) === nothing
+        @test Reseau.socket_listen(listener_socket, 1024) === nothing
 
-        bound = AwsIO.socket_get_bound_address(listener_socket)
-        @test bound isa AwsIO.SocketEndpoint
-        port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+        bound = Reseau.socket_get_bound_address(listener_socket)
+        @test bound isa Reseau.SocketEndpoint
+        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
         if port == 0
             return
         end
@@ -1494,18 +1494,18 @@ end
             return nothing
         end
 
-        accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-        @test AwsIO.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+        accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+        @test Reseau.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
         end
 
-        connect_opts = AwsIO.SocketConnectOptions(
-            AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_opts = Reseau.SocketConnectOptions(
+            Reseau.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_done[] = true
@@ -1513,7 +1513,7 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(accept_done)
         @test wait_for_flag(connect_done)
 
@@ -1523,102 +1523,102 @@ end
             return
         end
 
-        assign_res = AwsIO.socket_assign_to_event_loop(server_sock, el_val)
-        @test !(assign_res isa AwsIO.ErrorResult)
+        assign_res = Reseau.socket_assign_to_event_loop(server_sock, el_val)
+        @test !(assign_res isa Reseau.ErrorResult)
 
         write_done_client = Threads.Atomic{Bool}(false)
         write_err_client = Ref{Int}(0)
         write_done_server = Threads.Atomic{Bool}(false)
         write_err_server = Ref{Int}(0)
 
-        write_task_client = AwsIO.ScheduledTask((ctx, status) -> begin
-            cursor = AwsIO.ByteCursor("teapot")
-            res = AwsIO.socket_write(
+        write_task_client = Reseau.ScheduledTask((ctx, status) -> begin
+            cursor = Reseau.ByteCursor("teapot")
+            res = Reseau.socket_write(
                 client_socket,
                 cursor,
                 (s, err, bytes, ud) -> begin
                     write_err_client[] = err
-                    AwsIO.socket_cleanup!(client_socket)
+                    Reseau.socket_cleanup!(client_socket)
                     write_done_client[] = true
                     return nothing
                 end,
                 nothing,
             )
-            if res isa AwsIO.ErrorResult
+            if res isa Reseau.ErrorResult
                 write_err_client[] = res.code
-                AwsIO.socket_cleanup!(client_socket)
+                Reseau.socket_cleanup!(client_socket)
                 write_done_client[] = true
             end
             return nothing
         end, nothing; type_tag = "socket_write_cleanup_client")
 
-        write_task_server = AwsIO.ScheduledTask((ctx, status) -> begin
-            cursor = AwsIO.ByteCursor("spout")
-            res = AwsIO.socket_write(
+        write_task_server = Reseau.ScheduledTask((ctx, status) -> begin
+            cursor = Reseau.ByteCursor("spout")
+            res = Reseau.socket_write(
                 server_sock,
                 cursor,
                 (s, err, bytes, ud) -> begin
                     write_err_server[] = err
-                    AwsIO.socket_cleanup!(server_sock)
+                    Reseau.socket_cleanup!(server_sock)
                     write_done_server[] = true
                     return nothing
                 end,
                 nothing,
             )
-            if res isa AwsIO.ErrorResult
+            if res isa Reseau.ErrorResult
                 write_err_server[] = res.code
-                AwsIO.socket_cleanup!(server_sock)
+                Reseau.socket_cleanup!(server_sock)
                 write_done_server[] = true
             end
             return nothing
         end, nothing; type_tag = "socket_write_cleanup_server")
 
-        AwsIO.event_loop_schedule_task_now!(el_val, write_task_client)
+        Reseau.event_loop_schedule_task_now!(el_val, write_task_client)
         @test wait_for_flag(write_done_client)
-        AwsIO.event_loop_schedule_task_now!(el_val, write_task_server)
+        Reseau.event_loop_schedule_task_now!(el_val, write_task_server)
         @test wait_for_flag(write_done_server)
-        @test write_err_client[] == AwsIO.AWS_OP_SUCCESS
-        @test write_err_server[] == AwsIO.AWS_OP_SUCCESS
+        @test write_err_client[] == Reseau.AWS_OP_SUCCESS
+        @test write_err_server[] == Reseau.AWS_OP_SUCCESS
     finally
         if client_socket !== nothing
-            AwsIO.socket_cleanup!(client_socket)
+            Reseau.socket_cleanup!(client_socket)
         end
         if accepted[] !== nothing
-            AwsIO.socket_cleanup!(accepted[])
+            Reseau.socket_cleanup!(accepted[])
         end
-        AwsIO.socket_cleanup!(listener_socket)
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.socket_cleanup!(listener_socket)
+        Reseau.event_loop_destroy!(el_val)
     end
 end
 
 @testset "local socket communication" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
-    server = AwsIO.socket_init(opts)
-    server_socket = server isa AwsIO.Socket ? server : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
+    server = Reseau.socket_init(opts)
+    server_socket = server isa Reseau.Socket ? server : nothing
     @test server_socket !== nothing
 
     client_socket = nothing
     accepted = Ref{Any}(nothing)
-    endpoint = AwsIO.SocketEndpoint()
-    AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
-    local_path = AwsIO.get_address(endpoint)
+    endpoint = Reseau.SocketEndpoint()
+    Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
+    local_path = Reseau.get_address(endpoint)
 
     try
         if server_socket === nothing
             return
         end
 
-        bind_opts = AwsIO.SocketBindOptions(endpoint)
-        @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
-        @test AwsIO.socket_listen(server_socket, 8) === nothing
+        bind_opts = Reseau.SocketBindOptions(endpoint)
+        @test Reseau.socket_bind(server_socket, bind_opts) === nothing
+        @test Reseau.socket_listen(server_socket, 8) === nothing
 
         accept_err = Ref{Int}(0)
         read_err = Ref{Int}(0)
@@ -1633,67 +1633,67 @@ end
         on_accept = (listener, err, new_sock, ud) -> begin
             accept_err[] = err
             accepted[] = new_sock
-            if err != AwsIO.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
                 read_done[] = true
                 return nothing
             end
 
-            assign_res = AwsIO.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa AwsIO.ErrorResult
+            assign_res = Reseau.socket_assign_to_event_loop(new_sock, el_val)
+            if assign_res isa Reseau.ErrorResult
                 read_err[] = assign_res.code
                 read_done[] = true
                 return nothing
             end
 
-            sub_res = AwsIO.socket_subscribe_to_readable_events(
+            sub_res = Reseau.socket_subscribe_to_readable_events(
                 new_sock, (sock, err, ud) -> begin
                     read_err[] = err
-                    if err != AwsIO.AWS_OP_SUCCESS
+                    if err != Reseau.AWS_OP_SUCCESS
                         read_done[] = true
                         return nothing
                     end
 
-                    buf = AwsIO.ByteBuffer(64)
-                    read_res = AwsIO.socket_read(sock, buf)
-                    if read_res isa AwsIO.ErrorResult
+                    buf = Reseau.ByteBuffer(64)
+                    read_res = Reseau.socket_read(sock, buf)
+                    if read_res isa Reseau.ErrorResult
                         read_err[] = read_res.code
                     else
-                        payload[] = String(AwsIO.byte_cursor_from_buf(buf))
+                        payload[] = String(Reseau.byte_cursor_from_buf(buf))
                     end
                     read_done[] = true
                     return nothing
                 end, nothing
             )
 
-            if sub_res isa AwsIO.ErrorResult
+            if sub_res isa Reseau.ErrorResult
                 read_err[] = sub_res.code
                 read_done[] = true
             end
             return nothing
         end
 
-        accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-        @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+        @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
         end
 
-        connect_opts = AwsIO.SocketConnectOptions(
+        connect_opts = Reseau.SocketConnectOptions(
             endpoint;
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     return nothing
                 end
 
-                cursor = AwsIO.ByteCursor("ping")
-                write_res = AwsIO.socket_write(
+                cursor = Reseau.ByteCursor("ping")
+                write_res = Reseau.socket_write(
                     sock, cursor, (s, err, bytes, ud) -> begin
                         write_err[] = err
                         write_done[] = true
@@ -1701,7 +1701,7 @@ end
                     end, nothing
                 )
 
-                if write_res isa AwsIO.ErrorResult
+                if write_res isa Reseau.ErrorResult
                     write_err[] = write_res.code
                     write_done[] = true
                 end
@@ -1709,26 +1709,26 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == AwsIO.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test accept_err[] == AwsIO.AWS_OP_SUCCESS
-        @test read_err[] == AwsIO.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.AWS_OP_SUCCESS
+        @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
-            AwsIO.socket_close(client_socket)
+            Reseau.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            AwsIO.socket_close(accepted[])
+            Reseau.socket_close(accepted[])
         end
         if server_socket !== nothing
-            AwsIO.socket_close(server_socket)
+            Reseau.socket_close(server_socket)
         end
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -1736,47 +1736,47 @@ end
 end
 
 @testset "local socket connect before accept" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
-    server = AwsIO.socket_init(opts)
-    server_socket = server isa AwsIO.Socket ? server : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
+    server = Reseau.socket_init(opts)
+    server_socket = server isa Reseau.Socket ? server : nothing
     @test server_socket !== nothing
 
     client_socket = nothing
     accepted = Ref{Any}(nothing)
-    endpoint = AwsIO.SocketEndpoint()
-    AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
-    local_path = AwsIO.get_address(endpoint)
+    endpoint = Reseau.SocketEndpoint()
+    Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
+    local_path = Reseau.get_address(endpoint)
 
     try
         if server_socket === nothing
             return
         end
 
-        bind_opts = AwsIO.SocketBindOptions(endpoint)
-        @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
-        @test AwsIO.socket_listen(server_socket, 1024) === nothing
+        bind_opts = Reseau.SocketBindOptions(endpoint)
+        @test Reseau.socket_bind(server_socket, bind_opts) === nothing
+        @test Reseau.socket_listen(server_socket, 1024) === nothing
 
         accept_err = Ref{Int}(0)
         accept_done = Threads.Atomic{Bool}(false)
         connect_err = Ref{Int}(0)
         connect_done = Threads.Atomic{Bool}(false)
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
         end
 
-        connect_opts = AwsIO.SocketConnectOptions(
+        connect_opts = Reseau.SocketConnectOptions(
             endpoint;
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
@@ -1786,7 +1786,7 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
 
         on_accept = (listener, err, new_sock, ud) -> begin
             accept_err[] = err
@@ -1795,24 +1795,24 @@ end
             return nothing
         end
 
-        accept_opts = AwsIO.SocketListenerOptions(on_accept_result = on_accept)
-        @test AwsIO.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = Reseau.SocketListenerOptions(on_accept_result = on_accept)
+        @test Reseau.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
         @test wait_for_flag(connect_done)
         @test wait_for_flag(accept_done)
-        @test connect_err[] == AwsIO.AWS_OP_SUCCESS
-        @test accept_err[] == AwsIO.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.AWS_OP_SUCCESS
     finally
         if client_socket !== nothing
-            AwsIO.socket_cleanup!(client_socket)
+            Reseau.socket_cleanup!(client_socket)
         end
         if accepted[] !== nothing
-            AwsIO.socket_cleanup!(accepted[])
+            Reseau.socket_cleanup!(accepted[])
         end
         if server_socket !== nothing
-            AwsIO.socket_cleanup!(server_socket)
+            Reseau.socket_cleanup!(server_socket)
         end
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -1820,17 +1820,17 @@ end
 end
 
 @testset "udp socket communication" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.IPV4)
-    server = AwsIO.socket_init(opts)
-    server_socket = server isa AwsIO.Socket ? server : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.DGRAM, domain = Reseau.SocketDomain.IPV4)
+    server = Reseau.socket_init(opts)
+    server_socket = server isa Reseau.Socket ? server : nothing
     @test server_socket !== nothing
 
     client_socket = nothing
@@ -1839,44 +1839,44 @@ end
             return
         end
 
-        bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-        @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+        @test Reseau.socket_bind(server_socket, bind_opts) === nothing
 
-        bound = AwsIO.socket_get_bound_address(server_socket)
-        @test bound isa AwsIO.SocketEndpoint
-        port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+        bound = Reseau.socket_get_bound_address(server_socket)
+        @test bound isa Reseau.SocketEndpoint
+        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
         if port == 0
             return
         end
 
-        assign_res = AwsIO.socket_assign_to_event_loop(server_socket, el_val)
-        @test !(assign_res isa AwsIO.ErrorResult)
+        assign_res = Reseau.socket_assign_to_event_loop(server_socket, el_val)
+        @test !(assign_res isa Reseau.ErrorResult)
 
         read_err = Ref{Int}(0)
         read_done = Threads.Atomic{Bool}(false)
         payload = Ref{String}("")
-        sub_res = AwsIO.socket_subscribe_to_readable_events(
+        sub_res = Reseau.socket_subscribe_to_readable_events(
             server_socket, (sock, err, ud) -> begin
                 read_err[] = err
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     read_done[] = true
                     return nothing
                 end
-                    buf = AwsIO.ByteBuffer(64)
-                    read_res = AwsIO.socket_read(sock, buf)
-                    if read_res isa AwsIO.ErrorResult
+                    buf = Reseau.ByteBuffer(64)
+                    read_res = Reseau.socket_read(sock, buf)
+                    if read_res isa Reseau.ErrorResult
                         read_err[] = read_res.code
                     else
-                        payload[] = String(AwsIO.byte_cursor_from_buf(buf))
+                        payload[] = String(Reseau.byte_cursor_from_buf(buf))
                     end
                     read_done[] = true
                     return nothing
             end, nothing
         )
-        @test !(sub_res isa AwsIO.ErrorResult)
+        @test !(sub_res isa Reseau.ErrorResult)
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
@@ -1887,24 +1887,24 @@ end
         write_err = Ref{Int}(0)
         write_done = Threads.Atomic{Bool}(false)
 
-        connect_opts = AwsIO.SocketConnectOptions(
-            AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_opts = Reseau.SocketConnectOptions(
+            Reseau.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     return nothing
                 end
-                cursor = AwsIO.ByteCursor("ping")
-                write_res = AwsIO.socket_write(
+                cursor = Reseau.ByteCursor("ping")
+                write_res = Reseau.socket_write(
                     sock, cursor, (s, err, bytes, ud) -> begin
                         write_err[] = err
                         write_done[] = true
                         return nothing
                     end, nothing
                 )
-                if write_res isa AwsIO.ErrorResult
+                if write_res isa Reseau.ErrorResult
                     write_err[] = write_res.code
                     write_done[] = true
                 end
@@ -1912,37 +1912,37 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == AwsIO.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test read_err[] == AwsIO.AWS_OP_SUCCESS
+        @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
-            AwsIO.socket_close(client_socket)
+            Reseau.socket_close(client_socket)
         end
         if server_socket !== nothing
-            AwsIO.socket_close(server_socket)
+            Reseau.socket_close(server_socket)
         end
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
     end
 end
 
 @testset "udp bind connect communication" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.IPV4)
-    server = AwsIO.socket_init(opts)
-    server_socket = server isa AwsIO.Socket ? server : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.DGRAM, domain = Reseau.SocketDomain.IPV4)
+    server = Reseau.socket_init(opts)
+    server_socket = server isa Reseau.Socket ? server : nothing
     @test server_socket !== nothing
 
     client_socket = nothing
@@ -1951,75 +1951,75 @@ end
             return
         end
 
-        bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-        @test AwsIO.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+        @test Reseau.socket_bind(server_socket, bind_opts) === nothing
 
-        bound = AwsIO.socket_get_bound_address(server_socket)
-        @test bound isa AwsIO.SocketEndpoint
-        port = bound isa AwsIO.SocketEndpoint ? Int(bound.port) : 0
+        bound = Reseau.socket_get_bound_address(server_socket)
+        @test bound isa Reseau.SocketEndpoint
+        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
         if port == 0
             return
         end
 
-        assign_res = AwsIO.socket_assign_to_event_loop(server_socket, el_val)
-        @test !(assign_res isa AwsIO.ErrorResult)
+        assign_res = Reseau.socket_assign_to_event_loop(server_socket, el_val)
+        @test !(assign_res isa Reseau.ErrorResult)
 
         read_err = Ref{Int}(0)
         read_done = Threads.Atomic{Bool}(false)
         payload = Ref{String}("")
-        sub_res = AwsIO.socket_subscribe_to_readable_events(
+        sub_res = Reseau.socket_subscribe_to_readable_events(
             server_socket, (sock, err, ud) -> begin
                 read_err[] = err
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     read_done[] = true
                     return nothing
                 end
-                buf = AwsIO.ByteBuffer(64)
-                read_res = AwsIO.socket_read(sock, buf)
-                if read_res isa AwsIO.ErrorResult
+                buf = Reseau.ByteBuffer(64)
+                read_res = Reseau.socket_read(sock, buf)
+                if read_res isa Reseau.ErrorResult
                     read_err[] = read_res.code
                 else
-                    payload[] = String(AwsIO.byte_cursor_from_buf(buf))
+                    payload[] = String(Reseau.byte_cursor_from_buf(buf))
                 end
                 read_done[] = true
                 return nothing
             end, nothing
         )
-        @test !(sub_res isa AwsIO.ErrorResult)
+        @test !(sub_res isa Reseau.ErrorResult)
 
-        client = AwsIO.socket_init(opts)
-        client_socket = client isa AwsIO.Socket ? client : nothing
+        client = Reseau.socket_init(opts)
+        client_socket = client isa Reseau.Socket ? client : nothing
         @test client_socket !== nothing
         if client_socket === nothing
             return
         end
 
-        local_bind = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
-        @test AwsIO.socket_bind(client_socket, local_bind) === nothing
+        local_bind = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
+        @test Reseau.socket_bind(client_socket, local_bind) === nothing
 
         connect_err = Ref{Int}(0)
         connect_done = Threads.Atomic{Bool}(false)
         write_err = Ref{Int}(0)
         write_done = Threads.Atomic{Bool}(false)
 
-        connect_opts = AwsIO.SocketConnectOptions(
-            AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_opts = Reseau.SocketConnectOptions(
+            Reseau.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = (sock, err, ud) -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != AwsIO.AWS_OP_SUCCESS
+                if err != Reseau.AWS_OP_SUCCESS
                     return nothing
                 end
-                cursor = AwsIO.ByteCursor("ping")
-                write_res = AwsIO.socket_write(
+                cursor = Reseau.ByteCursor("ping")
+                write_res = Reseau.socket_write(
                     sock, cursor, (s, err, bytes, ud) -> begin
                         write_err[] = err
                         write_done[] = true
                         return nothing
                     end, nothing
                 )
-                if write_res isa AwsIO.ErrorResult
+                if write_res isa Reseau.ErrorResult
                     write_err[] = write_res.code
                     write_done[] = true
                 end
@@ -2027,22 +2027,22 @@ end
             end,
         )
 
-        @test AwsIO.socket_connect(client_socket, connect_opts) === nothing
+        @test Reseau.socket_connect(client_socket, connect_opts) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == AwsIO.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == AwsIO.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test read_err[] == AwsIO.AWS_OP_SUCCESS
+        @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
-            AwsIO.socket_close(client_socket)
+            Reseau.socket_close(client_socket)
         end
         if server_socket !== nothing
-            AwsIO.socket_close(server_socket)
+            Reseau.socket_close(server_socket)
         end
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
     end
 end
 
@@ -2050,53 +2050,53 @@ end
     if Sys.iswindows()
         @test true
     else
-        el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-        el_val = el isa AwsIO.EventLoop ? el : nothing
+        el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+        el_val = el isa Reseau.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test AwsIO.event_loop_run!(el_val) === nothing
+        @test Reseau.event_loop_run!(el_val) === nothing
 
         # Use LOCAL domain (POSIX path on all platforms) since this test
         # exercises POSIX-specific bind/assign/read/write/close flow
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.LOCAL)
-        sock = AwsIO.socket_init(opts)
-        socket_val = sock isa AwsIO.Socket ? sock : nothing
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.DGRAM, domain = Reseau.SocketDomain.LOCAL)
+        sock = Reseau.socket_init(opts)
+        socket_val = sock isa Reseau.Socket ? sock : nothing
         @test socket_val !== nothing
         if socket_val === nothing
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.event_loop_destroy!(el_val)
             return
         end
 
         try
-            endpoint = AwsIO.SocketEndpoint()
-            AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
-            bind_opts = AwsIO.SocketBindOptions(endpoint)
-            @test AwsIO.socket_bind(socket_val, bind_opts) === nothing
-            @test AwsIO.socket_assign_to_event_loop(socket_val, el_val) === nothing
-            sub_res = AwsIO.socket_subscribe_to_readable_events(socket_val, (sock, err, ud) -> nothing, nothing)
-            @test !(sub_res isa AwsIO.ErrorResult)
+            endpoint = Reseau.SocketEndpoint()
+            Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
+            bind_opts = Reseau.SocketBindOptions(endpoint)
+            @test Reseau.socket_bind(socket_val, bind_opts) === nothing
+            @test Reseau.socket_assign_to_event_loop(socket_val, el_val) === nothing
+            sub_res = Reseau.socket_subscribe_to_readable_events(socket_val, (sock, err, ud) -> nothing, nothing)
+            @test !(sub_res isa Reseau.ErrorResult)
 
-            buf = AwsIO.ByteBuffer(4)
-            read_res = AwsIO.socket_read(socket_val, buf)
-            @test read_res isa AwsIO.ErrorResult
-            read_res isa AwsIO.ErrorResult && @test read_res.code == AwsIO.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+            buf = Reseau.ByteBuffer(4)
+            read_res = Reseau.socket_read(socket_val, buf)
+            @test read_res isa Reseau.ErrorResult
+            read_res isa Reseau.ErrorResult && @test read_res.code == Reseau.ERROR_IO_EVENT_LOOP_THREAD_ONLY
 
-            write_res = AwsIO.socket_write(socket_val, AwsIO.ByteCursor("noop"), (s, err, bytes, ud) -> nothing, nothing)
-            @test write_res isa AwsIO.ErrorResult
-            write_res isa AwsIO.ErrorResult && @test write_res.code == AwsIO.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+            write_res = Reseau.socket_write(socket_val, Reseau.ByteCursor("noop"), (s, err, bytes, ud) -> nothing, nothing)
+            @test write_res isa Reseau.ErrorResult
+            write_res isa Reseau.ErrorResult && @test write_res.code == Reseau.ERROR_IO_EVENT_LOOP_THREAD_ONLY
 
             close_done = Threads.Atomic{Bool}(false)
-            close_task = AwsIO.ScheduledTask((ctx, status) -> begin
-                AwsIO.socket_close(socket_val)
+            close_task = Reseau.ScheduledTask((ctx, status) -> begin
+                Reseau.socket_close(socket_val)
                 close_done[] = true
                 return nothing
             end, nothing; type_tag = "socket_close_wrong_thread")
-            AwsIO.event_loop_schedule_task_now!(el_val, close_task)
+            Reseau.event_loop_schedule_task_now!(el_val, close_task)
             @test wait_for_flag(close_done)
         finally
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.event_loop_destroy!(el_val)
         end
     end
 end
@@ -2105,154 +2105,154 @@ end
     # Use LOCAL domain on macOS to get a POSIX socket (IPV4 → NW on macOS,
     # which doesn't expose resolved port from socket_get_bound_address)
     @static if Sys.isapple()
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
     else
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
     end
-    sock = AwsIO.socket_init(opts)
-    socket_val = sock isa AwsIO.Socket ? sock : nothing
+    sock = Reseau.socket_init(opts)
+    socket_val = sock isa Reseau.Socket ? sock : nothing
     @test socket_val !== nothing
     if socket_val === nothing
         return
     end
 
-    res = AwsIO.socket_get_bound_address(socket_val)
-    @test res isa AwsIO.ErrorResult
+    res = Reseau.socket_get_bound_address(socket_val)
+    @test res isa Reseau.ErrorResult
 
     @static if Sys.isapple()
-        endpoint = AwsIO.SocketEndpoint()
-        AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
+        endpoint = Reseau.SocketEndpoint()
+        Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
     else
-        endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
+        endpoint = Reseau.SocketEndpoint("127.0.0.1", 0)
     end
-    @test AwsIO.socket_bind(socket_val, AwsIO.SocketBindOptions(endpoint)) === nothing
-    @test AwsIO.socket_listen(socket_val, 1024) === nothing
+    @test Reseau.socket_bind(socket_val, Reseau.SocketBindOptions(endpoint)) === nothing
+    @test Reseau.socket_listen(socket_val, 1024) === nothing
 
-    bound = AwsIO.socket_get_bound_address(socket_val)
-    @test bound isa AwsIO.SocketEndpoint
+    bound = Reseau.socket_get_bound_address(socket_val)
+    @test bound isa Reseau.SocketEndpoint
     @static if !Sys.isapple()
         # Port resolution only testable on POSIX with IPV4
-        if bound isa AwsIO.SocketEndpoint
+        if bound isa Reseau.SocketEndpoint
             @test bound.port > 0
-            @test AwsIO.get_address(bound) == "127.0.0.1"
+            @test Reseau.get_address(bound) == "127.0.0.1"
         end
 
-        bound2 = AwsIO.socket_get_bound_address(socket_val)
-        @test bound2 isa AwsIO.SocketEndpoint
-        if bound2 isa AwsIO.SocketEndpoint && bound isa AwsIO.SocketEndpoint
+        bound2 = Reseau.socket_get_bound_address(socket_val)
+        @test bound2 isa Reseau.SocketEndpoint
+        if bound2 isa Reseau.SocketEndpoint && bound isa Reseau.SocketEndpoint
             @test bound2.port == bound.port
-            @test AwsIO.get_address(bound2) == AwsIO.get_address(bound)
+            @test Reseau.get_address(bound2) == Reseau.get_address(bound)
         end
     end
 
-    AwsIO.socket_close(socket_val)
+    Reseau.socket_close(socket_val)
 end
 
 @testset "bind on zero port udp ipv4" begin
     @static if Sys.isapple()
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.LOCAL)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.DGRAM, domain = Reseau.SocketDomain.LOCAL)
     else
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.IPV4)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.DGRAM, domain = Reseau.SocketDomain.IPV4)
     end
-    sock = AwsIO.socket_init(opts)
-    socket_val = sock isa AwsIO.Socket ? sock : nothing
+    sock = Reseau.socket_init(opts)
+    socket_val = sock isa Reseau.Socket ? sock : nothing
     @test socket_val !== nothing
     if socket_val === nothing
         return
     end
 
-    res = AwsIO.socket_get_bound_address(socket_val)
-    @test res isa AwsIO.ErrorResult
+    res = Reseau.socket_get_bound_address(socket_val)
+    @test res isa Reseau.ErrorResult
 
     @static if Sys.isapple()
-        endpoint = AwsIO.SocketEndpoint()
-        AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
+        endpoint = Reseau.SocketEndpoint()
+        Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
     else
-        endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
+        endpoint = Reseau.SocketEndpoint("127.0.0.1", 0)
     end
-    @test AwsIO.socket_bind(socket_val, AwsIO.SocketBindOptions(endpoint)) === nothing
+    @test Reseau.socket_bind(socket_val, Reseau.SocketBindOptions(endpoint)) === nothing
 
-    bound = AwsIO.socket_get_bound_address(socket_val)
-    @test bound isa AwsIO.SocketEndpoint
+    bound = Reseau.socket_get_bound_address(socket_val)
+    @test bound isa Reseau.SocketEndpoint
     @static if !Sys.isapple()
-        if bound isa AwsIO.SocketEndpoint
+        if bound isa Reseau.SocketEndpoint
             @test bound.port > 0
-            @test AwsIO.get_address(bound) == "127.0.0.1"
+            @test Reseau.get_address(bound) == "127.0.0.1"
         end
 
-        bound2 = AwsIO.socket_get_bound_address(socket_val)
-        @test bound2 isa AwsIO.SocketEndpoint
-        if bound2 isa AwsIO.SocketEndpoint && bound isa AwsIO.SocketEndpoint
+        bound2 = Reseau.socket_get_bound_address(socket_val)
+        @test bound2 isa Reseau.SocketEndpoint
+        if bound2 isa Reseau.SocketEndpoint && bound isa Reseau.SocketEndpoint
             @test bound2.port == bound.port
-            @test AwsIO.get_address(bound2) == AwsIO.get_address(bound)
+            @test Reseau.get_address(bound2) == Reseau.get_address(bound)
         end
     end
 
-    AwsIO.socket_close(socket_val)
+    Reseau.socket_close(socket_val)
 end
 
 @testset "incoming duplicate tcp bind errors" begin
     # Use LOCAL on macOS since IPV4 → NW sockets, which don't expose
     # resolved port or enforce POSIX duplicate-bind semantics
     @static if Sys.isapple()
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
     else
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
     end
-    sock1 = AwsIO.socket_init(opts)
-    sock1_val = sock1 isa AwsIO.Socket ? sock1 : nothing
+    sock1 = Reseau.socket_init(opts)
+    sock1_val = sock1 isa Reseau.Socket ? sock1 : nothing
     @test sock1_val !== nothing
     if sock1_val === nothing
         return
     end
 
-    sock2 = AwsIO.socket_init(opts)
-    sock2_val = sock2 isa AwsIO.Socket ? sock2 : nothing
+    sock2 = Reseau.socket_init(opts)
+    sock2_val = sock2 isa Reseau.Socket ? sock2 : nothing
     @test sock2_val !== nothing
 
     try
         @static if Sys.isapple()
-            endpoint = AwsIO.SocketEndpoint()
-            AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
-            bind_opts = AwsIO.SocketBindOptions(endpoint)
+            endpoint = Reseau.SocketEndpoint()
+            Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
+            bind_opts = Reseau.SocketBindOptions(endpoint)
         else
-            bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+            bind_opts = Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))
         end
-        @test AwsIO.socket_bind(sock1_val, bind_opts) === nothing
-        @test AwsIO.socket_listen(sock1_val, 1024) === nothing
+        @test Reseau.socket_bind(sock1_val, bind_opts) === nothing
+        @test Reseau.socket_listen(sock1_val, 1024) === nothing
 
         @static if Sys.isapple()
             # On macOS LOCAL: duplicate bind on the same path
             if sock2_val !== nothing
-                res = AwsIO.socket_bind(sock2_val, bind_opts)
-                @test res isa AwsIO.ErrorResult
-                res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_ADDRESS_IN_USE
+                res = Reseau.socket_bind(sock2_val, bind_opts)
+                @test res isa Reseau.ErrorResult
+                res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_ADDRESS_IN_USE
             end
         else
-            bound = AwsIO.socket_get_bound_address(sock1_val)
-            @test bound isa AwsIO.SocketEndpoint
-            if bound isa AwsIO.SocketEndpoint && sock2_val !== nothing
-                dup_endpoint = AwsIO.SocketEndpoint("127.0.0.1", Int(bound.port))
-                res = AwsIO.socket_bind(sock2_val, AwsIO.SocketBindOptions(dup_endpoint))
-                @test res isa AwsIO.ErrorResult
-                res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_ADDRESS_IN_USE
+            bound = Reseau.socket_get_bound_address(sock1_val)
+            @test bound isa Reseau.SocketEndpoint
+            if bound isa Reseau.SocketEndpoint && sock2_val !== nothing
+                dup_endpoint = Reseau.SocketEndpoint("127.0.0.1", Int(bound.port))
+                res = Reseau.socket_bind(sock2_val, Reseau.SocketBindOptions(dup_endpoint))
+                @test res isa Reseau.ErrorResult
+                res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_ADDRESS_IN_USE
             end
         end
     finally
-        sock2_val !== nothing && AwsIO.socket_close(sock2_val)
-        AwsIO.socket_close(sock1_val)
+        sock2_val !== nothing && Reseau.socket_close(sock2_val)
+        Reseau.socket_close(sock1_val)
     end
 end
 
 @testset "incoming tcp socket errors" begin
     # Use LOCAL on macOS to test POSIX bind error paths
     @static if Sys.isapple()
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
     else
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
     end
-    sock = AwsIO.socket_init(opts)
-    sock_val = sock isa AwsIO.Socket ? sock : nothing
+    sock = Reseau.socket_init(opts)
+    sock_val = sock isa Reseau.Socket ? sock : nothing
     @test sock_val !== nothing
     if sock_val === nothing
         return
@@ -2260,35 +2260,35 @@ end
 
     @static if Sys.isapple()
         # Test bind to a path in a non-existent directory
-        endpoint = AwsIO.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
-        res = AwsIO.socket_bind(sock_val, AwsIO.SocketBindOptions(endpoint))
-        @test res isa AwsIO.ErrorResult
+        endpoint = Reseau.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
+        res = Reseau.socket_bind(sock_val, Reseau.SocketBindOptions(endpoint))
+        @test res isa Reseau.ErrorResult
     else
-        endpoint = AwsIO.SocketEndpoint("127.0.0.1", 80)
-        res = AwsIO.socket_bind(sock_val, AwsIO.SocketBindOptions(endpoint))
+        endpoint = Reseau.SocketEndpoint("127.0.0.1", 80)
+        res = Reseau.socket_bind(sock_val, Reseau.SocketBindOptions(endpoint))
         if res === nothing
             # likely running with elevated privileges; skip assertion
             @test true
         else
             @static if Sys.iswindows()
-                @test res.code == AwsIO.ERROR_NO_PERMISSION ||
-                    res.code == AwsIO.ERROR_IO_SOCKET_ADDRESS_IN_USE
+                @test res.code == Reseau.ERROR_NO_PERMISSION ||
+                    res.code == Reseau.ERROR_IO_SOCKET_ADDRESS_IN_USE
             else
-                @test res.code == AwsIO.ERROR_NO_PERMISSION
+                @test res.code == Reseau.ERROR_NO_PERMISSION
             end
         end
     end
-    AwsIO.socket_close(sock_val)
+    Reseau.socket_close(sock_val)
 end
 
 @testset "incoming udp socket errors" begin
     @static if Sys.isapple()
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.LOCAL)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.DGRAM, domain = Reseau.SocketDomain.LOCAL)
     else
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.DGRAM, domain = AwsIO.SocketDomain.IPV4)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.DGRAM, domain = Reseau.SocketDomain.IPV4)
     end
-    sock = AwsIO.socket_init(opts)
-    sock_val = sock isa AwsIO.Socket ? sock : nothing
+    sock = Reseau.socket_init(opts)
+    sock_val = sock isa Reseau.Socket ? sock : nothing
     @test sock_val !== nothing
     if sock_val === nothing
         return
@@ -2296,45 +2296,45 @@ end
 
     @static if Sys.isapple()
         # Test bind to an invalid/non-existent path
-        endpoint = AwsIO.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
-        res = AwsIO.socket_bind(sock_val, AwsIO.SocketBindOptions(endpoint))
-        @test res isa AwsIO.ErrorResult
+        endpoint = Reseau.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
+        res = Reseau.socket_bind(sock_val, Reseau.SocketBindOptions(endpoint))
+        @test res isa Reseau.ErrorResult
     else
-        endpoint = AwsIO.SocketEndpoint("127.0", 80)
-        res = AwsIO.socket_bind(sock_val, AwsIO.SocketBindOptions(endpoint))
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_IO_SOCKET_INVALID_ADDRESS
+        endpoint = Reseau.SocketEndpoint("127.0", 80)
+        res = Reseau.socket_bind(sock_val, Reseau.SocketBindOptions(endpoint))
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_SOCKET_INVALID_ADDRESS
     end
-    AwsIO.socket_close(sock_val)
+    Reseau.socket_close(sock_val)
 end
 
 @testset "outgoing local socket errors" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
-    sock = AwsIO.socket_init(opts)
-    sock_val = sock isa AwsIO.Socket ? sock : nothing
+    opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
+    sock = Reseau.socket_init(opts)
+    sock_val = sock isa Reseau.Socket ? sock : nothing
     @test sock_val !== nothing
     if sock_val === nothing
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
         return
     end
 
-    endpoint = AwsIO.SocketEndpoint()
-    AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
+    endpoint = Reseau.SocketEndpoint()
+    Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
     # Ensure path does not exist
-    local_path = AwsIO.get_address(endpoint)
+    local_path = Reseau.get_address(endpoint)
     isfile(local_path) && rm(local_path; force = true)
 
     err_code = Ref{Int}(0)
     done = Threads.Atomic{Bool}(false)
-    connect_opts = AwsIO.SocketConnectOptions(
+    connect_opts = Reseau.SocketConnectOptions(
         endpoint;
         event_loop = el_val,
         on_connection_result = (sock, err, ud) -> begin
@@ -2344,81 +2344,81 @@ end
         end,
     )
 
-    res = AwsIO.socket_connect(sock_val, connect_opts)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.socket_connect(sock_val, connect_opts)
+    if res isa Reseau.ErrorResult
         err_code[] = res.code
         done[] = true
     end
 
     @test wait_for_flag(done)
     @static if Sys.iswindows()
-        @test err_code[] == AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
-            err_code[] == AwsIO.ERROR_FILE_INVALID_PATH ||
-            err_code[] == AwsIO.ERROR_IO_SOCKET_NOT_CONNECTED
+        @test err_code[] == Reseau.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
+            err_code[] == Reseau.ERROR_FILE_INVALID_PATH ||
+            err_code[] == Reseau.ERROR_IO_SOCKET_NOT_CONNECTED
     else
-        @test err_code[] == AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
-            err_code[] == AwsIO.ERROR_FILE_INVALID_PATH
+        @test err_code[] == Reseau.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
+            err_code[] == Reseau.ERROR_FILE_INVALID_PATH
     end
 
-    AwsIO.socket_close(sock_val)
-    AwsIO.event_loop_destroy!(el_val)
+    Reseau.socket_close(sock_val)
+    Reseau.event_loop_destroy!(el_val)
 end
 
 @testset "outgoing tcp socket error" begin
-    el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    el_val = el isa AwsIO.EventLoop ? el : nothing
+    el = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    el_val = el isa Reseau.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test AwsIO.event_loop_run!(el_val) === nothing
+    @test Reseau.event_loop_run!(el_val) === nothing
 
     @static if Sys.isapple()
         # On macOS, use LOCAL domain (POSIX path) with a nonexistent socket
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
-        endpoint = AwsIO.SocketEndpoint()
-        AwsIO.socket_endpoint_init_local_address_for_test!(endpoint)
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
+        endpoint = Reseau.SocketEndpoint()
+        Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
         # Don't actually create a listener — the path won't exist
         connect_endpoint = endpoint
     else
-        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
-        temp = AwsIO.socket_init(opts)
-        temp_val = temp isa AwsIO.Socket ? temp : nothing
+        opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4)
+        temp = Reseau.socket_init(opts)
+        temp_val = temp isa Reseau.Socket ? temp : nothing
         @test temp_val !== nothing
         if temp_val === nothing
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.event_loop_destroy!(el_val)
             return
         end
 
         port = 0
         try
-            @test AwsIO.socket_bind(temp_val, AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))) === nothing
-            bound = AwsIO.socket_get_bound_address(temp_val)
-            if bound isa AwsIO.SocketEndpoint
+            @test Reseau.socket_bind(temp_val, Reseau.SocketBindOptions(Reseau.SocketEndpoint("127.0.0.1", 0))) === nothing
+            bound = Reseau.socket_get_bound_address(temp_val)
+            if bound isa Reseau.SocketEndpoint
                 port = Int(bound.port)
             end
         finally
-            AwsIO.socket_close(temp_val)
+            Reseau.socket_close(temp_val)
         end
 
         if port == 0
-            AwsIO.event_loop_destroy!(el_val)
+            Reseau.event_loop_destroy!(el_val)
             return
         end
-        connect_endpoint = AwsIO.SocketEndpoint("127.0.0.1", port)
+        connect_endpoint = Reseau.SocketEndpoint("127.0.0.1", port)
     end
 
-    sock = AwsIO.socket_init(opts)
-    sock_val = sock isa AwsIO.Socket ? sock : nothing
+    sock = Reseau.socket_init(opts)
+    sock_val = sock isa Reseau.Socket ? sock : nothing
     @test sock_val !== nothing
     if sock_val === nothing
-        AwsIO.event_loop_destroy!(el_val)
+        Reseau.event_loop_destroy!(el_val)
         return
     end
 
     err_code = Ref{Int}(0)
     done = Threads.Atomic{Bool}(false)
-    connect_opts = AwsIO.SocketConnectOptions(
+    connect_opts = Reseau.SocketConnectOptions(
         connect_endpoint;
         event_loop = el_val,
         on_connection_result = (sock, err, ud) -> begin
@@ -2428,16 +2428,16 @@ end
         end,
     )
 
-    res = AwsIO.socket_connect(sock_val, connect_opts)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.socket_connect(sock_val, connect_opts)
+    if res isa Reseau.ErrorResult
         err_code[] = res.code
         done[] = true
     end
 
     @test wait_for_flag(done)
-    @test err_code[] == AwsIO.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
-        err_code[] == AwsIO.ERROR_FILE_INVALID_PATH
+    @test err_code[] == Reseau.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
+        err_code[] == Reseau.ERROR_FILE_INVALID_PATH
 
-    AwsIO.socket_close(sock_val)
-    AwsIO.event_loop_destroy!(el_val)
+    Reseau.socket_close(sock_val)
+    Reseau.event_loop_destroy!(el_val)
 end

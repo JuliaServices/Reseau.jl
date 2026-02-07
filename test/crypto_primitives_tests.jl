@@ -1,7 +1,7 @@
 using Test
 using Random
 using SHA
-using AwsIO
+using Reseau
 using LibAwsCal
 
 const TEST_RSA_PEM = """
@@ -39,34 +39,34 @@ function _hkdf_ref_sha512(ikm::Vector{UInt8}, salt::Vector{UInt8}, info::Vector{
     return okm[1:out_len]
 end
 
-function _buf_to_vec(buf::AwsIO.ByteBuffer)
-    cursor = AwsIO.byte_cursor_from_buf(buf)
+function _buf_to_vec(buf::Reseau.ByteBuffer)
+    cursor = Reseau.byte_cursor_from_buf(buf)
     len = Int(cursor.len)
     len == 0 && return UInt8[]
     out = Vector{UInt8}(undef, len)
-    AwsIO.byte_cursor_read(Ref(cursor), out, len)
+    Reseau.byte_cursor_read(Ref(cursor), out, len)
     return out
 end
 
 function _pem_private_key_der(pem::String)
-    parsed = AwsIO.pem_parse(pem)
-    @test !(parsed isa AwsIO.ErrorResult)
+    parsed = Reseau.pem_parse(pem)
+    @test !(parsed isa Reseau.ErrorResult)
     parsed isa Vector || return UInt8[]
-    keys = AwsIO.pem_filter_private_keys(parsed)
+    keys = Reseau.pem_filter_private_keys(parsed)
     @test length(keys) == 1
     length(keys) == 1 || return UInt8[]
     return _buf_to_vec(keys[1].data)
 end
 
 @testset "crypto primitives - HKDF SHA512" begin
-    ikm = Vector{UInt8}(codeunits("awsio-hkdf-ikm"))
-    salt = Vector{UInt8}(codeunits("awsio-hkdf-salt"))
-    info = Vector{UInt8}(codeunits("awsio-hkdf-info"))
+    ikm = Vector{UInt8}(codeunits("reseau-hkdf-ikm"))
+    salt = Vector{UInt8}(codeunits("reseau-hkdf-salt"))
+    info = Vector{UInt8}(codeunits("reseau-hkdf-info"))
     expected = _hkdf_ref_sha512(ikm, salt, info, 42)
 
-    derived = AwsIO.hkdf_derive(AwsIO.HkdfHmacType.SHA512, ikm; salt = salt, info = info, length = 42)
-    @test !(derived isa AwsIO.ErrorResult)
-    if derived isa AwsIO.ByteBuffer
+    derived = Reseau.hkdf_derive(Reseau.HkdfHmacType.SHA512, ikm; salt = salt, info = info, length = 42)
+    @test !(derived isa Reseau.ErrorResult)
+    if derived isa Reseau.ByteBuffer
         @test _buf_to_vec(derived) == expected
     end
 end
@@ -78,8 +78,8 @@ end
     aad = rand(UInt8, 16)
     plaintext = rand(UInt8, 128)
 
-    enc = AwsIO.aes_gcm_256_encrypt(key, iv, aad, plaintext)
-    if enc isa AwsIO.ErrorResult
+    enc = Reseau.aes_gcm_256_encrypt(key, iv, aad, plaintext)
+    if enc isa Reseau.ErrorResult
         unsupported = Int(LibAwsCal.aws_cal_errors.AWS_ERROR_CAL_UNSUPPORTED_ALGORITHM)
         @test enc.code == unsupported
         return
@@ -87,30 +87,30 @@ end
 
     ciphertext = enc.ciphertext
     tag = enc.tag
-    dec = AwsIO.aes_gcm_256_decrypt(key, iv, aad, _buf_to_vec(ciphertext), _buf_to_vec(tag))
-    @test dec isa AwsIO.ByteBuffer
-    if dec isa AwsIO.ByteBuffer
+    dec = Reseau.aes_gcm_256_decrypt(key, iv, aad, _buf_to_vec(ciphertext), _buf_to_vec(tag))
+    @test dec isa Reseau.ByteBuffer
+    if dec isa Reseau.ByteBuffer
         @test _buf_to_vec(dec) == plaintext
     end
 
     bad_tag = _buf_to_vec(tag)
     bad_tag[1] = bad_tag[1] ⊻ 0xFF
-    bad_dec = AwsIO.aes_gcm_256_decrypt(key, iv, aad, _buf_to_vec(ciphertext), bad_tag)
-    @test bad_dec isa AwsIO.ErrorResult
+    bad_dec = Reseau.aes_gcm_256_decrypt(key, iv, aad, _buf_to_vec(ciphertext), bad_tag)
+    @test bad_dec isa Reseau.ErrorResult
 end
 
 @testset "crypto primitives - ECC sign/verify" begin
     Random.seed!(5678)
-    pair = AwsIO.ecc_key_pair_generate(AwsIO.EccCurveName.P256)
-    @test pair isa AwsIO.EccKeyPair
-    pair isa AwsIO.EccKeyPair || return
+    pair = Reseau.ecc_key_pair_generate(Reseau.EccCurveName.P256)
+    @test pair isa Reseau.EccKeyPair
+    pair isa Reseau.EccKeyPair || return
 
     message = rand(UInt8, 128)
-    signature = AwsIO.ecc_sign(pair, message)
-    @test signature isa AwsIO.ByteBuffer
-    signature isa AwsIO.ByteBuffer || return
+    signature = Reseau.ecc_sign(pair, message)
+    @test signature isa Reseau.ByteBuffer
+    signature isa Reseau.ByteBuffer || return
 
-    verified = AwsIO.ecc_verify(pair, message, signature)
+    verified = Reseau.ecc_verify(pair, message, signature)
     @test verified === true
 end
 
@@ -119,55 +119,55 @@ end
     key_der = _pem_private_key_der(TEST_RSA_PEM)
     isempty(key_der) && return
 
-    pair = AwsIO.rsa_key_pair_new_from_private_key_pkcs8(key_der)
-    @test pair isa AwsIO.RsaKeyPair
-    pair isa AwsIO.RsaKeyPair || return
+    pair = Reseau.rsa_key_pair_new_from_private_key_pkcs8(key_der)
+    @test pair isa Reseau.RsaKeyPair
+    pair isa Reseau.RsaKeyPair || return
 
-    public_key = AwsIO.rsa_key_pair_get_public_key(pair)
-    if public_key isa AwsIO.ErrorResult
-        @test public_key.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+    public_key = Reseau.rsa_key_pair_get_public_key(pair)
+    if public_key isa Reseau.ErrorResult
+        @test public_key.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
         pub_pair = pair
     else
-        @test public_key isa AwsIO.ByteBuffer
-        public_key isa AwsIO.ByteBuffer || return
-        pub_pair = AwsIO.rsa_key_pair_new_from_public_key_pkcs1(_buf_to_vec(public_key))
-        @test pub_pair isa AwsIO.RsaKeyPair
-        pub_pair isa AwsIO.RsaKeyPair || return
+        @test public_key isa Reseau.ByteBuffer
+        public_key isa Reseau.ByteBuffer || return
+        pub_pair = Reseau.rsa_key_pair_new_from_public_key_pkcs1(_buf_to_vec(public_key))
+        @test pub_pair isa Reseau.RsaKeyPair
+        pub_pair isa Reseau.RsaKeyPair || return
     end
 
     message = rand(UInt8, 64)
     digest = SHA.sha256(message)
-    signature = AwsIO.rsa_key_pair_sign_message(
+    signature = Reseau.rsa_key_pair_sign_message(
         pair,
-        AwsIO.RsaSignatureAlgorithm.PKCS1_5_SHA256,
+        Reseau.RsaSignatureAlgorithm.PKCS1_5_SHA256,
         digest,
     )
-    @test signature isa AwsIO.ByteBuffer
-    signature isa AwsIO.ByteBuffer || return
+    @test signature isa Reseau.ByteBuffer
+    signature isa Reseau.ByteBuffer || return
 
-    verified = AwsIO.rsa_key_pair_verify_signature(
+    verified = Reseau.rsa_key_pair_verify_signature(
         pub_pair,
-        AwsIO.RsaSignatureAlgorithm.PKCS1_5_SHA256,
+        Reseau.RsaSignatureAlgorithm.PKCS1_5_SHA256,
         digest,
         _buf_to_vec(signature),
     )
     @test verified === true
 
     plaintext = rand(UInt8, 32)
-    encrypted = AwsIO.rsa_key_pair_encrypt(
+    encrypted = Reseau.rsa_key_pair_encrypt(
         pub_pair,
-        AwsIO.RsaEncryptionAlgorithm.PKCS1_5,
+        Reseau.RsaEncryptionAlgorithm.PKCS1_5,
         plaintext,
     )
-    @test encrypted isa AwsIO.ByteBuffer
-    encrypted isa AwsIO.ByteBuffer || return
+    @test encrypted isa Reseau.ByteBuffer
+    encrypted isa Reseau.ByteBuffer || return
 
-    decrypted = AwsIO.rsa_key_pair_decrypt(
+    decrypted = Reseau.rsa_key_pair_decrypt(
         pair,
-        AwsIO.RsaEncryptionAlgorithm.PKCS1_5,
+        Reseau.RsaEncryptionAlgorithm.PKCS1_5,
         _buf_to_vec(encrypted),
     )
-    @test decrypted isa AwsIO.ByteBuffer
-    decrypted isa AwsIO.ByteBuffer || return
+    @test decrypted isa Reseau.ByteBuffer
+    decrypted isa Reseau.ByteBuffer || return
     @test _buf_to_vec(decrypted) == plaintext
 end

@@ -1,4 +1,4 @@
-# ChannelBuffer - IO adapter for AwsIO channels
+# ChannelBuffer - IO adapter for Reseau channels
 
 mutable struct ChannelBuffer <: IO
     channel::Union{Channel, Nothing}
@@ -623,12 +623,12 @@ function Base.unsafe_write(io::ChannelBuffer, p::Ptr{UInt8}, n::UInt)
     return nbytes
 end
 
-function AwsIO.setchannelslot!(handler::ChannelBufferHandler, slot::ChannelSlot)::Nothing
+function Reseau.setchannelslot!(handler::ChannelBufferHandler, slot::ChannelSlot)::Nothing
     handler.slot = slot
     return nothing
 end
 
-function AwsIO.handler_process_read_message(
+function Reseau.handler_process_read_message(
         handler::ChannelBufferHandler,
         slot::ChannelSlot,
         message::IoMessage,
@@ -650,7 +650,7 @@ function AwsIO.handler_process_read_message(
     return nothing
 end
 
-function AwsIO.handler_process_write_message(
+function Reseau.handler_process_write_message(
         handler::ChannelBufferHandler,
         slot::ChannelSlot,
         message::IoMessage,
@@ -662,7 +662,7 @@ function AwsIO.handler_process_write_message(
     return ErrorResult(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
 end
 
-function AwsIO.handler_increment_read_window(
+function Reseau.handler_increment_read_window(
         handler::ChannelBufferHandler,
         slot::ChannelSlot,
         size::Csize_t,
@@ -671,7 +671,7 @@ function AwsIO.handler_increment_read_window(
     return channel_slot_increment_read_window!(slot, size)
 end
 
-function AwsIO.handler_shutdown(
+function Reseau.handler_shutdown(
         handler::ChannelBufferHandler,
         slot::ChannelSlot,
         direction::ChannelDirection.T,
@@ -682,16 +682,16 @@ function AwsIO.handler_shutdown(
     return channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
 end
 
-function AwsIO.handler_initial_window_size(handler::ChannelBufferHandler)::Csize_t
+function Reseau.handler_initial_window_size(handler::ChannelBufferHandler)::Csize_t
     return Csize_t(handler.io.initial_window_size)
 end
 
-function AwsIO.handler_message_overhead(handler::ChannelBufferHandler)::Csize_t
+function Reseau.handler_message_overhead(handler::ChannelBufferHandler)::Csize_t
     _ = handler
     return Csize_t(0)
 end
 
-function AwsIO.handler_destroy(handler::ChannelBufferHandler)::Nothing
+function Reseau.handler_destroy(handler::ChannelBufferHandler)::Nothing
     _ = handler
     return nothing
 end

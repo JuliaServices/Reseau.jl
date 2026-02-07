@@ -1,5 +1,5 @@
 using Test
-using AwsIO
+using Reseau
 
 function _wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
@@ -14,166 +14,166 @@ function _wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
 end
 
 @testset "Future basics" begin
-    future = AwsIO.Future{Int}()
+    future = Reseau.Future{Int}()
 
-    @test !AwsIO.future_is_done(future)
-    @test !AwsIO.future_is_success(future)
-    @test !AwsIO.future_is_failed(future)
-    @test !AwsIO.future_is_cancelled(future)
+    @test !Reseau.future_is_done(future)
+    @test !Reseau.future_is_success(future)
+    @test !Reseau.future_is_failed(future)
+    @test !Reseau.future_is_cancelled(future)
 
     on_done = Ref(false)
-    AwsIO.future_on_complete!(future, (f, ud) -> (ud[] = true), on_done)
+    Reseau.future_on_complete!(future, (f, ud) -> (ud[] = true), on_done)
 
-    @test AwsIO.future_complete!(future, 42) === nothing
-    @test AwsIO.future_is_done(future)
-    @test AwsIO.future_is_success(future)
-    @test AwsIO.future_get_result(future) == 42
+    @test Reseau.future_complete!(future, 42) === nothing
+    @test Reseau.future_is_done(future)
+    @test Reseau.future_is_success(future)
+    @test Reseau.future_get_result(future) == 42
     @test on_done[]
 
     immediate = Ref(false)
-    AwsIO.future_on_complete!(future, (f, ud) -> (ud[] = true), immediate)
+    Reseau.future_on_complete!(future, (f, ud) -> (ud[] = true), immediate)
     @test immediate[]
 
-    err = AwsIO.future_complete!(future, 7)
-    @test err isa AwsIO.ErrorResult
-    @test err.code == AwsIO.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE
+    err = Reseau.future_complete!(future, 7)
+    @test err isa Reseau.ErrorResult
+    @test err.code == Reseau.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE
 end
 
 @testset "Future fail/cancel" begin
-    failed = AwsIO.Future{Int}()
-    @test AwsIO.future_fail!(failed, AwsIO.ERROR_IO_SOCKET_TIMEOUT) === nothing
-    @test AwsIO.future_is_failed(failed)
-    @test AwsIO.future_get_error(failed) == AwsIO.ERROR_IO_SOCKET_TIMEOUT
+    failed = Reseau.Future{Int}()
+    @test Reseau.future_fail!(failed, Reseau.ERROR_IO_SOCKET_TIMEOUT) === nothing
+    @test Reseau.future_is_failed(failed)
+    @test Reseau.future_get_error(failed) == Reseau.ERROR_IO_SOCKET_TIMEOUT
 
-    cancelled = AwsIO.Future{Int}()
-    @test AwsIO.future_cancel!(cancelled) === nothing
-    @test AwsIO.future_is_cancelled(cancelled)
-    @test AwsIO.future_get_error(cancelled) == AwsIO.ERROR_IO_OPERATION_CANCELLED
+    cancelled = Reseau.Future{Int}()
+    @test Reseau.future_cancel!(cancelled) === nothing
+    @test Reseau.future_is_cancelled(cancelled)
+    @test Reseau.future_get_error(cancelled) == Reseau.ERROR_IO_OPERATION_CANCELLED
 
-    noop = AwsIO.future_cancel!(cancelled)
+    noop = Reseau.future_cancel!(cancelled)
     @test noop === nothing
 end
 
 @testset "Future wait/any/all" begin
-    pending = AwsIO.Future{Int}()
-    @test !AwsIO.future_wait(pending; timeout_ms = 1)
+    pending = Reseau.Future{Int}()
+    @test !Reseau.future_wait(pending; timeout_ms = 1)
 
-    done = AwsIO.Future{Int}()
-    @test AwsIO.future_complete!(done, 5) === nothing
-    @test AwsIO.future_wait(done; timeout_ms = 1)
+    done = Reseau.Future{Int}()
+    @test Reseau.future_complete!(done, 5) === nothing
+    @test Reseau.future_wait(done; timeout_ms = 1)
 
-    f1 = AwsIO.Future{Int}()
-    f2 = AwsIO.Future{Int}()
-    AwsIO.future_complete!(f2, 9)
-    @test AwsIO.future_any([f1, f2]; timeout_ms = 10) == 2
+    f1 = Reseau.Future{Int}()
+    f2 = Reseau.Future{Int}()
+    Reseau.future_complete!(f2, 9)
+    @test Reseau.future_any([f1, f2]; timeout_ms = 10) == 2
 
-    f3 = AwsIO.Future{Int}()
-    AwsIO.future_complete!(f1, 1)
-    AwsIO.future_complete!(f3, 3)
-    @test AwsIO.future_all([f1, f2, f3])
+    f3 = Reseau.Future{Int}()
+    Reseau.future_complete!(f1, 1)
+    Reseau.future_complete!(f3, 3)
+    @test Reseau.future_all([f1, f2, f3])
 end
 
 @testset "Future chaining" begin
-    base = AwsIO.Future{Int}()
-    chained = AwsIO.future_then(base, x -> x + 1)
-    AwsIO.future_complete!(base, 41)
-    @test AwsIO.future_is_success(chained)
-    @test AwsIO.future_get_result(chained) == 42
+    base = Reseau.Future{Int}()
+    chained = Reseau.future_then(base, x -> x + 1)
+    Reseau.future_complete!(base, 41)
+    @test Reseau.future_is_success(chained)
+    @test Reseau.future_get_result(chained) == 42
 
-    base_fail = AwsIO.Future{Int}()
-    chained_fail = AwsIO.future_then(base_fail, x -> x + 1)
-    AwsIO.future_fail!(base_fail, AwsIO.ERROR_IO_SOCKET_TIMEOUT)
-    @test AwsIO.future_is_failed(chained_fail)
-    @test AwsIO.future_get_error(chained_fail) == AwsIO.ERROR_IO_SOCKET_TIMEOUT
+    base_fail = Reseau.Future{Int}()
+    chained_fail = Reseau.future_then(base_fail, x -> x + 1)
+    Reseau.future_fail!(base_fail, Reseau.ERROR_IO_SOCKET_TIMEOUT)
+    @test Reseau.future_is_failed(chained_fail)
+    @test Reseau.future_get_error(chained_fail) == Reseau.ERROR_IO_SOCKET_TIMEOUT
 
-    base_throw = AwsIO.Future{Int}()
-    chained_throw = AwsIO.future_then(base_throw, x -> error("boom"))
-    AwsIO.future_complete!(base_throw, 1)
-    @test AwsIO.future_is_failed(chained_throw)
-    @test AwsIO.future_get_error(chained_throw) == AwsIO.ERROR_UNKNOWN
+    base_throw = Reseau.Future{Int}()
+    chained_throw = Reseau.future_then(base_throw, x -> error("boom"))
+    Reseau.future_complete!(base_throw, 1)
+    @test Reseau.future_is_failed(chained_throw)
+    @test Reseau.future_get_error(chained_throw) == Reseau.ERROR_UNKNOWN
 end
 
 @testset "Promise" begin
-    promise = AwsIO.Promise{Int}()
-    future = AwsIO.promise_get_future(promise)
-    @test AwsIO.promise_complete!(promise, 99) === nothing
-    @test AwsIO.future_is_success(future)
-    @test AwsIO.future_get_result(future) == 99
+    promise = Reseau.Promise{Int}()
+    future = Reseau.promise_get_future(promise)
+    @test Reseau.promise_complete!(promise, 99) === nothing
+    @test Reseau.future_is_success(future)
+    @test Reseau.future_get_result(future) == 99
 
-    p_fail = AwsIO.Promise{Int}()
-    f_fail = AwsIO.promise_get_future(p_fail)
-    @test AwsIO.promise_fail!(p_fail, AwsIO.ERROR_IO_SOCKET_TIMEOUT) === nothing
-    @test AwsIO.future_is_failed(f_fail)
-    @test AwsIO.future_get_error(f_fail) == AwsIO.ERROR_IO_SOCKET_TIMEOUT
+    p_fail = Reseau.Promise{Int}()
+    f_fail = Reseau.promise_get_future(p_fail)
+    @test Reseau.promise_fail!(p_fail, Reseau.ERROR_IO_SOCKET_TIMEOUT) === nothing
+    @test Reseau.future_is_failed(f_fail)
+    @test Reseau.future_get_error(f_fail) == Reseau.ERROR_IO_SOCKET_TIMEOUT
 end
 
 @testset "Future callback registration" begin
-    pending = AwsIO.Future{Bool}()
+    pending = Reseau.Future{Bool}()
     called = Ref(false)
-    @test AwsIO.future_on_complete_if_not_done!(pending, (f, ud) -> (ud[] = true), called)
-    @test_throws ErrorException AwsIO.future_on_complete!(pending, (f, ud) -> nothing, nothing)
-    @test_throws ErrorException AwsIO.future_on_complete_if_not_done!(pending, (f, ud) -> nothing, nothing)
-    AwsIO.future_complete!(pending, true)
+    @test Reseau.future_on_complete_if_not_done!(pending, (f, ud) -> (ud[] = true), called)
+    @test_throws ErrorException Reseau.future_on_complete!(pending, (f, ud) -> nothing, nothing)
+    @test_throws ErrorException Reseau.future_on_complete_if_not_done!(pending, (f, ud) -> nothing, nothing)
+    Reseau.future_complete!(pending, true)
     @test called[]
 
-    done = AwsIO.Future{Bool}()
-    AwsIO.future_complete!(done, true)
+    done = Reseau.Future{Bool}()
+    Reseau.future_complete!(done, true)
     called2 = Ref(false)
-    @test !AwsIO.future_on_complete_if_not_done!(done, (f, ud) -> (ud[] = true), called2)
+    @test !Reseau.future_on_complete_if_not_done!(done, (f, ud) -> (ud[] = true), called2)
     @test !called2[]
 end
 
 @testset "Future event loop callback" begin
-    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
-    future = AwsIO.Future{Int}()
+    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = Reseau.event_loop_group_get_next_loop(elg)
+    future = Reseau.Future{Int}()
     called = Ref(false)
-    AwsIO.future_on_event_loop!(future, event_loop, (f, ud) -> (ud[] = true), called)
-    AwsIO.future_complete!(future, 1)
+    Reseau.future_on_event_loop!(future, event_loop, (f, ud) -> (ud[] = true), called)
+    Reseau.future_complete!(future, 1)
     @test _wait_for_pred(() -> called[])
 
-    done = AwsIO.Future{Int}()
-    AwsIO.future_complete!(done, 2)
+    done = Reseau.Future{Int}()
+    Reseau.future_complete!(done, 2)
     called2 = Ref(false)
-    AwsIO.future_on_event_loop!(done, event_loop, (f, ud) -> (ud[] = true), called2)
+    Reseau.future_on_event_loop!(done, event_loop, (f, ud) -> (ud[] = true), called2)
     @test _wait_for_pred(() -> called2[])
 
-    AwsIO.event_loop_group_destroy!(elg)
+    Reseau.event_loop_group_destroy!(elg)
 end
 
 @testset "Future channel callback" begin
-    elg = AwsIO.EventLoopGroup(AwsIO.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = AwsIO.event_loop_group_get_next_loop(elg)
-    channel = AwsIO.Channel(event_loop, nothing)
+    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = Reseau.event_loop_group_get_next_loop(elg)
+    channel = Reseau.Channel(event_loop, nothing)
 
-    future = AwsIO.Future{Int}()
+    future = Reseau.Future{Int}()
     called = Ref(false)
-    AwsIO.future_on_channel!(future, channel, (f, ud) -> (ud[] = true), called)
-    AwsIO.future_complete!(future, 1)
+    Reseau.future_on_channel!(future, channel, (f, ud) -> (ud[] = true), called)
+    Reseau.future_complete!(future, 1)
     @test _wait_for_pred(() -> called[])
 
-    done = AwsIO.Future{Int}()
-    AwsIO.future_complete!(done, 2)
+    done = Reseau.Future{Int}()
+    Reseau.future_complete!(done, 2)
     called2 = Ref(false)
-    AwsIO.future_on_channel!(done, channel, (f, ud) -> (ud[] = true), called2)
+    Reseau.future_on_channel!(done, channel, (f, ud) -> (ud[] = true), called2)
     @test _wait_for_pred(() -> called2[])
 
-    AwsIO.event_loop_group_destroy!(elg)
+    Reseau.event_loop_group_destroy!(elg)
 end
 
 @testset "Future wait ns" begin
-    pending = AwsIO.Future{Bool}()
-    @test !AwsIO.future_wait_ns(pending; timeout_ns = 1_000_000)
+    pending = Reseau.Future{Bool}()
+    @test !Reseau.future_wait_ns(pending; timeout_ns = 1_000_000)
 
-    done = AwsIO.Future{Bool}()
-    AwsIO.future_complete!(done, true)
-    @test AwsIO.future_wait_ns(done; timeout_ns = 1_000_000)
+    done = Reseau.Future{Bool}()
+    Reseau.future_complete!(done, true)
+    @test Reseau.future_wait_ns(done; timeout_ns = 1_000_000)
 end
 
 @testset "Future move semantics" begin
-    future = AwsIO.Future{Int}()
-    AwsIO.future_complete!(future, 10)
-    @test AwsIO.future_get_result_by_move!(future) == 10
-    @test_throws ErrorException AwsIO.future_get_result(future)
-    @test_throws ErrorException AwsIO.future_get_result_by_move!(future)
+    future = Reseau.Future{Int}()
+    Reseau.future_complete!(future, 10)
+    @test Reseau.future_get_result_by_move!(future) == 10
+    @test_throws ErrorException Reseau.future_get_result(future)
+    @test_throws ErrorException Reseau.future_get_result_by_move!(future)
 end

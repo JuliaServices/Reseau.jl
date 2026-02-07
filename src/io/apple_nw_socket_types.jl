@@ -8,7 +8,7 @@
     const _COREFOUNDATION_LIB = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 
     # Backwards-compat feature flag:
-    # Downstream packages historically checked `AwsIO._NW_SHIM_LIB != ""` to
+    # Downstream packages historically checked `Reseau._NW_SHIM_LIB != ""` to
     # decide whether Apple Network.framework sockets were available. The shim
     # shared library has been removed; keep a non-empty sentinel on macOS.
     const _NW_SHIM_LIB = "<builtin>"
@@ -75,7 +75,7 @@
         parameters::nw_parameters_t
         parameters_context::Union{NWParametersContext, Nothing}
         mode::NWSocketMode.T
-        read_queue::Deque{ReadQueueNode}
+        read_queue::Vector{ReadQueueNode}
         on_readable::Union{Function, Nothing}
         on_readable_user_data::Any
         on_connection_result::Union{Function, Nothing}
@@ -111,7 +111,7 @@
             C_NULL,
             nothing,
             NWSocketMode.CONNECTION,
-            Deque{ReadQueueNode}(16),
+            ReadQueueNode[],
             nothing,
             nothing,
             nothing,

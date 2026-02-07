@@ -1,13 +1,13 @@
-module AwsIOS2NExt
+module ReseauS2NExt
 
-using AwsIO
+using Reseau
 import s2n_tls_jll
 
 function __init__()
     if s2n_tls_jll.is_available() && hasproperty(s2n_tls_jll, :libs2n)
-        AwsIO._register_s2n_lib!(s2n_tls_jll.libs2n)
+        Reseau._register_s2n_lib!(s2n_tls_jll.libs2n)
     end
     return nothing
 end
 
-end # module AwsIOS2NExt
+end # module ReseauS2NExt

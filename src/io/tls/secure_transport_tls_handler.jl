@@ -105,7 +105,7 @@ mutable struct SecureTransportTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}}
     timeout_task::ChannelTask
     ctx::SSLContextRef
     ctx_obj::Union{TlsContext, Nothing}
-    input_queue::Deque{IoMessage}
+    input_queue::Vector{IoMessage}
     protocol::ByteBuffer
     server_name::ByteBuffer
     alpn_list::Union{String, Nothing}
@@ -518,20 +518,10 @@ function _secure_transport_negotiation_task(task::ChannelTask, handler::SecureTr
     return nothing
 end
 
-function _tls_pending_input_bytes(queue::Deque{IoMessage})::Int
+function _tls_pending_input_bytes(queue::Vector{IoMessage})::Int
     total = 0
-    queue.length == 0 && return total
-    idx = queue.head
-    cap = capacity(queue)
-    for _ in 1:queue.length
-        msg = queue.data[idx]
-        if msg !== nothing
-            total += Int(msg.message_data.len) - Int(msg.copy_mark)
-        end
-        idx += 1
-        if idx > cap
-            idx = 1
-        end
+    for msg in queue
+        total += Int(msg.message_data.len) - Int(msg.copy_mark)
     end
     return total
 end
@@ -541,8 +531,8 @@ function _secure_transport_read_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len
     requested = unsafe_load(len_ptr)
     written = Csize_t(0)
     queue = handler.input_queue
-    while !linked_list_empty(queue) && written < requested
-        message = linked_list_pop_front(queue)
+    while !isempty(queue) && written < requested
+        message = popfirst!(queue)
         message === nothing && break
         msg = message::IoMessage
         remaining_message_len = Int(msg.message_data.len) - Int(msg.copy_mark)
@@ -561,7 +551,7 @@ function _secure_transport_read_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len
                 channel_release_message_to_pool!(msg.owning_channel, msg)
             end
         else
-            linked_list_push_front(queue, msg)
+            pushfirst!(queue, msg)
         end
     end
 
@@ -693,8 +683,8 @@ end
 
 function handler_destroy(handler::SecureTransportTlsHandler)::Nothing
     delete!(_secure_transport_handler_registry, handler)
-    while !linked_list_empty(handler.input_queue)
-        msg = linked_list_pop_front(handler.input_queue)
+    while !isempty(handler.input_queue)
+        msg = popfirst!(handler.input_queue)
         if msg isa IoMessage && msg.owning_channel isa Channel
             channel_release_message_to_pool!(msg.owning_channel, msg)
         end
@@ -730,7 +720,7 @@ function handler_process_read_message(
     end
 
     if message !== nothing
-        linked_list_push_back(handler.input_queue, message)
+        push!(handler.input_queue, message)
 
         if !handler.negotiation_finished
             message_len = message.message_data.len
@@ -895,7 +885,7 @@ function handler_shutdown(
     if direction == ChannelDirection.READ
         if !abort_immediately &&
                 handler.negotiation_finished &&
-                !linked_list_empty(handler.input_queue) &&
+                !isempty(handler.input_queue) &&
                 slot.adj_right !== nothing
             _secure_transport_initialize_read_delay_shutdown(handler, slot, error_code)
             return nothing
@@ -907,8 +897,8 @@ function handler_shutdown(
         end
     end
 
-    while !linked_list_empty(handler.input_queue)
-        msg = linked_list_pop_front(handler.input_queue)
+    while !isempty(handler.input_queue)
+        msg = popfirst!(handler.input_queue)
         if msg isa IoMessage && msg.owning_channel isa Channel
             channel_release_message_to_pool!(msg.owning_channel, msg)
         end
@@ -1066,7 +1056,7 @@ function _secure_transport_handler_new(
         ChannelTask(),
         C_NULL,
         ctx,
-        linked_list_init(IoMessage),
+        IoMessage[],
         null_buffer(),
         null_buffer(),
         options.alpn_list === nothing ? st_ctx.alpn_list : options.alpn_list,

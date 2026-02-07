@@ -303,7 +303,7 @@
         should_signal_thread = false
 
         lock(impl.cross_thread_data.mutex)
-        push_back!(impl.cross_thread_data.tasks_to_schedule, task)
+        push!(impl.cross_thread_data.tasks_to_schedule, task)
 
         if !impl.cross_thread_data.thread_signaled
             should_signal_thread = true
@@ -370,7 +370,11 @@
         removed = false
         lock(impl.cross_thread_data.mutex)
         if !isempty(impl.cross_thread_data.tasks_to_schedule)
-            removed = remove!(impl.cross_thread_data.tasks_to_schedule, task; eq = (===))
+            idx = findfirst(x -> x === task, impl.cross_thread_data.tasks_to_schedule)
+            if idx !== nothing
+                deleteat!(impl.cross_thread_data.tasks_to_schedule, idx)
+                removed = true
+            end
         end
         unlock(impl.cross_thread_data.mutex)
 
@@ -648,7 +652,7 @@
 
         # Move tasks from cross-thread queue
         while !isempty(impl.cross_thread_data.tasks_to_schedule)
-            task = pop_front!(impl.cross_thread_data.tasks_to_schedule)
+            task = popfirst!(impl.cross_thread_data.tasks_to_schedule)
             if task !== nothing
                 push!(tasks_to_schedule, task)
             end
@@ -872,7 +876,7 @@
 
         # Cancel tasks in cross-thread queue
         while !isempty(impl.cross_thread_data.tasks_to_schedule)
-            task = pop_front!(impl.cross_thread_data.tasks_to_schedule)
+            task = popfirst!(impl.cross_thread_data.tasks_to_schedule)
             if task !== nothing
                 task_run!(task, TaskStatus.CANCELED)
             end

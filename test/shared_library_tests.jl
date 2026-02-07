@@ -1,11 +1,11 @@
 using Test
-using AwsIO
+using Reseau
 using Libdl
 
 @testset "shared library load failure" begin
-    res = AwsIO.shared_library_load("not-a-real-library.blah")
-    @test res isa AwsIO.ErrorResult
-    @test res.code == AwsIO.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
+    res = Reseau.shared_library_load("not-a-real-library.blah")
+    @test res isa Reseau.ErrorResult
+    @test res.code == Reseau.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
 end
 
 @testset "shared library load/find" begin
@@ -13,25 +13,25 @@ end
     if path === nothing || isempty(path)
         @test true
     else
-        lib = AwsIO.shared_library_load(path)
-        @test !(lib isa AwsIO.ErrorResult)
-        lib isa AwsIO.ErrorResult && return
+        lib = Reseau.shared_library_load(path)
+        @test !(lib isa Reseau.ErrorResult)
+        lib isa Reseau.ErrorResult && return
 
-        sym = AwsIO.shared_library_find_symbol(lib, "jl_errno")
-        @test !(sym isa AwsIO.ErrorResult)
-        sym isa AwsIO.ErrorResult && return
+        sym = Reseau.shared_library_find_symbol(lib, "jl_errno")
+        @test !(sym isa Reseau.ErrorResult)
+        sym isa Reseau.ErrorResult && return
         @test sym != C_NULL
 
-        bad = AwsIO.shared_library_find_symbol(lib, "not_a_real_function")
-        @test bad isa AwsIO.ErrorResult
+        bad = Reseau.shared_library_find_symbol(lib, "not_a_real_function")
+        @test bad isa Reseau.ErrorResult
 
-        AwsIO.shared_library_unload!(lib)
+        Reseau.shared_library_unload!(lib)
     end
 end
 
 @testset "shared library load default" begin
-    lib = AwsIO.shared_library_load_default()
-    @test !(lib isa AwsIO.ErrorResult)
-    lib isa AwsIO.ErrorResult && return
-    AwsIO.shared_library_unload!(lib)
+    lib = Reseau.shared_library_load_default()
+    @test !(lib isa Reseau.ErrorResult)
+    lib isa Reseau.ErrorResult && return
+    Reseau.shared_library_unload!(lib)
 end

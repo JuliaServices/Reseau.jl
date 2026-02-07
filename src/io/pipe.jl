@@ -32,7 +32,7 @@ end
 mutable struct PipeWriteEnd
     io_handle::IoHandle
     event_loop::Union{EventLoop, Nothing}
-    write_queue::Deque{SocketWriteRequest}  # Reuse socket write request
+    write_queue::Vector{SocketWriteRequest}  # Reuse socket write request
     is_subscribed::Bool
     impl::Any  # platform-specific impl data (e.g. IOCP on Windows)
 end
@@ -41,7 +41,7 @@ function PipeWriteEnd(fd::Integer)
     return PipeWriteEnd(
         IoHandle(Int32(fd)),
         nothing,
-        Deque{SocketWriteRequest}(),
+        SocketWriteRequest[],
         false,
         nothing,
     )

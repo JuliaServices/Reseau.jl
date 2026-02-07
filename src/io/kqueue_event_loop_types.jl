@@ -112,7 +112,7 @@
     mutable struct KqueueCrossThreadData
         mutex::ReentrantLock
         thread_signaled::Bool
-        tasks_to_schedule::Deque{ScheduledTask}
+        tasks_to_schedule::Vector{ScheduledTask}
         state::EventThreadState.T
     end
 
@@ -120,7 +120,7 @@
         return KqueueCrossThreadData(
             ReentrantLock(),
             false,
-            Deque{ScheduledTask}(16),
+            ScheduledTask[],
             EventThreadState.READY_TO_RUN,
         )
     end

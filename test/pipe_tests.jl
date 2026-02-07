@@ -1,18 +1,18 @@
 using Test
 using Random
-using AwsIO
+using Reseau
 
 const SMALL_BUFFER_SIZE = 4
 const GIANT_BUFFER_SIZE = 1024 * 1024 * 32
 
 @testset "IOCP pipe stub" begin
-    res = AwsIO.pipe_create_iocp()
+    res = Reseau.pipe_create_iocp()
     if Sys.iswindows()
-        @test res isa AwsIO.ErrorResult || res isa Tuple
+        @test res isa Reseau.ErrorResult || res isa Tuple
     else
-        @test res isa AwsIO.ErrorResult
+        @test res isa Reseau.ErrorResult
     end
-    res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 end
 
 @enum PipeLoopSetup::UInt8 begin
@@ -27,8 +27,8 @@ mutable struct PipeResults
 end
 
 mutable struct PipeBuffers
-    src::AwsIO.ByteBuffer
-    dst::AwsIO.ByteBuffer
+    src::Reseau.ByteBuffer
+    dst::Reseau.ByteBuffer
     num_bytes_written::Csize_t
 end
 
@@ -41,10 +41,10 @@ end
 mutable struct PipeState
     loop_setup::PipeLoopSetup
     buffer_size::Int
-    read_loop::Union{AwsIO.EventLoop, Nothing}
-    write_loop::Union{AwsIO.EventLoop, Nothing}
-    read_end::Union{AwsIO.PipeReadEnd, Nothing}
-    write_end::Union{AwsIO.PipeWriteEnd, Nothing}
+    read_loop::Union{Reseau.EventLoop, Nothing}
+    write_loop::Union{Reseau.EventLoop, Nothing}
+    read_end::Union{Reseau.PipeReadEnd, Nothing}
+    write_end::Union{Reseau.PipeWriteEnd, Nothing}
     results::PipeResults
     buffers::PipeBuffers
     readable_events::PipeReadableEvents
@@ -52,7 +52,7 @@ mutable struct PipeState
 end
 
 function PipeState(loop_setup::PipeLoopSetup, buffer_size::Integer)
-    empty_buf = AwsIO.ByteBuffer(0)
+    empty_buf = Reseau.ByteBuffer(0)
     return PipeState(
         loop_setup,
         Int(buffer_size),
@@ -62,7 +62,7 @@ function PipeState(loop_setup::PipeLoopSetup, buffer_size::Integer)
         nothing,
         PipeResults(false, false, 0),
         PipeBuffers(empty_buf, empty_buf, Csize_t(0)),
-        PipeReadableEvents(AwsIO.AWS_OP_SUCCESS, 0, 0),
+        PipeReadableEvents(Reseau.AWS_OP_SUCCESS, 0, 0),
         nothing,
     )
 end
@@ -101,67 +101,67 @@ end
 
 function _pipe_state_check_copied_data(state::PipeState)
     @test state.buffers.num_bytes_written == Csize_t(state.buffer_size)
-    @test AwsIO.byte_buf_eq(state.buffers.src, state.buffers.dst)
+    @test Reseau.byte_buf_eq(state.buffers.src, state.buffers.dst)
     return nothing
 end
 
-function _schedule_task(state::PipeState, loop::AwsIO.EventLoop, fn; delay_secs::Int = 0, serialized::Bool = false)
-    task = AwsIO.ScheduledTask((ctx, status) -> begin
-        status == AwsIO.TaskStatus.RUN_READY || return _signal_error!(state)
+function _schedule_task(state::PipeState, loop::Reseau.EventLoop, fn; delay_secs::Int = 0, serialized::Bool = false)
+    task = Reseau.ScheduledTask((ctx, status) -> begin
+        status == Reseau.TaskStatus.RUN_READY || return _signal_error!(state)
         fn(state)
         return nothing
     end, nothing; type_tag = "pipe_state_task")
 
     if delay_secs == 0
         if serialized
-            AwsIO.event_loop_schedule_task_now_serialized!(loop, task)
+            Reseau.event_loop_schedule_task_now_serialized!(loop, task)
         else
-            AwsIO.event_loop_schedule_task_now!(loop, task)
+            Reseau.event_loop_schedule_task_now!(loop, task)
         end
         return nothing
     end
 
-    now_ns = AwsIO.event_loop_current_clock_time(loop)
-    if now_ns isa AwsIO.ErrorResult
+    now_ns = Reseau.event_loop_current_clock_time(loop)
+    if now_ns isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
     run_at = UInt64(now_ns + UInt64(delay_secs) * 1_000_000_000)
-    AwsIO.event_loop_schedule_task_future!(loop, task, run_at)
+    Reseau.event_loop_schedule_task_future!(loop, task, run_at)
     return nothing
 end
 
 _schedule_read_end_task(state::PipeState, fn; delay_secs::Int = 0, serialized::Bool = false) =
-    _schedule_task(state, state.read_loop::AwsIO.EventLoop, fn; delay_secs = delay_secs, serialized = serialized)
+    _schedule_task(state, state.read_loop::Reseau.EventLoop, fn; delay_secs = delay_secs, serialized = serialized)
 
 _schedule_write_end_task(state::PipeState, fn; delay_secs::Int = 0) =
-    _schedule_task(state, state.write_loop::AwsIO.EventLoop, fn; delay_secs = delay_secs)
+    _schedule_task(state, state.write_loop::Reseau.EventLoop, fn; delay_secs = delay_secs)
 
 function _fixture_before!(state::PipeState)
-    read_loop = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-    read_loop isa AwsIO.ErrorResult && return read_loop
-    AwsIO.event_loop_run!(read_loop)
+    read_loop = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    read_loop isa Reseau.ErrorResult && return read_loop
+    Reseau.event_loop_run!(read_loop)
     state.read_loop = read_loop
 
     if state.loop_setup == DIFFERENT_EVENT_LOOPS
-        write_loop = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-        write_loop isa AwsIO.ErrorResult && return write_loop
-        AwsIO.event_loop_run!(write_loop)
+        write_loop = Reseau.event_loop_new(Reseau.EventLoopOptions())
+        write_loop isa Reseau.ErrorResult && return write_loop
+        Reseau.event_loop_run!(write_loop)
         state.write_loop = write_loop
     else
         state.write_loop = read_loop
     end
 
-    pipe_result = AwsIO.pipe_init(state.read_loop, state.write_loop)
-    pipe_result isa AwsIO.ErrorResult && return pipe_result
+    pipe_result = Reseau.pipe_init(state.read_loop, state.write_loop)
+    pipe_result isa Reseau.ErrorResult && return pipe_result
     state.read_end, state.write_end = pipe_result
 
     if state.buffer_size > 0
-        src = AwsIO.ByteBuffer(state.buffer_size)
+        src = Reseau.ByteBuffer(state.buffer_size)
         src.len = Csize_t(state.buffer_size)
         Random.rand!(src.mem)
 
-        dst = AwsIO.ByteBuffer(state.buffer_size)
+        dst = Reseau.ByteBuffer(state.buffer_size)
         dst.len = Csize_t(0)
         fill!(dst.mem, 0x00)
 
@@ -173,17 +173,17 @@ end
 
 function _fixture_after!(state::PipeState)
     if state.read_loop !== nothing
-        AwsIO.event_loop_destroy!(state.read_loop)
+        Reseau.event_loop_destroy!(state.read_loop)
     end
     if state.write_loop !== nothing && state.write_loop !== state.read_loop
-        AwsIO.event_loop_destroy!(state.write_loop)
+        Reseau.event_loop_destroy!(state.write_loop)
     end
     return nothing
 end
 
 function _clean_up_read_end_task(state::PipeState)
-    res = AwsIO.pipe_clean_up_read_end(state.read_end::AwsIO.PipeReadEnd)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.pipe_clean_up_read_end(state.read_end::Reseau.PipeReadEnd)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
     else
         _signal_done_on_read_end_closed!(state)
@@ -192,8 +192,8 @@ function _clean_up_read_end_task(state::PipeState)
 end
 
 function _clean_up_write_end_task(state::PipeState)
-    res = AwsIO.pipe_clean_up_write_end(state.write_end::AwsIO.PipeWriteEnd)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.pipe_clean_up_write_end(state.write_end::Reseau.PipeWriteEnd)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
     else
         _signal_done_on_write_end_closed!(state)
@@ -203,11 +203,11 @@ end
 
 function _clean_up_write_end_on_write_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
     state = user_data
-    if error_code == AwsIO.AWS_OP_SUCCESS
+    if error_code == Reseau.AWS_OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
-    res = AwsIO.pipe_clean_up_write_end(write_end)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.pipe_clean_up_write_end(write_end)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
@@ -216,17 +216,17 @@ function _clean_up_write_end_on_write_completed(write_end, error_code::Int, byte
 end
 
 function _write_once_task(state::PipeState)
-    cursor = AwsIO.byte_cursor_from_buf(state.buffers.src)
-    res = AwsIO.pipe_write(state.write_end::AwsIO.PipeWriteEnd, cursor, _clean_up_write_end_on_write_completed, state)
-    res isa AwsIO.ErrorResult && _signal_error!(state)
+    cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
+    res = Reseau.pipe_write(state.write_end::Reseau.PipeWriteEnd, cursor, _clean_up_write_end_on_write_completed, state)
+    res isa Reseau.ErrorResult && _signal_error!(state)
     return nothing
 end
 
 function _read_everything_task(state::PipeState)
     while state.buffers.dst.len < state.buffers.dst.capacity
-        res = AwsIO.pipe_read(state.read_end::AwsIO.PipeReadEnd, state.buffers.dst)
-        if res isa AwsIO.ErrorResult
-            if res.code == AwsIO.ERROR_IO_READ_WOULD_BLOCK
+        res = Reseau.pipe_read(state.read_end::Reseau.PipeReadEnd, state.buffers.dst)
+        if res isa Reseau.ErrorResult
+            if res.code == Reseau.ERROR_IO_READ_WOULD_BLOCK
                 break
             end
             _signal_error!(state)
@@ -239,8 +239,8 @@ function _read_everything_task(state::PipeState)
         return nothing
     end
 
-    res2 = AwsIO.pipe_clean_up_read_end(state.read_end::AwsIO.PipeReadEnd)
-    if res2 isa AwsIO.ErrorResult
+    res2 = Reseau.pipe_clean_up_read_end(state.read_end::Reseau.PipeReadEnd)
+    if res2 isa Reseau.ErrorResult
         _signal_error!(state)
     else
         _signal_done_on_read_end_closed!(state)
@@ -253,8 +253,8 @@ function _on_readable_event(read_end, error_code::Int, user_data)
     if error_code == state.readable_events.error_code_to_monitor
         state.readable_events.count += 1
         if state.readable_events.count == state.readable_events.close_read_end_after_n_events
-            res = AwsIO.pipe_clean_up_read_end(read_end)
-            if res isa AwsIO.ErrorResult
+            res = Reseau.pipe_clean_up_read_end(read_end)
+            if res isa Reseau.ErrorResult
                 _signal_error!(state)
                 return nothing
             end
@@ -265,8 +265,8 @@ function _on_readable_event(read_end, error_code::Int, user_data)
 end
 
 function _subscribe_task(state::PipeState)
-    res = AwsIO.pipe_subscribe_to_readable_events(state.read_end::AwsIO.PipeReadEnd, _on_readable_event, state)
-    res isa AwsIO.ErrorResult && _signal_error!(state)
+    res = Reseau.pipe_subscribe_to_readable_events(state.read_end::Reseau.PipeReadEnd, _on_readable_event, state)
+    res isa Reseau.ErrorResult && _signal_error!(state)
     return nothing
 end
 
@@ -282,18 +282,18 @@ function _sentonce_on_readable_event(read_end, error_code::Int, user_data)
 end
 
 function _sentonce_subscribe_task(state::PipeState)
-    res = AwsIO.pipe_subscribe_to_readable_events(state.read_end::AwsIO.PipeReadEnd, _sentonce_on_readable_event, state)
-    res isa AwsIO.ErrorResult && _signal_error!(state)
+    res = Reseau.pipe_subscribe_to_readable_events(state.read_end::Reseau.PipeReadEnd, _sentonce_on_readable_event, state)
+    res isa Reseau.ErrorResult && _signal_error!(state)
     return nothing
 end
 
 function _subscribe_on_write_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
     state = user_data
-    if error_code == AwsIO.AWS_OP_SUCCESS
+    if error_code == Reseau.AWS_OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
-    res = AwsIO.pipe_clean_up_write_end(write_end)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.pipe_clean_up_write_end(write_end)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
@@ -303,9 +303,9 @@ function _subscribe_on_write_completed(write_end, error_code::Int, bytes_written
 end
 
 function _write_once_then_subscribe_task(state::PipeState)
-    cursor = AwsIO.byte_cursor_from_buf(state.buffers.src)
-    res = AwsIO.pipe_write(state.write_end::AwsIO.PipeWriteEnd, cursor, _subscribe_on_write_completed, state)
-    res isa AwsIO.ErrorResult && _signal_error!(state)
+    cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
+    res = Reseau.pipe_write(state.write_end::Reseau.PipeWriteEnd, cursor, _subscribe_on_write_completed, state)
+    res isa Reseau.ErrorResult && _signal_error!(state)
     return nothing
 end
 
@@ -316,27 +316,27 @@ function _resubscribe_on_readable_event(read_end, error_code::Int, user_data)
     state.results.status_code != 0 && return nothing
 
     if state.readable_events.count == 1 && prev_count == 0
-        res = AwsIO.pipe_unsubscribe_from_readable_events(state.read_end::AwsIO.PipeReadEnd)
-        if res isa AwsIO.ErrorResult
+        res = Reseau.pipe_unsubscribe_from_readable_events(state.read_end::Reseau.PipeReadEnd)
+        if res isa Reseau.ErrorResult
             _signal_error!(state)
             return nothing
         end
-        res2 = AwsIO.pipe_subscribe_to_readable_events(state.read_end::AwsIO.PipeReadEnd, _on_readable_event, state)
-        res2 isa AwsIO.ErrorResult && _signal_error!(state)
+        res2 = Reseau.pipe_subscribe_to_readable_events(state.read_end::Reseau.PipeReadEnd, _on_readable_event, state)
+        res2 isa Reseau.ErrorResult && _signal_error!(state)
     end
     return nothing
 end
 
 function _resubscribe_1_task(state::PipeState)
-    res = AwsIO.pipe_subscribe_to_readable_events(state.read_end::AwsIO.PipeReadEnd, _resubscribe_on_readable_event, state)
-    res isa AwsIO.ErrorResult && _signal_error!(state)
+    res = Reseau.pipe_subscribe_to_readable_events(state.read_end::Reseau.PipeReadEnd, _resubscribe_on_readable_event, state)
+    res isa Reseau.ErrorResult && _signal_error!(state)
     return nothing
 end
 
 function _resubscribe_write_task(state::PipeState)
-    cursor = AwsIO.byte_cursor_from_buf(state.buffers.src)
-    res = AwsIO.pipe_write(state.write_end::AwsIO.PipeWriteEnd, cursor, _clean_up_write_end_on_write_completed, state)
-    if res isa AwsIO.ErrorResult
+    cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
+    res = Reseau.pipe_write(state.write_end::Reseau.PipeWriteEnd, cursor, _clean_up_write_end_on_write_completed, state)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
@@ -346,15 +346,15 @@ end
 
 function _readall_on_write_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
     state = user_data
-    if error_code != AwsIO.AWS_OP_SUCCESS
+    if error_code != Reseau.AWS_OP_SUCCESS
         _signal_error!(state)
         return nothing
     end
     is_second = state.buffers.num_bytes_written > 0
     state.buffers.num_bytes_written += bytes_written
     if is_second
-        res = AwsIO.pipe_clean_up_write_end(write_end)
-        if res isa AwsIO.ErrorResult
+        res = Reseau.pipe_clean_up_write_end(write_end)
+        if res isa Reseau.ErrorResult
             _signal_error!(state)
             return nothing
         end
@@ -364,9 +364,9 @@ function _readall_on_write_completed(write_end, error_code::Int, bytes_written::
 end
 
 function _readall_write_task(state::PipeState)
-    cursor = AwsIO.byte_cursor_from_buf(state.buffers.src)
-    res = AwsIO.pipe_write(state.write_end::AwsIO.PipeWriteEnd, cursor, _readall_on_write_completed, state)
-    res isa AwsIO.ErrorResult && _signal_error!(state)
+    cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
+    res = Reseau.pipe_write(state.write_end::Reseau.PipeWriteEnd, cursor, _readall_on_write_completed, state)
+    res isa Reseau.ErrorResult && _signal_error!(state)
     return nothing
 end
 
@@ -380,9 +380,9 @@ function _readall_on_readable(read_end, error_code::Int, user_data)
         total_bytes_read = 0
         while true
             state.buffers.dst.len = Csize_t(0)
-            res = AwsIO.pipe_read(read_end, state.buffers.dst)
-            if res isa AwsIO.ErrorResult
-                if res.code == AwsIO.ERROR_IO_READ_WOULD_BLOCK
+            res = Reseau.pipe_read(read_end, state.buffers.dst)
+            if res isa Reseau.ErrorResult
+                if res.code == Reseau.ERROR_IO_READ_WOULD_BLOCK
                     break
                 end
                 _signal_error!(state)
@@ -397,14 +397,14 @@ function _readall_on_readable(read_end, error_code::Int, user_data)
 end
 
 function _readall_subscribe_task(state::PipeState)
-    res = AwsIO.pipe_subscribe_to_readable_events(state.read_end::AwsIO.PipeReadEnd, _readall_on_readable, state)
-    res isa AwsIO.ErrorResult && _signal_error!(state)
+    res = Reseau.pipe_subscribe_to_readable_events(state.read_end::Reseau.PipeReadEnd, _readall_on_readable, state)
+    res isa Reseau.ErrorResult && _signal_error!(state)
     return nothing
 end
 
 function _subscribe_and_schedule_write_end_clean_up_task(state::PipeState)
-    res = AwsIO.pipe_subscribe_to_readable_events(state.read_end::AwsIO.PipeReadEnd, _on_readable_event, state)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.pipe_subscribe_to_readable_events(state.read_end::Reseau.PipeReadEnd, _on_readable_event, state)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
@@ -413,8 +413,8 @@ function _subscribe_and_schedule_write_end_clean_up_task(state::PipeState)
 end
 
 function _clean_up_write_end_then_schedule_subscribe_task(state::PipeState)
-    res = AwsIO.pipe_clean_up_write_end(state.write_end::AwsIO.PipeWriteEnd)
-    if res isa AwsIO.ErrorResult
+    res = Reseau.pipe_clean_up_write_end(state.write_end::Reseau.PipeWriteEnd)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
@@ -425,14 +425,14 @@ end
 
 function _close_write_end_after_all_writes_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
     state = user_data
-    if error_code != AwsIO.AWS_OP_SUCCESS
+    if error_code != Reseau.AWS_OP_SUCCESS
         _signal_error!(state)
         return nothing
     end
     state.buffers.num_bytes_written += bytes_written
     if state.buffers.num_bytes_written == Csize_t(state.buffer_size)
-        res = AwsIO.pipe_clean_up_write_end(write_end)
-        if res isa AwsIO.ErrorResult
+        res = Reseau.pipe_clean_up_write_end(write_end)
+        if res isa Reseau.ErrorResult
             _signal_error!(state)
             return nothing
         end
@@ -442,17 +442,17 @@ function _close_write_end_after_all_writes_completed(write_end, error_code::Int,
 end
 
 function _write_in_simultaneous_chunks_task(state::PipeState)
-    cursor_ref = Ref(AwsIO.byte_cursor_from_buf(state.buffers.src))
+    cursor_ref = Ref(Reseau.byte_cursor_from_buf(state.buffers.src))
     chunk_size = Int(cursor_ref[].len) ÷ 8
     while cursor_ref[].len > 0
         bytes_to_write = chunk_size < Int(cursor_ref[].len) ? chunk_size : Int(cursor_ref[].len)
-        chunk_cursor = AwsIO.byte_cursor_from_array(cursor_ref[].ptr, bytes_to_write)
-        res = AwsIO.pipe_write(state.write_end::AwsIO.PipeWriteEnd, chunk_cursor, _close_write_end_after_all_writes_completed, state)
-        if res isa AwsIO.ErrorResult
+        chunk_cursor = Reseau.byte_cursor_from_array(cursor_ref[].ptr, bytes_to_write)
+        res = Reseau.pipe_write(state.write_end::Reseau.PipeWriteEnd, chunk_cursor, _close_write_end_after_all_writes_completed, state)
+        if res isa Reseau.ErrorResult
             _signal_error!(state)
             return nothing
         end
-        _ = AwsIO.byte_cursor_advance(cursor_ref, Csize_t(bytes_to_write))
+        _ = Reseau.byte_cursor_advance(cursor_ref, Csize_t(bytes_to_write))
     end
     return nothing
 end
@@ -461,7 +461,7 @@ function _cancelled_on_write_completed(write_end, error_code::Int, bytes_written
     state = user_data
     status_ref = state.test_data::Base.RefValue{Int}
     status_ref[] = error_code
-    if error_code == AwsIO.AWS_OP_SUCCESS
+    if error_code == Reseau.AWS_OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
     _schedule_read_end_task(state, _clean_up_read_end_task)
@@ -469,14 +469,14 @@ function _cancelled_on_write_completed(write_end, error_code::Int, bytes_written
 end
 
 function _write_then_clean_up_task(state::PipeState)
-    cursor = AwsIO.byte_cursor_from_buf(state.buffers.src)
-    res = AwsIO.pipe_write(state.write_end::AwsIO.PipeWriteEnd, cursor, _cancelled_on_write_completed, state)
-    if res isa AwsIO.ErrorResult
+    cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
+    res = Reseau.pipe_write(state.write_end::Reseau.PipeWriteEnd, cursor, _cancelled_on_write_completed, state)
+    if res isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
-    res2 = AwsIO.pipe_clean_up_write_end(state.write_end::AwsIO.PipeWriteEnd)
-    if res2 isa AwsIO.ErrorResult
+    res2 = Reseau.pipe_clean_up_write_end(state.write_end::Reseau.PipeWriteEnd)
+    if res2 isa Reseau.ErrorResult
         _signal_error!(state)
         return nothing
     end
@@ -487,8 +487,8 @@ end
 function _run_pipe_case(test_fn::Function, name::AbstractString, buffer_size::Integer, loop_setup::PipeLoopSetup)
     state = PipeState(loop_setup, buffer_size)
     setup_res = _fixture_before!(state)
-    @test !(setup_res isa AwsIO.ErrorResult)
-    setup_res isa AwsIO.ErrorResult && return nothing
+    @test !(setup_res isa Reseau.ErrorResult)
+    setup_res isa Reseau.ErrorResult && return nothing
 
     try
         test_fn(state)
@@ -502,7 +502,7 @@ end
     if Threads.nthreads(:interactive) <= 1
         @test true
     else
-        AwsIO.io_library_init()
+        Reseau.io_library_init()
 
         for loop_setup in (SAME_EVENT_LOOP, DIFFERENT_EVENT_LOOPS)
             if loop_setup == DIFFERENT_EVENT_LOOPS && Threads.nthreads(:interactive) <= 2
@@ -537,7 +537,7 @@ end
 
             @testset "readable_event_after_write $(loop_setup)" begin
                 _run_pipe_case("readable_after_write", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = AwsIO.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 1
                     _schedule_read_end_task(state, _subscribe_task)
                     _schedule_write_end_task(state, _write_once_task)
@@ -548,7 +548,7 @@ end
 
             @testset "readable_event_sent_once $(loop_setup)" begin
                 _run_pipe_case("readable_sent_once", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = AwsIO.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
                     _schedule_read_end_task(state, _sentonce_subscribe_task)
                     _schedule_write_end_task(state, _write_once_task)
                     @test _wait_for_results(state) == 0
@@ -558,7 +558,7 @@ end
 
             @testset "readable_on_subscribe_if_data_present $(loop_setup)" begin
                 _run_pipe_case("readable_on_subscribe", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = AwsIO.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 1
                     _schedule_write_end_task(state, _write_once_then_subscribe_task)
                     @test _wait_for_results(state) == 0
@@ -568,7 +568,7 @@ end
 
             @testset "readable_on_resubscribe_if_data_present $(loop_setup)" begin
                 _run_pipe_case("readable_on_resubscribe", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = AwsIO.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 2
                     _schedule_write_end_task(state, _resubscribe_write_task)
                     @test _wait_for_results(state) == 0
@@ -578,7 +578,7 @@ end
 
             @testset "readable_event_sent_again_after_all_data_read $(loop_setup)" begin
                 _run_pipe_case("readable_readall", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = AwsIO.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 2
                     _schedule_read_end_task(state, _readall_subscribe_task)
                     _schedule_write_end_task(state, _readall_write_task)
@@ -589,7 +589,7 @@ end
 
             @testset "error_event_after_write_end_closed $(loop_setup)" begin
                 _run_pipe_case("error_after_write_closed", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = AwsIO.ERROR_IO_BROKEN_PIPE
+                    state.readable_events.error_code_to_monitor = Reseau.ERROR_IO_BROKEN_PIPE
                     state.readable_events.close_read_end_after_n_events = 1
                     _schedule_read_end_task(state, _subscribe_and_schedule_write_end_clean_up_task)
                     @test _wait_for_results(state) == 0
@@ -599,7 +599,7 @@ end
 
             @testset "error_event_on_subscribe_if_write_closed $(loop_setup)" begin
                 _run_pipe_case("error_on_subscribe_if_write_closed", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = AwsIO.ERROR_IO_BROKEN_PIPE
+                    state.readable_events.error_code_to_monitor = Reseau.ERROR_IO_BROKEN_PIPE
                     state.readable_events.close_read_end_after_n_events = 1
                     _schedule_write_end_task(state, _clean_up_write_end_then_schedule_subscribe_task)
                     @test _wait_for_results(state) == 0
@@ -622,7 +622,7 @@ end
                     state.test_data = write_status
                     _schedule_write_end_task(state, _write_then_clean_up_task)
                     @test _wait_for_results(state; timeout_s = 120.0) == 0
-                    @test write_status[] == AwsIO.ERROR_IO_BROKEN_PIPE
+                    @test write_status[] == Reseau.ERROR_IO_BROKEN_PIPE
                     @test state.buffers.num_bytes_written < Csize_t(state.buffer_size)
                 end
             end

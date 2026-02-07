@@ -1071,7 +1071,7 @@
             _ = status
             if data != C_NULL
                 node = ReadQueueNode(data, 0)
-                push_back!(nw_socket.read_queue, node)
+                push!(nw_socket.read_queue, node)
             end
 
             if nw_socket.base_socket !== nothing
@@ -1484,7 +1484,7 @@
 
     function _nw_destroy_socket!(nw_socket::NWSocket)
         while !isempty(nw_socket.read_queue)
-            node = pop_front!(nw_socket.read_queue)
+            node = popfirst!(nw_socket.read_queue)
             node === nothing && break
             _nw_read_queue_node_destroy!(node)
         end
@@ -1987,7 +1987,7 @@
 
         amount_read = Csize_t(0)
         while !isempty(nw_socket.read_queue) && max_to_read > 0
-            node = front(nw_socket.read_queue)
+            node = first(nw_socket.read_queue)
             node === nothing && break
 
             map_data, buf_ptr, size = _nw_dispatch_data_map(node.data)
@@ -2007,7 +2007,7 @@
             ccall((:dispatch_release, _NW_DISPATCH_LIB), Cvoid, (dispatch_data_t,), map_data)
 
             if node.offset >= size
-                pop_front!(nw_socket.read_queue)
+                popfirst!(nw_socket.read_queue)
                 _nw_read_queue_node_destroy!(node)
             end
         end

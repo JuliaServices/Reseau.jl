@@ -1,5 +1,5 @@
 using Test
-using AwsIO
+using Reseau
 
 include("test_utils.jl")
 setup_test_keychain!()

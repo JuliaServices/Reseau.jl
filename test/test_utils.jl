@@ -1,4 +1,4 @@
-const _TLS_TEST_ENV = "AWSIO_RUN_TLS_TESTS"
+const _TLS_TEST_ENV = "RESEAU_RUN_TLS_TESTS"
 
 function tls_tests_enabled()::Bool
     val = lowercase(get(ENV, _TLS_TEST_ENV, ""))
@@ -53,7 +53,7 @@ function setup_test_keychain!()::Nothing
     end
     _TEST_KEYCHAIN_PATH[] !== nothing && return nothing
     temp_dir = mktempdir()
-    path = joinpath(temp_dir, "awsio-test.keychain")
+    path = joinpath(temp_dir, "reseau-test.keychain")
     if !_create_test_keychain!(path)
         _TEST_KEYCHAIN_DIR[] = nothing
         _TEST_KEYCHAIN_PATH[] = nothing
@@ -89,10 +89,10 @@ function test_keychain_path()::Union{String, Nothing}
 end
 
 function maybe_apply_test_keychain!(opts)
-    if Sys.isapple() && !AwsIO.is_using_secitem()
+    if Sys.isapple() && !Reseau.is_using_secitem()
         path = test_keychain_path()
-        if path !== nothing && opts isa AwsIO.TlsContextOptions
-            _ = AwsIO.tls_ctx_options_set_keychain_path!(opts, path)
+        if path !== nothing && opts isa Reseau.TlsContextOptions
+            _ = Reseau.tls_ctx_options_set_keychain_path!(opts, path)
         end
     end
     return opts

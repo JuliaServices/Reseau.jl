@@ -186,7 +186,7 @@ function _tls_generate_secitem_labels()::Union{SecItemOptions, ErrorResult}
         return ErrorResult(ERROR_SYS_CALL_FAILURE)
     end
     uuid_str = String(byte_cursor_from_buf(buf[]))
-    return SecItemOptions("awsio-cert-$uuid_str", "awsio-key-$uuid_str")
+    return SecItemOptions("reseau-cert-$uuid_str", "reseau-key-$uuid_str")
 end
 
 struct TlsCtxPkcs11Options{PL}
@@ -477,7 +477,7 @@ function _tls_set_use_secitem_from_env()
             _tls_use_secitem[] = _tls_use_secitem_override[]
             return nothing
         end
-        val = lowercase(get(ENV, "AWSIO_USE_SECITEM", ""))
+        val = lowercase(get(ENV, "RESEAU_USE_SECITEM", ""))
         enabled = if !isempty(val)
             _env_truthy(val)
         else

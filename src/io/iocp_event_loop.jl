@@ -213,9 +213,9 @@
         return event_loop
     end
 
-    function _iocp_process_tasks_to_schedule(impl::IocpEventLoop, tasks::Deque{ScheduledTask})
+    function _iocp_process_tasks_to_schedule(impl::IocpEventLoop, tasks::Vector{ScheduledTask})
         while !isempty(tasks)
-            task = pop_front!(tasks)
+            task = popfirst!(tasks)
             task === nothing && break
             if task.timestamp == 0
                 task_scheduler_schedule_now!(impl.thread_data.scheduler, task)
@@ -229,7 +229,7 @@
     function _iocp_process_synced_data(event_loop::EventLoop)
         impl = event_loop.impl_data
 
-        tasks_to_schedule = Deque{ScheduledTask}(16)
+        tasks_to_schedule = ScheduledTask[]
         lock(impl.synced_data.mutex)
         try
             impl.synced_data.thread_signaled = false
@@ -242,7 +242,7 @@
 
             # Swap queue contents.
             tasks_to_schedule = impl.synced_data.tasks_to_schedule
-            impl.synced_data.tasks_to_schedule = Deque{ScheduledTask}(16)
+            impl.synced_data.tasks_to_schedule = ScheduledTask[]
         finally
             unlock(impl.synced_data.mutex)
         end
@@ -471,7 +471,7 @@
         should_signal = false
         lock(impl.synced_data.mutex)
         try
-            push_back!(impl.synced_data.tasks_to_schedule, task)
+            push!(impl.synced_data.tasks_to_schedule, task)
             if !impl.synced_data.thread_signaled
                 impl.synced_data.thread_signaled = true
                 should_signal = true
@@ -498,7 +498,11 @@
         lock(impl.synced_data.mutex)
         try
             if !isempty(impl.synced_data.tasks_to_schedule)
-                removed = remove!(impl.synced_data.tasks_to_schedule, task; eq = (===))
+                idx = findfirst(x -> x === task, impl.synced_data.tasks_to_schedule)
+                if idx !== nothing
+                    deleteat!(impl.synced_data.tasks_to_schedule, idx)
+                    removed = true
+                end
             end
         finally
             unlock(impl.synced_data.mutex)
@@ -608,11 +612,11 @@
 
         lock(impl.synced_data.mutex)
         tasks = impl.synced_data.tasks_to_schedule
-        impl.synced_data.tasks_to_schedule = Deque{ScheduledTask}(16)
+        impl.synced_data.tasks_to_schedule = ScheduledTask[]
         unlock(impl.synced_data.mutex)
 
         while !isempty(tasks)
-            task = pop_front!(tasks)
+            task = popfirst!(tasks)
             task === nothing && break
             task_run!(task, TaskStatus.CANCELED)
         end

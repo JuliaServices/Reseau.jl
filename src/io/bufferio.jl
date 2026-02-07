@@ -1,4 +1,4 @@
-# BufferIOChannel - BufferIO adapter for AwsIO channels
+# BufferIOChannel - BufferIO adapter for Reseau channels
 
 import BufferIO
 using BufferIO: AbstractBufReader, AbstractBufWriter, ImmutableMemoryView, MemoryView, MutableMemoryView, IOError, IOErrorKinds, IOReader, IOWriter
@@ -695,12 +695,12 @@ function _bufferiochannel_wait_writes(io::BufferIOChannel)::Nothing
     return nothing
 end
 
-function AwsIO.setchannelslot!(handler::BufferIOChannelHandler, slot::ChannelSlot)::Nothing
+function Reseau.setchannelslot!(handler::BufferIOChannelHandler, slot::ChannelSlot)::Nothing
     handler.slot = slot
     return nothing
 end
 
-function AwsIO.handler_process_read_message(handler::BufferIOChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
+function Reseau.handler_process_read_message(handler::BufferIOChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
     io = handler.io
     data_len = Int(message.message_data.len)
     if data_len > 0
@@ -719,7 +719,7 @@ function AwsIO.handler_process_read_message(handler::BufferIOChannelHandler, slo
     return nothing
 end
 
-function AwsIO.handler_process_write_message(handler::BufferIOChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
+function Reseau.handler_process_write_message(handler::BufferIOChannelHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
     _ = handler
     _ = slot
     _ = message
@@ -727,26 +727,26 @@ function AwsIO.handler_process_write_message(handler::BufferIOChannelHandler, sl
     return ErrorResult(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
 end
 
-function AwsIO.handler_increment_read_window(handler::BufferIOChannelHandler, slot::ChannelSlot, size::Csize_t)::Union{Nothing, ErrorResult}
+function Reseau.handler_increment_read_window(handler::BufferIOChannelHandler, slot::ChannelSlot, size::Csize_t)::Union{Nothing, ErrorResult}
     _ = handler
     return channel_slot_increment_read_window!(slot, size)
 end
 
-function AwsIO.handler_shutdown(handler::BufferIOChannelHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Union{Nothing, ErrorResult}
+function Reseau.handler_shutdown(handler::BufferIOChannelHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Union{Nothing, ErrorResult}
     _bufferiochannel_mark_closed!(handler.io, error_code)
     return channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
 end
 
-function AwsIO.handler_initial_window_size(handler::BufferIOChannelHandler)::Csize_t
+function Reseau.handler_initial_window_size(handler::BufferIOChannelHandler)::Csize_t
     return Csize_t(handler.io.initial_window_size)
 end
 
-function AwsIO.handler_message_overhead(handler::BufferIOChannelHandler)::Csize_t
+function Reseau.handler_message_overhead(handler::BufferIOChannelHandler)::Csize_t
     _ = handler
     return Csize_t(0)
 end
 
-function AwsIO.handler_destroy(handler::BufferIOChannelHandler)::Nothing
+function Reseau.handler_destroy(handler::BufferIOChannelHandler)::Nothing
     _ = handler
     return nothing
 end

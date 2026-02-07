@@ -219,7 +219,7 @@
         lock(impl.task_pre_queue_mutex)
 
         is_first_task = isempty(impl.task_pre_queue)
-        push_back!(impl.task_pre_queue, task)
+        push!(impl.task_pre_queue, task)
 
         # If the list was not empty, we already have a pending read on the pipe/eventfd
         if is_first_task
@@ -287,7 +287,11 @@
         removed = false
         lock(impl.task_pre_queue_mutex)
         if !isempty(impl.task_pre_queue)
-            removed = remove!(impl.task_pre_queue, task; eq = (===))
+            idx = findfirst(x -> x === task, impl.task_pre_queue)
+            if idx !== nothing
+                deleteat!(impl.task_pre_queue, idx)
+                removed = true
+            end
         end
         unlock(impl.task_pre_queue_mutex)
 
@@ -450,13 +454,13 @@
 
         # Swap pre-queue contents to minimize lock hold time
         tasks_to_schedule = impl.task_pre_queue
-        impl.task_pre_queue = Deque{ScheduledTask}(16)
+        impl.task_pre_queue = ScheduledTask[]
 
         unlock(impl.task_pre_queue_mutex)
 
         # Schedule the tasks
         while !isempty(tasks_to_schedule)
-            task = pop_front!(tasks_to_schedule)
+            task = popfirst!(tasks_to_schedule)
             task === nothing && break
             logf(
                 LogLevel.TRACE,
@@ -669,7 +673,7 @@
 
         # Cancel tasks in pre-queue
         while !isempty(impl.task_pre_queue)
-            task = pop_front!(impl.task_pre_queue)
+            task = popfirst!(impl.task_pre_queue)
             if task !== nothing
                 task_run!(task, TaskStatus.CANCELED)
             end

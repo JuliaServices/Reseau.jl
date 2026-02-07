@@ -1,5 +1,5 @@
 using Test
-using AwsIO
+using Reseau
 
 const _PKI_RESOURCE_ROOT = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources")
 const _CF_LIB = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
@@ -14,7 +14,7 @@ end
 
 function _pki_load_cursor(name::AbstractString)
     path = _pki_resource_path(name)
-    return AwsIO.ByteCursor(read(path))
+    return Reseau.ByteCursor(read(path))
 end
 
 @testset "PKI utils default path selection" begin
@@ -24,146 +24,146 @@ end
 
     exists_fn = path -> path in seen
 
-    @test AwsIO.determine_default_pki_dir(; path_exists = exists_fn) == "/etc/ssl/certs"
-    @test AwsIO.determine_default_pki_ca_file(; path_exists = exists_fn) ==
+    @test Reseau.determine_default_pki_dir(; path_exists = exists_fn) == "/etc/ssl/certs"
+    @test Reseau.determine_default_pki_ca_file(; path_exists = exists_fn) ==
           "/etc/ssl/certs/ca-certificates.crt"
 
     empty_fn = _ -> false
-    @test AwsIO.determine_default_pki_dir(; path_exists = empty_fn) === nothing
-    @test AwsIO.determine_default_pki_ca_file(; path_exists = empty_fn) === nothing
+    @test Reseau.determine_default_pki_dir(; path_exists = empty_fn) === nothing
+    @test Reseau.determine_default_pki_ca_file(; path_exists = empty_fn) === nothing
 end
 
 @testset "PKI utils platform stubs" begin
     if Sys.isapple()
         if !tls_tests_enabled()
-            @info "Skipping Apple PKI tests (set AWSIO_RUN_TLS_TESTS=1 to enable)"
+            @info "Skipping Apple PKI tests (set RESEAU_RUN_TLS_TESTS=1 to enable)"
             return
         end
 
         cert = _pki_load_cursor("unittests.crt")
         key = _pki_load_cursor("unittests.key")
         pkcs12 = _pki_load_cursor("unittests.p12")
-        pwd = AwsIO.ByteCursor("1234")
+        pwd = Reseau.ByteCursor("1234")
 
-        res = AwsIO.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
-        @test !(res isa AwsIO.ErrorResult)
+        res = Reseau.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
+        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
             @test _cf_array_count(res) == 1
-            AwsIO._cf_release(res)
+            Reseau._cf_release(res)
         end
 
-        res = AwsIO.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
-        @test !(res isa AwsIO.ErrorResult)
+        res = Reseau.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
+        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
             @test _cf_array_count(res) == 1
-            AwsIO._cf_release(res)
+            Reseau._cf_release(res)
         end
 
-        res = AwsIO.import_pkcs12_to_identity(pkcs12, pwd)
-        @test !(res isa AwsIO.ErrorResult)
+        res = Reseau.import_pkcs12_to_identity(pkcs12, pwd)
+        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
             @test _cf_array_count(res) == 1
-            AwsIO._cf_release(res)
+            Reseau._cf_release(res)
         end
 
         ca = _pki_load_cursor("server_chain.crt")
-        pem_objs = AwsIO.pem_parse(read(_pki_resource_path("server_chain.crt")))
-        @test !(pem_objs isa AwsIO.ErrorResult)
-        res = AwsIO.import_trusted_certificates(ca)
-        @test !(res isa AwsIO.ErrorResult)
+        pem_objs = Reseau.pem_parse(read(_pki_resource_path("server_chain.crt")))
+        @test !(pem_objs isa Reseau.ErrorResult)
+        res = Reseau.import_trusted_certificates(ca)
+        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
             if pem_objs isa Vector
                 @test _cf_array_count(res) == length(pem_objs)
             end
-            AwsIO._cf_release(res)
+            Reseau._cf_release(res)
         end
 
-        if AwsIO.is_using_secitem()
-            res = AwsIO.secitem_import_cert_and_key(cert, key; cert_label = "awsio-cert", key_label = "awsio-key")
-            @test !(res isa AwsIO.ErrorResult)
+        if Reseau.is_using_secitem()
+            res = Reseau.secitem_import_cert_and_key(cert, key; cert_label = "reseau-cert", key_label = "reseau-key")
+            @test !(res isa Reseau.ErrorResult)
             if res isa Ptr{Cvoid}
-                AwsIO._cf_release(res)
+                Reseau._cf_release(res)
             end
 
-            res = AwsIO.secitem_import_pkcs12(pkcs12, pwd; cert_label = "awsio-cert", key_label = "awsio-key")
-            @test !(res isa AwsIO.ErrorResult)
+            res = Reseau.secitem_import_pkcs12(pkcs12, pwd; cert_label = "reseau-cert", key_label = "reseau-key")
+            @test !(res isa Reseau.ErrorResult)
             if res isa Ptr{Cvoid}
-                AwsIO._cf_release(res)
+                Reseau._cf_release(res)
             end
         else
             @info "Skipping SecItem PKI tests (SecItem disabled)."
         end
     else
-        cert = AwsIO.ByteCursor("cert")
-        key = AwsIO.ByteCursor("key")
-        pkcs12 = AwsIO.ByteCursor("pkcs12")
-        pwd = AwsIO.ByteCursor("pwd")
+        cert = Reseau.ByteCursor("cert")
+        key = Reseau.ByteCursor("key")
+        pkcs12 = Reseau.ByteCursor("pkcs12")
+        pwd = Reseau.ByteCursor("pwd")
 
-        res = AwsIO.import_public_and_private_keys_to_identity(cert, key)
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.import_public_and_private_keys_to_identity(cert, key)
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-        res = AwsIO.import_pkcs12_to_identity(pkcs12, pwd)
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.import_pkcs12_to_identity(pkcs12, pwd)
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-        res = AwsIO.import_trusted_certificates(cert)
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.import_trusted_certificates(cert)
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-        res = AwsIO.secitem_import_cert_and_key(cert, key; cert_label = "cert", key_label = "key")
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.secitem_import_cert_and_key(cert, key; cert_label = "cert", key_label = "key")
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-        res = AwsIO.secitem_import_pkcs12(pkcs12, pwd; cert_label = "cert", key_label = "key")
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.secitem_import_pkcs12(pkcs12, pwd; cert_label = "cert", key_label = "key")
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-        res = AwsIO.load_cert_from_system_cert_store("cert")
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.load_cert_from_system_cert_store("cert")
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-        res = AwsIO.import_key_pair_to_cert_context(cert, key; is_client_mode = true)
-        @test res isa AwsIO.ErrorResult
-        res isa AwsIO.ErrorResult && @test res.code == AwsIO.ERROR_PLATFORM_NOT_SUPPORTED
+        res = Reseau.import_key_pair_to_cert_context(cert, key; is_client_mode = true)
+        @test res isa Reseau.ErrorResult
+        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
 
-        AwsIO.close_cert_store(C_NULL)
+        Reseau.close_cert_store(C_NULL)
     end
 end
 
 @testset "X509 helpers (aws-lc)" begin
-    if !AwsIO.aws_lc_available()
+    if !Reseau.aws_lc_available()
         @info "Skipping X509 helper tests (aws_lc_jll not available)"
         return
     end
 
-    chain_pem = AwsIO.ByteCursor(read(_pki_resource_path("server_chain.crt")))
-    ca_pem = AwsIO.ByteCursor(read(_pki_resource_path("ca_root.crt")))
+    chain_pem = Reseau.ByteCursor(read(_pki_resource_path("server_chain.crt")))
+    ca_pem = Reseau.ByteCursor(read(_pki_resource_path("ca_root.crt")))
 
-    @test AwsIO.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "localhost") === nothing
+    @test Reseau.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "localhost") === nothing
 
-    res = AwsIO.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "example.com")
-    @test res isa AwsIO.ErrorResult
-    if res isa AwsIO.ErrorResult
-        @test res.code == AwsIO.ERROR_IO_TLS_HOST_NAME_MISMATCH
+    res = Reseau.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "example.com")
+    @test res isa Reseau.ErrorResult
+    if res isa Reseau.ErrorResult
+        @test res.code == Reseau.ERROR_IO_TLS_HOST_NAME_MISMATCH
     end
 
-    wrong_ca = AwsIO.ByteCursor(read(_pki_resource_path("DigiCertGlobalRootCA.crt.pem")))
-    res = AwsIO.x509_verify_chain(chain_pem; trust_store_cursor = wrong_ca)
-    @test res isa AwsIO.ErrorResult
-    if res isa AwsIO.ErrorResult
-        @test res.code in (AwsIO.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE, AwsIO.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN)
+    wrong_ca = Reseau.ByteCursor(read(_pki_resource_path("DigiCertGlobalRootCA.crt.pem")))
+    res = Reseau.x509_verify_chain(chain_pem; trust_store_cursor = wrong_ca)
+    @test res isa Reseau.ErrorResult
+    if res isa Reseau.ErrorResult
+        @test res.code in (Reseau.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE, Reseau.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN)
     end
 
-    chain = AwsIO.x509_parse_pem_chain(chain_pem)
+    chain = Reseau.x509_parse_pem_chain(chain_pem)
     @test chain isa Vector
     chain isa Vector && @test length(chain) == 2
 
-    pem_objs = AwsIO.pem_parse(read(_pki_resource_path("unittests.crt")))
-    @test !(pem_objs isa AwsIO.ErrorResult)
+    pem_objs = Reseau.pem_parse(read(_pki_resource_path("unittests.crt")))
+    @test !(pem_objs isa Reseau.ErrorResult)
     if pem_objs isa Vector && !isempty(pem_objs)
-        der_cursor = AwsIO.byte_cursor_from_buf(pem_objs[1].data)
-        x509 = AwsIO.x509_load_der(der_cursor)
-        @test x509 isa AwsIO.X509Ref
+        der_cursor = Reseau.byte_cursor_from_buf(pem_objs[1].data)
+        x509 = Reseau.x509_load_der(der_cursor)
+        @test x509 isa Reseau.X509Ref
     end
 end

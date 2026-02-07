@@ -1,5 +1,5 @@
 using Test
-using AwsIO
+using Reseau
 
 # `Pkg.test` includes `test/test_utils.jl` from `test/runtests.jl` before including this file.
 # But when someone includes `test/tls_tests.jl` directly, these helpers don't exist yet.
@@ -10,7 +10,7 @@ if !isdefined(@__MODULE__, :tls_tests_enabled)
 end
 
 if !tls_tests_enabled()
-    @info "Skipping TLS tests (set AWSIO_RUN_TLS_TESTS=1 to enable)"
+    @info "Skipping TLS tests (set RESEAU_RUN_TLS_TESTS=1 to enable)"
 else
     include("tls_tests_impl.jl")
 end

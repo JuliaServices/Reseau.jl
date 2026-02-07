@@ -20,8 +20,8 @@ end
 
 # POSIX socket implementation data
 mutable struct PosixSocket
-    write_queue::Deque{SocketWriteRequest}
-    written_queue::Deque{SocketWriteRequest}
+    write_queue::Vector{SocketWriteRequest}
+    written_queue::Vector{SocketWriteRequest}
     written_task::Union{ScheduledTask, Nothing}  # nullable
     connect_args::Union{PosixSocketConnectArgs, Nothing}  # nullable
     written_task_scheduled::Bool
@@ -36,8 +36,8 @@ end
 
 function PosixSocket()
     return PosixSocket(
-        Deque{SocketWriteRequest}(),
-        Deque{SocketWriteRequest}(),
+        SocketWriteRequest[],
+        SocketWriteRequest[],
         nothing,
         nothing,
         false,

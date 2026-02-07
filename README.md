@@ -1,26 +1,26 @@
-# AwsIO.jl
+# Reseau.jl
 
 Pure-Julia implementation of aws-c-io style primitives (macOS + Linux).
 The API mirrors aws-c-io naming and behavior, but drops the `aws_` prefix.
 Event loops, sockets, channels, TLS, host resolver, and async input streams
 use direct OS syscalls and Julia-managed threads (no libuv).
 
-GitHub Actions : [![Build Status](https://github.com/JuliaServices/AwsIO.jl/workflows/CI/badge.svg)](https://github.com/JuliaServices/AwsIO.jl/actions?query=workflow%3ACI+branch%3Amaster)
+GitHub Actions : [![Build Status](https://github.com/JuliaServices/Reseau.jl/workflows/CI/badge.svg)](https://github.com/JuliaServices/Reseau.jl/actions?query=workflow%3ACI+branch%3Amaster)
 
-[![codecov.io](http://codecov.io/github/JuliaServices/AwsIO.jl/coverage.svg?branch=master)](http://codecov.io/github/JuliaServices/AwsIO.jl?branch=master)
+[![codecov.io](http://codecov.io/github/JuliaServices/Reseau.jl/coverage.svg?branch=master)](http://codecov.io/github/JuliaServices/Reseau.jl?branch=master)
 
 ## Installation
 
 ```julia
 using Pkg
-Pkg.add("AwsIO")
+Pkg.add("Reseau")
 ```
 
 ## Usage
 
 ### Event loop group + resolver
 ```julia
-using AwsIO
+using Reseau
 
 elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
 resolver = DefaultHostResolver(elg)
@@ -32,7 +32,7 @@ end
 
 ### Socket + channel (plain)
 ```julia
-using AwsIO
+using Reseau
 
 elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
 el = event_loop_group_get_next_loop(elg)
@@ -49,7 +49,7 @@ socket_connect(sock, connect_opts)
 
 ### TLS channel handler
 ```julia
-using AwsIO
+using Reseau
 
 # Assumes an established socket and event loop (see socket example).
 channel = Channel(el, nothing)
@@ -64,7 +64,7 @@ channel_setup_complete!(channel)
 
 ### Async input stream
 ```julia
-using AwsIO
+using Reseau
 
 data = ByteBuffer(5)
 stream = AsyncInputStream((s, dest) -> begin
@@ -80,7 +80,7 @@ future_wait(future)
 
 ## Threading requirements
 
-AwsIO runs event loops on Julia-managed threads and intentionally avoids the libuv global IO lock.
+Reseau runs event loops on Julia-managed threads and intentionally avoids the libuv global IO lock.
 For correctness and to keep the main interactive thread available, the event-loop group requires:
 
 - `Threads.nthreads(:interactive) > 1`

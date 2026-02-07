@@ -126,26 +126,6 @@ slot_left(slot::ChannelSlot) = slot.adj_left
 # Get the slot immediately to the right (application side)
 slot_right(slot::ChannelSlot) = slot.adj_right
 
-# Channel handler base structure
-# Concrete handlers should embed this or use similar structure
-mutable struct ChannelHandlerBase{V, Impl, SlotRef <: Union{ChannelSlot, Nothing}}
-    vtable::V  # ChannelHandlerVTable implementation
-    impl::Impl  # Handler-specific implementation data
-    slot::SlotRef
-    message_overhead::Csize_t
-    initial_window_size::Csize_t
-end
-
-function ChannelHandlerBase(vtable::V, impl::Impl; initial_window_size::Integer = 0) where {V, Impl}
-    return ChannelHandlerBase{V, Impl, Union{ChannelSlot, Nothing}}(
-        vtable,
-        impl,
-        nothing,
-        Csize_t(0),
-        Csize_t(initial_window_size),
-    )
-end
-
 # Channel handler vtable interface - methods that all handlers must implement
 # These are dispatched via multiple dispatch on the vtable type
 
@@ -261,7 +241,7 @@ mutable struct Channel{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChanne
     # Channel task tracking
     pending_tasks::IdDict{ChannelTask, Bool}
     pending_tasks_lock::ReentrantLock
-    cross_thread_tasks::Deque{ChannelTask}
+    cross_thread_tasks::Vector{ChannelTask}
     cross_thread_tasks_lock::ReentrantLock
     cross_thread_tasks_scheduled::Bool
     cross_thread_task::ScheduledTask
@@ -315,7 +295,7 @@ function Channel(
         ChannelTask(),
         IdDict{ChannelTask, Bool}(),
         ReentrantLock(),
-        Deque{ChannelTask}(0),
+        ChannelTask[],
         ReentrantLock(),
         false,
         ScheduledTask((_channel, _status) -> nothing, nothing; type_tag = "channel_cross_thread_placeholder"),
@@ -364,7 +344,7 @@ function _channel_schedule_cross_thread_tasks(channel::Channel, status::TaskStat
     tasks = ChannelTask[]
     lock(channel.cross_thread_tasks_lock) do
         while !isempty(channel.cross_thread_tasks)
-            task = pop_front!(channel.cross_thread_tasks)
+            task = popfirst!(channel.cross_thread_tasks)
             task === nothing && break
             push!(tasks, task)
         end
@@ -390,7 +370,7 @@ function _channel_register_task_cross_thread!(channel::Channel, task::ChannelTas
         if channel.channel_state == ChannelState.SHUT_DOWN
             schedule_now = true
         else
-            push_back!(channel.cross_thread_tasks, task)
+            push!(channel.cross_thread_tasks, task)
             if !channel.cross_thread_tasks_scheduled
                 channel.cross_thread_tasks_scheduled = true
                 schedule_now = true
