@@ -111,6 +111,10 @@ end
         dwLowDateTime::UInt32
         dwHighDateTime::UInt32
     end
+
+    const _FILE_TIME_TO_NS = UInt64(100)
+    const _EC_TO_UNIX_EPOCH = UInt64(11644473600)
+    const _WINDOWS_TICK = UInt64(10000000)
 end
 
 function high_res_clock_get_ticks(timestamp::Ptr{UInt64})
@@ -158,14 +162,10 @@ function sys_clock_get_ticks(timestamp::Ptr{UInt64})
         return raise_error(ERROR_INVALID_ARGUMENT)
     end
     @static if _PLATFORM_WINDOWS
-        const FILE_TIME_TO_NS = UInt64(100)
-        const EC_TO_UNIX_EPOCH = UInt64(11644473600)
-        const WINDOWS_TICK = UInt64(10000000)
-
         ft = Ref{_filetime}()
         ccall((:GetSystemTimeAsFileTime, "kernel32"), Cvoid, (Ref{_filetime},), ft)
         quad = (UInt64(ft[].dwHighDateTime) << 32) | UInt64(ft[].dwLowDateTime)
-        unsafe_store!(timestamp, (quad - (WINDOWS_TICK * EC_TO_UNIX_EPOCH)) * FILE_TIME_TO_NS)
+        unsafe_store!(timestamp, (quad - (_WINDOWS_TICK * _EC_TO_UNIX_EPOCH)) * _FILE_TIME_TO_NS)
         return OP_SUCCESS
     else
         ts = Ref{_timespec}()
