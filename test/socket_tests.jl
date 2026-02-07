@@ -904,9 +904,11 @@ end
             Reseau.socket_close(server_socket)
         end
         Reseau.event_loop_destroy!(el_val)
-        # Clean up Unix domain socket file
-        sock_path = Reseau.get_address(local_endpoint)
-        isfile(sock_path) && rm(sock_path; force=true)
+        # Clean up Unix domain socket file (Windows LOCAL uses named pipes, not a filesystem path).
+        @static if !Sys.iswindows()
+            sock_path = Reseau.get_address(local_endpoint)
+            isfile(sock_path) && rm(sock_path; force=true)
+        end
     end
 end
 

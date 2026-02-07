@@ -1279,8 +1279,13 @@
 
             new_sock.state = SocketState.CONNECTED
 
-            # Transfer current handle to the accepted socket.
-            new_sock.io_handle = sock.io_handle
+            # Transfer current handle to the accepted socket. IoHandle is mutable, so don't
+            # share the same instance between listener and accepted sockets.
+            new_sock.io_handle.fd = sock.io_handle.fd
+            new_sock.io_handle.handle = sock.io_handle.handle
+            new_sock.io_handle.additional_data = sock.io_handle.additional_data
+            new_sock.io_handle.set_queue = sock.io_handle.set_queue
+            new_sock.io_handle.additional_ref = sock.io_handle.additional_ref
             if sock.event_loop !== nothing
                 _ = event_loop_unsubscribe_from_io_events!(sock.event_loop, new_sock.io_handle)
             end

@@ -741,7 +741,7 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
             vm_addr = SockAddrVM(Cushort(AF_VSOCK), Cushort(0), UInt32(port), cid_result, _VSOCK_ZERO)
             vm_ref = Ref(vm_addr)
             sockaddr_obj = vm_ref
-            sockaddr_ptr = Base.unsafe_convert(Ptr{UInt8}, vm_ref)
+            sockaddr_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrVM}, vm_ref))
             sockaddr_len = Cuint(sizeof(SockAddrVM))
         else
             raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
@@ -1135,7 +1135,7 @@ function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOption
             vm_addr = SockAddrVM(Cushort(AF_VSOCK), Cushort(0), UInt32(port), cid_result, _VSOCK_ZERO)
             vm_ref = Ref(vm_addr)
             sockaddr_obj = vm_ref
-            sockaddr_ptr = Base.unsafe_convert(Ptr{UInt8}, vm_ref)
+            sockaddr_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrVM}, vm_ref))
             sockaddr_len = Cuint(sizeof(SockAddrVM))
         else
             raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
