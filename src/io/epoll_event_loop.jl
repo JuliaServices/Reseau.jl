@@ -535,7 +535,7 @@
                 tracing_task_begin(tracing_event_loop_event)
                 try
                     ev = events[i]
-                    event_data_ptr = ev.data.ptr
+                    event_data_ptr = _epoll_event_data_ptr(ev)
 
                     if event_data_ptr == C_NULL
                         continue

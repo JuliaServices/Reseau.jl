@@ -62,7 +62,11 @@ function _byte_buf_init_from_file_impl(
     file = Libc.FILE(file_ptr)
     try
         if use_file_size_as_hint
-            fd = ccall(:fileno, Cint, (Ptr{Cvoid},), file.ptr)
+            fd = @static if _PLATFORM_WINDOWS
+                ccall(:_fileno, Cint, (Ptr{Cvoid},), file.ptr)
+            else
+                ccall(:fileno, Cint, (Ptr{Cvoid},), file.ptr)
+            end
             if fd == -1
                 raise_error(ERROR_INVALID_FILE_HANDLE)
                 return OP_ERR

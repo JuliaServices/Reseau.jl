@@ -15,18 +15,22 @@
     const EPOLL_CTL_DEL = Cint(2)
     const EPOLL_CTL_MOD = Cint(3)
 
-    # epoll_event structure - must match C layout
-    struct EpollEventData
-        ptr::Ptr{Cvoid}
-    end
-
+    # epoll_event ABI is packed in the Linux UAPI headers: u32 events; u64 data; (12 bytes).
+    # Use three UInt32 fields to match the packed layout across platforms.
     struct EpollEvent
         events::UInt32
-        data::EpollEventData
+        data_lo::UInt32
+        data_hi::UInt32
     end
 
-    function EpollEvent(events::UInt32, ptr::Ptr{Cvoid})
-        return EpollEvent(events, EpollEventData(ptr))
+    @inline function EpollEvent(events::UInt32, ptr::Ptr{Cvoid})
+        u = UInt64(UInt(ptr))
+        return EpollEvent(events, UInt32(u & 0xffffffff), UInt32(u >> 32))
+    end
+
+    @inline function _epoll_event_data_ptr(ev::EpollEvent)::Ptr{Cvoid}
+        u = (UInt64(ev.data_hi) << 32) | UInt64(ev.data_lo)
+        return Ptr{Cvoid}(u)
     end
 
     # Constants for eventfd
