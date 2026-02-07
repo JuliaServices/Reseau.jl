@@ -7,9 +7,9 @@
 # It receives write messages and sends them out the socket (write direction)
 
 # Socket channel handler structure
-mutable struct SocketChannelHandler{S, SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
-    socket::S
-    slot::SlotRef
+mutable struct SocketChannelHandler <: AbstractChannelHandler
+    socket::Socket
+    slot::Union{ChannelSlot, Nothing}
     max_rw_size::Csize_t
     read_task_storage::ChannelTask
     shutdown_task_storage::ChannelTask
@@ -20,12 +20,12 @@ mutable struct SocketChannelHandler{S, SlotRef <: Union{ChannelSlot, Nothing}} <
 end
 
 function SocketChannelHandler(
-        socket::S;
+        socket::Socket;
         max_read_size::Integer = 16384,
-    ) where {S}
+    )
     stats = SocketHandlerStatistics()
     crt_statistics_socket_init!(stats)
-    return SocketChannelHandler{S, Union{ChannelSlot, Nothing}}(
+    return SocketChannelHandler(
         socket,
         nothing,
         Csize_t(max_read_size),

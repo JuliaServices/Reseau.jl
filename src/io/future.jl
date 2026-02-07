@@ -13,9 +13,9 @@ end
 const OnFutureCompleteFn = Function  # (future, user_data) -> nothing
 
 # Future waiter - for tracking pending callbacks
-mutable struct FutureWaiter{F, U}
-    callback::F
-    user_data::U
+mutable struct FutureWaiter
+    callback::OnFutureCompleteFn
+    user_data::Any
     next::Union{FutureWaiter, Nothing}  # nullable
 end
 

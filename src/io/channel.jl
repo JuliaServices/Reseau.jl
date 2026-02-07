@@ -40,7 +40,7 @@ end
 
 # Channel task wrapper (aws_channel_task)
 mutable struct ChannelTaskContext
-    channel::Union{AbstractChannel, Nothing}  # late-initialized: nothing → Channel
+    channel::Any  # Channel or nothing (set after Channel is constructed)
     task::Any  # late-initialized: nothing → ChannelTask (forward ref)
 end
 
@@ -87,34 +87,25 @@ ChannelHandlerShutdownOptions() = ChannelHandlerShutdownOptions(false, false)
 # Each slot can hold a handler and links to adjacent slots.
 # Read direction flows left -> right (toward application).
 # Write direction flows right -> left (toward socket).
-mutable struct ChannelSlot{H <: Union{AbstractChannelHandler, Nothing}, C <: Union{AbstractChannel, Nothing}, SlotRef}
-    adj_left::SlotRef   # Toward the socket/network (write direction)
-    adj_right::SlotRef  # Toward the application (read direction)
-    handler::H
-    channel::C
+# Slots are frequently traversed (`adj_left`/`adj_right`) so keep that side
+# concretely typed. The backref to the owning channel is typed as `Any` to avoid
+# circular type references and specialization churn.
+mutable struct ChannelSlot
+    adj_left::Union{ChannelSlot, Nothing}   # Toward the socket/network (write direction)
+    adj_right::Union{ChannelSlot, Nothing}  # Toward the application (read direction)
+    handler::Union{AbstractChannelHandler, Nothing}
+    channel::Any  # Channel or nothing
     window_size::Csize_t
     current_window_update_batch_size::Csize_t
     upstream_message_overhead::Csize_t
 end
 
 function ChannelSlot()
-    return ChannelSlot{Union{AbstractChannelHandler, Nothing}, Union{AbstractChannel, Nothing}, Union{ChannelSlot, Nothing}}(
+    return ChannelSlot(
         nothing,
         nothing,
         nothing,
         nothing,
-        Csize_t(0),
-        Csize_t(0),
-        Csize_t(0),
-    )
-end
-
-function ChannelSlot(handler::H, channel::C) where {H, C}
-    return ChannelSlot{H, C, Union{ChannelSlot, Nothing}}(
-        nothing,
-        nothing,
-        handler,
-        channel,
         Csize_t(0),
         Csize_t(0),
         Csize_t(0),
@@ -212,10 +203,10 @@ end
 end
 
 # Channel - a bidirectional pipeline of handlers
-mutable struct Channel{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannel
+mutable struct Channel
     event_loop::EventLoop
-    first::SlotRef  # nullable - Socket side (leftmost)
-    last::SlotRef   # nullable - Application side (rightmost)
+    first::Union{ChannelSlot, Nothing}  # nullable - Socket side (leftmost)
+    last::Union{ChannelSlot, Nothing}   # nullable - Application side (rightmost)
     channel_state::ChannelState.T
     read_back_pressure_enabled::Bool
     channel_id::UInt64
@@ -252,6 +243,12 @@ mutable struct Channel{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChanne
     shutdown_lock::ReentrantLock
 end
 
+@inline function slot_channel(slot::ChannelSlot)::Channel
+    ch = slot.channel
+    ch isa Channel || error("ChannelSlot has no owning Channel")
+    return ch::Channel
+end
+
 # Global channel counter for unique IDs
 const _channel_id_counter = Ref{UInt64}(0)
 
@@ -269,7 +266,7 @@ function Channel(
     channel_id = _next_channel_id()
     window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
 
-    channel = Channel{Union{ChannelSlot, Nothing}}(
+    channel = Channel(
         event_loop,
         nothing,  # first
         nothing,  # last
@@ -422,8 +419,8 @@ channel_put_local_object!(channel::Channel, obj::EventLoopLocalObject) = event_l
 channel_remove_local_object!(channel::Channel, key) = event_loop_remove_local_object!(channel.event_loop, key)
 
 # Channel creation API matching aws_channel_new
-mutable struct ChannelSetupArgs{C <: Channel}
-    channel::C
+mutable struct ChannelSetupArgs
+    channel::Channel
 end
 
 function _channel_message_pool_on_removed(obj::EventLoopLocalObject)
@@ -712,7 +709,7 @@ end
 
 # Insert slot to the right of another slot
 function channel_slot_insert_right!(slot::ChannelSlot, to_add::ChannelSlot)
-    channel = slot.channel
+    channel = slot_channel(slot)
 
     to_add.adj_right = slot.adj_right
     if slot.adj_right !== nothing
@@ -722,7 +719,7 @@ function channel_slot_insert_right!(slot::ChannelSlot, to_add::ChannelSlot)
     to_add.adj_left = slot
     to_add.channel = channel
 
-    if channel !== nothing && channel.last === slot
+    if channel.last === slot
         channel.last = to_add
     end
 
@@ -731,7 +728,7 @@ end
 
 # Insert slot to the left of another slot
 function channel_slot_insert_left!(slot::ChannelSlot, to_add::ChannelSlot)
-    channel = slot.channel
+    channel = slot_channel(slot)
 
     to_add.adj_left = slot.adj_left
     if slot.adj_left !== nothing
@@ -741,7 +738,7 @@ function channel_slot_insert_left!(slot::ChannelSlot, to_add::ChannelSlot)
     to_add.adj_right = slot
     to_add.channel = channel
 
-    if channel !== nothing && channel.first === slot
+    if channel.first === slot
         channel.first = to_add
     end
 
@@ -786,7 +783,8 @@ end
 
 # Remove a slot from the channel
 function channel_slot_remove!(slot::ChannelSlot)
-    channel = slot.channel
+    channel_any = slot.channel
+    channel = channel_any === nothing ? nothing : (channel_any::Channel)
 
     if channel !== nothing
         if channel.first === slot
@@ -823,7 +821,8 @@ end
 
 # Replace a slot in the channel with a new slot
 function channel_slot_replace!(remove::ChannelSlot, new_slot::ChannelSlot)
-    channel = remove.channel
+    channel_any = remove.channel
+    channel = channel_any === nothing ? nothing : (channel_any::Channel)
     new_slot.channel = channel
     new_slot.adj_left = remove.adj_left
     new_slot.adj_right = remove.adj_right
@@ -1073,8 +1072,8 @@ function channel_setup_complete!(channel::Channel)::Union{Nothing, ErrorResult}
     return nothing
 end
 
-mutable struct ChannelShutdownWriteArgs{S <: ChannelSlot}
-    slot::S
+mutable struct ChannelShutdownWriteArgs
+    slot::ChannelSlot
     error_code::Int
     shutdown_immediately::Bool
 end
@@ -1351,8 +1350,8 @@ end
 # Helper struct for simple passthrough handler
 struct PassthroughHandlerVTable end
 
-mutable struct PassthroughHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: AbstractChannelHandler
-    slot::SlotRef
+mutable struct PassthroughHandler <: AbstractChannelHandler
+    slot::Union{ChannelSlot, Nothing}
     initial_window_size::Csize_t
     message_overhead::Csize_t
 end
@@ -1361,7 +1360,7 @@ function PassthroughHandler(;
         initial_window_size::Integer = SIZE_MAX,
         message_overhead::Integer = 0,
     )
-    return PassthroughHandler{Union{ChannelSlot, Nothing}}(
+    return PassthroughHandler(
         nothing,
         Csize_t(initial_window_size),
         Csize_t(message_overhead),

@@ -50,20 +50,20 @@
     const O_CLOEXEC = Cint(0o2000000)
 
     # Handle data attached to IoHandle while subscribed
-    mutable struct EpollEventHandleData{F <: OnEventCallback, U}
+    mutable struct EpollEventHandleData
         handle::IoHandle
-        on_event::F
-        user_data::U
+        on_event::OnEventCallback
+        user_data::Any
         cleanup_task::Union{Nothing, ScheduledTask}  # nullable
         is_subscribed::Bool  # false when handle is unsubscribed but struct not cleaned up yet
     end
 
     function EpollEventHandleData(
             handle::IoHandle,
-            on_event::F,
-            user_data::U,
-        ) where {F <: OnEventCallback, U}
-        return EpollEventHandleData{F, U}(
+            on_event::OnEventCallback,
+            user_data,
+        )
+        return EpollEventHandleData(
             handle,
             on_event,
             user_data,

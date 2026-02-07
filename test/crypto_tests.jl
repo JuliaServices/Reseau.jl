@@ -103,7 +103,7 @@ end
 
 @testset "BYO crypto handler integration" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     incoming_rw_args = ByoCryptoRwArgs(ReentrantLock(), Reseau.ByteBuffer(128), false, nothing)
     outgoing_rw_args = ByoCryptoRwArgs(ReentrantLock(), Reseau.ByteBuffer(128), false, nothing)

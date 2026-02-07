@@ -12,7 +12,7 @@ mutable struct BufferIOChannel <: IO
     port::Int
     tls_enabled::Bool
     event_loop_group::EventLoopGroup
-    host_resolver::DefaultHostResolver
+    host_resolver::HostResolver
     bootstrap::ClientBootstrap
     owns_event_loop_group::Bool
     owns_host_resolver::Bool
@@ -43,7 +43,7 @@ end
 
 const _BUFFERIOCHANNEL_DEFAULT_LOCK = ReentrantLock()
 const _BUFFERIOCHANNEL_DEFAULT_ELG = Ref{Union{EventLoopGroup, Nothing}}(nothing)
-const _BUFFERIOCHANNEL_DEFAULT_RESOLVER = Ref{Union{DefaultHostResolver, Nothing}}(nothing)
+const _BUFFERIOCHANNEL_DEFAULT_RESOLVER = Ref{Union{HostResolver, Nothing}}(nothing)
 
 function _bufferiochannel_default_resources()
     lock(_BUFFERIOCHANNEL_DEFAULT_LOCK)
@@ -51,11 +51,11 @@ function _bufferiochannel_default_resources()
         if _BUFFERIOCHANNEL_DEFAULT_ELG[] === nothing
             elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
             elg isa ErrorResult && error("Failed to create EventLoopGroup: $(elg.code)")
-            resolver = DefaultHostResolver(elg)
+            resolver = HostResolver(elg)
             _BUFFERIOCHANNEL_DEFAULT_ELG[] = elg
             _BUFFERIOCHANNEL_DEFAULT_RESOLVER[] = resolver
         end
-        return _BUFFERIOCHANNEL_DEFAULT_ELG[]::EventLoopGroup, _BUFFERIOCHANNEL_DEFAULT_RESOLVER[]::DefaultHostResolver
+        return _BUFFERIOCHANNEL_DEFAULT_ELG[]::EventLoopGroup, _BUFFERIOCHANNEL_DEFAULT_RESOLVER[]::HostResolver
     finally
         unlock(_BUFFERIOCHANNEL_DEFAULT_LOCK)
     end
@@ -196,7 +196,7 @@ function BufferIOChannel(
         elg, resolver = _bufferiochannel_default_resources()
     else
         if resolver === nothing
-            resolver = DefaultHostResolver(elg)
+            resolver = HostResolver(elg)
             owns_resolver = true
         end
     end

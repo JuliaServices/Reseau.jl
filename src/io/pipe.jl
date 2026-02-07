@@ -6,19 +6,19 @@ const OnPipeReadableFn = Function  # (pipe, error_code, user_data) -> nothing
 const OnPipeWriteCompleteFn = Function  # (pipe, error_code, bytes_written, user_data) -> nothing
 
 # Pipe read end
-# Note: user_data is parameterized as U (typically Any) since it can hold any user-provided value
-# and is set dynamically after creation via pipe_read_end_subscribe!
-mutable struct PipeReadEnd{U}
+# Note: user_data can hold any user-provided value and is set dynamically after
+# creation via pipe_read_end_subscribe!.
+mutable struct PipeReadEnd
     io_handle::IoHandle
     event_loop::Union{EventLoop, Nothing}  # nullable
     on_readable::Union{OnPipeReadableFn, Nothing}  # nullable
-    user_data::U
+    user_data::Any
     is_subscribed::Bool
     impl::Any  # platform-specific impl data (e.g. IOCP on Windows)
 end
 
 function PipeReadEnd(fd::Integer)
-    return PipeReadEnd{Any}(
+    return PipeReadEnd(
         IoHandle(Int32(fd)),
         nothing,
         nothing,

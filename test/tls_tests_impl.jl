@@ -145,7 +145,7 @@ function _tls_network_connect(
         ctx_options_override::Union{Function, Nothing} = nothing,
     )
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     ctx_opts = Reseau.tls_ctx_options_init_default_client()
     if ctx_options_override !== nothing
@@ -1814,7 +1814,7 @@ end
 
 function _tls_local_handshake_with_min_version(min_version::Reseau.TlsVersion.T)
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     server_opts = Reseau.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
@@ -1967,7 +1967,7 @@ end
 
 @testset "TLS server multiple connections" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     server_opts = Reseau.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
@@ -2099,7 +2099,7 @@ end
 
 @testset "TLS server hangup during negotiation" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     server_opts = Reseau.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
@@ -2187,7 +2187,7 @@ end
     end
 
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     server_opts = if Sys.isapple()
         Reseau.tls_ctx_options_init_server_pkcs12_from_path(_resource_path("unittests.p12"), "1234")
@@ -2365,7 +2365,7 @@ end
     Reseau.g_aws_channel_max_fragment_size[] = 4096
 
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     server_ctx = _test_server_ctx()
     client_ctx = Reseau.tls_context_new_client(; verify_peer = false)
@@ -2511,7 +2511,7 @@ end
         Reseau.g_aws_channel_max_fragment_size[] = 4096
 
         elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-        resolver = Reseau.DefaultHostResolver(elg)
+        resolver = Reseau.HostResolver(elg)
 
         server_ctx = _test_server_ctx()
         client_ctx = Reseau.tls_context_new_client(; verify_peer = false)
