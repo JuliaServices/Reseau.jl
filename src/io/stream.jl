@@ -206,21 +206,29 @@ const _FILE_STREAM_READ_MODE = "rb"
 const _FILE_STREAM_SEEK_SET = Cint(0)
 const _FILE_STREAM_SEEK_END = Cint(2)
 
-# Windows CRT doesn't provide POSIX `fseeko`/`ftello` symbols.
+# Windows CRT doesn't provide POSIX `fseeko`/`ftello` symbols, and the 64-bit
+# MSVC variants aren't always available in the CRT that Julia is linked against.
 @static if Sys.iswindows()
-    const _FILE_STREAM_SEEK_FN = :_fseeki64
-    const _FILE_STREAM_TELL_FN = :_ftelli64
+    function _file_stream_seek(file::Libc.FILE, offset::Int64, whence::Cint)::Cint
+        offset_long = Clong(offset)
+        if Int64(offset_long) != offset
+            Libc.errno(Libc.EINVAL)
+            return Cint(-1)
+        end
+        return ccall(:fseek, Cint, (Ptr{Cvoid}, Clong, Cint), file.ptr, offset_long, whence)
+    end
+
+    function _file_stream_tell(file::Libc.FILE)::Int64
+        return Int64(ccall(:ftell, Clong, (Ptr{Cvoid},), file.ptr))
+    end
 else
-    const _FILE_STREAM_SEEK_FN = :fseeko
-    const _FILE_STREAM_TELL_FN = :ftello
-end
+    function _file_stream_seek(file::Libc.FILE, offset::Int64, whence::Cint)::Cint
+        return ccall(:fseeko, Cint, (Ptr{Cvoid}, Int64, Cint), file.ptr, offset, whence)
+    end
 
-function _file_stream_seek(file::Libc.FILE, offset::Int64, whence::Cint)::Cint
-    return ccall(_FILE_STREAM_SEEK_FN, Cint, (Ptr{Cvoid}, Int64, Cint), file.ptr, offset, whence)
-end
-
-function _file_stream_tell(file::Libc.FILE)::Int64
-    return ccall(_FILE_STREAM_TELL_FN, Int64, (Ptr{Cvoid},), file.ptr)
+    function _file_stream_tell(file::Libc.FILE)::Int64
+        return ccall(:ftello, Int64, (Ptr{Cvoid},), file.ptr)
+    end
 end
 
 function _file_open_read(path::AbstractString)::Union{Libc.FILE, ErrorResult}
