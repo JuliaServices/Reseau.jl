@@ -22,7 +22,8 @@ This doc is a checklist/plan for doing the rename with minimal breakage and with
     - `awsio`: `https://github.com/JuliaServices/AwsIO.jl.git`
 - GitHub Actions CI:
   - Status: passing on `main` (macOS/Linux/Windows; Julia 1.12)
-  - Last green run: `21784949856` (2026-02-07)
+  - First green after Windows fixes: `21784949856` (2026-02-07)
+  - Latest green run: `21785036187` (2026-02-07)
 - Tests (all passing as run locally):
   - `Reseau` (this repo)
   - `AwsHTTP`
