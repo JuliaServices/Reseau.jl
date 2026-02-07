@@ -570,22 +570,59 @@ end
     @test write_err[] == Reseau.AWS_OP_SUCCESS
     @test wait_for(() -> socket_handler.pending_read)
 
-    channel = channel_ref[]
-    @test channel isa Reseau.Channel
-    if !(channel isa Reseau.Channel)
+    channel_any = channel_ref[]
+    @test channel_any isa Reseau.Channel
+    if !(channel_any isa Reseau.Channel)
         Reseau.event_loop_group_destroy!(elg)
         return
     end
+    channel = channel_any::Reseau.Channel
 
-    app_handler = TestReadHandler(64)
-    app_slot = Reseau.channel_slot_new!(channel)
-    if Reseau.channel_first_slot(channel) !== app_slot
-        Reseau.channel_slot_insert_end!(channel, app_slot)
+    setup_done = Ref(false)
+    setup_err = Ref(0)
+    app_handler_ref = Ref{Any}(nothing)
+
+    setup_task = Reseau.ChannelTask((task, arg, status) -> begin
+        status == Reseau.TaskStatus.RUN_READY || return nothing
+        ch = arg::Reseau.Channel
+
+        app_handler = TestReadHandler(64)
+        app_slot = Reseau.channel_slot_new!(ch)
+        if Reseau.channel_first_slot(ch) !== app_slot
+            insert_res = Reseau.channel_slot_insert_end!(ch, app_slot)
+            if insert_res isa Reseau.ErrorResult
+                setup_err[] = insert_res.code
+                setup_done[] = true
+                return nothing
+            end
+        end
+
+        set_res = Reseau.channel_slot_set_handler!(app_slot, app_handler)
+        if set_res isa Reseau.ErrorResult
+            setup_err[] = set_res.code
+            setup_done[] = true
+            return nothing
+        end
+        app_handler.slot = app_slot
+
+        res = Reseau.channel_setup_complete!(ch)
+        setup_err[] = res isa Reseau.ErrorResult ? res.code : Reseau.AWS_OP_SUCCESS
+        app_handler_ref[] = app_handler
+        setup_done[] = true
+        return nothing
+    end, channel, "setup_downstream")
+    Reseau.channel_schedule_task_now!(channel, setup_task)
+
+    @test wait_for(() -> setup_done[])
+    @test setup_err[] == Reseau.AWS_OP_SUCCESS
+
+    app_handler = app_handler_ref[]
+    @test app_handler isa TestReadHandler
+    if !(app_handler isa TestReadHandler)
+        Reseau.event_loop_group_destroy!(elg)
+        return
     end
-    Reseau.channel_slot_set_handler!(app_slot, app_handler)
-    app_handler.slot = app_slot
-    @test Reseau.channel_setup_complete!(channel) === nothing
-    @test wait_for(() -> String(app_handler.received) == payload)
+    @test wait_for(() -> String((app_handler::TestReadHandler).received) == payload)
 
     if client isa Reseau.Socket
         Reseau.socket_close(client)
