@@ -72,6 +72,7 @@
 
     # Keepalive tuning
     const SIO_KEEPALIVE_VALS = UInt32(0x98000004)
+    const FIONBIO = UInt32(0x8004667E)
     struct TcpKeepAlive
         onoff::UInt32
         keepalivetime::UInt32
@@ -336,7 +337,6 @@
         end
 
         # Set non-blocking
-        const FIONBIO = UInt32(0x8004667E)
         non_blocking = Ref{UInt32}(1)
         if ccall((:ioctlsocket, _WS2_32), Cint, (UInt, UInt32, Ptr{UInt32}), handle, FIONBIO, non_blocking) != 0
             wsa_err = _wsa_get_last_error()
@@ -1111,7 +1111,6 @@
         incoming.remote_endpoint.port = port
 
         # Make accepted socket non-blocking.
-        const FIONBIO = UInt32(0x8004667E)
         nb = Ref{UInt32}(1)
         _ = ccall((:ioctlsocket, _WS2_32), Cint, (UInt, UInt32, Ptr{UInt32}), _winsock_socket_handle(incoming), FIONBIO, nb)
 
