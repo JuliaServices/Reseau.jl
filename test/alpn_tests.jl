@@ -153,10 +153,11 @@ end
         window = sizeof(AwsIO.TlsNegotiatedProtocolMessage),
     )
     AwsIO.channel_slot_set_handler!(right_slot, handler)
-    shared = AwsIO.TlsHandlerShared{Any}(nothing, UInt32(0), AwsIO.TlsHandlerStatistics(), AwsIO.ChannelTask())
     tls_handler = AwsIO.SecureTransportTlsHandler(
         left_slot,
-        shared,
+        UInt32(0),
+        AwsIO.TlsHandlerStatistics(),
+        AwsIO.ChannelTask(),
         C_NULL,
         nothing,
         AwsIO.Deque{AwsIO.IoMessage}(16),
@@ -179,7 +180,6 @@ end
         0,
         AwsIO.ChannelTask(),
     )
-    shared.handler = tls_handler
     AwsIO._secure_transport_send_alpn_message(tls_handler)
     @test message_count[] == 0
     tls_handler.protocol = AwsIO.byte_buf_from_c_str("h2")
@@ -193,10 +193,11 @@ end
         @test true
         return
     end
-    shared = AwsIO.TlsHandlerShared{Any}(nothing, UInt32(0), AwsIO.TlsHandlerStatistics(), AwsIO.ChannelTask())
     handler = AwsIO.SecureTransportTlsHandler(
         nothing,
-        shared,
+        UInt32(0),
+        AwsIO.TlsHandlerStatistics(),
+        AwsIO.ChannelTask(),
         C_NULL,
         nothing,
         AwsIO.Deque{AwsIO.IoMessage}(16),
@@ -219,7 +220,6 @@ end
         0,
         AwsIO.ChannelTask(),
     )
-    shared.handler = handler
     protocol = AwsIO._secure_transport_get_protocol(handler)
     @test protocol.len == 0
 end
@@ -229,10 +229,11 @@ end
         @test true
         return
     end
-    shared = AwsIO.TlsHandlerShared{Any}(nothing, UInt32(0), AwsIO.TlsHandlerStatistics(), AwsIO.ChannelTask())
     handler = AwsIO.SecureTransportTlsHandler(
         nothing,
-        shared,
+        UInt32(0),
+        AwsIO.TlsHandlerStatistics(),
+        AwsIO.ChannelTask(),
         C_NULL,
         nothing,
         AwsIO.Deque{AwsIO.IoMessage}(16),
@@ -255,7 +256,6 @@ end
         0,
         AwsIO.ChannelTask(),
     )
-    shared.handler = handler
     AwsIO._secure_transport_handle_would_block(handler, false)
     @test handler.negotiation_finished == false
 end

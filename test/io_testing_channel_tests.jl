@@ -137,7 +137,7 @@ function _setup_channel(; enable_read_back_pressure::Bool = false)
 end
 
 @testset "io_testing_channel" begin
-    if Sys.iswindows() || Threads.nthreads(:interactive) <= 1
+    if Threads.nthreads(:interactive) <= 1
         @test true
     else
         AwsIO.io_library_init()

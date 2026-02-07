@@ -70,7 +70,12 @@ AwsIO.handler_destroy(::TestReadHandler) = nothing
         return
     end
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    # Use LOCAL on macOS (IPV4 → NW sockets, which don't expose resolved port)
+    @static if Sys.isapple()
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    end
     server = AwsIO.socket_init(opts)
     @test server isa AwsIO.Socket
     if server isa AwsIO.ErrorResult
@@ -78,13 +83,23 @@ AwsIO.handler_destroy(::TestReadHandler) = nothing
         return
     end
 
-    bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+    @static if Sys.isapple()
+        bind_endpoint = AwsIO.SocketEndpoint()
+        AwsIO.socket_endpoint_init_local_address_for_test!(bind_endpoint)
+        connect_endpoint = bind_endpoint
+    else
+        bind_endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
+    end
+    bind_opts = AwsIO.SocketBindOptions(bind_endpoint)
     @test AwsIO.socket_bind(server, bind_opts) === nothing
     @test AwsIO.socket_listen(server, 8) === nothing
-    bound = AwsIO.socket_get_bound_address(server)
-    @test bound isa AwsIO.SocketEndpoint
-    port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
-    @test port > 0
+    @static if !Sys.isapple()
+        bound = AwsIO.socket_get_bound_address(server)
+        @test bound isa AwsIO.SocketEndpoint
+        port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
+        @test port > 0
+        connect_endpoint = AwsIO.SocketEndpoint("127.0.0.1", port)
+    end
 
     accept_done = Ref(false)
     accept_err = Ref(0)
@@ -146,7 +161,7 @@ AwsIO.handler_destroy(::TestReadHandler) = nothing
     connect_done = Ref(false)
     connect_err = Ref(0)
     connect_opts = AwsIO.SocketConnectOptions(
-        AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_endpoint;
         event_loop = event_loop,
         on_connection_result = (sock, err, ud) -> begin
             connect_err[] = err
@@ -240,7 +255,11 @@ end
         return
     end
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    @static if Sys.isapple()
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    end
     server = AwsIO.socket_init(opts)
     @test server isa AwsIO.Socket
     if server isa AwsIO.ErrorResult
@@ -248,13 +267,23 @@ end
         return
     end
 
-    bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+    @static if Sys.isapple()
+        bind_endpoint = AwsIO.SocketEndpoint()
+        AwsIO.socket_endpoint_init_local_address_for_test!(bind_endpoint)
+        connect_endpoint = bind_endpoint
+    else
+        bind_endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
+    end
+    bind_opts = AwsIO.SocketBindOptions(bind_endpoint)
     @test AwsIO.socket_bind(server, bind_opts) === nothing
     @test AwsIO.socket_listen(server, 8) === nothing
-    bound = AwsIO.socket_get_bound_address(server)
-    @test bound isa AwsIO.SocketEndpoint
-    port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
-    @test port > 0
+    @static if !Sys.isapple()
+        bound = AwsIO.socket_get_bound_address(server)
+        @test bound isa AwsIO.SocketEndpoint
+        port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
+        @test port > 0
+        connect_endpoint = AwsIO.SocketEndpoint("127.0.0.1", port)
+    end
 
     accept_done = Ref(false)
     accept_err = Ref(0)
@@ -306,7 +335,7 @@ end
     connect_done = Ref(false)
     connect_err = Ref(0)
     connect_opts = AwsIO.SocketConnectOptions(
-        AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_endpoint;
         event_loop = event_loop,
         on_connection_result = (sock, err, ud) -> begin
             connect_err[] = err
@@ -422,7 +451,11 @@ end
         return
     end
 
-    opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    @static if Sys.isapple()
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.LOCAL)
+    else
+        opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
+    end
     server = AwsIO.socket_init(opts)
     @test server isa AwsIO.Socket
     if server isa AwsIO.ErrorResult
@@ -430,13 +463,23 @@ end
         return
     end
 
-    bind_opts = AwsIO.SocketBindOptions(AwsIO.SocketEndpoint("127.0.0.1", 0))
+    @static if Sys.isapple()
+        bind_endpoint = AwsIO.SocketEndpoint()
+        AwsIO.socket_endpoint_init_local_address_for_test!(bind_endpoint)
+        connect_endpoint = bind_endpoint
+    else
+        bind_endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
+    end
+    bind_opts = AwsIO.SocketBindOptions(bind_endpoint)
     @test AwsIO.socket_bind(server, bind_opts) === nothing
     @test AwsIO.socket_listen(server, 8) === nothing
-    bound = AwsIO.socket_get_bound_address(server)
-    @test bound isa AwsIO.SocketEndpoint
-    port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
-    @test port > 0
+    @static if !Sys.isapple()
+        bound = AwsIO.socket_get_bound_address(server)
+        @test bound isa AwsIO.SocketEndpoint
+        port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
+        @test port > 0
+        connect_endpoint = AwsIO.SocketEndpoint("127.0.0.1", port)
+    end
 
     accept_done = Ref(false)
     accept_err = Ref(0)
@@ -477,7 +520,7 @@ end
     connect_done = Ref(false)
     connect_err = Ref(0)
     connect_opts = AwsIO.SocketConnectOptions(
-        AwsIO.SocketEndpoint("127.0.0.1", port);
+        connect_endpoint;
         event_loop = event_loop,
         on_connection_result = (sock, err, ud) -> begin
             connect_err[] = err

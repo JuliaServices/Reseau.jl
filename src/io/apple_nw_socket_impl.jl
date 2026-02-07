@@ -1,44 +1,10 @@
 # AWS IO Library - Apple Network Framework sockets
 # Port of aws-c-io/source/darwin/nw_socket.c
 
+# Type definitions (NWSocket, NWSendContext, enums, type aliases, library paths)
+# are in apple_nw_socket_types.jl — included before socket.jl for type ordering.
+
 @static if Sys.isapple()
-    const _NW_NETWORK_LIB = "/System/Library/Frameworks/Network.framework/Network"
-    const _NW_SECURITY_LIB = "/System/Library/Frameworks/Security.framework/Security"
-    const _NW_DISPATCH_LIB = "libSystem"
-    const _COREFOUNDATION_LIB = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
-
-    # Backwards-compat feature flag:
-    # Downstream packages historically checked `AwsIO._NW_SHIM_LIB != ""` to
-    # decide whether Apple Network.framework sockets were available. The shim
-    # shared library has been removed; keep a non-empty sentinel on macOS.
-    const _NW_SHIM_LIB = "<builtin>"
-
-    const nw_connection_t = Ptr{Cvoid}
-    const nw_listener_t = Ptr{Cvoid}
-    const nw_parameters_t = Ptr{Cvoid}
-    const nw_endpoint_t = Ptr{Cvoid}
-    const nw_error_t = Ptr{Cvoid}
-    const nw_path_t = Ptr{Cvoid}
-    const nw_protocol_metadata_t = Ptr{Cvoid}
-    const nw_protocol_definition_t = Ptr{Cvoid}
-    const nw_protocol_options_t = Ptr{Cvoid}
-    const nw_content_context_t = Ptr{Cvoid}
-    const sec_protocol_options_t = Ptr{Cvoid}
-    const sec_protocol_metadata_t = Ptr{Cvoid}
-    const sec_trust_t = Ptr{Cvoid}
-    const dispatch_data_t = Ptr{Cvoid}
-    const dispatch_queue_t = Ptr{Cvoid}
-    const CFErrorRef = Ptr{Cvoid}
-    const CFStringRef = Ptr{Cvoid}
-    const CFTypeRef = Ptr{Cvoid}
-    const CFArrayRef = Ptr{Cvoid}
-    const SecTrustRef = Ptr{Cvoid}
-    const SecPolicyRef = Ptr{Cvoid}
-    const SecIdentityRef = Ptr{Cvoid}
-    const OSStatus = Int32
-
-    const KB_16 = Csize_t(16 * 1024)
-
     # Network.framework exports some "constants" (e.g. NW_PARAMETERS_DISABLE_PROTOCOL) as
     # globals whose value is already a pointer type. We must load the pointer value from
     # the global's storage (i.e. dereference `cglobal`).
@@ -84,115 +50,8 @@
     const tls_protocol_version_TLSv12 = UInt16(0x0303)
     const tls_protocol_version_TLSv13 = UInt16(0x0304)
 
-    @enumx NWSocketState::UInt16 begin
-        INVALID = 0x000
-        INIT = 0x001
-        CONNECTING = 0x002
-        CONNECTED_READ = 0x004
-        CONNECTED_WRITE = 0x008
-        BOUND = 0x010
-        LISTENING = 0x020
-        STOPPED = 0x040
-        ERROR = 0x080
-        CLOSING = 0x100
-        CLOSED = 0x200
-    end
-
-    @enumx NWSocketMode::UInt8 begin
-        CONNECTION = 0
-        LISTENER = 1
-    end
-
-    mutable struct ReadQueueNode
-        data::dispatch_data_t
-        offset::Csize_t
-    end
-
-    mutable struct NWParametersContext
-        socket::Any
-        options::SocketOptions
-    end
-
-    mutable struct NWSocket
-        last_error::Int
-        connection::nw_connection_t
-        listener::nw_listener_t
-        parameters::nw_parameters_t
-        parameters_context::Union{NWParametersContext, Nothing}
-        mode::NWSocketMode.T
-        read_queue::Deque{ReadQueueNode}
-        on_readable::Union{SocketOnReadableFn, Nothing}
-        on_readable_user_data::Any
-        on_connection_result::Union{SocketOnConnectionResultFn, Nothing}
-        connect_result_user_data::Any
-        on_accept_started::Union{SocketOnAcceptStartedFn, Nothing}
-        listen_accept_started_user_data::Any
-        on_close_complete::Union{SocketOnShutdownCompleteFn, Nothing}
-        close_user_data::Any
-        on_cleanup_complete::Union{SocketOnShutdownCompleteFn, Nothing}
-        cleanup_user_data::Any
-        cleanup_requested::Bool
-        event_loop::Union{EventLoop, Nothing}
-        connection_setup::Bool
-        timeout_task::Union{ScheduledTask, Nothing}
-        host_name::Union{String, Nothing}
-        alpn_list::Union{String, Nothing}
-        tls_ctx::Union{Any, Nothing}
-        protocol_buf::ByteBuffer
-        synced_lock::ReentrantLock
-        read_scheduled::Bool
-        state::UInt16
-        base_socket_lock::ReentrantLock
-        base_socket::Union{Socket, Nothing}
-        pending_writes::Int
-        registry_key::Ptr{Cvoid}
-    end
-
-    function NWSocket()
-        return NWSocket(
-            0,
-            C_NULL,
-            C_NULL,
-            C_NULL,
-            nothing,
-            NWSocketMode.CONNECTION,
-            Deque{ReadQueueNode}(16),
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            false,
-            nothing,
-            false,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            null_buffer(),
-            ReentrantLock(),
-            false,
-            UInt16(NWSocketState.INIT),
-            ReentrantLock(),
-            nothing,
-            0,
-            C_NULL,
-        )
-    end
-
     const _nw_socket_registry = Dict{Ptr{Cvoid}, NWSocket}()
     const _nw_socket_registry_lock = ReentrantLock()
-
-    mutable struct NWSendContext
-        socket::NWSocket
-        written_fn::Union{Function, Nothing}
-        user_data::Any
-    end
 
     const _nw_send_registry = Dict{Ptr{Cvoid}, NWSendContext}()
     const _nw_send_registry_lock = ReentrantLock()
@@ -1548,8 +1407,7 @@
             end
 
             options = copy(listener.options)
-            options.impl_type = SocketImplType.APPLE_NETWORK_FRAMEWORK
-            new_socket = socket_init(options)
+            new_socket = socket_init_apple_nw(options)
             if new_socket isa ErrorResult
                 listener.accept_result_fn(listener, new_socket.code, nothing, listener.connect_accept_user_data)
                 _nw_unlock_base(nw_socket)
@@ -1677,13 +1535,7 @@
         return nothing
     end
 
-    # VTable implementation for Apple Network Framework
-    struct AppleNWSocketVTable <: SocketVTable end
-    const APPLE_NW_SOCKET_VTABLE = AppleNWSocketVTable()
-
-    const AppleNWSocketType = Socket{AppleNWSocketVTable}
-
-    function socket_init_apple_nw(options::SocketOptions)::Union{AppleNWSocketType, ErrorResult}
+    function socket_init_apple_nw(options::SocketOptions)::Union{Socket, ErrorResult}
         if options.network_interface_name[1] != 0
             raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
             return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -1693,8 +1545,7 @@
         nw_socket = NWSocket()
         _nw_register_socket!(nw_socket)
 
-        sock = Socket{AppleNWSocketVTable}(
-            APPLE_NW_SOCKET_VTABLE,
+        sock = Socket(
             SocketEndpoint(),
             SocketEndpoint(),
             copy(options),
@@ -1714,7 +1565,7 @@
         return sock
     end
 
-    function vtable_socket_cleanup!(::AppleNWSocketVTable, socket::AppleNWSocketType)
+    function socket_cleanup_impl(::NWSocket, socket::Socket)
         nw_socket = socket.impl
         nw_socket === nothing && return nothing
 
@@ -1740,9 +1591,9 @@
         return nothing
     end
 
-    function vtable_socket_connect(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_connect_impl(
+            ::NWSocket,
+            socket::Socket,
             options::SocketConnectOptions,
         )::Union{Nothing, ErrorResult}
         nw_socket = socket.impl
@@ -1867,9 +1718,9 @@
         return nothing
     end
 
-    function vtable_socket_bind(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_bind_impl(
+            ::NWSocket,
+            socket::Socket,
             options::SocketBindOptions,
         )::Union{Nothing, ErrorResult}
         nw_socket = socket.impl
@@ -1916,9 +1767,9 @@
         return nothing
     end
 
-    function vtable_socket_listen(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_listen_impl(
+            ::NWSocket,
+            socket::Socket,
             backlog_size::Integer,
         )::Union{Nothing, ErrorResult}
         _ = backlog_size
@@ -1942,6 +1793,14 @@
             return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
 
+        # When binding to port 0, Network.framework may already have chosen an ephemeral port
+        # at listener creation time. Grab it early so `socket_get_bound_address()` reflects it
+        # before `socket_start_accept()` transitions to READY.
+        port = ccall((:nw_listener_get_port, _NW_NETWORK_LIB), UInt16, (nw_listener_t,), listener)
+        if port != 0
+            socket.local_endpoint.port = port
+        end
+
         socket.io_handle.handle = listener
         socket.io_handle.set_queue = _nw_listener_set_queue_c[]
         nw_socket.listener = listener
@@ -1951,9 +1810,9 @@
         return nothing
     end
 
-    function vtable_socket_start_accept(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_start_accept_impl(
+            ::NWSocket,
+            socket::Socket,
             accept_loop::EventLoop,
             options::SocketListenerOptions,
         )::Union{Nothing, ErrorResult}
@@ -2011,7 +1870,7 @@
         return nothing
     end
 
-    function vtable_socket_stop_accept(::AppleNWSocketVTable, socket::AppleNWSocketType)::Union{Nothing, ErrorResult}
+    function socket_stop_accept_impl(::NWSocket, socket::Socket)::Union{Nothing, ErrorResult}
         nw_socket = socket.impl
         _nw_lock_synced(nw_socket)
         if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
@@ -2025,7 +1884,7 @@
         return nothing
     end
 
-    function vtable_socket_close(::AppleNWSocketVTable, socket::AppleNWSocketType)::Union{Nothing, ErrorResult}
+    function socket_close_impl(::NWSocket, socket::Socket)::Union{Nothing, ErrorResult}
         nw_socket = socket.impl
         _nw_lock_synced(nw_socket)
         if nw_socket.state < _nw_state_mask(NWSocketState.CLOSING)
@@ -2040,15 +1899,15 @@
         return nothing
     end
 
-    function vtable_socket_shutdown_dir(::AppleNWSocketVTable, socket::AppleNWSocketType, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
+    function socket_shutdown_dir_impl(::NWSocket, socket::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
         _ = dir
         raise_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
         return ErrorResult(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
     end
 
-    function vtable_socket_set_options(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_set_options_impl(
+            ::NWSocket,
+            socket::Socket,
             options::SocketOptions,
         )::Union{Nothing, ErrorResult}
         if socket.options.domain != options.domain || socket.options.type != options.type
@@ -2060,9 +1919,9 @@
         return _nw_setup_socket_params!(nw_socket, options)
     end
 
-    function vtable_socket_assign_to_event_loop(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_assign_to_event_loop_impl(
+            ::NWSocket,
+            socket::Socket,
             event_loop::EventLoop,
         )::Union{Nothing, ErrorResult}
         nw_socket = socket.impl
@@ -2085,9 +1944,9 @@
         return nothing
     end
 
-    function vtable_socket_subscribe_to_readable_events(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_subscribe_to_readable_events_impl(
+            ::NWSocket,
+            socket::Socket,
             on_readable::SocketOnReadableFn,
             user_data,
         )::Union{Nothing, ErrorResult}
@@ -2101,9 +1960,9 @@
         return _nw_schedule_next_read!(nw_socket)
     end
 
-    function vtable_socket_read(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_read_impl(
+            ::NWSocket,
+            socket::Socket,
             buffer::ByteBuffer,
         )::Union{Tuple{Nothing, Csize_t}, ErrorResult}
         nw_socket = socket.impl
@@ -2156,9 +2015,9 @@
         return (nothing, amount_read)
     end
 
-    function vtable_socket_write(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_write_impl(
+            ::NWSocket,
+            socket::Socket,
             cursor::ByteCursor,
             written_fn::Union{SocketOnWriteCompletedFn, Nothing},
             user_data,
@@ -2221,11 +2080,11 @@
         return nothing
     end
 
-    function vtable_socket_get_error(::AppleNWSocketVTable, socket::AppleNWSocketType)::Int
+    function socket_get_error_impl(::NWSocket, socket::Socket)::Int
         return socket.impl.last_error
     end
 
-    function vtable_socket_is_open(::AppleNWSocketVTable, socket::AppleNWSocketType)::Bool
+    function socket_is_open_impl(::NWSocket, socket::Socket)::Bool
         nw_socket = socket.impl
         _nw_lock_synced(nw_socket)
         is_open = nw_socket.state < _nw_state_mask(NWSocketState.CLOSING)
@@ -2233,9 +2092,9 @@
         return is_open
     end
 
-    function vtable_socket_set_close_callback(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_set_close_callback_impl(
+            ::NWSocket,
+            socket::Socket,
             fn::SocketOnShutdownCompleteFn,
             user_data,
         )::Union{Nothing, ErrorResult}
@@ -2245,9 +2104,9 @@
         return nothing
     end
 
-    function vtable_socket_set_cleanup_callback(
-            ::AppleNWSocketVTable,
-            socket::AppleNWSocketType,
+    function socket_set_cleanup_callback_impl(
+            ::NWSocket,
+            socket::Socket,
             fn::SocketOnShutdownCompleteFn,
             user_data,
         )::Union{Nothing, ErrorResult}
@@ -2257,11 +2116,11 @@
         return nothing
     end
 
-    function vtable_socket_get_protocol(::AppleNWSocketVTable, socket::AppleNWSocketType)::ByteBuffer
+    function socket_get_protocol_impl(::NWSocket, socket::Socket)::ByteBuffer
         return socket.impl.protocol_buf
     end
 
-    function vtable_socket_get_server_name(::AppleNWSocketVTable, socket::AppleNWSocketType)::ByteBuffer
+    function socket_get_server_name_impl(::NWSocket, socket::Socket)::ByteBuffer
         name = socket.impl.host_name
         name === nothing && return null_buffer()
         return byte_buf_from_c_str(name)

@@ -200,55 +200,7 @@ function _parse_vsock_cid(address::AbstractString)::Union{UInt32, ErrorResult}
     end
 end
 
-# Socket write request for queued writes
-mutable struct SocketWriteRequest
-    cursor::ByteCursor
-    original_len::Csize_t
-    written_fn::Union{Function, Nothing}
-    user_data::Any
-    error_code::Int
-    node_next::Union{SocketWriteRequest, Nothing}  # nullable
-    node_prev::Union{SocketWriteRequest, Nothing}  # nullable
-end
-
-# POSIX socket connect args
-mutable struct PosixSocketConnectArgs
-    task::Union{ScheduledTask, Nothing}
-    socket::Union{Socket, Nothing}
-end
-
-# POSIX socket implementation data
-mutable struct PosixSocket
-    write_queue::Deque{SocketWriteRequest}
-    written_queue::Deque{SocketWriteRequest}
-    written_task::Union{ScheduledTask, Nothing}  # nullable
-    connect_args::Union{PosixSocketConnectArgs, Nothing}  # nullable
-    written_task_scheduled::Bool
-    currently_subscribed::Bool
-    continue_accept::Bool
-    close_happened::Union{Ref{Bool}, Nothing}  # nullable
-    on_close_complete::Union{Function, Nothing}
-    close_user_data::Any
-    on_cleanup_complete::Union{Function, Nothing}
-    cleanup_user_data::Any
-end
-
-function PosixSocket()
-    return PosixSocket(
-        Deque{SocketWriteRequest}(),
-        Deque{SocketWriteRequest}(),
-        nothing,
-        nothing,
-        false,
-        false,
-        false,
-        nothing,
-        nothing,
-        nothing,
-        nothing,
-        nothing,
-    )
-end
+# Type definitions are in posix_socket_types.jl
 
 # Internal socket state as bitmask (matching C implementation)
 const POSIX_SOCKET_STATE_INIT = 0x01
@@ -260,13 +212,6 @@ const POSIX_SOCKET_STATE_LISTENING = 0x20
 const POSIX_SOCKET_STATE_TIMEDOUT = 0x40
 const POSIX_SOCKET_STATE_ERROR = 0x80
 const POSIX_SOCKET_STATE_CLOSED = 0x0100
-
-# POSIX Socket VTable
-struct PosixSocketVTable <: SocketVTable end
-const POSIX_SOCKET_VTABLE = PosixSocketVTable()
-
-# Type alias for POSIX socket
-const PosixSocketType = Socket{PosixSocketVTable}
 
 # Internal helper to get errno
 function get_errno()::Cint
@@ -315,7 +260,7 @@ end
 function socket_init_posix(
         options::SocketOptions;
         existing_fd::Cint = Cint(-1),
-    )::Union{PosixSocketType, ErrorResult}
+    )::Union{Socket, ErrorResult}
 
     socket_impl = PosixSocket()
 
@@ -330,8 +275,7 @@ function socket_init_posix(
         io_handle.fd = existing_fd
     end
 
-    sock = Socket{PosixSocketVTable}(
-        POSIX_SOCKET_VTABLE,
+    sock = Socket(
         SocketEndpoint(),
         SocketEndpoint(),
         copy(options),
@@ -370,7 +314,6 @@ function Base.copy(options::SocketOptions)
     return SocketOptions(
         options.type,
         options.domain,
-        options.impl_type,
         options.connect_timeout_ms,
         options.keep_alive_interval_sec,
         options.keep_alive_timeout_sec,
@@ -381,7 +324,7 @@ function Base.copy(options::SocketOptions)
 end
 
 # Set socket options on the underlying fd
-function set_posix_socket_options!(sock::PosixSocketType, options::SocketOptions)::Union{Nothing, ErrorResult}
+function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
 
     # Set NOSIGPIPE on macOS
@@ -668,8 +611,8 @@ end
 htons(x::Integer) = hton(UInt16(x))
 ntohs(x::Integer) = ntoh(UInt16(x))
 
-# VTable implementation - cleanup
-function vtable_socket_cleanup!(vtable::PosixSocketVTable, sock::PosixSocketType)
+# POSIX impl - cleanup
+function socket_cleanup_impl(::PosixSocket, sock::Socket)
     if sock.impl === nothing
         return nothing
     end
@@ -677,9 +620,9 @@ function vtable_socket_cleanup!(vtable::PosixSocketVTable, sock::PosixSocketType
     socket_impl = sock.impl
     fd_for_logging = sock.io_handle.fd
 
-    if vtable_socket_is_open(vtable, sock)
+    if socket_is_open(sock)
         logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd_for_logging is still open, closing...")
-        vtable_socket_close(vtable, sock)
+        socket_close(sock)
     end
 
     on_cleanup_complete = socket_impl.on_cleanup_complete
@@ -696,8 +639,8 @@ function vtable_socket_cleanup!(vtable::PosixSocketVTable, sock::PosixSocketType
     return nothing
 end
 
-# VTable implementation - connect
-function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType, options::SocketConnectOptions)::Union{Nothing, ErrorResult}
+# POSIX impl - connect
+function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnectOptions)::Union{Nothing, ErrorResult}
     remote_endpoint = options.remote_endpoint
     event_loop = options.event_loop
     on_connection_result = options.on_connection_result
@@ -888,7 +831,7 @@ function vtable_socket_connect(vtable::PosixSocketVTable, sock::PosixSocketType,
 end
 
 # Connection success callback
-function _on_connection_success(sock::PosixSocketType)
+function _on_connection_success(sock::Socket)
     event_loop = sock.event_loop
     socket_impl = sock.impl
     fd = sock.io_handle.fd
@@ -929,7 +872,7 @@ function _on_connection_success(sock::PosixSocketType)
     sock.state = socket_state_mask(SocketState.CONNECTED_READ, SocketState.CONNECTED_WRITE)
 
     # Re-assign to event loop
-    assign_result = vtable_socket_assign_to_event_loop(sock.vtable, sock, event_loop)
+    assign_result = socket_assign_to_event_loop(sock, event_loop)
     if assign_result isa ErrorResult
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to assign to event loop")
         _on_connection_error(sock, last_error())
@@ -943,7 +886,7 @@ function _on_connection_success(sock::PosixSocketType)
 end
 
 # Connection error callback
-function _on_connection_error(sock::PosixSocketType, error_code::Integer)
+function _on_connection_error(sock::Socket, error_code::Integer)
     sock.state = SocketState.ERROR
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: connection failure, error=$error_code")
@@ -968,7 +911,7 @@ function _socket_connect_event(event_loop, handle::IoHandle, events::Int, user_d
 
         # Check for error/closed events
         if (events & Int(IoEventType.ERROR) != 0) || (events & Int(IoEventType.CLOSED) != 0)
-            aws_error = vtable_socket_get_error(sock.vtable, sock)
+            aws_error = socket_get_error(sock)
             if aws_error == ERROR_IO_READ_WOULD_BLOCK
                 return nothing  # Spurious event
             end
@@ -1019,7 +962,7 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs, status::Ta
         # Close socket and notify error
         connect_args.socket = nothing
         socket_impl.connect_args = nothing
-        vtable_socket_close(sock.vtable, sock)
+        socket_close(sock)
         _on_connection_error(sock, error_code)
     end
 
@@ -1048,7 +991,7 @@ function _run_connect_success(connect_args::PosixSocketConnectArgs, status::Task
 end
 
 # Update local endpoint from socket
-function _update_local_endpoint!(sock::PosixSocketType)
+function _update_local_endpoint!(sock::Socket)
     fd = sock.io_handle.fd
     address = Memory{UInt8}(undef, 128)
     fill!(address, 0x00)
@@ -1107,8 +1050,8 @@ function _update_local_endpoint!(sock::PosixSocketType)
     return nothing
 end
 
-# VTable implementation - bind
-function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, options::SocketBindOptions)::Union{Nothing, ErrorResult}
+# POSIX impl - bind
+function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOptions)::Union{Nothing, ErrorResult}
     local_endpoint = options.local_endpoint
     fd = sock.io_handle.fd
 
@@ -1235,8 +1178,8 @@ function vtable_socket_bind(vtable::PosixSocketVTable, sock::PosixSocketType, op
     return nothing
 end
 
-# VTable implementation - listen
-function vtable_socket_listen(vtable::PosixSocketVTable, sock::PosixSocketType, backlog_size::Integer)::Union{Nothing, ErrorResult}
+# POSIX impl - listen
+function socket_listen_impl(::PosixSocket, sock::Socket, backlog_size::Integer)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
 
     if sock.state != SocketState.BOUND
@@ -1261,8 +1204,8 @@ function vtable_socket_listen(vtable::PosixSocketVTable, sock::PosixSocketType, 
     return ErrorResult(aws_error)
 end
 
-# VTable implementation - close
-function vtable_socket_close(vtable::PosixSocketVTable, sock::PosixSocketType)::Union{Nothing, ErrorResult}
+# POSIX impl - close
+function socket_close_impl(::PosixSocket, sock::Socket)::Union{Nothing, ErrorResult}
     socket_impl = sock.impl
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: closing")
@@ -1273,7 +1216,7 @@ function vtable_socket_close(vtable::PosixSocketVTable, sock::PosixSocketType)::
         # Unsubscribe from events if subscribed
         if socket_impl.currently_subscribed
             if sock.state == SocketState.LISTENING
-                vtable_socket_stop_accept(vtable, sock)
+                socket_stop_accept(sock)
             else
                 event_loop_unsubscribe_from_io_events!(event_loop, sock.io_handle)
             end
@@ -1291,7 +1234,7 @@ function vtable_socket_close(vtable::PosixSocketVTable, sock::PosixSocketType)::
         socket_impl.connect_args = nothing
     end
 
-    if vtable_socket_is_open(vtable, sock)
+    if socket_is_open(sock)
         ccall(:close, Cint, (Cint,), fd)
         sock.io_handle.fd = -1
         sock.state = SocketState.CLOSED
@@ -1326,8 +1269,8 @@ function vtable_socket_close(vtable::PosixSocketVTable, sock::PosixSocketType)::
     return nothing
 end
 
-# VTable implementation - shutdown direction
-function vtable_socket_shutdown_dir(vtable::PosixSocketVTable, sock::PosixSocketType, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
+# POSIX impl - shutdown direction
+function socket_shutdown_dir_impl(::PosixSocket, sock::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
     how = dir == ChannelDirection.READ ? SHUT_RD : SHUT_WR
 
@@ -1349,8 +1292,8 @@ function vtable_socket_shutdown_dir(vtable::PosixSocketVTable, sock::PosixSocket
     return nothing
 end
 
-# VTable implementation - set options
-function vtable_socket_set_options(vtable::PosixSocketVTable, sock::PosixSocketType, options::SocketOptions)::Union{Nothing, ErrorResult}
+# POSIX impl - set options
+function socket_set_options_impl(::PosixSocket, sock::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
     if sock.options.domain != options.domain || sock.options.type != options.type
         raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
@@ -1358,8 +1301,8 @@ function vtable_socket_set_options(vtable::PosixSocketVTable, sock::PosixSocketT
     return set_posix_socket_options!(sock, options)
 end
 
-# VTable implementation - assign to event loop
-function vtable_socket_assign_to_event_loop(vtable::PosixSocketVTable, sock::PosixSocketType, event_loop::EventLoop)::Union{Nothing, ErrorResult}
+# POSIX impl - assign to event loop
+function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loop::EventLoop)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing
@@ -1419,7 +1362,7 @@ function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_dat
             Base.invokelatest(sock.readable_fn, sock, ERROR_IO_SOCKET_CLOSED, sock.readable_user_data)
         end
     elseif socket_impl.currently_subscribed && (events & Int(IoEventType.ERROR)) != 0
-        aws_error = vtable_socket_get_error(sock.vtable, sock)
+        aws_error = socket_get_error(sock)
         raise_error(aws_error)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: error event occurred")
         if sock.readable_fn !== nothing
@@ -1430,8 +1373,8 @@ function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_dat
     return nothing
 end
 
-# VTable implementation - subscribe to readable events
-function vtable_socket_subscribe_to_readable_events(vtable::PosixSocketVTable, sock::PosixSocketType, on_readable::SocketOnReadableFn, user_data)::Union{Nothing, ErrorResult}
+# POSIX impl - subscribe to readable events
+function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, on_readable::SocketOnReadableFn, user_data)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: subscribing to readable events")
 
@@ -1453,8 +1396,8 @@ function vtable_socket_subscribe_to_readable_events(vtable::PosixSocketVTable, s
     return nothing
 end
 
-# VTable implementation - read
-function vtable_socket_read(vtable::PosixSocketVTable, sock::PosixSocketType, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+# POSIX impl - read
+function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
@@ -1524,7 +1467,7 @@ function vtable_socket_read(vtable::PosixSocketVTable, sock::PosixSocketType, bu
 end
 
 # Process socket write requests
-function _process_socket_write_requests(sock::PosixSocketType, parent_request::Union{SocketWriteRequest, Nothing})
+function _process_socket_write_requests(sock::Socket, parent_request::Union{SocketWriteRequest, Nothing})
     socket_impl = sock.impl
     fd = sock.io_handle.fd
 
@@ -1614,7 +1557,7 @@ function _process_socket_write_requests(sock::PosixSocketType, parent_request::U
 end
 
 # Written task callback
-function _written_task_fn(sock::PosixSocketType, status::TaskStatus.T)
+function _written_task_fn(sock::Socket, status::TaskStatus.T)
     socket_impl = sock.impl
 
     socket_impl.written_task_scheduled = false
@@ -1638,8 +1581,8 @@ function _written_task_fn(sock::PosixSocketType, status::TaskStatus.T)
     return nothing
 end
 
-# VTable implementation - write
-function vtable_socket_write(vtable::PosixSocketVTable, sock::PosixSocketType, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Union{Nothing, ErrorResult}
+# POSIX impl - write
+function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
@@ -1675,8 +1618,8 @@ function vtable_socket_write(vtable::PosixSocketVTable, sock::PosixSocketType, c
     return nothing
 end
 
-# VTable implementation - get error
-function vtable_socket_get_error(vtable::PosixSocketVTable, sock::PosixSocketType)::Int
+# POSIX impl - get error
+function socket_get_error_impl(::PosixSocket, sock::Socket)::Int
     fd = sock.io_handle.fd
     connect_result = Ref{Cint}(0)
     result_len = Ref{Cuint}(sizeof(Cint))
@@ -1695,13 +1638,13 @@ function vtable_socket_get_error(vtable::PosixSocketVTable, sock::PosixSocketTyp
     return AWS_OP_SUCCESS
 end
 
-# VTable implementation - is open
-function vtable_socket_is_open(vtable::PosixSocketVTable, sock::PosixSocketType)::Bool
+# POSIX impl - is open
+function socket_is_open_impl(::PosixSocket, sock::Socket)::Bool
     return sock.io_handle.fd >= 0
 end
 
-# VTable implementation - start accept
-function vtable_socket_start_accept(vtable::PosixSocketVTable, sock::PosixSocketType, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
+# POSIX impl - start accept
+function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing
@@ -1773,7 +1716,7 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
                 if errno_val == EAGAIN || errno_val == EWOULDBLOCK
                     break
                 end
-                aws_error = vtable_socket_get_error(sock.vtable, sock)
+                aws_error = socket_get_error(sock)
                 raise_error(aws_error)
                 _on_connection_error(sock, aws_error)
                 break
@@ -1857,8 +1800,8 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
     return nothing
 end
 
-# VTable implementation - stop accept
-function vtable_socket_stop_accept(vtable::PosixSocketVTable, sock::PosixSocketType)::Union{Nothing, ErrorResult}
+# POSIX impl - stop accept
+function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Union{Nothing, ErrorResult}
     fd = sock.io_handle.fd
 
     if sock.state != SocketState.LISTENING
@@ -1880,16 +1823,16 @@ function vtable_socket_stop_accept(vtable::PosixSocketVTable, sock::PosixSocketT
     return nothing
 end
 
-# VTable implementation - set close callback
-function vtable_socket_set_close_callback(vtable::PosixSocketVTable, sock::PosixSocketType, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+# POSIX impl - set close callback
+function socket_set_close_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
     socket_impl = sock.impl
     socket_impl.close_user_data = user_data
     socket_impl.on_close_complete = fn
     return nothing
 end
 
-# VTable implementation - set cleanup callback
-function vtable_socket_set_cleanup_callback(vtable::PosixSocketVTable, sock::PosixSocketType, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+# POSIX impl - set cleanup callback
+function socket_set_cleanup_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
     socket_impl = sock.impl
     socket_impl.cleanup_user_data = user_data
     socket_impl.on_cleanup_complete = fn

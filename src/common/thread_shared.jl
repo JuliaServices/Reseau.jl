@@ -118,11 +118,7 @@ function thread_join_all_managed()
         done = done || (_unjoined_thread_count[] <= threshold && isempty(_pending_join_managed_threads[]))
         unlock(_managed_thread_lock[])
         for handle in join_list
-            if handle.os_thread != 0
-                @ccall gc_safe = true pthread_join(handle.os_thread::pthread_t, C_NULL::Ptr{Ptr{Cvoid}})::Cint
-            elseif handle.task !== nothing
-                wait(handle.task)
-            end
+            _thread_join_os_thread!(handle)
             handle.detach_state = ThreadDetachState.JOIN_COMPLETED
             thread_clean_up(handle)
         end

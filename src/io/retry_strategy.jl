@@ -36,26 +36,24 @@ end
 const OnRetryTokenAcquiredFn = Function  # (retry_token, error_code, user_data) -> nothing
 const OnRetryReadyFn = Function  # (retry_token, error_code, user_data) -> nothing
 
+# Abstract retry strategy interface
+abstract type AbstractRetryStrategy end
+
 # Retry token - represents a single retry attempt
-# Note: user_data is parameterized as U (typically Any) since it can hold any user-provided value
-# and is set dynamically after token creation via retry_token_schedule_retry
-mutable struct RetryToken{S, U, BL <: Union{Nothing, EventLoop}}
-    strategy::S
+mutable struct RetryToken
+    strategy::AbstractRetryStrategy
     error_type::RetryErrorType.T
     original_error::Int
     @atomic retry_count::UInt32
     @atomic last_backoff::UInt64
     last_error::Int
-    bound_loop::BL
+    bound_loop::Union{Nothing, EventLoop}
     lock::ReentrantLock
     # For scheduled retry
     scheduled_retry_task::Union{ScheduledTask, Nothing}  # nullable
     on_retry_ready::Union{OnRetryReadyFn, Nothing}  # nullable
-    user_data::U
+    user_data::Any
 end
-
-# Abstract retry strategy interface
-abstract type AbstractRetryStrategy end
 
 # =============================================================================
 # No Retry Strategy
@@ -99,26 +97,6 @@ function retry_strategy_acquire_token!(
     return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
 end
 
-function retry_token_schedule_retry(token::RetryToken{NoRetryStrategy, U}, on_retry_ready::OnRetryReadyFn, user_data) where {U}
-    _ = token
-    _ = on_retry_ready
-    _ = user_data
-    fatal_assert("schedule_retry must not be called for no-retry strategy", "<unknown>", 0)
-    return nothing
-end
-
-function retry_token_record_success(token::RetryToken{NoRetryStrategy, U})::Nothing where {U}
-    _ = token
-    fatal_assert("record_success must not be called for no-retry strategy", "<unknown>", 0)
-    return nothing
-end
-
-function retry_token_release!(token::RetryToken{NoRetryStrategy, U})::Nothing where {U}
-    _ = token
-    fatal_assert("release_token must not be called for no-retry strategy", "<unknown>", 0)
-    return nothing
-end
-
 function retry_strategy_shutdown!(strategy::NoRetryStrategy)
     @atomic strategy.shutdown = true
     if strategy.shutdown_options.shutdown_callback_fn !== nothing
@@ -127,35 +105,19 @@ function retry_strategy_shutdown!(strategy::NoRetryStrategy)
     return nothing
 end
 
-# Schedule retry callback
-function retry_token_schedule_retry(token::RetryToken, on_retry_ready::OnRetryReadyFn, user_data)::Union{Nothing, ErrorResult}
-    error("retry_token_schedule_retry must be implemented by concrete retry strategy")
-end
-
-# Record success - called when the operation succeeds
-function retry_token_record_success(token::RetryToken)::Nothing
-    error("retry_token_record_success must be implemented by concrete retry strategy")
-end
-
-# Release the retry token
-function retry_token_release!(token::RetryToken)::Nothing
-    # Default: do nothing
-    return nothing
-end
-
 # =============================================================================
 # Exponential Backoff Retry Strategy
 # =============================================================================
 
 # Exponential backoff configuration (matches aws-c-io options)
-struct ExponentialBackoffConfig{GR <: Union{Nothing, Function}, GRI <: Union{Nothing, Function}, UD}
+struct ExponentialBackoffConfig
     backoff_scale_factor_ms::UInt64
     max_backoff_secs::UInt64
     max_retries::UInt32
     jitter_mode::Symbol  # :default, :none, :full, :decorrelated
-    generate_random::GR
-    generate_random_impl::GRI
-    generate_random_user_data::UD
+    generate_random::Union{Nothing, Function}
+    generate_random_impl::Union{Nothing, Function}
+    generate_random_user_data::Any
 end
 
 function _default_generate_random(_user_data)
@@ -195,16 +157,16 @@ function ExponentialBackoffConfig(;
 end
 
 # Exponential backoff retry strategy
-mutable struct ExponentialBackoffRetryStrategy{ELG} <: AbstractRetryStrategy
-    event_loop_group::ELG
+mutable struct ExponentialBackoffRetryStrategy <: AbstractRetryStrategy
+    event_loop_group::EventLoopGroup
     config::ExponentialBackoffConfig
     @atomic shutdown::Bool
 end
 
 function ExponentialBackoffRetryStrategy(
-        event_loop_group::ELG,
+        event_loop_group::EventLoopGroup,
         config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
-    ) where {ELG}
+    )
     if config.max_retries > 63
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
@@ -213,7 +175,7 @@ function ExponentialBackoffRetryStrategy(
         raise_error(ERROR_INVALID_ARGUMENT)
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
-    strategy = ExponentialBackoffRetryStrategy{ELG}(
+    strategy = ExponentialBackoffRetryStrategy(
         event_loop_group,
         config,
         false,
@@ -223,12 +185,12 @@ end
 
 # Acquire a retry token from the strategy
 function retry_strategy_acquire_token!(
-        strategy::ExponentialBackoffRetryStrategy{ELG},
+        strategy::ExponentialBackoffRetryStrategy,
         partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
         timeout_ms::Integer = 0,
-    )::Union{Nothing, ErrorResult} where {ELG}
+    )::Union{Nothing, ErrorResult}
     _ = partition_id
     _ = timeout_ms
     if @atomic strategy.shutdown
@@ -246,8 +208,7 @@ function retry_strategy_acquire_token!(
         return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
 
-    # Create token with Any for user_data to allow dynamic assignment
-    token = RetryToken{typeof(strategy), Any, typeof(event_loop)}(
+    token = RetryToken(
         strategy,
         RetryErrorType.TRANSIENT,
         0,
@@ -372,21 +333,21 @@ end
 
 # Schedule retry for exponential backoff token (default error type)
 function retry_token_schedule_retry(
-        token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U},
+        token::RetryToken,
         on_retry_ready::OnRetryReadyFn,
         user_data,
-    ) where {ELG, U}
+    )::Union{Nothing, ErrorResult}
     return retry_token_schedule_retry(token, token.error_type, on_retry_ready, user_data)
 end
 
 # Schedule retry for exponential backoff token
 function retry_token_schedule_retry(
-        token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U},
+        token::RetryToken,
         error_type::RetryErrorType.T,
         on_retry_ready::OnRetryReadyFn,
         user_data,
-    ) where {ELG, U}
-    strategy = token.strategy
+    )::Union{Nothing, ErrorResult}
+    strategy = token.strategy::ExponentialBackoffRetryStrategy
     config = strategy.config
     token.error_type = error_type
     schedule_at = UInt64(0)
@@ -491,7 +452,8 @@ function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T
 end
 
 # Record success for exponential backoff token
-function retry_token_record_success(token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U})::Nothing where {ELG, U}
+function retry_token_record_success(token::RetryToken)::Nothing
+    _ = token.strategy::ExponentialBackoffRetryStrategy
     retries = @atomic token.retry_count
     logf(
         LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
@@ -501,7 +463,8 @@ function retry_token_record_success(token::RetryToken{ExponentialBackoffRetryStr
 end
 
 # Release exponential backoff token
-function retry_token_release!(token::RetryToken{ExponentialBackoffRetryStrategy{ELG}, U})::Nothing where {ELG, U}
+function retry_token_release!(token::RetryToken)::Nothing
+    _ = token.strategy::ExponentialBackoffRetryStrategy
     _ = token
     return nothing
 end
@@ -551,25 +514,25 @@ function RetryBucket(partition_id::AbstractString, capacity::UInt64)
 end
 
 # Standard retry strategy with token bucket rate limiting
-mutable struct StandardRetryStrategy{ELG} <: AbstractRetryStrategy
-    event_loop_group::ELG
+mutable struct StandardRetryStrategy <: AbstractRetryStrategy
+    event_loop_group::EventLoopGroup
     config::StandardRetryConfig
     max_capacity::UInt64
     buckets::Dict{String, RetryBucket}
     lock::ReentrantLock
-    backoff_strategy::ExponentialBackoffRetryStrategy{ELG}
+    backoff_strategy::ExponentialBackoffRetryStrategy
     @atomic shutdown::Bool
 end
 
 function StandardRetryStrategy(
-        event_loop_group::ELG,
+        event_loop_group::EventLoopGroup,
         config::StandardRetryConfig = StandardRetryConfig(),
-    ) where {ELG}
+    )
     backoff_strategy = ExponentialBackoffRetryStrategy(event_loop_group, config.backoff_config)
     if backoff_strategy isa ErrorResult
         return backoff_strategy
     end
-    strategy = StandardRetryStrategy{ELG}(
+    strategy = StandardRetryStrategy(
         event_loop_group,
         config,
         config.initial_bucket_capacity,
@@ -581,13 +544,13 @@ function StandardRetryStrategy(
     return strategy
 end
 
-mutable struct StandardRetryToken{ELG, U}
-    strategy::StandardRetryStrategy{ELG}
+mutable struct StandardRetryToken
+    strategy::StandardRetryStrategy
     bucket::RetryBucket
-    exp_token::Union{Nothing, RetryToken{ExponentialBackoffRetryStrategy{ELG}, Any}}
+    exp_token::Union{Nothing, RetryToken}
     last_retry_cost::UInt64
     on_acquired::Union{OnRetryTokenAcquiredFn, Nothing}
-    acquired_user_data::U
+    acquired_user_data::Any
     on_ready::Union{OnRetryReadyFn, Nothing}
     ready_user_data::Any
     lock::ReentrantLock
@@ -617,12 +580,12 @@ end
 
 # Acquire a retry token from standard strategy
 function retry_strategy_acquire_token!(
-        strategy::StandardRetryStrategy{ELG},
+        strategy::StandardRetryStrategy,
         partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
         timeout_ms::Integer = 0,
-    )::Union{Nothing, ErrorResult} where {ELG}
+    )::Union{Nothing, ErrorResult}
     if @atomic strategy.shutdown
         logf(
             LogLevel.ERROR, LS_IO_STANDARD_RETRY_STRATEGY,
@@ -634,7 +597,7 @@ function retry_strategy_acquire_token!(
 
     bucket = _standard_get_bucket!(strategy, partition_id)
 
-    token = StandardRetryToken{ELG, Any}(
+    token = StandardRetryToken(
         strategy,
         bucket,
         nothing,

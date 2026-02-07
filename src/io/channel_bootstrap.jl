@@ -12,12 +12,12 @@ const OnServerListenerDestroyFn = Function     # (server_bootstrap, user_data) -
 const ChannelOnProtocolNegotiatedFn = Function # (new_slot, protocol::ByteBuffer, user_data) -> AbstractChannelHandler
 
 # Client bootstrap options
-struct ClientBootstrapOptions
+struct ClientBootstrapOptions{TO}
     event_loop_group::EventLoopGroup
     host_resolver::AbstractHostResolver
     host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
-    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    tls_connection_options::TO
     on_protocol_negotiated::Union{Function, Nothing}
     on_creation_callback::Union{Function, Nothing}
     on_setup_callback::Union{Function, Nothing}
@@ -37,7 +37,7 @@ function ClientBootstrapOptions(;
         on_shutdown_callback = nothing,
         user_data = nothing,
     )
-    return ClientBootstrapOptions(
+    return ClientBootstrapOptions{typeof(tls_connection_options)}(
         event_loop_group,
         host_resolver,
         host_resolution_config,
@@ -52,12 +52,12 @@ function ClientBootstrapOptions(;
 end
 
 # Client bootstrap - for creating outgoing connections
-mutable struct ClientBootstrap
+mutable struct ClientBootstrap{TO}
     event_loop_group::EventLoopGroup
     host_resolver::AbstractHostResolver
     host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
-    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    tls_connection_options::TO
     on_protocol_negotiated::Union{Function, Nothing}
     on_creation_callback::Union{Function, Nothing}
     on_setup_callback::Union{Function, Nothing}
@@ -66,8 +66,8 @@ mutable struct ClientBootstrap
     @atomic shutdown::Bool
 end
 
-function ClientBootstrap(options::ClientBootstrapOptions)
-    bootstrap = ClientBootstrap(
+function ClientBootstrap(options::ClientBootstrapOptions{TO}) where {TO}
+    bootstrap = ClientBootstrap{TO}(
         options.event_loop_group,
         options.host_resolver,
         options.host_resolution_config,
@@ -88,7 +88,9 @@ end
 
 @inline function _socket_uses_network_framework_tls(socket::Socket, tls_options)::Bool
     @static if Sys.isapple()
-        return tls_options !== nothing && socket.options.impl_type == SocketImplType.APPLE_NETWORK_FRAMEWORK
+        # Network.framework TLS is only active when SecItem support is enabled.
+        # Otherwise, we stack the pure-Julia TLS channel handler on top of the socket.
+        return tls_options !== nothing && socket.impl isa NWSocket && is_using_secitem()
     else
         return false
     end
@@ -334,7 +336,10 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Hos
 
     # Create socket
     options = copy(request.socket_options)
-    options.domain = address.address_type == HostAddressType.AAAA ? SocketDomain.IPV6 : SocketDomain.IPV4
+    # Only override domain for IP sockets; LOCAL/VSOCK keep their domain
+    if options.domain != SocketDomain.LOCAL && options.domain != SocketDomain.VSOCK
+        options.domain = address.address_type == HostAddressType.AAAA ? SocketDomain.IPV6 : SocketDomain.IPV4
+    end
     sock_result = socket_init(options)
 
     if sock_result isa ErrorResult
@@ -676,12 +681,12 @@ end
 # =============================================================================
 
 # Server bootstrap options
-struct ServerBootstrapOptions
+struct ServerBootstrapOptions{TO}
     event_loop_group::EventLoopGroup
     socket_options::SocketOptions
     host::String
     port::UInt32
-    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    tls_connection_options::TO
     on_protocol_negotiated::Union{Function, Nothing}
     on_listener_setup::Union{Function, Nothing}
     on_incoming_channel_setup::Union{Function, Nothing}
@@ -705,7 +710,7 @@ function ServerBootstrapOptions(;
         user_data = nothing,
         enable_read_back_pressure::Bool = false,
     )
-    return ServerBootstrapOptions(
+    return ServerBootstrapOptions{typeof(tls_connection_options)}(
         event_loop_group,
         socket_options,
         String(host),
@@ -722,12 +727,12 @@ function ServerBootstrapOptions(;
 end
 
 # Server bootstrap - for accepting incoming connections
-mutable struct ServerBootstrap
+mutable struct ServerBootstrap{TO}
     event_loop_group::EventLoopGroup
     socket_options::SocketOptions
     listener_socket::Union{Socket, Nothing}
     listener_event_loop::Union{EventLoop, Nothing}
-    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    tls_connection_options::TO
     on_protocol_negotiated::Union{Function, Nothing}
     on_listener_setup::Union{Function, Nothing}
     on_incoming_channel_setup::Union{Function, Nothing}
@@ -741,8 +746,8 @@ mutable struct ServerBootstrap
     @atomic shutdown::Bool
 end
 
-function ServerBootstrap(options::ServerBootstrapOptions)
-    bootstrap = ServerBootstrap(
+function ServerBootstrap(options::ServerBootstrapOptions{TO}) where {TO}
+    bootstrap = ServerBootstrap{TO}(
         options.event_loop_group,
         options.socket_options,
         nothing,
@@ -782,8 +787,7 @@ function ServerBootstrap(options::ServerBootstrapOptions)
     set_address!(local_endpoint, options.host)
     local_endpoint.port = options.port
 
-    bind_opts = if options.tls_connection_options !== nothing &&
-            options.socket_options.impl_type == SocketImplType.APPLE_NETWORK_FRAMEWORK
+    bind_opts = if _socket_uses_network_framework_tls(listener, options.tls_connection_options)
         SocketBindOptions(local_endpoint; tls_connection_options = options.tls_connection_options)
     else
         SocketBindOptions(local_endpoint)

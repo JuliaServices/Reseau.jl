@@ -81,7 +81,50 @@ end
     end
 
     @testset "Event loop scheduling" begin
-        if Sys.iswindows()
+        opts = AwsIO.EventLoopOptions()
+        el = AwsIO.event_loop_new(opts)
+        @test !(el isa AwsIO.ErrorResult)
+
+        if !(el isa AwsIO.ErrorResult)
+            interactive_threads = Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+                AwsIO.event_loop_destroy!(el)
+            else
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
+
+                try
+                    done = Ref(false)
+                    thread_ok = Ref(false)
+                    ctx = (el = el, done = done, thread_ok = thread_ok)
+
+                    task_fn = (ctx, status) -> begin
+                        ctx.thread_ok[] = AwsIO.event_loop_thread_is_callers_thread(ctx.el)
+                        ctx.done[] = true
+                        return nothing
+                    end
+
+                    task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "event_loop_test_task")
+                    AwsIO.event_loop_schedule_task_now!(el, task)
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !done[] && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test done[]
+                    @test thread_ok[]
+                finally
+                    AwsIO.event_loop_destroy!(el)
+                end
+            end
+        end
+    end
+
+    @testset "Event loop future scheduling timing" begin
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
             opts = AwsIO.EventLoopOptions()
@@ -89,27 +132,29 @@ end
             @test !(el isa AwsIO.ErrorResult)
 
             if !(el isa AwsIO.ErrorResult)
-                interactive_threads = Threads.nthreads(:interactive)
-                if interactive_threads <= 1
-                    @test true
-                    AwsIO.event_loop_destroy!(el)
-                else
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    try
-                        done = Ref(false)
-                        thread_ok = Ref(false)
-                        ctx = (el = el, done = done, thread_ok = thread_ok)
+                try
+                    done = Ref(false)
+                    actual_time = Ref{UInt64}(0)
 
+                    start_time = AwsIO.event_loop_current_clock_time(el)
+                    if start_time isa AwsIO.ErrorResult
+                        @test false
+                    else
+                        target_time = start_time + 50_000_000
+
+                        ctx = (el = el, done = done, actual_time = actual_time)
                         task_fn = (ctx, status) -> begin
-                            ctx.thread_ok[] = AwsIO.event_loop_thread_is_callers_thread(ctx.el)
+                            now = AwsIO.event_loop_current_clock_time(ctx.el)
+                            ctx.actual_time[] = now isa AwsIO.ErrorResult ? UInt64(0) : now
                             ctx.done[] = true
                             return nothing
                         end
 
-                        task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "event_loop_test_task")
-                        AwsIO.event_loop_schedule_task_now!(el, task)
+                        task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "future_timing")
+                        AwsIO.event_loop_schedule_task_future!(el, task, target_time)
 
                         deadline = Base.time_ns() + 2_000_000_000
                         while !done[] && Base.time_ns() < deadline
@@ -117,212 +162,151 @@ end
                         end
 
                         @test done[]
-                        @test thread_ok[]
-                    finally
-                        AwsIO.event_loop_destroy!(el)
-                    end
-                end
-            end
-        end
-    end
-
-    @testset "Event loop future scheduling timing" begin
-        if Sys.iswindows()
-            @test true
-        else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
-
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
-
-                    try
-                        done = Ref(false)
-                        actual_time = Ref{UInt64}(0)
-
-                        start_time = AwsIO.event_loop_current_clock_time(el)
-                        if start_time isa AwsIO.ErrorResult
-                            @test false
-                        else
-                            target_time = start_time + 50_000_000
-
-                            ctx = (el = el, done = done, actual_time = actual_time)
-                            task_fn = (ctx, status) -> begin
-                                now = AwsIO.event_loop_current_clock_time(ctx.el)
-                                ctx.actual_time[] = now isa AwsIO.ErrorResult ? UInt64(0) : now
-                                ctx.done[] = true
-                                return nothing
-                            end
-
-                            task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "future_timing")
-                            AwsIO.event_loop_schedule_task_future!(el, task, target_time)
-
-                            deadline = Base.time_ns() + 2_000_000_000
-                            while !done[] && Base.time_ns() < deadline
-                                yield()
-                            end
-
-                            @test done[]
-                            if done[]
-                                @test actual_time[] >= target_time
-                                @test actual_time[] - target_time < 1_000_000_000
-                            end
+                        if done[]
+                            @test actual_time[] >= target_time
+                            @test actual_time[] - target_time < 1_000_000_000
                         end
-                    finally
-                        AwsIO.event_loop_destroy!(el)
                     end
+                finally
+                    AwsIO.event_loop_destroy!(el)
                 end
             end
         end
     end
 
     @testset "Event loop stress scheduling" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
 
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    try
-                        total = 500
-                        count = Ref(0)
-                        done_ch = Channel{Nothing}(1)
-                        count_lock = ReentrantLock()
+                try
+                    total = 500
+                    count = Ref(0)
+                    done_ch = Channel{Nothing}(1)
+                    count_lock = ReentrantLock()
 
-                        ctx = (count = count, lock = count_lock, done_ch = done_ch, total = total)
-                        task_fn = (ctx, status) -> begin
-                            local current
-                            Base.lock(ctx.lock) do
-                                ctx.count[] += 1
-                                current = ctx.count[]
-                            end
-                            if current == ctx.total
-                                put!(ctx.done_ch, nothing)
-                            end
-                            return nothing
+                    ctx = (count = count, lock = count_lock, done_ch = done_ch, total = total)
+                    task_fn = (ctx, status) -> begin
+                        local current
+                        Base.lock(ctx.lock) do
+                            ctx.count[] += 1
+                            current = ctx.count[]
                         end
-
-                        for _ in 1:total
-                            task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "stress_now")
-                            AwsIO.event_loop_schedule_task_now!(el, task)
+                        if current == ctx.total
+                            put!(ctx.done_ch, nothing)
                         end
-
-                        deadline = Base.time_ns() + 3_000_000_000
-                        while !isready(done_ch) && Base.time_ns() < deadline
-                            yield()
-                        end
-
-                        @test isready(done_ch)
-                        isready(done_ch) && take!(done_ch)
-                    finally
-                        AwsIO.event_loop_destroy!(el)
+                        return nothing
                     end
+
+                    for _ in 1:total
+                        task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "stress_now")
+                        AwsIO.event_loop_schedule_task_now!(el, task)
+                    end
+
+                    deadline = Base.time_ns() + 3_000_000_000
+                    while !isready(done_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test isready(done_ch)
+                    isready(done_ch) && take!(done_ch)
+                finally
+                    AwsIO.event_loop_destroy!(el)
                 end
             end
         end
     end
 
     @testset "Event loop pipe subscribe stress" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
 
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    read_end = nothing
-                    write_end = nothing
+                read_end = nothing
+                write_end = nothing
 
-                    try
-                        pipe_res = AwsIO.pipe_create()
-                        @test !(pipe_res isa AwsIO.ErrorResult)
-                        if pipe_res isa AwsIO.ErrorResult
-                            return
-                        end
+                try
+                    pipe_res = AwsIO.pipe_create()
+                    @test !(pipe_res isa AwsIO.ErrorResult)
+                    if pipe_res isa AwsIO.ErrorResult
+                        return
+                    end
 
-                        read_end, write_end = pipe_res
+                    read_end, write_end = pipe_res
 
-                        payload = Memory{UInt8}(undef, 4)
-                        payload[1] = UInt8('p')
-                        payload[2] = UInt8('i')
-                        payload[3] = UInt8('n')
-                        payload[4] = UInt8('g')
-                        total_writes = 50
-                        expected_bytes = total_writes * length(payload)
+                    payload = Memory{UInt8}(undef, 4)
+                    payload[1] = UInt8('p')
+                    payload[2] = UInt8('i')
+                    payload[3] = UInt8('n')
+                    payload[4] = UInt8('g')
+                    total_writes = 50
+                    expected_bytes = total_writes * length(payload)
 
-                        bytes_read = Ref(0)
-                        done = Ref(false)
-                        done_ch = Channel{Nothing}(1)
-                        read_lock = ReentrantLock()
+                    bytes_read = Ref(0)
+                    done = Ref(false)
+                    done_ch = Channel{Nothing}(1)
+                    read_lock = ReentrantLock()
 
-                        on_readable = (pipe, err, user_data) -> begin
-                            if err != AwsIO.AWS_OP_SUCCESS
-                                return nothing
-                            end
-
-                            buf = AwsIO.ByteBuffer(64)
-                            read_res = AwsIO.pipe_read!(pipe, buf)
-                            if read_res isa AwsIO.ErrorResult
-                                return nothing
-                            end
-
-                            _, amount = read_res
-                            local total
-                            Base.lock(read_lock) do
-                                bytes_read[] += Int(amount)
-                                total = bytes_read[]
-                                if !done[] && total >= expected_bytes
-                                    done[] = true
-                                    put!(done_ch, nothing)
-                                end
-                            end
-
+                    on_readable = (pipe, err, user_data) -> begin
+                        if err != AwsIO.AWS_OP_SUCCESS
                             return nothing
                         end
 
-                        sub_res = AwsIO.pipe_read_end_subscribe!(read_end, el, on_readable, nothing)
-                        @test sub_res === nothing
-
-                        for _ in 1:total_writes
-                            write_res = AwsIO.pipe_write_sync!(write_end, payload)
-                            @test !(write_res isa AwsIO.ErrorResult)
+                        buf = AwsIO.ByteBuffer(64)
+                        read_res = AwsIO.pipe_read!(pipe, buf)
+                        if read_res isa AwsIO.ErrorResult
+                            return nothing
                         end
 
-                        deadline = Base.time_ns() + 3_000_000_000
-                        while !isready(done_ch) && Base.time_ns() < deadline
-                            yield()
+                        _, amount = read_res
+                        local total
+                        Base.lock(read_lock) do
+                            bytes_read[] += Int(amount)
+                            total = bytes_read[]
+                            if !done[] && total >= expected_bytes
+                                done[] = true
+                                put!(done_ch, nothing)
+                            end
                         end
 
-                        @test isready(done_ch)
-                        isready(done_ch) && take!(done_ch)
-                    finally
-                        read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
-                        write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
-                        AwsIO.event_loop_destroy!(el)
+                        return nothing
                     end
+
+                    sub_res = AwsIO.pipe_read_end_subscribe!(read_end, el, on_readable, nothing)
+                    @test sub_res === nothing
+
+                    for _ in 1:total_writes
+                        write_res = AwsIO.pipe_write_sync!(write_end, payload)
+                        @test !(write_res isa AwsIO.ErrorResult)
+                    end
+
+                    deadline = Base.time_ns() + 3_000_000_000
+                    while !isready(done_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test isready(done_ch)
+                    isready(done_ch) && take!(done_ch)
+                finally
+                    read_end !== nothing && AwsIO.pipe_read_end_close!(read_end)
+                    write_end !== nothing && AwsIO.pipe_write_end_close!(write_end)
+                    AwsIO.event_loop_destroy!(el)
                 end
             end
         end
@@ -1039,67 +1023,63 @@ end
     end
 
     @testset "Event loop group thread affinity" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 2
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 2
-                @test true
-            else
-                opts = AwsIO.EventLoopGroupOptions(loop_count = 2)
-                elg = AwsIO.event_loop_group_new(opts)
-                @test !(elg isa AwsIO.ErrorResult)
+            opts = AwsIO.EventLoopGroupOptions(loop_count = 2)
+            elg = AwsIO.event_loop_group_new(opts)
+            @test !(elg isa AwsIO.ErrorResult)
 
-                if !(elg isa AwsIO.ErrorResult)
-                    try
-                        loop1 = AwsIO.event_loop_group_get_next_loop(elg)
-                        loop2 = AwsIO.event_loop_group_get_next_loop(elg)
+            if !(elg isa AwsIO.ErrorResult)
+                try
+                    loop1 = AwsIO.event_loop_group_get_next_loop(elg)
+                    loop2 = AwsIO.event_loop_group_get_next_loop(elg)
 
-                        @test loop1 !== loop2
+                    @test loop1 !== loop2
 
-                        ids1 = Int[]
-                        ids2 = Int[]
-                        lock = ReentrantLock()
-                        done_ch = Channel{Nothing}(1)
-                        done_count = Ref(0)
-                        total = 4
+                    ids1 = Int[]
+                    ids2 = Int[]
+                    lock = ReentrantLock()
+                    done_ch = Channel{Nothing}(1)
+                    done_count = Ref(0)
+                    total = 4
 
-                        task_fn = (ctx, status) -> begin
-                            Base.lock(lock) do
-                                push!(ctx.ids, Threads.threadid())
-                                done_count[] += 1
-                                if done_count[] == total
-                                    put!(done_ch, nothing)
-                                end
-                            end
-                            return nothing
-                        end
-
-                        for _ in 1:2
-                            task1 = AwsIO.ScheduledTask(task_fn, (ids = ids1,); type_tag = "elg_affinity")
-                            AwsIO.event_loop_schedule_task_now!(loop1, task1)
-
-                            task2 = AwsIO.ScheduledTask(task_fn, (ids = ids2,); type_tag = "elg_affinity")
-                            AwsIO.event_loop_schedule_task_now!(loop2, task2)
-                        end
-
-                        deadline = Base.time_ns() + 3_000_000_000
-                        while !isready(done_ch) && Base.time_ns() < deadline
-                            yield()
-                        end
-
-                        @test isready(done_ch)
-                        isready(done_ch) && take!(done_ch)
-
+                    task_fn = (ctx, status) -> begin
                         Base.lock(lock) do
-                            @test !isempty(ids1)
-                            @test !isempty(ids2)
-                            @test all(==(ids1[1]), ids1)
-                            @test all(==(ids2[1]), ids2)
+                            push!(ctx.ids, Threads.threadid())
+                            done_count[] += 1
+                            if done_count[] == total
+                                put!(done_ch, nothing)
+                            end
                         end
-                    finally
-                        AwsIO.event_loop_group_destroy!(elg)
+                        return nothing
                     end
+
+                    for _ in 1:2
+                        task1 = AwsIO.ScheduledTask(task_fn, (ids = ids1,); type_tag = "elg_affinity")
+                        AwsIO.event_loop_schedule_task_now!(loop1, task1)
+
+                        task2 = AwsIO.ScheduledTask(task_fn, (ids = ids2,); type_tag = "elg_affinity")
+                        AwsIO.event_loop_schedule_task_now!(loop2, task2)
+                    end
+
+                    deadline = Base.time_ns() + 3_000_000_000
+                    while !isready(done_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test isready(done_ch)
+                    isready(done_ch) && take!(done_ch)
+
+                    Base.lock(lock) do
+                        @test !isempty(ids1)
+                        @test !isempty(ids2)
+                        @test all(==(ids1[1]), ids1)
+                        @test all(==(ids2[1]), ids2)
+                    end
+                finally
+                    AwsIO.event_loop_group_destroy!(elg)
                 end
             end
         end
@@ -1172,46 +1152,42 @@ end
     end
 
     @testset "Event loop unsubscribe error" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
 
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    try
-                        done_ch = Channel{Int}(1)
-                        ctx = (el = el, handle = AwsIO.IoHandle(), done_ch = done_ch)
-                        task_fn = (ctx, status) -> begin
-                            res = AwsIO.event_loop_unsubscribe_from_io_events!(ctx.el, ctx.handle)
-                            code = res isa AwsIO.ErrorResult ? AwsIO.last_error() : 0
-                            put!(ctx.done_ch, code)
-                            return nothing
-                        end
-                        task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "unsubscribe_error")
-                        AwsIO.event_loop_schedule_task_now!(el, task)
-
-                        deadline = Base.time_ns() + 2_000_000_000
-                        while !isready(done_ch) && Base.time_ns() < deadline
-                            yield()
-                        end
-
-                        @test isready(done_ch)
-                        if isready(done_ch)
-                            code = take!(done_ch)
-                            @test code == AwsIO.ERROR_IO_NOT_SUBSCRIBED
-                        end
-                    finally
-                        AwsIO.event_loop_destroy!(el)
+                try
+                    done_ch = Channel{Int}(1)
+                    ctx = (el = el, handle = AwsIO.IoHandle(), done_ch = done_ch)
+                    task_fn = (ctx, status) -> begin
+                        res = AwsIO.event_loop_unsubscribe_from_io_events!(ctx.el, ctx.handle)
+                        code = res isa AwsIO.ErrorResult ? AwsIO.last_error() : 0
+                        put!(ctx.done_ch, code)
+                        return nothing
                     end
+                    task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "unsubscribe_error")
+                    AwsIO.event_loop_schedule_task_now!(el, task)
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !isready(done_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test isready(done_ch)
+                    if isready(done_ch)
+                        code = take!(done_ch)
+                        @test code == AwsIO.ERROR_IO_NOT_SUBSCRIBED
+                    end
+                finally
+                    AwsIO.event_loop_destroy!(el)
                 end
             end
         end
@@ -1299,157 +1275,145 @@ end
     end
 
     @testset "Event loop serialized ordering" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
 
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    try
-                        order = Int[]
-                        order_lock = ReentrantLock()
-                        done_ch = Channel{Nothing}(1)
-                        total = 5
+                try
+                    order = Int[]
+                    order_lock = ReentrantLock()
+                    done_ch = Channel{Nothing}(1)
+                    total = 5
 
-                        for i in 1:total
-                            ctx = (order = order, lock = order_lock, done_ch = done_ch, i = i, total = total)
-                            task_fn = (ctx, status) -> begin
-                                local count
-                                Base.lock(ctx.lock) do
-                                    push!(ctx.order, ctx.i)
-                                    count = length(ctx.order)
-                                end
-                                if count == ctx.total
-                                    put!(ctx.done_ch, nothing)
-                                end
-                                return nothing
+                    for i in 1:total
+                        ctx = (order = order, lock = order_lock, done_ch = done_ch, i = i, total = total)
+                        task_fn = (ctx, status) -> begin
+                            local count
+                            Base.lock(ctx.lock) do
+                                push!(ctx.order, ctx.i)
+                                count = length(ctx.order)
                             end
-                            task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "serialized_order")
-                            AwsIO.event_loop_schedule_task_now_serialized!(el, task)
+                            if count == ctx.total
+                                put!(ctx.done_ch, nothing)
+                            end
+                            return nothing
                         end
-
-                        deadline = Base.time_ns() + 2_000_000_000
-                        while !isready(done_ch) && Base.time_ns() < deadline
-                            yield()
-                        end
-
-                        @test isready(done_ch)
-                        isready(done_ch) && take!(done_ch)
-                        Base.lock(order_lock) do
-                            @test order == collect(1:total)
-                        end
-                    finally
-                        AwsIO.event_loop_destroy!(el)
+                        task = AwsIO.ScheduledTask(task_fn, ctx; type_tag = "serialized_order")
+                        AwsIO.event_loop_schedule_task_now_serialized!(el, task)
                     end
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !isready(done_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+
+                    @test isready(done_ch)
+                    isready(done_ch) && take!(done_ch)
+                    Base.lock(order_lock) do
+                        @test order == collect(1:total)
+                    end
+                finally
+                    AwsIO.event_loop_destroy!(el)
                 end
             end
         end
     end
 
     @testset "Event loop cancel task" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
 
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    try
-                        status_ch = Channel{Tuple{AwsIO.TaskStatus.T, Bool}}(1)
-                        ctx = (el = el, status_ch = status_ch)
-                        future_fn = (ctx, status) -> begin
-                            put!(ctx.status_ch, (status, AwsIO.event_loop_thread_is_callers_thread(ctx.el)))
-                            return nothing
-                        end
-                        future_task = AwsIO.ScheduledTask(future_fn, ctx; type_tag = "future_task")
-
-                        now = AwsIO.event_loop_current_clock_time(el)
-                        if now isa AwsIO.ErrorResult
-                            @test false
-                        else
-                            AwsIO.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
-
-                            cancel_ctx = (el = el, task = future_task)
-                            cancel_fn = (ctx, status) -> begin
-                                AwsIO.event_loop_cancel_task!(ctx.el, ctx.task)
-                                return nothing
-                            end
-                            cancel_task = AwsIO.ScheduledTask(cancel_fn, cancel_ctx; type_tag = "cancel_task")
-                            AwsIO.event_loop_schedule_task_now!(el, cancel_task)
-
-                            deadline = Base.time_ns() + 2_000_000_000
-                            while !isready(status_ch) && Base.time_ns() < deadline
-                                yield()
-                            end
-
-                            @test isready(status_ch)
-                            if isready(status_ch)
-                                status, thread_ok = take!(status_ch)
-                                @test status == AwsIO.TaskStatus.CANCELED
-                                @test thread_ok
-                            end
-                        end
-                    finally
-                        AwsIO.event_loop_destroy!(el)
-                    end
-                end
-            end
-        end
-    end
-
-    @testset "Event loop destroy cancels pending task" begin
-        if Sys.iswindows()
-            @test true
-        else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
-
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
-
-                    status_ch = Channel{AwsIO.TaskStatus.T}(1)
-                    ctx = (status_ch = status_ch,)
+                try
+                    status_ch = Channel{Tuple{AwsIO.TaskStatus.T, Bool}}(1)
+                    ctx = (el = el, status_ch = status_ch)
                     future_fn = (ctx, status) -> begin
-                        put!(ctx.status_ch, status)
+                        put!(ctx.status_ch, (status, AwsIO.event_loop_thread_is_callers_thread(ctx.el)))
                         return nothing
                     end
-                    future_task = AwsIO.ScheduledTask(future_fn, ctx; type_tag = "future_task_destroy")
+                    future_task = AwsIO.ScheduledTask(future_fn, ctx; type_tag = "future_task")
 
                     now = AwsIO.event_loop_current_clock_time(el)
                     if now isa AwsIO.ErrorResult
                         @test false
                     else
                         AwsIO.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
-                        AwsIO.event_loop_destroy!(el)
+
+                        cancel_ctx = (el = el, task = future_task)
+                        cancel_fn = (ctx, status) -> begin
+                            AwsIO.event_loop_cancel_task!(ctx.el, ctx.task)
+                            return nothing
+                        end
+                        cancel_task = AwsIO.ScheduledTask(cancel_fn, cancel_ctx; type_tag = "cancel_task")
+                        AwsIO.event_loop_schedule_task_now!(el, cancel_task)
+
+                        deadline = Base.time_ns() + 2_000_000_000
+                        while !isready(status_ch) && Base.time_ns() < deadline
+                            yield()
+                        end
 
                         @test isready(status_ch)
                         if isready(status_ch)
-                            status = take!(status_ch)
+                            status, thread_ok = take!(status_ch)
                             @test status == AwsIO.TaskStatus.CANCELED
+                            @test thread_ok
                         end
+                    end
+                finally
+                    AwsIO.event_loop_destroy!(el)
+                end
+            end
+        end
+    end
+
+    @testset "Event loop destroy cancels pending task" begin
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
+            @test true
+        else
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
+
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
+
+                status_ch = Channel{AwsIO.TaskStatus.T}(1)
+                ctx = (status_ch = status_ch,)
+                future_fn = (ctx, status) -> begin
+                    put!(ctx.status_ch, status)
+                    return nothing
+                end
+                future_task = AwsIO.ScheduledTask(future_fn, ctx; type_tag = "future_task_destroy")
+
+                now = AwsIO.event_loop_current_clock_time(el)
+                if now isa AwsIO.ErrorResult
+                    @test false
+                else
+                    AwsIO.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
+                    AwsIO.event_loop_destroy!(el)
+
+                    @test isready(status_ch)
+                    if isready(status_ch)
+                        status = take!(status_ch)
+                        @test status == AwsIO.TaskStatus.CANCELED
                     end
                 end
             end
@@ -1457,285 +1421,250 @@ end
     end
 
     @testset "Event loop destroy on loop thread throws" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                opts = AwsIO.EventLoopOptions()
-                el = AwsIO.event_loop_new(opts)
-                @test !(el isa AwsIO.ErrorResult)
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
-                    destroy_called = Ref(false)
-                    destroy_threw = Ref(false)
-                    task = AwsIO.ScheduledTask(
-                        (ctx, status) -> begin
-                            status == AwsIO.TaskStatus.RUN_READY || return nothing
-                            ctx.destroy_called[] = true
-                            try
-                                AwsIO.event_loop_destroy!(ctx.el)
-                            catch err
-                                ctx.destroy_threw[] = err isa ErrorException
-                            end
-                            return nothing
-                        end,
-                        (el = el, destroy_called = destroy_called, destroy_threw = destroy_threw);
-                        type_tag = "destroy_on_loop",
-                    )
-                    AwsIO.event_loop_schedule_task_now!(el, task)
-                    deadline = Base.time_ns() + 2_000_000_000
-                    while !destroy_called[] && Base.time_ns() < deadline
-                        sleep(0.01)
-                    end
-                    @test destroy_called[]
-                    @test destroy_threw[]
-                    AwsIO.event_loop_destroy!(el)
+            opts = AwsIO.EventLoopOptions()
+            el = AwsIO.event_loop_new(opts)
+            @test !(el isa AwsIO.ErrorResult)
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
+                destroy_called = Ref(false)
+                destroy_threw = Ref(false)
+                task = AwsIO.ScheduledTask(
+                    (ctx, status) -> begin
+                        status == AwsIO.TaskStatus.RUN_READY || return nothing
+                        ctx.destroy_called[] = true
+                        try
+                            AwsIO.event_loop_destroy!(ctx.el)
+                        catch err
+                            ctx.destroy_threw[] = err isa ErrorException
+                        end
+                        return nothing
+                    end,
+                    (el = el, destroy_called = destroy_called, destroy_threw = destroy_threw);
+                    type_tag = "destroy_on_loop",
+                )
+                AwsIO.event_loop_schedule_task_now!(el, task)
+                deadline = Base.time_ns() + 2_000_000_000
+                while !destroy_called[] && Base.time_ns() < deadline
+                    sleep(0.01)
                 end
+                @test destroy_called[]
+                @test destroy_threw[]
+                AwsIO.event_loop_destroy!(el)
             end
         end
     end
 
     @testset "Event loop group" begin
-        if Sys.iswindows()
-            @test true
-        else
-            opts = AwsIO.EventLoopGroupOptions(loop_count = 1)
-            elg = AwsIO.event_loop_group_new(opts)
-            @test !(elg isa AwsIO.ErrorResult)
+        opts = AwsIO.EventLoopGroupOptions(loop_count = 1)
+        elg = AwsIO.event_loop_group_new(opts)
+        @test !(elg isa AwsIO.ErrorResult)
 
-            if !(elg isa AwsIO.ErrorResult)
-                try
-                    @test AwsIO.event_loop_group_get_loop_count(elg) == 1
-                    el = AwsIO.event_loop_group_get_next_loop(elg)
-                    @test el !== nothing
-                    if el !== nothing
-                        acquired = AwsIO.event_loop_group_acquire_from_event_loop(el)
-                        @test acquired === elg
-                        AwsIO.event_loop_group_release_from_event_loop!(el)
-                    end
-                finally
-                    AwsIO.event_loop_group_destroy!(elg)
+        if !(elg isa AwsIO.ErrorResult)
+            try
+                @test AwsIO.event_loop_group_get_loop_count(elg) == 1
+                el = AwsIO.event_loop_group_get_next_loop(elg)
+                @test el !== nothing
+                if el !== nothing
+                    acquired = AwsIO.event_loop_group_acquire_from_event_loop(el)
+                    @test acquired === elg
+                    AwsIO.event_loop_group_release_from_event_loop!(el)
                 end
+            finally
+                AwsIO.event_loop_group_destroy!(elg)
             end
         end
     end
 
     @testset "Event loop group async shutdown" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                shutdown_ch = Channel{Bool}(1)
-                shutdown_opts = AwsIO.shutdown_callback_options(
-                    (ud) -> begin
-                        put!(shutdown_ch, true)
-                        return nothing
-                    end,
-                    nothing,
-                )
+            shutdown_ch = Channel{Bool}(1)
+            shutdown_opts = AwsIO.shutdown_callback_options(
+                (ud) -> begin
+                    put!(shutdown_ch, true)
+                    return nothing
+                end,
+                nothing,
+            )
 
-                opts = AwsIO.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts)
-                elg = AwsIO.event_loop_group_new(opts)
-                @test !(elg isa AwsIO.ErrorResult)
-                if elg isa AwsIO.ErrorResult
+            opts = AwsIO.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts)
+            elg = AwsIO.event_loop_group_new(opts)
+            @test !(elg isa AwsIO.ErrorResult)
+            if elg isa AwsIO.ErrorResult
+                return
+            end
+
+            done = false
+            try
+                el = AwsIO.event_loop_group_get_next_loop(elg)
+                @test el !== nothing
+                if el === nothing
                     return
                 end
 
-                done = false
-                try
-                    el = AwsIO.event_loop_group_get_next_loop(elg)
-                    @test el !== nothing
-                    if el === nothing
-                        return
-                    end
-
-                    release_task = AwsIO.ScheduledTask(
-                        (ctx, status) -> begin
-                            AwsIO.event_loop_group_release!(ctx.elg)
-                            return nothing
-                        end,
-                        (elg = elg,);
-                        type_tag = "elg_release_async",
-                    )
-                    AwsIO.event_loop_schedule_task_now!(el, release_task)
-                    done = _wait_for_channel(shutdown_ch)
-                    @test done
-                finally
-                    if !done
-                        AwsIO.event_loop_group_destroy!(elg)
-                    end
+                release_task = AwsIO.ScheduledTask(
+                    (ctx, status) -> begin
+                        AwsIO.event_loop_group_release!(ctx.elg)
+                        return nothing
+                    end,
+                    (elg = elg,);
+                    type_tag = "elg_release_async",
+                )
+                AwsIO.event_loop_schedule_task_now!(el, release_task)
+                done = _wait_for_channel(shutdown_ch)
+                @test done
+            finally
+                if !done
+                    AwsIO.event_loop_group_destroy!(elg)
                 end
             end
         end
     end
 
     @testset "Event loop group NUMA setup" begin
-        if Sys.iswindows()
-            @test true
-        else
-            cpu_group = Ref{UInt16}(0)
-            cpu_count = AwsIO.get_cpu_count_for_group(cpu_group[])
-            opts = AwsIO.EventLoopGroupOptions(loop_count = typemax(UInt16), cpu_group = cpu_group)
-            elg = AwsIO.event_loop_group_new(opts)
+        cpu_group = Ref{UInt16}(0)
+        cpu_count = AwsIO.get_cpu_count_for_group(cpu_group[])
+        opts = AwsIO.EventLoopGroupOptions(loop_count = typemax(UInt16), cpu_group = cpu_group)
+        elg = AwsIO.event_loop_group_new(opts)
 
-            @test !(elg isa AwsIO.ErrorResult)
-            if !(elg isa AwsIO.ErrorResult)
-                try
-                    el_count = AwsIO.event_loop_group_get_loop_count(elg)
-                    @test el_count == cpu_count
-                finally
-                    AwsIO.event_loop_group_destroy!(elg)
-                end
+        @test !(elg isa AwsIO.ErrorResult)
+        if !(elg isa AwsIO.ErrorResult)
+            try
+                el_count = AwsIO.event_loop_group_get_loop_count(elg)
+                @test el_count == cpu_count
+            finally
+                AwsIO.event_loop_group_destroy!(elg)
             end
         end
     end
 
     @testset "Event loop stop then restart" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-                @test !(el isa AwsIO.ErrorResult)
+            el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+            @test !(el isa AwsIO.ErrorResult)
 
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    done1 = Channel{Bool}(1)
-                    task1 = AwsIO.ScheduledTask((ctx, status) -> begin
-                        if status == AwsIO.TaskStatus.RUN_READY
-                            put!(done1, AwsIO.event_loop_thread_is_callers_thread(el))
-                        end
-                        return nothing
-                    end, nothing; type_tag = "event_loop_stop_restart_first")
-                    AwsIO.event_loop_schedule_task_now!(el, task1)
-                    @test _wait_for_channel(done1)
-                    @test take!(done1)
+                done1 = Channel{Bool}(1)
+                task1 = AwsIO.ScheduledTask((ctx, status) -> begin
+                    if status == AwsIO.TaskStatus.RUN_READY
+                        put!(done1, AwsIO.event_loop_thread_is_callers_thread(el))
+                    end
+                    return nothing
+                end, nothing; type_tag = "event_loop_stop_restart_first")
+                AwsIO.event_loop_schedule_task_now!(el, task1)
+                @test _wait_for_channel(done1)
+                @test take!(done1)
 
-                    @test AwsIO.event_loop_stop!(el) === nothing
-                    @test AwsIO.event_loop_wait_for_stop_completion!(el) === nothing
-                    @test AwsIO.event_loop_run!(el) === nothing
+                @test AwsIO.event_loop_stop!(el) === nothing
+                @test AwsIO.event_loop_wait_for_stop_completion!(el) === nothing
+                @test AwsIO.event_loop_run!(el) === nothing
 
-                    done2 = Channel{Bool}(1)
-                    task2 = AwsIO.ScheduledTask((ctx, status) -> begin
-                        if status == AwsIO.TaskStatus.RUN_READY
-                            put!(done2, AwsIO.event_loop_thread_is_callers_thread(el))
-                        end
-                        return nothing
-                    end, nothing; type_tag = "event_loop_stop_restart_second")
-                    AwsIO.event_loop_schedule_task_now!(el, task2)
-                    @test _wait_for_channel(done2)
-                    @test take!(done2)
+                done2 = Channel{Bool}(1)
+                task2 = AwsIO.ScheduledTask((ctx, status) -> begin
+                    if status == AwsIO.TaskStatus.RUN_READY
+                        put!(done2, AwsIO.event_loop_thread_is_callers_thread(el))
+                    end
+                    return nothing
+                end, nothing; type_tag = "event_loop_stop_restart_second")
+                AwsIO.event_loop_schedule_task_now!(el, task2)
+                @test _wait_for_channel(done2)
+                @test take!(done2)
 
-                    AwsIO.event_loop_destroy!(el)
-                end
+                AwsIO.event_loop_destroy!(el)
             end
         end
     end
 
     @testset "Event loop multiple stops" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
-                @test !(el isa AwsIO.ErrorResult)
+            el = AwsIO.event_loop_new(AwsIO.EventLoopOptions())
+            @test !(el isa AwsIO.ErrorResult)
 
-                if !(el isa AwsIO.ErrorResult)
-                    run_res = AwsIO.event_loop_run!(el)
-                    @test run_res === nothing
+            if !(el isa AwsIO.ErrorResult)
+                run_res = AwsIO.event_loop_run!(el)
+                @test run_res === nothing
 
-                    for _ in 1:8
-                        @test AwsIO.event_loop_stop!(el) === nothing
-                    end
-
-                    AwsIO.event_loop_destroy!(el)
+                for _ in 1:8
+                    @test AwsIO.event_loop_stop!(el) === nothing
                 end
+
+                AwsIO.event_loop_destroy!(el)
             end
         end
     end
 
     @testset "Event loop group setup and shutdown" begin
-        if Sys.iswindows()
-            @test true
-        else
-            expected = max(1, Sys.CPU_THREADS >> 1)
+        expected = max(1, Sys.CPU_THREADS >> 1)
 
-            opts = AwsIO.EventLoopGroupOptions(loop_count = 0)
-            elg = AwsIO.event_loop_group_new(opts)
+        opts = AwsIO.EventLoopGroupOptions(loop_count = 0)
+        elg = AwsIO.event_loop_group_new(opts)
 
-            @test !(elg isa AwsIO.ErrorResult)
-            if !(elg isa AwsIO.ErrorResult)
-                try
-                    @test AwsIO.event_loop_group_get_loop_count(elg) == expected
-                    loop = AwsIO.event_loop_group_get_next_loop(elg)
-                    @test loop !== nothing
-                finally
-                    AwsIO.event_loop_group_destroy!(elg)
-                end
+        @test !(elg isa AwsIO.ErrorResult)
+        if !(elg isa AwsIO.ErrorResult)
+            try
+                @test AwsIO.event_loop_group_get_loop_count(elg) == expected
+                loop = AwsIO.event_loop_group_get_next_loop(elg)
+                @test loop !== nothing
+            finally
+                AwsIO.event_loop_group_destroy!(elg)
             end
         end
     end
 
     @testset "Event loop group shutdown callback" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
-                shutdown_called = Ref(false)
-                shutdown_thread = Ref(0)
-                done_ch = Channel{Nothing}(1)
+            shutdown_called = Ref(false)
+            shutdown_thread = Ref(0)
+            done_ch = Channel{Nothing}(1)
 
-                shutdown_opts = AwsIO.shutdown_callback_options(
-                    (user_data) -> begin
-                        shutdown_called[] = true
-                        shutdown_thread[] = Threads.threadid()
-                        if !isready(done_ch)
-                            put!(done_ch, nothing)
-                        end
-                        return nothing
-                    end,
-                    nothing,
-                )
+            shutdown_opts = AwsIO.shutdown_callback_options(
+                (user_data) -> begin
+                    shutdown_called[] = true
+                    shutdown_thread[] = Threads.threadid()
+                    if !isready(done_ch)
+                        put!(done_ch, nothing)
+                    end
+                    return nothing
+                end,
+                nothing,
+            )
 
-                elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts))
-                @test !(elg isa AwsIO.ErrorResult)
+            elg = AwsIO.event_loop_group_new(AwsIO.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts))
+            @test !(elg isa AwsIO.ErrorResult)
 
-                if !(elg isa AwsIO.ErrorResult)
-                    AwsIO.event_loop_group_destroy!(elg)
-                    @test _wait_for_channel(done_ch)
-                    @test shutdown_called[]
-                    @test shutdown_thread[] != 0
-                end
+            if !(elg isa AwsIO.ErrorResult)
+                AwsIO.event_loop_group_destroy!(elg)
+                @test _wait_for_channel(done_ch)
+                @test shutdown_called[]
+                @test shutdown_thread[] != 0
             end
         end
     end
 
     @testset "Event loop local objects" begin
-        if Sys.iswindows()
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads <= 1
             @test true
         else
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads <= 1
-                @test true
-            else
                 opts = AwsIO.EventLoopOptions()
                 el = AwsIO.event_loop_new(opts)
                 @test !(el isa AwsIO.ErrorResult)
@@ -1847,87 +1776,75 @@ end
     end
 
     @testset "Event loop load factor" begin
-        if Sys.iswindows()
-            @test true
-        else
-            times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
-            idx = Ref(0)
-            clock = () -> begin
-                idx[] += 1
-                return idx[] <= length(times) ? times[idx[]] : times[end]
-            end
+        times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
+        idx = Ref(0)
+        clock = () -> begin
+            idx[] += 1
+            return idx[] <= length(times) ? times[idx[]] : times[end]
+        end
 
-            opts = AwsIO.EventLoopOptions(clock = clock)
-            el = AwsIO.event_loop_new(opts)
-            @test !(el isa AwsIO.ErrorResult)
-            if !(el isa AwsIO.ErrorResult)
-                AwsIO.event_loop_register_tick_start!(el)
-                AwsIO.event_loop_register_tick_end!(el)
+        opts = AwsIO.EventLoopOptions(clock = clock)
+        el = AwsIO.event_loop_new(opts)
+        @test !(el isa AwsIO.ErrorResult)
+        if !(el isa AwsIO.ErrorResult)
+            AwsIO.event_loop_register_tick_start!(el)
+            AwsIO.event_loop_register_tick_end!(el)
 
-                # Force stale state and confirm load factor reports 0
-                @atomic el.next_flush_time = UInt64(0)
-                @test AwsIO.event_loop_get_load_factor(el) == 0
-            end
+            # Force stale state and confirm load factor reports 0
+            @atomic el.next_flush_time = UInt64(0)
+            @test AwsIO.event_loop_get_load_factor(el) == 0
         end
     end
 
     @testset "Event loop clock override" begin
-        if Sys.iswindows()
-            @test true
-        else
-            clock_calls = Ref(0)
-            clock = () -> begin
-                clock_calls[] += 1
-                return UInt64(42)
-            end
+        clock_calls = Ref(0)
+        clock = () -> begin
+            clock_calls[] += 1
+            return UInt64(42)
+        end
 
-            opts = AwsIO.EventLoopOptions(clock = clock)
-            el = AwsIO.event_loop_new(opts)
-            @test !(el isa AwsIO.ErrorResult)
+        opts = AwsIO.EventLoopOptions(clock = clock)
+        el = AwsIO.event_loop_new(opts)
+        @test !(el isa AwsIO.ErrorResult)
 
-            if !(el isa AwsIO.ErrorResult)
-                @test AwsIO.event_loop_current_clock_time(el) == UInt64(42)
-            end
+        if !(el isa AwsIO.ErrorResult)
+            @test AwsIO.event_loop_current_clock_time(el) == UInt64(42)
+        end
 
-            interactive_threads = Threads.nthreads(:interactive)
-            if interactive_threads > 1
-                group_opts = AwsIO.EventLoopGroupOptions(loop_count = 1, clock_override = clock)
-                elg = AwsIO.event_loop_group_new(group_opts)
-                @test !(elg isa AwsIO.ErrorResult)
+        interactive_threads = Threads.nthreads(:interactive)
+        if interactive_threads > 1
+            group_opts = AwsIO.EventLoopGroupOptions(loop_count = 1, clock_override = clock)
+            elg = AwsIO.event_loop_group_new(group_opts)
+            @test !(elg isa AwsIO.ErrorResult)
 
-                if !(elg isa AwsIO.ErrorResult)
-                    try
-                        loop = AwsIO.event_loop_group_get_next_loop(elg)
-                        @test loop !== nothing
-                        if loop !== nothing
-                            @test AwsIO.event_loop_current_clock_time(loop) == UInt64(42)
-                        end
-                    finally
-                        AwsIO.event_loop_group_destroy!(elg)
+            if !(elg isa AwsIO.ErrorResult)
+                try
+                    loop = AwsIO.event_loop_group_get_next_loop(elg)
+                    @test loop !== nothing
+                    if loop !== nothing
+                        @test AwsIO.event_loop_current_clock_time(loop) == UInt64(42)
                     end
+                finally
+                    AwsIO.event_loop_group_destroy!(elg)
                 end
             end
-
-            @test clock_calls[] >= 1
         end
+
+        @test clock_calls[] >= 1
     end
 
     @testset "Event loop group thread constraint" begin
         # OS threads have no interactive thread pool constraint;
         # verify that creating an ELG with a reasonable count succeeds.
-        if !Sys.iswindows()
-            opts = AwsIO.EventLoopGroupOptions(loop_count = UInt16(2))
-            elg = AwsIO.event_loop_group_new(opts)
-            @test !(elg isa AwsIO.ErrorResult)
-            if !(elg isa AwsIO.ErrorResult)
-                try
-                    @test AwsIO.event_loop_group_get_loop_count(elg) == 2
-                finally
-                    AwsIO.event_loop_group_destroy!(elg)
-                end
+        opts = AwsIO.EventLoopGroupOptions(loop_count = UInt16(2))
+        elg = AwsIO.event_loop_group_new(opts)
+        @test !(elg isa AwsIO.ErrorResult)
+        if !(elg isa AwsIO.ErrorResult)
+            try
+                @test AwsIO.event_loop_group_get_loop_count(elg) == 2
+            finally
+                AwsIO.event_loop_group_destroy!(elg)
             end
-        else
-            @test true
         end
     end
 
@@ -2015,4 +1932,3 @@ end
             end
         end
     end
-end

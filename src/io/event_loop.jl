@@ -122,7 +122,7 @@ end
 
 # Connect an IO handle to the event loop's completion port / queue (platform-specific)
 # On Apple/BSD, the real implementation is in kqueue_event_loop.jl
-@static if !(Sys.isapple() || Sys.isbsd())
+@static if !(Sys.isapple() || Sys.isbsd() || Sys.iswindows())
 function event_loop_connect_to_io_completion_port!(
         event_loop::EventLoop,
         handle::IoHandle,

@@ -14,6 +14,7 @@ mutable struct PipeReadEnd{U}
     on_readable::Union{OnPipeReadableFn, Nothing}  # nullable
     user_data::U
     is_subscribed::Bool
+    impl::Any  # platform-specific impl data (e.g. IOCP on Windows)
 end
 
 function PipeReadEnd(fd::Integer)
@@ -23,6 +24,7 @@ function PipeReadEnd(fd::Integer)
         nothing,
         nothing,
         false,
+        nothing,
     )
 end
 
@@ -32,6 +34,7 @@ mutable struct PipeWriteEnd
     event_loop::Union{EventLoop, Nothing}
     write_queue::Deque{SocketWriteRequest}  # Reuse socket write request
     is_subscribed::Bool
+    impl::Any  # platform-specific impl data (e.g. IOCP on Windows)
 end
 
 function PipeWriteEnd(fd::Integer)
@@ -40,19 +43,19 @@ function PipeWriteEnd(fd::Integer)
         nothing,
         Deque{SocketWriteRequest}(),
         false,
+        nothing,
     )
 end
 
 # Create a pipe (returns read_end, write_end)
 function pipe_create()::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
+    @static if Sys.iswindows()
+        return pipe_create_iocp()
+    end
+
     fds = Memory{Cint}(undef, 2)
 
-    @static if Sys.iswindows()
-        # Windows doesn't have pipe(), use _pipe()
-        result = ccall(:_pipe, Cint, (Ptr{Cint}, Cuint, Cint), fds, 4096, 0x8000)  # _O_BINARY
-    else
-        result = ccall(:pipe, Cint, (Ptr{Cint},), fds)
-    end
+    result = ccall(:pipe, Cint, (Ptr{Cint},), fds)
 
     if result != 0
         errno_val = get_errno()
@@ -67,10 +70,8 @@ function pipe_create()::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
     logf(LogLevel.DEBUG, LS_IO_GENERAL, "Pipe: created read_fd=$read_fd, write_fd=$write_fd")
 
     # Set non-blocking
-    @static if !Sys.iswindows()
-        _set_nonblocking(read_fd)
-        _set_nonblocking(write_fd)
-    end
+    _set_nonblocking(read_fd)
+    _set_nonblocking(write_fd)
 
     read_end = PipeReadEnd(read_fd)
     write_end = PipeWriteEnd(write_fd)
@@ -91,6 +92,10 @@ end
 
 # Close pipe read end
 function pipe_read_end_close!(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+    @static if Sys.iswindows()
+        return _pipe_read_end_close_iocp!(read_end)
+    end
+
     fd = read_end.io_handle.fd
 
     if fd >= 0
@@ -113,6 +118,10 @@ end
 
 # Close pipe write end
 function pipe_write_end_close!(write_end::PipeWriteEnd)::Union{Nothing, ErrorResult}
+    @static if Sys.iswindows()
+        return _pipe_write_end_close_iocp!(write_end)
+    end
+
     fd = write_end.io_handle.fd
 
     if fd >= 0
@@ -146,6 +155,12 @@ function pipe_read_end_subscribe!(
         on_readable::OnPipeReadableFn,
         user_data,
     )::Union{Nothing, ErrorResult}
+    @static if Sys.iswindows()
+        # event_loop is already stored on the read_end during pipe_init(); keep in sync.
+        read_end.event_loop = event_loop
+        return _pipe_read_end_subscribe_iocp!(read_end, on_readable, user_data)
+    end
+
     if read_end.is_subscribed
         raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
         return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
@@ -210,6 +225,26 @@ function pipe_init(
 
     read_end.event_loop = read_end_event_loop
     write_end.event_loop = write_end_event_loop
+
+    @static if Sys.iswindows()
+        # Associate handles with each loop's IOCP.
+        res = event_loop_connect_to_io_completion_port!(write_end_event_loop, write_end.io_handle)
+        if res isa ErrorResult
+            pipe_read_end_close!(read_end)
+            pipe_write_end_close!(write_end)
+            return res
+        end
+        res2 = event_loop_connect_to_io_completion_port!(read_end_event_loop, read_end.io_handle)
+        if res2 isa ErrorResult
+            pipe_read_end_close!(read_end)
+            pipe_write_end_close!(write_end)
+            return res2
+        end
+
+        # For IOCP, write-end does not require "writable" subscription; IO completion callbacks drive progress.
+        write_end.is_subscribed = true
+        return (read_end, write_end)
+    end
 
     sub_result = pipe_write_end_subscribe!(write_end, write_end_event_loop)
     if sub_result isa ErrorResult
@@ -299,6 +334,10 @@ function pipe_subscribe_to_readable_events(
 end
 
 function pipe_unsubscribe_from_readable_events(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+    @static if Sys.iswindows()
+        return _pipe_read_end_unsubscribe_iocp!(read_end)
+    end
+
     if read_end.event_loop === nothing
         raise_error(ERROR_IO_BROKEN_PIPE)
         return ErrorResult(ERROR_IO_BROKEN_PIPE)
@@ -322,6 +361,10 @@ end
 
 # Read from pipe
 function pipe_read!(read_end::PipeReadEnd, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+    @static if Sys.iswindows()
+        return _pipe_read_iocp!(read_end, buffer)
+    end
+
     fd = read_end.io_handle.fd
 
     if fd < 0
@@ -456,6 +499,10 @@ function pipe_write!(
         on_complete::Union{OnPipeWriteCompleteFn, Nothing} = nothing,
         user_data = nothing,
     )::Union{Nothing, ErrorResult}
+    @static if Sys.iswindows()
+        return _pipe_write_iocp!(write_end, cursor, on_complete, user_data)
+    end
+
     fd = write_end.io_handle.fd
 
     if fd < 0

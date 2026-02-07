@@ -50,7 +50,7 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
 end
 
 @testset "channel" begin
-    if Sys.iswindows() || Threads.nthreads(:interactive) <= 1
+    if Threads.nthreads(:interactive) <= 1
         @test true
     else
         AwsIO.io_library_init()

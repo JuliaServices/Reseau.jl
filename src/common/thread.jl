@@ -38,44 +38,24 @@ Base.@kwdef struct ThreadOptions
     cpu_id::Int = -1
     join_strategy::ThreadJoinStrategy.T = ThreadJoinStrategy.MANUAL
     name::String = ""
-    pool::Symbol = :default
 end
 
-mutable struct ThreadHandle{F}
+mutable struct ThreadHandle
     id::thread_id_t
     detach_state::ThreadDetachState.T
-    task::Union{Task, Nothing}  # nullable
     os_thread::pthread_t        # pthread_t (0 if not OS thread)
     name::String
     managed::Bool
-    atexit::Vector{F}
+    atexit::Vector{Any}
     _start_ctx::Any             # temporary (fn, ctx) for OS thread startup
 end
 
 function ThreadHandle()
-    return ThreadHandle{Any}(thread_id_t(0), ThreadDetachState.NOT_CREATED, nothing, pthread_t(0), "", false, Any[], nothing)
+    return ThreadHandle(thread_id_t(0), ThreadDetachState.NOT_CREATED, pthread_t(0), "", false, Any[], nothing)
 end
 
 const thread = ThreadHandle
 const thread_options = ThreadOptions
-
-const _thread_state_registry = SmallRegistry{UInt64, ThreadHandle{Any}}()
-const _thread_name_registry = SmallRegistry{UInt64, String}()
-
-mutable struct _interactive_thread_state
-    @atomic next_id::Int
-end
-
-const _interactive_thread_state = _interactive_thread_state(0)
-
-function _next_interactive_thread_id()
-    count = Threads.nthreads(:interactive)
-    if count <= 1
-        return 1
-    end
-    next_idx = @atomic _interactive_thread_state.next_id += 1
-    return Int(mod(next_idx - 1, count - 1)) + 2
-end
 
 # --- OS thread support via pthread_create + @cfunction auto-adoption ---
 
@@ -84,6 +64,21 @@ const _os_thread_entry_c = Ref{Ptr{Cvoid}}(C_NULL)
 
 # Thread entry point — @cfunction slow-path auto-adopts the foreign thread
 # CRITICAL: must never throw across the C boundary
+@static if _PLATFORM_WINDOWS
+function _os_thread_entry_impl(arg::Ptr{Cvoid})::UInt32
+    try
+        handle = unsafe_pointer_to_objref(arg)::ThreadHandle
+        fn, user_ctx = handle._start_ctx::Tuple
+        handle._start_ctx = nothing  # release reference
+        _thread_task_entry(handle, fn, user_ctx)
+    catch ex
+        try
+            @error "Fatal error in OS thread entry" exception=(ex, catch_backtrace())
+        catch; end
+    end
+    return UInt32(0)
+end
+else
 function _os_thread_entry_impl(arg::Ptr{Cvoid})::Ptr{Cvoid}
     try
         handle = unsafe_pointer_to_objref(arg)::ThreadHandle
@@ -97,12 +92,39 @@ function _os_thread_entry_impl(arg::Ptr{Cvoid})::Ptr{Cvoid}
     end
     return C_NULL
 end
+end
 
 function _init_os_thread_cfunc!()
-    _os_thread_entry_c[] = @cfunction(_os_thread_entry_impl, Ptr{Cvoid}, (Ptr{Cvoid},))
+    @static if _PLATFORM_WINDOWS
+        _os_thread_entry_c[] = @cfunction(_os_thread_entry_impl, UInt32, (Ptr{Cvoid},))
+    else
+        _os_thread_entry_c[] = @cfunction(_os_thread_entry_impl, Ptr{Cvoid}, (Ptr{Cvoid},))
+    end
     return nothing
 end
 
+@static if _PLATFORM_WINDOWS
+function _spawn_os_thread(handle::ThreadHandle, fn, ctx)
+    handle._start_ctx = (fn, ctx)
+    thread_handle = ccall(
+        (:CreateThread, "kernel32"),
+        Ptr{Cvoid},
+        (Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}),
+        C_NULL,
+        Csize_t(0),
+        _os_thread_entry_c[],
+        pointer_from_objref(handle),
+        UInt32(0),
+        C_NULL,
+    )
+    if thread_handle == C_NULL
+        handle._start_ctx = nothing
+        return Cint(1)
+    end
+    handle.os_thread = pthread_t(UInt(thread_handle))
+    return Cint(0)
+end
+else
 function _spawn_os_thread(handle::ThreadHandle, fn, ctx)
     handle._start_ctx = (fn, ctx)
     pthread_ref = Ref{pthread_t}(0)
@@ -116,14 +138,6 @@ function _spawn_os_thread(handle::ThreadHandle, fn, ctx)
     handle.os_thread = pthread_ref[]
     return Cint(0)
 end
-
-function _spawn_on_interactive_thread(handle::ThreadHandle, fn, ctx, target_tid::Int)
-    task = Task(() -> _thread_task_entry(handle, fn, ctx))
-    task.sticky = true
-    Base.Threads._spawn_set_thrpool(task, :interactive)
-    _ = ccall(:jl_set_task_tid, Cint, (Any, Cint), task, target_tid - 1)
-    schedule(task)
-    return task
 end
 
 @inline function _thread_tls_handle()
@@ -187,21 +201,19 @@ function default_thread_options()
     return ThreadOptions()
 end
 
-function thread_options_with_defaults(opts::ThreadOptions; name::AbstractString = "", pool::Symbol = opts.pool)
+function thread_options_with_defaults(opts::ThreadOptions; name::AbstractString = "")
     resolved_name = isempty(opts.name) ? String(name) : opts.name
     return ThreadOptions(;
         stack_size = opts.stack_size,
         cpu_id = opts.cpu_id,
         join_strategy = opts.join_strategy,
         name = resolved_name,
-        pool = pool,
     )
 end
 
 function thread_init(handle::ThreadHandle)
     handle.id = thread_id_t(0)
     handle.detach_state = ThreadDetachState.NOT_CREATED
-    handle.task = nothing
     handle.os_thread = pthread_t(0)
     handle.name = ""
     handle.managed = false
@@ -217,44 +229,22 @@ end
 
 function thread_launch(handle::ThreadHandle, fn, ctx, options::Union{ThreadOptions, Nothing} = nothing)
     opts = options === nothing ? ThreadOptions() : options
-    if opts.pool == :interactive
-        if Threads.nthreads(:interactive) <= 1
-            raise_error(ERROR_THREAD_INVALID_SETTINGS)
-            return ERROR_THREAD_INVALID_SETTINGS
-        end
-    elseif opts.pool != :default && opts.pool != :os
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ERROR_INVALID_ARGUMENT
-    end
     managed = opts.join_strategy == ThreadJoinStrategy.MANAGED
     handle.detach_state = managed ? ThreadDetachState.MANAGED : ThreadDetachState.JOINABLE
     handle.managed = managed
     handle.name = opts.name
     handle.id = _thread_next_id()
-    registry_set!(_thread_state_registry, UInt64(handle.id), handle)
-    if !isempty(handle.name)
-        registry_set!(_thread_name_registry, UInt64(handle.id), handle.name)
-    end
     if managed
         thread_increment_unjoined_count()
     end
-    if opts.pool == :os
-        ret = _spawn_os_thread(handle, fn, ctx)
-        if ret != 0
-            registry_delete!(_thread_state_registry, UInt64(handle.id))
-            registry_delete!(_thread_name_registry, UInt64(handle.id))
-            if managed
-                thread_decrement_unjoined_count()
-            end
-            handle.detach_state = ThreadDetachState.NOT_CREATED
-            raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID)
-            return ERROR_THREAD_NO_SUCH_THREAD_ID
+    ret = _spawn_os_thread(handle, fn, ctx)
+    if ret != 0
+        if managed
+            thread_decrement_unjoined_count()
         end
-    elseif opts.pool == :interactive
-        target_tid = _next_interactive_thread_id()
-        handle.task = Base.errormonitor(_spawn_on_interactive_thread(handle, fn, ctx, target_tid))
-    else
-        handle.task = Base.errormonitor(Threads.@spawn _thread_task_entry(handle, fn, ctx))
+        handle.detach_state = ThreadDetachState.NOT_CREATED
+        raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID)
+        return ERROR_THREAD_NO_SUCH_THREAD_ID
     end
     return OP_SUCCESS
 end
@@ -281,11 +271,7 @@ end
 
 function thread_join(handle::ThreadHandle)
     if handle.detach_state == ThreadDetachState.JOINABLE
-        if handle.os_thread != 0
-            @ccall gc_safe = true pthread_join(handle.os_thread::pthread_t, C_NULL::Ptr{Ptr{Cvoid}})::Cint
-        elseif handle.task !== nothing
-            wait(handle.task)
-        end
+        _thread_join_os_thread!(handle)
         handle.detach_state = ThreadDetachState.JOIN_COMPLETED
         return OP_SUCCESS
     end
@@ -297,13 +283,8 @@ function thread_join(handle_ref::Base.RefValue{ThreadHandle})
 end
 
 function thread_clean_up(handle::ThreadHandle)
-    if handle.id != 0
-        registry_delete!(_thread_state_registry, UInt64(handle.id))
-        registry_delete!(_thread_name_registry, UInt64(handle.id))
-    end
     handle.id = thread_id_t(0)
     handle.detach_state = ThreadDetachState.NOT_CREATED
-    handle.task = nothing
     handle.os_thread = pthread_t(0)
     handle.name = ""
     handle.managed = false
@@ -323,11 +304,20 @@ function thread_current_at_exit(callback)
     return OP_SUCCESS
 end
 
-function thread_name(thread_id::thread_id_t)
-    return registry_get(_thread_name_registry, UInt64(thread_id), nothing)
-end
-
 function thread_current_name()
     handle = _thread_tls_handle()
     return handle === nothing ? nothing : handle.name
+end
+
+function _thread_join_os_thread!(handle::ThreadHandle)
+    handle.os_thread == 0 && return nothing
+    @static if _PLATFORM_WINDOWS
+        h = Ptr{Cvoid}(handle.os_thread)
+        _ = ccall((:WaitForSingleObject, "kernel32"), UInt32, (Ptr{Cvoid}, UInt32), h, UInt32(0xffffffff))
+        _ = ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), h)
+    else
+        @ccall gc_safe = true pthread_join(handle.os_thread::pthread_t, C_NULL::Ptr{Ptr{Cvoid}})::Cint
+    end
+    handle.os_thread = pthread_t(0)
+    return nothing
 end

@@ -727,8 +727,8 @@ end
     end
     AwsIO.channel_slot_set_handler!(slot, handler)
 
-    handler.shared.stats.handshake_status = AwsIO.TlsNegotiationStatus.ONGOING
-    AwsIO._tls_timeout_task(handler.shared.timeout_task, handler.shared, AwsIO.TaskStatus.RUN_READY)
+    handler.stats.handshake_status = AwsIO.TlsNegotiationStatus.ONGOING
+    AwsIO._tls_timeout_task(handler.timeout_task, handler, AwsIO.TaskStatus.RUN_READY)
 
     @test channel.shutdown_pending
     @test channel.shutdown_error_code == AwsIO.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
@@ -1511,12 +1511,9 @@ end
     bind_endpoint = AwsIO.SocketEndpoint("127.0.0.1", 0)
     @test AwsIO.socket_bind(server_sock, AwsIO.SocketBindOptions(bind_endpoint)) === nothing
     @test AwsIO.socket_listen(server_sock, 16) === nothing
-    bound = AwsIO.socket_get_bound_address(server_sock)
-    @test bound isa AwsIO.SocketEndpoint
-    port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
-    @test port > 0
 
     server_ready = Ref(false)
+    accept_started = Ref(false)
     server_negotiated = Ref(false)
     server_received = Ref(false)
 
@@ -1560,8 +1557,23 @@ end
         return nothing
     end
 
-    listener_opts = AwsIO.SocketListenerOptions(; on_accept_result = on_accept)
+    on_accept_start = (socket, err, ud) -> begin
+        _ = socket
+        _ = ud
+        if err == AwsIO.AWS_OP_SUCCESS
+            accept_started[] = true
+        end
+        return nothing
+    end
+
+    listener_opts = AwsIO.SocketListenerOptions(; on_accept_start = on_accept_start, on_accept_result = on_accept)
     @test AwsIO.socket_start_accept(server_sock, event_loop, listener_opts) === nothing
+    @test wait_for_flag_tls(accept_started)
+
+    bound = AwsIO.socket_get_bound_address(server_sock)
+    @test bound isa AwsIO.SocketEndpoint
+    port = bound isa AwsIO.SocketEndpoint ? bound.port : 0
+    @test port > 0
 
     client_opts = AwsIO.SocketOptions(; type = AwsIO.SocketType.STREAM, domain = AwsIO.SocketDomain.IPV4)
     client_sock = AwsIO.socket_init(client_opts)
@@ -2885,4 +2897,3 @@ if get(ENV, "AWSIO_RUN_NETWORK_TESTS", "0") == "1"
 else
     @info "Skipping TLS network tests (set AWSIO_RUN_NETWORK_TESTS=1 to enable)"
 end
-

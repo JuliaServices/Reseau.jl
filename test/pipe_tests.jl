@@ -499,7 +499,7 @@ function _run_pipe_case(test_fn::Function, name::AbstractString, buffer_size::In
 end
 
 @testset "pipe" begin
-    if Sys.iswindows() || Threads.nthreads(:interactive) <= 1
+    if Threads.nthreads(:interactive) <= 1
         @test true
     else
         AwsIO.io_library_init()

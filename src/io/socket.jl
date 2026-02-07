@@ -15,14 +15,6 @@ end
     DGRAM = 1   # UDP when used with IPV4/6
 end
 
-# Socket implementation type
-@enumx SocketImplType::UInt8 begin
-    PLATFORM_DEFAULT = 0
-    POSIX = 1
-    WINSOCK = 2
-    APPLE_NETWORK_FRAMEWORK = 3
-end
-
 # Channel direction enum (also used by channel.jl)
 @enumx ChannelDirection::UInt8 begin
     READ = 0
@@ -126,7 +118,6 @@ end
 mutable struct SocketOptions
     type::SocketType.T
     domain::SocketDomain.T
-    impl_type::SocketImplType.T
     connect_timeout_ms::UInt32
     keep_alive_interval_sec::UInt16
     keep_alive_timeout_sec::UInt16
@@ -138,7 +129,6 @@ end
 function SocketOptions(;
         type::SocketType.T = SocketType.STREAM,
         domain::SocketDomain.T = SocketDomain.IPV4,
-        impl_type::SocketImplType.T = SocketImplType.PLATFORM_DEFAULT,
         connect_timeout_ms::Integer = 3000,
         keep_alive_interval_sec::Integer = 0,
         keep_alive_timeout_sec::Integer = 0,
@@ -150,7 +140,6 @@ function SocketOptions(;
     return SocketOptions(
         type,
         domain,
-        impl_type,
         UInt32(connect_timeout_ms),
         UInt16(keep_alive_interval_sec),
         UInt16(keep_alive_timeout_sec),
@@ -180,17 +169,13 @@ const SocketOnAcceptResultFn = Function      # (socket, error_code, new_socket, 
 const SocketOnWriteCompletedFn = Function    # (socket, error_code, bytes_written, user_data) -> Nothing
 const SocketOnReadableFn = Function          # (socket, error_code, user_data) -> Nothing
 
-# Forward declaration
-abstract type AbstractSocket end
-abstract type AbstractTlsConnectionOptions end
-
 # Socket connect options
-struct SocketConnectOptions
+struct SocketConnectOptions{TO}
     remote_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
     on_connection_result::Union{Function, Nothing}
     user_data::Any
-    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    tls_connection_options::TO
 end
 
 function SocketConnectOptions(
@@ -200,7 +185,7 @@ function SocketConnectOptions(
         user_data = nothing,
         tls_connection_options = nothing,
     )
-    return SocketConnectOptions(
+    return SocketConnectOptions{typeof(tls_connection_options)}(
         remote_endpoint,
         event_loop,
         on_connection_result,
@@ -210,11 +195,11 @@ function SocketConnectOptions(
 end
 
 # Socket bind options
-struct SocketBindOptions
+struct SocketBindOptions{TO}
     local_endpoint::SocketEndpoint
     user_data::Any
     event_loop::Union{EventLoop, Nothing}
-    tls_connection_options::Union{AbstractTlsConnectionOptions, Nothing}
+    tls_connection_options::TO
 end
 
 function SocketBindOptions(
@@ -223,7 +208,7 @@ function SocketBindOptions(
         event_loop = nothing,
         tls_connection_options = nothing,
     )
-    return SocketBindOptions(
+    return SocketBindOptions{typeof(tls_connection_options)}(
         local_endpoint,
         user_data,
         event_loop,
@@ -253,12 +238,17 @@ function SocketListenerOptions(;
     )
 end
 
-# Socket vtable - defines the interface for socket implementations
-abstract type SocketVTable end
+# Platform-specific socket implementation type
+const PlatformSocketImpl = @static if Sys.isapple()
+    Union{PosixSocket, NWSocket}
+elseif Sys.iswindows()
+    WinsockSocket
+else
+    PosixSocket
+end
 
-# Socket struct - polymorphic socket with vtable dispatch
-mutable struct Socket{V <: SocketVTable} <: AbstractSocket
-    vtable::V
+# Socket struct - non-parametric, dispatches on impl type
+mutable struct Socket
     local_endpoint::SocketEndpoint
     remote_endpoint::SocketEndpoint
     options::SocketOptions
@@ -271,225 +261,114 @@ mutable struct Socket{V <: SocketVTable} <: AbstractSocket
     connection_result_fn::Union{Function, Nothing}
     accept_result_fn::Union{Function, Nothing}
     connect_accept_user_data::Any
-    impl::Any  # Platform-specific implementation data
+    impl::Union{PlatformSocketImpl, Nothing}
 end
 
-# Vtable interface functions - must be implemented by platform-specific vtables
-
-# Initialize socket based on impl_type (platform default if unspecified)
+# Initialize socket based on platform and domain
 function socket_init(options::SocketOptions)::Union{Socket, ErrorResult}
-    impl_type = options.impl_type == SocketImplType.PLATFORM_DEFAULT ?
-        socket_get_default_impl_type() : options.impl_type
-
-    if impl_type == SocketImplType.POSIX
-        return socket_init_posix(options)
-    elseif impl_type == SocketImplType.WINSOCK
-        @static if Sys.iswindows()
-            return socket_init_winsock(options)
+    @static if Sys.isapple()
+        # macOS: domain-based selection
+        if options.domain == SocketDomain.LOCAL || options.domain == SocketDomain.VSOCK
+            return socket_init_posix(options)
         else
-            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
-        end
-    elseif impl_type == SocketImplType.APPLE_NETWORK_FRAMEWORK
-        @static if Sys.isapple()
             return socket_init_apple_nw(options)
-        else
-            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
         end
+    elseif Sys.iswindows()
+        return socket_init_winsock(options)
+    else
+        return socket_init_posix(options)
     end
-
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 
-# Clean up socket resources
+# Socket interface - dispatches to platform-specific implementations via socket_*_impl
+
 function socket_cleanup!(socket::Socket)
-    return vtable_socket_cleanup!(socket.vtable, socket)
+    socket.impl === nothing && return nothing
+    return socket_cleanup_impl(socket.impl, socket)
 end
 
-function vtable_socket_cleanup!(vtable::SocketVTable, socket::Socket)
-    error("vtable_socket_cleanup! must be implemented by socket vtable")
-end
-
-# Connect to a remote endpoint
 function socket_connect(socket::Socket, options::SocketConnectOptions)::Union{Nothing, ErrorResult}
-    return vtable_socket_connect(socket.vtable, socket, options)
+    return socket_connect_impl(socket.impl, socket, options)
 end
 
-function vtable_socket_connect(vtable::SocketVTable, socket::Socket, options::SocketConnectOptions)::Union{Nothing, ErrorResult}
-    error("vtable_socket_connect must be implemented by socket vtable")
-end
-
-# Bind to a local endpoint
 function socket_bind(socket::Socket, options::SocketBindOptions)::Union{Nothing, ErrorResult}
-    return vtable_socket_bind(socket.vtable, socket, options)
+    return socket_bind_impl(socket.impl, socket, options)
 end
 
-function vtable_socket_bind(vtable::SocketVTable, socket::Socket, options::SocketBindOptions)::Union{Nothing, ErrorResult}
-    error("vtable_socket_bind must be implemented by socket vtable")
-end
-
-# Start listening for connections
 function socket_listen(socket::Socket, backlog_size::Integer)::Union{Nothing, ErrorResult}
-    return vtable_socket_listen(socket.vtable, socket, backlog_size)
+    return socket_listen_impl(socket.impl, socket, backlog_size)
 end
 
-function vtable_socket_listen(vtable::SocketVTable, socket::Socket, backlog_size::Integer)::Union{Nothing, ErrorResult}
-    error("vtable_socket_listen must be implemented by socket vtable")
-end
-
-# Start accepting connections
 function socket_start_accept(socket::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
-    return vtable_socket_start_accept(socket.vtable, socket, accept_loop, options)
+    return socket_start_accept_impl(socket.impl, socket, accept_loop, options)
 end
 
-function vtable_socket_start_accept(vtable::SocketVTable, socket::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
-    error("vtable_socket_start_accept must be implemented by socket vtable")
-end
-
-# Stop accepting connections
 function socket_stop_accept(socket::Socket)::Union{Nothing, ErrorResult}
-    return vtable_socket_stop_accept(socket.vtable, socket)
+    return socket_stop_accept_impl(socket.impl, socket)
 end
 
-function vtable_socket_stop_accept(vtable::SocketVTable, socket::Socket)::Union{Nothing, ErrorResult}
-    error("vtable_socket_stop_accept must be implemented by socket vtable")
-end
-
-# Close the socket
 function socket_close(socket::Socket)::Union{Nothing, ErrorResult}
-    return vtable_socket_close(socket.vtable, socket)
+    return socket_close_impl(socket.impl, socket)
 end
 
-function vtable_socket_close(vtable::SocketVTable, socket::Socket)::Union{Nothing, ErrorResult}
-    error("vtable_socket_close must be implemented by socket vtable")
-end
-
-# Shutdown direction (read or write)
 function socket_shutdown_dir(socket::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
-    return vtable_socket_shutdown_dir(socket.vtable, socket, dir)
+    return socket_shutdown_dir_impl(socket.impl, socket, dir)
 end
 
-function vtable_socket_shutdown_dir(vtable::SocketVTable, socket::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
-    error("vtable_socket_shutdown_dir must be implemented by socket vtable")
-end
-
-# Set socket options
 function socket_set_options(socket::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
-    return vtable_socket_set_options(socket.vtable, socket, options)
+    return socket_set_options_impl(socket.impl, socket, options)
 end
 
-function vtable_socket_set_options(vtable::SocketVTable, socket::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
-    error("vtable_socket_set_options must be implemented by socket vtable")
-end
-
-# Assign socket to event loop
 function socket_assign_to_event_loop(socket::Socket, event_loop::EventLoop)::Union{Nothing, ErrorResult}
-    return vtable_socket_assign_to_event_loop(socket.vtable, socket, event_loop)
+    return socket_assign_to_event_loop_impl(socket.impl, socket, event_loop)
 end
 
-function vtable_socket_assign_to_event_loop(vtable::SocketVTable, socket::Socket, event_loop::EventLoop)::Union{Nothing, ErrorResult}
-    error("vtable_socket_assign_to_event_loop must be implemented by socket vtable")
-end
-
-# Subscribe to readable events
 function socket_subscribe_to_readable_events(socket::Socket, on_readable::SocketOnReadableFn, user_data)::Union{Nothing, ErrorResult}
-    return vtable_socket_subscribe_to_readable_events(socket.vtable, socket, on_readable, user_data)
+    return socket_subscribe_to_readable_events_impl(socket.impl, socket, on_readable, user_data)
 end
 
-function vtable_socket_subscribe_to_readable_events(vtable::SocketVTable, socket::Socket, on_readable::SocketOnReadableFn, user_data)::Union{Nothing, ErrorResult}
-    error("vtable_socket_subscribe_to_readable_events must be implemented by socket vtable")
-end
-
-# Read from socket
 function socket_read(socket::Socket, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
-    return vtable_socket_read(socket.vtable, socket, buffer)
+    return socket_read_impl(socket.impl, socket, buffer)
 end
 
-function vtable_socket_read(vtable::SocketVTable, socket::Socket, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
-    error("vtable_socket_read must be implemented by socket vtable")
-end
-
-# Write to socket
 function socket_write(socket::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Union{Nothing, ErrorResult}
-    return vtable_socket_write(socket.vtable, socket, cursor, written_fn, user_data)
+    return socket_write_impl(socket.impl, socket, cursor, written_fn, user_data)
 end
 
-function vtable_socket_write(vtable::SocketVTable, socket::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Union{Nothing, ErrorResult}
-    error("vtable_socket_write must be implemented by socket vtable")
-end
-
-# Get socket error
 function socket_get_error(socket::Socket)::Int
-    return vtable_socket_get_error(socket.vtable, socket)
+    return socket_get_error_impl(socket.impl, socket)
 end
 
-function vtable_socket_get_error(vtable::SocketVTable, socket::Socket)::Int
-    error("vtable_socket_get_error must be implemented by socket vtable")
-end
-
-# Check if socket is open
 function socket_is_open(socket::Socket)::Bool
-    return vtable_socket_is_open(socket.vtable, socket)
+    return socket_is_open_impl(socket.impl, socket)
 end
 
-function vtable_socket_is_open(vtable::SocketVTable, socket::Socket)::Bool
-    error("vtable_socket_is_open must be implemented by socket vtable")
-end
-
-# Set close complete callback (Apple Network Framework only)
 function socket_set_close_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
-    return vtable_socket_set_close_callback(socket.vtable, socket, fn, user_data)
+    return socket_set_close_callback_impl(socket.impl, socket, fn, user_data)
 end
 
-function vtable_socket_set_close_callback(vtable::SocketVTable, socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
-    # Default implementation - not supported on most platforms
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
-end
-
-# Set cleanup complete callback (Apple Network Framework only)
 function socket_set_cleanup_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
-    return vtable_socket_set_cleanup_callback(socket.vtable, socket, fn, user_data)
+    return socket_set_cleanup_callback_impl(socket.impl, socket, fn, user_data)
 end
 
-function vtable_socket_set_cleanup_callback(vtable::SocketVTable, socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
-    # Default implementation - not supported on most platforms
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
-end
-
-# Get negotiated protocol (ALPN) for socket-based TLS (SecItem/NW)
 function socket_get_protocol(socket::Socket)::ByteBuffer
-    return vtable_socket_get_protocol(socket.vtable, socket)
+    return socket_get_protocol_impl(socket.impl, socket)
 end
 
-function vtable_socket_get_protocol(vtable::SocketVTable, socket::Socket)::ByteBuffer
-    _ = vtable
-    _ = socket
-    return null_buffer()
-end
-
-# Get server name for socket-based TLS (SecItem/NW)
 function socket_get_server_name(socket::Socket)::ByteBuffer
-    return vtable_socket_get_server_name(socket.vtable, socket)
+    return socket_get_server_name_impl(socket.impl, socket)
 end
 
-function vtable_socket_get_server_name(vtable::SocketVTable, socket::Socket)::ByteBuffer
-    _ = vtable
-    _ = socket
-    return null_buffer()
-end
+# Default implementations for methods only overridden by NW
+socket_get_protocol_impl(::PosixSocket, ::Socket) = null_buffer()
+socket_get_server_name_impl(::PosixSocket, ::Socket) = null_buffer()
 
-# Non-vtable helper functions
+# Non-dispatch helper functions
 
-# Get event loop from socket
 function socket_get_event_loop(socket::Socket)::Union{EventLoop, Nothing}
     return socket.event_loop
 end
 
-# Get bound address
 function socket_get_bound_address(socket::Socket)::Union{SocketEndpoint, ErrorResult}
     if socket.local_endpoint.address[1] == 0
         logf(
@@ -500,23 +379,6 @@ function socket_get_bound_address(socket::Socket)::Union{SocketEndpoint, ErrorRe
         return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
     return copy(socket.local_endpoint)
-end
-
-# Get default socket implementation type
-function socket_get_default_impl_type()::SocketImplType.T
-    @static if Sys.islinux() || Sys.isbsd()
-        return SocketImplType.POSIX
-    elseif Sys.isapple()
-        val = lowercase(get(ENV, "AWSIO_USE_APPLE_NETWORK_FRAMEWORK", ""))
-        if !isempty(val) && (val == "1" || val == "true" || val == "yes" || val == "y" || val == "on")
-            return SocketImplType.APPLE_NETWORK_FRAMEWORK
-        end
-        return SocketImplType.POSIX
-    elseif Sys.iswindows()
-        return SocketImplType.WINSOCK
-    else
-        return SocketImplType.PLATFORM_DEFAULT
-    end
 end
 
 @inline function _socket_domain_valid(domain::SocketDomain.T)::Bool
@@ -607,13 +469,10 @@ function socket_endpoint_init_local_address_for_test!(endpoint::SocketEndpoint)
     end
     uuid_str = String(byte_cursor_from_buf(buf[]))
 
-    impl_type = socket_get_default_impl_type()
-    if impl_type == SocketImplType.APPLE_NETWORK_FRAMEWORK
-        set_address!(endpoint, "testsock$(uuid_str).local")
-    elseif impl_type == SocketImplType.POSIX
-        set_address!(endpoint, "testsock$(uuid_str).sock")
-    elseif impl_type == SocketImplType.WINSOCK
+    @static if Sys.iswindows()
         set_address!(endpoint, "\\\\.\\pipe\\testsock$(uuid_str)")
+    else
+        set_address!(endpoint, "testsock$(uuid_str).sock")
     end
 
     return endpoint

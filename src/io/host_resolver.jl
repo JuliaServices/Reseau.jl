@@ -62,27 +62,27 @@ const OnHostResolveCompleteFn = Function  # (resolver, user_data) -> nothing
     SHUTTING_DOWN = 1
 end
 
-mutable struct PendingCallback{F <: OnHostResolvedFn, UD}
-    callback::F
-    user_data::UD
+mutable struct PendingCallback
+    callback::OnHostResolvedFn
+    user_data::Any
 end
 
 # Host resolver configuration
-struct HostResolverConfig{CO <: Union{Function, Nothing}}
+struct HostResolverConfig
     max_entries::UInt64
     max_ttl_secs::UInt64
     min_ttl_secs::UInt64
     max_addresses_per_host::UInt64
     resolve_frequency_ns::UInt64  # How often to re-resolve
     background_refresh::Bool  # retained for compatibility
-    clock_override::CO
+    clock_override::Union{Function, Nothing}
 end
 
-struct HostResolutionConfig{Impl <: Union{Function, Nothing}, ID}
-    impl::Impl
+struct HostResolutionConfig
+    impl::Union{Function, Nothing}
     max_ttl_secs::UInt64
     resolve_frequency_ns::UInt64
-    impl_data::ID
+    impl_data::Any
 end
 
 function HostResolutionConfig(;
@@ -128,8 +128,8 @@ const HostResolverCache = Dict{String, Any}
 abstract type AbstractHostResolver end
 
 # Default host resolver with caching
-mutable struct DefaultHostResolver{ELG} <: AbstractHostResolver
-    event_loop_group::ELG
+mutable struct DefaultHostResolver <: AbstractHostResolver
+    event_loop_group::EventLoopGroup
     config::HostResolverConfig
     cache::HostResolverCache
     resolver_lock::ReentrantLock
@@ -142,12 +142,12 @@ end
 end
 
 function DefaultHostResolver(
-        event_loop_group::ELG,
+        event_loop_group::EventLoopGroup,
         config::HostResolverConfig = HostResolverConfig(),
-    ) where {ELG}
+    )
     cache = Dict{String, Any}()
     sizehint!(cache, Int(config.max_entries))
-    resolver = DefaultHostResolver{ELG}(
+    resolver = DefaultHostResolver(
         event_loop_group,
         config,
         cache,
@@ -157,10 +157,10 @@ function DefaultHostResolver(
     return resolver
 end
 
-mutable struct HostEntry{HR <: DefaultHostResolver, RC <: HostResolutionConfig, TH <: ThreadHandle}
-    resolver::HR
+mutable struct HostEntry
+    resolver::DefaultHostResolver
     host_name::String
-    resolution_config::RC
+    resolution_config::HostResolutionConfig
     resolve_frequency_ns::UInt64
     entry_lock::ReentrantLock
     entry_signal::ConditionVariable
@@ -176,7 +176,7 @@ mutable struct HostEntry{HR <: DefaultHostResolver, RC <: HostResolutionConfig, 
     expired_addresses::Vector{HostAddress}
     on_host_purge_complete::Union{Function, Nothing}  # late-init: nothing → Function
     on_host_purge_complete_user_data::Any              # late-init
-    resolver_thread::TH
+    resolver_thread::ThreadHandle
 end
 
 function _entry_cache_capacity(resolver::DefaultHostResolver, config::HostResolutionConfig)
@@ -645,7 +645,6 @@ function host_resolver_resolve!(
         thread_options = ThreadOptions(;
             join_strategy = ThreadJoinStrategy.MANAGED,
             name = "AwsHostResolver",
-            pool = :os,
         )
         launch_result = thread_launch(new_entry.resolver_thread, _host_resolver_thread, new_entry, thread_options)
         if launch_result != OP_SUCCESS
