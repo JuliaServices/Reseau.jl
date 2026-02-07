@@ -174,7 +174,7 @@ Notes:
 - Coverage upload was removed from CI for now to avoid requiring `CODECOV_TOKEN` during bootstrap.
 
 Remaining (manual, if publishing/registry):
-- [ ] Initial push to the new repo.
+- [x] Initial push to the new repo (pushed to `origin/main`).
 - [ ] Copy/set repo secrets as needed:
   - [ ] `CODECOV_TOKEN` (if re-enabling Codecov)
   - [ ] `DOCUMENTER_KEY` (TagBot)
