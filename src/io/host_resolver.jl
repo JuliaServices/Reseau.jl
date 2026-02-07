@@ -382,8 +382,27 @@ function _invoke_resolver_impl(impl::Function, host::String, impl_data)
     return result, AWS_OP_SUCCESS
 end
 
+
+@inline function _is_ipv4_literal(host::AbstractString)::Bool
+    parts = split(host, '.')
+    length(parts) == 4 || return false
+    for part in parts
+        isempty(part) && return false
+        all(c -> '0' <= c <= '9', part) || return false
+        val = tryparse(Int, part)
+        val === nothing && return false
+        0 <= val <= 255 || return false
+    end
+    return true
+end
+
 function _default_dns_resolve(host::String, impl_data)
     max_addresses = impl_data isa Integer ? Int(impl_data) : 0
+
+    # Fast path: for numeric IP literals, skip getaddrinfo() entirely.
+    if _is_ipv4_literal(host)
+        return [HostAddress(host, HostAddressType.A, host, UInt64(0))], AWS_OP_SUCCESS
+    end
     # We want a stable mix of A/AAAA results. `getaddrinfo()` ordering is platform-dependent and can
     # yield long runs of one family (e.g. AAAA first). If we hard-cap by "first N" we may end up
     # with only one family even when both exist (e.g. dualstack endpoints).

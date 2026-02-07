@@ -593,10 +593,13 @@
             impl.read_io_data.in_use = false
         end
 
+        conn_cb = sock.connection_result_fn
+        conn_ud = sock.connect_accept_user_data
+
         raise_error(error_code)
         socket_close(sock)
 
-        sock.connection_result_fn !== nothing && Base.invokelatest(sock.connection_result_fn, sock, error_code, sock.connect_accept_user_data)
+        conn_cb !== nothing && Base.invokelatest(conn_cb, sock, error_code, conn_ud)
         args.socket = nothing
         return nothing
     end
