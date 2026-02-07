@@ -180,7 +180,15 @@
     function _iocp_signal_synced_data_changed(event_loop::EventLoop)
         impl = event_loop.impl_data
         completion_key = UInt(impl.iocp_handle)
-        _win_post_queued_completion_status(impl.iocp_handle, UInt32(0), completion_key, C_NULL)
+        ok = _win_post_queued_completion_status(impl.iocp_handle, UInt32(0), completion_key, C_NULL)
+        if !ok
+            logf(
+                LogLevel.ERROR,
+                LS_IO_EVENT_LOOP,
+                "PostQueuedCompletionStatus() failed with error %d",
+                _win_get_last_error(),
+            )
+        end
         return nothing
     end
 
@@ -317,6 +325,12 @@
                 _iocp_process_synced_data(event_loop)
             end
 
+            if @atomic event_loop.should_stop
+                impl.thread_data.state = IocpEventThreadState.STOPPING
+                event_loop_register_tick_end!(event_loop)
+                break
+            end
+
             # Run scheduled tasks.
             now_ns_result = event_loop.clock()
             now_ns = now_ns_result isa ErrorResult ? UInt64(0) : now_ns_result
@@ -406,10 +420,12 @@
         try
             if impl.synced_data.state == IocpEventThreadState.RUNNING
                 impl.synced_data.state = IocpEventThreadState.STOPPING
-                if !impl.synced_data.thread_signaled
-                    impl.synced_data.thread_signaled = true
-                    signal_thread = true
-                end
+            end
+
+            if impl.synced_data.state == IocpEventThreadState.STOPPING
+                # Always wake the thread so it can observe the stop request.
+                impl.synced_data.thread_signaled = true
+                signal_thread = true
             end
         finally
             unlock(impl.synced_data.mutex)
