@@ -18,6 +18,26 @@ const _SEEK_END = Cint(2)
 @static if _PLATFORM_WINDOWS
     const _WIN_FILE_ATTRIBUTE_DIRECTORY = UInt32(0x10)
     const _WIN_INVALID_FILE_ATTRIBUTES = UInt32(0xffffffff)
+    const _WIN_CRT_LIBS = ("ucrtbase", "msvcrt")
+
+    @inline function _win_crt_ccall(sym::Symbol, rettype::Type, argtypes::Tuple, args...)
+        # Windows CRT functions may not be imported into the Julia binary. Prefer the CRT dlls
+        # explicitly, falling back to the default search if needed.
+        for lib in _WIN_CRT_LIBS
+            try
+                return ccall((sym, lib), rettype, argtypes, args...)
+            catch err
+                if err isa ErrorException
+                    msg = err.msg
+                    if occursin("could not load", msg) || occursin("could not find", msg)
+                        continue
+                    end
+                end
+                rethrow()
+            end
+        end
+        return ccall(sym, rettype, argtypes, args...)
+    end
 end
 
 @inline function _c_str_is_empty(c_str::Ptr{UInt8})
@@ -34,13 +54,20 @@ end
 
 function _fs_file_length(file::Libc.FILE)::Union{Int64, Nothing}
     @static if _PLATFORM_WINDOWS
-        pos = ccall(:_ftelli64, Int64, (Ptr{Cvoid},), file.ptr)
-        pos < 0 && return nothing
-        ccall(:_fseeki64, Cint, (Ptr{Cvoid}, Int64, Cint), file.ptr, 0, _SEEK_END) == 0 || return nothing
-        len = ccall(:_ftelli64, Int64, (Ptr{Cvoid},), file.ptr)
-        _ = ccall(:_fseeki64, Cint, (Ptr{Cvoid}, Int64, Cint), file.ptr, pos, _SEEK_SET)
-        len < 0 && return nothing
-        return len
+        try
+            pos = _win_crt_ccall(:_ftelli64, Int64, (Ptr{Cvoid},), file.ptr)
+            pos < 0 && return nothing
+            _win_crt_ccall(:_fseeki64, Cint, (Ptr{Cvoid}, Int64, Cint), file.ptr, 0, _SEEK_END) == 0 || return nothing
+            len = _win_crt_ccall(:_ftelli64, Int64, (Ptr{Cvoid},), file.ptr)
+            _ = _win_crt_ccall(:_fseeki64, Cint, (Ptr{Cvoid}, Int64, Cint), file.ptr, pos, _SEEK_SET)
+            len < 0 && return nothing
+            return len
+        catch err
+            if err isa ErrorException && occursin("could not load", err.msg)
+                return nothing
+            end
+            rethrow()
+        end
     else
         pos = ccall(:ftello, Int64, (Ptr{Cvoid},), file.ptr)
         pos < 0 && return nothing
