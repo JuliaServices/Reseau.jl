@@ -25,6 +25,9 @@ Local verification (macOS):
 - `AwsHTTP` tests pass
 - `HTTP` tests pass
 
+CI verification:
+- `Reseau` PR #1 CI is green on macOS/Linux/Windows (`gh` run `21787880109`).
+
 Invariant checks:
 - `Reseau/src/` has no `sleep(` / `time_ns` / `Base.timedwait` / `stat(` call sites (comments/docstrings may still mention them).
 - `AwsHTTP/src/` has no `time_ns(` call sites.
