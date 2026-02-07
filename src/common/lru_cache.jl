@@ -28,14 +28,14 @@ function _touch!(cache::LRUCache{K, V}, key::K) where {K, V}
     return nothing
 end
 
-function get!(cache::LRUCache{K, V}, key::K, default::V) where {K, V}
+function Base.get!(cache::LRUCache{K, V}, key::K, default::V) where {K, V}
     haskey(cache.data, key) || return default
     value = cache.data[key]
     _touch!(cache, key)
     return value
 end
 
-function put!(cache::LRUCache{K, V}, key::K, value::V) where {K, V}
+function Base.put!(cache::LRUCache{K, V}, key::K, value::V) where {K, V}
     _touch!(cache, key)
     cache.data[key] = value
     if length(cache.order) > cache.max_items
