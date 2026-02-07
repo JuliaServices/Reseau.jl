@@ -967,3 +967,13 @@ function _native_getaddrinfo(hostname::String; flags::Cint = Cint(0))::Vector{Tu
     end
     return addresses
 end
+
+"""
+    getalladdrinfo(hostname; flags=0) -> Vector{Tuple{String, Cint}}
+
+Public wrapper for the libuv-free `getaddrinfo()` implementation used by the
+host resolver. This exists primarily so downstream packages can avoid `Sockets`.
+"""
+function getalladdrinfo(hostname::AbstractString; flags::Cint = Cint(0))::Vector{Tuple{String, Cint}}
+    return _native_getaddrinfo(String(hostname); flags = flags)
+end

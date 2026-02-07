@@ -145,6 +145,8 @@
         thread_created_on::Union{Nothing, ThreadHandle}
         thread_joined_to::UInt64
         @atomic running_thread_id::UInt64
+        startup_event::Threads.Event
+        @atomic startup_error::Int
         kq_fd::Int32
         cross_thread_signal_pipe::NTuple{2, Int32}
         cross_thread_data::KqueueCrossThreadData
@@ -159,6 +161,8 @@
             nothing,
             UInt64(0),
             UInt64(0),
+            Threads.Event(),
+            0,
             Int32(-1),
             (Int32(-1), Int32(-1)),
             KqueueCrossThreadData(),

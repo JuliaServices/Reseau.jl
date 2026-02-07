@@ -25,6 +25,7 @@ mutable struct Future{T}
     result::Union{T, Nothing}  # nullable
     error_code::Int
     lock::ReentrantLock
+    done_event::Threads.Event
     callback::Union{FutureWaiter, Nothing}  # nullable
     owns_result::Bool
 end
@@ -35,6 +36,7 @@ function Future{T}() where {T}
         nothing,
         0,
         ReentrantLock(),
+        Threads.Event(),
         nothing,
         false,
     )
@@ -77,19 +79,13 @@ end
 
 # Wait for future to complete (blocking)
 function future_wait(future::Future; timeout_ms::Integer = -1)::Bool
-    start_time = high_res_clock()
-    timeout_ns = timeout_ms < 0 ? typemax(UInt64) : UInt64(timeout_ms) * 1_000_000
-
-    while !future_is_done(future)
-        elapsed = high_res_clock() - start_time
-        if elapsed >= timeout_ns
-            return false  # Timeout
-        end
-        yield()  # Let other tasks run
-        sleep(0.001)  # Small sleep to avoid busy-waiting
+    future_is_done(future) && return true
+    if timeout_ms < 0
+        wait(future.done_event)
+        return true
     end
-
-    return true
+    timeout_ns = UInt64(max(timeout_ms, 0)) * UInt64(1_000_000)
+    return timedwait_poll_ns(() -> future_is_done(future), timeout_ns) == :ok
 end
 
 # Register a callback for when the future completes
@@ -175,19 +171,12 @@ end
 
 # Wait for future to complete (timeout in nanoseconds)
 function future_wait_ns(future::Future; timeout_ns::Integer)::Bool
-    start_time = high_res_clock()
-    limit = timeout_ns < 0 ? typemax(UInt64) : UInt64(timeout_ns)
-
-    while !future_is_done(future)
-        elapsed = high_res_clock() - start_time
-        if elapsed >= limit
-            return false
-        end
-        yield()
-        sleep(0.001)
+    future_is_done(future) && return true
+    if timeout_ns < 0
+        wait(future.done_event)
+        return true
     end
-
-    return true
+    return timedwait_poll_ns(() -> future_is_done(future), timeout_ns) == :ok
 end
 
 # Complete the future with a result
@@ -211,6 +200,7 @@ function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorRes
     if ret isa ErrorResult
         return ret
     end
+    notify(future.done_event)
     _notify_callback(callback, future)
     return nothing
 end
@@ -237,6 +227,7 @@ function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResu
     if ret isa ErrorResult
         return ret
     end
+    notify(future.done_event)
     _notify_callback(callback, future)
     return nothing
 end
@@ -263,6 +254,7 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
     if ret isa ErrorResult
         return ret
     end
+    notify(future.done_event)
     _notify_callback(callback, future)
     return nothing
 end
@@ -344,8 +336,9 @@ end
 
 # Wait for any future to complete, returns index of first completed
 function future_any(futures::Vector{<:Future}; timeout_ms::Integer = -1)::Int
-    start_time = high_res_clock()
-    timeout_ns = timeout_ms < 0 ? typemax(UInt64) : UInt64(timeout_ms) * 1_000_000
+    start = monotonic_time_ns()
+    timeout_ns = timeout_ms < 0 ? typemax(UInt64) : UInt64(max(timeout_ms, 0)) * 1_000_000
+    deadline = add_u64_saturating(start, timeout_ns)
 
     while true
         for (i, future) in enumerate(futures)
@@ -354,13 +347,11 @@ function future_any(futures::Vector{<:Future}; timeout_ms::Integer = -1)::Int
             end
         end
 
-        elapsed = high_res_clock() - start_time
-        if elapsed >= timeout_ns
+        now = monotonic_time_ns()
+        if now >= deadline
             return 0  # Timeout, none completed
         end
-
-        yield()
-        sleep(0.001)
+        thread_sleep_ns(1_000_000)
     end
     return
 end

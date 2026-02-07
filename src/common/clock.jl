@@ -189,3 +189,124 @@ end
 function sys_clock_get_ticks(timestamp::Base.RefValue{UInt64})
     return sys_clock_get_ticks(Base.unsafe_convert(Ptr{UInt64}, timestamp))
 end
+
+# -----------------------------------------------------------------------------
+# Libuv-free clock/timer replacements
+#
+# Julia Base `time_ns()` and `sleep()/Timer/timedwait` drive libuv. For our IO
+# stack we want monotonic time + delays without libuv-backed timers.
+# -----------------------------------------------------------------------------
+
+"""
+    monotonic_time_ns()::UInt64
+
+High-resolution monotonic timestamp in nanoseconds.
+
+This is a libuv-free replacement for `Base.time_ns()`.
+"""
+function monotonic_time_ns()::UInt64
+    ts = Ref{UInt64}(0)
+    high_res_clock_get_ticks(ts)
+    return ts[]
+end
+
+"""
+    thread_sleep_ns(ns::Integer)::Nothing
+
+Block the *current OS thread* for `ns` nanoseconds.
+
+This must only be used on dedicated threads that are not expected to run other
+Julia tasks. Use `task_sleep_ns` when you need task-friendly sleeping.
+"""
+function thread_sleep_ns(ns::Integer)::Nothing
+    ns <= 0 && return nothing
+    remaining = UInt64(ns)
+    @static if _PLATFORM_WINDOWS
+        while remaining > 0
+            # Sleep(ms) is millisecond granularity; round up so we don't under-sleep.
+            ms = (remaining + 999_999) ÷ 1_000_000
+            if ms > typemax(UInt32)
+                ccall((:Sleep, "kernel32"), Cvoid, (UInt32,), typemax(UInt32))
+                remaining -= UInt64(typemax(UInt32)) * 1_000_000
+            else
+                ccall((:Sleep, "kernel32"), Cvoid, (UInt32,), UInt32(ms))
+                break
+            end
+        end
+        return nothing
+    else
+        req = Ref{_timespec}()
+        rem = Ref{_timespec}()
+        while remaining > 0
+            req[] = _timespec(
+                Clong(remaining ÷ UInt64(TIMESTAMP_NANOS)),
+                Clong(remaining % UInt64(TIMESTAMP_NANOS)),
+            )
+            ret = @ccall gc_safe = true nanosleep(req::Ref{_timespec}, rem::Ref{_timespec})::Cint
+            if ret == 0
+                break
+            end
+            err = Libc.errno()
+            if err == Libc.EINTR
+                remaining = UInt64(rem[].tv_sec) * UInt64(TIMESTAMP_NANOS) + UInt64(rem[].tv_nsec)
+                continue
+            end
+            translate_and_raise_io_error(err)
+            break
+        end
+        return nothing
+    end
+end
+
+"""
+    thread_sleep_s(seconds::Real)::Nothing
+
+Thin wrapper over `thread_sleep_ns`.
+"""
+function thread_sleep_s(seconds::Real)::Nothing
+    seconds <= 0 && return nothing
+    isfinite(seconds) || return (raise_error(ERROR_INVALID_ARGUMENT); nothing)
+    ns_f = Float64(seconds) * Float64(TIMESTAMP_NANOS)
+    ns_f <= 0 && return nothing
+    ns = ns_f >= Float64(typemax(UInt64)) ? typemax(UInt64) : UInt64(round(ns_f))
+    thread_sleep_ns(ns)
+    return nothing
+end
+
+function timedwait_poll_ns(
+        testcb,
+        timeout_ns::Integer;
+        poll_ns::Integer = 1_000_000, # 1ms
+    )::Symbol
+    testcb() && return :ok
+    timeout_ns <= 0 && return :timed_out
+
+    start = monotonic_time_ns()
+    deadline = add_u64_saturating(start, UInt64(timeout_ns))
+    poll = UInt64(max(poll_ns, 0))
+
+    while true
+        testcb() && return :ok
+        now = monotonic_time_ns()
+        now >= deadline && return :timed_out
+
+        remaining = deadline - now
+        sleep_ns = poll == 0 ? remaining : min(remaining, poll)
+        thread_sleep_ns(sleep_ns)
+    end
+end
+
+"""
+    timedwait_poll(testcb, timeout_s; poll_s=0.001) -> (:ok | :timed_out)
+
+Libuv-free replacement for `Base.timedwait`. Polls `testcb()` until it returns
+true or the timeout expires.
+"""
+function timedwait_poll(testcb, timeout_s::Real; poll_s::Real = 0.001)::Symbol
+    testcb() && return :ok
+    timeout_s <= 0 && return :timed_out
+
+    timeout_ns = UInt64(round(Float64(timeout_s) * Float64(TIMESTAMP_NANOS)))
+    poll_ns = poll_s <= 0 ? 0 : Int(round(Float64(poll_s) * Float64(TIMESTAMP_NANOS)))
+    return timedwait_poll_ns(testcb, timeout_ns; poll_ns = poll_ns)
+end
