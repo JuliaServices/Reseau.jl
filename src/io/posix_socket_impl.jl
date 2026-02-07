@@ -1724,8 +1724,15 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
 
             logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: incoming connection, new fd=$in_fd")
 
-            # Create new socket for the connection
-            new_sock_result = socket_init_posix(sock.options; existing_fd = Cint(in_fd))
+            # Create new socket for the connection. Accepted sockets are already bound to the listener's
+            # interface; on Linux, attempting to apply SO_BINDTODEVICE on an already-connected socket
+            # can fail, so clear the interface name when cloning options for the accepted socket.
+            accept_options = sock.options
+            if SO_BINDTODEVICE != 0 && accept_options.network_interface_name[1] != 0
+                accept_options = copy(accept_options)
+                accept_options.network_interface_name = ntuple(_ -> UInt8(0), NETWORK_INTERFACE_NAME_MAX)
+            end
+            new_sock_result = socket_init_posix(accept_options; existing_fd = Cint(in_fd))
             if new_sock_result isa ErrorResult
                 ccall(:close, Cint, (Cint,), in_fd)
                 _on_connection_error(sock, last_error())

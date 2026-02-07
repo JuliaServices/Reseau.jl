@@ -10,7 +10,12 @@
 
     const INVALID_HANDLE_VALUE = Ptr{Cvoid}(-1)
 
-    const FILE_SKIP_SET_EVENT_ON_HANDLE = UInt8(0x01)
+    # SetFileCompletionNotificationModes() flags:
+    # - FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = 0x01
+    # - FILE_SKIP_SET_EVENT_ON_HANDLE       = 0x02
+    # We only want to skip setting the event; we still need completion packets
+    # even when an operation completes synchronously.
+    const FILE_SKIP_SET_EVENT_ON_HANDLE = UInt8(0x02)
 
     const ERROR_IO_PENDING = UInt32(997)
     const ERROR_INVALID_PARAMETER = UInt32(87)
