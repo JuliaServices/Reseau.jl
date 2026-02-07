@@ -105,10 +105,6 @@
         return Int(ccall((:WSAGetLastError, _WS2_32), Cint, ()))
     end
 
-    @inline function _win_get_last_error()::Int
-        return Int(ccall((:GetLastError, _WIN_KERNEL32), UInt32, ()))
-    end
-
     function _winsock_determine_socket_error(code::Integer)::Int
         c = Int(code)
         if c == Int(WSAECONNREFUSED) || c == IO_STATUS_CONNECTION_REFUSED

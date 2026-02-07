@@ -479,8 +479,8 @@ function import_pkcs12_to_identity(
     pass_ref = if password.len == 0
         ccall(
             (:CFStringCreateWithCString, _COREFOUNDATION_LIB),
-            CFStringRef,
-            (CFAllocatorRef, Cstring, UInt32),
+            Ptr{Cvoid},
+            (Ptr{Cvoid}, Cstring, UInt32),
             C_NULL,
             "",
             _kCFStringEncodingUTF8,

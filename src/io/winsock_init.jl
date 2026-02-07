@@ -48,10 +48,6 @@
         lpVendorInfo::Ptr{UInt8}
     end
 
-    @inline function _wsa_get_last_error()::Cint
-        return ccall((:WSAGetLastError, _WS2_32), Cint, ())
-    end
-
     function winsock_check_and_init!()::Union{Nothing, ErrorResult}
         if _winsock_initialized[]
             return nothing

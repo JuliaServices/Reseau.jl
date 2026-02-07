@@ -329,6 +329,13 @@ function _pkcs11_load_ckr_map!()
     _pkcs11_ckr_loaded[] && return nothing
     _pkcs11_ckr_loaded[] = true
 
+    # Populate a minimal built-in CKR -> aws error mapping so tests and error
+    # reporting work even when the vendored pkcs11.h isn't present (the
+    # aws-c-io source tree is typically not shipped with this Julia package).
+    _pkcs11_ckr_map[][UInt64(CKR_FUNCTION_NOT_SUPPORTED)] = ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
+    _pkcs11_ckr_map[][UInt64(CKR_CRYPTOKI_ALREADY_INITIALIZED)] = ERROR_IO_PKCS11_CKR_CRYPTOKI_ALREADY_INITIALIZED
+    _pkcs11_ckr_map[][UInt64(CKR_USER_ALREADY_LOGGED_IN)] = ERROR_IO_PKCS11_CKR_USER_ALREADY_LOGGED_IN
+
     root = normpath(joinpath(@__DIR__, "..", ".."))
     header_path = joinpath(root, "aws-c-io", "source", "pkcs11", "v2.40", "pkcs11.h")
     isfile(header_path) || return nothing
