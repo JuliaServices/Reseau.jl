@@ -20,6 +20,9 @@ This doc is a checklist/plan for doing the rename with minimal breakage and with
   - Remotes:
     - `origin`: `https://github.com/JuliaServices/Reseau.jl.git`
     - `awsio`: `https://github.com/JuliaServices/AwsIO.jl.git`
+- GitHub Actions CI:
+  - Status: passing on `main` (macOS/Linux/Windows; Julia 1.12)
+  - Last green run: `21784949856` (2026-02-07)
 - Tests (all passing as run locally):
   - `Reseau` (this repo)
   - `AwsHTTP`
@@ -172,6 +175,9 @@ git remote -v
 
 Notes:
 - Coverage upload was removed from CI for now to avoid requiring `CODECOV_TOKEN` during bootstrap.
+- Windows CI required follow-up fixes (post-rename) to get green:
+  - IOCP event loop shutdown robustness (avoid hangs).
+  - `FileInputStream` seek/length portability (avoid missing `fseeko`/`fileno` symbols).
 
 Remaining (manual, if publishing/registry):
 - [x] Initial push to the new repo (pushed to `origin/main`).
