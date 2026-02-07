@@ -206,6 +206,23 @@ const _FILE_STREAM_READ_MODE = "rb"
 const _FILE_STREAM_SEEK_SET = Cint(0)
 const _FILE_STREAM_SEEK_END = Cint(2)
 
+# Windows CRT doesn't provide POSIX `fseeko`/`ftello` symbols.
+@static if Sys.iswindows()
+    const _FILE_STREAM_SEEK_FN = :_fseeki64
+    const _FILE_STREAM_TELL_FN = :_ftelli64
+else
+    const _FILE_STREAM_SEEK_FN = :fseeko
+    const _FILE_STREAM_TELL_FN = :ftello
+end
+
+function _file_stream_seek(file::Libc.FILE, offset::Int64, whence::Cint)::Cint
+    return ccall(_FILE_STREAM_SEEK_FN, Cint, (Ptr{Cvoid}, Int64, Cint), file.ptr, offset, whence)
+end
+
+function _file_stream_tell(file::Libc.FILE)::Int64
+    return ccall(_FILE_STREAM_TELL_FN, Int64, (Ptr{Cvoid},), file.ptr)
+end
+
 function _file_open_read(path::AbstractString)::Union{Libc.FILE, ErrorResult}
     file_ptr = ccall(:fopen, Ptr{Cvoid}, (Cstring, Cstring), path, _FILE_STREAM_READ_MODE)
     if file_ptr == C_NULL
@@ -298,7 +315,7 @@ function stream_seek(stream::FileInputStream, offset::Int64, basis::StreamSeekBa
         return ErrorResult(ERROR_INVALID_ARGUMENT)
     end
 
-    rc = ccall(:fseeko, Cint, (Ptr{Cvoid}, Int64, Cint), stream.file.ptr, offset, whence)
+    rc = _file_stream_seek(stream.file, offset, whence)
     if rc != 0
         err = Libc.errno()
         translate_and_raise_io_error_or(err, ERROR_STREAM_UNSEEKABLE)
@@ -314,20 +331,36 @@ function stream_get_length(stream::FileInputStream)::Union{Int64, ErrorResult}
         return ErrorResult(ERROR_INVALID_FILE_HANDLE)
     end
 
-    fd = ccall(:fileno, Cint, (Ptr{Cvoid},), stream.file.ptr)
-    if fd == -1
-        raise_error(ERROR_INVALID_FILE_HANDLE)
-        return ErrorResult(ERROR_INVALID_FILE_HANDLE)
-    end
-
-    try
-        st = stat(RawFD(fd))
-        return filesize(st)
-    catch
+    # Use seek/tell instead of `fileno`+`stat` for Windows portability.
+    old_pos = _file_stream_tell(stream.file)
+    if old_pos < 0
         err = Libc.errno()
         translate_and_raise_io_error(err)
         return ErrorResult(last_error())
     end
+
+    rc = _file_stream_seek(stream.file, Int64(0), _FILE_STREAM_SEEK_END)
+    if rc != 0
+        err = Libc.errno()
+        translate_and_raise_io_error_or(err, ERROR_STREAM_UNSEEKABLE)
+        return ErrorResult(last_error())
+    end
+
+    end_pos = _file_stream_tell(stream.file)
+    if end_pos < 0
+        err = Libc.errno()
+        translate_and_raise_io_error(err)
+        return ErrorResult(last_error())
+    end
+
+    rc = _file_stream_seek(stream.file, old_pos, _FILE_STREAM_SEEK_SET)
+    if rc != 0
+        err = Libc.errno()
+        translate_and_raise_io_error_or(err, ERROR_STREAM_UNSEEKABLE)
+        return ErrorResult(last_error())
+    end
+
+    return end_pos
 end
 
 function stream_get_position(stream::FileInputStream)::Union{Int64, ErrorResult}
@@ -336,14 +369,14 @@ function stream_get_position(stream::FileInputStream)::Union{Int64, ErrorResult}
         return ErrorResult(ERROR_INVALID_FILE_HANDLE)
     end
 
-    pos = ccall(:ftell, Clong, (Ptr{Cvoid},), stream.file.ptr)
+    pos = _file_stream_tell(stream.file)
     if pos < 0
         err = Libc.errno()
         translate_and_raise_io_error(err)
         return ErrorResult(last_error())
     end
 
-    return Int64(pos)
+    return pos
 end
 
 function stream_is_seekable(stream::FileInputStream)::Bool
