@@ -2,21 +2,67 @@
 # Included by src/io/tls_channel_handler.jl
 
 # Backend registration (s2n extension on Linux)
+#
+# On Linux, s2n is provided by s2n_tls_jll. JLLWrappers exports `libs2n` as a String path,
+# and also provides `libs2n_handle` as a dlopen() handle. We accept either, but always
+# convert to a handle for dlsym()/ccall().
 const _s2n_lib = Ref{Union{Nothing, String, Ptr{Cvoid}}}(nothing)
 const _s2n_available = Ref(false)
 
 function _register_s2n_lib!(lib)
-    _s2n_lib[] = lib
-    _s2n_available[] = true
+    if lib isa Ptr{Cvoid}
+        _s2n_lib[] = lib
+        _s2n_available[] = lib != C_NULL
+    elseif lib isa AbstractString
+        lib_str = String(lib)
+        _s2n_lib[] = lib_str
+        _s2n_available[] = !isempty(lib_str)
+    else
+        # Best-effort: allow passing a library product-like object.
+        try
+            handle = Base.unsafe_convert(Ptr{Cvoid}, lib)
+            _s2n_lib[] = handle
+            _s2n_available[] = handle != C_NULL
+        catch
+            _s2n_lib[] = nothing
+            _s2n_available[] = false
+        end
+    end
+
+    # The library may change from path -> handle; drop any cached symbols.
+    lock(_s2n_symbol_lock) do
+        empty!(_s2n_symbol_cache)
+    end
+
     return nothing
 end
 
-@inline function _s2n_lib_handle()
+@inline function _s2n_lib_handle()::Union{Ptr{Cvoid}, ErrorResult}
     lib = _s2n_lib[]
     if lib === nothing
         return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
     end
-    return lib
+
+    if lib isa Ptr{Cvoid}
+        lib == C_NULL && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
+        return lib
+    end
+
+    # `s2n_tls_jll.libs2n` is a path String on Julia >= 1.6 (JLLWrappers).
+    isempty(lib) && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
+
+    flags = @static isdefined(Libdl, :RTLD_DEEPBIND) ? (Libdl.RTLD_LAZY | Libdl.RTLD_DEEPBIND) : Libdl.RTLD_LAZY
+    try
+        handle = Libdl.dlopen(lib, flags)
+        _s2n_lib[] = handle
+        lock(_s2n_symbol_lock) do
+            empty!(_s2n_symbol_cache)
+        end
+        return handle
+    catch
+        raise_error(ERROR_IO_TLS_CTX_ERROR)
+        return ErrorResult(ERROR_IO_TLS_CTX_ERROR)
+    end
 end
 
 const _s2n_symbol_cache = Dict{Symbol, Ptr{Cvoid}}()
@@ -117,29 +163,38 @@ function _s2n_init_once()
     end
     !_s2n_available[] && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
     _s2n_initialized[] && return nothing
-    lock(_s2n_init_lock) do
-        if !_s2n_initialized[]
-            lib = _s2n_lib_handle()
-            if lib isa ErrorResult
-                return lib
+
+    res = lock(_s2n_init_lock) do
+        _s2n_initialized[] && return nothing
+
+        lib = _s2n_lib_handle()
+        lib isa ErrorResult && return lib
+
+        disable_atexit = _s2n_symbol(:s2n_disable_atexit)
+        disable_atexit == C_NULL && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
+        rc = ccall(disable_atexit, Cint, ())
+
+        if rc != 0
+            _s2n_initialized_externally[] = true
+        else
+            _s2n_initialized_externally[] = false
+
+            s2n_init = _s2n_symbol(:s2n_init)
+            s2n_init == C_NULL && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
+            if ccall(s2n_init, Cint, ()) != 0
+                logf(LogLevel.ERROR, LS_IO_TLS, "s2n_init failed: $(_s2n_strerror(_s2n_errno()))")
+                raise_error(ERROR_IO_TLS_CTX_ERROR)
+                return ErrorResult(ERROR_IO_TLS_CTX_ERROR)
             end
-            res = ccall(_s2n_symbol(:s2n_disable_atexit), Cint, ())
-            if res != 0
-                _s2n_initialized_externally[] = true
-            else
-                _s2n_initialized_externally[] = false
-                if ccall(_s2n_symbol(:s2n_init), Cint, ()) != 0
-                    logf(LogLevel.ERROR, LS_IO_TLS, "s2n_init failed: $(_s2n_strerror(_s2n_errno()))")
-                    raise_error(ERROR_IO_TLS_CTX_ERROR)
-                    return ErrorResult(ERROR_IO_TLS_CTX_ERROR)
-                end
-            end
-            _s2n_default_ca_dir[] = determine_default_pki_dir()
-            _s2n_default_ca_file[] = determine_default_pki_ca_file()
-            _s2n_initialized[] = true
         end
+
+        _s2n_default_ca_dir[] = determine_default_pki_dir()
+        _s2n_default_ca_file[] = determine_default_pki_ca_file()
+        _s2n_initialized[] = true
+        return nothing
     end
-    return nothing
+
+    return res
 end
 
 function _s2n_cleanup()
@@ -147,8 +202,10 @@ function _s2n_cleanup()
         if _s2n_initialized[] && !_s2n_initialized_externally[]
             lib = _s2n_lib_handle()
             if !(lib isa ErrorResult)
-                _ = ccall(_s2n_symbol(:s2n_cleanup_final), Cint, ())
+                cleanup_final = _s2n_symbol(:s2n_cleanup_final)
+                cleanup_final != C_NULL && (_ = ccall(cleanup_final, Cint, ()))
             end
+            _s2n_initialized[] = false
         end
     end
     return nothing
@@ -158,12 +215,12 @@ function _s2n_cleanup_thread()
     @static if Sys.islinux()
         lib = _s2n_lib_handle()
         if !(lib isa ErrorResult)
-            _ = ccall(_s2n_symbol(:s2n_cleanup_thread), Cint, ())
+            cleanup_thread = _s2n_symbol(:s2n_cleanup_thread)
+            cleanup_thread != C_NULL && (_ = ccall(cleanup_thread, Cint, ()))
         end
     end
     return nothing
 end
-
 function _s2n_wall_clock_time_nanoseconds(context::Ptr{Cvoid}, time_in_ns::Ptr{UInt64})::Cint
     _ = context
     if sys_clock_get_ticks(time_in_ns) != OP_SUCCESS
