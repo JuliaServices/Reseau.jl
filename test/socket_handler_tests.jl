@@ -181,27 +181,32 @@ Reseau.handler_destroy(::TestReadHandler) = nothing
         return
     end
 
-    write_err = Ref(0)
+    write_done = Ref(false)
+    write_err = Ref(Reseau.AWS_OP_SUCCESS)
+    write_bytes = Ref(0)
+
     payload = "abcdefghij"
-    bytes = Vector{UInt8}(codeunits(payload))
-    offset = 0
-    while offset < length(bytes)
-        sent = ccall(
-            :send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
-            client.io_handle.fd, pointer(bytes, offset + 1), length(bytes) - offset, Reseau.NO_SIGNAL_SEND
-        )
-        if sent < 0
-            errno_val = Reseau.get_errno()
-            if errno_val == Reseau.EAGAIN || errno_val == Reseau.EWOULDBLOCK
-                sleep(0.01)
-                continue
-            end
-            write_err[] = Reseau.determine_socket_error(errno_val)
-            break
+    cursor = Reseau.ByteCursor(payload)
+
+    write_task = Reseau.ScheduledTask((ctx, status) -> begin
+        status == Reseau.TaskStatus.RUN_READY || return nothing
+        res = Reseau.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
+            write_err[] = err
+            write_bytes[] = Int(num_bytes)
+            write_done[] = true
+            return nothing
+        end, nothing)
+        if res isa Reseau.ErrorResult
+            write_err[] = res.code
+            write_done[] = true
         end
-        offset += sent
-    end
+        return nothing
+    end, nothing; type_tag = "client_write")
+    Reseau.event_loop_schedule_task_now!(event_loop, write_task)
+
+    @test wait_for(() -> write_done[])
     @test write_err[] == Reseau.AWS_OP_SUCCESS
+    @test write_bytes[] == ncodeunits(payload)
 
     channel = channel_ref[]
     socket_handler = socket_handler_ref[]
@@ -540,26 +545,28 @@ end
         return
     end
 
-    payload = "pending"
-    bytes = Vector{UInt8}(codeunits(payload))
-    offset = 0
+    write_done = Ref(false)
     write_err = Ref(Reseau.AWS_OP_SUCCESS)
-    while offset < length(bytes)
-        sent = ccall(
-            :send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
-            client.io_handle.fd, pointer(bytes, offset + 1), length(bytes) - offset, Reseau.NO_SIGNAL_SEND
-        )
-        if sent < 0
-            errno_val = Reseau.get_errno()
-            if errno_val == Reseau.EAGAIN || errno_val == Reseau.EWOULDBLOCK
-                sleep(0.01)
-                continue
-            end
-            write_err[] = Reseau.determine_socket_error(errno_val)
-            break
+
+    payload = "pending"
+    cursor = Reseau.ByteCursor(payload)
+
+    write_task = Reseau.ScheduledTask((ctx, status) -> begin
+        status == Reseau.TaskStatus.RUN_READY || return nothing
+        res = Reseau.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
+            write_err[] = err
+            write_done[] = true
+            return nothing
+        end, nothing)
+        if res isa Reseau.ErrorResult
+            write_err[] = res.code
+            write_done[] = true
         end
-        offset += sent
-    end
+        return nothing
+    end, nothing; type_tag = "client_write_pending")
+    Reseau.event_loop_schedule_task_now!(event_loop, write_task)
+
+    @test wait_for(() -> write_done[])
     @test write_err[] == Reseau.AWS_OP_SUCCESS
     @test wait_for(() -> socket_handler.pending_read)
 

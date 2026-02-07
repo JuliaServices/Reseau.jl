@@ -412,9 +412,9 @@ function _default_dns_resolve(host::String, impl_data)
     flags = @static Sys.isopenbsd() ? Cint(0) : (AI_ALL | AI_V4MAPPED)
     raw_addresses = _native_getaddrinfo(host; flags = flags)
     for (addr, family) in raw_addresses
-        if family == AF_INET6
+        if family == _HR_AF_INET6
             push!(ipv6, HostAddress(addr, HostAddressType.AAAA, host, UInt64(0)))
-        elseif family == AF_INET
+        elseif family == _HR_AF_INET
             push!(ipv4, HostAddress(addr, HostAddressType.A, host, UInt64(0)))
         end
     end
@@ -865,7 +865,18 @@ end
 
 # struct addrinfo from C (used by getaddrinfo)
 # Note: The layout differs between platforms
-@static if Sys.isapple() || Sys.isbsd()
+@static if Sys.iswindows()
+    struct addrinfo
+        ai_flags::Cint
+        ai_family::Cint
+        ai_socktype::Cint
+        ai_protocol::Cint
+        ai_addrlen::Csize_t
+        ai_canonname::Ptr{UInt8}
+        ai_addr::Ptr{Cvoid}
+        ai_next::Ptr{addrinfo}
+    end
+elseif Sys.isapple() || Sys.isbsd()
     struct addrinfo
         ai_flags::Cint
         ai_family::Cint
@@ -895,7 +906,13 @@ const AI_ALL = @static Sys.isapple() ? Cint(0x00000100) : Sys.islinux() ? Cint(0
 const AI_V4MAPPED = @static Sys.isapple() ? Cint(0x00000800) : Sys.islinux() ? Cint(0x0008) : Cint(0)
 const AF_UNSPEC = Cint(0)
 const SOCK_STREAM = Cint(1)
-const NI_NUMERICHOST = Cint(0x00000002)
+# Address family constants as returned by the OS getaddrinfo()/getnameinfo() stack.
+# Note: On Windows, AF_INET6 is 23 (not POSIX's 10).
+const _HR_AF_INET = Cint(2)
+const _HR_AF_INET6 = @static Sys.iswindows() ? Cint(23) : AF_INET6
+
+# NI_NUMERICHOST is platform-specific (Linux uses 1, Apple/BSD/Windows use 2).
+const NI_NUMERICHOST = @static Sys.islinux() ? Cint(0x00000001) : Cint(0x00000002)
 
 """
 Native getaddrinfo wrapper - returns a vector of address/family pairs.
@@ -938,7 +955,7 @@ function _native_getaddrinfo(hostname::String; flags::Cint = Cint(0))::Vector{Tu
             end
             if gi == 0
                 addr = unsafe_string(pointer(buf))
-                if ai.ai_family == AF_INET || ai.ai_family == AF_INET6
+                if ai.ai_family == _HR_AF_INET || ai.ai_family == _HR_AF_INET6
                     push!(addresses, (addr, ai.ai_family))
                 end
             end
