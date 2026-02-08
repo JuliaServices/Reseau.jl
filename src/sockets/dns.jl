@@ -258,23 +258,46 @@ end
         end
         rc == _ERROR_SUCCESS || error("GetAdaptersAddresses failed: $(rc)")
 
+        buf_start = UInt(pointer(buf))
+        buf_end = buf_start + UInt(length(buf))
+
         p = Ptr{_IP_ADAPTER_ADDRESSES}(pointer(buf))
+        adapters_seen = 0
         while p != C_NULL
+            adapters_seen += 1
+            # Defensive: avoid infinite loops / corrupted lists.
+            adapters_seen > 1024 && break
+
+            p_addr = UInt(p)
+            (p_addr < buf_start || (p_addr + UInt(sizeof(_IP_ADAPTER_ADDRESSES)) > buf_end)) && break
+
             aa = unsafe_load(p)
             up = Ptr{_IP_ADAPTER_UNICAST_ADDRESS}(aa.first_unicast)
+            unicast_seen = 0
             while up != C_NULL
+                unicast_seen += 1
+                unicast_seen > 65536 && break
+
+                up_addr = UInt(up)
+                (up_addr < buf_start || (up_addr + UInt(sizeof(_IP_ADAPTER_UNICAST_ADDRESS)) > buf_end)) && break
+
                 ua = unsafe_load(up)
                 sa = ua.address.lpSockaddr
                 if sa != C_NULL
+                    sa_addr = UInt(sa)
                     # sockaddr first field is sa_family (UInt16) on Windows.
-                    family = unsafe_load(Ptr{UInt16}(sa))
-                    if family == UInt16(_AF_INET)
+                    if sa_addr >= buf_start && (sa_addr + UInt(2) <= buf_end)
+                        family = unsafe_load(Ptr{UInt16}(sa))
+                    else
+                        family = UInt16(0)
+                    end
+                    if family == UInt16(_AF_INET) && (sa_addr + UInt(8) <= buf_end)
                         bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(sa) + 4, 4; own = false)
                         ip = IPv4(bytes[1], bytes[2], bytes[3], bytes[4])
                         if (loopback || !_is_loopback(ip)) && (T == IPAddr || ip isa T)
                             push!(addrs, ip)
                         end
-                    elseif family == UInt16(_AF_INET6)
+                    elseif family == UInt16(_AF_INET6) && (sa_addr + UInt(24) <= buf_end)
                         bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(sa) + 8, 16; own = false)
                         host = UInt128(0)
                         @inbounds for i in 1:16
@@ -289,6 +312,18 @@ end
                 up = Ptr{_IP_ADAPTER_UNICAST_ADDRESS}(ua.next)
             end
             p = Ptr{_IP_ADAPTER_ADDRESSES}(aa.next)
+        end
+
+        # Guarantee loopback availability for parity with the stdlib contract.
+        if loopback
+            if T == IPAddr || T == IPv4
+                lo4 = IPv4("127.0.0.1")
+                lo4 in addrs || push!(addrs, lo4)
+            end
+            if T == IPAddr || T == IPv6
+                lo6 = IPv6("::1")
+                lo6 in addrs || push!(addrs, lo6)
+            end
         end
 
         return addrs
