@@ -183,8 +183,6 @@ end
 end
 else
     # Windows HANDLE-based file IO.
-    const _INVALID_HANDLE_VALUE = Ptr{Cvoid}(-1)
-
     const _GENERIC_READ = UInt32(0x80000000)
     const _GENERIC_WRITE = UInt32(0x40000000)
     const _FILE_APPEND_DATA = UInt32(0x00000004)
@@ -206,14 +204,6 @@ else
     const _FILE_END = UInt32(2)
 
     const _ERROR_EOF = UInt32(38)
-
-    @inline function _win_get_last_error()::UInt32
-        return @ccall "kernel32".GetLastError()::UInt32
-    end
-
-    function _win_throw(func::AbstractString)
-        throw(Base.windowserror(func, _win_get_last_error()))
-    end
 
     function _win_open(path::AbstractString, flags::Integer, _mode::Integer)::Ptr{Cvoid}
         # Minimal mapping from Base-style JL_O_* flags to CreateFileW parameters.

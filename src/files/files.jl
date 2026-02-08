@@ -44,6 +44,7 @@ export
     S_IRWXO
 
 include("constants.jl")
+include("win32.jl")
 include("filehandle.jl")
 include("stat.jl")
 include("fsops.jl")

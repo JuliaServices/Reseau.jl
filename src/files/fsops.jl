@@ -67,19 +67,9 @@ else
     # Windows
     # -------------------------------------------------------------------------
 
-    const _INVALID_HANDLE_VALUE = Ptr{Cvoid}(-1)
-
     const _MOVEFILE_REPLACE_EXISTING = UInt32(0x00000001)
     const _MOVEFILE_COPY_ALLOWED = UInt32(0x00000002)
     const _MOVEFILE_WRITE_THROUGH = UInt32(0x00000008)
-
-    @inline function _win_get_last_error()::UInt32
-        return @ccall "kernel32".GetLastError()::UInt32
-    end
-
-    function _win_throw(func::AbstractString)
-        throw(Base.windowserror(func, _win_get_last_error()))
-    end
 
     function pwd()::String
         # Query required length first.
@@ -374,11 +364,6 @@ else
     const _ERROR_FILE_NOT_FOUND = UInt32(2)
     const _ERROR_NO_MORE_FILES = UInt32(18)
 
-    struct _FILETIME
-        dwLowDateTime::UInt32
-        dwHighDateTime::UInt32
-    end
-
     struct _WIN32_FIND_DATAW
         dwFileAttributes::UInt32
         ftCreationTime::_FILETIME
@@ -638,17 +623,17 @@ else
         # Supports:
         # - symlinks (IO_REPARSE_TAG_SYMLINK)
         # - junctions/mount points (IO_REPARSE_TAG_MOUNT_POINT)
-        const _FILE_READ_ATTRIBUTES = UInt32(0x00000080)
-        const _FILE_SHARE_READ = UInt32(0x00000001)
-        const _FILE_SHARE_WRITE = UInt32(0x00000002)
-        const _FILE_SHARE_DELETE = UInt32(0x00000004)
-        const _OPEN_EXISTING = UInt32(3)
-        const _FILE_FLAG_BACKUP_SEMANTICS = UInt32(0x02000000)
-        const _FILE_FLAG_OPEN_REPARSE_POINT = UInt32(0x00200000)
+        _FILE_READ_ATTRIBUTES = UInt32(0x00000080)
+        _FILE_SHARE_READ = UInt32(0x00000001)
+        _FILE_SHARE_WRITE = UInt32(0x00000002)
+        _FILE_SHARE_DELETE = UInt32(0x00000004)
+        _OPEN_EXISTING = UInt32(3)
+        _FILE_FLAG_BACKUP_SEMANTICS = UInt32(0x02000000)
+        _FILE_FLAG_OPEN_REPARSE_POINT = UInt32(0x00200000)
 
-        const _FSCTL_GET_REPARSE_POINT = UInt32(0x000900A8)
-        const _IO_REPARSE_TAG_SYMLINK = UInt32(0xA000000C)
-        const _IO_REPARSE_TAG_MOUNT_POINT = UInt32(0xA0000003)
+        _FSCTL_GET_REPARSE_POINT = UInt32(0x000900A8)
+        _IO_REPARSE_TAG_SYMLINK = UInt32(0xA000000C)
+        _IO_REPARSE_TAG_MOUNT_POINT = UInt32(0xA0000003)
 
         wpath = Base.cwstring(path)
         h = GC.@preserve wpath begin
@@ -821,12 +806,12 @@ else
         catch
         end
         # Update last-write + access times to now.
-        const _FILE_WRITE_ATTRIBUTES = UInt32(0x00000100)
-        const _OPEN_EXISTING = UInt32(3)
-        const _FILE_SHARE_READ = UInt32(0x00000001)
-        const _FILE_SHARE_WRITE = UInt32(0x00000002)
-        const _FILE_SHARE_DELETE = UInt32(0x00000004)
-        const _FILE_ATTRIBUTE_NORMAL = UInt32(0x00000080)
+        _FILE_WRITE_ATTRIBUTES = UInt32(0x00000100)
+        _OPEN_EXISTING = UInt32(3)
+        _FILE_SHARE_READ = UInt32(0x00000001)
+        _FILE_SHARE_WRITE = UInt32(0x00000002)
+        _FILE_SHARE_DELETE = UInt32(0x00000004)
+        _FILE_ATTRIBUTE_NORMAL = UInt32(0x00000080)
 
         wpath = Base.cwstring(path)
         h = GC.@preserve wpath begin
@@ -858,13 +843,13 @@ else
     end
 
     function futime(path::AbstractString, atime::Real, mtime::Real)::Nothing
-        const _FILE_WRITE_ATTRIBUTES = UInt32(0x00000100)
-        const _OPEN_EXISTING = UInt32(3)
-        const _FILE_SHARE_READ = UInt32(0x00000001)
-        const _FILE_SHARE_WRITE = UInt32(0x00000002)
-        const _FILE_SHARE_DELETE = UInt32(0x00000004)
-        const _FILE_ATTRIBUTE_NORMAL = UInt32(0x00000080)
-        const _FILE_FLAG_BACKUP_SEMANTICS = UInt32(0x02000000)
+        _FILE_WRITE_ATTRIBUTES = UInt32(0x00000100)
+        _OPEN_EXISTING = UInt32(3)
+        _FILE_SHARE_READ = UInt32(0x00000001)
+        _FILE_SHARE_WRITE = UInt32(0x00000002)
+        _FILE_SHARE_DELETE = UInt32(0x00000004)
+        _FILE_ATTRIBUTE_NORMAL = UInt32(0x00000080)
+        _FILE_FLAG_BACKUP_SEMANTICS = UInt32(0x02000000)
 
         function _unix_seconds_to_filetime(t::Real)::_FILETIME
             tf = Float64(t)

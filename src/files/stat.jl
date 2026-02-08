@@ -125,8 +125,6 @@ end
     end
 else
     # Windows stat implemented via CreateFileW + GetFileInformationByHandle.
-    const _INVALID_HANDLE_VALUE = Ptr{Cvoid}(-1)
-
     const _FILE_READ_ATTRIBUTES = UInt32(0x00000080)
     const _FILE_SHARE_READ = UInt32(0x00000001)
     const _FILE_SHARE_WRITE = UInt32(0x00000002)
@@ -137,11 +135,6 @@ else
     const _FILE_ATTRIBUTE_DIRECTORY = UInt32(0x00000010)
     const _FILE_ATTRIBUTE_REPARSE_POINT = UInt32(0x00000400)
     const _FILE_ATTRIBUTE_READONLY = UInt32(0x00000001)
-
-    struct _FILETIME
-        dwLowDateTime::UInt32
-        dwHighDateTime::UInt32
-    end
 
     struct _BY_HANDLE_FILE_INFORMATION
         dwFileAttributes::UInt32
@@ -154,14 +147,6 @@ else
         nNumberOfLinks::UInt32
         nFileIndexHigh::UInt32
         nFileIndexLow::UInt32
-    end
-
-    @inline function _win_get_last_error()::UInt32
-        return @ccall "kernel32".GetLastError()::UInt32
-    end
-
-    function _win_throw(func::AbstractString)
-        throw(Base.windowserror(func, _win_get_last_error()))
     end
 
     @inline function _filetime_to_unix_seconds(ft::_FILETIME)::Float64
