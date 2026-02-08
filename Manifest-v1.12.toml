@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "9f690ddbee7797808bc4d8c07e3db452d705d4c8"
+project_hash = "c370a4a67ed72a7a09f33e9a54fef67756d253dc"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -11,12 +11,6 @@ version = "1.11.0"
 [[deps.Base64]]
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 version = "1.11.0"
-
-[[deps.BufferIO]]
-deps = ["MemoryViews"]
-git-tree-sha1 = "e32844528083dbcff5da6cd7081c4ea4d55e80a4"
-uuid = "ff366017-094f-4144-bd70-a828a0d67152"
-version = "0.2.4"
 
 [[deps.CEnum]]
 git-tree-sha1 = "389ad5c84de1ae7cf0e28e381131c98ea87d54fc"
@@ -64,21 +58,6 @@ version = "1.11.0"
 uuid = "56ddb016-857b-54e1-b83d-db4d58db5568"
 version = "1.11.0"
 
-[[deps.MemoryViews]]
-git-tree-sha1 = "97795a1f73146719dad3feca9246b2ccabf6a908"
-uuid = "a791c907-b98b-4e44-8f4d-e4c2362c6b2f"
-version = "0.3.7"
-
-    [deps.MemoryViews.extensions]
-    FixedSizeArraysExt = "FixedSizeArrays"
-    LibDeflateExt = "LibDeflate"
-    StringViewsExt = "StringViews"
-
-    [deps.MemoryViews.weakdeps]
-    FixedSizeArrays = "3821ddf9-e5b5-40d5-8e25-6813ab96b5e2"
-    LibDeflate = "9255714d-24a7-4b30-8ea3-d46a97f7e13b"
-    StringViews = "354b36f9-a18e-4713-926e-db85100087ba"
-
 [[deps.Preferences]]
 deps = ["TOML"]
 git-tree-sha1 = "522f093a29b31a93e34eaea17ba055d850edea28"
@@ -91,7 +70,7 @@ uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 version = "1.11.0"
 
 [[deps.Reseau]]
-deps = ["Base64", "BufferIO", "EnumX", "LibAwsCal", "LibAwsCommon", "Libdl", "Printf", "ScopedValues"]
+deps = ["Base64", "EnumX", "LibAwsCal", "LibAwsCommon", "Libdl", "Printf", "ScopedValues"]
 path = "."
 uuid = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 version = "1.1.1"

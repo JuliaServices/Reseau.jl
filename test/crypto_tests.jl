@@ -102,6 +102,12 @@ function _byo_tls_handler_new(options, slot, test_args::ByoCryptoTestArgs)
 end
 
 @testset "BYO crypto handler integration" begin
+    # The BYO crypto setup is global. Make sure this test restores any prior
+    # configuration so later TLS tests (including compat smoke tests) continue
+    # to use the default TLS handlers.
+    old_client_setup = Reseau._tls_byo_client_setup[]
+    old_server_setup = Reseau._tls_byo_server_setup[]
+    try
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
     resolver = Reseau.HostResolver(elg)
 
@@ -299,6 +305,10 @@ end
 
     Reseau.host_resolver_shutdown!(resolver)
     Reseau.event_loop_group_destroy!(elg)
+    finally
+        Reseau._tls_byo_client_setup[] = old_client_setup
+        Reseau._tls_byo_server_setup[] = old_server_setup
+    end
 end
 
 end # begin

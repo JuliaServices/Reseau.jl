@@ -6,13 +6,6 @@ using ScopedValues
 # Debug flag for internal asserts
 const DEBUG_BUILD = Ref(false)
 
-const _deps_path = joinpath(@__DIR__, "..", "deps", "deps.jl")
-if isfile(_deps_path)
-    include(_deps_path)
-else
-    const libawsio_nw_shim = ""
-end
-
 # --- common ---
 include("common/platform.jl")
 include("common/macros.jl")
@@ -89,10 +82,15 @@ include("io/channel_bootstrap.jl")
 include("io/aws_byte_helpers.jl")
 include("io/crypto_primitives.jl")
 include("io/async_stream.jl")
-include("io/channel_buffer.jl")
-include("io/bufferio.jl")
 include("io/tls_channel_handler.jl")
 include("io/alpn_handler.jl")
+
+# --- public submodules (thin wrappers / new surfaces) ---
+include("EventLoops.jl")
+include("Sockets.jl")
+include("Files.jl")
+# Must be last: defining `Reseau.Threads` shadows `Base.Threads` within this module.
+include("Threads.jl")
 
 function __init__()
     _init_os_thread_cfunc!()

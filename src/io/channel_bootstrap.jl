@@ -685,6 +685,7 @@ struct ServerBootstrapOptions
     socket_options::SocketOptions
     host::String
     port::UInt32
+    backlog::Int
     tls_connection_options::Any  # TlsConnectionOptions or nothing
     on_protocol_negotiated::Union{Function, Nothing}
     on_listener_setup::Union{Function, Nothing}
@@ -700,6 +701,7 @@ function ServerBootstrapOptions(;
         socket_options::SocketOptions = SocketOptions(),
         host::AbstractString = "0.0.0.0",
         port::Integer,
+        backlog::Integer = 128,
         tls_connection_options = nothing,
         on_protocol_negotiated = nothing,
         on_listener_setup = nothing,
@@ -714,6 +716,7 @@ function ServerBootstrapOptions(;
         socket_options,
         String(host),
         UInt32(port),
+        Int(backlog),
         tls_connection_options,
         on_protocol_negotiated,
         on_listener_setup,
@@ -803,7 +806,7 @@ function ServerBootstrap(options::ServerBootstrapOptions)
     end
 
     # Start listening
-    listen_result = socket_listen(listener, 128)
+    listen_result = socket_listen(listener, options.backlog)
 
     if listen_result isa ErrorResult
         logf(

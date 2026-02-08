@@ -140,52 +140,25 @@ We are explicitly OK with these for now; no replacement work is planned yet.
      - `src/common/log_channel.jl:36`
    - `wait(scheduler.worker)`:
      - `src/common/thread_scheduler.jl:94`
-   - BufferIO + ChannelBuffer:
-     - `src/io/bufferio.jl:249`
-     - `src/io/bufferio.jl:309`
-     - `src/io/bufferio.jl:579`
-     - `src/io/bufferio.jl:689`
-     - `src/io/channel_buffer.jl:232`
-     - `src/io/channel_buffer.jl:267`
-     - `src/io/channel_buffer.jl:302`
-     - `src/io/channel_buffer.jl:463`
-     - `src/io/channel_buffer.jl:606`
+   - Blocking IO facades (no libuv, but uses Base task waiting/notification):
+     - `src/sockets/tcp.jl`
+     - `src/files/watching.jl`
 
 4. `Threads.Condition` fields/constructors:
    - `src/common/condition_variable.jl:2`
    - `src/common/condition_variable.jl:6`
-   - `src/io/bufferio.jl:25`
-   - `src/io/bufferio.jl:227`
-   - `src/io/channel_buffer.jl:19`
-   - `src/io/channel_buffer.jl:210`
+   - `src/sockets/tcp.jl`
+   - `src/files/watching.jl`
 
 5. `Threads.Event` fields/constructors:
-   - `src/io/bufferio.jl:32`
-   - `src/io/bufferio.jl:234`
-   - `src/io/bufferio.jl:542`
-   - `src/io/channel_buffer.jl:26`
-   - `src/io/channel_buffer.jl:217`
-   - `src/io/channel_buffer.jl:422`
+   - `src/sockets/tcp.jl`
+   - `src/files/watching.jl`
 
 6. `notify(...)` on those conditions/events (pairs with the waits above):
    - `src/common/condition_variable.jl:21`
    - `src/common/condition_variable.jl:36`
-   - `src/io/bufferio.jl:109`
-   - `src/io/bufferio.jl:137`
-   - `src/io/bufferio.jl:143`
-   - `src/io/bufferio.jl:152`
-   - `src/io/bufferio.jl:550`
-   - `src/io/bufferio.jl:577`
-   - `src/io/bufferio.jl:604`
-   - `src/io/bufferio.jl:713`
-   - `src/io/channel_buffer.jl:97`
-   - `src/io/channel_buffer.jl:125`
-   - `src/io/channel_buffer.jl:131`
-   - `src/io/channel_buffer.jl:140`
-   - `src/io/channel_buffer.jl:430`
-   - `src/io/channel_buffer.jl:460`
-   - `src/io/channel_buffer.jl:488`
-   - `src/io/channel_buffer.jl:644`
+   - `src/sockets/tcp.jl`
+   - `src/files/watching.jl`
 
 7. `ReentrantLock` usage (contention path calls `yield`/`wait`):
    - `src/common/device_random.jl:10`
@@ -210,8 +183,6 @@ We are explicitly OK with these for now; no replacement work is planned yet.
    - `src/io/host_resolver.jl:204`
    - `src/io/epoll_event_loop_types.jl:79`
    - `src/io/epoll_event_loop_types.jl:98`
-   - `src/io/bufferio.jl:44`
-   - `src/io/channel_buffer.jl:30`
    - `src/io/channel.jl:243`
    - `src/io/channel.jl:245`
    - `src/io/channel.jl:252`
