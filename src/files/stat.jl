@@ -254,7 +254,10 @@ else
     function fstat(f::FileHandle)::StatStruct
         _require_open(f)
         info = _win_get_file_info(f.handle)
-        return _win_info_to_statstruct(Base.RawFD(-1), info)
+        # Base.StatStruct.desc is `Union{String, OS_HANDLE}`; on Windows `OS_HANDLE`
+        # is a Winsock socket handle, not a file descriptor. We only use `desc`
+        # for show/diagnostics, so a placeholder string is sufficient here.
+        return _win_info_to_statstruct("", info)
     end
 end
 
