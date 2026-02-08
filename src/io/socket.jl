@@ -170,12 +170,12 @@ const SocketOnWriteCompletedFn = Function    # (socket, error_code, bytes_writte
 const SocketOnReadableFn = Function          # (socket, error_code, user_data) -> Nothing
 
 # Socket connect options
-struct SocketConnectOptions{TO}
+struct SocketConnectOptions
     remote_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
     on_connection_result::Union{Function, Nothing}
     user_data::Any
-    tls_connection_options::TO
+    tls_connection_options::Any  # TlsConnectionOptions or nothing
 end
 
 function SocketConnectOptions(
@@ -185,7 +185,7 @@ function SocketConnectOptions(
         user_data = nothing,
         tls_connection_options = nothing,
     )
-    return SocketConnectOptions{typeof(tls_connection_options)}(
+    return SocketConnectOptions(
         remote_endpoint,
         event_loop,
         on_connection_result,
@@ -195,11 +195,11 @@ function SocketConnectOptions(
 end
 
 # Socket bind options
-struct SocketBindOptions{TO}
+struct SocketBindOptions
     local_endpoint::SocketEndpoint
     user_data::Any
     event_loop::Union{EventLoop, Nothing}
-    tls_connection_options::TO
+    tls_connection_options::Any  # TlsConnectionOptions or nothing
 end
 
 function SocketBindOptions(
@@ -208,7 +208,7 @@ function SocketBindOptions(
         event_loop = nothing,
         tls_connection_options = nothing,
     )
-    return SocketBindOptions{typeof(tls_connection_options)}(
+    return SocketBindOptions(
         local_endpoint,
         user_data,
         event_loop,

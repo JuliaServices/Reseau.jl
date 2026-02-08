@@ -1076,7 +1076,7 @@ end
             @test pkcs11_reload_hsm!(tester) isa Reseau.Pkcs11Lib
 
             elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-            resolver = Reseau.DefaultHostResolver(elg)
+            resolver = Reseau.HostResolver(elg)
 
             server_tls_opts = Reseau.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
             maybe_apply_test_keychain!(server_tls_opts)
@@ -1192,7 +1192,7 @@ end
             @test pkcs11_reload_hsm!(tester) isa Reseau.Pkcs11Lib
 
             elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-            resolver = Reseau.DefaultHostResolver(elg)
+            resolver = Reseau.HostResolver(elg)
 
             server_tls_opts = Reseau.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
             maybe_apply_test_keychain!(server_tls_opts)

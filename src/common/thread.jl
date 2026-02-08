@@ -313,8 +313,10 @@ function _thread_join_os_thread!(handle::ThreadHandle)
     handle.os_thread == 0 && return nothing
     @static if _PLATFORM_WINDOWS
         h = Ptr{Cvoid}(handle.os_thread)
-        _ = ccall((:WaitForSingleObject, "kernel32"), UInt32, (Ptr{Cvoid}, UInt32), h, UInt32(0xffffffff))
-        _ = ccall((:CloseHandle, "kernel32"), Int32, (Ptr{Cvoid},), h)
+        # IMPORTANT: joining can block for a while; make this GC-safe to avoid deadlocks where
+        # the joined thread needs to allocate/GC during shutdown while this thread is blocked.
+        _ = @ccall gc_safe = true "kernel32".WaitForSingleObject(h::Ptr{Cvoid}, UInt32(0xffffffff)::UInt32)::UInt32
+        _ = @ccall gc_safe = true "kernel32".CloseHandle(h::Ptr{Cvoid})::Int32
     else
         @ccall gc_safe = true pthread_join(handle.os_thread::pthread_t, C_NULL::Ptr{Ptr{Cvoid}})::Cint
     end

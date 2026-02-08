@@ -16,17 +16,21 @@ end
 mutable struct TestReadHandler <: Reseau.AbstractChannelHandler
     slot::Union{Reseau.ChannelSlot, Nothing}
     received::Vector{UInt8}
+    lock::ReentrantLock
     auto_increment::Bool
     initial_window_size::Csize_t
 end
 
 function TestReadHandler(initial_window_size::Integer; auto_increment::Bool = false)
-    return TestReadHandler(nothing, UInt8[], auto_increment, Csize_t(initial_window_size))
+    return TestReadHandler(nothing, UInt8[], ReentrantLock(), auto_increment, Csize_t(initial_window_size))
 end
 
 function Reseau.handler_process_read_message(handler::TestReadHandler, slot::Reseau.ChannelSlot, message::Reseau.IoMessage)
     payload = String(Reseau.byte_cursor_from_buf(message.message_data))
-    append!(handler.received, codeunits(payload))
+    # Handlers run on event-loop threads; tests may read `received` from the main thread.
+    lock(handler.lock) do
+        append!(handler.received, codeunits(payload))
+    end
 
     if handler.auto_increment
         Reseau.channel_slot_increment_read_window!(slot, message.message_data.len)
@@ -40,6 +44,18 @@ end
 
 function Reseau.handler_process_write_message(handler::TestReadHandler, slot::Reseau.ChannelSlot, message::Reseau.IoMessage)
     return Reseau.channel_slot_send_message(slot, message, Reseau.ChannelDirection.WRITE)
+end
+
+function _received_len(handler::TestReadHandler)::Int
+    return lock(handler.lock) do
+        length(handler.received)
+    end
+end
+
+function _received_string(handler::TestReadHandler)::String
+    return lock(handler.lock) do
+        String(handler.received)
+    end
 end
 
 function Reseau.handler_increment_read_window(handler::TestReadHandler, slot::Reseau.ChannelSlot, size::Csize_t)
@@ -227,8 +243,8 @@ Reseau.handler_destroy(::TestReadHandler) = nothing
     Reseau.channel_schedule_task_now!(channel, trigger_task)
     @test wait_for(() -> trigger_done[])
 
-    @test wait_for(() -> length(app_handler.received) >= 4)
-    @test length(app_handler.received) == 4
+    @test wait_for(() -> _received_len(app_handler) >= 4)
+    @test _received_len(app_handler) == 4
 
     update_done = Ref(false)
     update_task = Reseau.ChannelTask((task, arg, status) -> begin
@@ -241,7 +257,7 @@ Reseau.handler_destroy(::TestReadHandler) = nothing
     Reseau.channel_schedule_task_now!(channel, update_task)
     @test wait_for(() -> update_done[])
 
-    @test wait_for(() -> length(app_handler.received) == 10)
+    @test wait_for(() -> _received_len(app_handler) == 10)
 
     if accepted_socket[] isa Reseau.Socket
         Reseau.socket_close(accepted_socket[])
@@ -622,7 +638,7 @@ end
         Reseau.event_loop_group_destroy!(elg)
         return
     end
-    @test wait_for(() -> String((app_handler::TestReadHandler).received) == payload)
+    @test wait_for(() -> _received_string(app_handler::TestReadHandler) == payload)
 
     if client isa Reseau.Socket
         Reseau.socket_close(client)

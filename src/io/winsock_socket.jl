@@ -73,6 +73,7 @@
     # Keepalive tuning
     const SIO_KEEPALIVE_VALS = UInt32(0x98000004)
     const FIONBIO = UInt32(0x8004667E)
+    const FIONREAD = UInt32(0x4004667F)
     struct TcpKeepAlive
         onoff::UInt32
         keepalivetime::UInt32
@@ -1618,6 +1619,68 @@
     # Read / Write
     # =============================================================================
 
+    function _winsock_read_would_block(sock::Socket)::ErrorResult
+        impl = sock.impl::WinsockSocket
+        if !impl.waiting_on_readable
+            impl.waiting_on_readable = true
+            impl.read_io_data.in_use = true
+
+            if sock.options.type == SocketType.DGRAM
+                iocp_overlapped_init!(impl.read_io_data.signal, _winsock_dgram_readable_event, sock)
+                buf = Ref(WSABUF(UInt32(0), C_NULL))
+                flags = Ref{UInt32}(MSG_PEEK)
+                rc = ccall(
+                    (:WSARecv, _WS2_32),
+                    Cint,
+                    (UInt, Ptr{WSABUF}, UInt32, Ptr{UInt32}, Ptr{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
+                    _winsock_socket_handle(sock),
+                    buf,
+                    UInt32(1),
+                    C_NULL,
+                    flags,
+                    iocp_overlapped_ptr(impl.read_io_data.signal),
+                    C_NULL,
+                )
+                if rc != 0
+                    err = _wsa_get_last_error()
+                    if err != ERROR_IO_PENDING
+                        impl.waiting_on_readable = false
+                        impl.read_io_data.in_use = false
+                        aws_err = _winsock_determine_socket_error(err)
+                        raise_error(aws_err)
+                        return ErrorResult(aws_err)
+                    end
+                end
+            else
+                iocp_overlapped_init!(impl.read_io_data.signal, _winsock_stream_readable_event, sock)
+                fake = Ref{UInt32}(0)
+                ok = ccall(
+                    (:ReadFile, _WIN_KERNEL32),
+                    Int32,
+                    (Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}, Ptr{Cvoid}),
+                    sock.io_handle.handle,
+                    fake,
+                    UInt32(0),
+                    C_NULL,
+                    iocp_overlapped_ptr(impl.read_io_data.signal),
+                ) != 0
+                if !ok
+                    err = _win_get_last_error()
+                    if err != ERROR_IO_PENDING
+                        impl.waiting_on_readable = false
+                        impl.read_io_data.in_use = false
+                        aws_err = _winsock_determine_socket_error(err)
+                        raise_error(aws_err)
+                        return ErrorResult(aws_err)
+                    end
+                end
+            end
+        end
+
+        raise_error(ERROR_IO_READ_WOULD_BLOCK)
+        return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+    end
+
     function socket_read_impl(::WinsockSocket, sock::Socket, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
         if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
             raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
@@ -1718,8 +1781,44 @@
             return (nothing, amount)
         end
 
+        bytes_to_read = remaining
+        if sock.options.type == SocketType.STREAM
+            # Be defensive: if the socket ever ends up in blocking mode, a 2nd `recv` on the
+            # event-loop thread can deadlock shutdown. Only call `recv` when bytes are ready.
+            bytes_available = Ref{UInt32}(0)
+            if ccall(
+                    (:ioctlsocket, _WS2_32),
+                    Cint,
+                    (UInt, UInt32, Ptr{UInt32}),
+                    _winsock_socket_handle(sock),
+                    FIONREAD,
+                    bytes_available,
+                ) != 0
+                aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
+                raise_error(aws_err)
+                return ErrorResult(aws_err)
+            end
+
+            if bytes_available[] == 0
+                return _winsock_read_would_block(sock)
+            end
+
+            avail = Csize_t(bytes_available[])
+            bytes_to_read = avail < bytes_to_read ? avail : bytes_to_read
+        end
+
         buf_ptr = pointer(getfield(buffer, :mem)) + Int(buffer.len)
-        read_val = ccall((:recv, _WS2_32), Cint, (UInt, Ptr{UInt8}, Cint, Cint), _winsock_socket_handle(sock), buf_ptr, Cint(remaining), Cint(0))
+        max_cint = Csize_t(typemax(Cint))
+        bytes_to_read_cint = bytes_to_read > max_cint ? Cint(typemax(Cint)) : Cint(bytes_to_read)
+        read_val = ccall(
+            (:recv, _WS2_32),
+            Cint,
+            (UInt, Ptr{UInt8}, Cint, Cint),
+            _winsock_socket_handle(sock),
+            buf_ptr,
+            bytes_to_read_cint,
+            Cint(0),
+        )
 
         if read_val > 0
             amount = Csize_t(read_val)
@@ -1735,43 +1834,7 @@
 
         err = _wsa_get_last_error()
         if err == Int(WSAEWOULDBLOCK)
-            impl = sock.impl::WinsockSocket
-            if !impl.waiting_on_readable
-                impl.waiting_on_readable = true
-                impl.read_io_data.in_use = true
-                if sock.options.type == SocketType.DGRAM
-                    iocp_overlapped_init!(impl.read_io_data.signal, _winsock_dgram_readable_event, sock)
-                    buf = Ref(WSABUF(UInt32(0), C_NULL))
-                    flags = Ref{UInt32}(MSG_PEEK)
-                    _ = ccall(
-                        (:WSARecv, _WS2_32),
-                        Cint,
-                        (UInt, Ptr{WSABUF}, UInt32, Ptr{UInt32}, Ptr{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
-                        _winsock_socket_handle(sock),
-                        buf,
-                        UInt32(1),
-                        C_NULL,
-                        flags,
-                        iocp_overlapped_ptr(impl.read_io_data.signal),
-                        C_NULL,
-                    )
-                else
-                    iocp_overlapped_init!(impl.read_io_data.signal, _winsock_stream_readable_event, sock)
-                    fake = Ref{UInt32}(0)
-                    _ = ccall(
-                        (:ReadFile, _WIN_KERNEL32),
-                        Int32,
-                        (Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}, Ptr{Cvoid}),
-                        sock.io_handle.handle,
-                        fake,
-                        UInt32(0),
-                        C_NULL,
-                        iocp_overlapped_ptr(impl.read_io_data.signal),
-                    )
-                end
-            end
-            raise_error(ERROR_IO_READ_WOULD_BLOCK)
-            return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+            return _winsock_read_would_block(sock)
         end
 
         aws_err = _winsock_determine_socket_error(err)

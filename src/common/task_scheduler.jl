@@ -10,15 +10,15 @@ const _TASK_STATUS_STRINGS = (
     "<Canceled>", # TaskStatus.CANCELED == 1
 )
 
-struct TaskFn{F, Ctx}
-    f::F
-    ctx::Ctx
+struct TaskFn
+    f::Any
+    ctx::Any
 end
 
 (task::TaskFn)(status::TaskStatus.T) = Base.invokelatest(task.f, task.ctx, status)
 
-mutable struct ScheduledTask{F, Ctx}
-    fn::TaskFn{F, Ctx}
+mutable struct ScheduledTask
+    fn::TaskFn
     type_tag::String
     timestamp::UInt64
     scheduled::Bool

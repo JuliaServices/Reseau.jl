@@ -70,7 +70,7 @@ end
 
 @testset "host resolver ipv6 address variations" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     config = Reseau.HostResolutionConfig(max_ttl_secs = 10)
 
@@ -99,7 +99,7 @@ end
 @testset "host resolver background refresh stress" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
     resolver_config = Reseau.HostResolverConfig(; max_ttl_secs = 2, resolve_frequency_ns = 100_000_000)
-    resolver = Reseau.DefaultHostResolver(elg, resolver_config)
+    resolver = Reseau.HostResolver(elg, resolver_config)
 
     host = "refresh.example"
     addr1_ipv4 = Reseau.HostAddress("address1ipv4", Reseau.HostAddressType.A, host, 0)
@@ -137,7 +137,7 @@ end
 
 @testset "host resolver literal address lookups" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
     config = Reseau.HostResolutionConfig(max_ttl_secs = 10)
 
     result_v4 = resolve_and_wait(resolver, "127.0.0.1"; config = config)
@@ -171,7 +171,7 @@ end
 if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
     @testset "host resolver default dns lookups (network)" begin
         elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-        resolver = Reseau.DefaultHostResolver(elg)
+        resolver = Reseau.HostResolver(elg)
         config = Reseau.HostResolutionConfig(max_ttl_secs = 10)
 
         @testset "ipv6 dualstack lookup" begin
@@ -204,7 +204,7 @@ end
     clock_fn = () -> clock_ref[]
 
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(
+    resolver = Reseau.HostResolver(
         elg,
         Reseau.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
     )
@@ -281,7 +281,7 @@ end
 
 @testset "host resolver connection failure handling" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     host = "host_address"
     addr1_ipv4 = Reseau.HostAddress("address1ipv4", Reseau.HostAddressType.A, host, 0)
@@ -350,7 +350,7 @@ end
     clock_fn = () -> clock_ref[]
 
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(
+    resolver = Reseau.HostResolver(
         elg,
         Reseau.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
     )
@@ -410,7 +410,7 @@ end
     clock_fn = () -> clock_ref[]
 
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(
+    resolver = Reseau.HostResolver(
         elg,
         Reseau.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
     )
@@ -471,7 +471,7 @@ end
 
 @testset "host resolver low frequency starvation" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     host = "host_address"
     addr1_ipv4 = Reseau.HostAddress("address1ipv4", Reseau.HostAddressType.A, host, 0)
@@ -511,7 +511,7 @@ end
 
 @testset "host resolver cached results" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     resolve_calls = Ref(0)
     impl = (host, data) -> begin
@@ -549,7 +549,7 @@ end
 
 @testset "host resolver purge and count" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     resolved = Ref(false)
     addrs = Ref{Vector{Reseau.HostAddress}}(Reseau.HostAddress[])
@@ -619,7 +619,7 @@ end
 
 @testset "host resolver record failure moves address" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     resolved = Ref(false)
     addrs = Ref{Vector{Reseau.HostAddress}}(Reseau.HostAddress[])

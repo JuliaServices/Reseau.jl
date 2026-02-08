@@ -229,7 +229,6 @@ end
 io_handle_is_valid(handle::IoHandle) = handle.fd >= 0 || handle.handle != C_NULL
 
 # Forward declarations for types defined in other io files
-abstract type AbstractChannel end
 abstract type AbstractChannelHandler end
 
 # IO Message - data unit flowing through channel pipeline
@@ -238,7 +237,7 @@ mutable struct IoMessage
     message_type::IoMessageType.T
     message_tag::Int32
     copy_mark::Csize_t
-    owning_channel::Union{AbstractChannel, Nothing}  # nullable
+    owning_channel::Any  # Channel or nothing
     on_completion::Union{Function, Nothing}
     user_data::Any
     # Intrusive list node for queueing
@@ -597,4 +596,3 @@ function io_error_code_is_tls(error_code::Integer)::Bool
         error_code == ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN ||
         error_code == ERROR_IO_TLS_HOST_NAME_MISMATCH
 end
-

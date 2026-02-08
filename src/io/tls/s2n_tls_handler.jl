@@ -268,8 +268,8 @@ end
 
 S2nTlsCtx() = S2nTlsCtx(C_NULL, C_NULL, nothing)
 
-mutable struct S2nTlsHandler{SlotRef <: Union{ChannelSlot, Nothing}} <: TlsChannelHandler
-    slot::SlotRef
+mutable struct S2nTlsHandler <: TlsChannelHandler
+    slot::Union{ChannelSlot, Nothing}
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
     timeout_task::ChannelTask
@@ -1361,7 +1361,7 @@ function _s2n_handler_new(
     s2n_ctx = ctx.impl isa S2nTlsCtx ? ctx.impl : nothing
     s2n_ctx === nothing && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
 
-    handler = S2nTlsHandler{Union{ChannelSlot, Nothing}}(
+    handler = S2nTlsHandler(
         slot,
         options.timeout_ms,
         TlsHandlerStatistics(),

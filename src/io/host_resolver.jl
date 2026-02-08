@@ -124,11 +124,8 @@ const HOST_RESOLVER_MIN_WAIT_BETWEEN_RESOLVE_NS = UInt64(100_000_000) # 100ms
 
 const HostResolverCache = Dict{String, Any}
 
-# Abstract resolver interface
-abstract type AbstractHostResolver end
-
-# Default host resolver with caching
-mutable struct DefaultHostResolver <: AbstractHostResolver
+# Host resolver with caching
+mutable struct HostResolver
     event_loop_group::EventLoopGroup
     config::HostResolverConfig
     cache::HostResolverCache
@@ -136,18 +133,18 @@ mutable struct DefaultHostResolver <: AbstractHostResolver
     @atomic shutdown::Bool
 end
 
-@inline function _resolver_clock(resolver::DefaultHostResolver)::UInt64
+@inline function _resolver_clock(resolver::HostResolver)::UInt64
     clock_override = resolver.config.clock_override
     return clock_override === nothing ? high_res_clock() : clock_override()
 end
 
-function DefaultHostResolver(
+function HostResolver(
         event_loop_group::EventLoopGroup,
         config::HostResolverConfig = HostResolverConfig(),
     )
     cache = Dict{String, Any}()
     sizehint!(cache, Int(config.max_entries))
-    resolver = DefaultHostResolver(
+    resolver = HostResolver(
         event_loop_group,
         config,
         cache,
@@ -158,7 +155,7 @@ function DefaultHostResolver(
 end
 
 mutable struct HostEntry
-    resolver::DefaultHostResolver
+    resolver::HostResolver
     host_name::String
     resolution_config::HostResolutionConfig
     resolve_frequency_ns::UInt64
@@ -179,13 +176,13 @@ mutable struct HostEntry
     resolver_thread::ThreadHandle
 end
 
-function _entry_cache_capacity(resolver::DefaultHostResolver, config::HostResolutionConfig)
+function _entry_cache_capacity(resolver::HostResolver, config::HostResolutionConfig)
     ttl = config.max_ttl_secs != 0 ? config.max_ttl_secs : resolver.config.max_ttl_secs
     return max(Int(ttl), 1)
 end
 
 function HostEntry(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         host_name::AbstractString,
         config::Union{HostResolutionConfig, Nothing},
         timestamp::UInt64,
@@ -220,7 +217,7 @@ function HostEntry(
 end
 
 function _normalize_resolution_config(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         config::Union{HostResolutionConfig, Nothing},
     )
     base_max_ttl = resolver.config.max_ttl_secs
@@ -248,7 +245,7 @@ function _normalize_resolution_config(
 end
 
 function _dispatch_simple_callback(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         callback::Union{Function, Nothing},
         user_data,
     )
@@ -637,7 +634,7 @@ end
 
 # Resolve a hostname to addresses
 function host_resolver_resolve!(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         host_name::AbstractString,
         on_resolved::OnHostResolvedFn,
         user_data = nothing;
@@ -663,7 +660,7 @@ function host_resolver_resolve!(
         resolver.cache[host] = new_entry
         thread_options = ThreadOptions(;
             join_strategy = ThreadJoinStrategy.MANAGED,
-            name = "AwsHostResolver",
+            name = "ReseauHostResolver",
         )
         launch_result = thread_launch(new_entry.resolver_thread, _host_resolver_thread, new_entry, thread_options)
         if launch_result != OP_SUCCESS
@@ -699,7 +696,7 @@ function host_resolver_resolve!(
 end
 
 # Purge the entire cache
-function host_resolver_purge_cache!(resolver::DefaultHostResolver)
+function host_resolver_purge_cache!(resolver::HostResolver)
     lock(resolver.resolver_lock)
     for (_, entry_any) in resolver.cache
         entry = entry_any::HostEntry
@@ -713,7 +710,7 @@ function host_resolver_purge_cache!(resolver::DefaultHostResolver)
 end
 
 function host_resolver_purge_cache_with_callback!(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         on_purge_cache_complete::Union{Function, Nothing},
         user_data = nothing,
     )::Union{Nothing, ErrorResult}
@@ -723,7 +720,7 @@ function host_resolver_purge_cache_with_callback!(
 end
 
 function host_resolver_purge_host_cache!(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         host_name::AbstractString;
         on_host_purge_complete::Union{Function, Nothing} = nothing,
         user_data = nothing,
@@ -752,7 +749,7 @@ function host_resolver_purge_host_cache!(
 end
 
 function host_resolver_get_host_address_count(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         host_name::AbstractString;
         flags::UInt32 = GET_HOST_ADDRESS_COUNT_ALL,
     )::Csize_t
@@ -778,7 +775,7 @@ end
 
 # Get a single best address for a host (simplified version)
 function host_resolver_get_address!(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         host_name::AbstractString;
         address_type::HostAddressType.T = HostAddressType.A,
     )::Union{HostAddress, Nothing}
@@ -803,7 +800,7 @@ end
 
 # Record a connection failure for an address (for load balancing)
 function host_resolver_record_connection_failure!(
-        resolver::DefaultHostResolver,
+        resolver::HostResolver,
         address::HostAddress,
     )
     lock(resolver.resolver_lock)
@@ -842,7 +839,7 @@ function host_resolver_record_connection_failure!(
 end
 
 # Shutdown the resolver
-function host_resolver_shutdown!(resolver::DefaultHostResolver)
+function host_resolver_shutdown!(resolver::HostResolver)
     @atomic resolver.shutdown = true
     entries = HostEntry[]
     lock(resolver.resolver_lock)

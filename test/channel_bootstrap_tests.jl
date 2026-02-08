@@ -35,7 +35,7 @@ end
 
 @testset "client/server bootstrap callbacks" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     server_setup_called = Ref(false)
     server_setup_error = Ref{Int}(-1)
@@ -147,7 +147,7 @@ end
 
 @testset "client bootstrap attempts multiple resolved addresses" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
     server_setup_called = Ref(false)
@@ -245,7 +245,7 @@ end
 
 @testset "client bootstrap requested event loop mismatch" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
     client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
@@ -272,7 +272,7 @@ end
 
 @testset "client bootstrap on_setup runs on requested event loop" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
     client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
@@ -316,7 +316,7 @@ end
 if tls_tests_enabled()
 @testset "bootstrap tls negotiation" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
 
     cert_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.crt")
     key_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.key")
@@ -419,7 +419,7 @@ end
 
 @testset "server bootstrap destroy callback waits for channels" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
     destroy_called = Ref(false)
@@ -505,7 +505,7 @@ end
 
 @testset "server bootstrap destroy callback without channels" begin
     elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.DefaultHostResolver(elg)
+    resolver = Reseau.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
     destroy_called = Ref(false)
