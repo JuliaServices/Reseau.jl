@@ -210,10 +210,10 @@ end
     # - `union { ULONG Alignment; struct { ULONG Length; ULONG IfIndex; }; }` => model as 2 UInt32.
     # - Pointers are Ptr{Cvoid} (64-bit on Windows CI).
     struct _IP_ADAPTER_ADDRESSES
-        next::Ptr{Cvoid}
-        adapter_name::Ptr{UInt8}
         length::UInt32
         if_index::UInt32
+        next::Ptr{Cvoid}
+        adapter_name::Ptr{UInt8}
         first_unicast::Ptr{Cvoid}
         first_anycast::Ptr{Cvoid}
         first_multicast::Ptr{Cvoid}
@@ -269,13 +269,13 @@ end
                     # sockaddr first field is sa_family (UInt16) on Windows.
                     family = unsafe_load(Ptr{UInt16}(sa))
                     if family == UInt16(_AF_INET)
-                        bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(sa + 4), 4; own = false)
+                        bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(sa) + 4, 4; own = false)
                         ip = IPv4(bytes[1], bytes[2], bytes[3], bytes[4])
                         if (loopback || !_is_loopback(ip)) && (T == IPAddr || ip isa T)
                             push!(addrs, ip)
                         end
                     elseif family == UInt16(_AF_INET6)
-                        bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(sa + 8), 16; own = false)
+                        bytes = unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(sa) + 8, 16; own = false)
                         host = UInt128(0)
                         @inbounds for i in 1:16
                             host = (host << 8) | UInt128(bytes[i])
