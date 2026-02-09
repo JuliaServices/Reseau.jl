@@ -138,8 +138,8 @@ function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorRes
     ret = lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
-            raise_error(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         future.result = result
@@ -164,8 +164,8 @@ function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResu
     ret = lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
-            raise_error(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         future.result = nothing
@@ -197,7 +197,7 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
 
         future.result = nothing
         future.owns_result = false
-        future.error_code = _PARENT.ERROR_IO_OPERATION_CANCELLED
+        future.error_code = ERROR_IO_OPERATION_CANCELLED
         @atomic future.state = FutureState.CANCELLED
 
         callback = future.callback

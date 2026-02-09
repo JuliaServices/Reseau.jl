@@ -370,6 +370,34 @@ function event_loop_group_destroy!(elg::EventLoopGroup)
     return nothing
 end
 
+const _DEFAULT_EVENT_LOOP_GROUP_LOCK = ReentrantLock()
+const _DEFAULT_EVENT_LOOP_GROUP = Ref{Union{EventLoopGroup, Nothing}}(nothing)
+
+"""
+    default_event_loop_group() -> EventLoopGroup
+
+Return a process-wide default `EventLoopGroup`.
+
+This singleton is used by higher-level socket APIs (like `Sockets.TCPSocket`)
+when no explicit `EventLoopGroup` is provided.
+"""
+function default_event_loop_group()::EventLoopGroup
+    lock(_DEFAULT_EVENT_LOOP_GROUP_LOCK)
+    try
+        elg = _DEFAULT_EVENT_LOOP_GROUP[]
+        if elg === nothing
+            # Keep this single-loop to avoid surprising concurrency in downstream
+            # consumers that "just want a default".
+            elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
+            elg isa ErrorResult && error("Failed to create default EventLoopGroup: $(elg.code)")
+            _DEFAULT_EVENT_LOOP_GROUP[] = elg
+        end
+        return elg::EventLoopGroup
+    finally
+        unlock(_DEFAULT_EVENT_LOOP_GROUP_LOCK)
+    end
+end
+
 function event_loop_group_get_loop_count(elg::EventLoopGroup)::Csize_t
     return Csize_t(length(elg.event_loops))
 end

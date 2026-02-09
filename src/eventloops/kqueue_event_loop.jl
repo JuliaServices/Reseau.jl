@@ -184,11 +184,11 @@
                 write_size::Csize_t,
             )::Cssize_t
             if wrote == -1
-                errno_val = get_errno()
+                errno_val = Base.Libc.errno()
                 if errno_val == Libc.EINTR
                     continue
                 end
-                if errno_val != EAGAIN && errno_val != EWOULDBLOCK
+                if errno_val != Libc.EAGAIN && errno_val != Libc.EWOULDBLOCK
                     logf(
                         LogLevel.ERROR,
                         LS_IO_EVENT_LOOP,

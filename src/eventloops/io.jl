@@ -536,26 +536,6 @@ function _cal_cleanup()
     return nothing
 end
 
-const _io_library_initialized = Ref{Bool}(false)
-
-function io_library_init()
-    _io_library_initialized[] && return nothing
-    _io_library_initialized[] = true
-    thread_initialize_thread_management()
-    _cal_init()
-    tls_init_static_state()
-    io_tracing_init()
-    return nothing
-end
-
-function io_library_clean_up()
-    !_io_library_initialized[] && return nothing
-    _io_library_initialized[] = false
-    tls_clean_up_static_state()
-    thread_join_all_managed()
-    return nothing
-end
-
 # Helper for determining if an error code is retryable
 function io_error_code_is_retryable(error_code::Integer)::Bool
     return error_code == ERROR_IO_SOCKET_CLOSED ||

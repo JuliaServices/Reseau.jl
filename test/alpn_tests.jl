@@ -15,7 +15,7 @@ function wait_for_flag_alpn(flag::Base.RefValue{Bool}; timeout_s::Float64 = 2.0)
 end
 
 mutable struct AlpnNegotiationArgs
-    new_slot::Union{Reseau.ChannelSlot, Nothing}
+    new_slot::Union{Sockets.ChannelSlot, Nothing}
     new_handler::Any
     protocol::Union{Reseau.ByteBuffer, Nothing}
 end
@@ -25,19 +25,19 @@ function AlpnNegotiationArgs()
 end
 
 @testset "alpn handler" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = Reseau.event_loop_group_get_next_loop(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
-        Reseau.event_loop_group_destroy!(elg)
+        EventLoops.event_loop_group_destroy!(elg)
         return
     end
 
-    channel = Reseau.Channel(event_loop, nothing)
+    channel = Sockets.Channel(event_loop, nothing)
     setup_done = Ref(false)
     shutdown_done = Ref(false)
 
-    Reseau.channel_set_setup_callback!(
+    Sockets.channel_set_setup_callback!(
         channel,
         (ch, err, ud) -> begin
             setup_done[] = true
@@ -46,7 +46,7 @@ end
         nothing,
     )
 
-    Reseau.channel_set_shutdown_callback!(
+    Sockets.channel_set_shutdown_callback!(
         channel,
         (ch, err, ud) -> begin
             shutdown_done[] = true
@@ -55,33 +55,33 @@ end
         nothing,
     )
 
-    slot = Reseau.channel_slot_new!(channel)
-    if Reseau.channel_first_slot(channel) !== slot
-        Reseau.channel_slot_insert_front!(channel, slot)
+    slot = Sockets.channel_slot_new!(channel)
+    if Sockets.channel_first_slot(channel) !== slot
+        Sockets.channel_slot_insert_front!(channel, slot)
     end
 
     args = AlpnNegotiationArgs()
     on_protocol = (new_slot, protocol, user_data) -> begin
         user_data.new_slot = new_slot
         user_data.protocol = protocol
-        handler = Reseau.PassthroughHandler()
+        handler = Sockets.PassthroughHandler()
         user_data.new_handler = handler
         return handler
     end
 
-    handler = Reseau.tls_alpn_handler_new(on_protocol, args)
-    Reseau.channel_slot_set_handler!(slot, handler)
+    handler = Sockets.tls_alpn_handler_new(on_protocol, args)
+    Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
-    @test !(Reseau.channel_setup_complete!(channel) isa Reseau.ErrorResult)
+    @test !(Sockets.channel_setup_complete!(channel) isa Reseau.ErrorResult)
     @test wait_for_flag_alpn(setup_done)
 
-    message = Reseau.IoMessage(sizeof(Reseau.TlsNegotiatedProtocolMessage))
-    message.message_tag = Reseau.TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = Reseau.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
-    message.message_data.len = Csize_t(sizeof(Reseau.TlsNegotiatedProtocolMessage))
+    message = EventLoops.IoMessage(sizeof(Sockets.TlsNegotiatedProtocolMessage))
+    message.message_tag = EventLoops.TLS_NEGOTIATED_PROTOCOL_MESSAGE
+    message.user_data = Sockets.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
+    message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
-    res = Reseau.handler_process_read_message(handler, slot, message)
+    res = Sockets.handler_process_read_message(handler, slot, message)
     @test !(res isa Reseau.ErrorResult)
     @test args.protocol !== nothing
     @test String(Reseau.byte_cursor_from_buf(args.protocol)) == "h2"
@@ -90,40 +90,40 @@ end
     @test channel.last === args.new_slot
     @test args.new_handler !== nothing
 
-    Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
     @test wait_for_flag_alpn(shutdown_done)
-    Reseau.event_loop_group_destroy!(elg)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "alpn missing protocol message" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = Reseau.event_loop_group_get_next_loop(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
-        Reseau.event_loop_group_destroy!(elg)
+        EventLoops.event_loop_group_destroy!(elg)
         return
     end
 
-    channel = Reseau.Channel(event_loop, nothing)
-    slot = Reseau.channel_slot_new!(channel)
-    if Reseau.channel_first_slot(channel) !== slot
-        Reseau.channel_slot_insert_front!(channel, slot)
+    channel = Sockets.Channel(event_loop, nothing)
+    slot = Sockets.channel_slot_new!(channel)
+    if Sockets.channel_first_slot(channel) !== slot
+        Sockets.channel_slot_insert_front!(channel, slot)
     end
 
     args = AlpnNegotiationArgs()
-    handler = Reseau.tls_alpn_handler_new((new_slot, protocol, ud) -> Reseau.PassthroughHandler(), args)
-    Reseau.channel_slot_set_handler!(slot, handler)
+    handler = Sockets.tls_alpn_handler_new((new_slot, protocol, ud) -> Sockets.PassthroughHandler(), args)
+    Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
-    message = Reseau.IoMessage(0)
+    message = EventLoops.IoMessage(0)
     message.message_tag = 0
 
-    res = Reseau.handler_process_read_message(handler, slot, message)
+    res = Sockets.handler_process_read_message(handler, slot, message)
     @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_MISSING_ALPN_MESSAGE
+    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_MISSING_ALPN_MESSAGE
 
-    Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "alpn empty protocol does not send message" begin
@@ -131,17 +131,17 @@ end
         @test true
         return
     end
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = Reseau.event_loop_group_get_next_loop(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
-        Reseau.event_loop_group_destroy!(elg)
+        EventLoops.event_loop_group_destroy!(elg)
         return
     end
-    channel = Reseau.Channel(event_loop, nothing)
-    left_slot = Reseau.channel_slot_new!(channel)
-    right_slot = Reseau.channel_slot_new!(channel)
-    Reseau.channel_slot_insert_right!(left_slot, right_slot)
+    channel = Sockets.Channel(event_loop, nothing)
+    left_slot = Sockets.channel_slot_new!(channel)
+    right_slot = Sockets.channel_slot_new!(channel)
+    Sockets.channel_slot_insert_right!(left_slot, right_slot)
     message_count = Ref(0)
     handler = ReadWriteTestHandler(
         (_, _, _, _) -> begin
@@ -150,17 +150,17 @@ end
         end,
         (_, _, _, _) -> nothing;
         event_loop_driven = false,
-        window = sizeof(Reseau.TlsNegotiatedProtocolMessage),
+        window = sizeof(Sockets.TlsNegotiatedProtocolMessage),
     )
-    Reseau.channel_slot_set_handler!(right_slot, handler)
-    tls_handler = Reseau.SecureTransportTlsHandler(
+    Sockets.channel_slot_set_handler!(right_slot, handler)
+    tls_handler = Sockets.SecureTransportTlsHandler(
         left_slot,
         UInt32(0),
-        Reseau.TlsHandlerStatistics(),
-        Reseau.ChannelTask(),
+        Sockets.TlsHandlerStatistics(),
+        Sockets.ChannelTask(),
         C_NULL,
         nothing,
-        Reseau.IoMessage[],
+        EventLoops.IoMessage[],
         Reseau.null_buffer(),
         Reseau.null_buffer(),
         nothing,
@@ -174,18 +174,18 @@ end
         true,
         false,
         false,
-        Reseau.ChannelTask(),
+        Sockets.ChannelTask(),
         false,
-        Reseau.TlsHandlerReadState.OPEN,
+        Sockets.TlsHandlerReadState.OPEN,
         0,
-        Reseau.ChannelTask(),
+        Sockets.ChannelTask(),
     )
-    Reseau._secure_transport_send_alpn_message(tls_handler)
+    Sockets._secure_transport_send_alpn_message(tls_handler)
     @test message_count[] == 0
     tls_handler.protocol = Reseau.byte_buf_from_c_str("h2")
-    Reseau._secure_transport_send_alpn_message(tls_handler)
+    Sockets._secure_transport_send_alpn_message(tls_handler)
     @test message_count[] == 1
-    Reseau.event_loop_group_destroy!(elg)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "secure transport ALPN does not fabricate protocol" begin
@@ -193,14 +193,14 @@ end
         @test true
         return
     end
-    handler = Reseau.SecureTransportTlsHandler(
+    handler = Sockets.SecureTransportTlsHandler(
         nothing,
         UInt32(0),
-        Reseau.TlsHandlerStatistics(),
-        Reseau.ChannelTask(),
+        Sockets.TlsHandlerStatistics(),
+        Sockets.ChannelTask(),
         C_NULL,
         nothing,
-        Reseau.IoMessage[],
+        EventLoops.IoMessage[],
         Reseau.null_buffer(),
         Reseau.null_buffer(),
         "h2",
@@ -214,13 +214,13 @@ end
         true,
         false,
         false,
-        Reseau.ChannelTask(),
+        Sockets.ChannelTask(),
         false,
-        Reseau.TlsHandlerReadState.OPEN,
+        Sockets.TlsHandlerReadState.OPEN,
         0,
-        Reseau.ChannelTask(),
+        Sockets.ChannelTask(),
     )
-    protocol = Reseau._secure_transport_get_protocol(handler)
+    protocol = Sockets._secure_transport_get_protocol(handler)
     @test protocol.len == 0
 end
 
@@ -229,14 +229,14 @@ end
         @test true
         return
     end
-    handler = Reseau.SecureTransportTlsHandler(
+    handler = Sockets.SecureTransportTlsHandler(
         nothing,
         UInt32(0),
-        Reseau.TlsHandlerStatistics(),
-        Reseau.ChannelTask(),
+        Sockets.TlsHandlerStatistics(),
+        Sockets.ChannelTask(),
         C_NULL,
         nothing,
-        Reseau.IoMessage[],
+        EventLoops.IoMessage[],
         Reseau.null_buffer(),
         Reseau.null_buffer(),
         nothing,
@@ -250,44 +250,44 @@ end
         true,
         false,
         false,
-        Reseau.ChannelTask(),
+        Sockets.ChannelTask(),
         false,
-        Reseau.TlsHandlerReadState.OPEN,
+        Sockets.TlsHandlerReadState.OPEN,
         0,
-        Reseau.ChannelTask(),
+        Sockets.ChannelTask(),
     )
-    Reseau._secure_transport_handle_would_block(handler, false)
+    Sockets._secure_transport_handle_would_block(handler, false)
     @test handler.negotiation_finished == false
 end
 
 @testset "alpn error creating handler" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    event_loop = Reseau.event_loop_group_get_next_loop(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
-        Reseau.event_loop_group_destroy!(elg)
+        EventLoops.event_loop_group_destroy!(elg)
         return
     end
 
-    channel = Reseau.Channel(event_loop, nothing)
-    slot = Reseau.channel_slot_new!(channel)
-    if Reseau.channel_first_slot(channel) !== slot
-        Reseau.channel_slot_insert_front!(channel, slot)
+    channel = Sockets.Channel(event_loop, nothing)
+    slot = Sockets.channel_slot_new!(channel)
+    if Sockets.channel_first_slot(channel) !== slot
+        Sockets.channel_slot_insert_front!(channel, slot)
     end
 
-    handler = Reseau.tls_alpn_handler_new((new_slot, protocol, ud) -> nothing, nothing)
-    Reseau.channel_slot_set_handler!(slot, handler)
+    handler = Sockets.tls_alpn_handler_new((new_slot, protocol, ud) -> nothing, nothing)
+    Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
-    message = Reseau.IoMessage(sizeof(Reseau.TlsNegotiatedProtocolMessage))
-    message.message_tag = Reseau.TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = Reseau.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
-    message.message_data.len = Csize_t(sizeof(Reseau.TlsNegotiatedProtocolMessage))
+    message = EventLoops.IoMessage(sizeof(Sockets.TlsNegotiatedProtocolMessage))
+    message.message_tag = EventLoops.TLS_NEGOTIATED_PROTOCOL_MESSAGE
+    message.user_data = Sockets.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
+    message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
-    res = Reseau.handler_process_read_message(handler, slot, message)
+    res = Sockets.handler_process_read_message(handler, slot, message)
     @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE
+    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE
 
-    Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+    EventLoops.event_loop_group_destroy!(elg)
 end

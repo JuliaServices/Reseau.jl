@@ -1,5 +1,6 @@
 using Test
 using Reseau
+import Reseau: Threads, EventLoops, Sockets
 
 include("test_utils.jl")
 cleanup_test_sockets!()

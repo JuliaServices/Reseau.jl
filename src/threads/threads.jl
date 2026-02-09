@@ -37,7 +37,6 @@ include("condition_variable.jl")
 include("task_scheduler.jl")
 include("thread.jl")
 include("thread_shared.jl")
-include("future.jl")
 
 export
     ThreadHandle,
@@ -53,13 +52,6 @@ export
     thread_pending_join_add,
     ConditionVariable,
     ScheduledTask,
-    TaskScheduler,
-    Future,
-    future_complete!,
-    future_fail!,
-    future_get_error,
-    future_get_result,
-    future_on_complete!,
-    future_on_complete_if_not_done!
+    TaskScheduler
 
 end # module Threads

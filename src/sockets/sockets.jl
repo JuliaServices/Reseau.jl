@@ -2,11 +2,13 @@ module Sockets
 
 # Reseau's libuv-free sockets surface.
 #
-# This module now also houses the underlying event-loop + channel + socket + TLS
-# implementation that used to live under `src/io/*`.
+# This module houses the channel + socket + TLS implementation that used to live
+# under `src/io/*` (event-loops have moved to `Reseau.EventLoops`).
 
 using EnumX
 import UUIDs
+using LibAwsCal
+using LibAwsCommon
 
 # Bring parent-module bindings (common utilities, error codes, logging, etc.)
 # into this module so the moved `io/*` implementation can remain largely
@@ -44,19 +46,43 @@ for name in names(_THREADS; all = true, imported = false)
     @eval const $(name) = $(_THREADS).$(name)
 end
 
-# --- IO implementation (moved from `src/io/*`) ---
-include("io/io.jl")
+# Pull in event-loop + core IO definitions from the sibling `Reseau.EventLoops`
+# module so the socket stack can keep referring to them unqualified.
+const _EVENT_LOOPS = getfield(_PARENT, :EventLoops)
+for name in names(_EVENT_LOOPS; all = true, imported = false)
+    str = String(name)
+    startswith(str, "@") && continue
+    name === :EventLoops && continue
+    if isdefined(@__MODULE__, name)
+        owner = Base.binding_module(@__MODULE__, name)
+        owner === (@__MODULE__) && continue
+        (owner === Base || owner === Core) || continue
+    end
+    val = getfield(_EVENT_LOOPS, name)
+    @eval const $(name) = $(_EVENT_LOOPS).$(name)
+end
 
-# Previously included from src/io/io.jl (same order preserved)
-include("io/tracing.jl")
-include("io/event_loop_types.jl")
-include("io/kqueue_event_loop_types.jl")
-include("io/epoll_event_loop_types.jl")
-include("io/iocp_event_loop_types.jl")
-include("io/event_loop.jl")
-include("io/kqueue_event_loop.jl")
-include("io/epoll_event_loop.jl")
-include("io/iocp_event_loop.jl")
+const _io_library_initialized = Ref{Bool}(false)
+
+function io_library_init()
+    _io_library_initialized[] && return nothing
+    _io_library_initialized[] = true
+    thread_initialize_thread_management()
+    _cal_init()
+    tls_init_static_state()
+    io_tracing_init()
+    return nothing
+end
+
+function io_library_clean_up()
+    !_io_library_initialized[] && return nothing
+    _io_library_initialized[] = false
+    tls_clean_up_static_state()
+    thread_join_all_managed()
+    return nothing
+end
+
+# --- IO implementation (moved from `src/io/*`) ---
 include("io/message_pool.jl")
 include("io/posix_socket_types.jl")
 include("io/apple_nw_socket_types.jl")

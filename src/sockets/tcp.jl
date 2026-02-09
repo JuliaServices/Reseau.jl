@@ -37,26 +37,6 @@ mutable struct TCPSocket <: IO
     connect_error::Int
 end
 
-const _DEFAULT_LOCK = ReentrantLock()
-const _DEFAULT_ELG = Ref{Union{EventLoopGroup, Nothing}}(nothing)
-const _DEFAULT_RESOLVER = Ref{Union{HostResolver, Nothing}}(nothing)
-
-function _default_resources()
-    lock(_DEFAULT_LOCK)
-    try
-        if _DEFAULT_ELG[] === nothing
-            elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
-            elg isa ErrorResult && error("Failed to create EventLoopGroup: $(elg.code)")
-            resolver = HostResolver(elg)
-            _DEFAULT_ELG[] = elg
-            _DEFAULT_RESOLVER[] = resolver
-        end
-        return _DEFAULT_ELG[]::EventLoopGroup, _DEFAULT_RESOLVER[]::HostResolver
-    finally
-        unlock(_DEFAULT_LOCK)
-    end
-end
-
 mutable struct _TCPSocketHandler <: AbstractChannelHandler
     slot::Union{ChannelSlot, Nothing}
     io::TCPSocket
@@ -270,7 +250,8 @@ function TCPSocket(
     owns_elg = false
     owns_resolver = false
     if elg === nothing
-        elg, resolver = _default_resources()
+        elg = EventLoops.default_event_loop_group()
+        resolver = default_host_resolver()
     else
         if resolver === nothing
             resolver = HostResolver(elg)
@@ -472,7 +453,7 @@ function listen(host::AbstractString, port::Integer;
         event_loop_group = nothing,
         socket_options::SocketOptions = SocketOptions(),
     )
-    elg = event_loop_group === nothing ? _default_resources()[1] : event_loop_group
+    elg = event_loop_group === nothing ? EventLoops.default_event_loop_group() : event_loop_group
 
     tls_conn = tls_options
     if tls_conn === nothing && tls

@@ -154,6 +154,29 @@ function HostResolver(
     return resolver
 end
 
+const _DEFAULT_HOST_RESOLVER_LOCK = ReentrantLock()
+const _DEFAULT_HOST_RESOLVER = Ref{Union{HostResolver, Nothing}}(nothing)
+
+"""
+    default_host_resolver() -> HostResolver
+
+Return a process-wide default `HostResolver`, bound to
+`EventLoops.default_event_loop_group()`.
+"""
+function default_host_resolver()::HostResolver
+    lock(_DEFAULT_HOST_RESOLVER_LOCK)
+    try
+        resolver = _DEFAULT_HOST_RESOLVER[]
+        if resolver === nothing
+            resolver = HostResolver(EventLoops.default_event_loop_group())
+            _DEFAULT_HOST_RESOLVER[] = resolver
+        end
+        return resolver::HostResolver
+    finally
+        unlock(_DEFAULT_HOST_RESOLVER_LOCK)
+    end
+end
+
 mutable struct HostEntry
     resolver::HostResolver
     host_name::String
