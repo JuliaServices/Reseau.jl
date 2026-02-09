@@ -88,7 +88,6 @@ include("io/alpn_handler.jl")
 # --- public submodules (thin wrappers / new surfaces) ---
 include("EventLoops.jl")
 include("Sockets.jl")
-include("Files.jl")
 # Must be last: defining `Reseau.Threads` shadows `Base.Threads` within this module.
 include("Threads.jl")
 
