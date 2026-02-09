@@ -250,12 +250,10 @@ end
 end
 
 # Global channel counter for unique IDs
-const _channel_id_counter = Ref{UInt64}(0)
+const _channel_id_counter = Threads.Atomic{UInt64}(0)
 
 function _next_channel_id()::UInt64
-    id = _channel_id_counter[]
-    _channel_id_counter[] = id + 1
-    return id
+    return Threads.atomic_add!(_channel_id_counter, UInt64(1))
 end
 
 function Channel(

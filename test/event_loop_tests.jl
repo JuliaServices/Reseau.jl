@@ -55,6 +55,22 @@ function _drain_pipe(read_end::Reseau.PipeReadEnd)
 end
 
 @testset "Event Loops" begin
+    @testset "EventLoopGroup indexing convenience" begin
+        elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+        @test !(elg isa Reseau.ErrorResult)
+        elg isa Reseau.ErrorResult && return
+
+        try
+            @test length(elg) == 1
+            @test elg[1] isa Reseau.EventLoop
+            @test elg[1] === Reseau.event_loop_group_get_loop_at(elg, 0)
+            @test_throws BoundsError elg[0]
+            @test_throws BoundsError elg[2]
+        finally
+            Reseau.event_loop_group_release!(elg)
+        end
+    end
+
     @testset "Epoll pipe cloexec flags" begin
         if Sys.islinux()
             pipe_res = Reseau.open_nonblocking_posix_pipe()

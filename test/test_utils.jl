@@ -97,3 +97,18 @@ function maybe_apply_test_keychain!(opts)
     end
     return opts
 end
+
+function cleanup_test_sockets!()::Nothing
+    root = dirname(@__DIR__)
+    for name in readdir(root)
+        if startswith(name, "testsock") && endswith(name, ".sock")
+            path = joinpath(root, name)
+            try
+                rm(path; force = true)
+            catch
+                # Best-effort cleanup. Ignore errors for files that were already removed.
+            end
+        end
+    end
+    return nothing
+end

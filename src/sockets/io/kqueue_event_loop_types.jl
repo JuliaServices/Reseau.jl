@@ -61,8 +61,9 @@
     end
 
     # Configuration constants
-    # If we miss a cross-thread wakeup (e.g. signal pipe write fails), we still need to make
-    # forward progress in a timely way (especially for STOPPING), so don't sleep for too long.
+    # NOTE: aws-c-io uses a much larger default timeout (100s). We intentionally keep a smaller
+    # timeout here because cross-thread wakeups are best-effort (a signal pipe write failure can
+    # otherwise delay STOPPING/teardown by the full timeout).
     const DEFAULT_TIMEOUT_SEC = 1
     const MAX_EVENTS = 100
 

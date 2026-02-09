@@ -36,11 +36,10 @@ function async_input_stream_read(stream::AsyncInputStream, dest::ByteBuffer)::Fu
         return _async_stream_fail(ERROR_SHORT_BUFFER)
     end
 
-    if @atomic stream.read_in_progress
+    # Use CAS so concurrent callers can't both pass the check and set it true.
+    if !(@atomicreplace stream.read_in_progress false => true).success
         return _async_stream_fail(ERROR_INVALID_STATE)
     end
-
-    @atomic stream.read_in_progress = true
     read_future = stream.read_fn(stream, dest)
 
     wrapped = Future{Bool}()

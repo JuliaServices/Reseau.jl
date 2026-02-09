@@ -175,12 +175,14 @@ end
 
 function get_home_directory()
     home = @static if _PLATFORM_WINDOWS
-        something(
-            _getenv_string("USERPROFILE"),
-            let drive = _getenv_string("HOMEDRIVE"), path = _getenv_string("HOMEPATH")
-                (drive !== nothing && path !== nothing) ? string(drive, path) : nothing
-            end,
-        )
+        tmp = _getenv_string("USERPROFILE")
+        if tmp !== nothing && !isempty(tmp)
+            tmp
+        else
+            drive = _getenv_string("HOMEDRIVE")
+            path = _getenv_string("HOMEPATH")
+            (drive !== nothing && !isempty(drive) && path !== nothing && !isempty(path)) ? string(drive, path) : nothing
+        end
     else
         _getenv_string("HOME")
     end
@@ -193,14 +195,23 @@ end
 
 function get_temp_directory()::String
     @static if _PLATFORM_WINDOWS
-        tmp = something(_getenv_string("TMP"), _getenv_string("TEMP"), nothing)
+        tmp = _getenv_string("TMP")
+        if tmp === nothing || isempty(tmp)
+            tmp = _getenv_string("TEMP")
+        end
         if tmp !== nothing && !isempty(tmp)
             return tmp
         end
         # Best-effort fallback.
-        return "C:\\\\Windows\\\\Temp"
+        return "C:\\Windows\\Temp"
     else
-        tmp = something(_getenv_string("TMPDIR"), _getenv_string("TMP"), _getenv_string("TEMP"), nothing)
+        tmp = _getenv_string("TMPDIR")
+        if tmp === nothing || isempty(tmp)
+            tmp = _getenv_string("TMP")
+        end
+        if tmp === nothing || isempty(tmp)
+            tmp = _getenv_string("TEMP")
+        end
         if tmp !== nothing && !isempty(tmp)
             return tmp
         end

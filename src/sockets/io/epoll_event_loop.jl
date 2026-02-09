@@ -134,6 +134,10 @@
     function event_loop_run!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
         impl = event_loop.impl_data
 
+        if @atomic event_loop.running
+            return ErrorResult(raise_error(ERROR_INVALID_STATE))
+        end
+
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Starting event-loop thread")
 
         impl.should_continue = true
@@ -378,7 +382,10 @@
             event_loop::EventLoop,
             handle::IoHandle,
         )::Union{Nothing, ErrorResult}
-        debug_assert(event_loop_thread_is_callers_thread(event_loop))
+        if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
+            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "un-subscribing from events on fd %d", handle.fd)
 
         impl = event_loop.impl_data
@@ -680,9 +687,17 @@
         task_scheduler_clean_up!(impl.scheduler)
 
         # Cancel tasks in pre-queue
-        while !isempty(impl.task_pre_queue)
-            task = popfirst!(impl.task_pre_queue)
-            if task !== nothing
+        while true
+            tasks_to_cancel = nothing
+            lock(impl.task_pre_queue_mutex)
+            try
+                isempty(impl.task_pre_queue) && break
+                tasks_to_cancel = impl.task_pre_queue
+                impl.task_pre_queue = ScheduledTask[]
+            finally
+                unlock(impl.task_pre_queue_mutex)
+            end
+            for task in tasks_to_cancel
                 task_run!(task, TaskStatus.CANCELED)
             end
         end

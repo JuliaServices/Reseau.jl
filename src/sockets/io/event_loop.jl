@@ -251,6 +251,12 @@ mutable struct EventLoopGroup
     @atomic ref_count::Int
 end
 
+# Julia-idiomatic conveniences:
+# - `event_loop_group_get_loop_at(elg, i)` is intentionally 0-based (aws-c-io parity).
+# - `elg[i]` uses 1-based indexing like normal Julia collections.
+Base.length(elg::EventLoopGroup) = length(elg.event_loops)
+Base.getindex(elg::EventLoopGroup, i::Integer) = elg.event_loops[i]
+
 # Create a new event loop group (creates and runs event loops)
 function event_loop_group_new(options::EventLoopGroupOptions)
     loop_count = options.loop_count

@@ -679,6 +679,11 @@ end
 # Server Bootstrap - for accepting incoming connections
 # =============================================================================
 
+# NOTE: On Apple Network.framework (NWSocket backend), listener readiness is asynchronous.
+# In particular, when binding to port 0, the effective bound port may remain 0 until the
+# accept-start callback fires. Use `on_listener_setup` (wired to `on_accept_start`) to know
+# when the listener is ready for `socket_get_bound_address(...)`.
+
 # Server bootstrap options
 struct ServerBootstrapOptions
     event_loop_group::EventLoopGroup

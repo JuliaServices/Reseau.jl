@@ -1856,6 +1856,8 @@ function _tls_local_handshake_with_min_version(min_version::Reseau.TlsVersion.T)
     server_channel = Ref{Any}(nothing)
     server_negotiated_called = Ref(false)
     server_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_called = Ref(false)
+    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
 
     server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -1879,10 +1881,17 @@ function _tls_local_handshake_with_min_version(min_version::Reseau.TlsVersion.T)
             server_shutdown[] = true
             return nothing
         end,
+        on_listener_setup = (bs, err, ud) -> begin
+            listener_setup_called[] = true
+            listener_setup_err[] = err
+            return nothing
+        end,
     ))
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
+    @test wait_for_flag_tls(listener_setup_called)
+    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
     bound = Reseau.socket_get_bound_address(listener)
     port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -1996,6 +2005,8 @@ end
     server_channel = Ref{Any}(nothing)
     server_negotiated_called = Ref(false)
     server_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_called = Ref(false)
+    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
 
     server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -2019,10 +2030,17 @@ end
             server_shutdown[] = true
             return nothing
         end,
+        on_listener_setup = (bs, err, ud) -> begin
+            listener_setup_called[] = true
+            listener_setup_err[] = err
+            return nothing
+        end,
     ))
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
+    @test wait_for_flag_tls(listener_setup_called)
+    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
     bound = Reseau.socket_get_bound_address(listener)
     port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -2115,6 +2133,8 @@ end
     end
 
     listener_destroyed = Ref(false)
+    listener_setup_called = Ref(false)
+    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
     server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
         event_loop_group = elg,
         host = "127.0.0.1",
@@ -2124,10 +2144,17 @@ end
             listener_destroyed[] = true
             return nothing
         end,
+        on_listener_setup = (bs, err, ud) -> begin
+            listener_setup_called[] = true
+            listener_setup_err[] = err
+            return nothing
+        end,
     ))
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
+    @test wait_for_flag_tls(listener_setup_called)
+    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
     bound = Reseau.socket_get_bound_address(listener)
     port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -2224,6 +2251,8 @@ end
     client_negotiated = Ref(false)
     server_channel = Ref{Any}(nothing)
     client_channel = Ref{Any}(nothing)
+    listener_setup_called = Ref(false)
+    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
 
     server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -2241,10 +2270,17 @@ end
             server_channel[] = channel
             return nothing
         end,
+        on_listener_setup = (bs, err, ud) -> begin
+            listener_setup_called[] = true
+            listener_setup_err[] = err
+            return nothing
+        end,
     ))
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
+    @test wait_for_flag_tls(listener_setup_called)
+    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
     bound = Reseau.socket_get_bound_address(listener)
     port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -2390,6 +2426,8 @@ end
 
     client_ready = Ref(false)
     server_ready = Ref(false)
+    listener_setup_called = Ref(false)
+    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
 
     server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -2417,10 +2455,17 @@ end
             server_ready[] = true
             return nothing
         end,
+        on_listener_setup = (bs, err, ud) -> begin
+            listener_setup_called[] = true
+            listener_setup_err[] = err
+            return nothing
+        end,
     ))
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
+    @test wait_for_flag_tls(listener_setup_called)
+    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
     bound = Reseau.socket_get_bound_address(listener)
     @test bound isa Reseau.SocketEndpoint
     port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
@@ -2541,6 +2586,8 @@ end
         server_shutdown = Ref(false)
         client_shutdown = Ref(false)
         shutdown_invoked = Ref(false)
+        listener_setup_called = Ref(false)
+        listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
 
         function client_on_read(handler, slot, data_read, user_data)
             args = user_data::TlsTestRwArgs
@@ -2596,9 +2643,17 @@ end
                 server_shutdown[] = true
                 return nothing
             end,
+            on_listener_setup = (bs, err, ud) -> begin
+                listener_setup_called[] = true
+                listener_setup_err[] = err
+                return nothing
+            end,
         ))
 
         listener = server_bootstrap.listener_socket
+        @test listener !== nothing
+        @test wait_for_flag_tls(listener_setup_called)
+        @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
         bound = Reseau.socket_get_bound_address(listener)
         port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0

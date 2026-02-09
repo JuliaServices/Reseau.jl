@@ -25,6 +25,8 @@ end
 
 # Load a shared library from path
 function shared_library_load(path::AbstractString)::Union{SharedLibrary, ErrorResult}
+    # SECURITY: callers should avoid passing untrusted/relative paths (especially on Windows),
+    # since platform loader search rules can enable DLL hijacking.
     logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY, "SharedLib: loading '$path'")
 
     handle = @static if Sys.iswindows()

@@ -36,6 +36,17 @@ end
 
 # Registry to prevent GC of underlying data for wrapped cursors/buffers
 const _BUFFER_VIEW_REGISTRY = WeakKeyDict{Any, Any}()
+const _BUFFER_VIEW_REGISTRY_LOCK = ReentrantLock()
+
+@inline function _buffer_view_registry_set!(key, value)::Nothing
+    lock(_BUFFER_VIEW_REGISTRY_LOCK)
+    try
+        _BUFFER_VIEW_REGISTRY[key] = value
+    finally
+        unlock(_BUFFER_VIEW_REGISTRY_LOCK)
+    end
+    return nothing
+end
 
 #==========================================================================
   ByteCursor Constructors
@@ -47,7 +58,7 @@ function ByteCursor(s::AbstractString)
         return ByteCursor(Csize_t(0), memoryref(_null_cursor_mem))
     end
     mem = unsafe_wrap(Memory{UInt8}, pointer(s), len; own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = s
+    _buffer_view_registry_set!(mem, s)
     return ByteCursor(Csize_t(len), memoryref(mem))
 end
 
@@ -79,7 +90,7 @@ function ByteCursor(vec::Vector{UInt8}, len::Integer = length(vec))
     end
     actual_len = len > length(vec) ? length(vec) : Int(len)
     mem = unsafe_wrap(Memory{UInt8}, pointer(vec), actual_len; own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = vec
+    _buffer_view_registry_set!(mem, vec)
     return ByteCursor(Csize_t(actual_len), memoryref(mem))
 end
 
@@ -502,8 +513,11 @@ function byte_buf_from_c_str(c_str::AbstractString)
     if len == 0
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
-    mem = unsafe_wrap(Memory{UInt8}, pointer(c_str), len; own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = c_str
+    mem = Memory{UInt8}(undef, len)
+    bytes = codeunits(c_str)
+    GC.@preserve bytes begin
+        Base.unsafe_copyto!(pointer(mem), pointer(bytes), len)
+    end
     return ByteBuffer(mem, Csize_t(len))
 end
 
@@ -524,7 +538,7 @@ function byte_buf_from_array(bytes::AbstractVector{UInt8}, len::Integer = length
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
     mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), cap; own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = bytes
+    _buffer_view_registry_set!(mem, bytes)
     return ByteBuffer(mem, Csize_t(cap))
 end
 
@@ -537,7 +551,7 @@ function byte_buf_from_empty_array(bytes::AbstractVector{UInt8}, len::Integer = 
         return ByteBuffer(Memory{UInt8}(undef, 0), 0)
     end
     mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), cap; own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = bytes
+    _buffer_view_registry_set!(mem, bytes)
     return ByteBuffer(mem, Csize_t(0))
 end
 
@@ -565,7 +579,7 @@ function byte_cursor_from_array(bytes::AbstractVector{UInt8}, len::Integer = len
     actual_len = len > length(bytes) ? length(bytes) : Int(len)
     actual_len == 0 && return null_cursor()
     mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), actual_len; own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = bytes
+    _buffer_view_registry_set!(mem, bytes)
     return ByteCursor(Csize_t(actual_len), memoryref(mem))
 end
 
@@ -583,7 +597,7 @@ function byte_cursor_from_array(bytes::AbstractVector{UInt8}, offset::Integer, l
     actual_len = len > max_len ? max_len : Int(len)
     actual_len == 0 && return null_cursor()
     mem = unsafe_wrap(Memory{UInt8}, pointer(bytes), length(bytes); own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = bytes
+    _buffer_view_registry_set!(mem, bytes)
     return ByteCursor(Csize_t(actual_len), memoryref(mem, start + 1))
 end
 
@@ -593,7 +607,7 @@ function byte_cursor_from_c_str(c_str::AbstractString)
         return null_cursor()
     end
     mem = unsafe_wrap(Memory{UInt8}, pointer(c_str), len; own = false)
-    _BUFFER_VIEW_REGISTRY[mem] = c_str
+    _buffer_view_registry_set!(mem, c_str)
     return ByteCursor(Csize_t(len), memoryref(mem))
 end
 
@@ -1197,7 +1211,7 @@ function byte_buf_advance(buffer::Base.RefValue{ByteBuffer}, output::Base.RefVal
         else
             # The output buffer is a view into buffer's memory starting at len position
             output_mem = unsafe_wrap(Memory{UInt8}, pointer(b.mem, Int(b.len) + 1), Int(len); own = false)
-            _BUFFER_VIEW_REGISTRY[output_mem] = b.mem
+            _buffer_view_registry_set!(output_mem, b.mem)
             output[] = ByteBuffer(output_mem, Csize_t(0))
         end
         buffer[] = ByteBuffer(b.mem, b.len + Csize_t(len))

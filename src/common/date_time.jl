@@ -114,12 +114,16 @@ function _check_init_str_to_int()
     return nothing
 end
 
-function _get_month_number_from_str(time_string::Ptr{UInt8}, start_index::Integer, stop_index::Integer)
+function _get_month_number_from_str(time_string::MemoryRef{UInt8}, start_index::Integer, stop_index::Integer)
     _check_init_str_to_int()
     if stop_index - start_index < 3
         return -1
     end
-    comp_val = _triplet_to_index(time_string + start_index)
+    start = Int(start_index)
+    b0 = _ascii_tolower(memoryref(time_string, start + 1)[])
+    b1 = _ascii_tolower(memoryref(time_string, start + 2)[])
+    b2 = _ascii_tolower(memoryref(time_string, start + 3)[])
+    comp_val = UInt32(b0) | (UInt32(b1) << 8) | (UInt32(b2) << 16)
     if _month_jan[] == comp_val
         return 0
     elseif _month_feb[] == comp_val
@@ -218,7 +222,7 @@ function _parse_rfc_822(
 
     ptr = unsafe_load(date_str_cursor).ptr
     while !error && index < len
-        c = unsafe_load(ptr + index)
+        c = memoryref(ptr, index + 1)[]
         if state == _STATE_ON_WEEKDAY
             if c == UInt8(',')
                 state = _STATE_ON_SPACE_DELIM
@@ -344,7 +348,7 @@ function _read_n_digits(str::Base.RefValue{ByteCursor}, n::Integer, out_val::Bas
         return false
     end
     for i in 0:(n - 1)
-        c = unsafe_load(str[].ptr + i)
+        c = memoryref(str[].ptr, i + 1)[]
         if isdigit(c)
             val = val * 10 + (c - UInt8('0'))
         else
@@ -360,13 +364,13 @@ function _read_1_char(str::Base.RefValue{ByteCursor}, out_c::Base.RefValue{UInt8
     if str[].len == 0
         return false
     end
-    out_c[] = str[].ptr[1]
+    out_c[] = str[].ptr[]
     byte_cursor_advance(str, 1)
     return true
 end
 
 function _advance_if_next_char_is(str::Base.RefValue{ByteCursor}, c::UInt8)
-    if str[].len == 0 || str[].ptr[1] != c
+    if str[].len == 0 || str[].ptr[] != c
         return false
     end
     byte_cursor_advance(str, 1)
@@ -377,14 +381,14 @@ function _skip_optional_fractional_seconds(str::Base.RefValue{ByteCursor})
     if str[].len == 0
         return true
     end
-    c = str[].ptr[1]
+    c = str[].ptr[]
     if c != UInt8('.') && c != UInt8(',')
         return true
     end
     num_digits = 0
     len = Int(str[].len)
     for i in 2:len
-        if isdigit(str[].ptr[i])
+        if isdigit(memoryref(str[].ptr, i)[])
             num_digits += 1
         else
             break

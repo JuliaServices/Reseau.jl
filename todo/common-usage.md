@@ -1,5 +1,8 @@
 # Reseau `src/common/` Inventory & Usage Report
 
+NOTE: This document is historical and may be out of date. It was moved under `todo/` because it is not authoritative.
+The source of truth for what is included is `src/Reseau.jl` and the `include(...)` graph under `src/`.
+
 ## 1. DEAD FILES — Not Included in Module (17 files)
 
 These exist on disk but are **never `include()`d** in `Reseau.jl`. Safe to delete entirely.

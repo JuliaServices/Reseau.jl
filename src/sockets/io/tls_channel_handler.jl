@@ -507,12 +507,13 @@ function tls_set_use_secitem!(flag::Bool)::Nothing
 end
 
 function _tls_cal_init_once()
-    _tls_cal_initialized[] && return nothing
-    lock(_tls_cal_init_lock) do
-        if !_tls_cal_initialized[]
-            _cal_init()
-            _tls_cal_initialized[] = true
-        end
+    lock(_tls_cal_init_lock)
+    try
+        _tls_cal_initialized[] && return nothing
+        _cal_init()
+        _tls_cal_initialized[] = true
+    finally
+        unlock(_tls_cal_init_lock)
     end
     return nothing
 end

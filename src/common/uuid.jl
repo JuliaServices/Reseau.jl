@@ -41,8 +41,8 @@ function uuid_init(u::Base.RefValue{uuid})
     return uuid_init(Base.unsafe_convert(Ptr{uuid}, u))
 end
 
-function uuid_init_from_str(uuid::Ptr{uuid}, uuid_str::Ptr{ByteCursor})
-    precondition(uuid != C_NULL)
+function uuid_init_from_str(uuid_ptr::Ptr{uuid}, uuid_str::Ptr{ByteCursor})
+    precondition(uuid_ptr != C_NULL)
     precondition(uuid_str != C_NULL)
     str_val = unsafe_load(uuid_str)
     if str_val.len < UUID_STR_LEN - 1
@@ -51,7 +51,7 @@ function uuid_init_from_str(uuid::Ptr{uuid}, uuid_str::Ptr{ByteCursor})
     hex_digits = Memory{UInt8}(undef, 32)
     idx = 1
     for pos in 0:35
-        ch = unsafe_load(str_val.ptr + pos)
+        ch = memoryref(str_val.ptr, pos + 1)[]
         if pos == 8 || pos == 13 || pos == 18 || pos == 23
             if ch != UInt8('-')
                 return raise_error(ERROR_MALFORMED_INPUT_STRING)
@@ -69,16 +69,18 @@ function uuid_init_from_str(uuid::Ptr{uuid}, uuid_str::Ptr{ByteCursor})
     end
     bytes = Memory{UInt8}(undef, 16)
     for i in 1:16
-        high_val = Ref{UInt8}(0)
-        low_val = Ref{UInt8}(0)
-        if _hex_decode_char_to_int(hex_digits[2 * i - 1], high_val) != OP_SUCCESS ||
-                _hex_decode_char_to_int(hex_digits[2 * i], low_val) != OP_SUCCESS
+        status, high = _hex_decode_char_to_int(hex_digits[2 * i - 1])
+        if status != OP_SUCCESS
             return raise_error(ERROR_MALFORMED_INPUT_STRING)
         end
-        bytes[i] = (high_val[] << 4) | low_val[]
+        status, low = _hex_decode_char_to_int(hex_digits[2 * i])
+        if status != OP_SUCCESS
+            return raise_error(ERROR_MALFORMED_INPUT_STRING)
+        end
+        bytes[i] = (high << 4) | low
     end
     uuid_tuple = ntuple(i -> bytes[i], 16)
-    unsafe_store!(uuid, uuid(uuid_tuple))
+    unsafe_store!(uuid_ptr, uuid(uuid_tuple))
     return OP_SUCCESS
 end
 

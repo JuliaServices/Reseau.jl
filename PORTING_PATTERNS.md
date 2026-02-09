@@ -3,15 +3,17 @@
 This document is a prescriptive guide: it describes how we translate aws-c-common C patterns into Julia, with
 zero-copy and explicit ownership preserved where possible. Each section includes a concrete recipe and examples.
 
-## Global Rules We Follow
-- No abstract-typed fields. Use parametric types so fields are concrete and dispatch is compile-time.
-- No Vector or Dict in core data structures. Use Memory{T} as the lowest-level storage and build manual containers.
-- No finalizers. All resources are explicitly allocated and freed (C-style lifetime).
+## Global Guidelines (Prefer, With Exceptions)
+- Prefer concrete field types (often via parametric structs) on hot paths. We still use `Any`/`Function` in some places to
+  control specialization/compile-time, especially when storing heterogeneous callbacks.
+- Prefer `Memory{T}` for low-level storage and aws-c-* parity types. We still use `Vector`, `Dict`, `IdDict`, etc. where it
+  keeps the implementation simpler and the performance impact is negligible.
+- Prefer explicit cleanup (C-style lifetime). Finalizers are used sparingly as a safety net in a few places.
 - Use EnumX.jl for scoped enums. Enum types are referenced as `MyEnum.T`.
 - Use ScopedValues.jl for global or thread-local context.
-- Use @atomic fields and @atomic operations. Never use Threads.Atomic.
+- Prefer `@atomic` fields and `@atomic` operations. `Threads.Atomic` may still be used for a small number of global counters.
 - Errors return Union{T, Nothing} or Union{T, ErrorResult}. No Result type.
-- No Julia Logging. Use custom logging interfaces and macros.
+- Prefer `logf(...)` and the `@LOGF_*` macros for logging. Julia Logging is used rarely (e.g. for truly fatal internal errors).
 - OS-specific code lives in OS-specific modules and dispatches on `abstract type OS end`.
 - Channel handlers that store a channel slot should implement `setchannelslot!(handler, slot)`;
   the channel pipeline will call this hook when installing a handler.

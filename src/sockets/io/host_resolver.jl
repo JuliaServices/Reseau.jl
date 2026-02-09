@@ -400,41 +400,22 @@ function _default_dns_resolve(host::String, impl_data)
     if _is_ipv4_literal(host)
         return [HostAddress(host, HostAddressType.A, host, UInt64(0))], AWS_OP_SUCCESS
     end
-    # We want a stable mix of A/AAAA results. `getaddrinfo()` ordering is platform-dependent and can
-    # yield long runs of one family (e.g. AAAA first). If we hard-cap by "first N" we may end up
-    # with only one family even when both exist (e.g. dualstack endpoints).
-    ipv6 = HostAddress[]
-    ipv4 = HostAddress[]
+
+    # Preserve `getaddrinfo()` result ordering (aws-c-io parity). Callers that want
+    # different address selection strategies can provide a custom `HostResolutionConfig.impl`.
     error_code = AWS_OP_SUCCESS
     flags = @static Sys.isopenbsd() ? Cint(0) : (AI_ALL | AI_V4MAPPED)
     raw_addresses = _native_getaddrinfo(host; flags = flags)
+    addresses = HostAddress[]
     for (addr, family) in raw_addresses
         if family == _HR_AF_INET6
-            push!(ipv6, HostAddress(addr, HostAddressType.AAAA, host, UInt64(0)))
+            push!(addresses, HostAddress(addr, HostAddressType.AAAA, host, UInt64(0)))
         elseif family == _HR_AF_INET
-            push!(ipv4, HostAddress(addr, HostAddressType.A, host, UInt64(0)))
+            push!(addresses, HostAddress(addr, HostAddressType.A, host, UInt64(0)))
         end
-    end
-
-    addresses = HostAddress[]
-    if max_addresses > 0
-        # Interleave IPv6/IPv4 to keep both families represented when possible.
-        i6 = 1
-        i4 = 1
-        while length(addresses) < max_addresses && (i6 <= length(ipv6) || i4 <= length(ipv4))
-            if i6 <= length(ipv6)
-                push!(addresses, ipv6[i6])
-                i6 += 1
-                length(addresses) >= max_addresses && break
-            end
-            if i4 <= length(ipv4)
-                push!(addresses, ipv4[i4])
-                i4 += 1
-            end
+        if max_addresses > 0 && length(addresses) >= max_addresses
+            break
         end
-    else
-        append!(addresses, ipv6)
-        append!(addresses, ipv4)
     end
 
     if isempty(addresses)

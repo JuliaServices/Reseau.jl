@@ -96,10 +96,9 @@ const ERROR_INVALID_CBOR = ERROR_SUCCESS + 60
 const ERROR_CBOR_UNEXPECTED_TYPE = ERROR_SUCCESS + 61
 const ERROR_END_COMMON_RANGE = ERROR_ENUM_END_RANGE(COMMON_PACKAGE_ID)
 
-const _last_error = SmallRegistry{UInt64, Int}()
-
-const _thread_handler = SmallRegistry{UInt64, Function}()
-
+const _error_lock = ReentrantLock()
+const _last_error = Dict{UInt64, Int}()
+const _thread_handler = Dict{UInt64, Function}()
 const _global_handler = Ref{Union{Nothing, Function}}(nothing)
 
 @inline function _error_thread_key()
@@ -107,15 +106,26 @@ const _global_handler = Ref{Union{Nothing, Function}}(nothing)
 end
 
 function last_error()
-    return registry_get(_last_error, _error_thread_key(), 0)
+    key = _error_thread_key()
+    lock(_error_lock)
+    try
+        return get(_last_error, key, 0)
+    finally
+        unlock(_error_lock)
+    end
 end
 
 function _set_last_error(err::Int)
     key = _error_thread_key()
-    if err == 0
-        registry_delete!(_last_error, key)
-    else
-        registry_set!(_last_error, key, err)
+    lock(_error_lock)
+    try
+        if err == 0
+            delete!(_last_error, key)
+        else
+            _last_error[key] = err
+        end
+    finally
+        unlock(_error_lock)
     end
     return nothing
 end
@@ -141,13 +151,26 @@ function error_debug_str(err::Int)
 end
 
 function raise_error_private(err::Int)
-    _set_last_error(err)
+    handler = nothing
+    global_handler = nothing
     key = _error_thread_key()
-    entry = registry_get(_thread_handler, key, nothing)
-    if entry !== nothing
-        entry(err)
-    elseif _global_handler[] !== nothing
-        _global_handler[](err)
+    lock(_error_lock)
+    try
+        if err == 0
+            delete!(_last_error, key)
+        else
+            _last_error[key] = err
+        end
+        handler = get(_thread_handler, key, nothing)
+        global_handler = _global_handler[]
+    finally
+        unlock(_error_lock)
+    end
+
+    if handler !== nothing
+        handler(err)
+    elseif global_handler !== nothing
+        global_handler(err)
     end
     return nothing
 end
@@ -168,21 +191,27 @@ function restore_error(err::Int)
 end
 
 function set_global_error_handler(handler)
+    lock(_error_lock)
     old = _global_handler[]
     _global_handler[] = handler
+    unlock(_error_lock)
     return old
 end
 
 function set_thread_local_error_handler(handler)
     tid = _error_thread_key()
-    entry = registry_get(_thread_handler, tid, nothing)
-    old = entry === nothing ? nothing : entry
-    if handler === nothing
-        registry_delete!(_thread_handler, tid)
-    else
-        registry_set!(_thread_handler, tid, handler)
+    lock(_error_lock)
+    try
+        old = get(_thread_handler, tid, nothing)
+        if handler === nothing
+            delete!(_thread_handler, tid)
+        else
+            _thread_handler[tid] = handler
+        end
+        return old
+    finally
+        unlock(_error_lock)
     end
-    return old
 end
 
 function translate_and_raise_io_error_or(error_no::Integer, fallback_error_code::Integer)

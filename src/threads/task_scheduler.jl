@@ -31,13 +31,15 @@ end
 mutable struct TaskScheduler{Less}
     timed::PriorityQueue{ScheduledTask, Less}
     asap::Vector{ScheduledTask}
+    running::Vector{ScheduledTask}
 end
 
 function TaskScheduler(; capacity::Integer = 8)
     less = (a::ScheduledTask, b::ScheduledTask) -> a.timestamp < b.timestamp
     timed = PriorityQueue{ScheduledTask}(less; capacity = capacity)
     asap = ScheduledTask[]
-    return TaskScheduler{typeof(less)}(timed, asap)
+    running = ScheduledTask[]
+    return TaskScheduler{typeof(less)}(timed, asap, running)
 end
 
 @inline function task_status_to_string(status::TaskStatus.T)
@@ -108,6 +110,14 @@ function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)
             removed = true
         end
     end
+    if !removed && !isempty(scheduler.running)
+        idx = findfirst(x -> x === task, scheduler.running)
+        if idx !== nothing
+            # Avoid mutating the running list during execution; `run_all!` will
+            # skip unscheduled tasks.
+            removed = true
+        end
+    end
     if !removed
         removed = remove!(scheduler.timed, task; eq = (===))
     end
@@ -116,12 +126,13 @@ function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)
 end
 
 function _run_due!(scheduler::TaskScheduler, current_time::UInt64, status::TaskStatus.T)
-    while !isempty(scheduler.asap)
-        task = popfirst!(scheduler.asap)
-        task === nothing && break
-        task_run!(task, status)
-    end
+    # Move scheduled tasks to `running` before executing.
+    # This ensures tasks scheduled by other tasks don't execute until the next tick.
+    empty!(scheduler.running)
+    scheduler.running, scheduler.asap = scheduler.asap, scheduler.running
+    running = scheduler.running
 
+    # Move due timed tasks into `running` (by priority order).
     while true
         next_task = peek(scheduler.timed)
         next_task === nothing && break
@@ -130,8 +141,15 @@ function _run_due!(scheduler::TaskScheduler, current_time::UInt64, status::TaskS
         end
         task = pop!(scheduler.timed)
         task === nothing && break
+        push!(running, task)
+    end
+
+    # Run tasks in FIFO order.
+    for task in running
+        task.scheduled || continue
         task_run!(task, status)
     end
+    empty!(running)
     return nothing
 end
 

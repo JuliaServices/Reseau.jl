@@ -41,13 +41,11 @@ const _device_random_initialized = Ref{Bool}(false)
 end
 
 function _device_random_ensure_init()
-    _device_random_initialized[] && return nothing
     lock(_device_random_lock)
     try
-        if !_device_random_initialized[]
-            _device_random_init()
-            _device_random_initialized[] = true
-        end
+        _device_random_initialized[] && return nothing
+        _device_random_init()
+        _device_random_initialized[] = true
     finally
         unlock(_device_random_lock)
     end
