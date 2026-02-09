@@ -94,6 +94,9 @@ include("io/bufferio.jl")
 include("io/tls_channel_handler.jl")
 include("io/alpn_handler.jl")
 
+# --- public submodules ---
+include("Files.jl")
+
 function __init__()
     _init_os_thread_cfunc!()
     io_library_init()
