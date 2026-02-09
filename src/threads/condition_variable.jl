@@ -1,9 +1,9 @@
 mutable struct ConditionVariable
-    cond::Threads.Condition
+    cond::Base.Threads.Condition
     @atomic seq::UInt64
 end
 
-ConditionVariable() = ConditionVariable(Threads.Condition(), UInt64(0))
+ConditionVariable() = ConditionVariable(Base.Threads.Condition(), UInt64(0))
 
 function condition_variable_init(cond_ref::Base.RefValue{ConditionVariable})
     cond_ref[] = ConditionVariable()

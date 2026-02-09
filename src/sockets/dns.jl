@@ -1,8 +1,5 @@
 export DNSError, getalladdrinfo, getaddrinfo, getnameinfo, getipaddr, getipaddrs, islinklocaladdr
 
-using ..Reseau: _PLATFORM_WINDOWS, _PLATFORM_LINUX, _PLATFORM_APPLE
-using ..Reseau: getalladdrinfo as _reseau_getalladdrinfo
-
 """
     DNSError
 
@@ -18,7 +15,9 @@ function Base.show(io::IO, err::DNSError)
 end
 
 function getalladdrinfo(host::AbstractString)::Vector{IPAddr}
-    raw = _reseau_getalladdrinfo(host)
+    # Delegate to the internal libuv-free resolver implementation (defined in `io/host_resolver.jl`),
+    # which is exposed as `getalladdrinfo_raw(hostname; flags=...)`.
+    raw = getalladdrinfo_raw(host; flags = Cint(0))
     addrs = IPAddr[]
     for (addr, family) in raw
         # family: AF_INET / AF_INET6.

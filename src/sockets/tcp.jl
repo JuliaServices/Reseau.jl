@@ -9,46 +9,6 @@ export
     getpeername,
     tlsupgrade!
 
-using ..Reseau: AWS_OP_SUCCESS
-using ..Reseau: ERROR_IO_SOCKET_CLOSED, ERROR_IO_SOCKET_NOT_CONNECTED, ERROR_IO_SOCKET_ADDRESS_IN_USE
-using ..Reseau: ERROR_OOM, ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT
-using ..Reseau: ClientBootstrap, ClientBootstrapOptions, client_bootstrap_connect!
-using ..Reseau: ServerBootstrap, ServerBootstrapOptions, server_bootstrap_shutdown!
-using ..Reseau: Channel, ChannelSlot, ChannelState, ChannelDirection, ChannelTask, TaskStatus
-using ..Reseau: AbstractChannelHandler
-using ..Reseau: channel_slot_new!, channel_slot_insert_end!, channel_slot_set_handler!
-using ..Reseau: channel_first_slot, channel_trigger_read, channel_thread_is_callers_thread
-using ..Reseau: channel_schedule_task_now!, channel_shutdown!, channel_slot_increment_read_window!
-using ..Reseau: channel_slot_on_handler_shutdown_complete!
-using ..Reseau: socket_channel_handler_get_socket, SocketChannelHandler
-using ..Reseau: Socket, SocketEndpoint, get_address
-using ..Reseau: IoMessage, IoMessageType
-using ..Reseau: channel_acquire_message_from_pool, channel_release_message_to_pool!
-using ..Reseau: channel_slot_send_message
-using ..Reseau: ByteCursor, ByteBuffer, byte_cursor_advance, byte_buf_write_from_whole_cursor, capacity
-using ..Reseau: ErrorResult, raise_error
-using ..Reseau: EventLoopGroup, EventLoopGroupOptions, event_loop_group_release!
-using ..Reseau: HostResolver, HostResolutionConfig, HostAddress, HostAddressType, host_resolver_shutdown!
-using ..Reseau: SocketOptions, SocketDomain, SocketType
-using ..Reseau: socket_close, socket_shutdown_dir, socket_get_bound_address
-using ..Reseau: TlsContext, TlsConnectionOptions
-using ..Reseau: tls_ctx_options_init_default_client, tls_ctx_options_init_client_mtls_from_path
-using ..Reseau: tls_ctx_options_set_verify_peer!, tls_ctx_options_override_default_trust_store_from_path!
-using ..Reseau: tls_context_new
-using ..Reseau: tls_ctx_options_init_default_server_from_path
-using ..Reseau: TLS_DEFAULT_TIMEOUT_MS, channel_setup_client_tls
-
-# Extend channel handler hooks defined in the parent module.
-import ..Reseau:
-    setchannelslot!,
-    handler_process_read_message,
-    handler_process_write_message,
-    handler_increment_read_window,
-    handler_shutdown,
-    handler_initial_window_size,
-    handler_message_overhead,
-    handler_destroy
-
 mutable struct TCPSocket <: IO
     channel::Union{Channel, Nothing}
     slot::Union{ChannelSlot, Nothing}

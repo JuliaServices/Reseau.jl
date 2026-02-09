@@ -25,7 +25,7 @@ mutable struct Future{T}
     result::Union{T, Nothing}  # nullable
     error_code::Int
     lock::ReentrantLock
-    done_event::Threads.Event
+    done_event::Base.Threads.Event
     callback::Union{FutureWaiter, Nothing}  # nullable
     owns_result::Bool
 end
@@ -36,7 +36,7 @@ function Future{T}() where {T}
         nothing,
         0,
         ReentrantLock(),
-        Threads.Event(),
+        Base.Threads.Event(),
         nothing,
         false,
     )
@@ -118,56 +118,9 @@ function future_on_complete_if_not_done!(future::Future, callback::OnFutureCompl
     end
 end
 
-# Register a callback to run on an event loop thread.
-# Always schedules the callback asynchronously.
-function future_on_event_loop!(
-        future::Future,
-        event_loop::EventLoop,
-        callback::OnFutureCompleteFn,
-        user_data = nothing,
-    )
-    schedule_callback = () -> begin
-        task = ScheduledTask(
-            (t, status) -> callback(future, user_data),
-            nothing;
-            type_tag = "future_event_loop_callback",
-        )
-        event_loop_schedule_task_now!(event_loop, task)
-    end
-
-    if future_is_done(future)
-        schedule_callback()
-        return nothing
-    end
-
-    future_on_complete!(future, (f, ud) -> schedule_callback(), nothing)
-    return nothing
-end
-
-# Register a callback to run on a channel's event loop.
-function future_on_channel!(
-        future::Future,
-        channel::Channel,
-        callback::OnFutureCompleteFn,
-        user_data = nothing,
-    )
-    schedule_callback = () -> begin
-        task = ScheduledTask(
-            (t, status) -> callback(future, user_data),
-            nothing;
-            type_tag = "future_channel_callback",
-        )
-        event_loop_schedule_task_now!(channel.event_loop, task)
-    end
-
-    if future_is_done(future)
-        schedule_callback()
-        return nothing
-    end
-
-    future_on_complete!(future, (f, ud) -> schedule_callback(), nothing)
-    return nothing
-end
+# Integration hooks implemented by the IO stack (see `src/sockets/io/future_integration.jl`).
+function future_on_event_loop! end
+function future_on_channel! end
 
 # Wait for future to complete (timeout in nanoseconds)
 function future_wait_ns(future::Future; timeout_ns::Integer)::Bool
@@ -185,8 +138,8 @@ function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorRes
     ret = lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            raise_error(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            return ErrorResult(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         future.result = result
@@ -211,8 +164,8 @@ function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResu
     ret = lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            raise_error(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            return ErrorResult(_PARENT.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         future.result = nothing
@@ -244,7 +197,7 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
 
         future.result = nothing
         future.owns_result = false
-        future.error_code = ERROR_IO_OPERATION_CANCELLED
+        future.error_code = _PARENT.ERROR_IO_OPERATION_CANCELLED
         @atomic future.state = FutureState.CANCELLED
 
         callback = future.callback

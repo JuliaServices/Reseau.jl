@@ -1,0 +1,55 @@
+# Integration helpers for `Reseau.Threads.Future` that require socket/event-loop
+# types. This file lives in `Reseau.Sockets` to avoid making `Reseau.Threads`
+# depend on the IO stack.
+
+import ..Threads: Future, OnFutureCompleteFn, future_is_done, future_on_complete!
+import ..Threads: future_on_event_loop!, future_on_channel!
+
+function future_on_event_loop!(
+        future::Future,
+        event_loop::EventLoop,
+        callback::OnFutureCompleteFn,
+        user_data = nothing,
+    )
+    schedule_callback = () -> begin
+        task = ScheduledTask(
+            (_ctx, _status) -> callback(future, user_data),
+            nothing;
+            type_tag = "future_event_loop_callback",
+        )
+        event_loop_schedule_task_now!(event_loop, task)
+    end
+
+    if future_is_done(future)
+        schedule_callback()
+        return nothing
+    end
+
+    future_on_complete!(future, (_f, _ud) -> schedule_callback(), nothing)
+    return nothing
+end
+
+function future_on_channel!(
+        future::Future,
+        channel::Channel,
+        callback::OnFutureCompleteFn,
+        user_data = nothing,
+    )
+    schedule_callback = () -> begin
+        task = ScheduledTask(
+            (_ctx, _status) -> callback(future, user_data),
+            nothing;
+            type_tag = "future_channel_callback",
+        )
+        event_loop_schedule_task_now!(channel.event_loop, task)
+    end
+
+    if future_is_done(future)
+        schedule_callback()
+        return nothing
+    end
+
+    future_on_complete!(future, (_f, _ud) -> schedule_callback(), nothing)
+    return nothing
+end
+
