@@ -552,7 +552,10 @@
             event_loop::EventLoop,
             handle::IoHandle,
         )::Union{Nothing, ErrorResult}
-        debug_assert(event_loop_thread_is_callers_thread(event_loop))
+        if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
+            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "un-subscribing from events on fd %d", handle.fd)
 
         if handle.additional_data == C_NULL
@@ -585,10 +588,23 @@
             end
         end
 
-        # Schedule cleanup task
-        cleanup_fn = (ctx, status) -> kqueue_cleanup_task_callback(ctx, status)
-        handle_data.cleanup_task = ScheduledTask(cleanup_fn, handle_data; type_tag = "kqueue_cleanup")
-        event_loop_schedule_task_now!(event_loop, handle_data.cleanup_task)
+        if @atomic event_loop.running
+            # Schedule cleanup task
+            cleanup_fn = (ctx, status) -> kqueue_cleanup_task_callback(ctx, status)
+            handle_data.cleanup_task = ScheduledTask(cleanup_fn, handle_data; type_tag = "kqueue_cleanup")
+            event_loop_schedule_task_now!(event_loop, handle_data.cleanup_task)
+        else
+            # Event loop is no longer running, so task scheduling won't make forward progress.
+            # Perform the minimal cleanup synchronously to avoid leaking handle registry entries.
+            if handle_data.state == HandleState.SUBSCRIBED
+                impl.thread_data.connected_handle_count -= 1
+            end
+            if handle_data.registry_key != C_NULL
+                delete!(impl.handle_registry, handle_data.registry_key)
+                handle_data.registry_key = C_NULL
+            end
+            handle_data.cleanup_task = nothing
+        end
 
         handle_data.state = HandleState.UNSUBSCRIBED
         handle.additional_data = C_NULL

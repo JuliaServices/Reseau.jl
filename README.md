@@ -22,10 +22,10 @@ Pkg.add("Reseau")
 ```julia
 using Reseau
 
-elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
-resolver = DefaultHostResolver(elg)
+elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+resolver = Reseau.HostResolver(elg)
 
-host_resolver_resolve!(resolver, "localhost") do res, host, err, addrs
+Reseau.host_resolver_resolve!(resolver, "localhost") do res, host, err, addrs
     @show err addrs
 end
 ```
@@ -34,17 +34,17 @@ end
 ```julia
 using Reseau
 
-elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
-el = event_loop_group_get_next_loop(elg)
-sock = socket_init_posix(SocketOptions(; type = SocketType.STREAM, domain = SocketDomain.IPV4))
+elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
+el = Reseau.event_loop_group_get_next_loop(elg)
+sock = Reseau.socket_init_posix(Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4))
 
-connect_opts = SocketConnectOptions(
-    SocketEndpoint("127.0.0.1", 8080);
+connect_opts = Reseau.SocketConnectOptions(
+    Reseau.SocketEndpoint("127.0.0.1", 8080);
     event_loop = el,
     on_connection_result = (sock_obj, err, ud) -> @show err,
 )
 
-socket_connect(sock, connect_opts)
+Reseau.socket_connect(sock, connect_opts)
 ```
 
 ### TLS channel handler
@@ -52,40 +52,44 @@ socket_connect(sock, connect_opts)
 using Reseau
 
 # Assumes an established socket and event loop (see socket example).
-channel = Channel(el, nothing)
-socket_channel_handler_new!(channel, sock)
+channel = Reseau.Channel(el, nothing)
+Reseau.socket_channel_handler_new!(channel, sock)
 
-ctx = tls_context_new_client(; verify_peer = false)
-tls_opts = TlsConnectionOptions(ctx; server_name = "localhost")
-tls_channel_handler_new!(channel, tls_opts)
+ctx = Reseau.tls_context_new_client(; verify_peer = false)
+tls_opts = Reseau.TlsConnectionOptions(ctx; server_name = "localhost")
+Reseau.tls_channel_handler_new!(channel, tls_opts)
 
-channel_setup_complete!(channel)
+Reseau.channel_setup_complete!(channel)
 ```
 
 ### Async input stream
 ```julia
 using Reseau
 
-data = ByteBuffer(5)
-stream = AsyncInputStream((s, dest) -> begin
-    fut = Future{Bool}()
+data = Reseau.ByteBuffer(5)
+stream = Reseau.AsyncInputStream((s, dest) -> begin
+    fut = Reseau.Future{Bool}()
     dest.len += 5
-    future_complete!(fut, true)
+    Reseau.future_complete!(fut, true)
     fut
 end, s -> nothing, nothing)
 
-future = async_input_stream_read_to_fill(stream, data)
-future_wait(future)
+future = Reseau.async_input_stream_read_to_fill(stream, data)
+Reseau.future_wait(future)
 ```
 
-## Threading requirements
+## Threading model
 
-Reseau runs event loops on Julia-managed threads and intentionally avoids the libuv global IO lock.
-For correctness and to keep the main interactive thread available, the event-loop group requires:
+Reseau runs event loops on OS threads (via `pthread_create` / `CreateThread`) and auto-adopts them into Julia.
+There are no enforced `JULIA_NUM_THREADS` requirements; configure Julia threads based on your application needs.
+Note: `Reseau.Threads` is a Reseau submodule and intentionally shares its name with `Base.Threads`. Use `Base.Threads` when you mean the stdlib module.
 
-- `Threads.nthreads(:interactive) > 1`
-- `loop_count < Threads.nthreads(:interactive)`
+## Debug assertions
 
-If these constraints are not met, `event_loop_group_new` returns an error. Recommended settings
-for local development are `JULIA_NUM_THREADS=auto,2` (or higher interactive count when using
-multiple event loops).
+Some internal invariants (including certain thread-affinity checks) are guarded by `Reseau.DEBUG_BUILD[]` and are disabled by default.
+For local development you can enable them early in your process:
+
+```julia
+using Reseau
+Reseau.DEBUG_BUILD[] = true
+```

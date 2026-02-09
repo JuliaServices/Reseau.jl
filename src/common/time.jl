@@ -49,7 +49,8 @@ function localtime(time::time_t, t::Ptr{tm})
     precondition(t != C_NULL)
     time_ref = Ref{time_t}(time)
     @static if _PLATFORM_WINDOWS
-        ccall(:localtime_s, Cint, (Ptr{tm}, Ref{time_t}), t, time_ref)
+        # `localtime_s` is sometimes not exported as a symbol; use the explicit 64-bit CRT entrypoint.
+        ccall(:_localtime64_s, Cint, (Ptr{tm}, Ref{time_t}), t, time_ref)
     else
         ccall(:localtime_r, Ptr{tm}, (Ref{time_t}, Ptr{tm}), time_ref, t)
     end
@@ -64,7 +65,8 @@ function gmtime(time::time_t, t::Ptr{tm})
     precondition(t != C_NULL)
     time_ref = Ref{time_t}(time)
     @static if _PLATFORM_WINDOWS
-        ccall(:gmtime_s, Cint, (Ptr{tm}, Ref{time_t}), t, time_ref)
+        # `gmtime_s` is sometimes not exported as a symbol; use the explicit 64-bit CRT entrypoint.
+        ccall(:_gmtime64_s, Cint, (Ptr{tm}, Ref{time_t}), t, time_ref)
     else
         ccall(:gmtime_r, Ptr{tm}, (Ref{time_t}, Ptr{tm}), time_ref, t)
     end

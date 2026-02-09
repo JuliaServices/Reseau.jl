@@ -2,6 +2,8 @@ using Test
 using Reseau
 
 include("test_utils.jl")
+cleanup_test_sockets!()
+atexit(cleanup_test_sockets!)
 setup_test_keychain!()
 atexit(cleanup_test_keychain!)
 

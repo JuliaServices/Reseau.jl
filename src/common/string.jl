@@ -4,6 +4,7 @@ struct ByteString
 end
 
 const _static_string_cache = SmallRegistry{String, ByteString}()
+const _static_string_cache_lock = ReentrantLock()
 
 @inline function string_len(str::ByteString)
     return str.len
@@ -243,20 +244,27 @@ function secure_strlen(str::AbstractString, max_len::Integer, out_len::Base.RefV
 end
 
 function _static_string_value(literal::AbstractString)
-    return get(
-        () -> begin
-            bytes = codeunits(literal)
-            len = length(bytes)
-            mem = Memory{UInt8}(undef, len + 1)
-            if len > 0
-                GC.@preserve bytes begin
-                    Base.unsafe_copyto!(pointer(mem), pointer(bytes), len)
+    lock(_static_string_cache_lock)
+    try
+        return get(
+            () -> begin
+                bytes = codeunits(literal)
+                len = length(bytes)
+                mem = Memory{UInt8}(undef, len + 1)
+                if len > 0
+                    GC.@preserve bytes begin
+                        Base.unsafe_copyto!(pointer(mem), pointer(bytes), len)
+                    end
                 end
-            end
-            unsafe_store!(pointer(mem) + len, 0x00)
-            return ByteString(mem, len)
-        end, _static_string_cache, String(literal)
-    )
+                unsafe_store!(pointer(mem) + len, 0x00)
+                return ByteString(mem, len)
+            end,
+            _static_string_cache,
+            String(literal),
+        )
+    finally
+        unlock(_static_string_cache_lock)
+    end
 end
 
 function static_string_from_literal(literal::AbstractString)

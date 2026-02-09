@@ -197,6 +197,8 @@ end
     )
     @test Reseau.tls_byo_crypto_set_server_setup_options(server_setup) === nothing
 
+    listener_setup_called = Ref(false)
+    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
     server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
         event_loop_group = elg,
         host = "127.0.0.1",
@@ -230,10 +232,19 @@ end
             end
             return nothing
         end,
+        on_listener_setup = (bs, err, ud) -> begin
+            _ = bs
+            _ = ud
+            listener_setup_called[] = true
+            listener_setup_err[] = err
+            return nothing
+        end,
     ))
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
+    @test wait_for_pred(() -> listener_setup_called[])
+    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
     bound = Reseau.socket_get_bound_address(listener)
     @test bound isa Reseau.SocketEndpoint
     port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0

@@ -308,7 +308,39 @@ function socket_stop_accept(socket::Socket)::Union{Nothing, ErrorResult}
 end
 
 function socket_close(socket::Socket)::Union{Nothing, ErrorResult}
-    return socket_close_impl(socket.impl, socket)
+    socket.impl === nothing && return nothing
+
+    event_loop = socket.event_loop
+    if event_loop === nothing || !(@atomic event_loop.running) || event_loop_thread_is_callers_thread(event_loop)
+        return socket_close_impl(socket.impl, socket)
+    end
+
+    # `socket_close_impl` may need to unsubscribe from IO events and tear down
+    # event-loop-owned resources. Always do that work on the socket's event loop thread.
+    fut = Future{Nothing}()
+    task = ScheduledTask(
+        (ctx, status) -> begin
+            sock = ctx.socket
+            rv = socket_close_impl(sock.impl, sock)
+            if rv isa ErrorResult
+                future_fail!(ctx.future, rv.code)
+            else
+                future_complete!(ctx.future, nothing)
+            end
+            return nothing
+        end,
+        (socket = socket, future = fut);
+        type_tag = "socket_close_on_event_loop",
+    )
+    event_loop_schedule_task_now!(event_loop, task)
+    future_wait(fut)
+
+    err = future_get_error(fut)
+    if err != 0
+        raise_error(err)
+        return ErrorResult(err)
+    end
+    return nothing
 end
 
 function socket_shutdown_dir(socket::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}

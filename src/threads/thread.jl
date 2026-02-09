@@ -154,10 +154,14 @@ function thread_current_thread_id()
     if handle !== nothing
         return handle.id
     end
-    if _main_thread_id[] == 0
-        _main_thread_id[] = _thread_next_id()
+    # For Julia-managed threads (no Reseau ThreadHandle TLS), use a disjoint
+    # namespace so we never collide with Reseau-managed ids.
+    julia_tid = Base.Threads.threadid()
+    @static if _PLATFORM_WINDOWS
+        return thread_id_t(0x80000000) | thread_id_t(julia_tid)
+    else
+        return thread_id_t(0x8000000000000000) | thread_id_t(julia_tid)
     end
-    return _main_thread_id[]
 end
 
 @inline thread_thread_id_equal(t1::thread_id_t, t2::thread_id_t) = t1 == t2
