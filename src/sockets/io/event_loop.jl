@@ -262,7 +262,7 @@ function event_loop_group_new(options::EventLoopGroupOptions)
     loop_count = options.loop_count
     cpu_group_val = _cpu_group_value(options.cpu_group)
     if cpu_group_val !== nothing && loop_count == typemax(UInt16)
-        cpu_count = get_cpu_count_for_group(Int(cpu_group_val))
+        cpu_count = (Int(cpu_group_val) == 0) ? Sys.CPU_THREADS : 0
         loop_count = UInt16(cpu_count > 0 ? min(cpu_count, typemax(UInt16)) : 1)
     end
     if loop_count == 0

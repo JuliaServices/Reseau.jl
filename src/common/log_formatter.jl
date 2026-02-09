@@ -1,6 +1,16 @@
 using Printf
+import Dates
 
 abstract type AbstractLogFormatter end
+
+@enumx DateFormat::UInt8 begin
+    RFC822 = 0
+    ISO_8601 = 1
+    ISO_8601_BASIC = 2
+    AUTO_DETECT = 3
+end
+
+const date_format = DateFormat.T
 
 struct StandardLogFormatter <: AbstractLogFormatter
     date_format::date_format
@@ -26,15 +36,19 @@ end
     return Printf.format(Printf.Format(fmt), args...)
 end
 
-function _timestamp_string(date_format::date_format)
-    buf_mem = Memory{UInt8}(undef, DATE_TIME_STR_MAX_LEN)
-    byte_buf = Ref(ByteBuffer(buf_mem, 0))
-    dt = Ref{date_time}()
-    date_time_init_now(dt)
-    if date_time_to_utc_time_str(dt, date_format, byte_buf) != OP_SUCCESS
-        return ""
+const _TS_FMT_ISO_8601_UTC = Dates.DateFormat("yyyy-mm-dd\\THH:MM:SS")
+const _TS_FMT_ISO_8601_BASIC_UTC = Dates.DateFormat("yyyymmdd\\THHMMSS")
+
+function _timestamp_string(fmt::date_format)
+    dt = Dates.now(Dates.UTC)
+    if fmt == DateFormat.RFC822
+        return Dates.format(dt, Dates.RFC1123Format) * " GMT"
+    elseif fmt == DateFormat.ISO_8601_BASIC
+        return Dates.format(dt, _TS_FMT_ISO_8601_BASIC_UTC) * "Z"
+    else
+        # Treat AUTO_DETECT as ISO_8601 for logging.
+        return Dates.format(dt, _TS_FMT_ISO_8601_UTC) * "Z"
     end
-    return String(byte_cursor_from_buf(byte_buf[]))
 end
 
 function format_line(formatter::StandardLogFormatter, level::LogLevel.T, subject::LogSubject, fmt::AbstractString, args...)

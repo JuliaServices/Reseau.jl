@@ -514,7 +514,7 @@ const _io_log_subject_infos = (
 
 # Register IO log subjects at module load time
 for info in _io_log_subject_infos
-    registry_set!(_log_subject_registry, info.subject_id, info)
+    _log_subject_registry[info.subject_id] = info
 end
 
 const _cal_library_initialized = Ref(false)
@@ -541,7 +541,7 @@ const _io_library_initialized = Ref{Bool}(false)
 function io_library_init()
     _io_library_initialized[] && return nothing
     _io_library_initialized[] = true
-    _common_init()
+    thread_initialize_thread_management()
     _cal_init()
     tls_init_static_state()
     io_tracing_init()
@@ -552,7 +552,7 @@ function io_library_clean_up()
     !_io_library_initialized[] && return nothing
     _io_library_initialized[] = false
     tls_clean_up_static_state()
-    _common_cleanup()
+    thread_join_all_managed()
     return nothing
 end
 

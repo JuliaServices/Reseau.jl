@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "c370a4a67ed72a7a09f33e9a54fef67756d253dc"
+project_hash = "5161651ccad8168f11dafa414897e86ec255adbd"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -69,8 +69,13 @@ deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 version = "1.11.0"
 
+[[deps.Random]]
+deps = ["SHA"]
+uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+version = "1.11.0"
+
 [[deps.Reseau]]
-deps = ["Base64", "EnumX", "LibAwsCal", "LibAwsCommon", "Libdl", "Printf", "ScopedValues"]
+deps = ["Base64", "Dates", "EnumX", "LibAwsCal", "LibAwsCommon", "Libdl", "Printf", "ScopedValues", "UUIDs"]
 path = "."
 uuid = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 version = "1.1.1"
@@ -82,6 +87,10 @@ version = "1.1.1"
     aws_lc_jll = "97bc56f7-b146-5eb0-9ba6-f74d48471a93"
     s2n_tls_jll = "cddc5d3d-934d-5d3a-9747-62fc12ea3f48"
 
+[[deps.SHA]]
+uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+version = "0.7.0"
+
 [[deps.ScopedValues]]
 deps = ["HashArrayMappedTries", "Logging"]
 git-tree-sha1 = "c3b2323466378a2ba15bea4b2f73b081e022f473"
@@ -92,6 +101,11 @@ version = "1.5.0"
 deps = ["Dates"]
 uuid = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 version = "1.0.3"
+
+[[deps.UUIDs]]
+deps = ["Random", "SHA"]
+uuid = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+version = "1.11.0"
 
 [[deps.Unicode]]
 uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"

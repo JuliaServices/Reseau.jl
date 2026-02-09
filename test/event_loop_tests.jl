@@ -1546,7 +1546,7 @@ end
 
     @testset "Event loop group NUMA setup" begin
         cpu_group = Ref{UInt16}(0)
-        cpu_count = Reseau.get_cpu_count_for_group(cpu_group[])
+        cpu_count = max(1, min(Sys.CPU_THREADS, Int(typemax(UInt16))))
         opts = Reseau.EventLoopGroupOptions(loop_count = typemax(UInt16), cpu_group = cpu_group)
         elg = Reseau.event_loop_group_new(opts)
 

@@ -13,6 +13,30 @@ const TLS_MAX_RECORD_SIZE = 16 * 1024
 const TLS_EST_RECORD_OVERHEAD = 53
 const TLS_EST_HANDSHAKE_SIZE = 7 * 1024
 
+# The TLS backends and PKI utilities currently assume PEM-like text content.
+# Historically, `text_is_utf8()` in `src/common/encoding.jl` only accepted ASCII,
+# plus a UTF-8 BOM prefix. Keep that exact behavior here so we can delete the
+# broader encoding helpers.
+function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
+    n = Int(cursor.len)
+    if n >= 3
+        @inbounds begin
+            b0 = memoryref(cursor.ptr, 1)[]
+            b1 = memoryref(cursor.ptr, 2)[]
+            b2 = memoryref(cursor.ptr, 3)[]
+        end
+        if b0 == 0xef && b1 == 0xbb && b2 == 0xbf
+            return true
+        end
+    end
+    @inbounds for i in 1:n
+        if (memoryref(cursor.ptr, i)[] & 0x80) != 0
+            return false
+        end
+    end
+    return true
+end
+
 @enumx TlsVersion::UInt8 begin
     SSLv3 = 0
     TLSv1 = 1
@@ -175,17 +199,7 @@ struct SecItemOptions
 end
 
 function _tls_generate_secitem_labels()::Union{SecItemOptions, ErrorResult}
-    u = Ref{uuid}()
-    if uuid_init(u) != OP_SUCCESS
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
-    end
-    buf = Ref(ByteBuffer(UUID_STR_LEN))
-    if uuid_to_str(u, buf) != OP_SUCCESS
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
-    end
-    uuid_str = String(byte_cursor_from_buf(buf[]))
+    uuid_str = string(UUIDs.uuid4())
     return SecItemOptions("reseau-cert-$uuid_str", "reseau-key-$uuid_str")
 end
 
@@ -558,8 +572,19 @@ function _tls_buf_copy_from(value)::Union{ByteBuffer, ErrorResult}
 end
 
 function _tls_buf_from_file(path::AbstractString)::Union{ByteBuffer, ErrorResult}
+    bytes = try
+        read(path)
+    catch e
+        if e isa SystemError
+            translate_and_raise_io_error_or(e.errnum, ERROR_FILE_READ_FAILURE)
+        else
+            raise_error(ERROR_FILE_READ_FAILURE)
+        end
+        return ErrorResult(last_error())
+    end
+
     dest_ref = Ref(null_buffer())
-    if byte_buf_init_from_file(dest_ref, path) != OP_SUCCESS
+    if byte_buf_init_copy_from_cursor(dest_ref, ByteCursor(bytes)) != OP_SUCCESS
         return ErrorResult(last_error())
     end
     return dest_ref[]
