@@ -61,10 +61,9 @@
     end
 
     # Configuration constants
-    # NOTE: aws-c-io uses a much larger default timeout (100s). We intentionally keep a smaller
-    # timeout here because cross-thread wakeups are best-effort (a signal pipe write failure can
-    # otherwise delay STOPPING/teardown by the full timeout).
-    const DEFAULT_TIMEOUT_SEC = 1
+    # NOTE: Match aws-c-io's default timeout (100s). Cross-thread scheduling is normally woken via the
+    # signal pipe kevent; the default timeout is a backstop for "idle" loops with no scheduled work.
+    const DEFAULT_TIMEOUT_SEC = 100
     const MAX_EVENTS = 100
 
     # Handle state for subscribed handles

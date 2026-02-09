@@ -302,13 +302,13 @@ Suggested fix:
 
 ### P2.2 kqueue default kevent timeout is much smaller than aws-c-io
 
-Status: ADDRESSED (documented rationale for keeping `DEFAULT_TIMEOUT_SEC = 1`).
+Status: ADDRESSED (now matches aws-c-io: `DEFAULT_TIMEOUT_SEC = 100`).
 
 Impact:
 - Potentially higher wakeup rate and CPU usage on idle event loops.
 
 Evidence:
-- Reseau: `src/io/kqueue_event_loop_types.jl:63-67` sets `DEFAULT_TIMEOUT_SEC = 1`.
+- Reseau: `src/io/kqueue_event_loop_types.jl` sets `DEFAULT_TIMEOUT_SEC = 100`.
 - aws-c-io: `~/aws-c-io/source/bsd/kqueue_event_loop.c:126-129` sets `DEFAULT_TIMEOUT_SEC = 100`.
 
 Suggested fix:
@@ -667,7 +667,7 @@ Status: ADDRESSED (kept as reference; added `src/common/unused/README.md` clarif
 
 - `src/io/kqueue_event_loop_types.jl`
   - kqueue types.
-  - Parity divergence: `DEFAULT_TIMEOUT_SEC = 1` vs aws-c-io `100` (P2.2).
+  - Default timeout matches aws-c-io (P2.2).
 
 - `src/io/epoll_event_loop_types.jl`
   - epoll types.
