@@ -25,11 +25,11 @@ end
 end
 
 @inline function _getenv_string(name::AbstractString)::Union{Nothing, String}
-    ptr = ccall(:getenv, Ptr{UInt8}, (Cstring,), name)
-    if ptr == C_NULL || unsafe_load(ptr) == 0x00
-        return nothing
-    end
-    return unsafe_string(ptr)
+    # Prefer Julia's `ENV` view instead of `getenv(3)`.
+    # On Windows, `getenv` can observe a stale CRT-cached environment even after
+    # `SetEnvironmentVariableW` updates; `ENV` tracks the current process view.
+    val = get(ENV, name, nothing)
+    return (val === nothing || isempty(val)) ? nothing : val
 end
 
 function _fs_file_length(file::Libc.FILE)::Union{Int64, Nothing}
