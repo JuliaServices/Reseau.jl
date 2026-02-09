@@ -491,15 +491,7 @@ end
 
 # Initialize local address for testing (Unix domain sockets)
 function socket_endpoint_init_local_address_for_test!(endpoint::SocketEndpoint)
-    u = Ref{uuid}()
-    if uuid_init(u) != OP_SUCCESS
-        error("Failed to generate UUID for test socket")
-    end
-    buf = Ref(ByteBuffer(UUID_STR_LEN))
-    if uuid_to_str(u, buf) != OP_SUCCESS
-        error("Failed to convert UUID to string")
-    end
-    uuid_str = String(byte_cursor_from_buf(buf[]))
+    uuid_str = string(UUIDs.uuid4())
 
     @static if Sys.iswindows()
         set_address!(endpoint, "\\\\.\\pipe\\testsock$(uuid_str)")

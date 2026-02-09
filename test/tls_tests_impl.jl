@@ -134,8 +134,13 @@ function _load_resource_buf(name::AbstractString)
     if !isfile(path)
         return nothing
     end
-    buf_ref = Ref(Reseau.ByteBuffer(0))
-    Reseau.byte_buf_init_from_file(buf_ref, path) == Reseau.AWS_OP_SUCCESS || return nothing
+    bytes = try
+        read(path)
+    catch
+        return nothing
+    end
+    buf_ref = Ref(Reseau.null_buffer())
+    Reseau.byte_buf_init_copy_from_cursor(buf_ref, Reseau.ByteCursor(bytes)) == Reseau.AWS_OP_SUCCESS || return nothing
     return buf_ref[]
 end
 

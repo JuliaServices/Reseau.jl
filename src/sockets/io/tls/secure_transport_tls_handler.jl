@@ -968,7 +968,7 @@ function _secure_transport_context_new(options::TlsContextOptions)::Union{TlsCon
     if options.certificate_set && options.private_key_set
         cert_cursor = byte_cursor_from_buf(options.certificate)
         key_cursor = byte_cursor_from_buf(options.private_key)
-        if !text_is_utf8(cert_cursor) || !text_is_utf8(key_cursor)
+        if !_tls_text_is_ascii_or_utf8_bom(cert_cursor) || !_tls_text_is_ascii_or_utf8_bom(key_cursor)
             raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
             return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
         end

@@ -6,6 +6,7 @@ module Sockets
 # implementation that used to live under `src/io/*`.
 
 using EnumX
+import UUIDs
 
 # Bring parent-module bindings (common utilities, error codes, logging, etc.)
 # into this module so the moved `io/*` implementation can remain largely

@@ -133,15 +133,33 @@ macro LOGF_TRACE(subject, msg, args...)
     return :(logf(LOG_LEVEL_TRACE, $subject, $msg, $(args...)))
 end
 
-const _log_subject_registry = SmallRegistry{LogSubject, LogSubjectInfo}()
+const _log_subject_registry = Dict{LogSubject, LogSubjectInfo}()
+
+const _common_log_subject_infos = (
+    LogSubjectInfo(LS_COMMON_GENERAL, "aws-c-common", "Subject for aws-c-common logging that doesn't belong to any particular category"),
+    LogSubjectInfo(LS_COMMON_TASK_SCHEDULER, "task-scheduler", "Subject for task scheduler or task specific logging."),
+    LogSubjectInfo(LS_COMMON_THREAD, "thread", "Subject for logging thread related functions."),
+    LogSubjectInfo(LS_COMMON_MEMTRACE, "memtrace", "Output from the mem_trace_dump function"),
+    LogSubjectInfo(LS_COMMON_XML_PARSER, "xml-parser", "Subject for xml parser specific logging."),
+    LogSubjectInfo(LS_COMMON_IO, "common-io", "Common IO utilities"),
+    LogSubjectInfo(LS_COMMON_BUS, "bus", "Message bus"),
+    LogSubjectInfo(LS_COMMON_TEST, "test", "Unit/integration testing"),
+    LogSubjectInfo(LS_COMMON_JSON_PARSER, "json-parser", "Subject for json parser specific logging"),
+    LogSubjectInfo(LS_COMMON_CBOR, "cbor", "Subject for CBOR encode and decode"),
+)
+
+# Register common log subjects at module load time
+for info in _common_log_subject_infos
+    _log_subject_registry[info.subject_id] = info
+end
 
 function log_subject_name(subject::LogSubject)
-    info = registry_get(_log_subject_registry, subject, nothing)
+    info = get(_log_subject_registry, subject, nothing)
     return info === nothing ? "" : info.subject_name
 end
 
 function log_subject_description(subject::LogSubject)
-    info = registry_get(_log_subject_registry, subject, nothing)
+    info = get(_log_subject_registry, subject, nothing)
     return info === nothing ? "" : info.subject_description
 end
 

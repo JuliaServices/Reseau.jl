@@ -1198,7 +1198,7 @@ function _s2n_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorRe
     if options.certificate_set && options.private_key_set
         cert_cur = byte_cursor_from_buf(options.certificate)
         key_cur = byte_cursor_from_buf(options.private_key)
-        if !text_is_utf8(cert_cur) || !text_is_utf8(key_cur)
+        if !_tls_text_is_ascii_or_utf8_bom(cert_cur) || !_tls_text_is_ascii_or_utf8_bom(key_cur)
             _s2n_ctx_destroy!(ctx_impl)
             raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
             return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)

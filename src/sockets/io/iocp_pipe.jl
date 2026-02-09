@@ -101,11 +101,7 @@
     end
 
     function _iocp_pipe_unique_name()::String
-        u = Ref{uuid}()
-        uuid_init(u) != OP_SUCCESS && error("uuid_init failed")
-        buf = Ref(ByteBuffer(UUID_STR_LEN))
-        uuid_to_str(u, buf) != OP_SUCCESS && error("uuid_to_str failed")
-        uuid_str = String(byte_cursor_from_buf(buf[]))
+        uuid_str = string(UUIDs.uuid4())
         return "\\\\.\\pipe\\aws_pipe_$(uuid_str)"
     end
 

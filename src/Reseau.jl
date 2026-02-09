@@ -2,42 +2,33 @@ module Reseau
 
 using EnumX
 using ScopedValues
+import UUIDs
 
 # Debug flag for internal asserts
 const DEBUG_BUILD = Ref(false)
 
-# --- common ---
-include("common/platform.jl")
-include("common/macros.jl")
-include("common/registry.jl")
-include("common/assert.jl")
-include("common/error.jl")
-include("common/shutdown_types.jl")
-include("common/logging_types.jl")
+	# --- common ---
+	include("common/platform.jl")
+	include("common/macros.jl")
+	include("common/assert.jl")
+	include("common/error.jl")
+	include("common/shutdown_types.jl")
+	include("common/logging_types.jl")
 include("common/log_writer.jl")
 include("common/log_channel.jl")
 include("common/math.jl")
 include("common/zero.jl")
-include("common/priority_queue.jl")
-include("common/byte_buf.jl")
-include("common/file.jl")
-include("common/string.jl")
-include("common/cache.jl")
-include("common/lru_cache.jl")
-include("common/clock.jl")
-include("common/time.jl")
-include("common/date_time.jl")
-include("common/log_formatter.jl")
-include("common/logging.jl")
-include("common/statistics.jl")
-include("common/device_random.jl")
-include("common/encoding.jl")
-include("common/system_info.jl")
-include("common/uuid.jl")
-include("common/common.jl")
+	include("common/priority_queue.jl")
+	include("common/byte_buf.jl")
+	include("common/cache.jl")
+	include("common/lru_cache.jl")
+	include("common/clock.jl")
+	include("common/log_formatter.jl")
+	include("common/logging.jl")
+	include("common/statistics.jl")
 
-# --- public submodules (native implementations) ---
-include("threads/threads.jl")
+	# --- public submodules (native implementations) ---
+	include("threads/threads.jl")
 include("sockets/sockets.jl")
 
 # Re-alias moved bindings back into the parent module so existing call-sites
