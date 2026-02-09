@@ -214,7 +214,7 @@ mutable struct IoHandle
     additional_data::Ptr{Cvoid}
     # set_queue callback - for Apple Network Framework
     set_queue::Ptr{Cvoid}
-    # Keep Julia-side handle data alive when additional_data stores pointer_from_objref
+    # Keep Julia-side handle data alive while the backend stores an opaque token in `additional_data`.
     additional_ref::Any
 end
 

@@ -84,7 +84,7 @@
         state::HandleState.T
         subscribe_task::Union{Nothing, ScheduledTask}  # nullable
         cleanup_task::Union{Nothing, ScheduledTask}  # nullable
-        registry_key::Ptr{Cvoid}
+        registry_id::UInt64
     end
 
     function KqueueHandleData(
@@ -104,7 +104,7 @@
             HandleState.SUBSCRIBING,
             nothing,
             nothing,
-            C_NULL,
+            UInt64(0),
         )
     end
 
@@ -152,7 +152,9 @@
         cross_thread_data::KqueueCrossThreadData
         thread_data::KqueueThreadData
         thread_options::ThreadOptions
-        handle_registry::Dict{Ptr{Cvoid}, Any}
+        handle_registry_lock::ReentrantLock
+        next_handle_id::UInt64
+        handle_registry::Dict{UInt64, KqueueHandleData}
         nw_queue::Ptr{Cvoid}  # dispatch_queue_t for Apple NW sockets
     end
 
@@ -168,7 +170,9 @@
             KqueueCrossThreadData(),
             KqueueThreadData(),
             ThreadOptions(),
-            Dict{Ptr{Cvoid}, Any}(),
+            ReentrantLock(),
+            UInt64(1),
+            Dict{UInt64, KqueueHandleData}(),
             C_NULL,
         )
     end

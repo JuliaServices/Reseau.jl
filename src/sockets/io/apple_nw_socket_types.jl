@@ -144,5 +144,8 @@
         socket::NWSocket
         written_fn::Union{Function, Nothing}
         user_data::Any
+        registry_key::Ptr{Cvoid}
     end
+
+    NWSendContext(socket::NWSocket, written_fn, user_data) = NWSendContext(socket, written_fn, user_data, C_NULL)
 end

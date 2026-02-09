@@ -57,6 +57,14 @@
         return (read_fd, write_fd)
     end
 
+    @inline function _epoll_registry_ptr(id::UInt64)::Ptr{Cvoid}
+        return Ptr{Cvoid}(UInt(id))
+    end
+
+    @inline function _epoll_registry_id(ptr::Ptr{Cvoid})::UInt64
+        return UInt64(UInt(ptr))
+    end
+
     # Create a new epoll event loop
     function event_loop_new_with_epoll(
             options::EventLoopOptions,
@@ -327,13 +335,21 @@
         )::Union{Nothing, ErrorResult}
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "subscribing to events on fd %d", handle.fd)
 
-        epoll_event_data = EpollEventHandleData(handle, on_event, user_data)
-
-        # Store handle data reference
-        handle.additional_data = pointer_from_objref(epoll_event_data)
-        handle.additional_ref = epoll_event_data
-
         impl = event_loop.impl_data
+
+        epoll_event_data = EpollEventHandleData(event_loop, handle, on_event, user_data)
+
+        # Stable udata token (not a raw Julia object pointer).
+        lock(impl.handle_registry_lock)
+        id = impl.next_handle_id
+        impl.next_handle_id += 1
+        epoll_event_data.registry_id = id
+        impl.handle_registry[id] = epoll_event_data
+        unlock(impl.handle_registry_lock)
+
+        # Store token + keep data alive.
+        handle.additional_data = _epoll_registry_ptr(id)
+        handle.additional_ref = epoll_event_data
 
         # Build event mask - everyone is always registered for edge-triggered, hang up, remote hang up, errors
         event_mask = EPOLLET | EPOLLHUP | EPOLLRDHUP | EPOLLERR
@@ -347,7 +363,7 @@
         end
 
         # Create epoll_event struct
-        epoll_ev = EpollEvent(event_mask, handle.additional_data)
+        epoll_ev = EpollEvent(event_mask, id)
         epoll_ev_ref = Ref(epoll_ev)
 
         ret = @ccall epoll_ctl(
@@ -359,6 +375,10 @@
 
         if ret != 0
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to events on fd %d", handle.fd)
+            lock(impl.handle_registry_lock)
+            delete!(impl.handle_registry, id)
+            unlock(impl.handle_registry_lock)
+            epoll_event_data.registry_id = 0
             handle.additional_data = C_NULL
             handle.additional_ref = nothing
             return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
@@ -374,6 +394,13 @@
 
     # Cleanup task callback
     function epoll_unsubscribe_cleanup_task_callback(event_data::EpollEventHandleData, status::TaskStatus.T)
+        impl = event_data.event_loop.impl_data
+        if event_data.registry_id != 0
+            lock(impl.handle_registry_lock)
+            delete!(impl.handle_registry, event_data.registry_id)
+            unlock(impl.handle_registry_lock)
+            event_data.registry_id = 0
+        end
         return nothing
     end
 
@@ -394,7 +421,8 @@
             return ErrorResult(raise_error(ERROR_IO_NOT_SUBSCRIBED))
         end
 
-        event_data = unsafe_pointer_to_objref(handle.additional_data)::EpollEventHandleData
+        event_data = handle.additional_ref
+        event_data isa EpollEventHandleData || return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
 
         # Remove from epoll - use a dummy event (required by older kernels)
         dummy_event = EpollEvent(UInt32(0), C_NULL)
@@ -415,9 +443,16 @@
         # Mark as unsubscribed and schedule cleanup task
         event_data.is_subscribed = false
 
-        cleanup_fn = (ctx, status) -> epoll_unsubscribe_cleanup_task_callback(ctx, status)
-        event_data.cleanup_task = ScheduledTask(cleanup_fn, event_data; type_tag = "epoll_event_loop_unsubscribe_cleanup")
-        event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)
+        if @atomic event_loop.running
+            cleanup_fn = (ctx, status) -> epoll_unsubscribe_cleanup_task_callback(ctx, status)
+            event_data.cleanup_task = ScheduledTask(cleanup_fn, event_data; type_tag = "epoll_event_loop_unsubscribe_cleanup")
+            event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)
+        else
+            # Event loop is no longer running, so task scheduling won't make forward progress.
+            # Perform the minimal cleanup synchronously to avoid leaking handle registry entries.
+            epoll_unsubscribe_cleanup_task_callback(event_data, TaskStatus.RUN_READY)
+            event_data.cleanup_task = nothing
+        end
 
         handle.additional_data = C_NULL
         handle.additional_ref = nothing
@@ -550,13 +585,15 @@
                 tracing_task_begin(tracing_event_loop_event)
                 try
                     ev = events[i]
-                    event_data_ptr = _epoll_event_data_ptr(ev)
-
-                    if event_data_ptr == C_NULL
+                    id = _epoll_event_data_u64(ev)
+                    if id == 0
                         continue
                     end
 
-                    event_data = unsafe_pointer_to_objref(event_data_ptr)::EpollEventHandleData
+                    lock(impl.handle_registry_lock)
+                    event_data = get(impl.handle_registry, id, nothing)
+                    unlock(impl.handle_registry_lock)
+                    event_data === nothing && continue
 
                     # Convert epoll events to our event mask
                     event_mask = 0

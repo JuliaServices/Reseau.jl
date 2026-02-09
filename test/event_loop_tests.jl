@@ -1698,8 +1698,7 @@ end
                     fetched_value = Ref{Any}(nothing)
                     removed_value = Ref{Any}(nothing)
 
-                    key_obj = Ref(0)
-                    key = pointer_from_objref(key_obj)
+                    key = Ref(0)
 
                     ctx = (
                         el = el,

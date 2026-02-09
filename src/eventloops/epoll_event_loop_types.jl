@@ -28,9 +28,17 @@
         return EpollEvent(events, UInt32(u & 0xffffffff), UInt32(u >> 32))
     end
 
+    @inline function EpollEvent(events::UInt32, data::UInt64)
+        return EpollEvent(events, UInt32(data & 0xffffffff), UInt32(data >> 32))
+    end
+
     @inline function _epoll_event_data_ptr(ev::EpollEvent)::Ptr{Cvoid}
         u = (UInt64(ev.data_hi) << 32) | UInt64(ev.data_lo)
         return Ptr{Cvoid}(u)
+    end
+
+    @inline function _epoll_event_data_u64(ev::EpollEvent)::UInt64
+        return (UInt64(ev.data_hi) << 32) | UInt64(ev.data_lo)
     end
 
     # Constants for eventfd
@@ -51,6 +59,8 @@
 
     # Handle data attached to IoHandle while subscribed
     mutable struct EpollEventHandleData
+        registry_id::UInt64
+        event_loop::Any  # EventLoop (not yet defined at include time)
         handle::IoHandle
         on_event::OnEventCallback
         user_data::Any
@@ -59,11 +69,14 @@
     end
 
     function EpollEventHandleData(
+            event_loop,
             handle::IoHandle,
             on_event::OnEventCallback,
             user_data,
         )
         return EpollEventHandleData(
+            UInt64(0),
+            event_loop,
             handle,
             on_event,
             user_data,
@@ -91,6 +104,9 @@
         should_continue::Bool
         thread_options::ThreadOptions
         use_eventfd::Bool  # true if using eventfd, false if using pipe
+        handle_registry_lock::ReentrantLock
+        next_handle_id::UInt64
+        handle_registry::Dict{UInt64, EpollEventHandleData}
     end
 
     function EpollEventLoop()
@@ -112,6 +128,9 @@
             false,
             ThreadOptions(),
             false,
+            ReentrantLock(),
+            UInt64(1),
+            Dict{UInt64, EpollEventHandleData}(),
         )
     end
 

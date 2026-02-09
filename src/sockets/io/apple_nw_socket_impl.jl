@@ -52,13 +52,17 @@
 
     const _nw_socket_registry = Dict{Ptr{Cvoid}, NWSocket}()
     const _nw_socket_registry_lock = ReentrantLock()
+    const _nw_next_socket_id = Ref{UInt64}(UInt64(1))
 
     const _nw_send_registry = Dict{Ptr{Cvoid}, NWSendContext}()
     const _nw_send_registry_lock = ReentrantLock()
+    const _nw_next_send_id = Ref{UInt64}(UInt64(1))
 
     function _nw_register_socket!(sock::NWSocket)
-        key = pointer_from_objref(sock)
         lock(_nw_socket_registry_lock)
+        id = _nw_next_socket_id[]
+        _nw_next_socket_id[] = id + 1
+        key = Ptr{Cvoid}(UInt(id))
         _nw_socket_registry[key] = sock
         unlock(_nw_socket_registry_lock)
         sock.registry_key = key
@@ -77,18 +81,24 @@
     end
 
     function _nw_register_send!(ctx::NWSendContext)::Ptr{Cvoid}
-        key = pointer_from_objref(ctx)
         lock(_nw_send_registry_lock)
+        id = _nw_next_send_id[]
+        _nw_next_send_id[] = id + 1
+        key = Ptr{Cvoid}(UInt(id))
         _nw_send_registry[key] = ctx
         unlock(_nw_send_registry_lock)
+        ctx.registry_key = key
         return key
     end
 
     function _nw_unregister_send!(ctx::NWSendContext)
-        key = pointer_from_objref(ctx)
-        lock(_nw_send_registry_lock)
-        delete!(_nw_send_registry, key)
-        unlock(_nw_send_registry_lock)
+        key = ctx.registry_key
+        if key != C_NULL
+            lock(_nw_send_registry_lock)
+            delete!(_nw_send_registry, key)
+            unlock(_nw_send_registry_lock)
+            ctx.registry_key = C_NULL
+        end
         return nothing
     end
 
@@ -114,7 +124,7 @@
     @inline _nw_unlock_base(sock::NWSocket) = unlock(sock.base_socket_lock)
     @inline function _nw_socket_ptr(sock::NWSocket)::Ptr{Cvoid}
         key = sock.registry_key
-        return key == C_NULL ? pointer_from_objref(sock) : key
+        return key == C_NULL ? Ptr{Cvoid}(objectid(sock)) : key
     end
 
     function _nw_validate_event_loop(event_loop::Union{EventLoop, Nothing})::Bool
@@ -583,7 +593,7 @@
         else
             _nw_ensure_callbacks!()
             dispatch_queue = nw_socket.event_loop.impl_data.dispatch_queue
-            verify_ctx = pointer_from_objref(nw_socket)
+            verify_ctx = _nw_socket_ptr(nw_socket)
             blk = BlocksABI.make_stack_block_ctx(_nw_tls_verify_cb[], verify_ctx)
             try
                 ccall(
@@ -1037,7 +1047,7 @@
         end
 
         _nw_ensure_callbacks!()
-        recv_ctx = pointer_from_objref(nw_socket)
+        recv_ctx = _nw_socket_ptr(nw_socket)
         blk = BlocksABI.make_stack_block_ctx(_nw_receive_cb[], recv_ctx)
         try
             ccall(
@@ -1497,7 +1507,7 @@
             _nw_set_socket_state!(new_nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTED_READ)) | Int(_nw_state_mask(NWSocketState.CONNECTED_WRITE)))
 
             _nw_ensure_callbacks!()
-            st_ctx = pointer_from_objref(new_nw_socket)
+            st_ctx = _nw_socket_ptr(new_nw_socket)
             st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
             try
                 ccall(
@@ -1713,7 +1723,7 @@
         nw_socket.mode = NWSocketMode.CONNECTION
 
         _nw_ensure_callbacks!()
-        st_ctx = pointer_from_objref(nw_socket)
+        st_ctx = _nw_socket_ptr(nw_socket)
         st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
         try
             ccall(
@@ -1907,7 +1917,7 @@
         end
 
         _nw_ensure_callbacks!()
-        lctx = pointer_from_objref(nw_socket)
+        lctx = _nw_socket_ptr(nw_socket)
         state_blk = BlocksABI.make_stack_block_ctx(_nw_listener_state_changed_cb[], lctx)
         conn_blk = BlocksABI.make_stack_block_ctx(_nw_listener_new_conn_cb[], lctx)
 	        try

@@ -65,6 +65,14 @@
         return (read_fd, write_fd)
     end
 
+    @inline function _kqueue_registry_ptr(id::UInt64)::Ptr{Cvoid}
+        return Ptr{Cvoid}(UInt(id))
+    end
+
+    @inline function _kqueue_registry_id(ptr::Ptr{Cvoid})::UInt64
+        return UInt64(UInt(ptr))
+    end
+
     # Create a new kqueue event loop
     function event_loop_new_with_kqueue(
             options::EventLoopOptions,
@@ -417,7 +425,7 @@
 
         # Build changelist for kevent
         changelist = Vector{Kevent}()
-        handle_data_ptr = pointer_from_objref(task_data)
+        handle_data_ptr = _kqueue_registry_ptr(task_data.registry_id)
 
         if (task_data.events_subscribed & Int(IoEventType.READABLE)) != 0
             push!(
@@ -520,12 +528,17 @@
 
         handle_data = KqueueHandleData(handle, event_loop, on_event, user_data, events)
 
-        # Store handle data reference
-        handle_data_ptr = pointer_from_objref(handle_data)
-        handle.additional_data = handle_data_ptr
+        # Stable udata token (not a raw Julia object pointer).
+        impl = event_loop.impl_data
+        lock(impl.handle_registry_lock)
+        id = impl.next_handle_id
+        impl.next_handle_id += 1
+        handle_data.registry_id = id
+        impl.handle_registry[id] = handle_data
+        unlock(impl.handle_registry_lock)
+
+        handle.additional_data = _kqueue_registry_ptr(id)
         handle.additional_ref = handle_data
-        handle_data.registry_key = handle_data_ptr
-        event_loop.impl_data.handle_registry[handle_data_ptr] = handle_data
 
         # Create subscribe task
         subscribe_fn = (ctx, status) -> kqueue_subscribe_task_callback(ctx, status)
@@ -540,9 +553,11 @@
     function kqueue_cleanup_task_callback(handle_data::KqueueHandleData, status::TaskStatus.T)
         impl = handle_data.event_loop.impl_data
         impl.thread_data.connected_handle_count -= 1
-        if handle_data.registry_key != C_NULL
-            delete!(impl.handle_registry, handle_data.registry_key)
-            handle_data.registry_key = C_NULL
+        if handle_data.registry_id != 0
+            lock(impl.handle_registry_lock)
+            delete!(impl.handle_registry, handle_data.registry_id)
+            unlock(impl.handle_registry_lock)
+            handle_data.registry_id = 0
         end
         return nothing
     end
@@ -562,7 +577,8 @@
             return ErrorResult(raise_error(ERROR_IO_NOT_SUBSCRIBED))
         end
 
-        handle_data = unsafe_pointer_to_objref(handle.additional_data)::KqueueHandleData
+        handle_data = handle.additional_ref
+        handle_data isa KqueueHandleData || return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
         impl = event_loop.impl_data
 
         # If successfully subscribed, remove from kqueue
@@ -599,9 +615,11 @@
             if handle_data.state == HandleState.SUBSCRIBED
                 impl.thread_data.connected_handle_count -= 1
             end
-            if handle_data.registry_key != C_NULL
-                delete!(impl.handle_registry, handle_data.registry_key)
-                handle_data.registry_key = C_NULL
+            if handle_data.registry_id != 0
+                lock(impl.handle_registry_lock)
+                delete!(impl.handle_registry, handle_data.registry_id)
+                unlock(impl.handle_registry_lock)
+                handle_data.registry_id = 0
             end
             handle_data.cleanup_task = nothing
         end
@@ -772,7 +790,10 @@
                     end
 
                     if kevent.udata != C_NULL
-                        handle_data = get(impl.handle_registry, kevent.udata, nothing)
+                        id = _kqueue_registry_id(kevent.udata)
+                        lock(impl.handle_registry_lock)
+                        handle_data = get(impl.handle_registry, id, nothing)
+                        unlock(impl.handle_registry_lock)
                         handle_data === nothing && continue
                         if handle_data.events_this_loop == 0
                             push!(io_handle_events, handle_data)
