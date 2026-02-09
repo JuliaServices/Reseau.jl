@@ -1,7 +1,7 @@
 module EventLoops
 
 # Thin module wrapper that groups event-loop functionality under `Reseau.EventLoops`.
-# The underlying implementations currently live in `src/io/*`.
+# The underlying implementations currently live in `src/sockets/io/*`.
 
 using ..Reseau:
     EventLoop,
@@ -34,4 +34,3 @@ export
     event_loop_thread_is_callers_thread
 
 end # module EventLoops
-

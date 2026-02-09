@@ -1,5 +1,5 @@
 # SecureTransport TLS backend (macOS)
-# Included by src/io/tls_channel_handler.jl
+# Included by src/sockets/io/tls_channel_handler.jl
 
 # === SecureTransport backend (macOS) ===
 const CFTypeRef = Ptr{Cvoid}

@@ -1,5 +1,5 @@
 # s2n TLS backend (Linux)
-# Included by src/io/tls_channel_handler.jl
+# Included by src/sockets/io/tls_channel_handler.jl
 
 # Backend registration (s2n extension on Linux)
 #

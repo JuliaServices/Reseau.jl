@@ -20,6 +20,7 @@ Status (2026-02-08):
   - `TCPSocket <: IO` and `TCPServer` with `connect`/`listen`/`listenany`/`accept` and `getsockname`/`getpeername`
   - first-class TLS integration via keywords on `connect`/`listen` plus `tlsupgrade!(sock)` for explicit upgrades
 - The legacy channel-to-`IO` adapters (`src/io/channel_buffer.jl`, `src/io/bufferio.jl`) have been deleted and their useful behavior folded into `Reseau.Sockets.TCPSocket`. The `BufferIO` dependency was removed from `Project.toml`.
+- `Reseau.Files` is being tracked separately (see PR #4).
 - Tests added:
   - `test/sockets_compat_tests.jl` (TCP + LOCAL + addr/DNS utils, plus TLS echo behind `RESEAU_RUN_TLS_TESTS=1`)
 
@@ -37,11 +38,11 @@ High-level direction: organize the public surface of Reseau into a small number 
 
 Proposed public modules:
 - `Reseau.EventLoops`: event loop types, scheduling, event loop groups, IO-event subscription, timers/delays (libuv-free).
-- `Reseau.Files`: file handles/streams, async IO strategy (threadpool/overlapped/uring later), file watching, and any Base-like filesystem surface.
+- `Reseau.Files`: file handles/streams, async IO strategy (threadpool/overlapped/uring later), file watching, and any Base-like filesystem surface (see PR #4).
 - `Reseau.Sockets`: TCP + LOCAL (named pipes / unix domain sockets), DNS helpers, and TLS integration that makes `connect(...; tls=true)` / `listen(...; tls=true)` work.
 
 What about threads/concurrency?
-- There is a real "runtime/concurrency" layer in this repo today: `src/common/thread.jl`, `src/common/thread_shared.jl`, `src/common/condition_variable.jl`, `src/common/task_scheduler.jl`, `src/io/future.jl`, plus libuv-free sleep/clock utilities.
+- There is a real "runtime/concurrency" layer in this repo today: `src/threads/thread.jl`, `src/threads/thread_shared.jl`, `src/threads/condition_variable.jl`, `src/threads/task_scheduler.jl`, `src/threads/future.jl`, plus libuv-free sleep/clock utilities.
 - This layer is used by both EventLoops (each loop runs on an OS thread) and Sockets/DNS (host resolver runs an OS thread).
 
 Recommendation:
@@ -49,7 +50,7 @@ Recommendation:
   - OS thread lifecycle (`ThreadHandle`, `thread_launch`, managed-join, `thread_current_sleep`)
   - condition variables / synchronization helpers
   - `ScheduledTask`/`TaskScheduler` and `Future`
-- Status: implemented as a public submodule (`src/Threads.jl`). It intentionally re-exports `Base.Threads` bindings (`Event`, `Condition`, etc) while also exposing Reseau's OS-thread/runtime utilities. This keeps existing call-sites that use `Threads.Event` working while giving us a natural home for Reseau runtime pieces.
+- Status: implemented as a public submodule (`src/threads/threads.jl`). It re-exports `Base.Threads` bindings (`Event`, `Condition`, etc) while also exposing Reseau's OS-thread/runtime utilities. This keeps existing call-sites that use `Threads.Event` working while giving us a natural home for Reseau runtime pieces.
 
 ---
 
@@ -112,8 +113,8 @@ DNS + interface enumeration:
 ### A. Low-level sockets (already implemented)
 
 Key files:
-- `src/io/socket.jl` (public socket abstraction + options + endpoints)
-- `src/io/posix_socket_impl.jl`, `src/io/apple_nw_socket_impl.jl`, `src/io/winsock_socket.jl` (platform backends)
+- `src/sockets/io/socket.jl` (public socket abstraction + options + endpoints)
+- `src/sockets/io/posix_socket_impl.jl`, `src/sockets/io/apple_nw_socket_impl.jl`, `src/sockets/io/winsock_socket.jl` (platform backends)
 
 Reseau provides:
 - `SocketDomain`: `IPV4`, `IPV6`, `LOCAL`, `VSOCK`
@@ -128,9 +129,9 @@ Important nuance:
 ### B. Channel pipeline + bootstraps (already implemented)
 
 Key files:
-- `src/io/channel.jl`
-- `src/io/socket_channel_handler.jl`
-- `src/io/channel_bootstrap.jl`
+- `src/sockets/io/channel.jl`
+- `src/sockets/io/socket_channel_handler.jl`
+- `src/sockets/io/channel_bootstrap.jl`
 
 Reseau provides:
 - `ClientBootstrap` and `client_bootstrap_connect!` that do: DNS resolve -> connect attempts -> channel construction -> install socket handler -> optionally install TLS handler -> trigger reads.
@@ -140,7 +141,7 @@ Reseau provides:
 ### C. DNS resolver (already implemented, libuv-free)
 
 Key file:
-- `src/io/host_resolver.jl`
+- `src/sockets/io/host_resolver.jl`
 
 Reseau provides:
 - `HostResolver` with caching and address-family balancing logic.
@@ -151,7 +152,7 @@ Reseau provides:
 ### D. TLS (already implemented)
 
 Key file:
-- `src/io/tls_channel_handler.jl`
+- `src/sockets/io/tls_channel_handler.jl`
 
 Reseau provides:
 - `TlsContextOptions`, `TlsContext`, `TlsConnectionOptions`
@@ -342,7 +343,7 @@ Also run downstream tests after implementation:
 ## Phased TODO
 
 ### Phase 0: Module Refactor Skeleton (done)
-- `Reseau.EventLoops`, `Reseau.Files`, `Reseau.Sockets`, `Reseau.Threads` are now public submodules.
+- `Reseau.EventLoops`, `Reseau.Sockets`, `Reseau.Threads` are now public submodules (`Reseau.Files` is tracked separately; see PR #4).
 
 ### Phase 1: TCP client parity (done)
 - `TCPSocket <: IO` is implemented in `src/sockets/tcp.jl` with the buffering + handler logic folded in.
