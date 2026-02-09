@@ -1898,7 +1898,7 @@ end
                 end
 
                 impl.should_process_task_pre_queue = true
-                Reseau.process_task_pre_queue(el)
+                EventLoops.process_task_pre_queue(el)
 
                 @test isempty(impl.task_pre_queue)
 
