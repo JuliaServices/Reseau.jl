@@ -20,12 +20,12 @@ end
 @testset "Managed thread join" begin
     started = Channel{Nothing}(2)
     stop_flag = Ref(false)
-    opts = Reseau.ThreadOptions(; join_strategy = Reseau.ThreadJoinStrategy.MANAGED)
-    handles = Reseau.ThreadHandle[]
+    opts = Threads.ThreadOptions(; join_strategy = Threads.ThreadJoinStrategy.MANAGED)
+    handles = Threads.ThreadHandle[]
     for _ in 1:2
-        handle = Reseau.ThreadHandle()
+        handle = Threads.ThreadHandle()
         push!(handles, handle)
-        @test Reseau.thread_launch(handle, _ -> begin
+        @test Threads.thread_launch(handle, _ -> begin
             put!(started, nothing)
             while !stop_flag[]
                 sleep(0.001)
@@ -36,47 +36,47 @@ end
     take!(started)
     take!(started)
     stop_flag[] = true
-    @test Reseau.thread_join_all_managed() == Reseau.OP_SUCCESS
-    @test Reseau.thread_get_managed_thread_count() == 0
+    @test Threads.thread_join_all_managed() == Reseau.OP_SUCCESS
+    @test Threads.thread_get_managed_thread_count() == 0
 end
 
 @testset "TaskScheduler cancel" begin
-    scheduler = Reseau.TaskScheduler()
-    status_ch = Channel{Reseau.TaskStatus.T}(1)
-    task = Reseau.ScheduledTask((_, status) -> put!(status_ch, status), nothing; type_tag = "task_cancel")
-    Reseau.task_scheduler_cancel!(scheduler, task)
+    scheduler = Threads.TaskScheduler()
+    status_ch = Channel{Threads.TaskStatus.T}(1)
+    task = Threads.ScheduledTask((_, status) -> put!(status_ch, status), nothing; type_tag = "task_cancel")
+    Threads.task_scheduler_cancel!(scheduler, task)
     @test Base.timedwait(() -> isready(status_ch), 5.0) == :ok
-    @test take!(status_ch) == Reseau.TaskStatus.CANCELED
+    @test take!(status_ch) == Threads.TaskStatus.CANCELED
 end
 
 @testset "TaskScheduler fairness" begin
-    scheduler = Reseau.TaskScheduler()
+    scheduler = Threads.TaskScheduler()
     executed = String[]
 
-    task_a = Reseau.ScheduledTask(
+    task_a = Threads.ScheduledTask(
         (ctx, status) -> begin
-            status == Reseau.TaskStatus.RUN_READY || return nothing
+            status == Threads.TaskStatus.RUN_READY || return nothing
             push!(ctx.executed, "a")
-            task_b = Reseau.ScheduledTask(
+            task_b = Threads.ScheduledTask(
                 (ctx2, status2) -> begin
-                    status2 == Reseau.TaskStatus.RUN_READY || return nothing
+                    status2 == Threads.TaskStatus.RUN_READY || return nothing
                     push!(ctx2.executed, "b")
                     return nothing
                 end,
                 (executed = ctx.executed,);
                 type_tag = "task_b",
             )
-            Reseau.task_scheduler_schedule_now!(ctx.scheduler, task_b)
+            Threads.task_scheduler_schedule_now!(ctx.scheduler, task_b)
             return nothing
         end,
         (executed = executed, scheduler = scheduler);
         type_tag = "task_a",
     )
 
-    Reseau.task_scheduler_schedule_now!(scheduler, task_a)
-    Reseau.task_scheduler_run_all!(scheduler, UInt64(0))
+    Threads.task_scheduler_schedule_now!(scheduler, task_a)
+    Threads.task_scheduler_run_all!(scheduler, UInt64(0))
     @test executed == ["a"]
-    Reseau.task_scheduler_run_all!(scheduler, UInt64(0))
+    Threads.task_scheduler_run_all!(scheduler, UInt64(0))
     @test executed == ["a", "b"]
 end
 
@@ -116,25 +116,25 @@ end
 
 @testset "Thread-local last_error is per Julia thread" begin
     if Base.Threads.nthreads() > 1
-        barrier = Threads.Atomic{Int}(0)
+        barrier = Base.Threads.Atomic{Int}(0)
         tids = Channel{Int}(2)
         errs = Channel{Int}(2)
 
-        t1 = Threads.@spawn begin
-            put!(tids, Threads.threadid())
+        t1 = Base.Threads.@spawn begin
+            put!(tids, Base.Threads.threadid())
             Reseau.raise_error(Reseau.ERROR_INVALID_ARGUMENT)
-            Threads.atomic_add!(barrier, 1)
-            while Threads.atomic_load(barrier) < 2
+            Base.Threads.atomic_add!(barrier, 1)
+            while Base.Threads.atomic_load(barrier) < 2
                 yield()
             end
             put!(errs, Reseau.last_error())
         end
 
-        t2 = Threads.@spawn begin
-            put!(tids, Threads.threadid())
+        t2 = Base.Threads.@spawn begin
+            put!(tids, Base.Threads.threadid())
             Reseau.raise_error(Reseau.ERROR_OOM)
-            Threads.atomic_add!(barrier, 1)
-            while Threads.atomic_load(barrier) < 2
+            Base.Threads.atomic_add!(barrier, 1)
+            while Base.Threads.atomic_load(barrier) < 2
                 yield()
             end
             put!(errs, Reseau.last_error())

@@ -16,18 +16,18 @@ const DEFAULT_KEY_ID = "AABBCCDD"
 const TIMEOUT_SEC = 10.0
 
 @testset "PKCS11 error mapping" begin
-    @test Reseau.pkcs11_error_from_ckr(Reseau.CKR_FUNCTION_NOT_SUPPORTED) ==
-        Reseau.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
-    @test Reseau.pkcs11_error_from_ckr(0xdeadbeef) ==
-        Reseau.ERROR_IO_PKCS11_UNKNOWN_CRYPTOKI_RETURN_VALUE
-    @test Reseau.pkcs11_ckr_str(Reseau.CKR_FUNCTION_NOT_SUPPORTED) == "CKR_FUNCTION_NOT_SUPPORTED"
-    @test Reseau.pkcs11_ckr_str(0xdeadbeef) == "CKR_UNKNOWN"
+    @test Sockets.pkcs11_error_from_ckr(Sockets.CKR_FUNCTION_NOT_SUPPORTED) ==
+        EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
+    @test Sockets.pkcs11_error_from_ckr(0xdeadbeef) ==
+        EventLoops.ERROR_IO_PKCS11_UNKNOWN_CRYPTOKI_RETURN_VALUE
+    @test Sockets.pkcs11_ckr_str(Sockets.CKR_FUNCTION_NOT_SUPPORTED) == "CKR_FUNCTION_NOT_SUPPORTED"
+    @test Sockets.pkcs11_ckr_str(0xdeadbeef) == "CKR_UNKNOWN"
 end
 
 mutable struct Pkcs11Tester
     lib_path::String
     token_dir::String
-    lib::Union{Reseau.Pkcs11Lib, Nothing}
+    lib::Union{Sockets.Pkcs11Lib, Nothing}
 end
 
 function pkcs11_env_ready()
@@ -45,7 +45,7 @@ function pkcs11_clear_softhsm!(tester::Pkcs11Tester)
 end
 
 function pkcs11_tester_init_without_load!(tester::Pkcs11Tester)
-    Reseau.io_library_init()
+    Sockets.io_library_init()
     tester.lib_path = get(ENV, PKCS11_ENV_LIB, "")
     tester.token_dir = get(ENV, PKCS11_ENV_TOKEN_DIR, "")
     pkcs11_clear_softhsm!(tester)
@@ -55,26 +55,26 @@ end
 
 function pkcs11_tester_init!(
         tester::Pkcs11Tester;
-        behavior::Reseau.Pkcs11LibBehavior.T = Reseau.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
+        behavior::Sockets.Pkcs11LibBehavior.T = Sockets.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
     )
     pkcs11_tester_init_without_load!(tester)
-    opts = Reseau.Pkcs11LibOptions(;
+    opts = Sockets.Pkcs11LibOptions(;
         filename = tester.lib_path,
         initialize_finalize_behavior = behavior,
     )
-    lib = Reseau.pkcs11_lib_new(opts)
-    @test lib isa Reseau.Pkcs11Lib
-    tester.lib = lib isa Reseau.Pkcs11Lib ? lib : nothing
+    lib = Sockets.pkcs11_lib_new(opts)
+    @test lib isa Sockets.Pkcs11Lib
+    tester.lib = lib isa Sockets.Pkcs11Lib ? lib : nothing
     return tester.lib
 end
 
 function pkcs11_tester_cleanup!(tester::Pkcs11Tester)
     if tester.lib !== nothing
-        Reseau.pkcs11_lib_release(tester.lib)
+        Sockets.pkcs11_lib_release(tester.lib)
         tester.lib = nothing
     end
     pkcs11_clear_softhsm!(tester)
-    Reseau.io_library_clean_up()
+    Sockets.io_library_clean_up()
     tester.lib_path = ""
     tester.token_dir = ""
     return nothing
@@ -82,88 +82,88 @@ end
 
 function pkcs11_reload_hsm!(tester::Pkcs11Tester)
     if tester.lib !== nothing
-        Reseau.pkcs11_lib_release(tester.lib)
+        Sockets.pkcs11_lib_release(tester.lib)
         tester.lib = nothing
     end
-    opts = Reseau.Pkcs11LibOptions(;
+    opts = Sockets.Pkcs11LibOptions(;
         filename = tester.lib_path,
-        initialize_finalize_behavior = Reseau.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
+        initialize_finalize_behavior = Sockets.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
     )
-    lib = Reseau.pkcs11_lib_new(opts)
-    @test lib isa Reseau.Pkcs11Lib
-    tester.lib = lib isa Reseau.Pkcs11Lib ? lib : nothing
+    lib = Sockets.pkcs11_lib_new(opts)
+    @test lib isa Sockets.Pkcs11Lib
+    tester.lib = lib isa Sockets.Pkcs11Lib ? lib : nothing
     return tester.lib
 end
 
 function pkcs11_empty_token_info()
-    return Reseau.CK_TOKEN_INFO(
+    return Sockets.CK_TOKEN_INFO(
         ntuple(_ -> UInt8(0x20), 32),
         ntuple(_ -> UInt8(0x20), 32),
         ntuple(_ -> UInt8(0x20), 16),
         ntuple(_ -> UInt8(0x20), 16),
-        Reseau.CK_FLAGS(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_ULONG(0),
-        Reseau.CK_VERSION(0, 0),
-        Reseau.CK_VERSION(0, 0),
+        Sockets.CK_FLAGS(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_ULONG(0),
+        Sockets.CK_VERSION(0, 0),
+        Sockets.CK_VERSION(0, 0),
         ntuple(_ -> UInt8(0x20), 16),
     )
 end
 
-function pkcs11_find_slot(tester::Pkcs11Tester, token_info::Union{Reseau.CK_TOKEN_INFO, Nothing})
+function pkcs11_find_slot(tester::Pkcs11Tester, token_info::Union{Sockets.CK_TOKEN_INFO, Nothing})
     @test tester.lib !== nothing
-    fl_ptr = Reseau.pkcs11_lib_get_function_list(tester.lib::Reseau.Pkcs11Lib)
+    fl_ptr = Sockets.pkcs11_lib_get_function_list(tester.lib::Sockets.Pkcs11Lib)
     @test fl_ptr != C_NULL
     fl = unsafe_load(fl_ptr)
 
-    slot_count = Ref{Reseau.CK_ULONG}(0)
+    slot_count = Ref{Sockets.CK_ULONG}(0)
     rv = ccall(
         fl.C_GetSlotList,
-        Reseau.CK_RV,
-        (Reseau.CK_BBOOL, Ptr{Reseau.CK_SLOT_ID}, Ptr{Reseau.CK_ULONG}),
-        Reseau.CK_TRUE,
+        Sockets.CK_RV,
+        (Sockets.CK_BBOOL, Ptr{Sockets.CK_SLOT_ID}, Ptr{Sockets.CK_ULONG}),
+        Sockets.CK_TRUE,
         C_NULL,
         slot_count,
     )
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
 
     count = Int(slot_count[])
-    slots = Memory{Reseau.CK_SLOT_ID}(undef, count)
+    slots = Memory{Sockets.CK_SLOT_ID}(undef, count)
     rv = GC.@preserve slots begin
         ccall(
             fl.C_GetSlotList,
-            Reseau.CK_RV,
-            (Reseau.CK_BBOOL, Ptr{Reseau.CK_SLOT_ID}, Ptr{Reseau.CK_ULONG}),
-            Reseau.CK_FALSE,
+            Sockets.CK_RV,
+            (Sockets.CK_BBOOL, Ptr{Sockets.CK_SLOT_ID}, Ptr{Sockets.CK_ULONG}),
+            Sockets.CK_FALSE,
             pointer(slots),
             slot_count,
         )
     end
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
 
-    found_slot = Reseau.CK_SLOT_ID(0)
+    found_slot = Sockets.CK_SLOT_ID(0)
     matches = 0
     for i in 1:count
         info_ref = Ref(pkcs11_empty_token_info())
         rv = ccall(
             fl.C_GetTokenInfo,
-            Reseau.CK_RV,
-            (Reseau.CK_SLOT_ID, Ptr{Reseau.CK_TOKEN_INFO}),
+            Sockets.CK_RV,
+            (Sockets.CK_SLOT_ID, Ptr{Sockets.CK_TOKEN_INFO}),
             slots[i],
             info_ref,
         )
-        @test rv == Reseau.CKR_OK
+        @test rv == Sockets.CKR_OK
         info = info_ref[]
         if token_info === nothing
-            if (info.flags & Reseau.CKF_TOKEN_INITIALIZED) == 0
+            if (info.flags & Sockets.CKF_TOKEN_INITIALIZED) == 0
                 found_slot = slots[i]
                 matches += 1
             end
@@ -190,7 +190,7 @@ function pkcs11_softhsm_create_slot(
         user_pin::AbstractString,
     )
     @test tester.lib !== nothing
-    fl = unsafe_load(Reseau.pkcs11_lib_get_function_list(tester.lib::Reseau.Pkcs11Lib))
+    fl = unsafe_load(Sockets.pkcs11_lib_get_function_list(tester.lib::Sockets.Pkcs11Lib))
 
     label_buf = Memory{UInt8}(undef, 32)
     fill!(label_buf, UInt8(' '))
@@ -205,62 +205,62 @@ function pkcs11_softhsm_create_slot(
     GC.@preserve label_buf so_bytes user_bytes begin
         rv = ccall(
             fl.C_InitToken,
-            Reseau.CK_RV,
-            (Reseau.CK_SLOT_ID, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}),
+            Sockets.CK_RV,
+            (Sockets.CK_SLOT_ID, Ptr{UInt8}, Sockets.CK_ULONG, Ptr{UInt8}),
             slot_id,
             pointer(so_bytes),
-            Reseau.CK_ULONG(length(so_bytes)),
+            Sockets.CK_ULONG(length(so_bytes)),
             pointer(label_buf),
         )
-        @test rv == Reseau.CKR_OK
+        @test rv == Sockets.CKR_OK
 
-        session_ref = Ref{Reseau.CK_SESSION_HANDLE}(0)
+        session_ref = Ref{Sockets.CK_SESSION_HANDLE}(0)
         rv = ccall(
             fl.C_OpenSession,
-            Reseau.CK_RV,
-            (Reseau.CK_SLOT_ID, Reseau.CK_FLAGS, Ptr{Cvoid}, Ptr{Cvoid}, Ref{Reseau.CK_SESSION_HANDLE}),
+            Sockets.CK_RV,
+            (Sockets.CK_SLOT_ID, Sockets.CK_FLAGS, Ptr{Cvoid}, Ptr{Cvoid}, Ref{Sockets.CK_SESSION_HANDLE}),
             slot_id,
-            Reseau.CKF_SERIAL_SESSION | Reseau.CKF_RW_SESSION,
+            Sockets.CKF_SERIAL_SESSION | Sockets.CKF_RW_SESSION,
             C_NULL,
             C_NULL,
             session_ref,
         )
-        @test rv == Reseau.CKR_OK
+        @test rv == Sockets.CKR_OK
         session = session_ref[]
 
         rv = ccall(
             fl.C_Login,
-            Reseau.CK_RV,
-            (Reseau.CK_SESSION_HANDLE, Reseau.CK_ULONG, Ptr{UInt8}, Reseau.CK_ULONG),
+            Sockets.CK_RV,
+            (Sockets.CK_SESSION_HANDLE, Sockets.CK_ULONG, Ptr{UInt8}, Sockets.CK_ULONG),
             session,
-            Reseau.CKU_SO,
+            Sockets.CKU_SO,
             pointer(so_bytes),
-            Reseau.CK_ULONG(length(so_bytes)),
+            Sockets.CK_ULONG(length(so_bytes)),
         )
-        @test rv == Reseau.CKR_OK
+        @test rv == Sockets.CKR_OK
 
         rv = ccall(
             fl.C_InitPIN,
-            Reseau.CK_RV,
-            (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG),
+            Sockets.CK_RV,
+            (Sockets.CK_SESSION_HANDLE, Ptr{UInt8}, Sockets.CK_ULONG),
             session,
             pointer(user_bytes),
-            Reseau.CK_ULONG(length(user_bytes)),
+            Sockets.CK_ULONG(length(user_bytes)),
         )
-        @test rv == Reseau.CKR_OK
+        @test rv == Sockets.CKR_OK
     end
 
     info_ref = Ref(pkcs11_empty_token_info())
     rv = ccall(
         fl.C_GetTokenInfo,
-        Reseau.CK_RV,
-        (Reseau.CK_SLOT_ID, Ptr{Reseau.CK_TOKEN_INFO}),
+        Sockets.CK_RV,
+        (Sockets.CK_SLOT_ID, Ptr{Sockets.CK_TOKEN_INFO}),
         slot_id,
         info_ref,
     )
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
 
-    @test pkcs11_reload_hsm!(tester) isa Reseau.Pkcs11Lib
+    @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
     new_slot = pkcs11_find_slot(tester, info_ref[])
     return new_slot
 end
@@ -269,12 +269,12 @@ function pkcs11_tester_init_with_session_login!(
         tester::Pkcs11Tester,
         token_label::AbstractString,
     )
-    @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+    @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
     slot = pkcs11_softhsm_create_slot(tester, token_label, SO_PIN, USER_PIN)
-    session = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-    @test session isa Reseau.CK_SESSION_HANDLE
+    session = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+    @test session isa Sockets.CK_SESSION_HANDLE
 
-    login_res = Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN))
+    login_res = Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN))
     @test login_res === nothing
     return slot, session
 end
@@ -282,36 +282,36 @@ end
 function pkcs11_rsa_encrypt(
         tester::Pkcs11Tester,
         message::Reseau.ByteCursor,
-        session::Reseau.CK_SESSION_HANDLE,
-        public_key::Reseau.CK_OBJECT_HANDLE,
+        session::Sockets.CK_SESSION_HANDLE,
+        public_key::Sockets.CK_OBJECT_HANDLE,
     )
-    fl = unsafe_load(Reseau.pkcs11_lib_get_function_list(tester.lib::Reseau.Pkcs11Lib))
-    mechanism = Reseau.CK_MECHANISM(Reseau.CKM_RSA_PKCS, C_NULL, Reseau.CK_ULONG(0))
+    fl = unsafe_load(Sockets.pkcs11_lib_get_function_list(tester.lib::Sockets.Pkcs11Lib))
+    mechanism = Sockets.CK_MECHANISM(Sockets.CKM_RSA_PKCS, C_NULL, Sockets.CK_ULONG(0))
     rv = ccall(
         fl.C_EncryptInit,
-        Reseau.CK_RV,
-        (Reseau.CK_SESSION_HANDLE, Ref{Reseau.CK_MECHANISM}, Reseau.CK_OBJECT_HANDLE),
+        Sockets.CK_RV,
+        (Sockets.CK_SESSION_HANDLE, Ref{Sockets.CK_MECHANISM}, Sockets.CK_OBJECT_HANDLE),
         session,
         Ref(mechanism),
         public_key,
     )
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
 
-    cipher_len = Ref{Reseau.CK_ULONG}(0)
+    cipher_len = Ref{Sockets.CK_ULONG}(0)
     GC.@preserve message begin
         msg_ptr = message.len > 0 ? Ptr{UInt8}(pointer(message.ptr)) : Ptr{UInt8}(C_NULL)
         rv = ccall(
             fl.C_Encrypt,
-            Reseau.CK_RV,
-            (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}, Ptr{Reseau.CK_ULONG}),
+            Sockets.CK_RV,
+            (Sockets.CK_SESSION_HANDLE, Ptr{UInt8}, Sockets.CK_ULONG, Ptr{UInt8}, Ptr{Sockets.CK_ULONG}),
             session,
             msg_ptr,
-            Reseau.CK_ULONG(message.len),
+            Sockets.CK_ULONG(message.len),
             C_NULL,
             cipher_len,
         )
     end
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
 
     output = Reseau.ByteBuffer(Int(cipher_len[]))
     GC.@preserve message output begin
@@ -319,16 +319,16 @@ function pkcs11_rsa_encrypt(
         out_ptr = cipher_len[] > 0 ? Ptr{UInt8}(pointer(output.mem)) : Ptr{UInt8}(C_NULL)
         rv = ccall(
             fl.C_Encrypt,
-            Reseau.CK_RV,
-            (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}, Ptr{Reseau.CK_ULONG}),
+            Sockets.CK_RV,
+            (Sockets.CK_SESSION_HANDLE, Ptr{UInt8}, Sockets.CK_ULONG, Ptr{UInt8}, Ptr{Sockets.CK_ULONG}),
             session,
             msg_ptr,
-            Reseau.CK_ULONG(message.len),
+            Sockets.CK_ULONG(message.len),
             out_ptr,
             cipher_len,
         )
     end
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
     output.len = Csize_t(cipher_len[])
     return output
 end
@@ -337,109 +337,109 @@ function pkcs11_verify_signature(
         tester::Pkcs11Tester,
         message::Reseau.ByteCursor,
         signature::Reseau.ByteBuffer,
-        session::Reseau.CK_SESSION_HANDLE,
-        public_key::Reseau.CK_OBJECT_HANDLE,
-        mechanism_type::Reseau.CK_MECHANISM_TYPE,
+        session::Sockets.CK_SESSION_HANDLE,
+        public_key::Sockets.CK_OBJECT_HANDLE,
+        mechanism_type::Sockets.CK_MECHANISM_TYPE,
     )
-    fl = unsafe_load(Reseau.pkcs11_lib_get_function_list(tester.lib::Reseau.Pkcs11Lib))
-    mechanism = Reseau.CK_MECHANISM(mechanism_type, C_NULL, Reseau.CK_ULONG(0))
+    fl = unsafe_load(Sockets.pkcs11_lib_get_function_list(tester.lib::Sockets.Pkcs11Lib))
+    mechanism = Sockets.CK_MECHANISM(mechanism_type, C_NULL, Sockets.CK_ULONG(0))
     rv = ccall(
         fl.C_VerifyInit,
-        Reseau.CK_RV,
-        (Reseau.CK_SESSION_HANDLE, Ref{Reseau.CK_MECHANISM}, Reseau.CK_OBJECT_HANDLE),
+        Sockets.CK_RV,
+        (Sockets.CK_SESSION_HANDLE, Ref{Sockets.CK_MECHANISM}, Sockets.CK_OBJECT_HANDLE),
         session,
         Ref(mechanism),
         public_key,
     )
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
 
     GC.@preserve message signature begin
         msg_ptr = message.len > 0 ? Ptr{UInt8}(pointer(message.ptr)) : Ptr{UInt8}(C_NULL)
         sig_ptr = signature.len > 0 ? Ptr{UInt8}(pointer(signature.mem)) : Ptr{UInt8}(C_NULL)
         rv = ccall(
             fl.C_Verify,
-            Reseau.CK_RV,
-            (Reseau.CK_SESSION_HANDLE, Ptr{UInt8}, Reseau.CK_ULONG, Ptr{UInt8}, Reseau.CK_ULONG),
+            Sockets.CK_RV,
+            (Sockets.CK_SESSION_HANDLE, Ptr{UInt8}, Sockets.CK_ULONG, Ptr{UInt8}, Sockets.CK_ULONG),
             session,
             msg_ptr,
-            Reseau.CK_ULONG(message.len),
+            Sockets.CK_ULONG(message.len),
             sig_ptr,
-            Reseau.CK_ULONG(signature.len),
+            Sockets.CK_ULONG(signature.len),
         )
     end
-    @test rv == Reseau.CKR_OK
+    @test rv == Sockets.CKR_OK
     return nothing
 end
 
 function pkcs11_create_rsa_key(
         tester::Pkcs11Tester,
-        session::Reseau.CK_SESSION_HANDLE,
+        session::Sockets.CK_SESSION_HANDLE,
         key_label::AbstractString,
         key_id::AbstractString,
         key_length::Integer,
     )
-    fl = unsafe_load(Reseau.pkcs11_lib_get_function_list(tester.lib::Reseau.Pkcs11Lib))
+    fl = unsafe_load(Sockets.pkcs11_lib_get_function_list(tester.lib::Sockets.Pkcs11Lib))
 
-    smech = Reseau.CK_MECHANISM(Reseau.CKM_RSA_PKCS_KEY_PAIR_GEN, C_NULL, Reseau.CK_ULONG(0))
-    trueval = Ref{Reseau.CK_BBOOL}(Reseau.CK_TRUE)
-    falseval = Ref{Reseau.CK_BBOOL}(Reseau.CK_FALSE)
-    modulus = Ref{Reseau.CK_ULONG}(Reseau.CK_ULONG(key_length))
+    smech = Sockets.CK_MECHANISM(Sockets.CKM_RSA_PKCS_KEY_PAIR_GEN, C_NULL, Sockets.CK_ULONG(0))
+    trueval = Ref{Sockets.CK_BBOOL}(Sockets.CK_TRUE)
+    falseval = Ref{Sockets.CK_BBOOL}(Sockets.CK_FALSE)
+    modulus = Ref{Sockets.CK_ULONG}(Sockets.CK_ULONG(key_length))
 
-    public_attrs = Memory{Reseau.CK_ATTRIBUTE}(undef, 2)
-    public_attrs[1] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_VERIFY,
-        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.CK_BBOOL}, trueval)),
-        Reseau.CK_ULONG(sizeof(Reseau.CK_BBOOL)),
+    public_attrs = Memory{Sockets.CK_ATTRIBUTE}(undef, 2)
+    public_attrs[1] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_VERIFY,
+        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Sockets.CK_BBOOL}, trueval)),
+        Sockets.CK_ULONG(sizeof(Sockets.CK_BBOOL)),
     )
-    public_attrs[2] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_MODULUS_BITS,
-        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.CK_ULONG}, modulus)),
-        Reseau.CK_ULONG(sizeof(Reseau.CK_ULONG)),
+    public_attrs[2] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_MODULUS_BITS,
+        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Sockets.CK_ULONG}, modulus)),
+        Sockets.CK_ULONG(sizeof(Sockets.CK_ULONG)),
     )
 
     label_bytes = Vector{UInt8}(codeunits(key_label))
     id_bytes = Vector{UInt8}(codeunits(key_id))
-    private_attrs = Memory{Reseau.CK_ATTRIBUTE}(undef, 4)
-    private_attrs[1] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_LABEL,
+    private_attrs = Memory{Sockets.CK_ATTRIBUTE}(undef, 4)
+    private_attrs[1] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_LABEL,
         Ptr{Cvoid}(pointer(label_bytes)),
-        Reseau.CK_ULONG(length(label_bytes)),
+        Sockets.CK_ULONG(length(label_bytes)),
     )
-    private_attrs[2] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_ID,
+    private_attrs[2] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_ID,
         Ptr{Cvoid}(pointer(id_bytes)),
-        Reseau.CK_ULONG(length(id_bytes)),
+        Sockets.CK_ULONG(length(id_bytes)),
     )
-    private_attrs[3] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_SIGN,
-        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.CK_BBOOL}, trueval)),
-        Reseau.CK_ULONG(sizeof(Reseau.CK_BBOOL)),
+    private_attrs[3] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_SIGN,
+        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Sockets.CK_BBOOL}, trueval)),
+        Sockets.CK_ULONG(sizeof(Sockets.CK_BBOOL)),
     )
-    private_attrs[4] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_EXTRACTABLE,
-        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.CK_BBOOL}, falseval)),
-        Reseau.CK_ULONG(sizeof(Reseau.CK_BBOOL)),
+    private_attrs[4] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_EXTRACTABLE,
+        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Sockets.CK_BBOOL}, falseval)),
+        Sockets.CK_ULONG(sizeof(Sockets.CK_BBOOL)),
     )
 
-    priv_ref = Ref{Reseau.CK_OBJECT_HANDLE}(Reseau.CK_INVALID_HANDLE)
-    pub_ref = Ref{Reseau.CK_OBJECT_HANDLE}(Reseau.CK_INVALID_HANDLE)
+    priv_ref = Ref{Sockets.CK_OBJECT_HANDLE}(Sockets.CK_INVALID_HANDLE)
+    pub_ref = Ref{Sockets.CK_OBJECT_HANDLE}(Sockets.CK_INVALID_HANDLE)
 
     GC.@preserve public_attrs private_attrs label_bytes id_bytes trueval falseval modulus begin
         rv = ccall(
             fl.C_GenerateKeyPair,
-            Reseau.CK_RV,
-            (Reseau.CK_SESSION_HANDLE, Ref{Reseau.CK_MECHANISM}, Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG,
-             Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG, Ref{Reseau.CK_OBJECT_HANDLE}, Ref{Reseau.CK_OBJECT_HANDLE}),
+            Sockets.CK_RV,
+            (Sockets.CK_SESSION_HANDLE, Ref{Sockets.CK_MECHANISM}, Ptr{Sockets.CK_ATTRIBUTE}, Sockets.CK_ULONG,
+             Ptr{Sockets.CK_ATTRIBUTE}, Sockets.CK_ULONG, Ref{Sockets.CK_OBJECT_HANDLE}, Ref{Sockets.CK_OBJECT_HANDLE}),
             session,
             Ref(smech),
             pointer(public_attrs),
-            Reseau.CK_ULONG(length(public_attrs)),
+            Sockets.CK_ULONG(length(public_attrs)),
             pointer(private_attrs),
-            Reseau.CK_ULONG(length(private_attrs)),
+            Sockets.CK_ULONG(length(private_attrs)),
             pub_ref,
             priv_ref,
         )
-        @test rv == Reseau.CKR_OK
+        @test rv == Sockets.CKR_OK
     end
 
     return priv_ref[], pub_ref[]
@@ -449,71 +449,71 @@ const EC_P256_PARAMS = Memory{UInt8}([0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 
 
 function pkcs11_create_ec_key(
         tester::Pkcs11Tester,
-        session::Reseau.CK_SESSION_HANDLE,
+        session::Sockets.CK_SESSION_HANDLE,
         key_label::AbstractString,
         key_id::AbstractString,
     )
-    fl = unsafe_load(Reseau.pkcs11_lib_get_function_list(tester.lib::Reseau.Pkcs11Lib))
-    smech = Reseau.CK_MECHANISM(Reseau.CKM_EC_KEY_PAIR_GEN, C_NULL, Reseau.CK_ULONG(0))
+    fl = unsafe_load(Sockets.pkcs11_lib_get_function_list(tester.lib::Sockets.Pkcs11Lib))
+    smech = Sockets.CK_MECHANISM(Sockets.CKM_EC_KEY_PAIR_GEN, C_NULL, Sockets.CK_ULONG(0))
 
-    trueval = Ref{Reseau.CK_BBOOL}(Reseau.CK_TRUE)
-    falseval = Ref{Reseau.CK_BBOOL}(Reseau.CK_FALSE)
+    trueval = Ref{Sockets.CK_BBOOL}(Sockets.CK_TRUE)
+    falseval = Ref{Sockets.CK_BBOOL}(Sockets.CK_FALSE)
 
-    public_attrs = Memory{Reseau.CK_ATTRIBUTE}(undef, 2)
-    public_attrs[1] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_EC_PARAMS,
+    public_attrs = Memory{Sockets.CK_ATTRIBUTE}(undef, 2)
+    public_attrs[1] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_EC_PARAMS,
         Ptr{Cvoid}(pointer(EC_P256_PARAMS)),
-        Reseau.CK_ULONG(length(EC_P256_PARAMS)),
+        Sockets.CK_ULONG(length(EC_P256_PARAMS)),
     )
-    public_attrs[2] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_VERIFY,
-        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.CK_BBOOL}, trueval)),
-        Reseau.CK_ULONG(sizeof(Reseau.CK_BBOOL)),
+    public_attrs[2] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_VERIFY,
+        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Sockets.CK_BBOOL}, trueval)),
+        Sockets.CK_ULONG(sizeof(Sockets.CK_BBOOL)),
     )
 
     label_bytes = Vector{UInt8}(codeunits(key_label))
     id_bytes = Vector{UInt8}(codeunits(key_id))
-    private_attrs = Memory{Reseau.CK_ATTRIBUTE}(undef, 4)
-    private_attrs[1] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_LABEL,
+    private_attrs = Memory{Sockets.CK_ATTRIBUTE}(undef, 4)
+    private_attrs[1] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_LABEL,
         Ptr{Cvoid}(pointer(label_bytes)),
-        Reseau.CK_ULONG(length(label_bytes)),
+        Sockets.CK_ULONG(length(label_bytes)),
     )
-    private_attrs[2] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_ID,
+    private_attrs[2] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_ID,
         Ptr{Cvoid}(pointer(id_bytes)),
-        Reseau.CK_ULONG(length(id_bytes)),
+        Sockets.CK_ULONG(length(id_bytes)),
     )
-    private_attrs[3] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_SIGN,
-        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.CK_BBOOL}, trueval)),
-        Reseau.CK_ULONG(sizeof(Reseau.CK_BBOOL)),
+    private_attrs[3] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_SIGN,
+        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Sockets.CK_BBOOL}, trueval)),
+        Sockets.CK_ULONG(sizeof(Sockets.CK_BBOOL)),
     )
-    private_attrs[4] = Reseau.CK_ATTRIBUTE(
-        Reseau.CKA_EXTRACTABLE,
-        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Reseau.CK_BBOOL}, falseval)),
-        Reseau.CK_ULONG(sizeof(Reseau.CK_BBOOL)),
+    private_attrs[4] = Sockets.CK_ATTRIBUTE(
+        Sockets.CKA_EXTRACTABLE,
+        Ptr{Cvoid}(Base.unsafe_convert(Ptr{Sockets.CK_BBOOL}, falseval)),
+        Sockets.CK_ULONG(sizeof(Sockets.CK_BBOOL)),
     )
 
-    priv_ref = Ref{Reseau.CK_OBJECT_HANDLE}(Reseau.CK_INVALID_HANDLE)
-    pub_ref = Ref{Reseau.CK_OBJECT_HANDLE}(Reseau.CK_INVALID_HANDLE)
+    priv_ref = Ref{Sockets.CK_OBJECT_HANDLE}(Sockets.CK_INVALID_HANDLE)
+    pub_ref = Ref{Sockets.CK_OBJECT_HANDLE}(Sockets.CK_INVALID_HANDLE)
 
     GC.@preserve public_attrs private_attrs label_bytes id_bytes trueval falseval EC_P256_PARAMS begin
         rv = ccall(
             fl.C_GenerateKeyPair,
-            Reseau.CK_RV,
-            (Reseau.CK_SESSION_HANDLE, Ref{Reseau.CK_MECHANISM}, Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG,
-             Ptr{Reseau.CK_ATTRIBUTE}, Reseau.CK_ULONG, Ref{Reseau.CK_OBJECT_HANDLE}, Ref{Reseau.CK_OBJECT_HANDLE}),
+            Sockets.CK_RV,
+            (Sockets.CK_SESSION_HANDLE, Ref{Sockets.CK_MECHANISM}, Ptr{Sockets.CK_ATTRIBUTE}, Sockets.CK_ULONG,
+             Ptr{Sockets.CK_ATTRIBUTE}, Sockets.CK_ULONG, Ref{Sockets.CK_OBJECT_HANDLE}, Ref{Sockets.CK_OBJECT_HANDLE}),
             session,
             Ref(smech),
             pointer(public_attrs),
-            Reseau.CK_ULONG(length(public_attrs)),
+            Sockets.CK_ULONG(length(public_attrs)),
             pointer(private_attrs),
-            Reseau.CK_ULONG(length(private_attrs)),
+            Sockets.CK_ULONG(length(private_attrs)),
             pub_ref,
             priv_ref,
         )
-        @test rv == Reseau.CKR_OK
+        @test rv == Sockets.CKR_OK
     end
 
     return priv_ref[], pub_ref[]
@@ -527,7 +527,7 @@ end
 @testset "PKCS11 ASN1 bigint" begin
     function verify_bigint(input::AbstractVector{UInt8}, expected::AbstractVector{UInt8})
         buf_ref = Ref(Reseau.ByteBuffer(length(input) + 4))
-        res = Reseau.pkcs11_asn1_enc_ubigint(buf_ref, Reseau.ByteCursor(input))
+        res = Sockets.pkcs11_asn1_enc_ubigint(buf_ref, Reseau.ByteCursor(input))
         @test res === nothing
         buf = buf_ref[]
         @test buf.len == length(expected)
@@ -556,7 +556,7 @@ end
     @testset "pkcs11 lib sanity check" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -566,24 +566,24 @@ end
         tester = Pkcs11Tester("", "", nothing)
         try
             pkcs11_tester_init_without_load!(tester)
-            opts = Reseau.Pkcs11LibOptions(;
+            opts = Sockets.Pkcs11LibOptions(;
                 filename = tester.lib_path,
-                initialize_finalize_behavior = Reseau.Pkcs11LibBehavior.DEFAULT_BEHAVIOR,
+                initialize_finalize_behavior = Sockets.Pkcs11LibBehavior.DEFAULT_BEHAVIOR,
             )
-            lib1 = Reseau.pkcs11_lib_new(opts)
-            @test lib1 isa Reseau.Pkcs11Lib
-            lib2 = Reseau.pkcs11_lib_new(opts)
-            @test lib2 isa Reseau.Pkcs11Lib
-            Reseau.pkcs11_lib_release(lib1::Reseau.Pkcs11Lib)
-            info = Ref(Reseau.CK_INFO(Reseau.CK_VERSION(0, 0), ntuple(_ -> UInt8(0x20), 32), 0,
-                ntuple(_ -> UInt8(0x20), 32), Reseau.CK_VERSION(0, 0)))
-            fl = unsafe_load(Reseau.pkcs11_lib_get_function_list(lib2::Reseau.Pkcs11Lib))
-            rv = ccall(fl.C_GetInfo, Reseau.CK_RV, (Ref{Reseau.CK_INFO},), info)
-            @test rv == Reseau.CKR_OK
-            Reseau.pkcs11_lib_release(lib2::Reseau.Pkcs11Lib)
-            lib3 = Reseau.pkcs11_lib_new(opts)
-            @test lib3 isa Reseau.Pkcs11Lib
-            Reseau.pkcs11_lib_release(lib3::Reseau.Pkcs11Lib)
+            lib1 = Sockets.pkcs11_lib_new(opts)
+            @test lib1 isa Sockets.Pkcs11Lib
+            lib2 = Sockets.pkcs11_lib_new(opts)
+            @test lib2 isa Sockets.Pkcs11Lib
+            Sockets.pkcs11_lib_release(lib1::Sockets.Pkcs11Lib)
+            info = Ref(Sockets.CK_INFO(Sockets.CK_VERSION(0, 0), ntuple(_ -> UInt8(0x20), 32), 0,
+                ntuple(_ -> UInt8(0x20), 32), Sockets.CK_VERSION(0, 0)))
+            fl = unsafe_load(Sockets.pkcs11_lib_get_function_list(lib2::Sockets.Pkcs11Lib))
+            rv = ccall(fl.C_GetInfo, Sockets.CK_RV, (Ref{Sockets.CK_INFO},), info)
+            @test rv == Sockets.CKR_OK
+            Sockets.pkcs11_lib_release(lib2::Sockets.Pkcs11Lib)
+            lib3 = Sockets.pkcs11_lib_new(opts)
+            @test lib3 isa Sockets.Pkcs11Lib
+            Sockets.pkcs11_lib_release(lib3::Sockets.Pkcs11Lib)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -593,30 +593,30 @@ end
         tester = Pkcs11Tester("", "", nothing)
         try
             pkcs11_tester_init_without_load!(tester)
-            opts = Reseau.Pkcs11LibOptions(;
+            opts = Sockets.Pkcs11LibOptions(;
                 filename = tester.lib_path,
-                initialize_finalize_behavior = Reseau.Pkcs11LibBehavior.OMIT_INITIALIZE,
+                initialize_finalize_behavior = Sockets.Pkcs11LibBehavior.OMIT_INITIALIZE,
             )
-            lib_fail = Reseau.pkcs11_lib_new(opts)
+            lib_fail = Sockets.pkcs11_lib_new(opts)
             @test lib_fail isa Reseau.ErrorResult
             if lib_fail isa Reseau.ErrorResult
-                @test lib_fail.code == Reseau.ERROR_IO_PKCS11_CKR_CRYPTOKI_NOT_INITIALIZED
+                @test lib_fail.code == EventLoops.ERROR_IO_PKCS11_CKR_CRYPTOKI_NOT_INITIALIZED
             end
 
-            opts_strict = Reseau.Pkcs11LibOptions(;
+            opts_strict = Sockets.Pkcs11LibOptions(;
                 filename = tester.lib_path,
-                initialize_finalize_behavior = Reseau.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
+                initialize_finalize_behavior = Sockets.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
             )
-            lib1 = Reseau.pkcs11_lib_new(opts_strict)
-            @test lib1 isa Reseau.Pkcs11Lib
+            lib1 = Sockets.pkcs11_lib_new(opts_strict)
+            @test lib1 isa Sockets.Pkcs11Lib
 
-            lib2 = Reseau.pkcs11_lib_new(opts)
-            @test lib2 isa Reseau.Pkcs11Lib
-            if lib2 isa Reseau.Pkcs11Lib
-                Reseau.pkcs11_lib_release(lib2)
+            lib2 = Sockets.pkcs11_lib_new(opts)
+            @test lib2 isa Sockets.Pkcs11Lib
+            if lib2 isa Sockets.Pkcs11Lib
+                Sockets.pkcs11_lib_release(lib2)
             end
-            if lib1 isa Reseau.Pkcs11Lib
-                Reseau.pkcs11_lib_release(lib1)
+            if lib1 isa Sockets.Pkcs11Lib
+                Sockets.pkcs11_lib_release(lib1)
             end
         finally
             pkcs11_tester_cleanup!(tester)
@@ -627,16 +627,16 @@ end
         tester = Pkcs11Tester("", "", nothing)
         try
             pkcs11_tester_init_without_load!(tester)
-            opts = Reseau.Pkcs11LibOptions(;
+            opts = Sockets.Pkcs11LibOptions(;
                 filename = tester.lib_path,
-                initialize_finalize_behavior = Reseau.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
+                initialize_finalize_behavior = Sockets.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE,
             )
-            lib1 = Reseau.pkcs11_lib_new(opts)
-            @test lib1 isa Reseau.Pkcs11Lib
-            lib2 = Reseau.pkcs11_lib_new(opts)
-            @test lib2 isa Reseau.Pkcs11Lib
-            Reseau.pkcs11_lib_release(lib1::Reseau.Pkcs11Lib)
-            Reseau.pkcs11_lib_release(lib2::Reseau.Pkcs11Lib)
+            lib1 = Sockets.pkcs11_lib_new(opts)
+            @test lib1 isa Sockets.Pkcs11Lib
+            lib2 = Sockets.pkcs11_lib_new(opts)
+            @test lib2 isa Sockets.Pkcs11Lib
+            Sockets.pkcs11_lib_release(lib1::Sockets.Pkcs11Lib)
+            Sockets.pkcs11_lib_release(lib2::Sockets.Pkcs11Lib)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -645,20 +645,20 @@ end
     @testset "pkcs11 session tests" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL, SO_PIN, USER_PIN)
 
-            invalid = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(9999))
+            invalid = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(9999))
             @test invalid isa Reseau.ErrorResult
 
-            session1 = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test session1 isa Reseau.CK_SESSION_HANDLE
-            session2 = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test session2 isa Reseau.CK_SESSION_HANDLE
+            session1 = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test session1 isa Sockets.CK_SESSION_HANDLE
+            session2 = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test session2 isa Sockets.CK_SESSION_HANDLE
             @test session1 != session2
 
-            Reseau.pkcs11_lib_close_session(tester.lib::Reseau.Pkcs11Lib, session1)
-            Reseau.pkcs11_lib_close_session(tester.lib::Reseau.Pkcs11Lib, session2)
+            Sockets.pkcs11_lib_close_session(tester.lib::Sockets.Pkcs11Lib, session1)
+            Sockets.pkcs11_lib_close_session(tester.lib::Sockets.Pkcs11Lib, session2)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -667,35 +667,35 @@ end
     @testset "pkcs11 login tests" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL, SO_PIN, USER_PIN)
 
-            bad_login = Reseau.pkcs11_lib_login_user(
-                tester.lib::Reseau.Pkcs11Lib,
-                Reseau.CK_SESSION_HANDLE(1),
+            bad_login = Sockets.pkcs11_lib_login_user(
+                tester.lib::Sockets.Pkcs11Lib,
+                Sockets.CK_SESSION_HANDLE(1),
                 Reseau.ByteCursor(USER_PIN),
             )
             @test bad_login isa Reseau.ErrorResult
 
-            session = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test session isa Reseau.CK_SESSION_HANDLE
+            session = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test session isa Sockets.CK_SESSION_HANDLE
 
-            invalid_pin = Reseau.pkcs11_lib_login_user(
-                tester.lib::Reseau.Pkcs11Lib,
+            invalid_pin = Sockets.pkcs11_lib_login_user(
+                tester.lib::Sockets.Pkcs11Lib,
                 session,
                 Reseau.ByteCursor("INVALID_PIN"),
             )
             @test invalid_pin isa Reseau.ErrorResult
 
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN)) === nothing
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN)) === nothing
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN)) === nothing
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN)) === nothing
 
-            session2 = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session2, Reseau.ByteCursor(USER_PIN)) === nothing
+            session2 = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session2, Reseau.ByteCursor(USER_PIN)) === nothing
 
-            Reseau.pkcs11_lib_close_session(tester.lib::Reseau.Pkcs11Lib, session)
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session2, Reseau.ByteCursor(USER_PIN)) === nothing
-            Reseau.pkcs11_lib_close_session(tester.lib::Reseau.Pkcs11Lib, session2)
+            Sockets.pkcs11_lib_close_session(tester.lib::Sockets.Pkcs11Lib, session)
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session2, Reseau.ByteCursor(USER_PIN)) === nothing
+            Sockets.pkcs11_lib_close_session(tester.lib::Sockets.Pkcs11Lib, session2)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -704,47 +704,47 @@ end
     @testset "pkcs11 find private key for different rsa types" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL_RSA, SO_PIN, USER_PIN)
 
-            session_access = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            session_create = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
+            session_access = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            session_create = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
 
             k1, _ = pkcs11_create_rsa_key(tester, session_create, "1024_Key", "1024_id", 1024)
-            res1 = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res1 = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("1024_Key"),
             )
             @test res1 isa Tuple
             if res1 isa Tuple
                 @test res1[1] == k1
-                @test res1[2] == Reseau.CKK_RSA
+                @test res1[2] == Sockets.CKK_RSA
             end
 
             k2, _ = pkcs11_create_rsa_key(tester, session_create, "2048_Key", "2048_id", 2048)
-            res2 = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res2 = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("2048_Key"),
             )
             @test res2 isa Tuple
             if res2 isa Tuple
                 @test res2[1] == k2
-                @test res2[2] == Reseau.CKK_RSA
+                @test res2[2] == Sockets.CKK_RSA
             end
 
             k3, _ = pkcs11_create_rsa_key(tester, session_create, "4096_Key", "4096_id", 4096)
-            res3 = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res3 = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("4096_Key"),
             )
             @test res3 isa Tuple
             if res3 isa Tuple
                 @test res3[1] == k3
-                @test res3[2] == Reseau.CKK_RSA
+                @test res3[2] == Sockets.CKK_RSA
             end
         finally
             pkcs11_tester_cleanup!(tester)
@@ -754,23 +754,23 @@ end
     @testset "pkcs11 find private key for ec" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL, SO_PIN, USER_PIN)
 
-            session_access = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            session_create = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
+            session_access = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            session_create = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
 
             k1, _ = pkcs11_create_ec_key(tester, session_create, "EC_256_Key", "EC_256_id")
-            res = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("EC_256_Key"),
             )
             @test res isa Tuple
             if res isa Tuple
                 @test res[1] == k1
-                @test res[2] == Reseau.CKK_EC
+                @test res[2] == Sockets.CKK_EC
             end
         finally
             pkcs11_tester_cleanup!(tester)
@@ -780,45 +780,45 @@ end
     @testset "pkcs11 find multiple private key" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL, SO_PIN, USER_PIN)
 
-            session_access = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            session_create1 = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            session_create2 = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
+            session_access = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            session_create1 = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            session_create2 = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
 
             k1, _ = pkcs11_create_rsa_key(tester, session_create1, "RSA_KEY", "BEEFCAFE", 1024)
             k2, _ = pkcs11_create_rsa_key(tester, session_create2, "DES_KEY_2", "BEEFCAFEDEAD", 1024)
 
-            res = Reseau.pkcs11_lib_find_private_key(tester.lib::Reseau.Pkcs11Lib, session_access, nothing)
+            res = Sockets.pkcs11_lib_find_private_key(tester.lib::Sockets.Pkcs11Lib, session_access, nothing)
             @test res isa Reseau.ErrorResult
 
-            res1 = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res1 = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("RSA_KEY"),
             )
             @test res1 isa Tuple
             if res1 isa Tuple
                 @test res1[1] == k1
-                @test res1[2] == Reseau.CKK_RSA
+                @test res1[2] == Sockets.CKK_RSA
             end
 
-            res2 = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res2 = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("DES_KEY_2"),
             )
             @test res2 isa Tuple
             if res2 isa Tuple
                 @test res2[1] == k2
-                @test res2[2] == Reseau.CKK_RSA
+                @test res2[2] == Sockets.CKK_RSA
             end
 
-            Reseau.pkcs11_lib_close_session(tester.lib::Reseau.Pkcs11Lib, session_access)
-            Reseau.pkcs11_lib_close_session(tester.lib::Reseau.Pkcs11Lib, session_create1)
-            Reseau.pkcs11_lib_close_session(tester.lib::Reseau.Pkcs11Lib, session_create2)
+            Sockets.pkcs11_lib_close_session(tester.lib::Sockets.Pkcs11Lib, session_access)
+            Sockets.pkcs11_lib_close_session(tester.lib::Sockets.Pkcs11Lib, session_create1)
+            Sockets.pkcs11_lib_close_session(tester.lib::Sockets.Pkcs11Lib, session_create2)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -827,27 +827,27 @@ end
     @testset "pkcs11 find private key" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL, SO_PIN, USER_PIN)
 
-            session_access = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            session_create = Reseau.pkcs11_lib_open_session(tester.lib::Reseau.Pkcs11Lib, UInt64(slot))
-            @test Reseau.pkcs11_lib_login_user(tester.lib::Reseau.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
+            session_access = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            session_create = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
+            @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session_access, Reseau.ByteCursor(USER_PIN)) === nothing
 
             k1, _ = pkcs11_create_rsa_key(tester, session_create, "RSA_KEY", "BEEFCAFE", 1024)
-            res1 = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res1 = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("RSA_KEY"),
             )
             @test res1 isa Tuple
             if res1 isa Tuple
                 @test res1[1] == k1
-                @test res1[2] == Reseau.CKK_RSA
+                @test res1[2] == Sockets.CKK_RSA
             end
 
-            res_none = Reseau.pkcs11_lib_find_private_key(
-                tester.lib::Reseau.Pkcs11Lib,
+            res_none = Sockets.pkcs11_lib_find_private_key(
+                tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("NON_EXISTENT"),
             )
@@ -860,18 +860,18 @@ end
     @testset "pkcs11 find slot" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, "label!@#", SO_PIN, USER_PIN)
 
-            found = Reseau.pkcs11_lib_find_slot_with_token(tester.lib::Reseau.Pkcs11Lib, nothing, nothing)
+            found = Sockets.pkcs11_lib_find_slot_with_token(tester.lib::Sockets.Pkcs11Lib, nothing, nothing)
             @test found isa UInt64
 
             match_slot = UInt64(slot)
-            found_slot = Reseau.pkcs11_lib_find_slot_with_token(tester.lib::Reseau.Pkcs11Lib, match_slot, nothing)
+            found_slot = Sockets.pkcs11_lib_find_slot_with_token(tester.lib::Sockets.Pkcs11Lib, match_slot, nothing)
             @test found_slot == match_slot
 
             label = Reseau.ByteCursor("label!@#")
-            found_label = Reseau.pkcs11_lib_find_slot_with_token(tester.lib::Reseau.Pkcs11Lib, nothing, label)
+            found_label = Sockets.pkcs11_lib_find_slot_with_token(tester.lib::Sockets.Pkcs11Lib, nothing, label)
             @test found_label == match_slot
         finally
             pkcs11_tester_cleanup!(tester)
@@ -881,17 +881,17 @@ end
     @testset "pkcs11 find slot many tokens" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot1 = pkcs11_softhsm_create_slot(tester, "token_one", SO_PIN, USER_PIN)
             slot2 = pkcs11_softhsm_create_slot(tester, "token_two", SO_PIN, USER_PIN)
 
-            found1 = Reseau.pkcs11_lib_find_slot_with_token(tester.lib::Reseau.Pkcs11Lib, UInt64(slot1), nothing)
+            found1 = Sockets.pkcs11_lib_find_slot_with_token(tester.lib::Sockets.Pkcs11Lib, UInt64(slot1), nothing)
             @test found1 == UInt64(slot1)
-            found2 = Reseau.pkcs11_lib_find_slot_with_token(tester.lib::Reseau.Pkcs11Lib, UInt64(slot2), nothing)
+            found2 = Sockets.pkcs11_lib_find_slot_with_token(tester.lib::Sockets.Pkcs11Lib, UInt64(slot2), nothing)
             @test found2 == UInt64(slot2)
 
             label1 = Reseau.ByteCursor("token_one")
-            found_label1 = Reseau.pkcs11_lib_find_slot_with_token(tester.lib::Reseau.Pkcs11Lib, nothing, label1)
+            found_label1 = Sockets.pkcs11_lib_find_slot_with_token(tester.lib::Sockets.Pkcs11Lib, nothing, label1)
             @test found_label1 == UInt64(slot1)
         finally
             pkcs11_tester_cleanup!(tester)
@@ -908,11 +908,11 @@ end
             cipher_buf = pkcs11_rsa_encrypt(tester, input_cursor, session, pub)
             cipher_cur = Reseau.byte_cursor_from_buf(cipher_buf)
 
-            decrypted = Reseau.pkcs11_lib_decrypt(
-                tester.lib::Reseau.Pkcs11Lib,
+            decrypted = Sockets.pkcs11_lib_decrypt(
+                tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
-                Reseau.CKK_RSA,
+                Sockets.CKK_RSA,
                 cipher_cur,
             )
             @test decrypted isa Reseau.ByteBuffer
@@ -922,38 +922,38 @@ end
                 @test out == Vector{UInt8}(codeunits("ABCDEFGHIJKL"))
             end
 
-            unsupported = Reseau.pkcs11_lib_decrypt(
-                tester.lib::Reseau.Pkcs11Lib,
+            unsupported = Sockets.pkcs11_lib_decrypt(
+                tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
-                Reseau.CKK_GENERIC_SECRET,
+                Sockets.CKK_GENERIC_SECRET,
                 cipher_cur,
             )
             @test unsupported isa Reseau.ErrorResult
 
-            bad_session = Reseau.pkcs11_lib_decrypt(
-                tester.lib::Reseau.Pkcs11Lib,
-                Reseau.CK_SESSION_HANDLE(0),
+            bad_session = Sockets.pkcs11_lib_decrypt(
+                tester.lib::Sockets.Pkcs11Lib,
+                Sockets.CK_SESSION_HANDLE(0),
                 priv,
-                Reseau.CKK_RSA,
+                Sockets.CKK_RSA,
                 cipher_cur,
             )
             @test bad_session isa Reseau.ErrorResult
 
-            bad_key = Reseau.pkcs11_lib_decrypt(
-                tester.lib::Reseau.Pkcs11Lib,
+            bad_key = Sockets.pkcs11_lib_decrypt(
+                tester.lib::Sockets.Pkcs11Lib,
                 session,
-                Reseau.CK_INVALID_HANDLE,
-                Reseau.CKK_RSA,
+                Sockets.CK_INVALID_HANDLE,
+                Sockets.CKK_RSA,
                 cipher_cur,
             )
             @test bad_key isa Reseau.ErrorResult
 
-            empty = Reseau.pkcs11_lib_decrypt(
-                tester.lib::Reseau.Pkcs11Lib,
+            empty = Sockets.pkcs11_lib_decrypt(
+                tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
-                Reseau.CKK_RSA,
+                Sockets.CKK_RSA,
                 Reseau.ByteCursor(""),
             )
             @test empty isa Reseau.ErrorResult
@@ -970,11 +970,11 @@ end
                 priv, pub = pkcs11_create_rsa_key(tester, session, DEFAULT_KEY_LABEL, DEFAULT_KEY_ID, 2048)
 
                 message = Reseau.ByteCursor("ABCDEFGHIJKL")
-                signature = Reseau.pkcs11_lib_sign(
-                    tester.lib::Reseau.Pkcs11Lib,
+                signature = Sockets.pkcs11_lib_sign(
+                    tester.lib::Sockets.Pkcs11Lib,
                     session,
                     priv,
-                    Reseau.CKK_RSA,
+                    Sockets.CKK_RSA,
                     message,
                     digest_alg,
                     Reseau.TlsSignatureAlgorithm.RSA,
@@ -995,16 +995,16 @@ end
                             signature,
                             session,
                             pub,
-                            Reseau.CKM_RSA_PKCS,
+                            Sockets.CKM_RSA_PKCS,
                         )
                     end
                 end
 
-                unsupported = Reseau.pkcs11_lib_sign(
-                    tester.lib::Reseau.Pkcs11Lib,
+                unsupported = Sockets.pkcs11_lib_sign(
+                    tester.lib::Sockets.Pkcs11Lib,
                     session,
                     priv,
-                    Reseau.CKK_GENERIC_SECRET,
+                    Sockets.CKK_GENERIC_SECRET,
                     message,
                     digest_alg,
                     Reseau.TlsSignatureAlgorithm.RSA,
@@ -1028,22 +1028,22 @@ end
             priv, pub = pkcs11_create_ec_key(tester, session, DEFAULT_KEY_LABEL, DEFAULT_KEY_ID)
 
             message = Reseau.ByteCursor("ABCDEFGHIJKL")
-            signature = Reseau.pkcs11_lib_sign(
-                tester.lib::Reseau.Pkcs11Lib,
+            signature = Sockets.pkcs11_lib_sign(
+                tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
-                Reseau.CKK_EC,
+                Sockets.CKK_EC,
                 message,
                 Reseau.TlsHashAlgorithm.UNKNOWN,
                 Reseau.TlsSignatureAlgorithm.ECDSA,
             )
             @test signature isa Reseau.ByteBuffer
 
-            unsupported = Reseau.pkcs11_lib_sign(
-                tester.lib::Reseau.Pkcs11Lib,
+            unsupported = Sockets.pkcs11_lib_sign(
+                tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
-                Reseau.CKK_GENERIC_SECRET,
+                Sockets.CKK_GENERIC_SECRET,
                 message,
                 Reseau.TlsHashAlgorithm.UNKNOWN,
                 Reseau.TlsSignatureAlgorithm.ECDSA,
@@ -1057,9 +1057,9 @@ end
     @testset "pkcs11 tls negotiation succeeds (rsa)" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL_RSA, SO_PIN, USER_PIN)
-            Reseau.pkcs11_lib_release(tester.lib::Reseau.Pkcs11Lib)
+            Sockets.pkcs11_lib_release(tester.lib::Sockets.Pkcs11Lib)
             tester.lib = nothing
 
             root = normpath(joinpath(@__DIR__, ".."))
@@ -1073,7 +1073,7 @@ end
             cmd = `softhsm2-util --import $(rsa_p8) --module $(tester.lib_path) --slot $(slot) --label $(DEFAULT_KEY_LABEL) --id $(DEFAULT_KEY_ID) --pin $(USER_PIN)`
             pkcs11_run_cmd(cmd)
 
-            @test pkcs11_reload_hsm!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
             elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
             resolver = Reseau.HostResolver(elg)
@@ -1173,9 +1173,9 @@ end
     @testset "pkcs11 tls negotiation succeeds (ec)" begin
         tester = Pkcs11Tester("", "", nothing)
         try
-            @test pkcs11_tester_init!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL_EC, SO_PIN, USER_PIN)
-            Reseau.pkcs11_lib_release(tester.lib::Reseau.Pkcs11Lib)
+            Sockets.pkcs11_lib_release(tester.lib::Sockets.Pkcs11Lib)
             tester.lib = nothing
 
             root = normpath(joinpath(@__DIR__, ".."))
@@ -1189,7 +1189,7 @@ end
             cmd = `softhsm2-util --import $(ec_p8) --module $(tester.lib_path) --slot $(slot) --label $(DEFAULT_KEY_LABEL) --id $(DEFAULT_KEY_ID) --pin $(USER_PIN)`
             pkcs11_run_cmd(cmd)
 
-            @test pkcs11_reload_hsm!(tester) isa Reseau.Pkcs11Lib
+            @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
             elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
             resolver = Reseau.HostResolver(elg)

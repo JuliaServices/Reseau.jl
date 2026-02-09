@@ -1184,7 +1184,7 @@ function byte_buf_reserve_smart(buf::Base.RefValue{ByteBuffer}, requested_capaci
         return OP_SUCCESS
     end
     double_capacity = add_size_saturating(cap, cap)
-    new_capacity = max_size(req, double_capacity)
+    new_capacity = max(req, double_capacity)
     return byte_buf_reserve(buf, new_capacity)
 end
 

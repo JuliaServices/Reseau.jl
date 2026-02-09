@@ -1,5 +1,6 @@
 using Test
 using Reseau
+import Reseau: EventLoops, Sockets
 
 function _wait_ready(ch::Channel; timeout_ns::Integer = 5_000_000_000)
     deadline = Base.time_ns() + timeout_ns
@@ -10,41 +11,40 @@ function _wait_ready(ch::Channel; timeout_ns::Integer = 5_000_000_000)
 end
 
 @testset "no retry strategy" begin
-    Reseau.io_library_init()
+    Sockets.io_library_init()
 
-    strategy = Reseau.NoRetryStrategy()
-    res = Reseau.retry_strategy_acquire_token!(strategy, (token, code, ud) -> nothing, nothing)
+    strategy = Sockets.NoRetryStrategy()
+    res = Sockets.retry_strategy_acquire_token!(strategy, (token, code, ud) -> nothing, nothing)
     @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_RETRY_PERMISSION_DENIED
+    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
-    Reseau.retry_strategy_shutdown!(strategy)
-    Reseau.io_library_clean_up()
+    Sockets.retry_strategy_shutdown!(strategy)
+    Sockets.io_library_clean_up()
 end
 
 @testset "exponential backoff max retries" begin
-    if Threads.nthreads(:interactive) <= 1
+    if Base.Threads.nthreads(:interactive) <= 1
         @test true
     else
         for jitter_mode in (:none, :full, :decorrelated, :default)
             @testset "jitter $(jitter_mode)" begin
-                Reseau.io_library_init()
+                Sockets.io_library_init()
 
-                elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
-                elg = Reseau.event_loop_group_new(elg_opts)
+                elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
                 @test !(elg isa Reseau.ErrorResult)
                 elg isa Reseau.ErrorResult && return
 
-                config = Reseau.ExponentialBackoffConfig(;
+                config = Sockets.ExponentialBackoffConfig(;
                     backoff_scale_factor_ms = 1,
                     max_backoff_secs = 1,
                     max_retries = 3,
                     jitter_mode = jitter_mode,
                 )
-                strategy = Reseau.ExponentialBackoffRetryStrategy(elg, config)
+                strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
                 @test !(strategy isa Reseau.ErrorResult)
                 if strategy isa Reseau.ErrorResult
-                    Reseau.event_loop_group_destroy!(elg)
-                    Reseau.io_library_clean_up()
+                    EventLoops.event_loop_group_release!(elg)
+                    Sockets.io_library_clean_up()
                     return
                 end
 
@@ -56,24 +56,24 @@ end
                     lock(mtx) do
                         retry_count[] += 1
                     end
-                    res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                    res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
                     if res isa Reseau.ErrorResult
                         put!(done_ch, res.code)
-                        Reseau.retry_token_release!(token)
+                        Sockets.retry_token_release!(token)
                     end
                     return nothing
                 end
 
                 on_acquired = function (token, code, ud)
-                    res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                    res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
                     if res isa Reseau.ErrorResult
                         put!(done_ch, res.code)
-                        Reseau.retry_token_release!(token)
+                        Sockets.retry_token_release!(token)
                     end
                     return nothing
                 end
 
-                _ = Reseau.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+                _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
 
                 deadline = Base.time_ns() + 5_000_000_000
                 while !isready(done_ch) && Base.time_ns() < deadline
@@ -83,43 +83,42 @@ end
                 @test isready(done_ch)
                 if isready(done_ch)
                     code = take!(done_ch)
-                    @test code == Reseau.ERROR_IO_MAX_RETRIES_EXCEEDED
+                    @test code == EventLoops.ERROR_IO_MAX_RETRIES_EXCEEDED
                 end
 
                 lock(mtx) do
                     @test retry_count[] == Int(config.max_retries)
                 end
 
-                Reseau.retry_strategy_shutdown!(strategy)
-                Reseau.event_loop_group_destroy!(elg)
-                Reseau.io_library_clean_up()
+                Sockets.retry_strategy_shutdown!(strategy)
+                EventLoops.event_loop_group_release!(elg)
+                Sockets.io_library_clean_up()
             end
         end
     end
 end
 
 @testset "exponential backoff client errors do not count" begin
-    if Threads.nthreads(:interactive) <= 1
+    if Base.Threads.nthreads(:interactive) <= 1
         @test true
     else
-        Reseau.io_library_init()
+        Sockets.io_library_init()
 
-        elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
-        elg = Reseau.event_loop_group_new(elg_opts)
+        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
         @test !(elg isa Reseau.ErrorResult)
         elg isa Reseau.ErrorResult && return
 
-        config = Reseau.ExponentialBackoffConfig(;
+        config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        strategy = Reseau.ExponentialBackoffRetryStrategy(elg, config)
+        strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
         @test !(strategy isa Reseau.ErrorResult)
         if strategy isa Reseau.ErrorResult
-            Reseau.event_loop_group_destroy!(elg)
-            Reseau.io_library_clean_up()
+            EventLoops.event_loop_group_release!(elg)
+            Sockets.io_library_clean_up()
             return
         end
 
@@ -136,27 +135,27 @@ end
             lock(mtx) do
                 if client_errors[] > 0
                     client_errors[] -= 1
-                    err_type = Reseau.RetryErrorType.CLIENT_ERROR
+                    err_type = Sockets.RetryErrorType.CLIENT_ERROR
                 end
             end
-            res = Reseau.retry_token_schedule_retry(token, err_type, on_ready, ud)
+            res = Sockets.retry_token_schedule_retry(token, err_type, on_ready, ud)
             if res isa Reseau.ErrorResult
                 put!(done_ch, res.code)
-                Reseau.retry_token_release!(token)
+                Sockets.retry_token_release!(token)
             end
             return nothing
         end
 
         on_acquired = function (token, code, ud)
-            res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
             if res isa Reseau.ErrorResult
                 put!(done_ch, res.code)
-                Reseau.retry_token_release!(token)
+                Sockets.retry_token_release!(token)
             end
             return nothing
         end
 
-        _ = Reseau.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
 
         deadline = Base.time_ns() + 5_000_000_000
         while !isready(done_ch) && Base.time_ns() < deadline
@@ -166,41 +165,40 @@ end
         @test isready(done_ch)
         if isready(done_ch)
             code = take!(done_ch)
-            @test code == Reseau.ERROR_IO_MAX_RETRIES_EXCEEDED
+            @test code == EventLoops.ERROR_IO_MAX_RETRIES_EXCEEDED
         end
 
         lock(mtx) do
             @test retry_count[] == Int(config.max_retries) + 2
         end
 
-        Reseau.retry_strategy_shutdown!(strategy)
-        Reseau.event_loop_group_destroy!(elg)
-        Reseau.io_library_clean_up()
+        Sockets.retry_strategy_shutdown!(strategy)
+        EventLoops.event_loop_group_release!(elg)
+        Sockets.io_library_clean_up()
     end
 end
 
 @testset "exponential backoff no jitter time taken" begin
-    if Threads.nthreads(:interactive) <= 1
+    if Base.Threads.nthreads(:interactive) <= 1
         @test true
     else
-        Reseau.io_library_init()
+        Sockets.io_library_init()
 
-        elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
-        elg = Reseau.event_loop_group_new(elg_opts)
+        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
         @test !(elg isa Reseau.ErrorResult)
         elg isa Reseau.ErrorResult && return
 
-        config = Reseau.ExponentialBackoffConfig(;
+        config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 5,
             max_backoff_secs = 10,
             max_retries = 3,
             jitter_mode = :none,
         )
-        strategy = Reseau.ExponentialBackoffRetryStrategy(elg, config)
+        strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
         @test !(strategy isa Reseau.ErrorResult)
         if strategy isa Reseau.ErrorResult
-            Reseau.event_loop_group_destroy!(elg)
-            Reseau.io_library_clean_up()
+            EventLoops.event_loop_group_release!(elg)
+            Sockets.io_library_clean_up()
             return
         end
 
@@ -212,19 +210,19 @@ end
             lock(mtx) do
                 retry_count[] += 1
             end
-            res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
             if res isa Reseau.ErrorResult
                 put!(done_ch, res.code)
-                Reseau.retry_token_release!(token)
+                Sockets.retry_token_release!(token)
             end
             return nothing
         end
 
         on_acquired = function (token, code, ud)
-            res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
             if res isa Reseau.ErrorResult
                 put!(done_ch, res.code)
-                Reseau.retry_token_release!(token)
+                Sockets.retry_token_release!(token)
             end
             return nothing
         end
@@ -232,7 +230,7 @@ end
         before = Ref{UInt64}()
         @test Reseau.high_res_clock_get_ticks(before) == Reseau.OP_SUCCESS
 
-        _ = Reseau.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
 
         deadline = Base.time_ns() + 10_000_000_000
         while !isready(done_ch) && Base.time_ns() < deadline
@@ -245,7 +243,7 @@ end
         @test isready(done_ch)
         if isready(done_ch)
             code = take!(done_ch)
-            @test code == Reseau.ERROR_IO_MAX_RETRIES_EXCEEDED
+            @test code == EventLoops.ERROR_IO_MAX_RETRIES_EXCEEDED
         end
 
         scale_ns = config.backoff_scale_factor_ms * UInt64(1_000_000)
@@ -256,34 +254,33 @@ end
             @test retry_count[] == Int(config.max_retries)
         end
 
-        Reseau.retry_strategy_shutdown!(strategy)
-        Reseau.event_loop_group_destroy!(elg)
-        Reseau.io_library_clean_up()
+        Sockets.retry_strategy_shutdown!(strategy)
+        EventLoops.event_loop_group_release!(elg)
+        Sockets.io_library_clean_up()
     end
 end
 
 @testset "exponential backoff max backoff cap" begin
-    if Threads.nthreads(:interactive) <= 1
+    if Base.Threads.nthreads(:interactive) <= 1
         @test true
     else
-        Reseau.io_library_init()
+        Sockets.io_library_init()
 
-        elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
-        elg = Reseau.event_loop_group_new(elg_opts)
+        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
         @test !(elg isa Reseau.ErrorResult)
         elg isa Reseau.ErrorResult && return
 
-        config = Reseau.ExponentialBackoffConfig(;
+        config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 400,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        strategy = Reseau.ExponentialBackoffRetryStrategy(elg, config)
+        strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
         @test !(strategy isa Reseau.ErrorResult)
         if strategy isa Reseau.ErrorResult
-            Reseau.event_loop_group_destroy!(elg)
-            Reseau.io_library_clean_up()
+            EventLoops.event_loop_group_release!(elg)
+            Sockets.io_library_clean_up()
             return
         end
 
@@ -295,19 +292,19 @@ end
             lock(mtx) do
                 retry_count[] += 1
             end
-            res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
             if res isa Reseau.ErrorResult
                 put!(done_ch, res.code)
-                Reseau.retry_token_release!(token)
+                Sockets.retry_token_release!(token)
             end
             return nothing
         end
 
         on_acquired = function (token, code, ud)
-            res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
             if res isa Reseau.ErrorResult
                 put!(done_ch, res.code)
-                Reseau.retry_token_release!(token)
+                Sockets.retry_token_release!(token)
             end
             return nothing
         end
@@ -315,7 +312,7 @@ end
         before = Ref{UInt64}()
         @test Reseau.high_res_clock_get_ticks(before) == Reseau.OP_SUCCESS
 
-        _ = Reseau.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
 
         deadline = Base.time_ns() + 15_000_000_000
         while !isready(done_ch) && Base.time_ns() < deadline
@@ -328,7 +325,7 @@ end
         @test isready(done_ch)
         if isready(done_ch)
             code = take!(done_ch)
-            @test code == Reseau.ERROR_IO_MAX_RETRIES_EXCEEDED
+            @test code == EventLoops.ERROR_IO_MAX_RETRIES_EXCEEDED
         end
 
         scale_ns = config.backoff_scale_factor_ms * UInt64(1_000_000)
@@ -343,59 +340,57 @@ end
             @test retry_count[] == Int(config.max_retries)
         end
 
-        Reseau.retry_strategy_shutdown!(strategy)
-        Reseau.event_loop_group_destroy!(elg)
-        Reseau.io_library_clean_up()
+        Sockets.retry_strategy_shutdown!(strategy)
+        EventLoops.event_loop_group_release!(elg)
+        Sockets.io_library_clean_up()
     end
 end
 
 @testset "exponential backoff invalid options" begin
-    Reseau.io_library_init()
+    Sockets.io_library_init()
 
-    elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
-    elg = Reseau.event_loop_group_new(elg_opts)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     @test !(elg isa Reseau.ErrorResult)
     elg isa Reseau.ErrorResult && return
 
-    config = Reseau.ExponentialBackoffConfig(;
+    config = Sockets.ExponentialBackoffConfig(;
         max_retries = 64,
     )
-    strategy = Reseau.ExponentialBackoffRetryStrategy(elg, config)
+    strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
     @test strategy isa Reseau.ErrorResult
     if strategy isa Reseau.ErrorResult
         @test strategy.code == Reseau.ERROR_INVALID_ARGUMENT
     end
 
-    Reseau.event_loop_group_destroy!(elg)
-    Reseau.io_library_clean_up()
+    EventLoops.event_loop_group_release!(elg)
+    Sockets.io_library_clean_up()
 end
 
 @testset "standard retry failure exhausts bucket" begin
-    if Threads.nthreads(:interactive) <= 1
+    if Base.Threads.nthreads(:interactive) <= 1
         @test true
     else
-        Reseau.io_library_init()
+        Sockets.io_library_init()
 
-        elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
-        elg = Reseau.event_loop_group_new(elg_opts)
+        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
         @test !(elg isa Reseau.ErrorResult)
         elg isa Reseau.ErrorResult && return
 
-        backoff_config = Reseau.ExponentialBackoffConfig(;
+        backoff_config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        config = Reseau.StandardRetryConfig(;
+        config = Sockets.StandardRetryConfig(;
             initial_bucket_capacity = 15,
             backoff_config = backoff_config,
         )
-        strategy = Reseau.StandardRetryStrategy(elg, config)
+        strategy = Sockets.StandardRetryStrategy(elg, config)
         @test !(strategy isa Reseau.ErrorResult)
         if strategy isa Reseau.ErrorResult
-            Reseau.event_loop_group_destroy!(elg)
-            Reseau.io_library_clean_up()
+            EventLoops.event_loop_group_release!(elg)
+            Sockets.io_library_clean_up()
             return
         end
 
@@ -403,21 +398,21 @@ end
 
         acquired_ch = Channel{Tuple{Any, Int}}(1)
         on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-        _ = Reseau.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
         @test _wait_ready(acquired_ch)
         token1, code1 = take!(acquired_ch)
         @test code1 == Reseau.AWS_OP_SUCCESS
 
         acquired_ch2 = Channel{Tuple{Any, Int}}(1)
         on_acquired2 = (token, code, ud) -> put!(acquired_ch2, (token, code))
-        _ = Reseau.retry_strategy_acquire_token!(strategy, partition, on_acquired2, nothing, 0)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired2, nothing, 0)
         @test _wait_ready(acquired_ch2)
         token2, code2 = take!(acquired_ch2)
         @test code2 == Reseau.AWS_OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        res = Reseau.retry_token_schedule_retry(token1, Reseau.RetryErrorType.TRANSIENT, on_ready, nothing)
+        res = Sockets.retry_token_schedule_retry(token1, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
         @test !(res isa Reseau.ErrorResult)
         @test _wait_ready(ready_ch)
         ready_token, ready_code = take!(ready_ch)
@@ -426,84 +421,83 @@ end
 
         ready_ch2 = Channel{Tuple{Any, Int}}(1)
         on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
-        res = Reseau.retry_token_schedule_retry(token2, Reseau.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
+        res = Sockets.retry_token_schedule_retry(token2, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
         @test !(res isa Reseau.ErrorResult)
         @test _wait_ready(ready_ch2)
         ready_token2, ready_code2 = take!(ready_ch2)
         @test ready_token2 === token2
         @test ready_code2 == Reseau.AWS_OP_SUCCESS
 
-        res = Reseau.retry_token_schedule_retry(
+        res = Sockets.retry_token_schedule_retry(
             token1,
-            Reseau.RetryErrorType.SERVER_ERROR,
+            Sockets.RetryErrorType.SERVER_ERROR,
             on_ready,
             nothing,
         )
         @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_RETRY_PERMISSION_DENIED
+        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
-        res = Reseau.retry_token_schedule_retry(
+        res = Sockets.retry_token_schedule_retry(
             token2,
-            Reseau.RetryErrorType.SERVER_ERROR,
+            Sockets.RetryErrorType.SERVER_ERROR,
             on_ready2,
             nothing,
         )
         @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_RETRY_PERMISSION_DENIED
+        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
-        Reseau.retry_token_release!(token1)
-        Reseau.retry_token_release!(token2)
+        Sockets.retry_token_release!(token1)
+        Sockets.retry_token_release!(token2)
 
         acquired_ch3 = Channel{Tuple{Any, Int}}(1)
         on_acquired3 = (token, code, ud) -> put!(acquired_ch3, (token, code))
-        _ = Reseau.retry_strategy_acquire_token!(strategy, nothing, on_acquired3, nothing, 0)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, nothing, on_acquired3, nothing, 0)
         @test _wait_ready(acquired_ch3)
         token3, code3 = take!(acquired_ch3)
         @test code3 == Reseau.AWS_OP_SUCCESS
 
         ready_ch3 = Channel{Tuple{Any, Int}}(1)
         on_ready3 = (token, code, ud) -> put!(ready_ch3, (token, code))
-        res = Reseau.retry_token_schedule_retry(token3, Reseau.RetryErrorType.SERVER_ERROR, on_ready3, nothing)
+        res = Sockets.retry_token_schedule_retry(token3, Sockets.RetryErrorType.SERVER_ERROR, on_ready3, nothing)
         @test !(res isa Reseau.ErrorResult)
         @test _wait_ready(ready_ch3)
         ready_token3, ready_code3 = take!(ready_ch3)
         @test ready_token3 === token3
         @test ready_code3 == Reseau.AWS_OP_SUCCESS
 
-        Reseau.retry_token_release!(token3)
+        Sockets.retry_token_release!(token3)
 
-        Reseau.retry_strategy_shutdown!(strategy)
-        Reseau.event_loop_group_destroy!(elg)
-        Reseau.io_library_clean_up()
+        Sockets.retry_strategy_shutdown!(strategy)
+        EventLoops.event_loop_group_release!(elg)
+        Sockets.io_library_clean_up()
     end
 end
 
 @testset "standard retry failure recovers capacity" begin
-    if Threads.nthreads(:interactive) <= 1
+    if Base.Threads.nthreads(:interactive) <= 1
         @test true
     else
-        Reseau.io_library_init()
+        Sockets.io_library_init()
 
-        elg_opts = Reseau.EventLoopGroupOptions(; loop_count = 1)
-        elg = Reseau.event_loop_group_new(elg_opts)
+        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
         @test !(elg isa Reseau.ErrorResult)
         elg isa Reseau.ErrorResult && return
 
-        backoff_config = Reseau.ExponentialBackoffConfig(;
+        backoff_config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        config = Reseau.StandardRetryConfig(;
+        config = Sockets.StandardRetryConfig(;
             initial_bucket_capacity = 15,
             backoff_config = backoff_config,
         )
-        strategy = Reseau.StandardRetryStrategy(elg, config)
+        strategy = Sockets.StandardRetryStrategy(elg, config)
         @test !(strategy isa Reseau.ErrorResult)
         if strategy isa Reseau.ErrorResult
-            Reseau.event_loop_group_destroy!(elg)
-            Reseau.io_library_clean_up()
+            EventLoops.event_loop_group_release!(elg)
+            Sockets.io_library_clean_up()
             return
         end
 
@@ -511,64 +505,64 @@ end
 
         acquired_ch = Channel{Tuple{Any, Int}}(1)
         on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-        _ = Reseau.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
         @test _wait_ready(acquired_ch)
         token, code = take!(acquired_ch)
         @test code == Reseau.AWS_OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.TRANSIENT, on_ready, nothing)
+        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
         @test !(res isa Reseau.ErrorResult)
         @test _wait_ready(ready_ch)
         _ = take!(ready_ch)
 
         ready_ch2 = Channel{Tuple{Any, Int}}(1)
         on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
-        res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
+        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
         @test !(res isa Reseau.ErrorResult)
         @test _wait_ready(ready_ch2)
         _ = take!(ready_ch2)
 
-        res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
         @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_RETRY_PERMISSION_DENIED
+        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
-        Reseau.retry_token_release!(token)
+        Sockets.retry_token_release!(token)
 
         for _ in 1:5
             acquired_ch = Channel{Tuple{Any, Int}}(1)
             on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-            _ = Reseau.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+            _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
             @test _wait_ready(acquired_ch)
             token, code = take!(acquired_ch)
             @test code == Reseau.AWS_OP_SUCCESS
-            Reseau.retry_token_record_success(token)
-            Reseau.retry_token_release!(token)
+            Sockets.retry_token_record_success(token)
+            Sockets.retry_token_release!(token)
         end
 
         acquired_ch = Channel{Tuple{Any, Int}}(1)
         on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-        _ = Reseau.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
         @test _wait_ready(acquired_ch)
         token, code = take!(acquired_ch)
         @test code == Reseau.AWS_OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
         @test !(res isa Reseau.ErrorResult)
         @test _wait_ready(ready_ch)
         _ = take!(ready_ch)
 
-        res = Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
         @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_RETRY_PERMISSION_DENIED
+        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
-        Reseau.retry_token_release!(token)
+        Sockets.retry_token_release!(token)
 
-        Reseau.retry_strategy_shutdown!(strategy)
-        Reseau.event_loop_group_destroy!(elg)
-        Reseau.io_library_clean_up()
+        Sockets.retry_strategy_shutdown!(strategy)
+        EventLoops.event_loop_group_release!(elg)
+        Sockets.io_library_clean_up()
     end
 end

@@ -1,4 +1,4 @@
-mutable struct LRUCache{K, V} <: AbstractCache{K, V}
+mutable struct LRUCache{K, V}
     data::Dict{K, V}
     order::Vector{K}
     max_items::Int
@@ -28,14 +28,7 @@ function _touch!(cache::LRUCache{K, V}, key::K) where {K, V}
     return nothing
 end
 
-function Base.get!(cache::LRUCache{K, V}, key::K, default::V) where {K, V}
-    haskey(cache.data, key) || return default
-    value = cache.data[key]
-    _touch!(cache, key)
-    return value
-end
-
-function Base.put!(cache::LRUCache{K, V}, key::K, value::V) where {K, V}
+function put!(cache::LRUCache{K, V}, key::K, value::V) where {K, V}
     _touch!(cache, key)
     cache.data[key] = value
     if length(cache.order) > cache.max_items
@@ -66,13 +59,4 @@ function use_lru!(cache::LRUCache{K, V}) where {K, V}
     deleteat!(cache.order, 1)
     push!(cache.order, key)
     return get(cache.data, key, nothing)
-end
-
-function mru(cache::LRUCache{K, V}) where {K, V}
-    isempty(cache.order) && return nothing
-    return get(cache.data, cache.order[end], nothing)
-end
-
-function cache_new_lru(max_items::Integer)
-    return LRUCache{Any, Any}(max_items)
 end

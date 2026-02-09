@@ -5,19 +5,19 @@ using Reseau
 # Use LOCAL domain (POSIX sockets) for bootstrap tests that need socket_get_bound_address.
 function _bootstrap_test_config()
     @static if Sys.isapple()
-        endpoint = Reseau.SocketEndpoint()
-        Reseau.socket_endpoint_init_local_address_for_test!(endpoint)
-        host = Reseau.get_address(endpoint)
-        sock_opts = Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.LOCAL)
+        endpoint = Sockets.SocketEndpoint()
+        Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+        host = Sockets.get_address(endpoint)
+        sock_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
         # Custom resolver that returns the local path as an address (DNS doesn't apply to LOCAL domain)
         resolve_fn = (h, impl_data) -> begin
             _ = impl_data
-            return [Reseau.HostAddress(host, Reseau.HostAddressType.A, h, UInt64(0))]
+            return [Sockets.HostAddress(host, Sockets.HostAddressType.A, h, UInt64(0))]
         end
-        res_config = Reseau.HostResolutionConfig(impl = resolve_fn)
+        res_config = Sockets.HostResolutionConfig(impl = resolve_fn)
         return (; host, sock_opts, use_port = false, resolution_config = res_config)
     else
-        return (; host = "127.0.0.1", sock_opts = Reseau.SocketOptions(), use_port = true, resolution_config = nothing)
+        return (; host = "127.0.0.1", sock_opts = Sockets.SocketOptions(), use_port = true, resolution_config = nothing)
     end
 end
 
@@ -34,8 +34,8 @@ function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
 end
 
 @testset "client/server bootstrap callbacks" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
 
     server_setup_called = Ref(false)
     server_setup_error = Ref{Int}(-1)
@@ -44,7 +44,7 @@ end
 
     cfg = _bootstrap_test_config()
 
-    server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         socket_options = cfg.sock_opts,
         host = cfg.host,
@@ -61,15 +61,15 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     if cfg.use_port
-        bound = Reseau.socket_get_bound_address(listener)
-        @test bound isa Reseau.SocketEndpoint
-        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
+        bound = Sockets.socket_get_bound_address(listener)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
     else
         port = 0
     end
 
-    client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
@@ -86,7 +86,7 @@ end
     setup_channel = Ref{Any}(nothing)
     setup_has_pool = Ref(false)
 
-    res = Reseau.client_bootstrap_connect!(
+    res = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port;
@@ -132,28 +132,28 @@ end
     @test server_setup_has_pool[]
 
     if setup_channel[] !== nothing
-        Reseau.channel_shutdown!(setup_channel[], 0)
+        Sockets.channel_shutdown!(setup_channel[], 0)
         @test wait_for_pred(() -> shutdown_called[])
     end
 
     if server_channel[] !== nothing
-        Reseau.channel_shutdown!(server_channel[], 0)
+        Sockets.channel_shutdown!(server_channel[], 0)
     end
 
-    Reseau.server_bootstrap_shutdown!(server_bootstrap)
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "client bootstrap attempts multiple resolved addresses" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
     server_setup_called = Ref(false)
     server_channel = Ref{Any}(nothing)
 
-    server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         socket_options = cfg.sock_opts,
         host = cfg.host,
@@ -168,15 +168,15 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     if cfg.use_port
-        bound = Reseau.socket_get_bound_address(listener)
-        @test bound isa Reseau.SocketEndpoint
-        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
+        bound = Sockets.socket_get_bound_address(listener)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
     else
         port = 0
     end
 
-    client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
@@ -191,21 +191,21 @@ end
         resolve_impl = (host, impl_data) -> begin
             _ = impl_data
             return [
-                Reseau.HostAddress(cfg.host, Reseau.HostAddressType.A, host, UInt64(0)),
+                Sockets.HostAddress(cfg.host, Sockets.HostAddressType.A, host, UInt64(0)),
             ]
         end
     else
         resolve_impl = (host, impl_data) -> begin
             _ = impl_data
             return [
-                Reseau.HostAddress("::1", Reseau.HostAddressType.AAAA, host, UInt64(0)),
-                Reseau.HostAddress("127.0.0.1", Reseau.HostAddressType.A, host, UInt64(0)),
+                Sockets.HostAddress("::1", Sockets.HostAddressType.AAAA, host, UInt64(0)),
+                Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, UInt64(0)),
             ]
         end
     end
-    resolution_config = Reseau.HostResolutionConfig(impl = resolve_impl)
+    resolution_config = Sockets.HostResolutionConfig(impl = resolve_impl)
 
-    res = Reseau.client_bootstrap_connect!(
+    res = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "example.com",
         port;
@@ -230,58 +230,58 @@ end
     @test wait_for_pred(() -> server_setup_called[])
 
     if setup_channel[] !== nothing
-        Reseau.channel_shutdown!(setup_channel[], 0)
+        Sockets.channel_shutdown!(setup_channel[], 0)
         @test wait_for_pred(() -> shutdown_called[])
     end
 
     if server_channel[] !== nothing
-        Reseau.channel_shutdown!(server_channel[], 0)
+        Sockets.channel_shutdown!(server_channel[], 0)
     end
 
-    Reseau.server_bootstrap_shutdown!(server_bootstrap)
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "client bootstrap requested event loop mismatch" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
-    client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
 
-    bad_loop = Reseau.event_loop_new(Reseau.EventLoopOptions())
+    bad_loop = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
     if bad_loop isa Reseau.ErrorResult
         @test true
     else
-        res = Reseau.client_bootstrap_connect!(
+        res = Sockets.client_bootstrap_connect!(
             client_bootstrap,
             "localhost",
             80;
             requested_event_loop = bad_loop,
         )
         @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_IO_PINNED_EVENT_LOOP_MISMATCH
-        Reseau.event_loop_destroy!(bad_loop)
+        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_PINNED_EVENT_LOOP_MISMATCH
+        EventLoops.event_loop_destroy!(bad_loop)
     end
 
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "client bootstrap on_setup runs on requested event loop" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
-    client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
-    requested_loop = Reseau.event_loop_group_get_loop_at(elg, 0)
+    requested_loop = EventLoops.event_loop_group_get_loop_at(elg, 0)
     @test requested_loop !== nothing
     setup_called = Ref(false)
     setup_on_loop = Ref(false)
-    request = Reseau.SocketConnectionRequest(
+    request = Sockets.SocketConnectionRequest(
         client_bootstrap,
         "example.com",
         UInt32(443),
@@ -293,7 +293,7 @@ end
         nothing,
         (bs, err, channel, ud) -> begin
             setup_called[] = true
-            setup_on_loop[] = Reseau.event_loop_thread_is_callers_thread(requested_loop)
+            setup_on_loop[] = EventLoops.event_loop_thread_is_callers_thread(requested_loop)
             return nothing
         end,
         nothing,
@@ -301,32 +301,32 @@ end
         false,
         requested_loop,
         nothing,
-        Reseau.HostAddress[],
+        Sockets.HostAddress[],
         0,
         0,
         false,
     )
-    Reseau._connection_request_complete(request, Reseau.ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
+    Sockets._connection_request_complete(request, EventLoops.ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
     @test wait_for_pred(() -> setup_called[])
     @test setup_on_loop[]
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 if tls_tests_enabled()
 @testset "bootstrap tls negotiation" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
 
     cert_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.crt")
     key_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.key")
-    server_opts = Reseau.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
+    server_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
     maybe_apply_test_keychain!(server_opts)
-    @test server_opts isa Reseau.TlsContextOptions
-    server_ctx = server_opts isa Reseau.TlsContextOptions ? Reseau.tls_context_new(server_opts) : server_opts
-    @test server_ctx isa Reseau.TlsContext
-    client_ctx = Reseau.tls_context_new_client(; verify_peer = false)
-    @test client_ctx isa Reseau.TlsContext
+    @test server_opts isa Sockets.TlsContextOptions
+    server_ctx = server_opts isa Sockets.TlsContextOptions ? Sockets.tls_context_new(server_opts) : server_opts
+    @test server_ctx isa Sockets.TlsContext
+    client_ctx = Sockets.tls_context_new_client(; verify_peer = false)
+    @test client_ctx isa Sockets.TlsContext
 
     server_negotiated = Ref(false)
     client_negotiated = Ref(false)
@@ -335,7 +335,7 @@ if tls_tests_enabled()
     server_channel = Ref{Any}(nothing)
     client_channel = Ref{Any}(nothing)
 
-    server_tls_opts = Reseau.TlsConnectionOptions(
+    server_tls_opts = Sockets.TlsConnectionOptions(
         server_ctx;
         on_negotiation_result = (handler, slot, err, ud) -> begin
             server_negotiated[] = true
@@ -345,7 +345,7 @@ if tls_tests_enabled()
 
     cfg = _bootstrap_test_config()
 
-    server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         socket_options = cfg.sock_opts,
         host = cfg.host,
@@ -361,15 +361,15 @@ if tls_tests_enabled()
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     if cfg.use_port
-        bound = Reseau.socket_get_bound_address(listener)
-        @test bound isa Reseau.SocketEndpoint
-        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
+        bound = Sockets.socket_get_bound_address(listener)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
     else
         port = 0
     end
 
-    client_tls_opts = Reseau.TlsConnectionOptions(
+    client_tls_opts = Sockets.TlsConnectionOptions(
         client_ctx;
         server_name = "localhost",
         on_negotiation_result = (handler, slot, err, ud) -> begin
@@ -378,12 +378,12 @@ if tls_tests_enabled()
         end,
     )
 
-    client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
 
-    @test Reseau.client_bootstrap_connect!(
+    @test Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port;
@@ -403,23 +403,23 @@ if tls_tests_enabled()
     @test wait_for_pred(() -> client_negotiated[])
 
     if client_channel[] !== nothing
-        Reseau.channel_shutdown!(client_channel[], 0)
+        Sockets.channel_shutdown!(client_channel[], 0)
     end
     if server_channel[] !== nothing
-        Reseau.channel_shutdown!(server_channel[], 0)
+        Sockets.channel_shutdown!(server_channel[], 0)
     end
 
-    Reseau.server_bootstrap_shutdown!(server_bootstrap)
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 else
     @info "Skipping bootstrap TLS negotiation (set RESEAU_RUN_TLS_TESTS=1 to enable)"
 end
 
 @testset "server bootstrap destroy callback waits for channels" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
     destroy_called = Ref(false)
@@ -428,7 +428,7 @@ end
     server_channels = Any[]
     client_channel = Ref{Any}(nothing)
 
-    server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         socket_options = cfg.sock_opts,
         host = cfg.host,
@@ -438,7 +438,7 @@ end
             if channel !== nothing
                 push!(server_channels, channel)
                 if @atomic bs.shutdown
-                    Reseau.channel_shutdown!(channel, 0)
+                    Sockets.channel_shutdown!(channel, 0)
                 end
             end
             return nothing
@@ -456,20 +456,20 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     if cfg.use_port
-        bound = Reseau.socket_get_bound_address(listener)
-        @test bound isa Reseau.SocketEndpoint
-        port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
+        bound = Sockets.socket_get_bound_address(listener)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
     else
         port = 0
     end
 
-    client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
 
-    @test Reseau.client_bootstrap_connect!(
+    @test Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port;
@@ -485,31 +485,31 @@ end
 
     @test wait_for_pred(() -> server_setup[])
 
-    Reseau.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
     sleep(0.05)
     @test !destroy_called[]
 
     for channel in server_channels
-        Reseau.channel_shutdown!(channel, 0)
+        Sockets.channel_shutdown!(channel, 0)
     end
     if client_channel[] !== nothing
-        Reseau.channel_shutdown!(client_channel[], 0)
+        Sockets.channel_shutdown!(client_channel[], 0)
     end
 
     @test wait_for_pred(() -> server_shutdown[])
     @test wait_for_pred(() -> destroy_called[])
 
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "server bootstrap destroy callback without channels" begin
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
     destroy_called = Ref(false)
-    server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         socket_options = cfg.sock_opts,
         host = cfg.host,
@@ -520,9 +520,9 @@ end
         end,
     ))
 
-    Reseau.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
     @test wait_for_pred(() -> destroy_called[])
 
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
 end
