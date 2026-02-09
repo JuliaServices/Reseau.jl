@@ -83,31 +83,31 @@ They are kept for provenance; see the Status section above for how to verify the
 #### Definite libuv calls (always enter libuv)
 
 1. `sleep(...)` (libuv `Timer`):
-   - `src/common/thread.jl:167`
-   - `src/io/epoll_event_loop.jl:161`
-   - `src/io/kqueue_event_loop.jl:241`
-   - `src/io/iocp_event_loop.jl:384`
-   - `src/io/future.jl:89`
-   - `src/io/future.jl:187`
-   - `src/io/future.jl:363`
+   - `src/threads/thread.jl:167`
+   - `src/sockets/io/epoll_event_loop.jl:161`
+   - `src/sockets/io/kqueue_event_loop.jl:241`
+   - `src/sockets/io/iocp_event_loop.jl:384`
+   - `src/threads/future.jl:89`
+   - `src/threads/future.jl:187`
+   - `src/threads/future.jl:363`
 
 2. `Base.timedwait(...)` (libuv `Timer`):
-   - `src/common/condition_variable.jl:107`
+   - `src/threads/condition_variable.jl:107`
 
 3. `time_ns()` (libuv `uv_hrtime`):
-   - `src/io/epoll_event_loop.jl:156`
-   - `src/io/epoll_event_loop.jl:158`
-   - `src/io/kqueue_event_loop.jl:236`
-   - `src/io/kqueue_event_loop.jl:238`
-   - `src/io/iocp_event_loop.jl:379`
-   - `src/io/iocp_event_loop.jl:381`
+   - `src/sockets/io/epoll_event_loop.jl:156`
+   - `src/sockets/io/epoll_event_loop.jl:158`
+   - `src/sockets/io/kqueue_event_loop.jl:236`
+   - `src/sockets/io/kqueue_event_loop.jl:238`
+   - `src/sockets/io/iocp_event_loop.jl:379`
+   - `src/sockets/io/iocp_event_loop.jl:381`
 
 4. Filesystem via Base (libuv `uv_fs_*` / `uv_os_*`):
    - `open(path, "a+")`:
      - `src/common/log_writer.jl:29`
    - `stat(...)`:
      - `src/common/file.jl:72`
-     - `src/io/stream.jl:324`
+     - `src/sockets/io/stream.jl:324`
    - `homedir()`:
      - `src/common/file.jl:153`
 
@@ -125,8 +125,8 @@ These can reach `Base.wait()`/`Base.yield()`, which calls `process_events()` and
 We are explicitly OK with these for now; no replacement work is planned yet.
 
 1. `Threads.@spawn`:
-   - `src/common/thread_scheduler.jl:83`
-   - `src/io/event_loop.jl:343`
+   - `src/common/unused/thread_scheduler.jl:83`
+   - `src/sockets/io/event_loop.jl:343`
 
 2. `@async` + `Channel{...}` (Base):
    - `src/common/log_channel.jl:6`
@@ -135,111 +135,82 @@ We are explicitly OK with these for now; no replacement work is planned yet.
 
 3. Waiting on task/conditions/events:
    - `wait(cond.cond)`:
-     - `src/common/condition_variable.jl:63`
+     - `src/threads/condition_variable.jl:63`
    - `wait(channel.task)`:
      - `src/common/log_channel.jl:36`
    - `wait(scheduler.worker)`:
-     - `src/common/thread_scheduler.jl:94`
-   - BufferIO + ChannelBuffer:
-     - `src/io/bufferio.jl:249`
-     - `src/io/bufferio.jl:309`
-     - `src/io/bufferio.jl:579`
-     - `src/io/bufferio.jl:689`
-     - `src/io/channel_buffer.jl:232`
-     - `src/io/channel_buffer.jl:267`
-     - `src/io/channel_buffer.jl:302`
-     - `src/io/channel_buffer.jl:463`
-     - `src/io/channel_buffer.jl:606`
+     - `src/common/unused/thread_scheduler.jl:94`
+   - Blocking IO facades (no libuv, but uses Base task waiting/notification):
+     - `src/sockets/tcp.jl`
+     - `src/files/watching.jl` (in PR #4)
 
 4. `Threads.Condition` fields/constructors:
-   - `src/common/condition_variable.jl:2`
-   - `src/common/condition_variable.jl:6`
-   - `src/io/bufferio.jl:25`
-   - `src/io/bufferio.jl:227`
-   - `src/io/channel_buffer.jl:19`
-   - `src/io/channel_buffer.jl:210`
+   - `src/threads/condition_variable.jl:2`
+   - `src/threads/condition_variable.jl:6`
+   - `src/sockets/tcp.jl`
+   - `src/files/watching.jl` (in PR #4)
 
 5. `Threads.Event` fields/constructors:
-   - `src/io/bufferio.jl:32`
-   - `src/io/bufferio.jl:234`
-   - `src/io/bufferio.jl:542`
-   - `src/io/channel_buffer.jl:26`
-   - `src/io/channel_buffer.jl:217`
-   - `src/io/channel_buffer.jl:422`
+   - `src/sockets/tcp.jl`
+   - `src/files/watching.jl` (in PR #4)
 
 6. `notify(...)` on those conditions/events (pairs with the waits above):
-   - `src/common/condition_variable.jl:21`
-   - `src/common/condition_variable.jl:36`
-   - `src/io/bufferio.jl:109`
-   - `src/io/bufferio.jl:137`
-   - `src/io/bufferio.jl:143`
-   - `src/io/bufferio.jl:152`
-   - `src/io/bufferio.jl:550`
-   - `src/io/bufferio.jl:577`
-   - `src/io/bufferio.jl:604`
-   - `src/io/bufferio.jl:713`
-   - `src/io/channel_buffer.jl:97`
-   - `src/io/channel_buffer.jl:125`
-   - `src/io/channel_buffer.jl:131`
-   - `src/io/channel_buffer.jl:140`
-   - `src/io/channel_buffer.jl:430`
-   - `src/io/channel_buffer.jl:460`
-   - `src/io/channel_buffer.jl:488`
-   - `src/io/channel_buffer.jl:644`
+   - `src/threads/condition_variable.jl:21`
+   - `src/threads/condition_variable.jl:36`
+   - `src/sockets/tcp.jl`
+   - `src/files/watching.jl` (in PR #4)
 
 7. `ReentrantLock` usage (contention path calls `yield`/`wait`):
    - `src/common/device_random.jl:10`
-   - `src/common/thread_scheduler.jl:5`
-   - `src/common/thread_scheduler.jl:78`
-   - `src/common/thread_shared.jl:1`
-   - `src/common/condition_variable.jl:53`
-   - `src/common/condition_variable.jl:76`
-   - `src/common/condition_variable.jl:85`
-   - `src/common/condition_variable.jl:119`
-   - `src/io/dispatch_queue_event_loop.jl:28`
-   - `src/io/dispatch_queue_event_loop.jl:39`
-   - `src/io/apple_nw_socket_types.jl:97`
-   - `src/io/apple_nw_socket_types.jl:100`
-   - `src/io/apple_nw_socket_types.jl:133`
-   - `src/io/apple_nw_socket_types.jl:136`
-   - `src/io/kqueue_event_loop_types.jl:113`
-   - `src/io/kqueue_event_loop_types.jl:121`
-   - `src/io/host_resolver.jl:135`
-   - `src/io/host_resolver.jl:154`
-   - `src/io/host_resolver.jl:165`
-   - `src/io/host_resolver.jl:204`
-   - `src/io/epoll_event_loop_types.jl:79`
-   - `src/io/epoll_event_loop_types.jl:98`
-   - `src/io/bufferio.jl:44`
-   - `src/io/channel_buffer.jl:30`
-   - `src/io/channel.jl:243`
-   - `src/io/channel.jl:245`
-   - `src/io/channel.jl:252`
-   - `src/io/channel.jl:297`
-   - `src/io/channel.jl:299`
-   - `src/io/channel.jl:305`
-   - `src/io/pki_utils.jl:96`
-   - `src/io/pki_utils.jl:1044`
-   - `src/io/tls_channel_handler.jl:211`
-   - `src/io/tls_channel_handler.jl:296`
-   - `src/io/tls_channel_handler.jl:464`
-   - `src/io/tls/s2n_tls_handler.jl:23`
-   - `src/io/tls/s2n_tls_handler.jl:85`
-   - `src/io/iocp_event_loop_types.jl:14`
-   - `src/io/iocp_event_loop_types.jl:22`
-   - `src/io/winsock_init.jl:8`
-   - `src/io/retry_strategy.jl:51`
-   - `src/io/retry_strategy.jl:219`
-   - `src/io/retry_strategy.jl:509`
-   - `src/io/retry_strategy.jl:513`
-   - `src/io/retry_strategy.jl:522`
-   - `src/io/retry_strategy.jl:540`
-   - `src/io/retry_strategy.jl:556`
-   - `src/io/retry_strategy.jl:609`
-   - `src/io/apple_nw_socket_impl.jl:54`
-   - `src/io/apple_nw_socket_impl.jl:57`
-   - `src/io/future.jl:27`
-   - `src/io/future.jl:37`
+   - `src/common/unused/thread_scheduler.jl:5`
+   - `src/common/unused/thread_scheduler.jl:78`
+   - `src/threads/thread_shared.jl:1`
+   - `src/threads/condition_variable.jl:53`
+   - `src/threads/condition_variable.jl:76`
+   - `src/threads/condition_variable.jl:85`
+   - `src/threads/condition_variable.jl:119`
+   - `src/sockets/io/dispatch_queue_event_loop.jl:28`
+   - `src/sockets/io/dispatch_queue_event_loop.jl:39`
+   - `src/sockets/io/apple_nw_socket_types.jl:97`
+   - `src/sockets/io/apple_nw_socket_types.jl:100`
+   - `src/sockets/io/apple_nw_socket_types.jl:133`
+   - `src/sockets/io/apple_nw_socket_types.jl:136`
+   - `src/sockets/io/kqueue_event_loop_types.jl:113`
+   - `src/sockets/io/kqueue_event_loop_types.jl:121`
+   - `src/sockets/io/host_resolver.jl:135`
+   - `src/sockets/io/host_resolver.jl:154`
+   - `src/sockets/io/host_resolver.jl:165`
+   - `src/sockets/io/host_resolver.jl:204`
+   - `src/sockets/io/epoll_event_loop_types.jl:79`
+   - `src/sockets/io/epoll_event_loop_types.jl:98`
+   - `src/sockets/io/channel.jl:243`
+   - `src/sockets/io/channel.jl:245`
+   - `src/sockets/io/channel.jl:252`
+   - `src/sockets/io/channel.jl:297`
+   - `src/sockets/io/channel.jl:299`
+   - `src/sockets/io/channel.jl:305`
+   - `src/sockets/io/pki_utils.jl:96`
+   - `src/sockets/io/pki_utils.jl:1044`
+   - `src/sockets/io/tls_channel_handler.jl:211`
+   - `src/sockets/io/tls_channel_handler.jl:296`
+   - `src/sockets/io/tls_channel_handler.jl:464`
+   - `src/sockets/io/tls/s2n_tls_handler.jl:23`
+   - `src/sockets/io/tls/s2n_tls_handler.jl:85`
+   - `src/sockets/io/iocp_event_loop_types.jl:14`
+   - `src/sockets/io/iocp_event_loop_types.jl:22`
+   - `src/sockets/io/winsock_init.jl:8`
+   - `src/sockets/io/retry_strategy.jl:51`
+   - `src/sockets/io/retry_strategy.jl:219`
+   - `src/sockets/io/retry_strategy.jl:509`
+   - `src/sockets/io/retry_strategy.jl:513`
+   - `src/sockets/io/retry_strategy.jl:522`
+   - `src/sockets/io/retry_strategy.jl:540`
+   - `src/sockets/io/retry_strategy.jl:556`
+   - `src/sockets/io/retry_strategy.jl:609`
+   - `src/sockets/io/apple_nw_socket_impl.jl:54`
+   - `src/sockets/io/apple_nw_socket_impl.jl:57`
+   - `src/threads/future.jl:27`
+   - `src/threads/future.jl:37`
 
 ### AwsHTTP (`/Users/jacob.quinn/.julia/dev/AwsHTTP`)
 
@@ -375,7 +346,7 @@ Implement these in `Reseau` to allow `Reseau`/`AwsHTTP`/`HTTP` to stop using the
 
 ### 1. Monotonic Clock (Replace `time_ns()`)
 
-Status: implemented in `Reseau/src/common/clock.jl` and call sites updated in `Reseau/src/io/*` + `AwsHTTP/src/*`.
+Status: implemented in `Reseau/src/common/clock.jl` and call sites updated in `Reseau/src/sockets/io/*` + `AwsHTTP/src/*`.
 
 Provide:
 - `Reseau.monotonic_time_ns()::UInt64` in common/clock.jl
@@ -388,7 +359,7 @@ Replace call sites:
 
 ### 2. Sleep/Delay (Replace `sleep(...)` Without Blocking Julia Threads)
 
-Status: implemented in `Reseau/src/common/clock.jl` (thread sleep) and `Reseau/src/io/event_loop.jl` (task sleep), with call sites updated in `Reseau` + `HTTP`.
+Status: implemented in `Reseau/src/common/clock.jl` (thread sleep) and `Reseau/src/sockets/io/event_loop.jl` (task sleep), with call sites updated in `Reseau` + `HTTP`.
 
 Provide:
 - `Reseau.thread_sleep_ns(ns::Integer)::Nothing`  in common/clock.jl (blocking; for dedicated threads only)
@@ -423,7 +394,7 @@ Replace call sites:
 
 ### 3. Replace `Base.timedwait(...)` (Avoid libuv `Timer`)
 
-Status: implemented in `Reseau/src/common/clock.jl` + `Reseau/src/common/condition_variable.jl`.
+Status: implemented in `Reseau/src/common/clock.jl` + `Reseau/src/threads/condition_variable.jl`.
 
 Provide:
 - `Reseau.timedwait_poll(testcb, timeout_s; poll_s=...) -> (:ok | :timed_out)`  in common/clock.jl
@@ -432,7 +403,7 @@ Implementation:
 - Use `Reseau.monotonic_time_ns()` + `Reseau.thread_sleep_ns(...)` and poll `testcb()` without `Timer`.
 
 Replace call sites:
-- `Reseau` `src/common/condition_variable.jl` (uses `Base.timedwait`)
+- `Reseau` `src/threads/condition_variable.jl` (uses `Base.timedwait`)
 
 ### 4. Non-libuv Filesystem Helpers (Replace `open`, `stat`, `homedir`, `tempdir`, `tempname`, `isdir`) in common/file.jl
 
@@ -451,7 +422,7 @@ Provide:
 
 Replace call sites:
 - `Reseau` `src/common/file.jl` (`stat`, `homedir`)
-- `Reseau` `src/io/stream.jl` (`stat`)
+- `Reseau` `src/sockets/io/stream.jl` (`stat`)
 - `Reseau` `src/common/log_writer.jl` (`open`)
 - `HTTP` `src/download.jl` (`tempdir`, `isdir`, `tempname`, `Base.open`)
 

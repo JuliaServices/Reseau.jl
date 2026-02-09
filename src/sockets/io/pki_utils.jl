@@ -519,14 +519,36 @@ function import_pkcs12_to_identity(
         return ErrorResult(ERROR_SYS_CALL_FAILURE)
     end
 
-    values_ref = Ref{Ptr{Cvoid}}(identity)
-    identity_array = ccall(
+    # SecureTransport expects an array where:
+    # - index 0 is a SecIdentityRef
+    # - subsequent entries are any intermediate SecCertificateRefs to send.
+    #
+    # SecPKCS12Import also yields a certificate chain. Include it so the server can
+    # present intermediates during the handshake (required for the certificate-chain test).
+    cert_chain = _kSecImportItemCertChain == C_NULL ? C_NULL :
+        ccall((:CFDictionaryGetValue, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}), item, _kSecImportItemCertChain)
+    chain_count = cert_chain == C_NULL ? Clong(0) :
+        ccall((:CFArrayGetCount, _COREFOUNDATION_LIB), Clong, (Ptr{Cvoid},), cert_chain)
+
+    extra = chain_count > 1 ? (chain_count - 1) : 0
+    total = Clong(1 + extra)
+    values = Vector{Ptr{Cvoid}}(undef, Int(total))
+    values[1] = identity
+    if extra > 0
+        # Skip the leaf cert (index 0); the identity already contains it.
+        for j in 1:extra
+            cert = ccall((:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Clong), cert_chain, j)
+            values[Int(1 + j)] = cert
+        end
+    end
+
+    identity_array = GC.@preserve values ccall(
         (:CFArrayCreate, _COREFOUNDATION_LIB),
         Ptr{Cvoid},
         (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Clong, Ptr{Cvoid}),
         C_NULL,
-        values_ref,
-        1,
+        pointer(values),
+        total,
         _kCFTypeArrayCallBacks,
     )
     _cf_release(items_ref[])

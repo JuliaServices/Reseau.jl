@@ -1,5 +1,5 @@
 # SecureTransport TLS backend (macOS)
-# Included by src/io/tls_channel_handler.jl
+# Included by src/sockets/io/tls_channel_handler.jl
 
 # === SecureTransport backend (macOS) ===
 const CFTypeRef = Ptr{Cvoid}
@@ -78,10 +78,12 @@ const _kSecItemTypeCertificate = UInt32(4)
     const _kCFTypeArrayCallBacks = cglobal((:kCFTypeArrayCallBacks, _COREFOUNDATION_LIB), Cvoid)
     const _kSecImportExportPassphrase = unsafe_load(cglobal((:kSecImportExportPassphrase, _SECURITY_LIB), Ptr{Cvoid}))
     const _kSecImportItemIdentity = unsafe_load(cglobal((:kSecImportItemIdentity, _SECURITY_LIB), Ptr{Cvoid}))
+    const _kSecImportItemCertChain = unsafe_load(cglobal((:kSecImportItemCertChain, _SECURITY_LIB), Ptr{Cvoid}))
 else
     const _kCFTypeArrayCallBacks = C_NULL
     const _kSecImportExportPassphrase = C_NULL
     const _kSecImportItemIdentity = C_NULL
+    const _kSecImportItemCertChain = C_NULL
 end
 
 struct CFRange
