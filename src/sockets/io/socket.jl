@@ -265,7 +265,7 @@ mutable struct Socket
 end
 
 # Initialize socket based on platform and domain
-function socket_init(options::SocketOptions)::Union{Socket, ErrorResult}
+function socket_init(options::SocketOptions)::Socket
     @static if Sys.isapple()
         # macOS: domain-based selection
         if options.domain == SocketDomain.LOCAL || options.domain == SocketDomain.VSOCK
@@ -287,32 +287,33 @@ function socket_cleanup!(socket::Socket)
     return socket_cleanup_impl(socket.impl, socket)
 end
 
-function socket_connect(socket::Socket, options::SocketConnectOptions)::Union{Nothing, ErrorResult}
+function socket_connect(socket::Socket, options::SocketConnectOptions)::Nothing
     return socket_connect_impl(socket.impl, socket, options)
 end
 
-function socket_bind(socket::Socket, options::SocketBindOptions)::Union{Nothing, ErrorResult}
+function socket_bind(socket::Socket, options::SocketBindOptions)::Nothing
     return socket_bind_impl(socket.impl, socket, options)
 end
 
-function socket_listen(socket::Socket, backlog_size::Integer)::Union{Nothing, ErrorResult}
+function socket_listen(socket::Socket, backlog_size::Integer)::Nothing
     return socket_listen_impl(socket.impl, socket, backlog_size)
 end
 
-function socket_start_accept(socket::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
+function socket_start_accept(socket::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
     return socket_start_accept_impl(socket.impl, socket, accept_loop, options)
 end
 
-function socket_stop_accept(socket::Socket)::Union{Nothing, ErrorResult}
+function socket_stop_accept(socket::Socket)::Nothing
     return socket_stop_accept_impl(socket.impl, socket)
 end
 
-function socket_close(socket::Socket)::Union{Nothing, ErrorResult}
+function socket_close(socket::Socket)::Nothing
     socket.impl === nothing && return nothing
 
     event_loop = socket.event_loop
     if event_loop === nothing || !(@atomic event_loop.running) || event_loop_thread_is_callers_thread(event_loop)
-        return socket_close_impl(socket.impl, socket)
+        socket_close_impl(socket.impl, socket)
+        return nothing
     end
 
     # `socket_close_impl` may need to unsubscribe from IO events and tear down
@@ -322,11 +323,11 @@ function socket_close(socket::Socket)::Union{Nothing, ErrorResult}
         TaskFn(function(status)
             try
                 sock = socket
-                rv = socket_close_impl(sock.impl, sock)
-                if rv isa ErrorResult
-                    future_fail!(fut, rv.code)
-                else
+                try
+                    socket_close_impl(sock.impl, sock)
                     future_complete!(fut, nothing)
+                catch e
+                    e isa ReseauError ? future_fail!(fut, e.code) : rethrow()
                 end
             catch e
                 Core.println("socket_close_on_event_loop task errored: $e")
@@ -339,34 +340,31 @@ function socket_close(socket::Socket)::Union{Nothing, ErrorResult}
     future_wait(fut)
 
     err = future_get_error(fut)
-    if err != 0
-        raise_error(err)
-        return ErrorResult(err)
-    end
+    err != 0 && throw_error(err)
     return nothing
 end
 
-function socket_shutdown_dir(socket::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
+function socket_shutdown_dir(socket::Socket, dir::ChannelDirection.T)::Nothing
     return socket_shutdown_dir_impl(socket.impl, socket, dir)
 end
 
-function socket_set_options(socket::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
+function socket_set_options(socket::Socket, options::SocketOptions)::Nothing
     return socket_set_options_impl(socket.impl, socket, options)
 end
 
-function socket_assign_to_event_loop(socket::Socket, event_loop::EventLoop)::Union{Nothing, ErrorResult}
+function socket_assign_to_event_loop(socket::Socket, event_loop::EventLoop)::Nothing
     return socket_assign_to_event_loop_impl(socket.impl, socket, event_loop)
 end
 
-function socket_subscribe_to_readable_events(socket::Socket, on_readable::SocketOnReadableFn, user_data)::Union{Nothing, ErrorResult}
+function socket_subscribe_to_readable_events(socket::Socket, on_readable::SocketOnReadableFn, user_data)::Nothing
     return socket_subscribe_to_readable_events_impl(socket.impl, socket, on_readable, user_data)
 end
 
-function socket_read(socket::Socket, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+function socket_read(socket::Socket, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
     return socket_read_impl(socket.impl, socket, buffer)
 end
 
-function socket_write(socket::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Union{Nothing, ErrorResult}
+function socket_write(socket::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Nothing
     return socket_write_impl(socket.impl, socket, cursor, written_fn, user_data)
 end
 
@@ -378,11 +376,11 @@ function socket_is_open(socket::Socket)::Bool
     return socket_is_open_impl(socket.impl, socket)
 end
 
-function socket_set_close_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+function socket_set_close_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
     return socket_set_close_callback_impl(socket.impl, socket, fn, user_data)
 end
 
-function socket_set_cleanup_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+function socket_set_cleanup_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
     return socket_set_cleanup_callback_impl(socket.impl, socket, fn, user_data)
 end
 
@@ -404,14 +402,13 @@ function socket_get_event_loop(socket::Socket)::Union{EventLoop, Nothing}
     return socket.event_loop
 end
 
-function socket_get_bound_address(socket::Socket)::Union{SocketEndpoint, ErrorResult}
+function socket_get_bound_address(socket::Socket)::SocketEndpoint
     if socket.local_endpoint.address[1] == 0
         logf(
             LogLevel.ERROR, LS_IO_SOCKET,
             "Socket has no local address. Socket must be bound first. fd=$(socket.io_handle.fd)"
         )
-        raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+        throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
     return copy(socket.local_endpoint)
 end
@@ -428,10 +425,9 @@ end
 end
 
 # Validate port for connect operation
-function socket_validate_port_for_connect(port::Integer, domain::SocketDomain.T)::Union{Nothing, ErrorResult}
+function socket_validate_port_for_connect(port::Integer, domain::SocketDomain.T)::Nothing
     if !_socket_domain_valid(domain)
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     # Local domain doesn't use ports
@@ -442,8 +438,7 @@ function socket_validate_port_for_connect(port::Integer, domain::SocketDomain.T)
     # VSOCK domain doesn't use ports in the same way
     if domain == SocketDomain.VSOCK
         if _socket_vsock_port_any(port) || port < 0 || port > 0x7fffffff
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         return nothing
     end
@@ -451,18 +446,16 @@ function socket_validate_port_for_connect(port::Integer, domain::SocketDomain.T)
     # TCP/UDP ports must be 1-65535 for connect
     if port < 1 || port > 65535
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid port $port for connect (must be 1-65535)")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     return nothing
 end
 
 # Validate port for bind operation
-function socket_validate_port_for_bind(port::Integer, domain::SocketDomain.T)::Union{Nothing, ErrorResult}
+function socket_validate_port_for_bind(port::Integer, domain::SocketDomain.T)::Nothing
     if !_socket_domain_valid(domain)
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     # Local domain doesn't use ports
@@ -476,8 +469,7 @@ function socket_validate_port_for_bind(port::Integer, domain::SocketDomain.T)::U
             return nothing
         end
         if port < 0 || port > 0x7fffffff
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         return nothing
     end
@@ -485,8 +477,7 @@ function socket_validate_port_for_bind(port::Integer, domain::SocketDomain.T)::U
     # TCP/UDP ports must be 0-65535 for bind (0 = ephemeral)
     if port < 0 || port > 65535
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid port $port for bind (must be 0-65535)")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     return nothing
@@ -531,12 +522,11 @@ function is_network_interface_name_valid(interface_name::AbstractString)::Bool
 end
 
 # Parse IPv4 address string to binary representation
-function parse_ipv4_address(src::AbstractString)::Union{UInt32, ErrorResult}
+function parse_ipv4_address(src::AbstractString)::UInt32
     parts = split(src, '.')
     if length(parts) != 4
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv4 address format: $src")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     result = UInt32(0)
@@ -544,8 +534,7 @@ function parse_ipv4_address(src::AbstractString)::Union{UInt32, ErrorResult}
         val = tryparse(UInt8, part)
         if val === nothing
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv4 address component: $part")
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         # Network byte order (big-endian)
         result |= UInt32(val) << (8 * (4 - i))
@@ -555,19 +544,17 @@ function parse_ipv4_address(src::AbstractString)::Union{UInt32, ErrorResult}
 end
 
 # Parse IPv6 address string to binary representation
-function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothing, ErrorResult}
+function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Nothing
     # Check capacity
     if byte_buf_remaining_capacity(dst) < 16
-        raise_error(ERROR_SHORT_BUFFER)
-        return ErrorResult(ERROR_SHORT_BUFFER)
+        throw_error(ERROR_SHORT_BUFFER)
     end
 
     # Handle :: notation
     parts = split(src, "::")
     if length(parts) > 2
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: multiple :: in $src")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     left_parts = isempty(parts[1]) ? String[] : split(parts[1], ':')
@@ -575,13 +562,11 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
 
     if length(left_parts) > 1 && any(part -> occursin('.', part), left_parts[1:end-1])
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: invalid IPv4 tail in $src")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
     if length(right_parts) > 1 && any(part -> occursin('.', part), right_parts[1:end-1])
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: invalid IPv4 tail in $src")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     ipv4_bytes = nothing
@@ -590,16 +575,11 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
 
     if ipv4_in_left && ipv4_in_right
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: multiple IPv4 tails in $src")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     if ipv4_in_left
-        ipv4_res = parse_ipv4_address(left_parts[end])
-        if ipv4_res isa ErrorResult
-            return ipv4_res
-        end
-        ipv4_val = ipv4_res
+        ipv4_val = parse_ipv4_address(left_parts[end])
         ipv4_bytes = Memory{UInt8}(undef, 4)
         ipv4_bytes[1] = UInt8((ipv4_val >> 24) & 0xff)
         ipv4_bytes[2] = UInt8((ipv4_val >> 16) & 0xff)
@@ -607,11 +587,7 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
         ipv4_bytes[4] = UInt8(ipv4_val & 0xff)
         left_parts = left_parts[1:end-1]
     elseif ipv4_in_right
-        ipv4_res = parse_ipv4_address(right_parts[end])
-        if ipv4_res isa ErrorResult
-            return ipv4_res
-        end
-        ipv4_val = ipv4_res
+        ipv4_val = parse_ipv4_address(right_parts[end])
         ipv4_bytes = Memory{UInt8}(undef, 4)
         ipv4_bytes[1] = UInt8((ipv4_val >> 24) & 0xff)
         ipv4_bytes[2] = UInt8((ipv4_val >> 16) & 0xff)
@@ -624,8 +600,7 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
     total_parts = length(left_parts) + length(right_parts) + ipv4_groups
     if total_parts > 8 || (length(parts) == 1 && total_parts != 8)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address format: wrong number of parts in $src")
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
 
     zeros_needed = 8 - total_parts
@@ -639,8 +614,7 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
         val = tryparse(UInt16, part; base = 16)
         if val === nothing
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address component: $part")
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         addr[byte_idx] = UInt8((val >> 8) & 0xff)
         addr[byte_idx + 1] = UInt8(val & 0xff)
@@ -654,8 +628,7 @@ function parse_ipv6_address!(src::AbstractString, dst::ByteBuffer)::Union{Nothin
         val = tryparse(UInt16, part; base = 16)
         if val === nothing
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Invalid IPv6 address component: $part")
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         addr[byte_idx] = UInt8((val >> 8) & 0xff)
         addr[byte_idx + 1] = UInt8(val & 0xff)

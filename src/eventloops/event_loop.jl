@@ -124,8 +124,8 @@ end
 function event_loop_connect_to_io_completion_port!(
         event_loop::EventLoop,
         handle::IoHandle,
-    )::Union{Nothing, ErrorResult}
-    return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+    )::Nothing
+    throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 end
 
@@ -138,7 +138,7 @@ end
 end
 
 # Get current clock time
-function event_loop_current_clock_time(event_loop::EventLoop)::Union{UInt64, ErrorResult}
+function event_loop_current_clock_time(event_loop::EventLoop)::UInt64
     return event_loop.clock()
 end
 
@@ -146,12 +146,11 @@ end
 function event_loop_fetch_local_object(
         event_loop::EventLoop,
         key,
-    )::Union{EventLoopLocalObject, ErrorResult}
+    )::Union{EventLoopLocalObject, Nothing}
     debug_assert(event_loop_thread_is_callers_thread(event_loop))
     obj = get(event_loop.local_data, key, nothing)
     if obj === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        return nothing
     end
     return obj::EventLoopLocalObject
 end
@@ -159,7 +158,7 @@ end
 function event_loop_put_local_object!(
         event_loop::EventLoop,
         obj::EventLoopLocalObject,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     debug_assert(event_loop_thread_is_callers_thread(event_loop))
     event_loop.local_data[obj.key] = obj
     return nothing
@@ -168,7 +167,7 @@ end
 function event_loop_remove_local_object!(
         event_loop::EventLoop,
         key,
-    )::Union{EventLoopLocalObject, Nothing, ErrorResult}
+    )::Union{EventLoopLocalObject, Nothing}
     debug_assert(event_loop_thread_is_callers_thread(event_loop))
     obj = get(event_loop.local_data, key, nothing)
     if obj === nothing
@@ -230,7 +229,7 @@ function event_loop_get_load_factor(event_loop::EventLoop)::Csize_t
 end
 
 # Create a new event loop based on platform
-function event_loop_new(options::EventLoopOptions)::Union{EventLoop, ErrorResult}
+function event_loop_new(options::EventLoopOptions)::EventLoop
     @static if Sys.islinux()
         return event_loop_new_with_epoll(options)
     elseif Sys.isapple() || Sys.isbsd()
@@ -238,7 +237,7 @@ function event_loop_new(options::EventLoopOptions)::Union{EventLoop, ErrorResult
     elseif Sys.iswindows()
         return event_loop_new_with_iocp(options)
     else
-        return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
@@ -269,44 +268,36 @@ function event_loop_group_new(options::EventLoopGroupOptions)
 
     clock = options.clock_override === nothing ? high_res_clock : options.clock_override
 
-    # Create first event loop
-    first_opts = EventLoopOptions(; clock = clock)
-    first_loop = event_loop_new(first_opts)
-    if first_loop isa ErrorResult
-        return first_loop
-    end
-
     elg = EventLoopGroup(
         Vector{EventLoop}(),
         options.shutdown_options,
         1,
     )
+    try
+        # Create first event loop
+        first_opts = EventLoopOptions(; clock = clock)
+        first_loop = event_loop_new(first_opts)
+        first_loop.base_elg = elg
+        push!(elg.event_loops, first_loop)
 
-    first_loop.base_elg = elg
-    push!(elg.event_loops, first_loop)
-
-    # Create remaining event loops
-    for _ in 2:loop_count
-        loop_opts = EventLoopOptions(; clock = clock, parent_elg = elg)
-        loop = event_loop_new(loop_opts)
-        if loop isa ErrorResult
-            event_loop_group_destroy!(elg)
-            return loop
+        # Create remaining event loops
+        for _ in 2:loop_count
+            loop_opts = EventLoopOptions(; clock = clock, parent_elg = elg)
+            loop = event_loop_new(loop_opts)
+            push!(elg.event_loops, loop)
         end
-        push!(elg.event_loops, loop)
-    end
 
-    # Start event loops
-    for i in 1:length(elg.event_loops)
-        loop = elg.event_loops[i]
-        result = event_loop_run!(loop)
-        if result isa ErrorResult
-            event_loop_group_destroy!(elg)
-            return result
+        # Start event loops
+        for i in 1:length(elg.event_loops)
+            loop = elg.event_loops[i]
+            event_loop_run!(loop)
         end
-    end
 
-    return elg
+        return elg
+    catch
+        event_loop_group_destroy!(elg)
+        rethrow()
+    end
 end
 
 function EventLoopGroup(options::EventLoopGroupOptions)
@@ -387,7 +378,6 @@ function default_event_loop_group()::EventLoopGroup
             # Keep this single-loop to avoid surprising concurrency in downstream
             # consumers that "just want a default".
             elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
-            elg isa ErrorResult && error("Failed to create default EventLoopGroup: $(elg.code)")
             _DEFAULT_EVENT_LOOP_GROUP[] = elg
         end
         return elg::EventLoopGroup
@@ -474,7 +464,7 @@ function task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing
     )
 
     now = event_loop.clock()
-    run_at = add_u64_saturating(now isa ErrorResult ? monotonic_time_ns() : now, UInt64(ns))
+    run_at = add_u64_saturating(now, UInt64(ns))
     event_loop_schedule_task_future!(event_loop, task, run_at)
 
     wait(wake)

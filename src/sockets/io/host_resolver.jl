@@ -670,11 +670,10 @@ function host_resolver_resolve!(
         on_resolved::OnHostResolvedFn,
         user_data = nothing;
         resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if @atomic resolver.shutdown
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve called after shutdown")
-        raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
     host = String(host_name)
@@ -696,7 +695,7 @@ function host_resolver_resolve!(
             take!(_RESOLVER_THREAD_STARTUP)  # drain on failure
             delete!(resolver.cache, host)
             unlock(resolver.resolver_lock)
-            return ErrorResult(last_error())
+            rethrow()
         end
         unlock(resolver.resolver_lock)
         return nothing
@@ -743,7 +742,7 @@ function host_resolver_purge_cache_with_callback!(
         resolver::HostResolver,
         on_purge_cache_complete::Union{Function, Nothing},
         user_data = nothing,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     host_resolver_purge_cache!(resolver)
     _dispatch_simple_callback(resolver, on_purge_cache_complete, user_data)
     return nothing
@@ -754,7 +753,7 @@ function host_resolver_purge_host_cache!(
         host_name::AbstractString;
         on_host_purge_complete::Union{Function, Nothing} = nothing,
         user_data = nothing,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     host = String(host_name)
 
     lock(resolver.resolver_lock)

@@ -93,11 +93,10 @@
         return ERROR_SYS_CALL_FAILURE
     end
 
-    function _iocp_pipe_raise_last_error()::ErrorResult
+    function _iocp_pipe_raise_last_error()
         win_err = _iocp_pipe_get_last_error()
         aws_err = _iocp_pipe_translate_windows_error(win_err)
-        raise_error(aws_err)
-        return ErrorResult(aws_err)
+        throw_error(aws_err)
     end
 
     function _iocp_pipe_unique_name()::String
@@ -105,7 +104,7 @@
         return "\\\\.\\pipe\\aws_pipe_$(uuid_str)"
     end
 
-    function pipe_create_iocp()::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
+    function pipe_create_iocp()::Tuple{PipeReadEnd, PipeWriteEnd}
         pipe_name = _iocp_pipe_unique_name()
 
         open_mode = PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE
@@ -126,7 +125,7 @@
         )
 
         if write_handle == INVALID_HANDLE_VALUE
-            return _iocp_pipe_raise_last_error()
+            _iocp_pipe_raise_last_error()
         end
 
         read_handle = ccall(
@@ -144,7 +143,7 @@
 
         if read_handle == INVALID_HANDLE_VALUE
             _ = ccall((:CloseHandle, _KERNEL32), Int32, (Ptr{Cvoid},), write_handle)
-            return _iocp_pipe_raise_last_error()
+            _iocp_pipe_raise_last_error()
         end
 
         read_end = PipeReadEnd(-1)
@@ -158,7 +157,7 @@
         return (read_end, write_end)
     end
 
-    function _pipe_read_end_close_iocp!(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+    function _pipe_read_end_close_iocp!(read_end::PipeReadEnd)::Nothing
         impl = read_end.impl::IocpPipeReadEndImpl
         if read_end.io_handle.handle != C_NULL && read_end.io_handle.handle != INVALID_HANDLE_VALUE
             _ = ccall((:CloseHandle, _KERNEL32), Int32, (Ptr{Cvoid},), read_end.io_handle.handle)
@@ -175,7 +174,7 @@
         return nothing
     end
 
-    function _pipe_write_end_close_iocp!(write_end::PipeWriteEnd)::Union{Nothing, ErrorResult}
+    function _pipe_write_end_close_iocp!(write_end::PipeWriteEnd)::Nothing
         impl = write_end.impl::IocpPipeWriteEndImpl
         impl.cleaned_up = true
 
@@ -242,7 +241,7 @@
             impl.error_report_task = ScheduledTask(
                 TaskFn(function(status)
                     try
-                        _iocp_pipe_read_end_report_error_task(read_end, TaskStatus.T(status))
+                        _iocp_pipe_read_end_report_error_task(read_end, _coerce_task_status(status))
                     catch e
                         Core.println("pipe_read_end_report_error task errored: $e")
                     end
@@ -323,25 +322,21 @@
             read_end::PipeReadEnd,
             on_readable::OnPipeReadableFn,
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         impl = read_end.impl::IocpPipeReadEndImpl
 
         if impl.state != IocpPipeReadEndState.OPEN
             if _pipe_read_end_is_subscribed(read_end)
-                raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
-                return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
+                throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
             end
-            raise_error(ERROR_UNKNOWN)
-            return ErrorResult(ERROR_UNKNOWN)
+            throw_error(ERROR_UNKNOWN)
         end
 
         if read_end.event_loop === nothing
-            raise_error(ERROR_IO_BROKEN_PIPE)
-            return ErrorResult(ERROR_IO_BROKEN_PIPE)
+            throw_error(ERROR_IO_BROKEN_PIPE)
         end
         if !event_loop_thread_is_callers_thread(read_end.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
 
         impl.state = IocpPipeReadEndState.SUBSCRIBING
@@ -353,20 +348,17 @@
         return nothing
     end
 
-    function _pipe_read_end_unsubscribe_iocp!(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+    function _pipe_read_end_unsubscribe_iocp!(read_end::PipeReadEnd)::Nothing
         impl = read_end.impl::IocpPipeReadEndImpl
 
         if read_end.event_loop === nothing
-            raise_error(ERROR_IO_BROKEN_PIPE)
-            return ErrorResult(ERROR_IO_BROKEN_PIPE)
+            throw_error(ERROR_IO_BROKEN_PIPE)
         end
         if !_pipe_read_end_is_subscribed(read_end)
-            raise_error(ERROR_IO_NOT_SUBSCRIBED)
-            return ErrorResult(ERROR_IO_NOT_SUBSCRIBED)
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
         end
         if !event_loop_thread_is_callers_thread(read_end.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
 
         impl.state = IocpPipeReadEndState.OPEN
@@ -383,14 +375,12 @@
         return nothing
     end
 
-    function _pipe_read_iocp!(read_end::PipeReadEnd, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+    function _pipe_read_iocp!(read_end::PipeReadEnd, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
         if read_end.event_loop === nothing
-            raise_error(ERROR_IO_BROKEN_PIPE)
-            return ErrorResult(ERROR_IO_BROKEN_PIPE)
+            throw_error(ERROR_IO_BROKEN_PIPE)
         end
         if !event_loop_thread_is_callers_thread(read_end.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
 
         remaining = buffer.capacity - buffer.len
@@ -413,13 +403,12 @@
 
         if !peek_success
             _pipe_read_end_request_async_monitoring!(read_end, MONITORING_BECAUSE_ERROR_SUSPECTED)
-            return _iocp_pipe_raise_last_error()
+            _iocp_pipe_raise_last_error()
         end
 
         if bytes_available[] == 0
             _pipe_read_end_request_async_monitoring!(read_end, MONITORING_BECAUSE_WAITING_FOR_DATA)
-            raise_error(ERROR_IO_READ_WOULD_BLOCK)
-            return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+            throw_error(ERROR_IO_READ_WOULD_BLOCK)
         end
 
         bytes_to_read = min(UInt32(remaining), bytes_available[])
@@ -439,7 +428,7 @@
 
         if !read_success
             _pipe_read_end_request_async_monitoring!(read_end, MONITORING_BECAUSE_ERROR_SUSPECTED)
-            return _iocp_pipe_raise_last_error()
+            _iocp_pipe_raise_last_error()
         end
 
         amount_read = Csize_t(bytes_read[])
@@ -457,23 +446,20 @@
             cursor::ByteCursor,
             on_complete::Union{OnPipeWriteCompleteFn, Nothing},
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         if write_end.event_loop === nothing
-            raise_error(ERROR_IO_BROKEN_PIPE)
-            return ErrorResult(ERROR_IO_BROKEN_PIPE)
+            throw_error(ERROR_IO_BROKEN_PIPE)
         end
         if !event_loop_thread_is_callers_thread(write_end.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
 
         if cursor.len > Csize_t(typemax(UInt32))
-            raise_error(ERROR_INVALID_BUFFER_SIZE)
-            return ErrorResult(ERROR_INVALID_BUFFER_SIZE)
+            throw_error(ERROR_INVALID_BUFFER_SIZE)
         end
 
         impl = write_end.impl::IocpPipeWriteEndImpl
-        impl.cleaned_up && return ErrorResult(raise_error(ERROR_IO_BROKEN_PIPE))
+        impl.cleaned_up && throw_error(ERROR_IO_BROKEN_PIPE)
 
         req = IocpPipeWriteRequest(
             write_end,
@@ -501,7 +487,7 @@
         if !success && _iocp_pipe_get_last_error() != ERROR_IO_PENDING
             # Remove request and report error.
             pop!(impl.writes)
-            return _iocp_pipe_raise_last_error()
+            _iocp_pipe_raise_last_error()
         end
 
         return nothing
@@ -539,8 +525,7 @@ end # @static if Sys.iswindows()
 # =============================================================================
 
 @static if !Sys.iswindows()
-function pipe_create_iocp()::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+function pipe_create_iocp()::Tuple{PipeReadEnd, PipeWriteEnd}
+    throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 end

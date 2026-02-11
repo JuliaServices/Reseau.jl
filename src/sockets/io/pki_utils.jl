@@ -223,9 +223,8 @@ function _pki_secitem_import(
     end
 end
 
-function _pki_import_ecc_key_into_keychain(private_key::ByteCursor, keychain::Ptr{Cvoid})::Union{Nothing, ErrorResult}
+function _pki_import_ecc_key_into_keychain(private_key::ByteCursor, keychain::Ptr{Cvoid})::Nothing
     pem_objs = pem_parse(_cursor_to_memory(private_key))
-    pem_objs isa ErrorResult && return pem_objs
 
     for obj in pem_objs
         data = obj.data
@@ -256,8 +255,7 @@ function _pki_import_ecc_key_into_keychain(private_key::ByteCursor, keychain::Pt
         out_items[] != C_NULL && _cf_release(out_items[])
     end
 
-    raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
-    return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
+    throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
 end
 
 # Platform-specific PKI helpers.
@@ -266,21 +264,20 @@ function import_public_and_private_keys_to_identity(
         public_cert_chain::ByteCursor,
         private_key::ByteCursor;
         keychain_path::Union{String, Nothing} = nothing,
-    )::Union{Ptr{Cvoid}, ErrorResult}
+    )::Ptr{Cvoid}
     @static if !Sys.isapple()
         _ = public_cert_chain
         _ = private_key
         _ = keychain_path
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     cert_data = _cf_data_create(_cursor_ptr(public_cert_chain), public_cert_chain.len)
-    cert_data == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    cert_data == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
     key_data = _cf_data_create(_cursor_ptr(private_key), private_key.len)
     if key_data == C_NULL
         _cf_release(cert_data)
-        return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     import_keychain = Ref{Ptr{Cvoid}}(C_NULL)
@@ -289,24 +286,21 @@ function import_public_and_private_keys_to_identity(
         if status != _errSecSuccess
             _cf_release(cert_data)
             _cf_release(key_data)
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         status = ccall((:SecKeychainUnlock, _SECURITY_LIB), Int32, (Ptr{Cvoid}, UInt32, Cstring, UInt8), import_keychain[], 0, "", 1)
         if status != _errSecSuccess
             _cf_release(cert_data)
             _cf_release(key_data)
             _cf_release(import_keychain[])
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
     else
         status = ccall((:SecKeychainCopyDefault, _SECURITY_LIB), Int32, (Ref{Ptr{Cvoid}},), import_keychain)
         if status != _errSecSuccess
             _cf_release(cert_data)
             _cf_release(key_data)
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
     end
 
@@ -318,14 +312,13 @@ function import_public_and_private_keys_to_identity(
     end
     if cert_status == _errSecUnknownFormat || cert_status == _errSecUnsupportedFormat
         cert_objects = pem_parse(_cursor_to_memory(public_cert_chain))
-        if cert_objects isa ErrorResult || isempty(cert_objects)
+        if isempty(cert_objects)
             _cf_release(cert_import_output[])
             _cf_release(key_import_output[])
             _cf_release(import_keychain[])
             _cf_release(cert_data)
             _cf_release(key_data)
-            raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
-            return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
+            throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
         end
 
         root_cert = cert_objects[1].data
@@ -336,8 +329,7 @@ function import_public_and_private_keys_to_identity(
             _cf_release(import_keychain[])
             _cf_release(cert_data)
             _cf_release(key_data)
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         cert_import_output[] != C_NULL && _cf_release(cert_import_output[])
@@ -358,19 +350,19 @@ function import_public_and_private_keys_to_identity(
         _cf_release(import_keychain[])
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
-        return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
+        throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
     end
 
     if key_status == _errSecUnknownFormat || key_status == _errSecUnsupportedFormat
-        ecc_res = _pki_import_ecc_key_into_keychain(private_key, import_keychain[])
-        if ecc_res isa ErrorResult
+        try
+            _pki_import_ecc_key_into_keychain(private_key, import_keychain[])
+        catch
             _cf_release(cert_import_output[])
             _cf_release(key_import_output[])
             _cf_release(import_keychain[])
             _cf_release(cert_data)
             _cf_release(key_data)
-            return ecc_res
+            rethrow()
         end
     elseif key_status != _errSecSuccess && key_status != _errSecDuplicateItem
         _cf_release(cert_import_output[])
@@ -378,27 +370,26 @@ function import_public_and_private_keys_to_identity(
         _cf_release(import_keychain[])
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
-        return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
+        throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
     end
 
     certificate_ref = Ref{Ptr{Cvoid}}(C_NULL)
     if cert_status == _errSecDuplicateItem
         cert_objects === nothing && (cert_objects = pem_parse(_cursor_to_memory(public_cert_chain)))
-        if cert_objects isa ErrorResult || isempty(cert_objects)
+        if isempty(cert_objects)
             _cf_release(cert_import_output[])
             _cf_release(key_import_output[])
             _cf_release(import_keychain[])
             _cf_release(cert_data)
             _cf_release(key_data)
-            return ErrorResult(raise_error(ERROR_IO_FILE_VALIDATION_FAILURE))
+            throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
         end
         root_cert = cert_objects[1].data
         root_data = _cf_data_create(pointer(root_cert.mem), root_cert.len)
-        root_data == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+        root_data == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
         certificate_ref[] = ccall((:SecCertificateCreateWithData, _SECURITY_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, root_data)
         _cf_release(root_data)
-        certificate_ref[] == C_NULL && return ErrorResult(raise_error(ERROR_IO_FILE_VALIDATION_FAILURE))
+        certificate_ref[] == C_NULL && throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
     else
         if cert_import_output[] == C_NULL
             _cf_release(cert_import_output[])
@@ -406,8 +397,7 @@ function import_public_and_private_keys_to_identity(
             _cf_release(import_keychain[])
             _cf_release(cert_data)
             _cf_release(key_data)
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         certificate_ref[] = ccall((:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Clong), cert_import_output[], 0)
         _cf_retain(certificate_ref[])
@@ -429,8 +419,7 @@ function import_public_and_private_keys_to_identity(
         _cf_release(import_keychain[])
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     values_ref = Ref{Ptr{Cvoid}}(identity_ref[])
@@ -452,8 +441,7 @@ function import_public_and_private_keys_to_identity(
     _cf_release(key_data)
     if identity_array == C_NULL
         _cf_release(identity_ref[])
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     return identity_array
@@ -462,19 +450,18 @@ end
 function import_pkcs12_to_identity(
         pkcs12_cursor::ByteCursor,
         password::ByteCursor,
-    )::Union{Ptr{Cvoid}, ErrorResult}
+    )::Ptr{Cvoid}
     @static if !Sys.isapple()
         _ = pkcs12_cursor
         _ = password
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     pkcs12_data = _cf_data_create(_cursor_ptr(pkcs12_cursor), pkcs12_cursor.len)
-    pkcs12_data == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    pkcs12_data == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     dict = _pki_cf_dict_create()
-    dict == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    dict == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     pass_ref = if password.len == 0
         ccall(
@@ -491,8 +478,7 @@ function import_pkcs12_to_identity(
     if pass_ref == C_NULL
         _cf_release(pkcs12_data)
         _cf_release(dict)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
     _pki_cf_dict_add_value(dict, _kSecImportExportPassphrase, pass_ref)
 
@@ -507,16 +493,14 @@ function import_pkcs12_to_identity(
 
     if status != _errSecSuccess
         items_ref[] != C_NULL && _cf_release(items_ref[])
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     item = ccall((:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Clong), items_ref[], 0)
     identity = ccall((:CFDictionaryGetValue, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}), item, _kSecImportItemIdentity)
     identity == C_NULL && begin
         _cf_release(items_ref[])
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     # SecureTransport expects an array where:
@@ -553,23 +537,20 @@ function import_pkcs12_to_identity(
     )
     _cf_release(items_ref[])
     if identity_array == C_NULL
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
     return identity_array
 end
 
 function import_trusted_certificates(
         certificates_blob::ByteCursor,
-    )::Union{Ptr{Cvoid}, ErrorResult}
+    )::Ptr{Cvoid}
     @static if !Sys.isapple()
         _ = certificates_blob
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     pem_objs = pem_parse(_cursor_to_memory(certificates_blob))
-    pem_objs isa ErrorResult && return pem_objs
 
     cert_count = length(pem_objs)
     cert_array = ccall(
@@ -580,7 +561,7 @@ function import_trusted_certificates(
         cert_count,
         _kCFTypeArrayCallBacks,
     )
-    cert_array == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    cert_array == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     lock(_pki_sec_lock) do
         for obj in pem_objs
@@ -603,14 +584,13 @@ function _secitem_add_certificate_to_keychain(
         cert_ref::Ptr{Cvoid},
         serial_data::Ptr{Cvoid},
         label::Ptr{Cvoid},
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     @static if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     add_attributes = _pki_cf_dict_create_typed()
-    add_attributes == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    add_attributes == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     delete_query = C_NULL
     _pki_cf_dict_add_value(add_attributes, _kSecClass, _kSecClassCertificate)
@@ -626,8 +606,7 @@ function _secitem_add_certificate_to_keychain(
             logf(LogLevel.ERROR, LS_IO_PKI, "SecItemAdd certificate failed with OSStatus $status")
         end
         _cf_release(add_attributes)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     if status == _errSecDuplicateItem
@@ -635,7 +614,7 @@ function _secitem_add_certificate_to_keychain(
         delete_query = _pki_cf_dict_create_typed()
         delete_query == C_NULL && begin
             _cf_release(add_attributes)
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         _pki_cf_dict_add_value(delete_query, _kSecClass, _kSecClassCertificate)
         _pki_cf_dict_add_value(delete_query, _kSecAttrSerialNumber, serial_data)
@@ -645,8 +624,7 @@ function _secitem_add_certificate_to_keychain(
             _cf_release(add_attributes)
             _cf_release(delete_query)
             logf(LogLevel.ERROR, LS_IO_PKI, "SecItemDelete certificate failed with OSStatus $del_status")
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         status = ccall((:SecItemAdd, _SECURITY_LIB), Int32, (Ptr{Cvoid}, Ptr{Cvoid}), add_attributes, C_NULL)
@@ -654,8 +632,7 @@ function _secitem_add_certificate_to_keychain(
             _cf_release(add_attributes)
             _cf_release(delete_query)
             logf(LogLevel.ERROR, LS_IO_PKI, "SecItemAdd certificate failed with OSStatus $status")
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
     end
 
@@ -668,14 +645,13 @@ function _secitem_add_private_key_to_keychain(
         key_ref::Ptr{Cvoid},
         label::Ptr{Cvoid},
         application_label::Ptr{Cvoid},
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     @static if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     add_attributes = _pki_cf_dict_create_typed()
-    add_attributes == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    add_attributes == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     delete_query = C_NULL
     _pki_cf_dict_add_value(add_attributes, _kSecClass, _kSecClassKey)
@@ -692,8 +668,7 @@ function _secitem_add_private_key_to_keychain(
             logf(LogLevel.ERROR, LS_IO_PKI, "SecItemAdd private key failed with OSStatus $status")
         end
         _cf_release(add_attributes)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     if status == _errSecDuplicateItem
@@ -701,7 +676,7 @@ function _secitem_add_private_key_to_keychain(
         delete_query = _pki_cf_dict_create_typed()
         delete_query == C_NULL && begin
             _cf_release(add_attributes)
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         _pki_cf_dict_add_value(delete_query, _kSecClass, _kSecClassKey)
         _pki_cf_dict_add_value(delete_query, _kSecAttrKeyClass, _kSecAttrKeyClassPrivate)
@@ -712,8 +687,7 @@ function _secitem_add_private_key_to_keychain(
             _cf_release(add_attributes)
             _cf_release(delete_query)
             logf(LogLevel.ERROR, LS_IO_PKI, "SecItemDelete private key failed with OSStatus $del_status")
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         status = ccall((:SecItemAdd, _SECURITY_LIB), Int32, (Ptr{Cvoid}, Ptr{Cvoid}), add_attributes, C_NULL)
@@ -721,8 +695,7 @@ function _secitem_add_private_key_to_keychain(
             _cf_release(add_attributes)
             _cf_release(delete_query)
             logf(LogLevel.ERROR, LS_IO_PKI, "SecItemAdd private key failed with OSStatus $status")
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
     end
 
@@ -731,14 +704,13 @@ function _secitem_add_private_key_to_keychain(
     return nothing
 end
 
-function _secitem_get_identity(serial_data::Ptr{Cvoid})::Union{Ptr{Cvoid}, ErrorResult}
+function _secitem_get_identity(serial_data::Ptr{Cvoid})::Ptr{Cvoid}
     @static if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     search_query = _pki_cf_dict_create_typed()
-    search_query == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    search_query == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     _pki_cf_dict_add_value(search_query, _kSecClass, _kSecClassIdentity)
     _pki_cf_dict_add_value(search_query, _kSecAttrSerialNumber, serial_data)
@@ -750,27 +722,24 @@ function _secitem_get_identity(serial_data::Ptr{Cvoid})::Union{Ptr{Cvoid}, Error
 
     if status != _errSecSuccess || identity_ref[] == C_NULL
         logf(LogLevel.ERROR, LS_IO_PKI, "SecItemCopyMatching identity failed with OSStatus $status")
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     logf(LogLevel.INFO, LS_IO_PKI, "Successfully retrieved identity from keychain.")
     return identity_ref[]
 end
 
-function _secitem_key_type_from_pem(pem_obj::PemObject)::Union{Ptr{Cvoid}, ErrorResult}
+function _secitem_key_type_from_pem(pem_obj::PemObject)::Ptr{Cvoid}
     if pem_obj.object_type == PemObjectType.RSA_PRIVATE_KEY
         return _kSecAttrKeyTypeRSA
     elseif pem_obj.object_type == PemObjectType.EC_PRIVATE_KEY
         return _kSecAttrKeyTypeEC
     elseif pem_obj.object_type == PemObjectType.PRIVATE_KEY
         logf(LogLevel.ERROR, LS_IO_PKI, "PKCS8 private key format unsupported for SecItem.")
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     logf(LogLevel.ERROR, LS_IO_PKI, "Unsupported private key format for SecItem.")
-    raise_error(ERROR_INVALID_ARGUMENT)
-    return ErrorResult(ERROR_INVALID_ARGUMENT)
+    throw_error(ERROR_INVALID_ARGUMENT)
 end
 
 function secitem_import_cert_and_key(
@@ -778,54 +747,45 @@ function secitem_import_cert_and_key(
         private_key::ByteCursor;
         cert_label::Union{String, Nothing} = nothing,
         key_label::Union{String, Nothing} = nothing,
-    )::Union{Ptr{Cvoid}, ErrorResult}
+    )::Ptr{Cvoid}
     @static if !Sys.isapple()
         _ = public_cert_chain
         _ = private_key
         _ = cert_label
         _ = key_label
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     if cert_label === nothing || key_label === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     cert_objects = pem_parse(_cursor_to_memory(public_cert_chain))
-    cert_objects isa ErrorResult && return cert_objects
-
     key_objects = pem_parse(_cursor_to_memory(private_key))
-    key_objects isa ErrorResult && return key_objects
 
     if length(cert_objects) != 1
         logf(LogLevel.ERROR, LS_IO_PKI, "Certificate chains not currently supported for SecItem.")
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     if isempty(key_objects)
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     cert_obj = cert_objects[1]
     if !pem_is_certificate(cert_obj)
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     key_obj = key_objects[1]
 
     key_type = _secitem_key_type_from_pem(key_obj)
-    key_type isa ErrorResult && return key_type
 
     cert_data = _cf_data_create(pointer(cert_obj.data.mem), cert_obj.data.len)
-    cert_data == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    cert_data == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     key_data = _cf_data_create(pointer(key_obj.data.mem), key_obj.data.len)
     if key_data == C_NULL
         _cf_release(cert_data)
-        return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     error_ref = Ref{Ptr{Cvoid}}(C_NULL)
@@ -833,8 +793,7 @@ function secitem_import_cert_and_key(
     if cert_ref == C_NULL
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     serial_data = ccall(
@@ -849,8 +808,7 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     cert_label_cur = ByteCursor(cert_label)
@@ -860,8 +818,7 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     key_attributes = _pki_cf_dict_create_typed()
@@ -871,8 +828,7 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
     _pki_cf_dict_add_value(key_attributes, _kSecAttrKeyClass, _kSecAttrKeyClassPrivate)
     _pki_cf_dict_add_value(key_attributes, _kSecAttrKeyType, key_type)
@@ -893,8 +849,7 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     key_copied_attributes = ccall((:SecKeyCopyAttributes, _SECURITY_LIB), Ptr{Cvoid}, (Ptr{Cvoid},), key_ref)
@@ -909,8 +864,7 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     key_label_cur = ByteCursor(key_label)
@@ -924,12 +878,14 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
-    cert_res = _secitem_add_certificate_to_keychain(cert_ref, serial_data, cert_label_ref)
-    if cert_res isa ErrorResult
+    try
+        _secitem_add_certificate_to_keychain(cert_ref, serial_data, cert_label_ref)
+        _secitem_add_private_key_to_keychain(key_ref, key_label_ref, application_label)
+        identity = _secitem_get_identity(serial_data)
+
         _cf_release(key_label_ref)
         _cf_release(key_copied_attributes)
         _cf_release(key_ref)
@@ -939,11 +895,9 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        return cert_res
-    end
 
-    key_res = _secitem_add_private_key_to_keychain(key_ref, key_label_ref, application_label)
-    if key_res isa ErrorResult
+        return identity
+    catch
         _cf_release(key_label_ref)
         _cf_release(key_copied_attributes)
         _cf_release(key_ref)
@@ -953,22 +907,8 @@ function secitem_import_cert_and_key(
         _cf_release(cert_ref)
         _cf_release(cert_data)
         _cf_release(key_data)
-        return key_res
+        rethrow()
     end
-
-    identity = _secitem_get_identity(serial_data)
-
-    _cf_release(key_label_ref)
-    _cf_release(key_copied_attributes)
-    _cf_release(key_ref)
-    _cf_release(key_attributes)
-    _cf_release(cert_label_ref)
-    _cf_release(serial_data)
-    _cf_release(cert_ref)
-    _cf_release(cert_data)
-    _cf_release(key_data)
-
-    return identity
 end
 
 function secitem_import_pkcs12(
@@ -976,26 +916,25 @@ function secitem_import_pkcs12(
         password::ByteCursor;
         cert_label::Union{String, Nothing} = nothing,
         key_label::Union{String, Nothing} = nothing,
-    )::Union{Ptr{Cvoid}, ErrorResult}
+    )::Ptr{Cvoid}
     @static if !Sys.isapple()
         _ = pkcs12_cursor
         _ = password
         _ = cert_label
         _ = key_label
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     _ = cert_label
     _ = key_label
 
     pkcs12_data = _cf_data_create(_cursor_ptr(pkcs12_cursor), pkcs12_cursor.len)
-    pkcs12_data == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    pkcs12_data == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
     dict = _pki_cf_dict_create()
     if dict == C_NULL
         _cf_release(pkcs12_data)
-        return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     pass_ref = password.len == 0 ? _cf_string_create(C_NULL, Csize_t(0), _kCFStringEncodingUTF8) :
@@ -1013,23 +952,20 @@ function secitem_import_pkcs12(
 
     if status != _errSecSuccess || items_ref[] == C_NULL
         items_ref[] != C_NULL && _cf_release(items_ref[])
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     count = ccall((:CFArrayGetCount, _COREFOUNDATION_LIB), Clong, (Ptr{Cvoid},), items_ref[])
     if count == 0
         _cf_release(items_ref[])
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     item = ccall((:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Clong), items_ref[], 0)
     identity = ccall((:CFDictionaryGetValue, _COREFOUNDATION_LIB), Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}), item, _kSecImportItemIdentity)
     if identity == C_NULL
         _cf_release(items_ref[])
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
     _cf_retain(identity)
     _cf_release(items_ref[])
@@ -1038,10 +974,9 @@ end
 
 function load_cert_from_system_cert_store(
         cert_path::AbstractString,
-    )::Union{Ptr{Cvoid}, ErrorResult}
+    )::Ptr{Cvoid}
     _ = cert_path
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 
 function close_cert_store(cert_store::Ptr{Cvoid})::Nothing
@@ -1053,12 +988,11 @@ function import_key_pair_to_cert_context(
         public_cert_chain::ByteCursor,
         private_key::ByteCursor;
         is_client_mode::Bool = true,
-    )::Union{Ptr{Cvoid}, ErrorResult}
+    )::Ptr{Cvoid}
     _ = public_cert_chain
     _ = private_key
     _ = is_client_mode
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 
 # === X509 helpers (aws-lc) ===
@@ -1138,19 +1072,19 @@ end
     return ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
 end
 
-function x509_parse_pem_chain(pem_cursor::ByteCursor)::Union{Vector{X509Ref}, ErrorResult}
-    _aws_lc_init_once() || return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+function x509_parse_pem_chain(pem_cursor::ByteCursor)::Vector{X509Ref}
+    _aws_lc_init_once() || throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     bio_new = _aws_lc_symbol(:BIO_new_mem_buf)
     pem_read = _aws_lc_symbol(:PEM_read_bio_X509)
     bio_free = _aws_lc_symbol(:BIO_free)
     err_clear = _aws_lc_symbol(:ERR_clear_error)
     if bio_new == C_NULL || pem_read == C_NULL || bio_free == C_NULL
-        return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     certs = X509Ref[]
     ptr = _cursor_ptr(pem_cursor)
     bio = ccall(bio_new, Ptr{Cvoid}, (Ptr{UInt8}, Cint), ptr, Cint(pem_cursor.len))
-    bio == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    bio == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
     try
         while true
             x509 = ccall(pem_read, Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), bio, C_NULL, C_NULL, C_NULL)
@@ -1161,28 +1095,27 @@ function x509_parse_pem_chain(pem_cursor::ByteCursor)::Union{Vector{X509Ref}, Er
         ccall(bio_free, Cint, (Ptr{Cvoid},), bio)
         err_clear != C_NULL && ccall(err_clear, Cvoid, ())
     end
-    isempty(certs) && return ErrorResult(raise_error(ERROR_IO_FILE_VALIDATION_FAILURE))
+    isempty(certs) && throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
     return certs
 end
 
-function x509_load_der(der_cursor::ByteCursor)::Union{X509Ref, ErrorResult}
-    _aws_lc_init_once() || return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+function x509_load_der(der_cursor::ByteCursor)::X509Ref
+    _aws_lc_init_once() || throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     d2i = _aws_lc_symbol(:d2i_X509)
-    d2i == C_NULL && return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+    d2i == C_NULL && throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     ptr_ref = Ref{Ptr{UInt8}}(_cursor_ptr(der_cursor))
     x509 = ccall(d2i, Ptr{Cvoid}, (Ptr{Cvoid}, Ref{Ptr{UInt8}}, Clong), C_NULL, ptr_ref, Clong(der_cursor.len))
-    x509 == C_NULL && return ErrorResult(raise_error(ERROR_IO_FILE_VALIDATION_FAILURE))
+    x509 == C_NULL && throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
     return _x509_ref(x509)
 end
 
-function x509_check_host(cert::X509Ref, host::AbstractString)::Union{Bool, ErrorResult}
-    _aws_lc_init_once() || return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+function x509_check_host(cert::X509Ref, host::AbstractString)::Bool
+    _aws_lc_init_once() || throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     check_host = _aws_lc_symbol(:X509_check_host)
-    check_host == C_NULL && return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+    check_host == C_NULL && throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     res = ccall(check_host, Cint, (Ptr{Cvoid}, Cstring, Csize_t, Cuint, Ptr{Ptr{Cchar}}), cert.handle, host, ncodeunits(host), UInt32(0), C_NULL)
     if res < 0
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
     return res == 1
 end
@@ -1191,8 +1124,8 @@ function x509_verify_chain(
         chain_cursor::ByteCursor;
         trust_store_cursor::Union{ByteCursor, Nothing} = nothing,
         host::Union{String, Nothing} = nothing,
-    )::Union{Nothing, ErrorResult}
-    _aws_lc_init_once() || return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+    )::Nothing
+    _aws_lc_init_once() || throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     store_new = _aws_lc_symbol(:X509_STORE_new)
     store_free = _aws_lc_symbol(:X509_STORE_free)
     store_add = _aws_lc_symbol(:X509_STORE_add_cert)
@@ -1209,21 +1142,17 @@ function x509_verify_chain(
     if store_new == C_NULL || store_free == C_NULL || store_add == C_NULL || ctx_new == C_NULL ||
             ctx_free == C_NULL || ctx_init == C_NULL || ctx_err == C_NULL || verify_cert == C_NULL ||
             sk_new == C_NULL || sk_free == C_NULL || sk_push == C_NULL
-        return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     chain = x509_parse_pem_chain(chain_cursor)
-    chain isa ErrorResult && return chain
     leaf = chain[1]
 
     store = ccall(store_new, Ptr{Cvoid}, ())
-    store == C_NULL && return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+    store == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
 
-    trust_certs = trust_store_cursor === nothing ? X509Ref[] : begin
-        res = x509_parse_pem_chain(trust_store_cursor)
-        res isa ErrorResult && return res
-        res
-    end
+    trust_certs = trust_store_cursor === nothing ? X509Ref[] :
+        x509_parse_pem_chain(trust_store_cursor)
 
     for cert in trust_certs
         _ = ccall(store_add, Cint, (Ptr{Cvoid}, Ptr{Cvoid}), store, cert.handle)
@@ -1232,19 +1161,19 @@ function x509_verify_chain(
     if trust_store_cursor === nothing
         if store_load == C_NULL
             ccall(store_free, Cvoid, (Ptr{Cvoid},), store)
-            return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
+            throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
         end
         ca_file = determine_default_pki_ca_file()
         ca_dir = determine_default_pki_dir()
         if ca_file === nothing && ca_dir === nothing
             ccall(store_free, Cvoid, (Ptr{Cvoid},), store)
-            return ErrorResult(raise_error(ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND))
+            throw_error(ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND)
         end
         ca_file_ptr = ca_file === nothing ? Ptr{UInt8}(C_NULL) : ca_file
         ca_dir_ptr = ca_dir === nothing ? Ptr{UInt8}(C_NULL) : ca_dir
         if ccall(store_load, Cint, (Ptr{Cvoid}, Cstring, Cstring), store, ca_file_ptr, ca_dir_ptr) != 1
             ccall(store_free, Cvoid, (Ptr{Cvoid},), store)
-            return ErrorResult(raise_error(ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND))
+            throw_error(ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND)
         end
     end
 
@@ -1253,7 +1182,7 @@ function x509_verify_chain(
         chain_stack = ccall(sk_new, Ptr{Cvoid}, ())
         if chain_stack == C_NULL
             ccall(store_free, Cvoid, (Ptr{Cvoid},), store)
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         for cert in chain[2:end]
             _ = ccall(sk_push, Cint, (Ptr{Cvoid}, Ptr{Cvoid}), chain_stack, cert.handle)
@@ -1264,29 +1193,24 @@ function x509_verify_chain(
     if ctx == C_NULL
         chain_stack != C_NULL && ccall(sk_free, Cvoid, (Ptr{Cvoid},), chain_stack)
         ccall(store_free, Cvoid, (Ptr{Cvoid},), store)
-        return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     try
         if ccall(ctx_init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), ctx, store, leaf.handle, chain_stack) != 1
-            return ErrorResult(raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE))
+            throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
         verify_res = ccall(verify_cert, Cint, (Ptr{Cvoid},), ctx)
         if verify_res != 1
             err = ccall(ctx_err, Cint, (Ptr{Cvoid},), ctx)
             depth = ccall(ctx_depth, Cint, (Ptr{Cvoid},), ctx)
             mapped = _x509_err_to_tls_error(Int(err), Int(depth))
-            raise_error(mapped)
-            return ErrorResult(mapped)
+            throw_error(mapped)
         end
         if host !== nothing
             host_ok = x509_check_host(leaf, host)
-            if host_ok isa ErrorResult
-                return host_ok
-            end
             if !host_ok
-                raise_error(ERROR_IO_TLS_HOST_NAME_MISMATCH)
-                return ErrorResult(ERROR_IO_TLS_HOST_NAME_MISMATCH)
+                throw_error(ERROR_IO_TLS_HOST_NAME_MISMATCH)
             end
         end
     finally

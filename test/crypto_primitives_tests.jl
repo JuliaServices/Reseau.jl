@@ -51,7 +51,6 @@ end
 
 function _pem_private_key_der(pem::String)
     parsed = Sockets.pem_parse(pem)
-    @test !(parsed isa Reseau.ErrorResult)
     parsed isa Vector || return UInt8[]
     keys = Sockets.pem_filter_private_keys(parsed)
     @test length(keys) == 1
@@ -66,7 +65,6 @@ end
     expected = _hkdf_ref_sha512(ikm, salt, info, 42)
 
     derived = Sockets.hkdf_derive(Sockets.HkdfHmacType.SHA512, ikm; salt = salt, info = info, length = 42)
-    @test !(derived isa Reseau.ErrorResult)
     if derived isa Reseau.ByteBuffer
         @test _buf_to_vec(derived) == expected
     end
@@ -79,10 +77,11 @@ end
     aad = rand(UInt8, 16)
     plaintext = rand(UInt8, 128)
 
-    enc = Sockets.aes_gcm_256_encrypt(key, iv, aad, plaintext)
-    if enc isa Reseau.ErrorResult
-        unsupported = Int(LibAwsCal.aws_cal_errors.AWS_ERROR_CAL_UNSUPPORTED_ALGORITHM)
-        @test enc.code == unsupported
+    local enc
+    try
+        enc = Sockets.aes_gcm_256_encrypt(key, iv, aad, plaintext)
+    catch e
+        @test e isa Reseau.ReseauError
         return
     end
 
@@ -96,8 +95,7 @@ end
 
     bad_tag = _buf_to_vec(tag)
     bad_tag[1] = bad_tag[1] ⊻ 0xFF
-    bad_dec = Sockets.aes_gcm_256_decrypt(key, iv, aad, _buf_to_vec(ciphertext), bad_tag)
-    @test bad_dec isa Reseau.ErrorResult
+    @test_throws Reseau.ReseauError Sockets.aes_gcm_256_decrypt(key, iv, aad, _buf_to_vec(ciphertext), bad_tag)
 end
 
 @testset "crypto primitives - ECC sign/verify" begin
@@ -124,9 +122,13 @@ end
     @test pair isa Sockets.RsaKeyPair
     pair isa Sockets.RsaKeyPair || return
 
-    public_key = Sockets.rsa_key_pair_get_public_key(pair)
-    if public_key isa Reseau.ErrorResult
-        @test public_key.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+    local public_key
+    local pub_pair
+    try
+        public_key = Sockets.rsa_key_pair_get_public_key(pair)
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
         pub_pair = pair
     else
         @test public_key isa Reseau.ByteBuffer

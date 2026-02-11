@@ -140,54 +140,40 @@ function _tls_byo_new_handler(
         setup::TlsByoCryptoSetupOptions,
         options,
         slot::ChannelSlot,
-    )::Union{AbstractChannelHandler, ErrorResult}
+    )::AbstractChannelHandler
     handler = setup.new_handler_fn(options, slot, setup.user_data)
-    if handler isa ErrorResult
-        return handler
-    end
     if !(handler isa AbstractChannelHandler)
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
-    set_res = channel_slot_set_handler!(slot, handler)
-    if set_res isa ErrorResult
-        return set_res
-    end
+    channel_slot_set_handler!(slot, handler)
     return handler
 end
 
 function _tls_byo_start_negotiation(
         setup::TlsByoCryptoSetupOptions,
         handler::AbstractChannelHandler,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if setup.start_negotiation_fn === nothing
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     res = setup.start_negotiation_fn(handler, setup.user_data)
-    if res isa ErrorResult
-        return res
-    end
     if res isa Integer && res != AWS_OP_SUCCESS
-        raise_error(Int(res))
-        return ErrorResult(Int(res))
+        throw_error(Int(res))
     end
     return nothing
 end
 
-function tls_byo_crypto_set_client_setup_options(options::TlsByoCryptoSetupOptions)
+function tls_byo_crypto_set_client_setup_options(options::TlsByoCryptoSetupOptions)::Nothing
     if options.new_handler_fn === nothing || options.start_negotiation_fn === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     _tls_byo_client_setup[] = options
     return nothing
 end
 
-function tls_byo_crypto_set_server_setup_options(options::TlsByoCryptoSetupOptions)
+function tls_byo_crypto_set_server_setup_options(options::TlsByoCryptoSetupOptions)::Nothing
     if options.new_handler_fn === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     _tls_byo_server_setup[] = options
     return nothing
@@ -198,7 +184,7 @@ struct SecItemOptions
     key_label::Union{String, Nothing}
 end
 
-function _tls_generate_secitem_labels()::Union{SecItemOptions, ErrorResult}
+function _tls_generate_secitem_labels()::SecItemOptions
     uuid_str = string(UUIDs.uuid4())
     return SecItemOptions("reseau-cert-$uuid_str", "reseau-key-$uuid_str")
 end
@@ -230,7 +216,7 @@ function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)
     state.closed && return nothing
     state.closed = true
     if state.session_handle != CK_SESSION_HANDLE(0)
-        _ = pkcs11_lib_close_session(state.pkcs11_lib, state.session_handle)
+        try; pkcs11_lib_close_session(state.pkcs11_lib, state.session_handle); catch; end
     end
     pkcs11_lib_release(state.pkcs11_lib)
     state.session_handle = CK_SESSION_HANDLE(0)
@@ -255,48 +241,52 @@ function pkcs11_tls_op_handler_new(
         token_label::ByteCursor,
         private_key_object_label::ByteCursor,
         slot_id::Union{UInt64, Nothing},
-    )::Union{CustomKeyOpHandler, ErrorResult}
+    )::CustomKeyOpHandler
     if pkcs11_lib === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     if !(pkcs11_lib isa Pkcs11Lib)
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     lib = pkcs11_lib_acquire(pkcs11_lib)
 
     match_label = token_label.len > 0 ? token_label : nothing
-    slot_res = pkcs11_lib_find_slot_with_token(lib, slot_id, match_label)
-    if slot_res isa ErrorResult
+    local selected_slot::UInt64
+    try
+        selected_slot = pkcs11_lib_find_slot_with_token(lib, slot_id, match_label)
+    catch
         pkcs11_lib_release(lib)
-        return slot_res
+        rethrow()
     end
-    selected_slot = slot_res
 
-    session_res = pkcs11_lib_open_session(lib, selected_slot)
-    if session_res isa ErrorResult
+    local session_handle::CK_SESSION_HANDLE
+    try
+        session_handle = pkcs11_lib_open_session(lib, selected_slot)
+    catch
         pkcs11_lib_release(lib)
-        return session_res
+        rethrow()
     end
 
     pin_cursor = user_pin.len > 0 ? user_pin : nothing
-    login_res = pkcs11_lib_login_user(lib, session_res, pin_cursor)
-    if login_res isa ErrorResult
-        _ = pkcs11_lib_close_session(lib, session_res)
+    try
+        pkcs11_lib_login_user(lib, session_handle, pin_cursor)
+    catch
+        try; pkcs11_lib_close_session(lib, session_handle); catch; end
         pkcs11_lib_release(lib)
-        return login_res
+        rethrow()
     end
 
     key_label = private_key_object_label.len > 0 ? private_key_object_label : nothing
-    key_res = pkcs11_lib_find_private_key(lib, session_res, key_label)
-    if key_res isa ErrorResult
-        _ = pkcs11_lib_close_session(lib, session_res)
+    local key_handle::CK_OBJECT_HANDLE
+    local key_type::CK_KEY_TYPE
+    try
+        key_handle, key_type = pkcs11_lib_find_private_key(lib, session_handle, key_label)
+    catch
+        try; pkcs11_lib_close_session(lib, session_handle); catch; end
         pkcs11_lib_release(lib)
-        return key_res
+        rethrow()
     end
-    key_handle, key_type = key_res
 
     state = Pkcs11KeyOpState(
         lib,
@@ -304,7 +294,7 @@ function pkcs11_tls_op_handler_new(
         UInt64(selected_slot),
         token_label,
         private_key_object_label,
-        session_res,
+        session_handle,
         key_handle,
         key_type,
         ReentrantLock(),
@@ -324,35 +314,37 @@ function pkcs11_tls_op_handler_new(
             op_type = tls_key_operation_get_type(operation)
             if op_type == TlsKeyOperationType.DECRYPT
                 input = tls_key_operation_get_input(operation)
-                res = pkcs11_lib_decrypt(
-                    state.pkcs11_lib,
-                    state.session_handle,
-                    state.private_key_handle,
-                    state.private_key_type,
-                    input,
-                )
-                if res isa ErrorResult
-                    tls_key_operation_complete_with_error!(operation, res.code)
-                else
+                try
+                    res = pkcs11_lib_decrypt(
+                        state.pkcs11_lib,
+                        state.session_handle,
+                        state.private_key_handle,
+                        state.private_key_type,
+                        input,
+                    )
                     tls_key_operation_complete!(operation, byte_cursor_from_buf(res))
+                catch e
+                    code = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                    tls_key_operation_complete_with_error!(operation, code)
                 end
             elseif op_type == TlsKeyOperationType.SIGN
                 input = tls_key_operation_get_input(operation)
                 digest_alg = tls_key_operation_get_digest_algorithm(operation)
                 sig_alg = tls_key_operation_get_signature_algorithm(operation)
-                res = pkcs11_lib_sign(
-                    state.pkcs11_lib,
-                    state.session_handle,
-                    state.private_key_handle,
-                    state.private_key_type,
-                    input,
-                    digest_alg,
-                    sig_alg,
-                )
-                if res isa ErrorResult
-                    tls_key_operation_complete_with_error!(operation, res.code)
-                else
+                try
+                    res = pkcs11_lib_sign(
+                        state.pkcs11_lib,
+                        state.session_handle,
+                        state.private_key_handle,
+                        state.private_key_type,
+                        input,
+                        digest_alg,
+                        sig_alg,
+                    )
                     tls_key_operation_complete!(operation, byte_cursor_from_buf(res))
+                catch e
+                    code = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                    tls_key_operation_complete_with_error!(operation, code)
                 end
             else
                 tls_key_operation_complete_with_error!(operation, ERROR_UNIMPLEMENTED)
@@ -546,7 +538,7 @@ is_using_secitem() = _tls_use_secitem[]
 
 @inline _tls_options_buf_is_set(is_set::Bool)::Bool = is_set
 
-function _tls_buf_copy_from(value)::Union{ByteBuffer, ErrorResult}
+function _tls_buf_copy_from(value)::ByteBuffer
     if value === nothing
         return null_buffer()
     end
@@ -560,18 +552,17 @@ function _tls_buf_copy_from(value)::Union{ByteBuffer, ErrorResult}
     elseif value isa AbstractString
         ByteCursor(value)
     else
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     dest_ref = Ref(null_buffer())
     if byte_buf_init_copy_from_cursor(dest_ref, cursor) != OP_SUCCESS
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
     return dest_ref[]
 end
 
-function _tls_buf_from_file(path::AbstractString)::Union{ByteBuffer, ErrorResult}
+function _tls_buf_from_file(path::AbstractString)::ByteBuffer
     bytes = try
         read(path)
     catch e
@@ -580,31 +571,27 @@ function _tls_buf_from_file(path::AbstractString)::Union{ByteBuffer, ErrorResult
         else
             raise_error(ERROR_FILE_READ_FAILURE)
         end
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     dest_ref = Ref(null_buffer())
     if byte_buf_init_copy_from_cursor(dest_ref, ByteCursor(bytes)) != OP_SUCCESS
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
     return dest_ref[]
 end
 
-function _tls_validate_pem(buf::ByteBuffer)::Union{Nothing, ErrorResult}
+function _tls_validate_pem(buf::ByteBuffer)::Nothing
     if buf.len == 0
-        raise_error(ERROR_IO_PEM_MALFORMED)
-        return ErrorResult(ERROR_IO_PEM_MALFORMED)
+        throw_error(ERROR_IO_PEM_MALFORMED)
     end
     data = Memory{UInt8}(undef, Int(buf.len))
     unsafe_copyto!(pointer(data), pointer(buf.mem), Int(buf.len))
-    parsed = pem_parse(data)
-    if parsed isa ErrorResult
-        return ErrorResult(last_error())
-    end
+    pem_parse(data)
     return nothing
 end
 
-function tls_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
+function tls_context_new(options::TlsContextOptions)::TlsContext
     _tls_cal_init_once()
     return _tls_context_new_impl(options)
 end
@@ -617,34 +604,37 @@ tls_ctx_release(::Nothing) = nothing
 function _tls_ctx_options_copy(
         options::TlsContextOptions;
         is_server_override::Union{Bool, Nothing} = nothing,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     ca_buf = _tls_buf_copy_from(options.ca_file)
-    ca_buf isa ErrorResult && return ca_buf
-    cert_buf = _tls_buf_copy_from(options.certificate)
-    if cert_buf isa ErrorResult
+    cert_buf = try
+        _tls_buf_copy_from(options.certificate)
+    catch
         byte_buf_clean_up_secure(Ref(ca_buf))
-        return cert_buf
+        rethrow()
     end
-    key_buf = _tls_buf_copy_from(options.private_key)
-    if key_buf isa ErrorResult
+    key_buf = try
+        _tls_buf_copy_from(options.private_key)
+    catch
         byte_buf_clean_up_secure(Ref(ca_buf))
         byte_buf_clean_up_secure(Ref(cert_buf))
-        return key_buf
+        rethrow()
     end
-    pkcs_buf = _tls_buf_copy_from(options.pkcs12)
-    if pkcs_buf isa ErrorResult
+    pkcs_buf = try
+        _tls_buf_copy_from(options.pkcs12)
+    catch
         byte_buf_clean_up_secure(Ref(ca_buf))
         byte_buf_clean_up_secure(Ref(cert_buf))
         byte_buf_clean_up_secure(Ref(key_buf))
-        return pkcs_buf
+        rethrow()
     end
-    pkcs_pwd_buf = _tls_buf_copy_from(options.pkcs12_password)
-    if pkcs_pwd_buf isa ErrorResult
+    pkcs_pwd_buf = try
+        _tls_buf_copy_from(options.pkcs12_password)
+    catch
         byte_buf_clean_up_secure(Ref(ca_buf))
         byte_buf_clean_up_secure(Ref(cert_buf))
         byte_buf_clean_up_secure(Ref(key_buf))
         byte_buf_clean_up_secure(Ref(pkcs_buf))
-        return pkcs_pwd_buf
+        rethrow()
     end
 
     secitem_copy = options.secitem_options === nothing ?
@@ -677,23 +667,19 @@ function _tls_ctx_options_copy(
     )
 end
 
-function tls_client_ctx_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
+function tls_client_ctx_new(options::TlsContextOptions)::TlsContext
     if !tls_is_cipher_pref_supported(options.cipher_pref)
-        raise_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
     end
     opts_copy = _tls_ctx_options_copy(options; is_server_override = false)
-    opts_copy isa ErrorResult && return opts_copy
     return tls_context_new(opts_copy)
 end
 
-function tls_server_ctx_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
+function tls_server_ctx_new(options::TlsContextOptions)::TlsContext
     if !tls_is_cipher_pref_supported(options.cipher_pref)
-        raise_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
     end
     opts_copy = _tls_ctx_options_copy(options; is_server_override = true)
-    opts_copy isa ErrorResult && return opts_copy
     return tls_context_new(opts_copy)
 end
 
@@ -765,9 +751,10 @@ end
 
 function _tls_key_operation_destroy!(operation::TlsKeyOperation)
     if operation.s2n_op != C_NULL
-        lib = _s2n_lib_handle()
-        if !(lib isa ErrorResult)
+        try
+            lib = _s2n_lib_handle()
             _ = ccall(_s2n_symbol(:s2n_async_pkey_op_free), Cint, (Ptr{Cvoid},), operation.s2n_op)
+        catch
         end
         operation.s2n_op = C_NULL
     end
@@ -795,15 +782,15 @@ function _tls_key_operation_completion_task(task::ChannelTask, operation::TlsKey
     end
 
     if operation.completion_error_code == 0
-        lib = _s2n_lib_handle()
-        if lib isa ErrorResult
-            operation.completion_error_code = ERROR_INVALID_STATE
-        else
+        try
+            lib = _s2n_lib_handle()
             if ccall(_s2n_symbol(:s2n_async_pkey_op_apply), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), operation.s2n_op, handler.connection) !=
                     S2N_SUCCESS
                 logf(LogLevel.ERROR, LS_IO_TLS, "Failed applying s2n async pkey op")
                 operation.completion_error_code = ERROR_INVALID_STATE
             end
+        catch
+            operation.completion_error_code = ERROR_INVALID_STATE
         end
     end
 
@@ -832,23 +819,24 @@ function _tls_key_operation_complete_common(
     end
 
     operation.output = null_buffer()
-    local out_buf::Union{ByteBuffer, ErrorResult} = null_buffer()
+    local out_buf::ByteBuffer = null_buffer()
+    local out_buf_failed::Bool = false
     if output !== nothing
-        out_buf = _tls_buf_copy_from(output)
-        if out_buf isa ErrorResult
-            error_code = out_buf.code
+        try
+            out_buf = _tls_buf_copy_from(output)
+        catch e
+            error_code = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            out_buf_failed = true
         end
     end
 
-    if !(out_buf isa ErrorResult)
+    if !out_buf_failed
         operation.output = out_buf
     end
 
-    if output !== nothing && !(out_buf isa ErrorResult) && operation.s2n_op != C_NULL
-        lib = _s2n_lib_handle()
-        if lib isa ErrorResult
-            error_code = ERROR_INVALID_STATE
-        else
+    if output !== nothing && !out_buf_failed && operation.s2n_op != C_NULL
+        try
+            lib = _s2n_lib_handle()
             if ccall(
                     _s2n_symbol(:s2n_async_pkey_op_set_output),
                     Cint,
@@ -860,6 +848,8 @@ function _tls_key_operation_complete_common(
                 logf(LogLevel.ERROR, LS_IO_TLS, "Failed setting output on s2n async pkey op")
                 error_code = ERROR_INVALID_STATE
             end
+        catch
+            error_code = ERROR_INVALID_STATE
         end
     end
 
@@ -985,19 +975,16 @@ end
 function tls_ctx_options_override_default_trust_store!(
         options::TlsContextOptions,
         ca_file,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if options.ca_file_set
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     ca_buf = _tls_buf_copy_from(ca_file)
-    if ca_buf isa ErrorResult
-        return ca_buf
-    end
-    pem_res = _tls_validate_pem(ca_buf)
-    if pem_res isa ErrorResult
+    try
+        _tls_validate_pem(ca_buf)
+    catch
         byte_buf_clean_up_secure(Ref(ca_buf))
-        return pem_res
+        rethrow()
     end
     options.ca_file = ca_buf
     options.ca_file_set = true
@@ -1008,14 +995,12 @@ function tls_ctx_options_override_default_trust_store_from_path!(
         options::TlsContextOptions;
         ca_path::Union{String, Nothing} = nothing,
         ca_file::Union{String, Nothing} = nothing,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if ca_path !== nothing && options.ca_path !== nothing
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     if ca_file !== nothing && options.ca_file_set
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
 
     if ca_path !== nothing
@@ -1024,13 +1009,11 @@ function tls_ctx_options_override_default_trust_store_from_path!(
 
     if ca_file !== nothing
         ca_buf = _tls_buf_from_file(ca_file)
-        if ca_buf isa ErrorResult
-            return ca_buf
-        end
-        pem_res = _tls_validate_pem(ca_buf)
-        if pem_res isa ErrorResult
+        try
+            _tls_validate_pem(ca_buf)
+        catch
             byte_buf_clean_up_secure(Ref(ca_buf))
-            return pem_res
+            rethrow()
         end
         options.ca_file = ca_buf
         options.ca_file_set = true
@@ -1044,30 +1027,21 @@ function tls_ctx_options_set_extension_data!(options::TlsContextOptions, extensi
     return nothing
 end
 
-function tls_ctx_options_init_client_mtls(cert, pkey)::Union{TlsContextOptions, ErrorResult}
+function tls_ctx_options_init_client_mtls(cert, pkey)::TlsContextOptions
     opts = tls_ctx_options_init_default_client()
+    try
+        cert_buf = _tls_buf_copy_from(cert)
+        opts.certificate = cert_buf
+        opts.certificate_set = true
+        _tls_validate_pem(cert_buf)
 
-    cert_buf = _tls_buf_copy_from(cert)
-    cert_buf isa ErrorResult && return cert_buf
-    opts.certificate = cert_buf
-    opts.certificate_set = true
-    pem_res = _tls_validate_pem(cert_buf)
-    if pem_res isa ErrorResult
+        key_buf = _tls_buf_copy_from(pkey)
+        opts.private_key = key_buf
+        opts.private_key_set = true
+        _tls_validate_pem(key_buf)
+    catch
         tls_ctx_options_clean_up!(opts)
-        return pem_res
-    end
-
-    key_buf = _tls_buf_copy_from(pkey)
-    if key_buf isa ErrorResult
-        tls_ctx_options_clean_up!(opts)
-        return key_buf
-    end
-    opts.private_key = key_buf
-    opts.private_key_set = true
-    pem_res = _tls_validate_pem(key_buf)
-    if pem_res isa ErrorResult
-        tls_ctx_options_clean_up!(opts)
-        return pem_res
+        rethrow()
     end
 
     return opts
@@ -1076,30 +1050,21 @@ end
 function tls_ctx_options_init_client_mtls_from_path(
         cert_path::AbstractString,
         pkey_path::AbstractString,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     opts = tls_ctx_options_init_default_client()
+    try
+        cert_buf = _tls_buf_from_file(cert_path)
+        opts.certificate = cert_buf
+        opts.certificate_set = true
+        _tls_validate_pem(cert_buf)
 
-    cert_buf = _tls_buf_from_file(cert_path)
-    cert_buf isa ErrorResult && return cert_buf
-    opts.certificate = cert_buf
-    opts.certificate_set = true
-    pem_res = _tls_validate_pem(cert_buf)
-    if pem_res isa ErrorResult
+        key_buf = _tls_buf_from_file(pkey_path)
+        opts.private_key = key_buf
+        opts.private_key_set = true
+        _tls_validate_pem(key_buf)
+    catch
         tls_ctx_options_clean_up!(opts)
-        return pem_res
-    end
-
-    key_buf = _tls_buf_from_file(pkey_path)
-    if key_buf isa ErrorResult
-        tls_ctx_options_clean_up!(opts)
-        return key_buf
-    end
-    opts.private_key = key_buf
-    opts.private_key_set = true
-    pem_res = _tls_validate_pem(key_buf)
-    if pem_res isa ErrorResult
-        tls_ctx_options_clean_up!(opts)
-        return pem_res
+        rethrow()
     end
 
     return opts
@@ -1107,10 +1072,9 @@ end
 
 function tls_ctx_options_init_client_mtls_from_system_path(
         cert_reg_path::AbstractString,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     if !Sys.iswindows()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     opts = tls_ctx_options_init_default_client()
     opts.system_certificate_path = cert_reg_path
@@ -1121,11 +1085,8 @@ function tls_ctx_options_init_default_server(
         cert,
         pkey;
         alpn_list::Union{String, Nothing} = nothing,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     opts = tls_ctx_options_init_client_mtls(cert, pkey)
-    if opts isa ErrorResult
-        return opts
-    end
     opts.is_server = true
     opts.verify_peer = false
     opts.alpn_list = alpn_list
@@ -1136,11 +1097,8 @@ function tls_ctx_options_init_default_server_from_path(
         cert_path::AbstractString,
         pkey_path::AbstractString;
         alpn_list::Union{String, Nothing} = nothing,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     opts = tls_ctx_options_init_client_mtls_from_path(cert_path, pkey_path)
-    if opts isa ErrorResult
-        return opts
-    end
     opts.is_server = true
     opts.verify_peer = false
     opts.alpn_list = alpn_list
@@ -1149,11 +1107,8 @@ end
 
 function tls_ctx_options_init_default_server_from_system_path(
         cert_reg_path::AbstractString,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     opts = tls_ctx_options_init_client_mtls_from_system_path(cert_reg_path)
-    if opts isa ErrorResult
-        return opts
-    end
     opts.is_server = true
     opts.verify_peer = false
     return opts
@@ -1162,21 +1117,20 @@ end
 function tls_ctx_options_init_client_mtls_pkcs12_from_path(
         pkcs12_path::AbstractString,
         pkcs_password,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     opts = tls_ctx_options_init_default_client()
-    pkcs_buf = _tls_buf_from_file(pkcs12_path)
-    pkcs_buf isa ErrorResult && return pkcs_buf
-    pwd_buf = _tls_buf_copy_from(pkcs_password)
-    if pwd_buf isa ErrorResult
+    try
+        pkcs_buf = _tls_buf_from_file(pkcs12_path)
+        opts.pkcs12 = pkcs_buf
+        pwd_buf = _tls_buf_copy_from(pkcs_password)
+        opts.pkcs12_password = pwd_buf
+    catch
         tls_ctx_options_clean_up!(opts)
-        return pwd_buf
+        rethrow()
     end
-    opts.pkcs12 = pkcs_buf
-    opts.pkcs12_password = pwd_buf
     opts.pkcs12_set = true
     opts.pkcs12_password_set = true
     return opts
@@ -1185,21 +1139,20 @@ end
 function tls_ctx_options_init_client_mtls_pkcs12(
         pkcs12,
         pkcs_password,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     opts = tls_ctx_options_init_default_client()
-    pkcs_buf = _tls_buf_copy_from(pkcs12)
-    pkcs_buf isa ErrorResult && return pkcs_buf
-    pwd_buf = _tls_buf_copy_from(pkcs_password)
-    if pwd_buf isa ErrorResult
+    try
+        pkcs_buf = _tls_buf_copy_from(pkcs12)
+        opts.pkcs12 = pkcs_buf
+        pwd_buf = _tls_buf_copy_from(pkcs_password)
+        opts.pkcs12_password = pwd_buf
+    catch
         tls_ctx_options_clean_up!(opts)
-        return pwd_buf
+        rethrow()
     end
-    opts.pkcs12 = pkcs_buf
-    opts.pkcs12_password = pwd_buf
     opts.pkcs12_set = true
     opts.pkcs12_password_set = true
     return opts
@@ -1208,11 +1161,8 @@ end
 function tls_ctx_options_init_server_pkcs12_from_path(
         pkcs12_path::AbstractString,
         pkcs_password,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     opts = tls_ctx_options_init_client_mtls_pkcs12_from_path(pkcs12_path, pkcs_password)
-    if opts isa ErrorResult
-        return opts
-    end
     opts.is_server = true
     opts.verify_peer = false
     return opts
@@ -1221,11 +1171,8 @@ end
 function tls_ctx_options_init_server_pkcs12(
         pkcs12,
         pkcs_password,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     opts = tls_ctx_options_init_client_mtls_pkcs12(pkcs12, pkcs_password)
-    if opts isa ErrorResult
-        return opts
-    end
     opts.is_server = true
     opts.verify_peer = false
     return opts
@@ -1234,14 +1181,12 @@ end
 function tls_ctx_options_set_keychain_path!(
         options::TlsContextOptions,
         keychain_path::AbstractString,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     if is_using_secitem()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     options.keychain_path = keychain_path
     return nothing
@@ -1250,14 +1195,12 @@ end
 function tls_ctx_options_set_secitem_options!(
         options::TlsContextOptions,
         secitem_options::SecItemOptions,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     if !is_using_secitem()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
     options.secitem_options = SecItemOptions(secitem_options.cert_label, secitem_options.key_label)
     return nothing
@@ -1295,26 +1238,24 @@ tls_secitem_options_clean_up(::SecItemOptions) = nothing
 function tls_ctx_options_init_client_mtls_with_custom_key_operations(
         custom_key_op_handler,
         cert,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     if custom_key_op_handler === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     handler = custom_key_op_handler
     if !(handler isa CustomKeyOpHandler) || handler.on_key_operation === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     opts = tls_ctx_options_init_default_client()
-    cert_buf = _tls_buf_copy_from(cert)
-    cert_buf isa ErrorResult && return cert_buf
-    opts.certificate = cert_buf
-    opts.certificate_set = true
-    pem_res = _tls_validate_pem(cert_buf)
-    if pem_res isa ErrorResult
+    try
+        cert_buf = _tls_buf_copy_from(cert)
+        opts.certificate = cert_buf
+        opts.certificate_set = true
+        _tls_validate_pem(cert_buf)
+    catch
         tls_ctx_options_clean_up!(opts)
-        return pem_res
+        rethrow()
     end
 
     opts.custom_key_op_handler = custom_key_op_handler_acquire(handler)
@@ -1323,14 +1264,12 @@ end
 
 function tls_ctx_options_init_client_mtls_with_pkcs11(
         pkcs11_options::TlsCtxPkcs11Options,
-    )::Union{TlsContextOptions, ErrorResult}
+    )::TlsContextOptions
     if pkcs11_options.pkcs11_lib === nothing
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     if pkcs11_options.cert_file_path.len > 0 && pkcs11_options.cert_file_contents.len > 0
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     handler = pkcs11_tls_op_handler_new(
@@ -1340,7 +1279,6 @@ function tls_ctx_options_init_client_mtls_with_pkcs11(
         pkcs11_options.private_key_object_label,
         pkcs11_options.slot_id,
     )
-    handler isa ErrorResult && return handler
 
     if pkcs11_options.cert_file_contents.len > 0
         return tls_ctx_options_init_client_mtls_with_custom_key_operations(
@@ -1351,7 +1289,6 @@ function tls_ctx_options_init_client_mtls_with_pkcs11(
 
     cert_path = String(pkcs11_options.cert_file_path)
     cert_buf = _tls_buf_from_file(cert_path)
-    cert_buf isa ErrorResult && return cert_buf
 
     cert_cursor = byte_cursor_from_buf(cert_buf)
     opts = tls_ctx_options_init_client_mtls_with_custom_key_operations(handler, cert_cursor)
@@ -1376,8 +1313,7 @@ function tls_context_new_client(;
         max_fragment_size = max_fragment_size,
     )
     if ca_file !== nothing || ca_path !== nothing
-        res = tls_ctx_options_override_default_trust_store_from_path!(opts; ca_path = ca_path, ca_file = ca_file)
-        res isa ErrorResult && return res
+        tls_ctx_options_override_default_trust_store_from_path!(opts; ca_path = ca_path, ca_file = ca_file)
     end
     return tls_context_new(opts)
 end
@@ -1395,9 +1331,6 @@ function tls_context_new_server(;
         private_key;
         alpn_list = alpn_list,
     )
-    if opts isa ErrorResult
-        return opts
-    end
     opts.minimum_tls_version = minimum_tls_version
     opts.cipher_pref = cipher_pref
     opts.max_fragment_size = Csize_t(max_fragment_size)
@@ -1545,7 +1478,6 @@ function tls_on_drive_negotiation(handler::TlsChannelHandler)
         channel = slot.channel
         channel === nothing && return nothing
         now = channel_current_clock_time(channel)
-        now isa ErrorResult && return nothing
         handler.stats.handshake_start_ns = now
 
         if handler.tls_timeout_ms > 0
@@ -1564,7 +1496,6 @@ function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::In
     channel = slot.channel
     channel === nothing && return nothing
     now = channel_current_clock_time(channel)
-    now isa ErrorResult && return nothing
     handler.stats.handshake_end_ns = now
     return nothing
 end
@@ -1575,8 +1506,7 @@ function _tls_backend_init()
     elseif Sys.islinux()
         return _s2n_init_once()
     else
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        return nothing
     end
 end
 
@@ -1620,14 +1550,13 @@ function tls_is_cipher_pref_supported(pref::TlsCipherPref.T)::Bool
     end
 end
 
-function _tls_context_new_impl(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
+function _tls_context_new_impl(options::TlsContextOptions)::TlsContext
     @static if Sys.islinux()
         return _s2n_context_new(options)
     elseif Sys.isapple()
         return _secure_transport_context_new(options)
     else
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
@@ -1645,10 +1574,9 @@ end
 function tls_client_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::Union{AbstractChannelHandler, ErrorResult}
+    )::AbstractChannelHandler
     if options.ctx.options.is_server
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     if _tls_byo_client_setup[] !== nothing
@@ -1660,18 +1588,16 @@ function tls_client_handler_new(
     elseif Sys.isapple()
         return _secure_transport_handler_new(options, slot, _kSSLClientSide)
     else
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
 function tls_server_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::Union{AbstractChannelHandler, ErrorResult}
+    )::AbstractChannelHandler
     if !options.ctx.options.is_server
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     if _tls_byo_server_setup[] !== nothing
@@ -1683,20 +1609,19 @@ function tls_server_handler_new(
     elseif Sys.isapple()
         return _secure_transport_handler_new(options, slot, _kSSLServerSide)
     else
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
-function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)
+function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)::Nothing
     if _tls_byo_client_setup[] !== nothing
-        return _tls_byo_start_negotiation(_tls_byo_client_setup[], handler)
+        _tls_byo_start_negotiation(_tls_byo_client_setup[], handler)
+        return nothing
     end
 
     @static if Sys.islinux()
         if !(handler isa S2nTlsHandler)
-            raise_error(ERROR_INVALID_STATE)
-            return ErrorResult(ERROR_INVALID_STATE)
+            throw_error(ERROR_INVALID_STATE)
         end
         if handler.slot !== nothing && handler.slot.channel !== nothing && channel_thread_is_callers_thread(handler.slot.channel)
             _ = _s2n_drive_negotiation(handler)
@@ -1707,18 +1632,17 @@ function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)
         return nothing
     elseif Sys.isapple()
         if !(handler isa SecureTransportTlsHandler)
-            raise_error(ERROR_INVALID_STATE)
-            return ErrorResult(ERROR_INVALID_STATE)
+            throw_error(ERROR_INVALID_STATE)
         end
         if handler.slot !== nothing && handler.slot.channel !== nothing && channel_thread_is_callers_thread(handler.slot.channel)
-            return _secure_transport_drive_negotiation(handler)
+            _secure_transport_drive_negotiation(handler)
+            return nothing
         end
         channel_task_init!(handler.negotiation_task, _secure_transport_negotiation_task, handler, "secure_transport_channel_handler_start_negotiation")
         channel_schedule_task_now!(handler.slot.channel, handler.negotiation_task)
         return nothing
     else
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
@@ -1745,8 +1669,8 @@ end
 function tls_channel_handler_new!(
         channel::Channel,
         options::TlsConnectionOptions,
-    )::Union{AbstractChannelHandler, ErrorResult}
-    channel.last === nothing && return ErrorResult(raise_error(ERROR_INVALID_STATE))
+    )::AbstractChannelHandler
+    channel.last === nothing && throw_error(ERROR_INVALID_STATE)
 
     tls_slot = ChannelSlot()
     tls_slot.channel = channel
@@ -1754,11 +1678,9 @@ function tls_channel_handler_new!(
     handler = options.ctx.options.is_server ?
         tls_server_handler_new(options, tls_slot) :
         tls_client_handler_new(options, tls_slot)
-    handler isa ErrorResult && return handler
 
     channel_slot_insert_right!(channel.last, tls_slot)
-    set_res = channel_slot_set_handler!(tls_slot, handler)
-    set_res isa ErrorResult && return set_res
+    channel_slot_set_handler!(tls_slot, handler)
 
     return handler
 end
@@ -1766,22 +1688,19 @@ end
 function channel_setup_client_tls(
         right_of_slot::ChannelSlot,
         options::TlsConnectionOptions,
-    )::Union{AbstractChannelHandler, ErrorResult}
+    )::AbstractChannelHandler
     channel = right_of_slot.channel
-    channel === nothing && return ErrorResult(raise_error(ERROR_INVALID_STATE))
+    channel === nothing && throw_error(ERROR_INVALID_STATE)
 
     tls_slot = ChannelSlot()
     tls_slot.channel = channel
 
     handler = tls_client_handler_new(options, tls_slot)
-    handler isa ErrorResult && return handler
 
     channel_slot_insert_right!(right_of_slot, tls_slot)
-    set_res = channel_slot_set_handler!(tls_slot, handler)
-    set_res isa ErrorResult && return set_res
+    channel_slot_set_handler!(tls_slot, handler)
 
-    start_res = tls_client_handler_start_negotiation(handler)
-    start_res isa ErrorResult && return start_res
+    tls_client_handler_start_negotiation(handler)
 
     return handler
 end

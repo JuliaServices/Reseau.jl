@@ -94,11 +94,11 @@ end
 end
 
 # Parse a PEM-encoded string into a list of PEM objects
-function pem_parse(pem_data::AbstractString)::Union{Vector{PemObject}, ErrorResult}
+function pem_parse(pem_data::AbstractString)::Vector{PemObject}
     return pem_parse(Vector{UInt8}(pem_data))
 end
 
-function pem_parse(pem_data::AbstractVector{UInt8})::Union{Vector{PemObject}, ErrorResult}
+function pem_parse(pem_data::AbstractVector{UInt8})::Vector{PemObject}
     objects = Vector{PemObject}()
     data_str = String(copy(pem_data))
 
@@ -116,8 +116,7 @@ function pem_parse(pem_data::AbstractVector{UInt8})::Union{Vector{PemObject}, Er
                 label = _extract_pem_label(trimmed)
                 if label === nothing
                     logf(LogLevel.ERROR, LS_IO_PEM, "PEM: malformed - invalid BEGIN header")
-                    raise_error(ERROR_IO_PEM_MALFORMED)
-                    return ErrorResult(ERROR_IO_PEM_MALFORMED)
+                    throw_error(ERROR_IO_PEM_MALFORMED)
                 end
                 current_label = label
                 current_obj_type = get(() -> PemObjectType.UNKNOWN, PEM_LABEL_TO_TYPE, label)
@@ -131,8 +130,7 @@ function pem_parse(pem_data::AbstractVector{UInt8})::Union{Vector{PemObject}, Er
                     base64decode(base64_clean)
                 catch e
                     logf(LogLevel.ERROR, LS_IO_PEM, "PEM: base64 decode failed: $e")
-                    raise_error(ERROR_IO_PEM_MALFORMED)
-                    return ErrorResult(ERROR_IO_PEM_MALFORMED)
+                    throw_error(ERROR_IO_PEM_MALFORMED)
                 end
 
                 buf = ByteBuffer(length(decoded))
@@ -166,24 +164,21 @@ function pem_parse(pem_data::AbstractVector{UInt8})::Union{Vector{PemObject}, Er
     end
 
     logf(LogLevel.ERROR, LS_IO_PEM, "PEM: malformed - invalid PEM buffer")
-    raise_error(ERROR_IO_PEM_MALFORMED)
-    return ErrorResult(ERROR_IO_PEM_MALFORMED)
+    throw_error(ERROR_IO_PEM_MALFORMED)
 end
 
 # Read and parse PEM from a file
-function pem_parse_from_file(path::AbstractString)::Union{Vector{PemObject}, ErrorResult}
+function pem_parse_from_file(path::AbstractString)::Vector{PemObject}
     if !isfile(path)
         logf(LogLevel.ERROR, LS_IO_PEM, "PEM: file not found: $path")
-        raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
-        return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
+        throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
     end
 
     data = try
         read(path)
     catch e
         logf(LogLevel.ERROR, LS_IO_PEM, "PEM: failed to read file $path: $e")
-        raise_error(ERROR_IO_STREAM_READ_FAILED)
-        return ErrorResult(ERROR_IO_STREAM_READ_FAILED)
+        throw_error(ERROR_IO_STREAM_READ_FAILED)
     end
 
     return pem_parse(data)

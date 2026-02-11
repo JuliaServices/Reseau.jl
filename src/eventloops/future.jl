@@ -133,13 +133,12 @@ function future_wait_ns(future::Future; timeout_ns::Integer)::Bool
 end
 
 # Complete the future with a result
-function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorResult} where {T}
+function future_complete!(future::Future{T}, result::T)::Nothing where {T}
     callback = nothing
-    ret = lock(future.lock) do
+    lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         future.result = result
@@ -150,22 +149,18 @@ function future_complete!(future::Future{T}, result::T)::Union{Nothing, ErrorRes
         future.callback = nothing
         return nothing
     end
-    if ret isa ErrorResult
-        return ret
-    end
     notify(future.done_event)
     _notify_callback(callback, future)
     return nothing
 end
 
 # Fail the future with an error code
-function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResult}
+function future_fail!(future::Future, error_code::Int)::Nothing
     callback = nothing
-    ret = lock(future.lock) do
+    lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         future.result = nothing
@@ -177,18 +172,15 @@ function future_fail!(future::Future, error_code::Int)::Union{Nothing, ErrorResu
         future.callback = nothing
         return nothing
     end
-    if ret isa ErrorResult
-        return ret
-    end
     notify(future.done_event)
     _notify_callback(callback, future)
     return nothing
 end
 
 # Cancel the future
-function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
+function future_cancel!(future::Future)::Nothing
     callback = nothing
-    ret = lock(future.lock) do
+    lock(future.lock) do
         state = @atomic future.state
         if state != FutureState.PENDING
             # Already done, nothing to cancel
@@ -203,9 +195,6 @@ function future_cancel!(future::Future)::Union{Nothing, ErrorResult}
         callback = future.callback
         future.callback = nothing
         return nothing
-    end
-    if ret isa ErrorResult
-        return ret
     end
     notify(future.done_event)
     _notify_callback(callback, future)
@@ -239,7 +228,7 @@ end
 const VoidFuture = Future{Nothing}
 
 # Complete void future
-function void_future_complete!(future::VoidFuture)::Union{Nothing, ErrorResult}
+function void_future_complete!(future::VoidFuture)::Nothing
     return future_complete!(future, nothing)
 end
 

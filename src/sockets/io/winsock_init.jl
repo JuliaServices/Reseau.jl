@@ -48,7 +48,7 @@
         lpVendorInfo::Ptr{UInt8}
     end
 
-    function winsock_check_and_init!()::Union{Nothing, ErrorResult}
+    function winsock_check_and_init!()::Nothing
         if _winsock_initialized[]
             return nothing
         end
@@ -66,16 +66,14 @@
             rc = ccall((:WSAStartup, _WS2_32), Cint, (UInt16, Ptr{WSADATA}), requested_version, wsa_data)
             if rc != 0
                 logf(LogLevel.ERROR, LS_IO_SOCKET, "static: WinSock initialization failed with error %d", rc)
-                raise_error(ERROR_SYS_CALL_FAILURE)
-                return ErrorResult(ERROR_SYS_CALL_FAILURE)
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
 
             dummy = ccall((:socket, _WS2_32), UInt, (Cint, Cint, Cint), AF_INET, SOCK_STREAM, Cint(0))
             if dummy == INVALID_SOCKET
                 err = _wsa_get_last_error()
                 logf(LogLevel.ERROR, LS_IO_SOCKET, "static: dummy socket() failed with WSAError %d", err)
-                raise_error(ERROR_SYS_CALL_FAILURE)
-                return ErrorResult(ERROR_SYS_CALL_FAILURE)
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
 
             try
@@ -100,8 +98,7 @@
                 if rc != 0 || connectex_ref[] == C_NULL
                     err = _wsa_get_last_error()
                     logf(LogLevel.ERROR, LS_IO_SOCKET, "static: failed to load WSAID_CONNECTEX with WSAError %d", err)
-                    raise_error(ERROR_SYS_CALL_FAILURE)
-                    return ErrorResult(ERROR_SYS_CALL_FAILURE)
+                    throw_error(ERROR_SYS_CALL_FAILURE)
                 end
                 _connectex_fn[] = connectex_ref[]
 
@@ -126,8 +123,7 @@
                 if rc != 0 || acceptex_ref[] == C_NULL
                     err = _wsa_get_last_error()
                     logf(LogLevel.ERROR, LS_IO_SOCKET, "static: failed to load WSAID_ACCEPTEX with WSAError %d", err)
-                    raise_error(ERROR_SYS_CALL_FAILURE)
-                    return ErrorResult(ERROR_SYS_CALL_FAILURE)
+                    throw_error(ERROR_SYS_CALL_FAILURE)
                 end
                 _acceptex_fn[] = acceptex_ref[]
             finally
@@ -141,38 +137,31 @@
         end
     end
 
-    function winsock_get_connectex_fn()::Union{Ptr{Cvoid}, ErrorResult}
-        res = winsock_check_and_init!()
-        res isa ErrorResult && return res
+    function winsock_get_connectex_fn()::Ptr{Cvoid}
+        winsock_check_and_init!()
         if _connectex_fn[] == C_NULL
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         return _connectex_fn[]
     end
 
-    function winsock_get_acceptex_fn()::Union{Ptr{Cvoid}, ErrorResult}
-        res = winsock_check_and_init!()
-        res isa ErrorResult && return res
+    function winsock_get_acceptex_fn()::Ptr{Cvoid}
+        winsock_check_and_init!()
         if _acceptex_fn[] == C_NULL
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         return _acceptex_fn[]
     end
 else
-    function winsock_check_and_init!()::Union{Nothing, ErrorResult}
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    function winsock_check_and_init!()::Nothing
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
-    function winsock_get_connectex_fn()::Union{Ptr{Cvoid}, ErrorResult}
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    function winsock_get_connectex_fn()::Ptr{Cvoid}
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
-    function winsock_get_acceptex_fn()::Union{Ptr{Cvoid}, ErrorResult}
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    function winsock_get_acceptex_fn()::Ptr{Cvoid}
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end

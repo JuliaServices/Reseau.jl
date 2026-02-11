@@ -370,12 +370,11 @@ function pkcs11_ckr_str(rv::Integer)::String
     return name === nothing ? "CKR_UNKNOWN" : name
 end
 
-function get_prefix_to_rsa_sig(digest_alg)::Union{ByteCursor, ErrorResult}
+function get_prefix_to_rsa_sig(digest_alg)::ByteCursor
     digest_val = try
         Int(digest_alg)
     catch
-        raise_error(ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED)
     end
     if digest_val == TLS_HASH_SHA1
         return byte_cursor_from_array(_SHA1_PREFIX_TO_RSA_SIG)
@@ -388,17 +387,15 @@ function get_prefix_to_rsa_sig(digest_alg)::Union{ByteCursor, ErrorResult}
     elseif digest_val == TLS_HASH_SHA512
         return byte_cursor_from_array(_SHA512_PREFIX_TO_RSA_SIG)
     end
-    raise_error(ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED)
-    return ErrorResult(ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED)
+    throw_error(ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED)
 end
 
-function pkcs11_lib_new(options::Pkcs11LibOptions)::Union{Pkcs11Lib, ErrorResult}
+function pkcs11_lib_new(options::Pkcs11LibOptions)::Pkcs11Lib
     behavior = options.initialize_finalize_behavior
     if behavior != Pkcs11LibBehavior.DEFAULT_BEHAVIOR &&
         behavior != Pkcs11LibBehavior.OMIT_INITIALIZE &&
         behavior != Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     lib = Pkcs11Lib(options)
@@ -407,24 +404,19 @@ function pkcs11_lib_new(options::Pkcs11LibOptions)::Union{Pkcs11Lib, ErrorResult
     else
         shared_library_load(String(options.filename))
     end
-    loaded isa ErrorResult && return loaded
-
     lib.shared_lib = loaded
 
     sym = shared_library_find_symbol(lib.shared_lib, "C_GetFunctionList")
-    sym isa ErrorResult && return sym
 
     fn_list = Ref{Ptr{Cvoid}}(C_NULL)
     rv = ccall(sym, Culong, (Ref{Ptr{Cvoid}},), fn_list)
     if rv != 0
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
     lib.function_list = fn_list[]
 
-    init_res = _pkcs11_init_with_function_list!(lib)
-    init_res isa ErrorResult && return init_res
+    _pkcs11_init_with_function_list!(lib)
 
     return lib
 end
@@ -456,26 +448,23 @@ function pkcs11_lib_get_function_list(lib::Pkcs11Lib)::Ptr{CK_FUNCTION_LIST}
     return Ptr{CK_FUNCTION_LIST}(lib.function_list)
 end
 
-function _pkcs11_init_with_function_list!(lib::Pkcs11Lib)::Union{Nothing, ErrorResult}
+function _pkcs11_init_with_function_list!(lib::Pkcs11Lib)::Nothing
     if lib.function_list == C_NULL
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     version = fl.version
     if version.major != AWS_SUPPORTED_CRYPTOKI_VERSION_MAJOR ||
         version.minor < AWS_MIN_SUPPORTED_CRYPTOKI_VERSION_MINOR
-        raise_error(ERROR_IO_PKCS11_VERSION_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_VERSION_UNSUPPORTED)
+        throw_error(ERROR_IO_PKCS11_VERSION_UNSUPPORTED)
     end
 
     behavior = lib.options.initialize_finalize_behavior
     if behavior != Pkcs11LibBehavior.OMIT_INITIALIZE
         init_ptr = fl.C_Initialize
         if init_ptr == C_NULL
-            raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-            return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+            throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
         end
         init_args = CK_C_INITIALIZE_ARGS(C_NULL, C_NULL, C_NULL, C_NULL, CKF_OS_LOCKING_OK, C_NULL)
         rv = ccall(init_ptr, CK_RV, (Ref{CK_C_INITIALIZE_ARGS},), Ref(init_args))
@@ -483,8 +472,7 @@ function _pkcs11_init_with_function_list!(lib::Pkcs11Lib)::Union{Nothing, ErrorR
             if rv != CKR_CRYPTOKI_ALREADY_INITIALIZED ||
                 behavior == Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE
                 code = pkcs11_error_from_ckr(rv)
-                raise_error(code)
-                return ErrorResult(code)
+                throw_error(code)
             end
         end
         if behavior == Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE
@@ -498,8 +486,7 @@ function _pkcs11_init_with_function_list!(lib::Pkcs11Lib)::Union{Nothing, ErrorR
         rv = ccall(info_ptr, CK_RV, (Ref{CK_INFO},), info)
         if rv != CKR_OK
             code = pkcs11_error_from_ckr(rv)
-            raise_error(code)
-            return ErrorResult(code)
+            throw_error(code)
         end
     end
 
@@ -527,39 +514,34 @@ function pkcs11_lib_find_slot_with_token(
         lib::Pkcs11Lib,
         match_slot_id::Union{UInt64, Nothing},
         match_token_label::Union{ByteCursor, Nothing},
-    )::Union{UInt64, ErrorResult}
+    )::UInt64
     match_slot = match_slot_id === nothing ? nothing : CK_SLOT_ID(match_slot_id)
     if lib.function_list == C_NULL
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     get_slot_list = fl.C_GetSlotList
     if get_slot_list == C_NULL
-        raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+        throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
     end
 
     count_ref = Ref{CK_ULONG}(0)
     rv = ccall(get_slot_list, CK_RV, (CK_BBOOL, Ptr{CK_SLOT_ID}, Ptr{CK_ULONG}), CK_TRUE, C_NULL, count_ref)
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     count = Int(count_ref[])
     if count == 0
-        raise_error(ERROR_IO_PKCS11_TOKEN_NOT_FOUND)
-        return ErrorResult(ERROR_IO_PKCS11_TOKEN_NOT_FOUND)
+        throw_error(ERROR_IO_PKCS11_TOKEN_NOT_FOUND)
     end
 
     slots = Vector{CK_SLOT_ID}(undef, count)
     rv = ccall(get_slot_list, CK_RV, (CK_BBOOL, Ptr{CK_SLOT_ID}, Ptr{CK_ULONG}), CK_TRUE, slots, count_ref)
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     found_slot::Union{CK_SLOT_ID, Nothing} = nothing
@@ -571,8 +553,7 @@ function pkcs11_lib_find_slot_with_token(
         if match_token_label !== nothing
             get_token_info = fl.C_GetTokenInfo
             if get_token_info == C_NULL
-                raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-                return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+                throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
             end
             info_ref = Ref(
                 CK_TOKEN_INFO(
@@ -599,8 +580,7 @@ function pkcs11_lib_find_slot_with_token(
             rv = ccall(get_token_info, CK_RV, (CK_SLOT_ID, Ptr{CK_TOKEN_INFO}), slot_id, info_ref)
             if rv != CKR_OK
                 code = pkcs11_error_from_ckr(rv)
-                raise_error(code)
-                return ErrorResult(code)
+                throw_error(code)
             end
             if !_pkcs11_label_matches(info_ref[].label, match_token_label)
                 continue
@@ -612,8 +592,7 @@ function pkcs11_lib_find_slot_with_token(
     end
 
     if found_count != 1 || found_slot === nothing
-        raise_error(ERROR_IO_PKCS11_TOKEN_NOT_FOUND)
-        return ErrorResult(ERROR_IO_PKCS11_TOKEN_NOT_FOUND)
+        throw_error(ERROR_IO_PKCS11_TOKEN_NOT_FOUND)
     end
 
     return UInt64(found_slot)
@@ -622,16 +601,14 @@ end
 function pkcs11_lib_open_session(
         lib::Pkcs11Lib,
         slot_id::UInt64,
-    )::Union{CK_SESSION_HANDLE, ErrorResult}
+    )::CK_SESSION_HANDLE
     if lib.function_list == C_NULL
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     open_ptr = fl.C_OpenSession
     if open_ptr == C_NULL
-        raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+        throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
     end
 
     session_ref = Ref{CK_SESSION_HANDLE}(0)
@@ -647,28 +624,24 @@ function pkcs11_lib_open_session(
     )
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
     return session_ref[]
 end
 
-function pkcs11_lib_close_session(lib::Pkcs11Lib, session_handle::CK_SESSION_HANDLE)::Union{Nothing, ErrorResult}
+function pkcs11_lib_close_session(lib::Pkcs11Lib, session_handle::CK_SESSION_HANDLE)::Nothing
     if lib.function_list == C_NULL
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     close_ptr = fl.C_CloseSession
     if close_ptr == C_NULL
-        raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+        throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
     end
     rv = ccall(close_ptr, CK_RV, (CK_SESSION_HANDLE,), session_handle)
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
     return nothing
 end
@@ -677,16 +650,14 @@ function pkcs11_lib_login_user(
         lib::Pkcs11Lib,
         session_handle::CK_SESSION_HANDLE,
         user_pin::Union{ByteCursor, Nothing},
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if lib.function_list == C_NULL
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     login_ptr = fl.C_Login
     if login_ptr == C_NULL
-        raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+        throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
     end
 
     pin_ptr = Ptr{UInt8}(C_NULL)
@@ -698,8 +669,7 @@ function pkcs11_lib_login_user(
     rv = ccall(login_ptr, CK_RV, (CK_SESSION_HANDLE, CK_ULONG, Ptr{UInt8}, CK_ULONG), session_handle, CKU_USER, pin_ptr, pin_len)
     if rv != CKR_OK && rv != CKR_USER_ALREADY_LOGGED_IN
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
     return nothing
 end
@@ -708,10 +678,9 @@ function pkcs11_lib_find_private_key(
         lib::Pkcs11Lib,
         session_handle::CK_SESSION_HANDLE,
         match_label::Union{ByteCursor, Nothing},
-    )::Union{Tuple{CK_OBJECT_HANDLE, CK_KEY_TYPE}, ErrorResult}
+    )::Tuple{CK_OBJECT_HANDLE, CK_KEY_TYPE}
     if lib.function_list == C_NULL
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     find_init = fl.C_FindObjectsInit
@@ -719,15 +688,13 @@ function pkcs11_lib_find_private_key(
     find_final = fl.C_FindObjectsFinal
     get_attr = fl.C_GetAttributeValue
     if find_init == C_NULL || find_objects == C_NULL || find_final == C_NULL || get_attr == C_NULL
-        raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+        throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
     end
 
     use_label = match_label !== nothing && match_label.len > 0
     if use_label && UInt64(match_label.len) > UInt64(typemax(CK_ULONG))
         logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: private key label is too long")
-        raise_error(ERROR_IO_PKCS11_KEY_NOT_FOUND)
-        return ErrorResult(ERROR_IO_PKCS11_KEY_NOT_FOUND)
+        throw_error(ERROR_IO_PKCS11_KEY_NOT_FOUND)
     end
 
     key_class_ref = Ref{CK_OBJECT_CLASS}(CKO_PRIVATE_KEY)
@@ -742,30 +709,24 @@ function pkcs11_lib_find_private_key(
         attrs[2] = CK_ATTRIBUTE(CKA_LABEL, Ptr{Cvoid}(label_ptr), CK_ULONG(match_label.len))
     end
 
-    must_finalize = false
+    GC.@preserve key_class_ref match_label attrs begin
+        rv = ccall(
+            find_init,
+            CK_RV,
+            (CK_SESSION_HANDLE, Ptr{CK_ATTRIBUTE}, CK_ULONG),
+            session_handle,
+            attrs,
+            CK_ULONG(length(attrs)),
+        )
+    end
+    if rv != CKR_OK
+        code = pkcs11_error_from_ckr(rv)
+        throw_error(code)
+    end
+
+    local result::Tuple{CK_OBJECT_HANDLE, CK_KEY_TYPE}
     success = false
-    result::Union{Tuple{CK_OBJECT_HANDLE, CK_KEY_TYPE}, ErrorResult} = ErrorResult(ERROR_IO_PKCS11_KEY_NOT_FOUND)
-
-    while true
-        GC.@preserve key_class_ref match_label attrs begin
-            rv = ccall(
-                find_init,
-                CK_RV,
-                (CK_SESSION_HANDLE, Ptr{CK_ATTRIBUTE}, CK_ULONG),
-                session_handle,
-                attrs,
-                CK_ULONG(length(attrs)),
-            )
-        end
-        if rv != CKR_OK
-            code = pkcs11_error_from_ckr(rv)
-            raise_error(code)
-            result = ErrorResult(code)
-            break
-        end
-
-        must_finalize = true
-
+    try
         found_objects = Memory{CK_OBJECT_HANDLE}(undef, 2)
         num_found_ref = Ref{CK_ULONG}(0)
         rv = ccall(
@@ -779,23 +740,17 @@ function pkcs11_lib_find_private_key(
         )
         if rv != CKR_OK
             code = pkcs11_error_from_ckr(rv)
-            raise_error(code)
-            result = ErrorResult(code)
-            break
+            throw_error(code)
         end
 
         num_found = Int(num_found_ref[])
         if num_found == 0 || found_objects[1] == CK_INVALID_HANDLE
             logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: Failed to find private key")
-            raise_error(ERROR_IO_PKCS11_KEY_NOT_FOUND)
-            result = ErrorResult(ERROR_IO_PKCS11_KEY_NOT_FOUND)
-            break
+            throw_error(ERROR_IO_PKCS11_KEY_NOT_FOUND)
         end
         if num_found > 1
             logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: Multiple private keys matched")
-            raise_error(ERROR_IO_PKCS11_KEY_NOT_FOUND)
-            result = ErrorResult(ERROR_IO_PKCS11_KEY_NOT_FOUND)
-            break
+            throw_error(ERROR_IO_PKCS11_KEY_NOT_FOUND)
         end
 
         key_handle = found_objects[1]
@@ -817,9 +772,7 @@ function pkcs11_lib_find_private_key(
         )
         if rv != CKR_OK
             code = pkcs11_error_from_ckr(rv)
-            raise_error(code)
-            result = ErrorResult(code)
-            break
+            throw_error(code)
         end
 
         key_type = key_type_ref[]
@@ -829,22 +782,15 @@ function pkcs11_lib_find_private_key(
                 LS_IO_PKCS11,
                 "PKCS11: Unsupported private key type 0x$(string(UInt64(key_type), base = 16))",
             )
-            raise_error(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
-            result = ErrorResult(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
-            break
+            throw_error(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
         end
 
         result = (key_handle, key_type)
         success = true
-        break
-    end
-
-    if must_finalize
+    finally
         rv = ccall(find_final, CK_RV, (CK_SESSION_HANDLE,), session_handle)
         if rv != CKR_OK && success
-            code = pkcs11_error_from_ckr(rv)
-            raise_error(code)
-            result = ErrorResult(code)
+            throw_error(pkcs11_error_from_ckr(rv))
         end
     end
 
@@ -857,30 +803,26 @@ function pkcs11_lib_decrypt(
         key_handle::CK_OBJECT_HANDLE,
         key_type::CK_KEY_TYPE,
         encrypted_data::ByteCursor,
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     if lib.function_list == C_NULL
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
     if key_type != CKK_RSA
-        raise_error(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
+        throw_error(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
     end
 
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     decrypt_init = fl.C_DecryptInit
     decrypt = fl.C_Decrypt
     if decrypt_init == C_NULL || decrypt == C_NULL
-        raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+        throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
     end
 
     mechanism = CK_MECHANISM(CKM_RSA_PKCS, C_NULL, CK_ULONG(0))
     rv = ccall(decrypt_init, CK_RV, (CK_SESSION_HANDLE, Ref{CK_MECHANISM}, CK_OBJECT_HANDLE), session_handle, Ref(mechanism), key_handle)
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     data_len_ref = Ref{CK_ULONG}(0)
@@ -897,8 +839,7 @@ function pkcs11_lib_decrypt(
     )
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     out_buf = ByteBuffer(Int(data_len_ref[]))
@@ -915,9 +856,8 @@ function pkcs11_lib_decrypt(
     )
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
         byte_buf_clean_up(Ref(out_buf))
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     out_buf.len = Csize_t(data_len_ref[])
@@ -930,20 +870,18 @@ function _pkcs11_sign_helper(
         key_handle::CK_OBJECT_HANDLE,
         mechanism::CK_MECHANISM,
         input_data::ByteCursor,
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     sign_init = fl.C_SignInit
     sign = fl.C_Sign
     if sign_init == C_NULL || sign == C_NULL
-        raise_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
-        return ErrorResult(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
+        throw_error(ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED)
     end
 
     rv = ccall(sign_init, CK_RV, (CK_SESSION_HANDLE, Ref{CK_MECHANISM}, CK_OBJECT_HANDLE), session_handle, Ref(mechanism), key_handle)
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     sig_len_ref = Ref{CK_ULONG}(0)
@@ -960,8 +898,7 @@ function _pkcs11_sign_helper(
     )
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     signature = ByteBuffer(Int(sig_len_ref[]))
@@ -978,9 +915,8 @@ function _pkcs11_sign_helper(
     )
     if rv != CKR_OK
         code = pkcs11_error_from_ckr(rv)
-        raise_error(code)
         byte_buf_clean_up(Ref(signature))
-        return ErrorResult(code)
+        throw_error(code)
     end
 
     signature.len = Csize_t(sig_len_ref[])
@@ -994,12 +930,11 @@ function _pkcs11_sign_rsa(
         digest_data::ByteCursor,
         digest_alg,
         signature_alg,
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     sig_val = try
         Int(signature_alg)
     catch
-        raise_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
     end
     if sig_val != TLS_SIGNATURE_RSA
         logf(
@@ -1007,19 +942,16 @@ function _pkcs11_sign_rsa(
             LS_IO_PKCS11,
             "PKCS11: Signature algorithm unsupported for RSA key",
         )
-        raise_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
     end
 
     prefix = get_prefix_to_rsa_sig(digest_alg)
-    prefix isa ErrorResult && return prefix
 
     prefixed_ref = Ref(ByteBuffer(Int(prefix.len + digest_data.len)))
     ok = byte_buf_write_from_whole_cursor(prefixed_ref, prefix)
     ok = ok && byte_buf_write_from_whole_cursor(prefixed_ref, digest_data)
     if !ok
-        raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-        return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+        throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
     end
 
     mechanism = CK_MECHANISM(CKM_RSA_PKCS, C_NULL, CK_ULONG(0))
@@ -1033,16 +965,14 @@ function _pkcs11_sign_rsa(
     return signature
 end
 
-function _pkcs11_asn1_enc_prefix(buffer::Base.RefValue{ByteBuffer}, identifier::UInt8, length::Integer)::Union{Nothing, ErrorResult}
+function _pkcs11_asn1_enc_prefix(buffer::Base.RefValue{ByteBuffer}, identifier::UInt8, length::Integer)::Nothing
     if (identifier & 0x1f) == 0x1f || length > 0x7f
         logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: Unable to encode ASN.1 header")
-        raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-        return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+        throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
     end
     if !byte_buf_write_u8(buffer, identifier) || !byte_buf_write_u8(buffer, UInt8(length))
         logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: Unable to encode ASN.1 header")
-        raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-        return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+        throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
     end
     return nothing
 end
@@ -1050,7 +980,7 @@ end
 function pkcs11_asn1_enc_ubigint(
         buffer::Base.RefValue{ByteBuffer},
         bigint::ByteCursor,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     cur = bigint
     while cur.len > 0 && cursor_getbyte(cur, 1) == 0
         if cur.len == 1
@@ -1062,21 +992,18 @@ function pkcs11_asn1_enc_ubigint(
     add_leading_zero = cur.len == 0 || (cursor_getbyte(cur, 1) & 0x80) != 0
     actual_len = Int(cur.len) + (add_leading_zero ? 1 : 0)
 
-    prefix_res = _pkcs11_asn1_enc_prefix(buffer, 0x02, actual_len)
-    prefix_res isa ErrorResult && return prefix_res
+    _pkcs11_asn1_enc_prefix(buffer, 0x02, actual_len)
 
     if add_leading_zero
         if !byte_buf_write_u8(buffer, 0x00)
             logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: Insufficient buffer for ASN.1 bigint")
-            raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-            return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+            throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
         end
     end
     if cur.len > 0
         if !byte_buf_write_from_whole_cursor(buffer, cur)
             logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: Insufficient buffer for ASN.1 bigint")
-            raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-            return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+            throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
         end
     end
     return nothing
@@ -1088,12 +1015,11 @@ function _pkcs11_sign_ecdsa(
         key_handle::CK_OBJECT_HANDLE,
         digest_data::ByteCursor,
         signature_alg,
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     sig_val = try
         Int(signature_alg)
     catch
-        raise_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
     end
     if sig_val != TLS_SIGNATURE_ECDSA
         logf(
@@ -1101,8 +1027,7 @@ function _pkcs11_sign_ecdsa(
             LS_IO_PKCS11,
             "PKCS11: Signature algorithm unsupported for EC key",
         )
-        raise_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
     end
 
     mechanism = CK_MECHANISM(CKM_ECDSA, C_NULL, CK_ULONG(0))
@@ -1113,12 +1038,10 @@ function _pkcs11_sign_ecdsa(
         mechanism,
         digest_data,
     )
-    part_signature isa ErrorResult && return part_signature
 
     if part_signature.len == 0 || (Int(part_signature.len) % 2) != 0
         logf(LogLevel.ERROR, LS_IO_PKCS11, "PKCS11: Invalid ECDSA signature length")
-        raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-        return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+        throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
     end
 
     num_bytes = Int(part_signature.len) ÷ 2
@@ -1128,24 +1051,19 @@ function _pkcs11_sign_ecdsa(
     r_cursor = byte_cursor_from_array(part_signature.mem, num_bytes)
     s_cursor = byte_cursor_from_array(part_signature.mem, num_bytes, num_bytes)
 
-    res = pkcs11_asn1_enc_ubigint(r_part_ref, r_cursor)
-    res isa ErrorResult && return res
-    res = pkcs11_asn1_enc_ubigint(s_part_ref, s_cursor)
-    res isa ErrorResult && return res
+    pkcs11_asn1_enc_ubigint(r_part_ref, r_cursor)
+    pkcs11_asn1_enc_ubigint(s_part_ref, s_cursor)
 
     r_part = r_part_ref[]
     s_part = s_part_ref[]
     pair_len = Int(r_part.len + s_part.len)
     out_signature_ref = Ref(ByteBuffer(pair_len + 2))
-    res = _pkcs11_asn1_enc_prefix(out_signature_ref, 0x30, pair_len)
-    res isa ErrorResult && return res
+    _pkcs11_asn1_enc_prefix(out_signature_ref, 0x30, pair_len)
     if !byte_buf_write_from_whole_buffer(out_signature_ref, r_part)
-        raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-        return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+        throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
     end
     if !byte_buf_write_from_whole_buffer(out_signature_ref, s_part)
-        raise_error(ERROR_IO_PKCS11_ENCODING_ERROR)
-        return ErrorResult(ERROR_IO_PKCS11_ENCODING_ERROR)
+        throw_error(ERROR_IO_PKCS11_ENCODING_ERROR)
     end
 
     return out_signature_ref[]
@@ -1159,7 +1077,7 @@ function pkcs11_lib_sign(
         digest_data::ByteCursor,
         digest_alg,
         signature_alg,
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     if key_type == CKK_RSA
         return _pkcs11_sign_rsa(
             lib,
@@ -1178,6 +1096,5 @@ function pkcs11_lib_sign(
             signature_alg,
         )
     end
-    raise_error(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
-    return ErrorResult(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
+    throw_error(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
 end

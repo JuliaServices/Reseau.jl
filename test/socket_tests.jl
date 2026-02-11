@@ -32,34 +32,58 @@ end
     @test Sockets.socket_validate_port_for_connect(80, Sockets.SocketDomain.IPV4) === nothing
     @test Sockets.socket_validate_port_for_bind(80, Sockets.SocketDomain.IPV4) === nothing
 
-    res = Sockets.socket_validate_port_for_connect(0, Sockets.SocketDomain.IPV4)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_connect(0, Sockets.SocketDomain.IPV4)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
     @test Sockets.socket_validate_port_for_bind(0, Sockets.SocketDomain.IPV4) === nothing
 
-    res = Sockets.socket_validate_port_for_connect(0xFFFFFFFF, Sockets.SocketDomain.IPV4)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_connect(0xFFFFFFFF, Sockets.SocketDomain.IPV4)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
 
-    res = Sockets.socket_validate_port_for_bind(0xFFFFFFFF, Sockets.SocketDomain.IPV4)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_bind(0xFFFFFFFF, Sockets.SocketDomain.IPV4)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
 
     @test Sockets.socket_validate_port_for_connect(80, Sockets.SocketDomain.IPV6) === nothing
     @test Sockets.socket_validate_port_for_bind(80, Sockets.SocketDomain.IPV6) === nothing
 
-    res = Sockets.socket_validate_port_for_connect(0, Sockets.SocketDomain.IPV6)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_connect(0, Sockets.SocketDomain.IPV6)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
     @test Sockets.socket_validate_port_for_bind(0, Sockets.SocketDomain.IPV6) === nothing
 
-    res = Sockets.socket_validate_port_for_connect(0xFFFFFFFF, Sockets.SocketDomain.IPV6)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_connect(0xFFFFFFFF, Sockets.SocketDomain.IPV6)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
 
-    res = Sockets.socket_validate_port_for_bind(0xFFFFFFFF, Sockets.SocketDomain.IPV6)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_bind(0xFFFFFFFF, Sockets.SocketDomain.IPV6)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
 
     @test Sockets.socket_validate_port_for_connect(80, Sockets.SocketDomain.VSOCK) === nothing
     @test Sockets.socket_validate_port_for_bind(80, Sockets.SocketDomain.VSOCK) === nothing
@@ -68,9 +92,13 @@ end
     @test Sockets.socket_validate_port_for_connect(0x7FFFFFFF, Sockets.SocketDomain.VSOCK) === nothing
     @test Sockets.socket_validate_port_for_bind(0x7FFFFFFF, Sockets.SocketDomain.VSOCK) === nothing
 
-    res = Sockets.socket_validate_port_for_connect(-1, Sockets.SocketDomain.VSOCK)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_connect(-1, Sockets.SocketDomain.VSOCK)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
     @test Sockets.socket_validate_port_for_bind(-1, Sockets.SocketDomain.VSOCK) === nothing
 
     @test Sockets.socket_validate_port_for_connect(0, Sockets.SocketDomain.LOCAL) === nothing
@@ -81,12 +109,20 @@ end
     @test Sockets.socket_validate_port_for_bind(-1, Sockets.SocketDomain.LOCAL) === nothing
 
     bad_domain = Base.bitcast(Sockets.SocketDomain.T, UInt8(0xff))
-    res = Sockets.socket_validate_port_for_connect(80, bad_domain)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
-    res = Sockets.socket_validate_port_for_bind(80, bad_domain)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    try
+        Sockets.socket_validate_port_for_connect(80, bad_domain)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
+    try
+        Sockets.socket_validate_port_for_bind(80, bad_domain)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
 end
 
 @testset "parse ipv4 valid addresses" begin
@@ -103,8 +139,7 @@ end
 
     for (input, expected) in cases
         res = Sockets.parse_ipv4_address(input)
-        @test res isa UInt32
-        res isa UInt32 && @test res == expected
+        @test res == expected
     end
 end
 
@@ -122,9 +157,13 @@ end
     ]
 
     for input in invalid
-        res = Sockets.parse_ipv4_address(input)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+        try
+            Sockets.parse_ipv4_address(input)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+        end
     end
 end
 
@@ -163,9 +202,13 @@ end
 
     for input in invalid
         buf = Reseau.ByteBuffer(16)
-        res = Sockets.parse_ipv6_address!(input, buf)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+        try
+            Sockets.parse_ipv6_address!(input, buf)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+        end
     end
 end
 
@@ -233,12 +276,14 @@ end
             domain = Sockets.SocketDomain.IPV4,
             network_interface_name = long_name,
         )
-        res = Sockets.socket_init(opts)
-        @test res isa Reseau.ErrorResult
-        if res isa Reseau.ErrorResult
+        try
+            Sockets.socket_init(opts)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
             # POSIX path returns INVALID_OPTIONS for bad interface name length;
             # NW path (macOS IPV4/IPV6) returns PLATFORM_NOT_SUPPORTED for any interface name
-            @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS || res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+            @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS || e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
         end
     end
 end
@@ -276,11 +321,13 @@ end
             network_interface_name = iface,
         )
 
-        server = Sockets.socket_init(opts)
-        server_socket = server isa Sockets.Socket ? server : nothing
-        if server isa Reseau.ErrorResult
-            @test server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
+        local server_socket
+        try
+            server_socket = Sockets.socket_init(opts)
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
             EventLoops.event_loop_destroy!(el_val)
             return
         end
@@ -290,16 +337,20 @@ end
 
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-            bind_res = Sockets.socket_bind(server_socket, bind_opts)
-            if bind_res isa Reseau.ErrorResult
-                @test bind_res.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
-                    bind_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+            try
+                Sockets.socket_bind(server_socket, bind_opts)
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                    e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
                 return
             end
-            listen_res = Sockets.socket_listen(server_socket, 1024)
-            if listen_res isa Reseau.ErrorResult
-                @test listen_res.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
-                    listen_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+            try
+                Sockets.socket_listen(server_socket, 1024)
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                    e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
                 return
             end
 
@@ -328,35 +379,36 @@ end
                     return nothing
                 end
 
-                assign_res = Sockets.socket_assign_to_event_loop(new_sock, el_val)
-                if assign_res isa Reseau.ErrorResult
-                    read_err[] = assign_res.code
+                try
+                    Sockets.socket_assign_to_event_loop(new_sock, el_val)
+                catch e
+                    read_err[] = e isa Reseau.ReseauError ? e.code : -1
                     read_done[] = true
                     return nothing
                 end
 
-                sub_res = Sockets.socket_subscribe_to_readable_events(
-                    new_sock, (sock, err, ud) -> begin
-                        read_err[] = err
-                        if err != Reseau.AWS_OP_SUCCESS
+                try
+                    Sockets.socket_subscribe_to_readable_events(
+                        new_sock, (sock, err, ud) -> begin
+                            read_err[] = err
+                            if err != Reseau.AWS_OP_SUCCESS
+                                read_done[] = true
+                                return nothing
+                            end
+
+                            buf = Reseau.ByteBuffer(64)
+                            try
+                                Sockets.socket_read(sock, buf)
+                                payload[] = String(Reseau.byte_cursor_from_buf(buf))
+                            catch e
+                                read_err[] = e isa Reseau.ReseauError ? e.code : -1
+                            end
                             read_done[] = true
                             return nothing
-                        end
-
-                        buf = Reseau.ByteBuffer(64)
-                        read_res = Sockets.socket_read(sock, buf)
-                        if read_res isa Reseau.ErrorResult
-                            read_err[] = read_res.code
-                        else
-                            payload[] = String(Reseau.byte_cursor_from_buf(buf))
-                        end
-                        read_done[] = true
-                        return nothing
-                    end, nothing
-                )
-
-                if sub_res isa Reseau.ErrorResult
-                    read_err[] = sub_res.code
+                        end, nothing
+                    )
+                catch e
+                    read_err[] = e isa Reseau.ReseauError ? e.code : -1
                     read_done[] = true
                 end
                 return nothing
@@ -383,16 +435,16 @@ end
                     end
 
                     cursor = Reseau.ByteCursor("ping")
-                    write_res = Sockets.socket_write(
-                        sock, cursor, (s, err, bytes, ud) -> begin
-                            write_err[] = err
-                            write_done[] = true
-                            return nothing
-                        end, nothing
-                    )
-
-                    if write_res isa Reseau.ErrorResult
-                        write_err[] = write_res.code
+                    try
+                        Sockets.socket_write(
+                            sock, cursor, (s, err, bytes, ud) -> begin
+                                write_err[] = err
+                                write_done[] = true
+                                return nothing
+                            end, nothing
+                        )
+                    catch e
+                        write_err[] = e isa Reseau.ReseauError ? e.code : -1
                         write_done[] = true
                     end
                     return nothing
@@ -435,11 +487,13 @@ end
             network_interface_name = iface,
         )
 
-        server = Sockets.socket_init(opts_udp)
-        server_socket = server isa Sockets.Socket ? server : nothing
-        if server isa Reseau.ErrorResult
-            @test server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
+        local server_socket
+        try
+            server_socket = Sockets.socket_init(opts_udp)
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
             EventLoops.event_loop_destroy!(el_val)
             return
         end
@@ -447,10 +501,12 @@ end
         client_socket = nothing
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-            bind_res = Sockets.socket_bind(server_socket, bind_opts)
-            if bind_res isa Reseau.ErrorResult
-                @test bind_res.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
-                    bind_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+            try
+                Sockets.socket_bind(server_socket, bind_opts)
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                    e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
                 return
             end
 
@@ -499,11 +555,13 @@ end
             network_interface_name = iface,
         )
 
-        server = Sockets.socket_init(opts6)
-        server_socket = server isa Sockets.Socket ? server : nothing
-        if server isa Reseau.ErrorResult
-            @test server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
+        local server_socket
+        try
+            server_socket = Sockets.socket_init(opts6)
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
             EventLoops.event_loop_destroy!(el_val)
             return
         end
@@ -513,9 +571,11 @@ end
 
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("::1", 0))
-            bind_res = Sockets.socket_bind(server_socket, bind_opts)
-            if bind_res isa Reseau.ErrorResult
-                @test bind_res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+            try
+                Sockets.socket_bind(server_socket, bind_opts)
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
                 return
             end
             @test Sockets.socket_listen(server_socket, 1024) === nothing
@@ -588,11 +648,13 @@ end
             network_interface_name = "invalid",
         )
 
-        res = Sockets.socket_init(opts)
-        @test res isa Reseau.ErrorResult
-        if res isa Reseau.ErrorResult
-            @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
-                res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        try
+            Sockets.socket_init(opts)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
+                e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
         end
     end
 end
@@ -610,12 +672,14 @@ end
         @test EventLoops.event_loop_run!(el_val) === nothing
 
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.VSOCK, connect_timeout_ms = 3000)
-        server = Sockets.socket_init(opts)
-        server_socket = server isa Sockets.Socket ? server : nothing
-        if server isa Reseau.ErrorResult
-            @test server.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
-                server.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
-                server.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+        local server_socket
+        try
+            server_socket = Sockets.socket_init(opts)
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
             EventLoops.event_loop_destroy!(el_val)
             return
         end
@@ -625,12 +689,14 @@ end
 
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("1", 0))
-            bind_res = Sockets.socket_bind(server_socket, bind_opts)
-            if bind_res isa Reseau.ErrorResult
-                @test bind_res.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
-                    bind_res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
-                    bind_res.code == Reseau.ERROR_NO_PERMISSION ||
-                    bind_res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+            try
+                Sockets.socket_bind(server_socket, bind_opts)
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                    e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
+                    e.code == Reseau.ERROR_NO_PERMISSION ||
+                    e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
                 return
             end
             @test Sockets.socket_listen(server_socket, 1024) === nothing
@@ -672,11 +738,13 @@ end
                 end,
             )
 
-            connect_res = Sockets.socket_connect(client_socket, connect_opts)
-            if connect_res isa Reseau.ErrorResult
-                @test _is_allowed_connect_error(connect_res.code) ||
-                    connect_res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS ||
-                    connect_res.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
+            try
+                Sockets.socket_connect(client_socket, connect_opts)
+            catch e
+                @test e isa Reseau.ReseauError
+                @test _is_allowed_connect_error(e.code) ||
+                    e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS ||
+                    e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY
                 return
             end
             @test wait_for_flag(connect_done)
@@ -730,21 +798,33 @@ end
 end
 
 @testset "winsock stubs" begin
-    res = Sockets.winsock_check_and_init!()
     if Sys.iswindows()
-        @test res isa Reseau.ErrorResult || res === nothing
+        @test Sockets.winsock_check_and_init!() === nothing
     else
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        try
+            Sockets.winsock_check_and_init!()
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        end
     end
 
-    res = Sockets.winsock_get_connectex_fn()
-    @test res isa Reseau.ErrorResult || res isa Ptr
-    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+    try
+        res = Sockets.winsock_get_connectex_fn()
+        @test res isa Ptr
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+    end
 
-    res = Sockets.winsock_get_acceptex_fn()
-    @test res isa Reseau.ErrorResult || res isa Ptr
-    res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+    try
+        res = Sockets.winsock_get_acceptex_fn()
+        @test res isa Ptr
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+    end
 end
 
 @testset "socket nonblocking cloexec" begin
@@ -815,35 +895,36 @@ end
                 return nothing
             end
 
-            assign_res = Sockets.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa Reseau.ErrorResult
-                read_err[] = assign_res.code
+            try
+                Sockets.socket_assign_to_event_loop(new_sock, el_val)
+            catch e
+                read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
                 return nothing
             end
 
-            sub_res = Sockets.socket_subscribe_to_readable_events(
-                new_sock, (sock, err, ud) -> begin
-                    read_err[] = err
-                    if err != Reseau.AWS_OP_SUCCESS
+            try
+                Sockets.socket_subscribe_to_readable_events(
+                    new_sock, (sock, err, ud) -> begin
+                        read_err[] = err
+                        if err != Reseau.AWS_OP_SUCCESS
+                            read_done[] = true
+                            return nothing
+                        end
+
+                        buf = Reseau.ByteBuffer(64)
+                        try
+                            Sockets.socket_read(sock, buf)
+                            payload[] = String(Reseau.byte_cursor_from_buf(buf))
+                        catch e
+                            read_err[] = e isa Reseau.ReseauError ? e.code : -1
+                        end
                         read_done[] = true
                         return nothing
-                    end
-
-                    buf = Reseau.ByteBuffer(64)
-                    read_res = Sockets.socket_read(sock, buf)
-                    if read_res isa Reseau.ErrorResult
-                        read_err[] = read_res.code
-                    else
-                        payload[] = String(Reseau.byte_cursor_from_buf(buf))
-                    end
-                    read_done[] = true
-                    return nothing
-                end, nothing
-            )
-
-            if sub_res isa Reseau.ErrorResult
-                read_err[] = sub_res.code
+                    end, nothing
+                )
+            catch e
+                read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
             end
             return nothing
@@ -869,16 +950,16 @@ end
                 end
 
                 cursor = Reseau.ByteCursor("ping")
-                write_res = Sockets.socket_write(
-                    sock, cursor, (s, err, bytes, ud) -> begin
-                        write_err[] = err
-                        write_done[] = true
-                        return nothing
-                    end, nothing
-                )
-
-                if write_res isa Reseau.ErrorResult
-                    write_err[] = write_res.code
+                try
+                    Sockets.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_done[] = true
+                            return nothing
+                        end, nothing
+                    )
+                catch e
+                    write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
 
@@ -984,35 +1065,36 @@ end
                 return nothing
             end
 
-            assign_res = Sockets.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa Reseau.ErrorResult
-                read_err[] = assign_res.code
+            try
+                Sockets.socket_assign_to_event_loop(new_sock, el_val)
+            catch e
+                read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
                 return nothing
             end
 
-            sub_res = Sockets.socket_subscribe_to_readable_events(
-                new_sock, (sock, err, ud) -> begin
-                    read_err[] = err
-                    if err != Reseau.AWS_OP_SUCCESS
+            try
+                Sockets.socket_subscribe_to_readable_events(
+                    new_sock, (sock, err, ud) -> begin
+                        read_err[] = err
+                        if err != Reseau.AWS_OP_SUCCESS
+                            read_done[] = true
+                            return nothing
+                        end
+
+                        buf = Reseau.ByteBuffer(64)
+                        try
+                            Sockets.socket_read(sock, buf)
+                            payload[] = String(Reseau.byte_cursor_from_buf(buf))
+                        catch e
+                            read_err[] = e isa Reseau.ReseauError ? e.code : -1
+                        end
                         read_done[] = true
                         return nothing
-                    end
-
-                    buf = Reseau.ByteBuffer(64)
-                    read_res = Sockets.socket_read(sock, buf)
-                    if read_res isa Reseau.ErrorResult
-                        read_err[] = read_res.code
-                    else
-                        payload[] = String(Reseau.byte_cursor_from_buf(buf))
-                    end
-                    read_done[] = true
-                    return nothing
-                end, nothing
-            )
-
-            if sub_res isa Reseau.ErrorResult
-                read_err[] = sub_res.code
+                    end, nothing
+                )
+            catch e
+                read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
             end
             return nothing
@@ -1045,16 +1127,16 @@ end
                 end
 
                 cursor = Reseau.ByteCursor("ping")
-                write_res = Sockets.socket_write(
-                    sock, cursor, (s, err, bytes, ud) -> begin
-                        write_err[] = err
-                        write_done[] = true
-                        return nothing
-                    end, nothing
-                )
-
-                if write_res isa Reseau.ErrorResult
-                    write_err[] = write_res.code
+                try
+                    Sockets.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_done[] = true
+                            return nothing
+                        end, nothing
+                    )
+                catch e
+                    write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
@@ -1124,8 +1206,9 @@ end
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
                 return nothing
             end
-            assign_res = Sockets.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa Reseau.ErrorResult
+            try
+                Sockets.socket_assign_to_event_loop(new_sock, el_val)
+            catch
                 return nothing
             end
             _ = Sockets.socket_subscribe_to_readable_events(
@@ -1169,15 +1252,16 @@ end
                 cursor = Reseau.ByteCursor("ping")
                 write_cb_invoked[] = false
                 write_cb_sync[] = false
-                write_res = Sockets.socket_write(
-                    sock, cursor, (s, err, bytes, ud) -> begin
-                        write_err[] = err
-                        write_cb_invoked[] = true
-                        return nothing
-                    end, nothing
-                )
-                if write_res isa Reseau.ErrorResult
-                    write_err[] = write_res.code
+                try
+                    Sockets.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_cb_invoked[] = true
+                            return nothing
+                        end, nothing
+                    )
+                catch e
+                    write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_cb_invoked[] = true
                 end
                 if write_cb_invoked[]
@@ -1246,12 +1330,13 @@ end
     )
 
     try
-        res = Sockets.socket_connect(socket_val, connect_opts)
-        if res isa Reseau.ErrorResult
-            @test _is_allowed_connect_error(res.code)
-        else
+        try
+            Sockets.socket_connect(socket_val, connect_opts)
             @test wait_for_flag(connect_done; timeout_s = 3.0)
             @test _is_allowed_connect_error(connect_err[])
+        catch e
+            @test e isa Reseau.ReseauError
+            @test _is_allowed_connect_error(e.code)
         end
     finally
         Sockets.socket_cleanup!(socket_val)
@@ -1296,14 +1381,15 @@ end
     )
 
     try
-        res = Sockets.socket_connect(socket_val, connect_opts)
-        if res isa Reseau.ErrorResult
-            @test _is_allowed_connect_error(res.code)
-        else
+        try
+            Sockets.socket_connect(socket_val, connect_opts)
             EventLoops.event_loop_group_destroy!(elg_val)
             @test connect_done[]
             @test connect_err[] == EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
                 _is_allowed_connect_error(connect_err[])
+        catch e
+            @test e isa Reseau.ReseauError
+            @test _is_allowed_connect_error(e.code)
         end
     finally
         Sockets.socket_cleanup!(socket_val)
@@ -1354,10 +1440,8 @@ end
         end); type_tag = "socket_cleanup_before_connect")
 
         try
-            res = Sockets.socket_connect(socket_val, connect_opts)
-            if res isa Reseau.ErrorResult
-                @test _is_allowed_connect_error(res.code)
-            else
+            try
+                Sockets.socket_connect(socket_val, connect_opts)
                 EventLoops.event_loop_schedule_task_now!(el_val, cleanup_task)
                 @test wait_for_flag(cleanup_done)
                 sleep(0.05)
@@ -1366,6 +1450,9 @@ end
                 else
                     @test true
                 end
+            catch e
+                @test e isa Reseau.ReseauError
+                @test _is_allowed_connect_error(e.code)
             end
         finally
             Sockets.socket_cleanup!(socket_val)
@@ -1527,8 +1614,7 @@ end
             return
         end
 
-        assign_res = Sockets.socket_assign_to_event_loop(server_sock, el_val)
-        @test !(assign_res isa Reseau.ErrorResult)
+        Sockets.socket_assign_to_event_loop(server_sock, el_val)
 
         write_done_client = Threads.Atomic{Bool}(false)
         write_err_client = Ref{Int}(0)
@@ -1537,19 +1623,20 @@ end
 
         write_task_client = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             cursor = Reseau.ByteCursor("teapot")
-            res = Sockets.socket_write(
-                client_socket,
-                cursor,
-                (s, err, bytes, ud) -> begin
-                    write_err_client[] = err
-                    Sockets.socket_cleanup!(client_socket)
-                    write_done_client[] = true
-                    return nothing
-                end,
-                nothing,
-            )
-            if res isa Reseau.ErrorResult
-                write_err_client[] = res.code
+            try
+                Sockets.socket_write(
+                    client_socket,
+                    cursor,
+                    (s, err, bytes, ud) -> begin
+                        write_err_client[] = err
+                        Sockets.socket_cleanup!(client_socket)
+                        write_done_client[] = true
+                        return nothing
+                    end,
+                    nothing,
+                )
+            catch e
+                write_err_client[] = e isa Reseau.ReseauError ? e.code : -1
                 Sockets.socket_cleanup!(client_socket)
                 write_done_client[] = true
             end
@@ -1558,19 +1645,20 @@ end
 
         write_task_server = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             cursor = Reseau.ByteCursor("spout")
-            res = Sockets.socket_write(
-                server_sock,
-                cursor,
-                (s, err, bytes, ud) -> begin
-                    write_err_server[] = err
-                    Sockets.socket_cleanup!(server_sock)
-                    write_done_server[] = true
-                    return nothing
-                end,
-                nothing,
-            )
-            if res isa Reseau.ErrorResult
-                write_err_server[] = res.code
+            try
+                Sockets.socket_write(
+                    server_sock,
+                    cursor,
+                    (s, err, bytes, ud) -> begin
+                        write_err_server[] = err
+                        Sockets.socket_cleanup!(server_sock)
+                        write_done_server[] = true
+                        return nothing
+                    end,
+                    nothing,
+                )
+            catch e
+                write_err_server[] = e isa Reseau.ReseauError ? e.code : -1
                 Sockets.socket_cleanup!(server_sock)
                 write_done_server[] = true
             end
@@ -1642,35 +1730,36 @@ end
                 return nothing
             end
 
-            assign_res = Sockets.socket_assign_to_event_loop(new_sock, el_val)
-            if assign_res isa Reseau.ErrorResult
-                read_err[] = assign_res.code
+            try
+                Sockets.socket_assign_to_event_loop(new_sock, el_val)
+            catch e
+                read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
                 return nothing
             end
 
-            sub_res = Sockets.socket_subscribe_to_readable_events(
-                new_sock, (sock, err, ud) -> begin
-                    read_err[] = err
-                    if err != Reseau.AWS_OP_SUCCESS
+            try
+                Sockets.socket_subscribe_to_readable_events(
+                    new_sock, (sock, err, ud) -> begin
+                        read_err[] = err
+                        if err != Reseau.AWS_OP_SUCCESS
+                            read_done[] = true
+                            return nothing
+                        end
+
+                        buf = Reseau.ByteBuffer(64)
+                        try
+                            Sockets.socket_read(sock, buf)
+                            payload[] = String(Reseau.byte_cursor_from_buf(buf))
+                        catch e
+                            read_err[] = e isa Reseau.ReseauError ? e.code : -1
+                        end
                         read_done[] = true
                         return nothing
-                    end
-
-                    buf = Reseau.ByteBuffer(64)
-                    read_res = Sockets.socket_read(sock, buf)
-                    if read_res isa Reseau.ErrorResult
-                        read_err[] = read_res.code
-                    else
-                        payload[] = String(Reseau.byte_cursor_from_buf(buf))
-                    end
-                    read_done[] = true
-                    return nothing
-                end, nothing
-            )
-
-            if sub_res isa Reseau.ErrorResult
-                read_err[] = sub_res.code
+                    end, nothing
+                )
+            catch e
+                read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
             end
             return nothing
@@ -1697,16 +1786,16 @@ end
                 end
 
                 cursor = Reseau.ByteCursor("ping")
-                write_res = Sockets.socket_write(
-                    sock, cursor, (s, err, bytes, ud) -> begin
-                        write_err[] = err
-                        write_done[] = true
-                        return nothing
-                    end, nothing
-                )
-
-                if write_res isa Reseau.ErrorResult
-                    write_err[] = write_res.code
+                try
+                    Sockets.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_done[] = true
+                            return nothing
+                        end, nothing
+                    )
+                catch e
+                    write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
@@ -1853,13 +1942,12 @@ end
             return
         end
 
-        assign_res = Sockets.socket_assign_to_event_loop(server_socket, el_val)
-        @test !(assign_res isa Reseau.ErrorResult)
+        Sockets.socket_assign_to_event_loop(server_socket, el_val)
 
         read_err = Ref{Int}(0)
         read_done = Threads.Atomic{Bool}(false)
         payload = Ref{String}("")
-        sub_res = Sockets.socket_subscribe_to_readable_events(
+        Sockets.socket_subscribe_to_readable_events(
             server_socket, (sock, err, ud) -> begin
                 read_err[] = err
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1867,17 +1955,16 @@ end
                     return nothing
                 end
                     buf = Reseau.ByteBuffer(64)
-                    read_res = Sockets.socket_read(sock, buf)
-                    if read_res isa Reseau.ErrorResult
-                        read_err[] = read_res.code
-                    else
+                    try
+                        Sockets.socket_read(sock, buf)
                         payload[] = String(Reseau.byte_cursor_from_buf(buf))
+                    catch e
+                        read_err[] = e isa Reseau.ReseauError ? e.code : -1
                     end
                     read_done[] = true
                     return nothing
             end, nothing
         )
-        @test !(sub_res isa Reseau.ErrorResult)
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1901,15 +1988,16 @@ end
                     return nothing
                 end
                 cursor = Reseau.ByteCursor("ping")
-                write_res = Sockets.socket_write(
-                    sock, cursor, (s, err, bytes, ud) -> begin
-                        write_err[] = err
-                        write_done[] = true
-                        return nothing
-                    end, nothing
-                )
-                if write_res isa Reseau.ErrorResult
-                    write_err[] = write_res.code
+                try
+                    Sockets.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_done[] = true
+                            return nothing
+                        end, nothing
+                    )
+                catch e
+                    write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
@@ -1965,13 +2053,12 @@ end
             return
         end
 
-        assign_res = Sockets.socket_assign_to_event_loop(server_socket, el_val)
-        @test !(assign_res isa Reseau.ErrorResult)
+        Sockets.socket_assign_to_event_loop(server_socket, el_val)
 
         read_err = Ref{Int}(0)
         read_done = Threads.Atomic{Bool}(false)
         payload = Ref{String}("")
-        sub_res = Sockets.socket_subscribe_to_readable_events(
+        Sockets.socket_subscribe_to_readable_events(
             server_socket, (sock, err, ud) -> begin
                 read_err[] = err
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1979,17 +2066,16 @@ end
                     return nothing
                 end
                 buf = Reseau.ByteBuffer(64)
-                read_res = Sockets.socket_read(sock, buf)
-                if read_res isa Reseau.ErrorResult
-                    read_err[] = read_res.code
-                else
+                try
+                    Sockets.socket_read(sock, buf)
                     payload[] = String(Reseau.byte_cursor_from_buf(buf))
+                catch e
+                    read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 end
                 read_done[] = true
                 return nothing
             end, nothing
         )
-        @test !(sub_res isa Reseau.ErrorResult)
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -2016,15 +2102,16 @@ end
                     return nothing
                 end
                 cursor = Reseau.ByteCursor("ping")
-                write_res = Sockets.socket_write(
-                    sock, cursor, (s, err, bytes, ud) -> begin
-                        write_err[] = err
-                        write_done[] = true
-                        return nothing
-                    end, nothing
-                )
-                if write_res isa Reseau.ErrorResult
-                    write_err[] = write_res.code
+                try
+                    Sockets.socket_write(
+                        sock, cursor, (s, err, bytes, ud) -> begin
+                            write_err[] = err
+                            write_done[] = true
+                            return nothing
+                        end, nothing
+                    )
+                catch e
+                    write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
@@ -2079,17 +2166,24 @@ end
             bind_opts = Sockets.SocketBindOptions(endpoint)
             @test Sockets.socket_bind(socket_val, bind_opts) === nothing
             @test Sockets.socket_assign_to_event_loop(socket_val, el_val) === nothing
-            sub_res = Sockets.socket_subscribe_to_readable_events(socket_val, (sock, err, ud) -> nothing, nothing)
-            @test !(sub_res isa Reseau.ErrorResult)
+            Sockets.socket_subscribe_to_readable_events(socket_val, (sock, err, ud) -> nothing, nothing)
 
             buf = Reseau.ByteBuffer(4)
-            read_res = Sockets.socket_read(socket_val, buf)
-            @test read_res isa Reseau.ErrorResult
-            read_res isa Reseau.ErrorResult && @test read_res.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+            try
+                Sockets.socket_read(socket_val, buf)
+                @test false
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+            end
 
-            write_res = Sockets.socket_write(socket_val, Reseau.ByteCursor("noop"), (s, err, bytes, ud) -> nothing, nothing)
-            @test write_res isa Reseau.ErrorResult
-            write_res isa Reseau.ErrorResult && @test write_res.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+            try
+                Sockets.socket_write(socket_val, Reseau.ByteCursor("noop"), (s, err, bytes, ud) -> nothing, nothing)
+                @test false
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+            end
 
             close_done = Threads.Atomic{Bool}(false)
             close_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
@@ -2120,8 +2214,12 @@ end
         return
     end
 
-    res = Sockets.socket_get_bound_address(socket_val)
-    @test res isa Reseau.ErrorResult
+    try
+        Sockets.socket_get_bound_address(socket_val)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+    end
 
     @static if Sys.isapple()
         endpoint = Sockets.SocketEndpoint()
@@ -2136,17 +2234,13 @@ end
     @test bound isa Sockets.SocketEndpoint
     @static if !Sys.isapple()
         # Port resolution only testable on POSIX with IPV4
-        if bound isa Sockets.SocketEndpoint
-            @test bound.port > 0
-            @test Sockets.get_address(bound) == "127.0.0.1"
-        end
+        @test bound.port > 0
+        @test Sockets.get_address(bound) == "127.0.0.1"
 
         bound2 = Sockets.socket_get_bound_address(socket_val)
         @test bound2 isa Sockets.SocketEndpoint
-        if bound2 isa Sockets.SocketEndpoint && bound isa Sockets.SocketEndpoint
-            @test bound2.port == bound.port
-            @test Sockets.get_address(bound2) == Sockets.get_address(bound)
-        end
+        @test bound2.port == bound.port
+        @test Sockets.get_address(bound2) == Sockets.get_address(bound)
     end
 
     Sockets.socket_close(socket_val)
@@ -2165,8 +2259,12 @@ end
         return
     end
 
-    res = Sockets.socket_get_bound_address(socket_val)
-    @test res isa Reseau.ErrorResult
+    try
+        Sockets.socket_get_bound_address(socket_val)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+    end
 
     @static if Sys.isapple()
         endpoint = Sockets.SocketEndpoint()
@@ -2179,17 +2277,13 @@ end
     bound = Sockets.socket_get_bound_address(socket_val)
     @test bound isa Sockets.SocketEndpoint
     @static if !Sys.isapple()
-        if bound isa Sockets.SocketEndpoint
-            @test bound.port > 0
-            @test Sockets.get_address(bound) == "127.0.0.1"
-        end
+        @test bound.port > 0
+        @test Sockets.get_address(bound) == "127.0.0.1"
 
         bound2 = Sockets.socket_get_bound_address(socket_val)
         @test bound2 isa Sockets.SocketEndpoint
-        if bound2 isa Sockets.SocketEndpoint && bound isa Sockets.SocketEndpoint
-            @test bound2.port == bound.port
-            @test Sockets.get_address(bound2) == Sockets.get_address(bound)
-        end
+        @test bound2.port == bound.port
+        @test Sockets.get_address(bound2) == Sockets.get_address(bound)
     end
 
     Sockets.socket_close(socket_val)
@@ -2228,18 +2322,26 @@ end
         @static if Sys.isapple()
             # On macOS LOCAL: duplicate bind on the same path
             if sock2_val !== nothing
-                res = Sockets.socket_bind(sock2_val, bind_opts)
-                @test res isa Reseau.ErrorResult
-                res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_ADDRESS_IN_USE
+                try
+                    Sockets.socket_bind(sock2_val, bind_opts)
+                    @test false
+                catch e
+                    @test e isa Reseau.ReseauError
+                    @test e.code == EventLoops.ERROR_IO_SOCKET_ADDRESS_IN_USE
+                end
             end
         else
             bound = Sockets.socket_get_bound_address(sock1_val)
             @test bound isa Sockets.SocketEndpoint
-            if bound isa Sockets.SocketEndpoint && sock2_val !== nothing
+            if sock2_val !== nothing
                 dup_endpoint = Sockets.SocketEndpoint("127.0.0.1", Int(bound.port))
-                res = Sockets.socket_bind(sock2_val, Sockets.SocketBindOptions(dup_endpoint))
-                @test res isa Reseau.ErrorResult
-                res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_ADDRESS_IN_USE
+                try
+                    Sockets.socket_bind(sock2_val, Sockets.SocketBindOptions(dup_endpoint))
+                    @test false
+                catch e
+                    @test e isa Reseau.ReseauError
+                    @test e.code == EventLoops.ERROR_IO_SOCKET_ADDRESS_IN_USE
+                end
             end
         end
     finally
@@ -2265,20 +2367,25 @@ end
     @static if Sys.isapple()
         # Test bind to a path in a non-existent directory
         endpoint = Sockets.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
-        res = Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
-        @test res isa Reseau.ErrorResult
+        try
+            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+        end
     else
         endpoint = Sockets.SocketEndpoint("127.0.0.1", 80)
-        res = Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
-        if res === nothing
+        try
+            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
             # likely running with elevated privileges; skip assertion
             @test true
-        else
+        catch e
+            @test e isa Reseau.ReseauError
             @static if Sys.iswindows()
-                @test res.code == Reseau.ERROR_NO_PERMISSION ||
-                    res.code == EventLoops.ERROR_IO_SOCKET_ADDRESS_IN_USE
+                @test e.code == Reseau.ERROR_NO_PERMISSION ||
+                    e.code == EventLoops.ERROR_IO_SOCKET_ADDRESS_IN_USE
             else
-                @test res.code == Reseau.ERROR_NO_PERMISSION
+                @test e.code == Reseau.ERROR_NO_PERMISSION
             end
         end
     end
@@ -2301,13 +2408,21 @@ end
     @static if Sys.isapple()
         # Test bind to an invalid/non-existent path
         endpoint = Sockets.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
-        res = Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
-        @test res isa Reseau.ErrorResult
+        try
+            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+        end
     else
         endpoint = Sockets.SocketEndpoint("127.0", 80)
-        res = Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+        try
+            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+        end
     end
     Sockets.socket_close(sock_val)
 end
@@ -2348,9 +2463,10 @@ end
         end,
     )
 
-    res = Sockets.socket_connect(sock_val, connect_opts)
-    if res isa Reseau.ErrorResult
-        err_code[] = res.code
+    try
+        Sockets.socket_connect(sock_val, connect_opts)
+    catch e
+        err_code[] = e isa Reseau.ReseauError ? e.code : -1
         done[] = true
     end
 
@@ -2432,9 +2548,10 @@ end
         end,
     )
 
-    res = Sockets.socket_connect(sock_val, connect_opts)
-    if res isa Reseau.ErrorResult
-        err_code[] = res.code
+    try
+        Sockets.socket_connect(sock_val, connect_opts)
+    catch e
+        err_code[] = e isa Reseau.ReseauError ? e.code : -1
         done[] = true
     end
 

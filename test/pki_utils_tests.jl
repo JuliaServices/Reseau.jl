@@ -47,21 +47,18 @@ end
         pwd = Reseau.ByteCursor("1234")
 
         res = Sockets.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
-        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
             @test _cf_array_count(res) == 1
             Sockets._cf_release(res)
         end
 
         res = Sockets.import_public_and_private_keys_to_identity(cert, key; keychain_path = test_keychain_path())
-        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
             @test _cf_array_count(res) == 1
             Sockets._cf_release(res)
         end
 
         res = Sockets.import_pkcs12_to_identity(pkcs12, pwd)
-        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
             @test _cf_array_count(res) == 1
             Sockets._cf_release(res)
@@ -69,25 +66,19 @@ end
 
         ca = _pki_load_cursor("server_chain.crt")
         pem_objs = Sockets.pem_parse(read(_pki_resource_path("server_chain.crt")))
-        @test !(pem_objs isa Reseau.ErrorResult)
         res = Sockets.import_trusted_certificates(ca)
-        @test !(res isa Reseau.ErrorResult)
         if res isa Ptr{Cvoid}
-            if pem_objs isa Vector
-                @test _cf_array_count(res) == length(pem_objs)
-            end
+            @test _cf_array_count(res) == length(pem_objs)
             Sockets._cf_release(res)
         end
 
         if Sockets.is_using_secitem()
             res = Sockets.secitem_import_cert_and_key(cert, key; cert_label = "reseau-cert", key_label = "reseau-key")
-            @test !(res isa Reseau.ErrorResult)
             if res isa Ptr{Cvoid}
                 Sockets._cf_release(res)
             end
 
             res = Sockets.secitem_import_pkcs12(pkcs12, pwd; cert_label = "reseau-cert", key_label = "reseau-key")
-            @test !(res isa Reseau.ErrorResult)
             if res isa Ptr{Cvoid}
                 Sockets._cf_release(res)
             end
@@ -100,33 +91,19 @@ end
         pkcs12 = Reseau.ByteCursor("pkcs12")
         pwd = Reseau.ByteCursor("pwd")
 
-        res = Sockets.import_public_and_private_keys_to_identity(cert, key)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        @test_throws Reseau.ReseauError Sockets.import_public_and_private_keys_to_identity(cert, key)
 
-        res = Sockets.import_pkcs12_to_identity(pkcs12, pwd)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        @test_throws Reseau.ReseauError Sockets.import_pkcs12_to_identity(pkcs12, pwd)
 
-        res = Sockets.import_trusted_certificates(cert)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        @test_throws Reseau.ReseauError Sockets.import_trusted_certificates(cert)
 
-        res = Sockets.secitem_import_cert_and_key(cert, key; cert_label = "cert", key_label = "key")
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        @test_throws Reseau.ReseauError Sockets.secitem_import_cert_and_key(cert, key; cert_label = "cert", key_label = "key")
 
-        res = Sockets.secitem_import_pkcs12(pkcs12, pwd; cert_label = "cert", key_label = "key")
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        @test_throws Reseau.ReseauError Sockets.secitem_import_pkcs12(pkcs12, pwd; cert_label = "cert", key_label = "key")
 
-        res = Sockets.load_cert_from_system_cert_store("cert")
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        @test_throws Reseau.ReseauError Sockets.load_cert_from_system_cert_store("cert")
 
-        res = Sockets.import_key_pair_to_cert_context(cert, key; is_client_mode = true)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        @test_throws Reseau.ReseauError Sockets.import_key_pair_to_cert_context(cert, key; is_client_mode = true)
 
         Sockets.close_cert_store(C_NULL)
     end
@@ -141,19 +118,23 @@ end
     chain_pem = Reseau.ByteCursor(read(_pki_resource_path("server_chain.crt")))
     ca_pem = Reseau.ByteCursor(read(_pki_resource_path("ca_root.crt")))
 
-    @test Sockets.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "localhost") === nothing
+    Sockets.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "localhost")
 
-    res = Sockets.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "example.com")
-    @test res isa Reseau.ErrorResult
-    if res isa Reseau.ErrorResult
-        @test res.code == EventLoops.ERROR_IO_TLS_HOST_NAME_MISMATCH
+    try
+        Sockets.x509_verify_chain(chain_pem; trust_store_cursor = ca_pem, host = "example.com")
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_TLS_HOST_NAME_MISMATCH
     end
 
     wrong_ca = Reseau.ByteCursor(read(_pki_resource_path("DigiCertGlobalRootCA.crt.pem")))
-    res = Sockets.x509_verify_chain(chain_pem; trust_store_cursor = wrong_ca)
-    @test res isa Reseau.ErrorResult
-    if res isa Reseau.ErrorResult
-        @test res.code in (EventLoops.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE, EventLoops.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN)
+    try
+        Sockets.x509_verify_chain(chain_pem; trust_store_cursor = wrong_ca)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code in (EventLoops.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE, EventLoops.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN)
     end
 
     chain = Sockets.x509_parse_pem_chain(chain_pem)
@@ -161,7 +142,6 @@ end
     chain isa Vector && @test length(chain) == 2
 
     pem_objs = Sockets.pem_parse(read(_pki_resource_path("unittests.crt")))
-    @test !(pem_objs isa Reseau.ErrorResult)
     if pem_objs isa Vector && !isempty(pem_objs)
         der_cursor = Reseau.byte_cursor_from_buf(pem_objs[1].data)
         x509 = Sockets.x509_load_der(der_cursor)

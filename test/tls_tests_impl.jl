@@ -156,11 +156,13 @@ function _tls_network_connect(
     if ctx_options_override !== nothing
         ctx_options_override(ctx_opts)
     end
-    ctx = Sockets.tls_context_new(ctx_opts)
-    if ctx isa Reseau.ErrorResult
+    local ctx
+    try
+        ctx = Sockets.tls_context_new(ctx_opts)
+    catch e
         Sockets.host_resolver_shutdown!(resolver)
         EventLoops.event_loop_group_destroy!(elg)
-        return ctx
+        return e isa Reseau.ReseauError ? e.code : rethrow()
     end
 
     setup_err = Ref{Union{Nothing, Int}}(nothing)
@@ -213,15 +215,14 @@ function _test_server_ctx()
     key_path = _resource_path("unittests.key")
     opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
     maybe_apply_test_keychain!(opts)
-    return opts isa Sockets.TlsContextOptions ? Sockets.tls_context_new(opts) : opts
+    return Sockets.tls_context_new(opts)
 end
 
 function _test_client_ctx(; verify_peer::Bool = true)
     opts = Sockets.tls_ctx_options_init_default_client()
     if verify_peer
         ca_file = _resource_path(Sys.isapple() ? "unittests.crt" : "ca_root.crt")
-        res = Sockets.tls_ctx_options_override_default_trust_store_from_path(opts; ca_file = ca_file)
-        res isa Reseau.ErrorResult && return res
+        Sockets.tls_ctx_options_override_default_trust_store_from_path(opts; ca_file = ca_file)
     else
         Sockets.tls_ctx_options_set_verify_peer(opts, false)
     end
@@ -254,11 +255,11 @@ end
     temp_dir = mktempdir()
     ca_path = joinpath(temp_dir, "ca.pem")
     write(ca_path, TEST_PEM_CERT)
-    @test Sockets.tls_ctx_options_override_default_trust_store_from_path(
+    @test_throws Reseau.ReseauError Sockets.tls_ctx_options_override_default_trust_store_from_path(
         opts;
         ca_path = "/tmp",
         ca_file = ca_path,
-    ) isa Reseau.ErrorResult
+    )
 
     opts2 = Sockets.tls_ctx_options_init_default_client()
     @test Sockets.tls_ctx_options_override_default_trust_store_from_path(
@@ -308,10 +309,8 @@ end
 @testset "TLS ctx acquire/release" begin
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Sockets.TlsContext
-        @test Sockets.tls_ctx_acquire(ctx) === ctx
-        @test Sockets.tls_ctx_release(ctx) === nothing
-    end
+    @test Sockets.tls_ctx_acquire(ctx) === ctx
+    @test Sockets.tls_ctx_release(ctx) === nothing
     @test Sockets.tls_ctx_acquire(nothing) === nothing
     @test Sockets.tls_ctx_release(nothing) === nothing
 end
@@ -321,85 +320,79 @@ end
     @test Sockets.tls_ctx_options_override_default_trust_store(opts, Reseau.ByteCursor(TEST_PEM_CERT)) === nothing
     ctx = Sockets.tls_client_ctx_new(opts)
     @test ctx isa Sockets.TlsContext
-    if ctx isa Sockets.TlsContext
-        @test !ctx.options.is_server
-        @test ctx.options.ca_file.len == opts.ca_file.len
-        @test ctx.options.ca_file.mem !== opts.ca_file.mem
-    end
+    @test !ctx.options.is_server
+    @test ctx.options.ca_file.len == opts.ca_file.len
+    @test ctx.options.ca_file.mem !== opts.ca_file.mem
 
     server_ctx = Sockets.tls_server_ctx_new(opts)
     @test server_ctx isa Sockets.TlsContext
-    if server_ctx isa Sockets.TlsContext
-        @test server_ctx.options.is_server
-    end
+    @test server_ctx.options.is_server
 
     srv_opts = Sockets.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
         Reseau.ByteCursor(TEST_PEM_KEY),
     )
     @test srv_opts isa Sockets.TlsContextOptions
-    if srv_opts isa Sockets.TlsContextOptions
-        client_ctx = Sockets.tls_client_ctx_new(srv_opts)
-        @test client_ctx isa Sockets.TlsContext
-        if client_ctx isa Sockets.TlsContext
-            @test !client_ctx.options.is_server
-        end
-    end
+    client_ctx = Sockets.tls_client_ctx_new(srv_opts)
+    @test client_ctx isa Sockets.TlsContext
+    @test !client_ctx.options.is_server
 
     bad_opts = Sockets.tls_ctx_options_init_default_client()
     Sockets.tls_ctx_options_set_tls_cipher_preference(
         bad_opts,
         Sockets.TlsCipherPref.TLS_CIPHER_PREF_END_RANGE,
     )
-    bad_ctx = Sockets.tls_client_ctx_new(bad_opts)
-    @test bad_ctx isa Reseau.ErrorResult
-    if bad_ctx isa Reseau.ErrorResult
-        @test bad_ctx.code == Reseau.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED
+    try
+        bad_ctx = Sockets.tls_client_ctx_new(bad_opts)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED
     end
 end
 
 @testset "TLS error code predicate - comprehensive" begin
     # All 26 TLS error codes must be recognized by the predicate
     tls_errors = [
-        Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE,
-        Reseau.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED,
-        Reseau.ERROR_IO_TLS_ERROR_WRITE_FAILURE,
-        Reseau.ERROR_IO_TLS_ERROR_ALERT_RECEIVED,
-        Reseau.ERROR_IO_TLS_CTX_ERROR,
-        Reseau.ERROR_IO_TLS_VERSION_UNSUPPORTED,
-        Reseau.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED,
-        Reseau.ERROR_IO_TLS_NEGOTIATION_TIMEOUT,
-        Reseau.ERROR_IO_TLS_ALERT_NOT_GRACEFUL,
-        Reseau.ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED,
-        Reseau.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED,
-        Reseau.ERROR_IO_TLS_ERROR_READ_FAILURE,
-        Reseau.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE,
-        Reseau.ERROR_IO_TLS_NO_ROOT_CERTIFICATE_FOUND,
-        Reseau.ERROR_IO_TLS_CERTIFICATE_EXPIRED,
-        Reseau.ERROR_IO_TLS_CERTIFICATE_NOT_YET_VALID,
-        Reseau.ERROR_IO_TLS_BAD_CERTIFICATE,
-        Reseau.ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED,
-        Reseau.ERROR_IO_TLS_BAD_PEER_CERTIFICATE,
-        Reseau.ERROR_IO_TLS_PEER_CERTIFICATE_REVOKED,
-        Reseau.ERROR_IO_TLS_PEER_CERTIFICATE_UNKNOWN,
-        Reseau.ERROR_IO_TLS_INTERNAL_ERROR,
-        Reseau.ERROR_IO_TLS_CLOSED_GRACEFUL,
-        Reseau.ERROR_IO_TLS_CLOSED_ABORT,
-        Reseau.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN,
-        Reseau.ERROR_IO_TLS_HOST_NAME_MISMATCH,
+        EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE,
+        EventLoops.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED,
+        EventLoops.ERROR_IO_TLS_ERROR_WRITE_FAILURE,
+        EventLoops.ERROR_IO_TLS_ERROR_ALERT_RECEIVED,
+        EventLoops.ERROR_IO_TLS_CTX_ERROR,
+        EventLoops.ERROR_IO_TLS_VERSION_UNSUPPORTED,
+        EventLoops.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED,
+        EventLoops.ERROR_IO_TLS_NEGOTIATION_TIMEOUT,
+        EventLoops.ERROR_IO_TLS_ALERT_NOT_GRACEFUL,
+        EventLoops.ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED,
+        EventLoops.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED,
+        EventLoops.ERROR_IO_TLS_ERROR_READ_FAILURE,
+        EventLoops.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE,
+        EventLoops.ERROR_IO_TLS_NO_ROOT_CERTIFICATE_FOUND,
+        EventLoops.ERROR_IO_TLS_CERTIFICATE_EXPIRED,
+        EventLoops.ERROR_IO_TLS_CERTIFICATE_NOT_YET_VALID,
+        EventLoops.ERROR_IO_TLS_BAD_CERTIFICATE,
+        EventLoops.ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED,
+        EventLoops.ERROR_IO_TLS_BAD_PEER_CERTIFICATE,
+        EventLoops.ERROR_IO_TLS_PEER_CERTIFICATE_REVOKED,
+        EventLoops.ERROR_IO_TLS_PEER_CERTIFICATE_UNKNOWN,
+        EventLoops.ERROR_IO_TLS_INTERNAL_ERROR,
+        EventLoops.ERROR_IO_TLS_CLOSED_GRACEFUL,
+        EventLoops.ERROR_IO_TLS_CLOSED_ABORT,
+        EventLoops.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN,
+        EventLoops.ERROR_IO_TLS_HOST_NAME_MISMATCH,
     ]
     for code in tls_errors
         @test Sockets.io_error_code_is_tls(code)
     end
     # Non-TLS error codes must not be recognized
-    @test !Sockets.io_error_code_is_tls(Reseau.ERROR_IO_SOCKET_TIMEOUT)
-    @test !Sockets.io_error_code_is_tls(Reseau.ERROR_IO_DNS_QUERY_FAILED)
-    @test !Sockets.io_error_code_is_tls(Reseau.ERROR_IO_EVENT_LOOP_SHUTDOWN)
-    @test !Sockets.io_error_code_is_tls(Reseau.ERROR_IO_BROKEN_PIPE)
+    @test !Sockets.io_error_code_is_tls(EventLoops.ERROR_IO_SOCKET_TIMEOUT)
+    @test !Sockets.io_error_code_is_tls(EventLoops.ERROR_IO_DNS_QUERY_FAILED)
+    @test !Sockets.io_error_code_is_tls(EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN)
+    @test !Sockets.io_error_code_is_tls(EventLoops.ERROR_IO_BROKEN_PIPE)
     @test !Sockets.io_error_code_is_tls(0)
     # DEFAULT_TRUST_STORE_NOT_FOUND is a config error, not classified as TLS
     # (matches aws-c-io aws_error_code_is_tls predicate)
-    @test !Sockets.io_error_code_is_tls(Reseau.ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND)
+    @test !Sockets.io_error_code_is_tls(EventLoops.ERROR_IO_TLS_ERROR_DEFAULT_TRUST_STORE_NOT_FOUND)
 end
 
 @testset "NW socket TLS error translation" begin
@@ -410,23 +403,23 @@ end
     # Test that _nw_determine_socket_error maps errSSL* codes to the correct TLS error codes.
     # These mappings match aws-c-io source/darwin/nw_socket.c:s_determine_socket_error()
     errSSL_map = [
-        (Int32(-9812), Reseau.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE),      # errSSLUnknownRootCert
-        (Int32(-9813), Reseau.ERROR_IO_TLS_NO_ROOT_CERTIFICATE_FOUND),     # errSSLNoRootCert
-        (Int32(-9814), Reseau.ERROR_IO_TLS_CERTIFICATE_EXPIRED),           # errSSLCertExpired
-        (Int32(-9815), Reseau.ERROR_IO_TLS_CERTIFICATE_NOT_YET_VALID),     # errSSLCertNotYetValid
-        (Int32(-9824), Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),     # errSSLPeerHandshakeFail
-        (Int32(-9808), Reseau.ERROR_IO_TLS_BAD_CERTIFICATE),              # errSSLBadCert
-        (Int32(-9828), Reseau.ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED),     # errSSLPeerCertExpired
-        (Int32(-9825), Reseau.ERROR_IO_TLS_BAD_PEER_CERTIFICATE),         # errSSLPeerBadCert
-        (Int32(-9827), Reseau.ERROR_IO_TLS_PEER_CERTIFICATE_REVOKED),     # errSSLPeerCertRevoked
-        (Int32(-9829), Reseau.ERROR_IO_TLS_PEER_CERTIFICATE_UNKNOWN),     # errSSLPeerCertUnknown
-        (Int32(-9810), Reseau.ERROR_IO_TLS_INTERNAL_ERROR),               # errSSLInternal
-        (Int32(-9805), Reseau.ERROR_IO_TLS_CLOSED_GRACEFUL),              # errSSLClosedGraceful
-        (Int32(-9806), Reseau.ERROR_IO_TLS_CLOSED_ABORT),                 # errSSLClosedAbort
-        (Int32(-9807), Reseau.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN),    # errSSLXCertChainInvalid
-        (Int32(-9843), Reseau.ERROR_IO_TLS_HOST_NAME_MISMATCH),           # errSSLHostNameMismatch
-        (Int32(-67843), Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),   # errSecNotTrusted
-        (Int32(-9836), Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),    # errSSLPeerProtocolVersion
+        (Int32(-9812), EventLoops.ERROR_IO_TLS_UNKNOWN_ROOT_CERTIFICATE),      # errSSLUnknownRootCert
+        (Int32(-9813), EventLoops.ERROR_IO_TLS_NO_ROOT_CERTIFICATE_FOUND),     # errSSLNoRootCert
+        (Int32(-9814), EventLoops.ERROR_IO_TLS_CERTIFICATE_EXPIRED),           # errSSLCertExpired
+        (Int32(-9815), EventLoops.ERROR_IO_TLS_CERTIFICATE_NOT_YET_VALID),     # errSSLCertNotYetValid
+        (Int32(-9824), EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),     # errSSLPeerHandshakeFail
+        (Int32(-9808), EventLoops.ERROR_IO_TLS_BAD_CERTIFICATE),              # errSSLBadCert
+        (Int32(-9828), EventLoops.ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED),     # errSSLPeerCertExpired
+        (Int32(-9825), EventLoops.ERROR_IO_TLS_BAD_PEER_CERTIFICATE),         # errSSLPeerBadCert
+        (Int32(-9827), EventLoops.ERROR_IO_TLS_PEER_CERTIFICATE_REVOKED),     # errSSLPeerCertRevoked
+        (Int32(-9829), EventLoops.ERROR_IO_TLS_PEER_CERTIFICATE_UNKNOWN),     # errSSLPeerCertUnknown
+        (Int32(-9810), EventLoops.ERROR_IO_TLS_INTERNAL_ERROR),               # errSSLInternal
+        (Int32(-9805), EventLoops.ERROR_IO_TLS_CLOSED_GRACEFUL),              # errSSLClosedGraceful
+        (Int32(-9806), EventLoops.ERROR_IO_TLS_CLOSED_ABORT),                 # errSSLClosedAbort
+        (Int32(-9807), EventLoops.ERROR_IO_TLS_INVALID_CERTIFICATE_CHAIN),    # errSSLXCertChainInvalid
+        (Int32(-9843), EventLoops.ERROR_IO_TLS_HOST_NAME_MISMATCH),           # errSSLHostNameMismatch
+        (Int32(-67843), EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),   # errSecNotTrusted
+        (Int32(-9836), EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE),    # errSSLPeerProtocolVersion
     ]
     for (osstatus, expected_error) in errSSL_map
         result = Sockets._nw_determine_socket_error(Int(osstatus))
@@ -440,10 +433,8 @@ end
         Reseau.ByteCursor(TEST_PEM_KEY),
     )
     @test opts isa Sockets.TlsContextOptions
-    if opts isa Sockets.TlsContextOptions
-        @test _buf_to_string(opts.certificate) == TEST_PEM_CERT
-        @test _buf_to_string(opts.private_key) == TEST_PEM_KEY
-    end
+    @test _buf_to_string(opts.certificate) == TEST_PEM_CERT
+    @test _buf_to_string(opts.private_key) == TEST_PEM_KEY
 
     temp_dir = mktempdir()
     cert_path = joinpath(temp_dir, "cert.pem")
@@ -453,10 +444,8 @@ end
 
     opts2 = Sockets.tls_ctx_options_init_client_mtls_from_path(cert_path, key_path)
     @test opts2 isa Sockets.TlsContextOptions
-    if opts2 isa Sockets.TlsContextOptions
-        @test _buf_to_string(opts2.certificate) == TEST_PEM_CERT
-        @test _buf_to_string(opts2.private_key) == TEST_PEM_KEY
-    end
+    @test _buf_to_string(opts2.certificate) == TEST_PEM_CERT
+    @test _buf_to_string(opts2.private_key) == TEST_PEM_KEY
 end
 
 @testset "TLS ctx options pkcs12" begin
@@ -466,14 +455,12 @@ end
     if Sys.isapple()
         opts = Sockets.tls_ctx_options_init_client_mtls_pkcs12(pkcs_bytes, pkcs_pwd)
         @test opts isa Sockets.TlsContextOptions
-        if opts isa Sockets.TlsContextOptions
-            pkcs_out = Vector{UInt8}(undef, Int(opts.pkcs12.len))
-            copyto!(pkcs_out, 1, opts.pkcs12.mem, 1, Int(opts.pkcs12.len))
-            @test pkcs_out == pkcs_bytes
-            @test _buf_to_string(opts.pkcs12_password) == pkcs_pwd
-        end
+        pkcs_out = Vector{UInt8}(undef, Int(opts.pkcs12.len))
+        copyto!(pkcs_out, 1, opts.pkcs12.mem, 1, Int(opts.pkcs12.len))
+        @test pkcs_out == pkcs_bytes
+        @test _buf_to_string(opts.pkcs12_password) == pkcs_pwd
     else
-        @test Sockets.tls_ctx_options_init_client_mtls_pkcs12(pkcs_bytes, pkcs_pwd) isa Reseau.ErrorResult
+        @test_throws Reseau.ReseauError Sockets.tls_ctx_options_init_client_mtls_pkcs12(pkcs_bytes, pkcs_pwd)
     end
 end
 
@@ -484,11 +471,9 @@ end
         alpn_list = "h2",
     )
     @test opts isa Sockets.TlsContextOptions
-    if opts isa Sockets.TlsContextOptions
-        @test opts.is_server
-        @test !opts.verify_peer
-        @test opts.alpn_list == "h2"
-    end
+    @test opts.is_server
+    @test !opts.verify_peer
+    @test opts.alpn_list == "h2"
 
     temp_dir = mktempdir()
     cert_path = joinpath(temp_dir, "cert.pem")
@@ -502,11 +487,9 @@ end
         alpn_list = "h2",
     )
     @test opts2 isa Sockets.TlsContextOptions
-    if opts2 isa Sockets.TlsContextOptions
-        @test opts2.is_server
-        @test !opts2.verify_peer
-        @test opts2.alpn_list == "h2"
-    end
+    @test opts2.is_server
+    @test !opts2.verify_peer
+    @test opts2.alpn_list == "h2"
 end
 
 @testset "TLS ctx options platform hooks" begin
@@ -514,16 +497,16 @@ end
     if Sys.isapple()
         secitem = Sockets.SecItemOptions("cert", "key")
         if Sockets.is_using_secitem()
-            @test Sockets.tls_ctx_options_set_keychain_path(opts, "/tmp") isa Reseau.ErrorResult
+            @test_throws Reseau.ReseauError Sockets.tls_ctx_options_set_keychain_path(opts, "/tmp")
             @test Sockets.tls_ctx_options_set_secitem_options(opts, secitem) === nothing
         else
             @test Sockets.tls_ctx_options_set_keychain_path(opts, "/tmp") === nothing
-            @test Sockets.tls_ctx_options_set_secitem_options(opts, secitem) isa Reseau.ErrorResult
+            @test_throws Reseau.ReseauError Sockets.tls_ctx_options_set_secitem_options(opts, secitem)
         end
     else
-        @test Sockets.tls_ctx_options_set_keychain_path(opts, "/tmp") isa Reseau.ErrorResult
+        @test_throws Reseau.ReseauError Sockets.tls_ctx_options_set_keychain_path(opts, "/tmp")
         secitem = Sockets.SecItemOptions("cert", "key")
-        @test Sockets.tls_ctx_options_set_secitem_options(opts, secitem) isa Reseau.ErrorResult
+        @test_throws Reseau.ReseauError Sockets.tls_ctx_options_set_secitem_options(opts, secitem)
     end
 end
 
@@ -552,23 +535,27 @@ end
     channel = Sockets.Channel(event_loop, nothing)
     slot = Sockets.channel_slot_new!(channel)
     conn = Sockets.tls_connection_options_init_from_ctx(ctx)
-    res = Sockets.tls_client_handler_new(conn, slot)
-    @test res isa Reseau.ErrorResult
-    if res isa Reseau.ErrorResult
-        @test res.code == Reseau.ERROR_IO_TLS_CTX_ERROR
+    try
+        res = Sockets.tls_client_handler_new(conn, slot)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_TLS_CTX_ERROR
     end
 
     EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "TLS ctx options custom key ops" begin
-    res = Sockets.tls_ctx_options_init_client_mtls_with_custom_key_operations(
-        nothing,
-        Reseau.ByteCursor(TEST_PEM_CERT),
-    )
-    @test res isa Reseau.ErrorResult
-    if res isa Reseau.ErrorResult
-        @test res.code == Reseau.ERROR_INVALID_ARGUMENT
+    try
+        res = Sockets.tls_ctx_options_init_client_mtls_with_custom_key_operations(
+            nothing,
+            Reseau.ByteCursor(TEST_PEM_CERT),
+        )
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_INVALID_ARGUMENT
     end
 end
 
@@ -597,18 +584,18 @@ end
         Reseau.ByteCursor(TEST_PEM_CERT),
     )
     @test opts isa Sockets.TlsContextOptions
-    if opts isa Sockets.TlsContextOptions
-        @test opts.custom_key_op_handler === handler
-        @test _buf_to_string(opts.certificate) == TEST_PEM_CERT
-    end
+    @test opts.custom_key_op_handler === handler
+    @test _buf_to_string(opts.certificate) == TEST_PEM_CERT
 
-    bad = Sockets.tls_ctx_options_init_client_mtls_with_custom_key_operations(
-        Sockets.CustomKeyOpHandler(nothing),
-        Reseau.ByteCursor(TEST_PEM_CERT),
-    )
-    @test bad isa Reseau.ErrorResult
-    if bad isa Reseau.ErrorResult
-        @test bad.code == Reseau.ERROR_INVALID_ARGUMENT
+    try
+        bad = Sockets.tls_ctx_options_init_client_mtls_with_custom_key_operations(
+            Sockets.CustomKeyOpHandler(nothing),
+            Reseau.ByteCursor(TEST_PEM_CERT),
+        )
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_INVALID_ARGUMENT
     end
 end
 
@@ -628,13 +615,14 @@ end
         Reseau.ByteCursor(TEST_PEM_CERT),
     )
     @test opts isa Sockets.TlsContextOptions
-    opts isa Reseau.ErrorResult && return
 
     Sockets.tls_ctx_options_set_minimum_tls_version(opts, Sockets.TlsVersion.TLSv1_3)
-    ctx = Sockets.tls_context_new(opts)
-    @test ctx isa Reseau.ErrorResult
-    if ctx isa Reseau.ErrorResult
-        @test ctx.code == Reseau.ERROR_IO_TLS_VERSION_UNSUPPORTED
+    try
+        ctx = Sockets.tls_context_new(opts)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_TLS_VERSION_UNSUPPORTED
     end
 end
 
@@ -644,10 +632,12 @@ end
         cert_file_path = "cert.pem",
         cert_file_contents = "cert",
     )
-    res = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(opts)
-    @test res isa Reseau.ErrorResult
-    if res isa Reseau.ErrorResult
-        @test res.code == Reseau.ERROR_INVALID_ARGUMENT
+    try
+        res = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(opts)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_INVALID_ARGUMENT
     end
 
     temp_dir = mktempdir()
@@ -658,20 +648,24 @@ end
         pkcs11_lib = :fake,
         cert_file_path = cert_path,
     )
-    res2 = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(opts2)
-    @test res2 isa Reseau.ErrorResult
-    if res2 isa Reseau.ErrorResult
-        @test res2.code == Reseau.ERROR_INVALID_ARGUMENT
+    try
+        res2 = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(opts2)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_INVALID_ARGUMENT
     end
 
     opts3 = Sockets.TlsCtxPkcs11Options(
         pkcs11_lib = :fake,
         cert_file_contents = TEST_PEM_CERT,
     )
-    res3 = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(opts3)
-    @test res3 isa Reseau.ErrorResult
-    if res3 isa Reseau.ErrorResult
-        @test res3.code == Reseau.ERROR_INVALID_ARGUMENT
+    try
+        res3 = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(opts3)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_INVALID_ARGUMENT
     end
 end
 
@@ -695,10 +689,12 @@ end
         new_handler_fn = nothing,
         start_negotiation_fn = nothing,
     )
-    res = Sockets.tls_byo_crypto_set_client_setup_options(bad_client)
-    @test res isa Reseau.ErrorResult
-    if res isa Reseau.ErrorResult
-        @test res.code == Reseau.ERROR_INVALID_ARGUMENT
+    try
+        res = Sockets.tls_byo_crypto_set_client_setup_options(bad_client)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_INVALID_ARGUMENT
     end
 
     Sockets._tls_byo_client_setup[] = nothing
@@ -716,27 +712,19 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     opts = Sockets.TlsConnectionOptions(ctx; timeout_ms = 1)
     channel = Sockets.Channel(event_loop, nothing)
     slot = Sockets.channel_slot_new!(channel)
     handler = Sockets.tls_client_handler_new(opts, slot)
     @test handler isa Sockets.TlsChannelHandler
-    if handler isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
     Sockets.channel_slot_set_handler!(slot, handler)
 
     handler.stats.handshake_status = Sockets.TlsNegotiationStatus.ONGOING
     Sockets._tls_timeout_task(handler.timeout_task, handler, Reseau.TaskStatus.RUN_READY)
 
     @test channel.shutdown_pending
-    @test channel.shutdown_error_code == Reseau.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
+    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
 
     EventLoops.event_loop_group_destroy!(elg)
 end
@@ -788,12 +776,12 @@ end
     )
     @test Sockets.tls_key_operation_complete_with_error!(
         err_operation,
-        Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE,
+        EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE,
     ) === nothing
     @test err_operation.completed
-    @test err_operation.error_code == Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
+    @test err_operation.error_code == EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
     @test cb_called[]
-    @test cb_err[] == Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
+    @test cb_err[] == EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
     @test cb_ud[] == 123
 
     @test Sockets.tls_hash_algorithm_str(Sockets.TlsHashAlgorithm.SHA384) == "SHA384"
@@ -808,9 +796,6 @@ end
     opts = Sockets.tls_ctx_options_init_default_client()
     ctx = Sockets.tls_context_new(opts)
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        return
-    end
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
@@ -826,10 +811,6 @@ end
     Sockets.tls_connection_options_set_server_name(conn, "example.com")
     handler = Sockets.tls_client_handler_new(conn, slot)
     @test handler isa Sockets.TlsChannelHandler
-    if handler isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
     Sockets.channel_slot_set_handler!(slot, handler)
 
     @test _buf_to_string(Sockets.tls_handler_server_name(handler)) == "example.com"
@@ -961,10 +942,6 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     new_called = Ref(false)
     start_called = Ref(false)
@@ -1066,10 +1043,6 @@ end
 
     client_ctx = _test_client_ctx()
     @test client_ctx isa Sockets.TlsContext
-    if client_ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     channel = Sockets.Channel(event_loop, nothing)
     left_slot = Sockets.channel_slot_new!(channel)
@@ -1119,10 +1092,12 @@ end
 
             bad_channel = Sockets.Channel(event_loop, nothing)
             bad_slot = Sockets.channel_slot_new!(bad_channel)
-            bad_handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(server_ctx), bad_slot)
-            @test bad_handler isa Reseau.ErrorResult
-            if bad_handler isa Reseau.ErrorResult
-                @test bad_handler.code == Reseau.ERROR_INVALID_ARGUMENT
+            try
+                bad_handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(server_ctx), bad_slot)
+                @test false
+            catch e
+                @test e isa Reseau.ReseauError
+                @test e.code == Reseau.ERROR_INVALID_ARGUMENT
             end
         end
     end
@@ -1142,10 +1117,6 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     channel = Sockets.Channel(event_loop, nothing)
     slot = Sockets.channel_slot_new!(channel)
@@ -1157,10 +1128,6 @@ end
     opts = Sockets.TlsConnectionOptions(ctx; on_data_read = on_data_read)
     handler = Sockets.tls_client_handler_new(opts, slot)
     @test handler isa Sockets.TlsChannelHandler
-    if handler isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
     Sockets.channel_slot_set_handler!(slot, handler)
     if hasproperty(handler, :state)
         setfield!(handler, :state, Sockets.TlsNegotiationState.SUCCEEDED)
@@ -1191,19 +1158,11 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     channel = Sockets.Channel(event_loop, nothing)
     slot = Sockets.channel_slot_new!(channel)
     handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), slot)
     @test handler isa Sockets.TlsChannelHandler
-    if handler isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
     Sockets.channel_slot_set_handler!(slot, handler)
     mark_tls_handler_negotiated!(handler)
 
@@ -1224,19 +1183,11 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     channel = Sockets.Channel(event_loop, nothing)
     slot = Sockets.channel_slot_new!(channel)
     handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), slot)
     @test handler isa Sockets.TlsChannelHandler
-    if handler isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
     Sockets.channel_slot_set_handler!(slot, handler)
     mark_tls_handler_failed!(handler)
 
@@ -1244,10 +1195,12 @@ end
     msg_ref = Ref(msg.message_data)
     Reseau.byte_buf_write_from_whole_cursor(msg_ref, Reseau.ByteCursor(UInt8[0x02]))
     msg.message_data = msg_ref[]
-    res = Sockets.handler_process_write_message(handler, slot, msg)
-    @test res isa Reseau.ErrorResult
-    if res isa Reseau.ErrorResult
-        @test res.code == Reseau.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED
+    try
+        Sockets.handler_process_write_message(handler, slot, msg)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED
     end
 
     EventLoops.event_loop_group_destroy!(elg)
@@ -1269,10 +1222,6 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     function new_alert_handler()
         channel = Sockets.Channel(event_loop, nothing)
@@ -1307,11 +1256,11 @@ end
 
     channel, slot, handler = new_alert_handler()
     send_alert!(handler, slot, Sockets.TLS_ALERT_LEVEL_WARNING, Sockets.TLS_ALERT_CLOSE_NOTIFY)
-    @test channel.shutdown_error_code == Reseau.ERROR_IO_TLS_CLOSED_GRACEFUL
+    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_CLOSED_GRACEFUL
 
     channel, slot, handler = new_alert_handler()
     send_alert!(handler, slot, Sockets.TLS_ALERT_LEVEL_FATAL, UInt8(40))
-    @test channel.shutdown_error_code == Reseau.ERROR_IO_TLS_ALERT_NOT_GRACEFUL
+    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_ALERT_NOT_GRACEFUL
 
     channel, slot, handler = new_alert_handler()
     msg = Sockets.IoMessage(1 + Sockets.TLS_RECORD_HEADER_LEN)
@@ -1330,7 +1279,7 @@ end
     end
     setfield!(buf, :len, Csize_t(1 + Sockets.TLS_RECORD_HEADER_LEN))
     Sockets.handler_process_read_message(handler, slot, msg)
-    @test channel.shutdown_error_code == Reseau.ERROR_IO_TLS_ERROR_ALERT_RECEIVED
+    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_ERROR_ALERT_RECEIVED
 
     EventLoops.event_loop_group_destroy!(elg)
 end
@@ -1351,10 +1300,6 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     channel = Sockets.Channel(event_loop, nothing)
     left_slot = Sockets.channel_slot_new!(channel)
@@ -1433,17 +1378,9 @@ end
         Reseau.ByteCursor(TEST_PEM_CERT),
     )
     @test opts isa Sockets.TlsContextOptions
-    if opts isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     ctx = Sockets.tls_context_new(opts)
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     channel = Sockets.Channel(event_loop, nothing)
     left_slot = Sockets.channel_slot_new!(channel)
@@ -1508,10 +1445,6 @@ end
     server_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     server_sock = Sockets.socket_init(server_opts)
     @test server_sock isa Sockets.Socket
-    if server_sock isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     @test Sockets.socket_bind(server_sock, Sockets.SocketBindOptions(bind_endpoint)) === nothing
@@ -1524,10 +1457,6 @@ end
 
     server_ctx = _test_server_ctx()
     @test server_ctx isa Sockets.TlsContext
-    if server_ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     on_server_negotiation = (handler, slot, err, ud) -> begin
         _ = handler
@@ -1583,10 +1512,6 @@ end
     client_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     client_sock = Sockets.socket_init(client_opts)
     @test client_sock isa Sockets.Socket
-    if client_sock isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     negotiated = Ref(false)
     read_done = Ref(false)
@@ -1605,10 +1530,6 @@ end
 
     client_ctx = Sockets.tls_context_new_client(; verify_peer = false)
     @test client_ctx isa Sockets.TlsContext
-    if client_ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     client_channel_ref = Ref{Any}(nothing)
     client_tls_ref = Ref{Any}(nothing)
@@ -1659,9 +1580,12 @@ end
         send_fn = (task, args, status) -> begin
             _ = task
             if status == Reseau.TaskStatus.RUN_READY
-                res = Sockets.handler_process_write_message(args.handler, args.slot, args.message)
-                if res isa Reseau.ErrorResult && args.slot.channel !== nothing
-                    Sockets.channel_release_message_to_pool!(args.slot.channel, args.message)
+                try
+                    Sockets.handler_process_write_message(args.handler, args.slot, args.message)
+                catch e
+                    if args.slot.channel !== nothing
+                        Sockets.channel_release_message_to_pool!(args.slot.channel, args.message)
+                    end
                 end
             end
             return nothing
@@ -1690,10 +1614,6 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     channel = Sockets.Channel(event_loop, nothing)
     left_slot = Sockets.channel_slot_new!(channel)
@@ -1808,12 +1728,17 @@ end
         opts,
         Sockets.TlsCipherPref.TLS_CIPHER_PREF_TLSV1_2_2025_07,
     )
-    ctx = Sockets.tls_client_ctx_new(opts)
     if Sockets.tls_is_cipher_pref_supported(opts.cipher_pref)
+        ctx = Sockets.tls_client_ctx_new(opts)
         @test ctx isa Sockets.TlsContext
     else
-        @test ctx isa Reseau.ErrorResult
-        ctx isa Reseau.ErrorResult && @test ctx.code == Reseau.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED
+        try
+            ctx = Sockets.tls_client_ctx_new(opts)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED
+        end
     end
 end
 
@@ -1825,35 +1750,33 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
         Reseau.ByteCursor(TEST_PEM_CERT),
         Reseau.ByteCursor(TEST_PEM_KEY),
     )
-    server_opts isa Reseau.ErrorResult && return server_opts
     Sockets.tls_ctx_options_set_minimum_tls_version(server_opts, min_version)
     maybe_apply_test_keychain!(server_opts)
-    server_ctx = Sockets.tls_context_new(server_opts)
-    @test server_ctx isa Sockets.TlsContext
-    if server_ctx isa Reseau.ErrorResult
+    local server_ctx
+    try
+        server_ctx = Sockets.tls_context_new(server_opts)
+    catch e
         Sockets.host_resolver_shutdown!(resolver)
         EventLoops.event_loop_group_destroy!(elg)
-        return server_ctx
+        return
     end
+    @test server_ctx isa Sockets.TlsContext
 
     client_opts = Sockets.tls_ctx_options_init_default_client()
     Sockets.tls_ctx_options_set_minimum_tls_version(client_opts, min_version)
-    res = Sockets.tls_ctx_options_override_default_trust_store_from_path(
+    Sockets.tls_ctx_options_override_default_trust_store_from_path(
         client_opts;
         ca_file = _resource_path("unittests.crt"),
     )
-    res isa Reseau.ErrorResult && begin
+    local client_ctx
+    try
+        client_ctx = Sockets.tls_context_new(client_opts)
+    catch e
         Sockets.host_resolver_shutdown!(resolver)
         EventLoops.event_loop_group_destroy!(elg)
-        return res
+        return
     end
-    client_ctx = Sockets.tls_context_new(client_opts)
     @test client_ctx isa Sockets.TlsContext
-    if client_ctx isa Reseau.ErrorResult
-        Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
-        return client_ctx
-    end
 
     server_setup_called = Ref(false)
     server_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
@@ -1990,19 +1913,9 @@ end
     maybe_apply_test_keychain!(server_opts)
     server_ctx = Sockets.tls_context_new(server_opts)
     @test server_ctx isa Sockets.TlsContext
-    if server_ctx isa Reseau.ErrorResult
-        Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     client_ctx = _test_client_ctx()
     @test client_ctx isa Sockets.TlsContext
-    if client_ctx isa Reseau.ErrorResult
-        Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     server_setup_called = Ref(false)
     server_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
@@ -2131,11 +2044,6 @@ end
     maybe_apply_test_keychain!(server_opts)
     server_ctx = Sockets.tls_context_new(server_opts)
     @test server_ctx isa Sockets.TlsContext
-    if server_ctx isa Reseau.ErrorResult
-        Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     listener_destroyed = Ref(false)
     listener_setup_called = Ref(false)
@@ -2167,12 +2075,6 @@ end
     client_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     client_socket = Sockets.socket_init(client_opts)
     @test client_socket isa Sockets.Socket
-    if client_socket isa Reseau.ErrorResult
-        Sockets.server_bootstrap_shutdown!(server_bootstrap)
-        Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     close_done = Ref(false)
     connect_opts = Sockets.SocketConnectOptions(
@@ -2184,10 +2086,6 @@ end
                 return nothing
             end
             now = EventLoops.event_loop_current_clock_time(sock.event_loop)
-            if now isa Reseau.ErrorResult
-                close_done[] = true
-                return nothing
-            end
             task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
                 Sockets.socket_close(sock)
@@ -2232,23 +2130,9 @@ end
     maybe_apply_test_keychain!(server_opts)
     server_ctx = Sockets.tls_context_new(server_opts)
     @test server_ctx isa Sockets.TlsContext
-    if server_ctx isa Reseau.ErrorResult
-        Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
-        Reseau.byte_buf_clean_up(Ref(cert_buf))
-        Reseau.byte_buf_clean_up(Ref(key_buf))
-        return
-    end
 
     client_ctx = _test_client_ctx()
     @test client_ctx isa Sockets.TlsContext
-    if client_ctx isa Reseau.ErrorResult
-        Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
-        Reseau.byte_buf_clean_up(Ref(cert_buf))
-        Reseau.byte_buf_clean_up(Ref(key_buf))
-        return
-    end
 
     server_setup = Ref(false)
     client_setup = Ref(false)
@@ -2345,10 +2229,6 @@ end
 
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
-    if ctx isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     prev_max = Sockets.g_aws_channel_max_fragment_size[]
     Sockets.g_aws_channel_max_fragment_size[] = Csize_t(4096)

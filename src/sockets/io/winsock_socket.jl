@@ -145,7 +145,7 @@
         return sock.io_handle.handle == C_NULL ? UInt(0) : UInt(sock.io_handle.handle)
     end
 
-    function _winsock_convert_domain(domain::SocketDomain.T)::Union{Cint, ErrorResult}
+    function _winsock_convert_domain(domain::SocketDomain.T)::Cint
         if domain == SocketDomain.IPV4
             return WS_AF_INET
         elseif domain == SocketDomain.IPV6
@@ -154,39 +154,35 @@
             # Named pipes (not AF_UNIX)
             return WS_AF_INET
         else
-            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
         end
     end
 
-    function _winsock_convert_type(type::SocketType.T)::Union{Cint, ErrorResult}
+    function _winsock_convert_type(type::SocketType.T)::Cint
         if type == SocketType.STREAM
             return WS_SOCK_STREAM
         elseif type == SocketType.DGRAM
             return WS_SOCK_DGRAM
         else
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
     end
 
-    function _winsock_inet_pton_ipv4(address::AbstractString)::Union{UInt32, ErrorResult}
+    function _winsock_inet_pton_ipv4(address::AbstractString)::UInt32
         addr_ref = Ref{UInt32}(0)
         rc = ccall((:inet_pton, _WS2_32), Cint, (Cint, Cstring, Ptr{UInt32}), WS_AF_INET, address, addr_ref)
         if rc != 1
             # rc==0 => invalid address; rc<0 => WSAGetLastError()
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         return addr_ref[]
     end
 
-    function _winsock_inet_pton_ipv6(address::AbstractString)::Union{NTuple{16, UInt8}, ErrorResult}
+    function _winsock_inet_pton_ipv6(address::AbstractString)::NTuple{16, UInt8}
         mem = Memory{UInt8}(undef, 16)
         rc = GC.@preserve mem ccall((:inet_pton, _WS2_32), Cint, (Cint, Cstring, Ptr{UInt8}), WS_AF_INET6, address, pointer(mem))
         if rc != 1
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         return Tuple(mem)
     end
@@ -211,9 +207,9 @@
         return join(parts, ":")
     end
 
-    function _winsock_update_local_endpoint_ipv4_ipv6!(sock::Socket)::Union{Nothing, ErrorResult}
+    function _winsock_update_local_endpoint_ipv4_ipv6!(sock::Socket)::Nothing
         handle = _winsock_socket_handle(sock)
-        handle == 0 && return ErrorResult(raise_error(ERROR_INVALID_STATE))
+        handle == 0 && throw_error(ERROR_INVALID_STATE)
 
         address = Memory{UInt8}(undef, 256)
         fill!(address, 0x00)
@@ -230,8 +226,7 @@
 
         if rc != 0
             aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
         family = unsafe_load(Ptr{Cushort}(pointer(address))) |> Cint
@@ -249,22 +244,19 @@
             return nothing
         end
 
-        raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-        return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
     end
 
-    function _winsock_socket_set_options!(sock::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
+    function _winsock_socket_set_options!(sock::Socket, options::SocketOptions)::Nothing
         if sock.options.domain != options.domain || sock.options.type != options.type
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
 
         sock.options = copy(options)
 
         iface = get_network_interface_name(options)
         if !isempty(iface)
-            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+            throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
         end
 
         if sock.options.domain != SocketDomain.LOCAL && sock.options.type == SocketType.STREAM
@@ -306,19 +298,16 @@
         return nothing
     end
 
-    function _winsock_create_underlying_socket!(sock::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
+    function _winsock_create_underlying_socket!(sock::Socket, options::SocketOptions)::Nothing
         domain = _winsock_convert_domain(options.domain)
-        domain isa ErrorResult && return domain
         stype = _winsock_convert_type(options.type)
-        stype isa ErrorResult && return stype
 
         handle = ccall((:socket, _WS2_32), UInt, (Cint, Cint, Cint), domain, stype, Cint(0))
         if handle == UInt(typemax(UInt))
             wsa_err = _wsa_get_last_error()
             aws_err = _winsock_determine_socket_error(wsa_err)
             logf(LogLevel.ERROR, LS_IO_SOCKET, "socket() failed with WSAError %d", wsa_err)
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
         # Set non-blocking
@@ -327,16 +316,14 @@
             wsa_err = _wsa_get_last_error()
             aws_err = _winsock_determine_socket_error(wsa_err)
             logf(LogLevel.ERROR, LS_IO_SOCKET, "ioctlsocket(FIONBIO) failed with WSAError %d", wsa_err)
-            raise_error(aws_err)
             _ = ccall((:closesocket, _WS2_32), Cint, (UInt,), handle)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
         sock.io_handle.handle = Ptr{Cvoid}(handle)
         sock.io_handle.additional_data = C_NULL
 
-        set_res = _winsock_socket_set_options!(sock, options)
-        set_res isa ErrorResult && return set_res
+        _winsock_socket_set_options!(sock, options)
         return nothing
     end
 
@@ -344,9 +331,8 @@
     # Socket init
     # =============================================================================
 
-    function socket_init_winsock(options::SocketOptions)::Union{Socket, ErrorResult}
-        init_res = winsock_check_and_init!()
-        init_res isa ErrorResult && return init_res
+    function socket_init_winsock(options::SocketOptions)::Socket
+        winsock_check_and_init!()
 
         impl = WinsockSocket()
         sock = Socket(
@@ -369,8 +355,7 @@
 
         # Local sockets (named pipes) create handles during bind/connect.
         if options.domain != SocketDomain.LOCAL
-            create_res = _winsock_create_underlying_socket!(sock, options)
-            create_res isa ErrorResult && return create_res
+            _winsock_create_underlying_socket!(sock, options)
         end
 
         return sock
@@ -420,14 +405,14 @@
         return nothing
     end
 
-    function socket_set_close_callback_impl(::WinsockSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+    function socket_set_close_callback_impl(::WinsockSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
         impl = sock.impl::WinsockSocket
         impl.close_user_data = user_data
         impl.on_close_complete = fn
         return nothing
     end
 
-    function socket_set_cleanup_callback_impl(::WinsockSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+    function socket_set_cleanup_callback_impl(::WinsockSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
         impl = sock.impl::WinsockSocket
         impl.cleanup_user_data = user_data
         impl.on_cleanup_complete = fn
@@ -442,21 +427,20 @@
     # Assign to event loop
     # =============================================================================
 
-    function socket_assign_to_event_loop_impl(::WinsockSocket, sock::Socket, event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function socket_assign_to_event_loop_impl(::WinsockSocket, sock::Socket, event_loop::EventLoop)::Nothing
         if sock.event_loop !== nothing
-            raise_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
+            throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
         if sock.io_handle.handle == C_NULL
-            raise_error(ERROR_INVALID_STATE)
-            return ErrorResult(ERROR_INVALID_STATE)
+            throw_error(ERROR_INVALID_STATE)
         end
 
         sock.event_loop = event_loop
-        res = event_loop_connect_to_io_completion_port!(event_loop, sock.io_handle)
-        if res isa ErrorResult
+        try
+            event_loop_connect_to_io_completion_port!(event_loop, sock.io_handle)
+        catch
             sock.event_loop = nothing
-            return res
+            rethrow()
         end
         return nothing
     end
@@ -483,11 +467,11 @@
         return nothing
     end
 
-    function _winsock_stream_connection_success(sock::Socket)::Union{Nothing, ErrorResult}
+    function _winsock_stream_connection_success(sock::Socket)::Nothing
         handle = _winsock_socket_handle(sock)
 
         # Apply keepalive, etc.
-        _ = _winsock_socket_set_options!(sock, sock.options)
+        _winsock_socket_set_options!(sock, sock.options)
 
         connect_result = Ref{Cint}(0)
         result_length = Ref{Cint}(Cint(sizeof(Cint)))
@@ -502,18 +486,15 @@
                 result_length,
             ) != 0
             aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
         if connect_result[] != 0
             aws_err = _winsock_determine_socket_error(connect_result[])
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
-        upd = _winsock_update_local_endpoint_ipv4_ipv6!(sock)
-        upd isa ErrorResult && return upd
+        _winsock_update_local_endpoint_ipv4_ipv6!(sock)
 
         # Best-effort update of connect context.
         _ = ccall(
@@ -562,9 +543,11 @@
             args.socket = nothing
 
             if status_code == 0
-                res = _winsock_stream_connection_success(sock)
-                if res isa ErrorResult
-                    _winsock_connection_error(sock, res.code)
+                try
+                    _winsock_stream_connection_success(sock)
+                catch e
+                    e isa ReseauError || rethrow()
+                    _winsock_connection_error(sock, e.code)
                 end
             else
                 aws_err = _winsock_determine_socket_error(status_code)
@@ -612,7 +595,7 @@
             bind_addr_ptr::Ptr{Cvoid},
             socket_addr_ptr::Ptr{Cvoid},
             sock_size::Cint,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         impl = sock.impl::WinsockSocket
         copy!(sock.remote_endpoint, remote_endpoint)
 
@@ -629,23 +612,23 @@
             Cint(sizeof(Cint)),
         )
 
-        if socket_assign_to_event_loop(sock, connect_loop) isa ErrorResult
+        try
+            socket_assign_to_event_loop(sock, connect_loop)
+        catch
             sock.state = SocketState.ERROR
-            return ErrorResult(last_error())
+            rethrow()
         end
 
         sock.state = SocketState.CONNECTING
 
-        connect_fn = winsock_get_connectex_fn()
-        connect_fn isa ErrorResult && return connect_fn
-        connect_ptr = connect_fn::Ptr{Cvoid}
+        connect_ptr = winsock_get_connectex_fn()
 
         # Create connect args and timeout task. Note: ScheduledTask is parametric on ctx type.
         args = WinsockSocketConnectArgs(sock, nothing, impl.read_io_data)
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    _winsock_handle_socket_timeout(args, TaskStatus.T(status))
+                    _winsock_handle_socket_timeout(args, _coerce_task_status(status))
                 catch e
                     Core.println("winsock_connect_timeout task errored: $e")
                 end
@@ -678,7 +661,6 @@
         ) != 0
 
         now_ns = event_loop_current_clock_time(connect_loop)
-        now_ns = now_ns isa ErrorResult ? UInt64(0) : now_ns
         time_to_run = now_ns
 
         if !connect_res
@@ -687,8 +669,7 @@
                 impl.connect_args = nothing
                 impl.read_io_data.in_use = false
                 aws_err = _winsock_determine_socket_error(err)
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
             time_to_run += UInt64(sock.options.connect_timeout_ms) * UInt64(1_000_000)
         else
@@ -700,7 +681,7 @@
         return nothing
     end
 
-    function socket_connect_impl(::WinsockSocket, sock::Socket, options::SocketConnectOptions)::Union{Nothing, ErrorResult}
+    function socket_connect_impl(::WinsockSocket, sock::Socket, options::SocketConnectOptions)::Nothing
         remote_endpoint = options.remote_endpoint
         connect_loop = options.event_loop
         on_connection_result = options.on_connection_result
@@ -709,26 +690,23 @@
         if sock.options.type != SocketType.DGRAM
             if sock.state != SocketState.INIT
                 sock.state = SocketState.ERROR
-                raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-                return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
             end
-            on_connection_result === nothing && return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
+            on_connection_result === nothing && throw_error(ERROR_INVALID_ARGUMENT)
         else
             if sock.state != SocketState.INIT && !socket_state_has(sock.state, SocketState.CONNECTED_READ)
                 sock.state = SocketState.ERROR
-                raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-                return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
             end
         end
 
-        port_res = socket_validate_port_for_connect(remote_endpoint.port, sock.options.domain)
-        port_res isa ErrorResult && return port_res
+        socket_validate_port_for_connect(remote_endpoint.port, sock.options.domain)
 
         sock.connection_result_fn = on_connection_result
         sock.connect_accept_user_data = user_data
 
         if sock.options.domain == SocketDomain.LOCAL
-            connect_loop === nothing && return ErrorResult(raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+            connect_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
             copy!(sock.remote_endpoint, remote_endpoint)
             handle = ccall(
@@ -747,20 +725,21 @@
                 win_err = _win_get_last_error()
                 aws_err = _winsock_determine_socket_error(win_err)
                 sock.state = SocketState.ERROR
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
             sock.io_handle.handle = handle
-            if socket_assign_to_event_loop(sock, connect_loop) isa ErrorResult
+            try
+                socket_assign_to_event_loop(sock, connect_loop)
+            catch
                 sock.state = SocketState.ERROR
-                return ErrorResult(last_error())
+                rethrow()
             end
 
             # Schedule success on the loop.
             task = ScheduledTask(
                 TaskFn(function(status)
                     try
-                        TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                        _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                         _winsock_local_and_udp_connection_success(sock)
                     catch e
                         Core.println("winsock_local_connect_success task errored: $e")
@@ -781,7 +760,6 @@
             address = get_address(remote_endpoint)
             if sock.options.domain == SocketDomain.IPV4
                 addr = _winsock_inet_pton_ipv4(address)
-                addr isa ErrorResult && return addr
                 sin = Ref(SockaddrIn(Cshort(WS_AF_INET), htons(remote_endpoint.port), addr, ntuple(_ -> UInt8(0), 8)))
                 rc = GC.@preserve sin ccall(
                     (:connect, _WS2_32),
@@ -794,12 +772,10 @@
                 if rc != 0
                     aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
                     sock.state = SocketState.ERROR
-                    raise_error(aws_err)
-                    return ErrorResult(aws_err)
+                    throw_error(aws_err)
                 end
             else
                 addr6 = _winsock_inet_pton_ipv6(address)
-                addr6 isa ErrorResult && return addr6
                 sin6 = Ref(SockaddrIn6(Cushort(WS_AF_INET6), htons(remote_endpoint.port), Cuint(0), addr6, Cuint(0)))
                 rc = GC.@preserve sin6 ccall(
                     (:connect, _WS2_32),
@@ -812,23 +788,24 @@
                 if rc != 0
                     aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
                     sock.state = SocketState.ERROR
-                    raise_error(aws_err)
-                    return ErrorResult(aws_err)
+                    throw_error(aws_err)
                 end
             end
 
-            _ = _winsock_update_local_endpoint_ipv4_ipv6!(sock)
+            _winsock_update_local_endpoint_ipv4_ipv6!(sock)
             sock.state = SocketState.CONNECTED
 
             if connect_loop !== nothing
-                if socket_assign_to_event_loop(sock, connect_loop) isa ErrorResult
+                try
+                    socket_assign_to_event_loop(sock, connect_loop)
+                catch
                     sock.state = SocketState.ERROR
-                    return ErrorResult(last_error())
+                    rethrow()
                 end
                 task = ScheduledTask(
                     TaskFn(function(status)
                         try
-                            TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                            _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                             _winsock_local_and_udp_connection_success(sock)
                         catch e
                             Core.println("winsock_udp_connect_success task errored: $e")
@@ -844,12 +821,11 @@
         end
 
         # TCP stream connect
-        connect_loop === nothing && return ErrorResult(raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+        connect_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
         address = get_address(remote_endpoint)
         if sock.options.domain == SocketDomain.IPV4
             addr = _winsock_inet_pton_ipv4(address)
-            addr isa ErrorResult && return addr
             remote = Ref(SockaddrIn(Cshort(WS_AF_INET), htons(remote_endpoint.port), addr, ntuple(_ -> UInt8(0), 8)))
             bind_addr = Ref(SockaddrIn(Cshort(WS_AF_INET), Cushort(0), UInt32(0), ntuple(_ -> UInt8(0), 8)))
             return GC.@preserve remote bind_addr _winsock_tcp_connect(
@@ -862,7 +838,6 @@
             )
         else
             addr6 = _winsock_inet_pton_ipv6(address)
-            addr6 isa ErrorResult && return addr6
             remote6 = Ref(SockaddrIn6(Cushort(WS_AF_INET6), htons(remote_endpoint.port), Cuint(0), addr6, Cuint(0)))
             bind6 = Ref(SockaddrIn6(Cushort(WS_AF_INET6), Cushort(0), Cuint(0), ntuple(_ -> UInt8(0), 16), Cuint(0)))
             return GC.@preserve remote6 bind6 _winsock_tcp_connect(
@@ -880,7 +855,7 @@
     # Bind / Listen
     # =============================================================================
 
-    function _winsock_tcp_bind(sock::Socket, sockaddr_ptr::Ptr{Cvoid}, sock_size::Cint)::Union{Nothing, ErrorResult}
+    function _winsock_tcp_bind(sock::Socket, sockaddr_ptr::Ptr{Cvoid}, sock_size::Cint)::Nothing
         handle = _winsock_socket_handle(sock)
 
         # Prevent duplicate binds.
@@ -898,51 +873,44 @@
         if rc != 0
             aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
             sock.state = SocketState.ERROR
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
         rc = ccall((:bind, _WS2_32), Cint, (UInt, Ptr{Cvoid}, Cint), handle, sockaddr_ptr, sock_size)
         if rc != 0
             aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
             sock.state = SocketState.ERROR
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
-        upd = _winsock_update_local_endpoint_ipv4_ipv6!(sock)
-        upd isa ErrorResult && return upd
+        _winsock_update_local_endpoint_ipv4_ipv6!(sock)
         sock.state = SocketState.BOUND
         return nothing
     end
 
-    function _winsock_udp_bind(sock::Socket, sockaddr_ptr::Ptr{Cvoid}, sock_size::Cint)::Union{Nothing, ErrorResult}
+    function _winsock_udp_bind(sock::Socket, sockaddr_ptr::Ptr{Cvoid}, sock_size::Cint)::Nothing
         handle = _winsock_socket_handle(sock)
         rc = ccall((:bind, _WS2_32), Cint, (UInt, Ptr{Cvoid}, Cint), handle, sockaddr_ptr, sock_size)
         if rc != 0
             aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
             sock.state = SocketState.ERROR
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
-        upd = _winsock_update_local_endpoint_ipv4_ipv6!(sock)
-        upd isa ErrorResult && return upd
+        _winsock_update_local_endpoint_ipv4_ipv6!(sock)
         sock.state = SocketState.CONNECTED_READ
         return nothing
     end
 
-    function socket_bind_impl(::WinsockSocket, sock::Socket, options::SocketBindOptions)::Union{Nothing, ErrorResult}
+    function socket_bind_impl(::WinsockSocket, sock::Socket, options::SocketBindOptions)::Nothing
         local_endpoint = options.local_endpoint
 
         if sock.state != SocketState.INIT
             sock.state = SocketState.ERROR
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
-        port_res = socket_validate_port_for_bind(local_endpoint.port, sock.options.domain)
-        port_res isa ErrorResult && return port_res
+        socket_validate_port_for_bind(local_endpoint.port, sock.options.domain)
 
         if sock.options.domain == SocketDomain.LOCAL
             copy!(sock.local_endpoint, local_endpoint)
@@ -964,8 +932,7 @@
                 win_err = _win_get_last_error()
                 aws_err = _winsock_determine_socket_error(win_err)
                 sock.state = SocketState.ERROR
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
             sock.io_handle.handle = handle
             sock.state = SocketState.BOUND
@@ -975,7 +942,6 @@
         address = get_address(local_endpoint)
         if sock.options.domain == SocketDomain.IPV4
             addr = _winsock_inet_pton_ipv4(address)
-            addr isa ErrorResult && return addr
             sin = Ref(SockaddrIn(Cshort(WS_AF_INET), htons(local_endpoint.port), addr, ntuple(_ -> UInt8(0), 8)))
             return GC.@preserve sin begin
                 if sock.options.type == SocketType.STREAM
@@ -986,7 +952,6 @@
             end
         else
             addr6 = _winsock_inet_pton_ipv6(address)
-            addr6 isa ErrorResult && return addr6
             sin6 = Ref(SockaddrIn6(Cushort(WS_AF_INET6), htons(local_endpoint.port), Cuint(0), addr6, Cuint(0)))
             return GC.@preserve sin6 begin
                 if sock.options.type == SocketType.STREAM
@@ -998,16 +963,14 @@
         end
     end
 
-    function socket_listen_impl(::WinsockSocket, sock::Socket, backlog_size::Integer)::Union{Nothing, ErrorResult}
+    function socket_listen_impl(::WinsockSocket, sock::Socket, backlog_size::Integer)::Nothing
         if sock.options.type == SocketType.DGRAM
-            raise_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
         end
 
         if sock.options.domain == SocketDomain.LOCAL
             if sock.state != SocketState.BOUND
-                raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-                return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
             end
             sock.state = SocketState.LISTENING
             return nothing
@@ -1020,8 +983,7 @@
         end
 
         aws_err = _winsock_determine_socket_error(_win_get_last_error())
-        raise_error(aws_err)
-        return ErrorResult(aws_err)
+        throw_error(aws_err)
     end
 
     # =============================================================================
@@ -1104,7 +1066,11 @@
         nb = Ref{UInt32}(1)
         _ = ccall((:ioctlsocket, _WS2_32), Cint, (UInt, UInt32, Ptr{UInt32}), _winsock_socket_handle(incoming), FIONBIO, nb)
 
-        _ = _winsock_socket_set_options!(incoming, sock.options)
+        try
+            _winsock_socket_set_options!(incoming, sock.options)
+        catch
+            # best-effort; ignore errors
+        end
 
         accepted = incoming
         impl.incoming_socket = nothing
@@ -1114,33 +1080,32 @@
         io_data.socket === nothing && return nothing
 
         # Setup next accept.
-        _ = _winsock_socket_setup_accept(sock, nothing)
+        try
+            _winsock_socket_setup_accept(sock, nothing)
+        catch
+            # best-effort; ignore errors (including ERROR_IO_READ_WOULD_BLOCK)
+        end
         return nothing
     end
 
-    function _winsock_socket_setup_accept(sock::Socket, accept_loop::Union{EventLoop, Nothing})::Union{Nothing, ErrorResult}
+    function _winsock_socket_setup_accept(sock::Socket, accept_loop::Union{EventLoop, Nothing})::Nothing
         impl = sock.impl::WinsockSocket
 
         # Create incoming socket.
-        incoming = socket_init(SocketOptions(; type = sock.options.type, domain = sock.options.domain))
-        incoming isa ErrorResult && return incoming
-        incoming_sock = incoming::Socket
+        incoming_sock = socket_init(SocketOptions(; type = sock.options.type, domain = sock.options.domain))
         copy!(incoming_sock.local_endpoint, sock.local_endpoint)
         incoming_sock.state = SocketState.INIT
 
         impl.incoming_socket = incoming_sock
 
         if accept_loop !== nothing
-            res = socket_assign_to_event_loop(sock, accept_loop)
-            res isa ErrorResult && return res
+            socket_assign_to_event_loop(sock, accept_loop)
         end
 
         iocp_overlapped_init!(impl.read_io_data.signal, _winsock_tcp_accept_event, sock)
         impl.read_io_data.in_use = true
 
-        accept_fn = winsock_get_acceptex_fn()
-        accept_fn isa ErrorResult && return accept_fn
-        accept_ptr = accept_fn::Ptr{Cvoid}
+        accept_ptr = winsock_get_acceptex_fn()
 
         while true
             ok = ccall(
@@ -1163,8 +1128,7 @@
 
             win_err = _wsa_get_last_error()
             if win_err == ERROR_IO_PENDING
-                raise_error(ERROR_IO_READ_WOULD_BLOCK)
-                return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+                throw_error(ERROR_IO_READ_WOULD_BLOCK)
             elseif win_err == Int(WSAECONNRESET)
                 continue
             end
@@ -1174,22 +1138,19 @@
             socket_cleanup!(incoming_sock)
             impl.incoming_socket = nothing
             aws_err = _winsock_determine_socket_error(win_err)
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
     end
 
-    function socket_start_accept_impl(::WinsockSocket, sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
-        options.on_accept_result === nothing && return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
+    function socket_start_accept_impl(::WinsockSocket, sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
+        options.on_accept_result === nothing && throw_error(ERROR_INVALID_ARGUMENT)
 
         if sock.state != SocketState.LISTENING
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         if sock.event_loop !== nothing && sock.event_loop != accept_loop
-            raise_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
+            throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
 
         impl = sock.impl::WinsockSocket
@@ -1203,19 +1164,24 @@
         end
 
         el_to_use = sock.event_loop === nothing ? accept_loop : nothing
-        res = _winsock_socket_setup_accept(sock, el_to_use)
-        if res === nothing || (res isa ErrorResult && res.code == ERROR_IO_READ_WOULD_BLOCK)
-            if options.on_accept_start !== nothing
-                Base.invokelatest(options.on_accept_start, sock, AWS_OP_SUCCESS, options.on_accept_start_user_data)
+        try
+            _winsock_socket_setup_accept(sock, el_to_use)
+        catch e
+            # IO_PENDING manifests as ERROR_IO_READ_WOULD_BLOCK; this is normal for async accept.
+            if e isa ReseauError && e.code == ERROR_IO_READ_WOULD_BLOCK
+                # fall through to success
+            else
+                sock.state = SocketState.ERROR
+                rethrow()
             end
-            return nothing
         end
-
-        sock.state = SocketState.ERROR
-        return res
+        if options.on_accept_start !== nothing
+            Base.invokelatest(options.on_accept_start, sock, AWS_OP_SUCCESS, options.on_accept_start_user_data)
+        end
+        return nothing
     end
 
-    function socket_stop_accept_impl(::WinsockSocket, sock::Socket)::Union{Nothing, ErrorResult}
+    function socket_stop_accept_impl(::WinsockSocket, sock::Socket)::Nothing
         impl = sock.impl::WinsockSocket
         impl.stop_accept = true
 
@@ -1261,15 +1227,17 @@
         end
 
         while !impl.stop_accept
-            new_sock_any = socket_init(SocketOptions(; type = sock.options.type, domain = sock.options.domain))
-            if new_sock_any isa ErrorResult
+            local new_sock
+            try
+                new_sock = socket_init(SocketOptions(; type = sock.options.type, domain = sock.options.domain))
+            catch e
+                e isa ReseauError || rethrow()
                 sock.state = SocketState.ERROR
-                _winsock_connection_error(sock, new_sock_any.code)
+                _winsock_connection_error(sock, e.code)
                 io_data.in_use = false
                 _winsock_maybe_finish_cleanup!(sock)
                 return nothing
             end
-            new_sock = new_sock_any::Socket
 
             new_sock.state = SocketState.CONNECTED
 
@@ -1314,9 +1282,12 @@
             sock.event_loop = nothing
 
             iocp_overlapped_init!(impl.read_io_data.signal, _winsock_incoming_pipe_connection_event, sock)
-            if socket_assign_to_event_loop(sock, event_loop) isa ErrorResult
+            try
+                socket_assign_to_event_loop(sock, event_loop)
+            catch e
+                e isa ReseauError || rethrow()
                 sock.state = SocketState.ERROR
-                _winsock_connection_error(sock, last_error())
+                _winsock_connection_error(sock, e.code)
                 io_data.in_use = false
                 _winsock_maybe_finish_cleanup!(sock)
                 return nothing
@@ -1376,7 +1347,7 @@
         return nothing
     end
 
-    function _winsock_local_start_accept(sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
+    function _winsock_local_start_accept(sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
         impl = sock.impl::WinsockSocket
         impl.stop_accept = false
 
@@ -1384,8 +1355,12 @@
         impl.read_io_data.in_use = true
 
         if sock.event_loop === nothing
-            res = socket_assign_to_event_loop(sock, accept_loop)
-            res isa ErrorResult && (impl.read_io_data.in_use = false; return res)
+            try
+                socket_assign_to_event_loop(sock, accept_loop)
+            catch
+                impl.read_io_data.in_use = false
+                rethrow()
+            end
         end
 
         ok = ccall(
@@ -1401,14 +1376,13 @@
             if err != ERROR_IO_PENDING && err != ERROR_PIPE_CONNECTED
                 impl.read_io_data.in_use = false
                 aws_err = _winsock_determine_socket_error(err)
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             elseif err == ERROR_PIPE_CONNECTED
                 # No IOCP event will fire; schedule a task to finish the accept.
                 task = ScheduledTask(
                     TaskFn(function(status)
                         try
-                            _winsock_named_pipe_connected_immediately_task(impl.read_io_data, TaskStatus.T(status))
+                            _winsock_named_pipe_connected_immediately_task(impl.read_io_data, _coerce_task_status(status))
                         catch e
                             Core.println("winsock_pipe_connected_immediately task errored: $e")
                         end
@@ -1431,7 +1405,7 @@
     # Close / shutdown
     # =============================================================================
 
-    function socket_close_impl(::WinsockSocket, sock::Socket)::Union{Nothing, ErrorResult}
+    function socket_close_impl(::WinsockSocket, sock::Socket)::Nothing
         impl = sock.impl::WinsockSocket
 
         if sock.event_loop !== nothing && sock.state == SocketState.LISTENING && !impl.stop_accept
@@ -1477,12 +1451,11 @@
         return nothing
     end
 
-    function socket_shutdown_dir_impl(::WinsockSocket, sock::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
+    function socket_shutdown_dir_impl(::WinsockSocket, sock::Socket, dir::ChannelDirection.T)::Nothing
         how = dir == ChannelDirection.READ ? WS_SD_RECEIVE : WS_SD_SEND
         if ccall((:shutdown, _WS2_32), Cint, (UInt, Cint), _winsock_socket_handle(sock), how) != 0
             aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-            raise_error(aws_err)
-            return ErrorResult(aws_err)
+            throw_error(aws_err)
         end
 
         if dir == ChannelDirection.READ
@@ -1570,22 +1543,19 @@
         return nothing
     end
 
-    function socket_subscribe_to_readable_events_impl(::WinsockSocket, sock::Socket, on_readable::SocketOnReadableFn, user_data)::Union{Nothing, ErrorResult}
+    function socket_subscribe_to_readable_events_impl(::WinsockSocket, sock::Socket, on_readable::SocketOnReadableFn, user_data)::Nothing
         if sock.event_loop === nothing
-            raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-            return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
+            throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         end
         if sock.readable_fn !== nothing
-            raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
-            return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
+            throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
         end
         if !socket_state_has(sock.state, SocketState.CONNECTED_READ)
-            raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-            return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
+            throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         end
 
         impl = sock.impl::WinsockSocket
-        impl.read_io_data.in_use && return ErrorResult(raise_error(ERROR_IO_ALREADY_SUBSCRIBED))
+        impl.read_io_data.in_use && throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
 
         sock.readable_fn = on_readable
         sock.readable_user_data = user_data
@@ -1615,8 +1585,7 @@
                     impl.read_io_data.in_use = false
                     impl.waiting_on_readable = false
                     aws_err = _winsock_determine_socket_error(err)
-                    raise_error(aws_err)
-                    return ErrorResult(aws_err)
+                    throw_error(aws_err)
                 end
             end
             return nothing
@@ -1641,8 +1610,7 @@
                 impl.read_io_data.in_use = false
                 impl.waiting_on_readable = false
                 aws_err = _winsock_determine_socket_error(err)
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
         end
 
@@ -1653,7 +1621,7 @@
     # Read / Write
     # =============================================================================
 
-    function _winsock_read_would_block(sock::Socket)::ErrorResult
+    function _winsock_read_would_block(sock::Socket)
         impl = sock.impl::WinsockSocket
         if !impl.waiting_on_readable
             impl.waiting_on_readable = true
@@ -1681,8 +1649,7 @@
                         impl.waiting_on_readable = false
                         impl.read_io_data.in_use = false
                         aws_err = _winsock_determine_socket_error(err)
-                        raise_error(aws_err)
-                        return ErrorResult(aws_err)
+                        throw_error(aws_err)
                     end
                 end
             else
@@ -1704,25 +1671,21 @@
                         impl.waiting_on_readable = false
                         impl.read_io_data.in_use = false
                         aws_err = _winsock_determine_socket_error(err)
-                        raise_error(aws_err)
-                        return ErrorResult(aws_err)
+                        throw_error(aws_err)
                     end
                 end
             end
         end
 
-        raise_error(ERROR_IO_READ_WOULD_BLOCK)
-        return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+        throw_error(ERROR_IO_READ_WOULD_BLOCK)
     end
 
-    function socket_read_impl(::WinsockSocket, sock::Socket, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+    function socket_read_impl(::WinsockSocket, sock::Socket, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
         if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
         if !socket_state_has(sock.state, SocketState.CONNECTED_READ)
-            raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-            return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
+            throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         end
 
         remaining = buffer.capacity - buffer.len
@@ -1747,8 +1710,7 @@
             if !peek_ok
                 win_err = _win_get_last_error()
                 aws_err = _winsock_determine_socket_error(win_err)
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
 
             if bytes_available[] == 0
@@ -1774,14 +1736,12 @@
                             impl.waiting_on_readable = false
                             impl.read_io_data.in_use = false
                             aws_err = _winsock_determine_socket_error(err)
-                            raise_error(aws_err)
-                            return ErrorResult(aws_err)
+                            throw_error(aws_err)
                         end
                     end
                 end
 
-                raise_error(ERROR_IO_READ_WOULD_BLOCK)
-                return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+                throw_error(ERROR_IO_READ_WOULD_BLOCK)
             end
 
             bytes_to_read = UInt32(min(Int(bytes_available[]), remaining))
@@ -1806,8 +1766,7 @@
                 else
                     sock.state = SocketState.ERROR
                 end
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
 
             amount = Csize_t(bytes_read[])
@@ -1829,12 +1788,11 @@
                     bytes_available,
                 ) != 0
                 aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
 
             if bytes_available[] == 0
-                return _winsock_read_would_block(sock)
+                _winsock_read_would_block(sock)
             end
 
             avail = Csize_t(bytes_available[])
@@ -1862,32 +1820,27 @@
 
         if read_val == 0
             sock.state = SocketState.CLOSED
-            raise_error(ERROR_IO_SOCKET_CLOSED)
-            return ErrorResult(ERROR_IO_SOCKET_CLOSED)
+            throw_error(ERROR_IO_SOCKET_CLOSED)
         end
 
         err = _wsa_get_last_error()
         if err == Int(WSAEWOULDBLOCK)
-            return _winsock_read_would_block(sock)
+            _winsock_read_would_block(sock)
         end
 
         aws_err = _winsock_determine_socket_error(err)
-        raise_error(aws_err)
-        return ErrorResult(aws_err)
+        throw_error(aws_err)
     end
 
-    function socket_write_impl(::WinsockSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Union{Nothing, ErrorResult}
+    function socket_write_impl(::WinsockSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Nothing
         if sock.event_loop === nothing || !event_loop_thread_is_callers_thread(sock.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
         if !socket_state_has(sock.state, SocketState.CONNECTED_WRITE)
-            raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-            return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
+            throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         end
         if cursor.len > Csize_t(typemax(UInt32))
-            raise_error(ERROR_INVALID_BUFFER_SIZE)
-            return ErrorResult(ERROR_INVALID_BUFFER_SIZE)
+            throw_error(ERROR_INVALID_BUFFER_SIZE)
         end
 
         impl = sock.impl::WinsockSocket
@@ -1911,8 +1864,7 @@
             if err != ERROR_IO_PENDING
                 pop!(impl.pending_writes)
                 aws_err = _winsock_determine_socket_error(err)
-                raise_error(aws_err)
-                return ErrorResult(aws_err)
+                throw_error(aws_err)
             end
         end
 
@@ -1951,7 +1903,7 @@
     # Socket misc
     # =============================================================================
 
-    function socket_set_options_impl(::WinsockSocket, sock::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
+    function socket_set_options_impl(::WinsockSocket, sock::Socket, options::SocketOptions)::Nothing
         return _winsock_socket_set_options!(sock, options)
     end
 
@@ -1987,9 +1939,8 @@ else
     # -------------------------------------------------------------------------
     # Non-Windows fallback stubs
     # -------------------------------------------------------------------------
-    function socket_init_winsock(options::SocketOptions)::Union{Socket, ErrorResult}
+    function socket_init_winsock(options::SocketOptions)::Socket
         _ = options
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end

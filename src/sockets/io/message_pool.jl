@@ -76,7 +76,7 @@ end
 
 function MessagePool(
         args::MessagePoolCreationArgs = MessagePoolCreationArgs(),
-    )::Union{MessagePool, ErrorResult}
+    )::MessagePool
     application_data_pool = MemoryPool(args.application_data_msg_count, args.application_data_msg_data_size)
     small_block_pool = MemoryPool(args.small_block_msg_count, args.small_block_msg_data_size)
 

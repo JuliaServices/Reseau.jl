@@ -14,6 +14,24 @@ struct ErrorResult
     code::Int
 end
 
+struct ReseauError <: Exception
+    code::Int
+end
+
+function Base.showerror(io::IO, e::ReseauError)
+    info = get(_error_registry, e.code, nothing)
+    if info === nothing
+        print(io, "ReseauError: unknown error code $(e.code)")
+    else
+        print(io, "ReseauError: ", info.formatted_name)
+    end
+end
+
+function throw_error(code::Int)
+    raise_error_private(code)
+    throw(ReseauError(code))
+end
+
 struct ErrorInfo
     literal_name::String
     error_str::String

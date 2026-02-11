@@ -217,8 +217,7 @@ end
 
 function _secure_transport_init()
     @static if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     handle = _secure_transport_security_handle[]
@@ -365,10 +364,12 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     message.message_tag = TLS_NEGOTIATED_PROTOCOL_MESSAGE
     message.user_data = TlsNegotiatedProtocolMessage(handler.protocol)
     setfield!(message.message_data, :len, Csize_t(sizeof(TlsNegotiatedProtocolMessage)))
-    send_res = channel_slot_send_message(slot, message, ChannelDirection.READ)
-    if send_res isa ErrorResult
+    try
+        channel_slot_send_message(slot, message, ChannelDirection.READ)
+    catch e
+        e isa ReseauError || rethrow()
         channel_release_message_to_pool!(channel, message)
-        channel_shutdown!(channel, send_res.code)
+        channel_shutdown!(channel, e.code)
     end
     return nothing
 end
@@ -384,10 +385,9 @@ function _secure_transport_handle_would_block(handler::SecureTransportTlsHandler
     return nothing
 end
 
-function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
+function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)::Nothing
     @static if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     tls_on_drive_negotiation(handler)
@@ -418,15 +418,13 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
         if handler.verify_peer
             if handler.ca_certs == C_NULL
                 _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             end
             trust_ref = Ref{SecTrustRef}(C_NULL)
             if ccall((:SSLCopyPeerTrust, _SECURITY_LIB), OSStatus, (SSLContextRef, Ref{SecTrustRef}), handler.ctx, trust_ref) !=
                     _errSecSuccess
                 _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             end
 
             policy = if handler.server_name.len > 0
@@ -445,8 +443,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                 _cf_release(policy)
                 _cf_release(trust_ref[])
                 _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             end
             _cf_release(policy)
 
@@ -460,8 +457,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                     ) != _errSecSuccess
                     _cf_release(trust_ref[])
                     _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                    raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                    return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                    throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 end
 
                 if ccall(
@@ -473,8 +469,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                     ) != _errSecSuccess
                     _cf_release(trust_ref[])
                     _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                    raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-                    return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                    throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 end
             end
 
@@ -492,8 +487,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                 LS_IO_TLS,
                 "SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])",
             )
-            raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-            return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+            throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 
         return _secure_transport_drive_negotiation(handler)
@@ -508,15 +502,18 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
         )
         handler.negotiation_finished = false
         _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-        raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-        return ErrorResult(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+        throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
     end
 end
 
 function _secure_transport_negotiation_task(task::ChannelTask, handler::SecureTransportTlsHandler, status::TaskStatus.T)
     _ = task
     status == TaskStatus.RUN_READY || return nothing
-    _ = _secure_transport_drive_negotiation(handler)
+    try
+        _secure_transport_drive_negotiation(handler)
+    catch
+        # negotiation result callback already fired inside _secure_transport_drive_negotiation
+    end
     return nothing
 end
 
@@ -602,8 +599,10 @@ function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, le
             handler.latest_message_completion_user_data = nothing
         end
 
-        send_res = channel_slot_send_message(handler.slot, message, ChannelDirection.WRITE)
-        if send_res isa ErrorResult
+        try
+            channel_slot_send_message(handler.slot, message, ChannelDirection.WRITE)
+        catch e
+            e isa ReseauError || rethrow()
             channel_release_message_to_pool!(channel, message)
             return _errSSLClosedNoNotify
         end
@@ -715,7 +714,7 @@ function handler_process_read_message(
         handler::SecureTransportTlsHandler,
         slot::ChannelSlot,
         message::Union{IoMessage, Nothing},
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
         message !== nothing && message.owning_channel isa Channel && channel_release_message_to_pool!(message.owning_channel, message)
         return nothing
@@ -726,8 +725,13 @@ function handler_process_read_message(
 
         if !handler.negotiation_finished
             message_len = message.message_data.len
-            res = _secure_transport_drive_negotiation(handler)
-            if res isa ErrorResult
+            negotiation_failed = false
+            try
+                _secure_transport_drive_negotiation(handler)
+            catch
+                negotiation_failed = true
+            end
+            if negotiation_failed
                 channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 return nothing
             end
@@ -775,10 +779,12 @@ function handler_process_read_message(
             end
 
             if slot.adj_right !== nothing
-                send_res = channel_slot_send_message(slot, outgoing, ChannelDirection.READ)
-                if send_res isa ErrorResult
+                try
+                    channel_slot_send_message(slot, outgoing, ChannelDirection.READ)
+                catch e
+                    e isa ReseauError || rethrow()
                     channel_release_message_to_pool!(slot.channel, outgoing)
-                    shutdown_error_code = send_res.code
+                    shutdown_error_code = e.code
                     break
                 end
             else
@@ -804,7 +810,6 @@ function handler_process_read_message(
                 LS_IO_TLS,
                 "SecureTransport SSLRead failed with OSStatus $status",
             )
-            raise_error(ERROR_IO_TLS_ERROR_READ_FAILURE)
             shutdown_error_code = ERROR_IO_TLS_ERROR_READ_FAILURE
             break
         end
@@ -831,25 +836,25 @@ function handler_process_read_message(
     return nothing
 end
 
-function handler_process_read_message(handler::SecureTransportTlsHandler, slot::ChannelSlot, message::IoMessage)
-    return invoke(
+function handler_process_read_message(handler::SecureTransportTlsHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+    invoke(
         handler_process_read_message,
         Tuple{SecureTransportTlsHandler, ChannelSlot, Union{IoMessage, Nothing}},
         handler,
         slot,
         message,
     )
+    return nothing
 end
 
 function handler_process_write_message(
         handler::SecureTransportTlsHandler,
         slot::ChannelSlot,
         message::IoMessage,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     _ = slot
     if !handler.negotiation_finished
-        raise_error(ERROR_IO_TLS_ERROR_NOT_NEGOTIATED)
-        return ErrorResult(ERROR_IO_TLS_ERROR_NOT_NEGOTIATED)
+        throw_error(ERROR_IO_TLS_ERROR_NOT_NEGOTIATED)
     end
 
     handler.latest_message_on_completion = message.on_completion
@@ -867,8 +872,7 @@ function handler_process_write_message(
     )
 
     if status != _errSecSuccess
-        raise_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
-        return ErrorResult(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
+        throw_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
     end
 
     channel_release_message_to_pool!(slot.channel, message)
@@ -881,7 +885,7 @@ function handler_shutdown(
         direction::ChannelDirection.T,
         error_code::Int,
         free_scarce_resources_immediately::Bool,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     abort_immediately = free_scarce_resources_immediately
 
     if direction == ChannelDirection.READ
@@ -913,7 +917,7 @@ function handler_increment_read_window(
         handler::SecureTransportTlsHandler,
         slot::ChannelSlot,
         size::Csize_t,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     _ = size
     if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
         return nothing
@@ -957,10 +961,9 @@ function _secure_transport_ctx_destroy!(ctx::SecureTransportCtx)
     return nothing
 end
 
-function _secure_transport_context_new(options::TlsContextOptions)::Union{TlsContext, ErrorResult}
+function _secure_transport_context_new(options::TlsContextOptions)::TlsContext
     if !tls_is_cipher_pref_supported(options.cipher_pref)
-        raise_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
+        throw_error(ERROR_IO_TLS_CIPHER_PREF_UNSUPPORTED)
     end
 
     ctx_impl = SecureTransportCtx(options.minimum_tls_version, options.alpn_list, options.verify_peer, C_NULL, C_NULL, C_NULL)
@@ -969,8 +972,7 @@ function _secure_transport_context_new(options::TlsContextOptions)::Union{TlsCon
         cert_cursor = byte_cursor_from_buf(options.certificate)
         key_cursor = byte_cursor_from_buf(options.private_key)
         if !_tls_text_is_ascii_or_utf8_bom(cert_cursor) || !_tls_text_is_ascii_or_utf8_bom(key_cursor)
-            raise_error(ERROR_IO_FILE_VALIDATION_FAILURE)
-            return ErrorResult(ERROR_IO_FILE_VALIDATION_FAILURE)
+            throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
         end
         if is_using_secitem()
             secitem_opts = options.secitem_options
@@ -978,51 +980,30 @@ function _secure_transport_context_new(options::TlsContextOptions)::Union{TlsCon
                     secitem_opts.cert_label === nothing ||
                     secitem_opts.key_label === nothing
                 secitem_opts = _tls_generate_secitem_labels()
-                secitem_opts isa ErrorResult && return secitem_opts
                 options.secitem_options = secitem_opts
             end
-            res = secitem_import_cert_and_key(
+            ctx_impl.secitem_identity = secitem_import_cert_and_key(
                 cert_cursor,
                 key_cursor;
                 cert_label = secitem_opts.cert_label,
                 key_label = secitem_opts.key_label,
             )
-            if res isa ErrorResult
-                return res
-            end
-            ctx_impl.secitem_identity = res
         else
-            res = import_public_and_private_keys_to_identity(cert_cursor, key_cursor; keychain_path = options.keychain_path)
-            if res isa ErrorResult
-                return res
-            end
-            ctx_impl.certs = res
+            ctx_impl.certs = import_public_and_private_keys_to_identity(cert_cursor, key_cursor; keychain_path = options.keychain_path)
         end
     elseif options.pkcs12_set
         pkcs_cursor = byte_cursor_from_buf(options.pkcs12)
         pwd_cursor = byte_cursor_from_buf(options.pkcs12_password)
         if is_using_secitem()
-            res = secitem_import_pkcs12(pkcs_cursor, pwd_cursor)
-            if res isa ErrorResult
-                return res
-            end
-            ctx_impl.secitem_identity = res
+            ctx_impl.secitem_identity = secitem_import_pkcs12(pkcs_cursor, pwd_cursor)
         else
-            res = import_pkcs12_to_identity(pkcs_cursor, pwd_cursor)
-            if res isa ErrorResult
-                return res
-            end
-            ctx_impl.certs = res
+            ctx_impl.certs = import_pkcs12_to_identity(pkcs_cursor, pwd_cursor)
         end
     end
 
     if options.ca_file_set
         ca_cursor = byte_cursor_from_buf(options.ca_file)
-        res = import_trusted_certificates(ca_cursor)
-        if res isa ErrorResult
-            return res
-        end
-        ctx_impl.ca_cert = res
+        ctx_impl.ca_cert = import_trusted_certificates(ca_cursor)
     end
 
     ctx = TlsContext(options, ctx_impl, false)
@@ -1040,16 +1021,14 @@ function _secure_transport_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
         protocol_side::SSLProtocolSide,
-    )::Union{SecureTransportTlsHandler, ErrorResult}
+    )::SecureTransportTlsHandler
     @static if !Sys.isapple()
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     ctx = options.ctx
-    ctx.impl isa ErrorResult && return ctx.impl
     st_ctx = ctx.impl isa SecureTransportCtx ? ctx.impl : nothing
-    st_ctx === nothing && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
+    st_ctx === nothing && throw_error(ERROR_IO_TLS_CTX_ERROR)
 
     handler = SecureTransportTlsHandler(
         slot,
@@ -1084,7 +1063,7 @@ function _secure_transport_handler_new(
     _secure_transport_handler_registry[handler] = nothing
 
     handler.ctx = ccall((:SSLCreateContext, _SECURITY_LIB), SSLContextRef, (CFAllocatorRef, SSLProtocolSide, SSLConnectionType), C_NULL, protocol_side, _kSSLStreamType)
-    handler.ctx == C_NULL && return ErrorResult(raise_error(ERROR_IO_TLS_CTX_ERROR))
+    handler.ctx == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
     _secure_transport_init_callbacks()
 
     if options.ctx.options.minimum_tls_version == TlsVersion.SSLv3
@@ -1096,15 +1075,13 @@ function _secure_transport_handler_new(
     elseif options.ctx.options.minimum_tls_version == TlsVersion.TLSv1_2
         _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kTLSProtocol12)
     elseif options.ctx.options.minimum_tls_version == TlsVersion.TLSv1_3
-        raise_error(ERROR_IO_TLS_CTX_ERROR)
-        return ErrorResult(ERROR_IO_TLS_CTX_ERROR)
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
     else
         _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kSSLProtocolUnknown)
     end
     if ccall((:SSLSetIOFuncs, _SECURITY_LIB), OSStatus, (SSLContextRef, Ptr{Cvoid}, Ptr{Cvoid}), handler.ctx, _secure_transport_read_cb_c[], _secure_transport_write_cb_c[]) != _errSecSuccess ||
             ccall((:SSLSetConnection, _SECURITY_LIB), OSStatus, (SSLContextRef, SSLConnectionRef), handler.ctx, pointer_from_objref(handler)) != _errSecSuccess
-        raise_error(ERROR_IO_TLS_CTX_ERROR)
-        return ErrorResult(ERROR_IO_TLS_CTX_ERROR)
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
     end
 
     handler.verify_peer = st_ctx.verify_peer

@@ -25,7 +25,7 @@ function TestReadHandler(initial_window_size::Integer; auto_increment::Bool = fa
     return TestReadHandler(nothing, UInt8[], ReentrantLock(), auto_increment, Csize_t(initial_window_size))
 end
 
-function Sockets.handler_process_read_message(handler::TestReadHandler, slot::Sockets.ChannelSlot, message::EventLoops.IoMessage)
+function Sockets.handler_process_read_message(handler::TestReadHandler, slot::Sockets.ChannelSlot, message::EventLoops.IoMessage)::Nothing
     payload = String(Reseau.byte_cursor_from_buf(message.message_data))
     # Handlers run on event-loop threads; tests may read `received` from the main thread.
     lock(handler.lock) do
@@ -42,8 +42,9 @@ function Sockets.handler_process_read_message(handler::TestReadHandler, slot::So
     return nothing
 end
 
-function Sockets.handler_process_write_message(handler::TestReadHandler, slot::Sockets.ChannelSlot, message::EventLoops.IoMessage)
-    return Sockets.channel_slot_send_message(slot, message, Sockets.ChannelDirection.WRITE)
+function Sockets.handler_process_write_message(handler::TestReadHandler, slot::Sockets.ChannelSlot, message::EventLoops.IoMessage)::Nothing
+    Sockets.channel_slot_send_message(slot, message, Sockets.ChannelDirection.WRITE)
+    return nothing
 end
 
 function _received_len(handler::TestReadHandler)::Int
@@ -58,8 +59,9 @@ function _received_string(handler::TestReadHandler)::String
     end
 end
 
-function Sockets.handler_increment_read_window(handler::TestReadHandler, slot::Sockets.ChannelSlot, size::Csize_t)
-    return Sockets.channel_slot_increment_read_window!(slot, size)
+function Sockets.handler_increment_read_window(handler::TestReadHandler, slot::Sockets.ChannelSlot, size::Csize_t)::Nothing
+    Sockets.channel_slot_increment_read_window!(slot, size)
+    return nothing
 end
 
 function Sockets.handler_shutdown(
@@ -68,7 +70,7 @@ function Sockets.handler_shutdown(
         direction::Sockets.ChannelDirection.T,
         error_code::Int,
         free_scarce_resources_immediately::Bool,
-    )
+    )::Nothing
     Sockets.channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end
@@ -94,10 +96,6 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     end
     server = Sockets.socket_init(opts)
     @test server isa Sockets.Socket
-    if server isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     @static if Sys.isapple()
         bind_endpoint = Sockets.SocketEndpoint()
@@ -132,8 +130,9 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
         end
         Sockets.socket_assign_to_event_loop(new_sock, event_loop)
         channel = Sockets.Channel(event_loop; enable_read_back_pressure = true)
-        handler = Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 4)
-        if handler isa Reseau.ErrorResult
+        handler = try
+            Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 4)
+        catch
             accept_done[] = true
             return nothing
         end
@@ -169,10 +168,6 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
-    if client isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     connect_done = Ref(false)
     connect_err = Ref(0)
@@ -206,14 +201,15 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
     write_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
         Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-        res = Sockets.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
-            write_err[] = err
-            write_bytes[] = Int(num_bytes)
-            write_done[] = true
-            return nothing
-        end, nothing)
-        if res isa Reseau.ErrorResult
-            write_err[] = res.code
+        try
+            Sockets.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
+                write_err[] = err
+                write_bytes[] = Int(num_bytes)
+                write_done[] = true
+                return nothing
+            end, nothing)
+        catch e
+            write_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
             write_done[] = true
         end
         return nothing
@@ -283,10 +279,6 @@ end
     end
     server = Sockets.socket_init(opts)
     @test server isa Sockets.Socket
-    if server isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     @static if Sys.isapple()
         bind_endpoint = Sockets.SocketEndpoint()
@@ -321,8 +313,9 @@ end
         end
         Sockets.socket_assign_to_event_loop(new_sock, event_loop)
         channel = Sockets.Channel(event_loop; enable_read_back_pressure = false)
-        socket_handler = Sockets.socket_channel_handler_new!(channel, new_sock)
-        if socket_handler isa Reseau.ErrorResult
+        socket_handler = try
+            Sockets.socket_channel_handler_new!(channel, new_sock)
+        catch
             accept_done[] = true
             return nothing
         end
@@ -348,10 +341,6 @@ end
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
-    if client isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     connect_done = Ref(false)
     connect_err = Ref(0)
@@ -375,24 +364,25 @@ end
     subscribe_done = Ref(false)
     subscribe_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
         Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-        res = Sockets.socket_subscribe_to_readable_events(client, (sock, err, ud) -> begin
-            read_err[] = err
-            if err != Reseau.AWS_OP_SUCCESS
+        try
+            Sockets.socket_subscribe_to_readable_events(client, (sock, err, ud) -> begin
+                read_err[] = err
+                if err != Reseau.AWS_OP_SUCCESS
+                    read_done[] = true
+                    return nothing
+                end
+                buf = Reseau.ByteBuffer(64)
+                try
+                    Sockets.socket_read(sock, buf)
+                    read_payload[] = String(Reseau.byte_cursor_from_buf(buf))
+                catch e
+                    read_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
+                end
                 read_done[] = true
                 return nothing
-            end
-            buf = Reseau.ByteBuffer(64)
-            read_res = Sockets.socket_read(sock, buf)
-            if read_res isa Reseau.ErrorResult
-                read_err[] = read_res.code
-            else
-                read_payload[] = String(Reseau.byte_cursor_from_buf(buf))
-            end
-            read_done[] = true
-            return nothing
-        end, nothing)
-        if res isa Reseau.ErrorResult
-            read_err[] = res.code
+            end, nothing)
+        catch e
+            read_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
             read_done[] = true
         end
         subscribe_done[] = true
@@ -440,9 +430,10 @@ end
             send_done[] = true
             return nothing
         end
-        res = Sockets.channel_slot_send_message(app_slot, msg, Sockets.ChannelDirection.WRITE)
-        if res isa Reseau.ErrorResult
-            send_err[] = res.code
+        try
+            Sockets.channel_slot_send_message(app_slot, msg, Sockets.ChannelDirection.WRITE)
+        catch e
+            send_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
             send_done[] = true
         end
         return nothing
@@ -479,10 +470,6 @@ end
     end
     server = Sockets.socket_init(opts)
     @test server isa Sockets.Socket
-    if server isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     @static if Sys.isapple()
         bind_endpoint = Sockets.SocketEndpoint()
@@ -516,8 +503,9 @@ end
         end
         Sockets.socket_assign_to_event_loop(new_sock, event_loop)
         channel = Sockets.Channel(event_loop; enable_read_back_pressure = false)
-        handler = Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 16)
-        if handler isa Reseau.ErrorResult
+        handler = try
+            Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 16)
+        catch
             accept_done[] = true
             return nothing
         end
@@ -533,10 +521,6 @@ end
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
-    if client isa Reseau.ErrorResult
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
 
     connect_done = Ref(false)
     connect_err = Ref(0)
@@ -569,13 +553,14 @@ end
 
     write_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
         Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-        res = Sockets.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
-            write_err[] = err
-            write_done[] = true
-            return nothing
-        end, nothing)
-        if res isa Reseau.ErrorResult
-            write_err[] = res.code
+        try
+            Sockets.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
+                write_err[] = err
+                write_done[] = true
+                return nothing
+            end, nothing)
+        catch e
+            write_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
             write_done[] = true
         end
         return nothing
@@ -602,28 +587,22 @@ end
         status == Reseau.TaskStatus.RUN_READY || return nothing
         ch = arg::Sockets.Channel
 
-        app_handler = TestReadHandler(64)
-        app_slot = Sockets.channel_slot_new!(ch)
-        if Sockets.channel_first_slot(ch) !== app_slot
-            insert_res = Sockets.channel_slot_insert_end!(ch, app_slot)
-            if insert_res isa Reseau.ErrorResult
-                setup_err[] = insert_res.code
-                setup_done[] = true
-                return nothing
+        try
+            app_handler = TestReadHandler(64)
+            app_slot = Sockets.channel_slot_new!(ch)
+            if Sockets.channel_first_slot(ch) !== app_slot
+                Sockets.channel_slot_insert_end!(ch, app_slot)
             end
-        end
 
-        set_res = Sockets.channel_slot_set_handler!(app_slot, app_handler)
-        if set_res isa Reseau.ErrorResult
-            setup_err[] = set_res.code
-            setup_done[] = true
-            return nothing
-        end
-        app_handler.slot = app_slot
+            Sockets.channel_slot_set_handler!(app_slot, app_handler)
+            app_handler.slot = app_slot
 
-        res = Sockets.channel_setup_complete!(ch)
-        setup_err[] = res isa Reseau.ErrorResult ? res.code : Reseau.AWS_OP_SUCCESS
-        app_handler_ref[] = app_handler
+            Sockets.channel_setup_complete!(ch)
+            setup_err[] = Reseau.AWS_OP_SUCCESS
+            app_handler_ref[] = app_handler
+        catch e
+            setup_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
+        end
         setup_done[] = true
         return nothing
     end, channel, "setup_downstream")
