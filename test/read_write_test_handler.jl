@@ -215,9 +215,10 @@ function _rw_handler_write_now(
     return nothing
 end
 
-function _rw_handler_write_task(task::Sockets.ChannelTask, args::RwWriteTaskArgs, status::Threads.TaskStatus.T)
+function _rw_handler_write_task(task::Sockets.ChannelTask, args::RwWriteTaskArgs, status)
     _ = task
-    if status != Threads.TaskStatus.RUN_READY
+    st = Reseau.TaskStatus.T(status)
+    if st != Reseau.TaskStatus.RUN_READY
         return nothing
     end
     _rw_handler_write_now(args.slot, args.buffer, args.on_completion, args.user_data)
@@ -267,9 +268,9 @@ mutable struct RwWindowTaskArgs
     window_update::Csize_t
 end
 
-function _rw_handler_window_update_task(task::Sockets.ChannelTask, args::RwWindowTaskArgs, status::Threads.TaskStatus.T)
+function _rw_handler_window_update_task(task::Sockets.ChannelTask, args::RwWindowTaskArgs, status)
     _ = task
-    status == Threads.TaskStatus.RUN_READY || return nothing
+    Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
     args.handler.window = Reseau.add_size_saturating(args.handler.window, args.window_update)
     Sockets.channel_slot_increment_read_window!(args.slot, args.window_update)
     return nothing

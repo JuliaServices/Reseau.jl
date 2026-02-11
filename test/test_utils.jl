@@ -89,10 +89,10 @@ function test_keychain_path()::Union{String, Nothing}
 end
 
 function maybe_apply_test_keychain!(opts)
-    if Sys.isapple() && !Reseau.is_using_secitem()
+    if Sys.isapple() && !Sockets.is_using_secitem()
         path = test_keychain_path()
-        if path !== nothing && opts isa Reseau.TlsContextOptions
-            _ = Reseau.tls_ctx_options_set_keychain_path!(opts, path)
+        if path !== nothing && opts isa Sockets.TlsContextOptions
+            _ = Sockets.tls_ctx_options_set_keychain_path!(opts, path)
         end
     end
     return opts

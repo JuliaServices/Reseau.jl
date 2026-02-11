@@ -5,6 +5,29 @@
 @static if Sys.islinux()
     using LibAwsCal
 
+    # Channel-based rendezvous for passing EventLoop to the thread function.
+    const _EPOLL_THREAD_STARTUP = Channel{Any}(1)
+
+    @wrap_thread_fn function _epoll_event_loop_thread_entry()
+        event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
+        try
+            epoll_event_loop_thread(event_loop)
+        catch e
+            Core.println("epoll event loop thread errored: $e")
+        finally
+            impl = event_loop.impl_data
+            notify(impl.completion_event)
+            managed_thread_finished!()
+        end
+    end
+
+    const _EPOLL_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+
+    function _epoll_init_cfunctions!()
+        _EPOLL_THREAD_ENTRY_C[] = @cfunction(_epoll_event_loop_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+        return nothing
+    end
+
     # Helper to check if eventfd is available and create one
     function try_create_eventfd()::Union{Int32, Nothing}
         fd = @ccall eventfd(0::Cuint, (EFD_CLOEXEC | EFD_NONBLOCK)::Cint)::Cint
@@ -64,10 +87,6 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered epoll event loop")
 
         impl = EpollEventLoop()
-
-        if options.thread_options !== nothing
-            impl.thread_options = options.thread_options
-        end
 
         # Create epoll instance
         epoll_fd = @ccall epoll_create(100::Cint)::Cint
@@ -143,20 +162,20 @@
         impl.should_continue = true
 
         # Thread startup synchronization (avoid libuv-backed `sleep`/`time_ns` polling).
-        impl.startup_event = Threads.Event()
+        impl.startup_event = Base.Threads.Event()
+        impl.completion_event = Base.Threads.Event()
         @atomic impl.startup_error = 0
         @atomic impl.running_thread_id = UInt64(0)
 
-        # Launch the event loop thread
-        thread_fn = el -> epoll_event_loop_thread(el)
-        impl.thread_created_on = ThreadHandle()
-        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-epoll")
-
-        result = thread_launch(impl.thread_created_on, thread_fn, event_loop, thread_options)
-        if result != OP_SUCCESS
+        # Launch the event loop thread via ForeignThread
+        put!(_EPOLL_THREAD_STARTUP, event_loop)
+        try
+            impl.thread_created_on = ForeignThread("aws-el-epoll", _EPOLL_THREAD_ENTRY_C)
+        catch
+            take!(_EPOLL_THREAD_STARTUP)  # drain on failure
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             impl.should_continue = false
-            return ErrorResult(last_error())
+            return ErrorResult(raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID))
         end
 
         event_loop.thread = impl.thread_created_on
@@ -185,8 +204,17 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Stopping event-loop thread")
 
         # Create and schedule stop task
-        stop_fn = (ctx, status) -> epoll_stop_task_callback(ctx, status)
-        impl.stop_task = ScheduledTask(stop_fn, event_loop; type_tag = "epoll_event_loop_stop")
+        impl.stop_task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    epoll_stop_task_callback(event_loop, TaskStatus.T(status))
+                catch e
+                    Core.println("epoll_stop task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "epoll_event_loop_stop",
+        )
         event_loop_schedule_task_now!(event_loop, impl.stop_task)
 
         return nothing
@@ -197,10 +225,7 @@
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
-            result = thread_join(impl.thread_created_on)
-            if result != OP_SUCCESS
-                return ErrorResult(last_error())
-            end
+            wait(impl.completion_event)
         end
 
         @atomic event_loop.running = false
@@ -314,7 +339,7 @@
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         impl = event_loop.impl_data
         running_id = @atomic impl.running_thread_id
-        return running_id != 0 && running_id == thread_current_thread_id()
+        return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
     end
 
     # Subscribe to IO events
@@ -415,8 +440,17 @@
         # Mark as unsubscribed and schedule cleanup task
         event_data.is_subscribed = false
 
-        cleanup_fn = (ctx, status) -> epoll_unsubscribe_cleanup_task_callback(ctx, status)
-        event_data.cleanup_task = ScheduledTask(cleanup_fn, event_data; type_tag = "epoll_event_loop_unsubscribe_cleanup")
+        event_data.cleanup_task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    epoll_unsubscribe_cleanup_task_callback(event_data, TaskStatus.T(status))
+                catch e
+                    Core.println("epoll_cleanup task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "epoll_event_loop_unsubscribe_cleanup",
+        )
         event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)
 
         handle.additional_data = C_NULL
@@ -494,7 +528,7 @@
         impl = event_loop.impl_data
 
         # Set running thread ID
-        @atomic impl.running_thread_id = thread_current_thread_id()
+        @atomic impl.running_thread_id = UInt64(Base.Threads.threadid())
 
         # Subscribe to events on the read task handle for cross-thread notifications.
         # Signal `startup_event` once subscription is complete.
@@ -514,7 +548,7 @@
         end
         notify(impl.startup_event)
 
-        _ = thread_current_at_exit(() -> LibAwsCal.aws_cal_thread_clean_up())
+        # Cal cleanup is handled in the thread entry finally block
 
         timeout = DEFAULT_TIMEOUT_MS
         events = Memory{EpollEvent}(undef, MAX_EVENTS)
@@ -667,6 +701,7 @@
         # Set thread ID back to NULL
         @atomic impl.running_thread_id = UInt64(0)
 
+        LibAwsCal.aws_cal_thread_clean_up()
         return nothing
     end
 
@@ -680,7 +715,7 @@
         event_loop_wait_for_stop_completion!(event_loop)
 
         # Set thread ID for cancellation callbacks
-        impl.thread_joined_to = thread_current_thread_id()
+        impl.thread_joined_to = UInt64(Base.Threads.threadid())
         @atomic impl.running_thread_id = impl.thread_joined_to
 
         # Clean up scheduler (cancels remaining tasks)

@@ -19,6 +19,8 @@ for name in names(_PARENT; all = true, imported = false)
     startswith(str, "@") && continue
     # Do not shadow stdlib `Threads` inside this module (IO code uses `Threads.*`).
     name === :Threads && continue
+    # Do not shadow Base.put!/Base.take! (lru_cache.jl defines Reseau.put! which would mask them).
+    name === :put! && continue
     # Avoid self-aliasing.
     name === :Sockets && continue
     if isdefined(@__MODULE__, name)
@@ -30,13 +32,14 @@ for name in names(_PARENT; all = true, imported = false)
     @eval const $(name) = $(_PARENT).$(name)
 end
 
-# Similarly, pull in thread/runtime primitives from the sibling `Reseau.Threads`
+# Similarly, pull in thread/runtime primitives from the sibling `Reseau.ForeignThreads`
 # module so the IO stack can keep referring to them unqualified.
-const _THREADS = getfield(_PARENT, :Threads)
+const _THREADS = getfield(_PARENT, :ForeignThreads)
 for name in names(_THREADS; all = true, imported = false)
     str = String(name)
     startswith(str, "@") && continue
-    name === :Threads && continue
+    name === :ForeignThreads && continue
+    name === :__init__ && continue
     if isdefined(@__MODULE__, name)
         owner = Base.binding_module(@__MODULE__, name)
         owner === (@__MODULE__) && continue
@@ -45,6 +48,8 @@ for name in names(_THREADS; all = true, imported = false)
     val = getfield(_THREADS, name)
     @eval const $(name) = $(_THREADS).$(name)
 end
+# Macros are skipped by the name-loop above; import them explicitly.
+using ..ForeignThreads: @wrap_thread_fn
 
 # Pull in event-loop + core IO definitions from the sibling `Reseau.EventLoops`
 # module so the socket stack can keep referring to them unqualified.
@@ -67,10 +72,10 @@ const _io_library_initialized = Ref{Bool}(false)
 function io_library_init()
     _io_library_initialized[] && return nothing
     _io_library_initialized[] = true
-    thread_initialize_thread_management()
     _cal_init()
     tls_init_static_state()
     io_tracing_init()
+    _host_resolver_init_cfunctions!()
     return nothing
 end
 
@@ -78,7 +83,7 @@ function io_library_clean_up()
     !_io_library_initialized[] && return nothing
     _io_library_initialized[] = false
     tls_clean_up_static_state()
-    thread_join_all_managed()
+    join_all_managed()
     return nothing
 end
 

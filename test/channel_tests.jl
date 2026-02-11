@@ -10,10 +10,10 @@ function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
 end
 
 function _setup_channel(; with_shutdown_cb::Bool = false)
-    opts = Reseau.EventLoopOptions()
-    el = Reseau.event_loop_new(opts)
+    opts = EventLoops.EventLoopOptions()
+    el = EventLoops.event_loop_new(opts)
     el isa Reseau.ErrorResult && return el
-    run_res = Reseau.event_loop_run!(el)
+    run_res = EventLoops.event_loop_run!(el)
     run_res isa Reseau.ErrorResult && return run_res
 
     setup_ch = Channel{Int}(1)
@@ -30,7 +30,7 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
             end
         ) : nothing
 
-    channel_opts = Reseau.ChannelOptions(
+    channel_opts = Sockets.ChannelOptions(
         event_loop = el,
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
@@ -38,7 +38,7 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
         shutdown_user_data = nothing,
     )
 
-    channel = Reseau.channel_new(channel_opts)
+    channel = Sockets.channel_new(channel_opts)
     channel isa Reseau.ErrorResult && return channel
 
     @test _wait_ready_channel(setup_ch)
@@ -53,7 +53,7 @@ end
     if Threads.nthreads(:interactive) <= 1
         @test true
     else
-        Reseau.io_library_init()
+        Sockets.io_library_init()
 
         @testset "slots cleanup" begin
             setup = _setup_channel()
@@ -63,16 +63,16 @@ end
                 el = setup.el
                 channel = setup.channel
 
-                slot_1 = Reseau.channel_slot_new!(channel)
-                slot_2 = Reseau.channel_slot_new!(channel)
-                slot_3 = Reseau.channel_slot_new!(channel)
-                slot_4 = Reseau.channel_slot_new!(channel)
-                slot_5 = Reseau.channel_slot_new!(channel)
+                slot_1 = Sockets.channel_slot_new!(channel)
+                slot_2 = Sockets.channel_slot_new!(channel)
+                slot_3 = Sockets.channel_slot_new!(channel)
+                slot_4 = Sockets.channel_slot_new!(channel)
+                slot_5 = Sockets.channel_slot_new!(channel)
 
-                Reseau.channel_slot_insert_right!(slot_1, slot_2)
-                Reseau.channel_slot_insert_right!(slot_2, slot_3)
-                Reseau.channel_slot_insert_left!(slot_3, slot_4)
-                Reseau.channel_slot_remove!(slot_2)
+                Sockets.channel_slot_insert_right!(slot_1, slot_2)
+                Sockets.channel_slot_insert_right!(slot_2, slot_3)
+                Sockets.channel_slot_insert_left!(slot_3, slot_4)
+                Sockets.channel_slot_remove!(slot_2)
 
                 @test slot_1.adj_left === nothing
                 @test slot_1.adj_right === slot_4
@@ -81,21 +81,21 @@ end
                 @test slot_3.adj_left === slot_4
                 @test slot_3.adj_right === nothing
 
-                Reseau.channel_slot_replace!(slot_4, slot_5)
+                Sockets.channel_slot_replace!(slot_4, slot_5)
                 @test slot_1.adj_right === slot_5
                 @test slot_5.adj_left === slot_1
                 @test slot_5.adj_right === slot_3
                 @test slot_3.adj_left === slot_5
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
 
         @testset "destroy before setup completes waits for setup" begin
-            opts = Reseau.EventLoopOptions()
-            el = Reseau.event_loop_new(opts)
-            el_val = el isa Reseau.EventLoop ? el : nothing
+            opts = EventLoops.EventLoopOptions()
+            el = EventLoops.event_loop_new(opts)
+            el_val = el isa EventLoops.EventLoop ? el : nothing
             @test el_val !== nothing
             if el_val === nothing
                 return
@@ -107,7 +107,7 @@ end
                 return nothing
             end
 
-            channel_opts = Reseau.ChannelOptions(
+            channel_opts = Sockets.ChannelOptions(
                 event_loop = el_val,
                 on_setup_completed = on_setup,
                 on_shutdown_completed = nothing,
@@ -115,15 +115,15 @@ end
                 shutdown_user_data = nothing,
             )
 
-            channel = Reseau.channel_new(channel_opts)
+            channel = Sockets.channel_new(channel_opts)
             if channel isa Reseau.ErrorResult
                 @test false
-                Reseau.event_loop_destroy!(el_val)
+                EventLoops.event_loop_destroy!(el_val)
                 return
             end
 
-            Reseau.channel_destroy!(channel)
-            @test Reseau.event_loop_run!(el_val) === nothing
+            Sockets.channel_destroy!(channel)
+            @test EventLoops.event_loop_run!(el_val) === nothing
 
             @test _wait_ready_channel(setup_ch)
             if isready(setup_ch)
@@ -131,12 +131,12 @@ end
             end
 
             deadline = Base.time_ns() + 1_000_000_000
-            while channel.channel_state != Reseau.ChannelState.SHUT_DOWN && Base.time_ns() < deadline
+            while channel.channel_state != Sockets.ChannelState.SHUT_DOWN && Base.time_ns() < deadline
                 yield()
             end
-            @test channel.channel_state == Reseau.ChannelState.SHUT_DOWN
+            @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
 
-            Reseau.event_loop_destroy!(el_val)
+            EventLoops.event_loop_destroy!(el_val)
         end
 
         @testset "channel tasks run" begin
@@ -155,22 +155,21 @@ end
                     return nothing
                 end
 
-                tasks = [Reseau.ChannelTask() for _ in 1:task_count]
+                tasks = [Sockets.ChannelTask() for _ in 1:task_count]
                 for i in 1:task_count
-                    Reseau.channel_task_init!(tasks[i], task_fn, i, "test_channel_task")
+                    Sockets.channel_task_init!(tasks[i], task_fn, i, "test_channel_task")
                 end
 
-                Reseau.channel_schedule_task_now!(channel, tasks[1])
-                Reseau.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
+                Sockets.channel_schedule_task_now!(channel, tasks[1])
+                Sockets.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
 
-                on_thread = (ctx, status) -> begin
-                    status == Reseau.TaskStatus.RUN_READY || return nothing
-                    Reseau.channel_schedule_task_now!(ctx.channel, ctx.tasks[3])
-                    Reseau.channel_schedule_task_future!(ctx.channel, ctx.tasks[4], UInt64(1))
+                scheduler_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                    Sockets.channel_schedule_task_now!(channel, tasks[3])
+                    Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
                     return nothing
-                end
-                scheduler_task = Reseau.ScheduledTask(on_thread, (channel = channel, tasks = tasks); type_tag = "schedule_on_thread")
-                Reseau.event_loop_schedule_task_now!(el, scheduler_task)
+                end); type_tag = "schedule_on_thread")
+                EventLoops.event_loop_schedule_task_now!(el, scheduler_task)
 
                 deadline = Base.time_ns() + 2_000_000_000
                 results = Dict{Int, Reseau.TaskStatus.T}()
@@ -188,8 +187,8 @@ end
                     @test status == Reseau.TaskStatus.RUN_READY
                 end
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
 
@@ -209,18 +208,18 @@ end
                     return nothing
                 end
 
-                tasks = [Reseau.ChannelTask() for _ in 1:task_count]
+                tasks = [Sockets.ChannelTask() for _ in 1:task_count]
                 for i in 1:task_count
-                    Reseau.channel_task_init!(tasks[i], task_fn, i, "test_channel_task_cross_thread")
+                    Sockets.channel_task_init!(tasks[i], task_fn, i, "test_channel_task_cross_thread")
                 end
 
                 t1 = errormonitor(Threads.@spawn begin
-                    Reseau.channel_schedule_task_now!(channel, tasks[1])
-                    Reseau.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
+                    Sockets.channel_schedule_task_now!(channel, tasks[1])
+                    Sockets.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
                 end)
                 t2 = errormonitor(Threads.@spawn begin
-                    Reseau.channel_schedule_task_now!(channel, tasks[3])
-                    Reseau.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
+                    Sockets.channel_schedule_task_now!(channel, tasks[3])
+                    Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
                 end)
                 wait(t1)
                 wait(t2)
@@ -241,8 +240,8 @@ end
                     @test status == Reseau.TaskStatus.RUN_READY
                 end
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
 
@@ -262,22 +261,21 @@ end
                     return nothing
                 end
 
-                tasks = [Reseau.ChannelTask() for _ in 1:task_count]
+                tasks = [Sockets.ChannelTask() for _ in 1:task_count]
                 for i in 1:task_count
-                    Reseau.channel_task_init!(tasks[i], task_fn, i, "test_channel_task_serialized")
+                    Sockets.channel_task_init!(tasks[i], task_fn, i, "test_channel_task_serialized")
                 end
 
-                Reseau.channel_schedule_task_now_serialized!(channel, tasks[1])
-                Reseau.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
+                Sockets.channel_schedule_task_now_serialized!(channel, tasks[1])
+                Sockets.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
 
-                on_thread = (ctx, status) -> begin
-                    status == Reseau.TaskStatus.RUN_READY || return nothing
-                    Reseau.channel_schedule_task_now_serialized!(ctx.channel, ctx.tasks[3])
-                    Reseau.channel_schedule_task_future!(ctx.channel, ctx.tasks[4], UInt64(1))
+                scheduler_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                    Sockets.channel_schedule_task_now_serialized!(channel, tasks[3])
+                    Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
                     return nothing
-                end
-                scheduler_task = Reseau.ScheduledTask(on_thread, (channel = channel, tasks = tasks); type_tag = "schedule_on_thread_serialized")
-                Reseau.event_loop_schedule_task_now!(el, scheduler_task)
+                end); type_tag = "schedule_on_thread_serialized")
+                EventLoops.event_loop_schedule_task_now!(el, scheduler_task)
 
                 deadline = Base.time_ns() + 2_000_000_000
                 results = Dict{Int, Reseau.TaskStatus.T}()
@@ -295,8 +293,8 @@ end
                     @test status == Reseau.TaskStatus.RUN_READY
                 end
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
 
@@ -309,8 +307,8 @@ end
                 channel = setup.channel
 
                 status_ch = Channel{Reseau.TaskStatus.T}(1)
-                task = Reseau.ChannelTask()
-                Reseau.channel_task_init!(
+                task = Sockets.ChannelTask()
+                Sockets.channel_task_init!(
                     task,
                     (task, arg, status) -> begin
                         put!(status_ch, status)
@@ -324,20 +322,16 @@ end
                 block_ch = Channel{Bool}(1)
                 released = Ref(false)
 
-                blocker = Reseau.ScheduledTask(
-                    (ctx, status) -> begin
-                        status == Reseau.TaskStatus.RUN_READY || return nothing
-                        Reseau.channel_schedule_task_now_serialized!(ctx.channel, ctx.task)
-                        put!(ctx.ready_ch, true)
-                        take!(ctx.block_ch)
-                        return nothing
-                    end,
-                    (channel = channel, task = task, ready_ch = ready_ch, block_ch = block_ch);
-                    type_tag = "block_serialized_queue",
-                )
+                blocker = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                    Sockets.channel_schedule_task_now_serialized!(channel, task)
+                    put!(ready_ch, true)
+                    take!(block_ch)
+                    return nothing
+                end); type_tag = "block_serialized_queue")
 
                 try
-                    Reseau.event_loop_schedule_task_now!(el, blocker)
+                    EventLoops.event_loop_schedule_task_now!(el, blocker)
                     @test take!(ready_ch)
 
                     queued = false
@@ -368,8 +362,8 @@ end
                         catch
                         end
                     end
-                    Reseau.channel_destroy!(channel)
-                    Reseau.event_loop_destroy!(el)
+                    Sockets.channel_destroy!(channel)
+                    EventLoops.event_loop_destroy!(el)
                 end
             end
         end
@@ -383,7 +377,7 @@ end
                 channel = setup.channel
                 shutdown_ch = setup.shutdown_ch
 
-                Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                 @test _wait_ready_channel(shutdown_ch)
 
                 task_status = Ref{Reseau.TaskStatus.T}(Reseau.TaskStatus.RUN_READY)
@@ -391,13 +385,13 @@ end
                     arg[] = status
                     return nothing
                 end
-                task = Reseau.ChannelTask()
-                Reseau.channel_task_init!(task, task_fn, task_status, "post_shutdown")
-                Reseau.channel_schedule_task_now!(channel, task)
+                task = Sockets.ChannelTask()
+                Sockets.channel_task_init!(task, task_fn, task_status, "post_shutdown")
+                Sockets.channel_schedule_task_now!(channel, task)
                 @test task_status[] == Reseau.TaskStatus.CANCELED
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
 
@@ -415,12 +409,12 @@ end
                     arg[] = Int(status)
                     return nothing
                 end
-                task = Reseau.ChannelTask()
-                Reseau.channel_task_init!(task, task_fn, task_status, "future_task")
-                Reseau.channel_schedule_task_future!(channel, task, typemax(UInt64) - 1)
+                task = Sockets.ChannelTask()
+                Sockets.channel_task_init!(task, task_fn, task_status, "future_task")
+                Sockets.channel_schedule_task_future!(channel, task, typemax(UInt64) - 1)
                 @test task_status[] == 100
 
-                Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                 @test _wait_ready_channel(shutdown_ch)
 
                 deadline = Base.time_ns() + 2_000_000_000
@@ -429,8 +423,8 @@ end
                 end
                 @test task_status[] == Int(Reseau.TaskStatus.CANCELED)
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
 
@@ -443,13 +437,13 @@ end
                 channel = setup.channel
                 shutdown_ch = setup.shutdown_ch
 
-                Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                 @test _wait_ready_channel(shutdown_ch)
 
-                Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
 
@@ -470,7 +464,7 @@ end
                     while !go[]
                         yield()
                     end
-                    Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                     return nothing
                 end)
                 t2 = errormonitor(Threads.@spawn begin
@@ -478,7 +472,7 @@ end
                     while !go[]
                         yield()
                     end
-                    Reseau.channel_shutdown!(channel, Reseau.ERROR_INVALID_STATE)
+                    Sockets.channel_shutdown!(channel, Reseau.ERROR_INVALID_STATE)
                     return nothing
                 end)
 
@@ -501,8 +495,8 @@ end
                 end
                 @test !isready(shutdown_ch)
 
-                Reseau.channel_destroy!(channel)
-                Reseau.event_loop_destroy!(el)
+                Sockets.channel_destroy!(channel)
+                EventLoops.event_loop_destroy!(el)
             end
         end
     end

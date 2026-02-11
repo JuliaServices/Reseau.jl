@@ -21,8 +21,8 @@ end
 
 function _schedule_event_loop_task(el::EventLoops.EventLoop, fn; type_tag::AbstractString = "event_loop_task")
     done_ch = Channel{Any}(1)
-    task_fn = (ctx, status) -> begin
-        if status != Threads.TaskStatus.RUN_READY
+    task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
             put!(done_ch, Reseau.ErrorResult(EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN))
             return nothing
         end
@@ -30,8 +30,7 @@ function _schedule_event_loop_task(el::EventLoops.EventLoop, fn; type_tag::Abstr
         result = fn()
         put!(done_ch, (ok, result))
         return nothing
-    end
-    task = Threads.ScheduledTask(task_fn, nothing; type_tag = type_tag)
+    end); type_tag = type_tag)
     EventLoops.event_loop_schedule_task_now!(el, task)
     return done_ch
 end
@@ -113,15 +112,12 @@ end
                 try
                     done = Ref(false)
                     thread_ok = Ref(false)
-                    ctx = (el = el, done = done, thread_ok = thread_ok)
 
-                    task_fn = (ctx, status) -> begin
-                        ctx.thread_ok[] = EventLoops.event_loop_thread_is_callers_thread(ctx.el)
-                        ctx.done[] = true
+                    task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                        thread_ok[] = EventLoops.event_loop_thread_is_callers_thread(el)
+                        done[] = true
                         return nothing
-                    end
-
-                    task = Threads.ScheduledTask(task_fn, ctx; type_tag = "event_loop_test_task")
+                    end); type_tag = "event_loop_test_task")
                     EventLoops.event_loop_schedule_task_now!(el, task)
 
                     deadline = Base.time_ns() + 2_000_000_000
@@ -161,15 +157,12 @@ end
                     else
                         target_time = start_time + 50_000_000
 
-                        ctx = (el = el, done = done, actual_time = actual_time)
-                        task_fn = (ctx, status) -> begin
-                            now = EventLoops.event_loop_current_clock_time(ctx.el)
-                            ctx.actual_time[] = now isa Reseau.ErrorResult ? UInt64(0) : now
-                            ctx.done[] = true
+                        task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                            now = EventLoops.event_loop_current_clock_time(el)
+                            actual_time[] = now isa Reseau.ErrorResult ? UInt64(0) : now
+                            done[] = true
                             return nothing
-                        end
-
-                        task = Threads.ScheduledTask(task_fn, ctx; type_tag = "future_timing")
+                        end); type_tag = "future_timing")
                         EventLoops.event_loop_schedule_task_future!(el, task, target_time)
 
                         deadline = Base.time_ns() + 2_000_000_000
@@ -209,21 +202,18 @@ end
                     done_ch = Channel{Nothing}(1)
                     count_lock = ReentrantLock()
 
-                    ctx = (count = count, lock = count_lock, done_ch = done_ch, total = total)
-                    task_fn = (ctx, status) -> begin
-                        local current
-                        Base.lock(ctx.lock) do
-                            ctx.count[] += 1
-                            current = ctx.count[]
-                        end
-                        if current == ctx.total
-                            put!(ctx.done_ch, nothing)
-                        end
-                        return nothing
-                    end
-
                     for _ in 1:total
-                        task = Threads.ScheduledTask(task_fn, ctx; type_tag = "stress_now")
+                        task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                            local current
+                            Base.lock(count_lock) do
+                                count[] += 1
+                                current = count[]
+                            end
+                            if current == total
+                                put!(done_ch, nothing)
+                            end
+                            return nothing
+                        end); type_tag = "stress_now")
                         EventLoops.event_loop_schedule_task_now!(el, task)
                     end
 
@@ -980,16 +970,12 @@ end
                             now = EventLoops.event_loop_current_clock_time(el)
                             if !(now isa Reseau.ErrorResult)
                                 run_at = now + 1_000_000_000
-                                done_task = Threads.ScheduledTask(
-                                    (ctx, status) -> begin
+                                done_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                                         if !isready(done_ch)
                                             put!(done_ch, nothing)
                                         end
                                         return nothing
-                                    end,
-                                    nothing;
-                                    type_tag = "unsubrace_done",
-                                )
+                                    end); type_tag = "unsubrace_done")
                                 EventLoops.event_loop_schedule_task_future!(el, done_task, run_at)
                             else
                                 if !isready(done_ch)
@@ -1061,22 +1047,29 @@ end
                     done_count = Ref(0)
                     total = 4
 
-                    task_fn = (ctx, status) -> begin
-                        Base.lock(lock) do
-                            push!(ctx.ids, Base.Threads.threadid())
-                            done_count[] += 1
-                            if done_count[] == total
-                                put!(done_ch, nothing)
-                            end
-                        end
-                        return nothing
-                    end
-
                     for _ in 1:2
-                        task1 = Threads.ScheduledTask(task_fn, (ids = ids1,); type_tag = "elg_affinity")
+                        task1 = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                            Base.lock(lock) do
+                                push!(ids1, Base.Threads.threadid())
+                                done_count[] += 1
+                                if done_count[] == total
+                                    put!(done_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end); type_tag = "elg_affinity")
                         EventLoops.event_loop_schedule_task_now!(loop1, task1)
 
-                        task2 = Threads.ScheduledTask(task_fn, (ids = ids2,); type_tag = "elg_affinity")
+                        task2 = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                            Base.lock(lock) do
+                                push!(ids2, Base.Threads.threadid())
+                                done_count[] += 1
+                                if done_count[] == total
+                                    put!(done_ch, nothing)
+                                end
+                            end
+                            return nothing
+                        end); type_tag = "elg_affinity")
                         EventLoops.event_loop_schedule_task_now!(loop2, task2)
                     end
 
@@ -1140,13 +1133,12 @@ end
                         @test read_end.io_handle.additional_data != C_NULL
 
                         done_ch = Channel{Nothing}(1)
-                        unsub_ctx = (el = el, handle = read_end.io_handle, done_ch = done_ch)
-                        unsub_fn = (ctx, status) -> begin
-                            EventLoops.event_loop_unsubscribe_from_io_events!(ctx.el, ctx.handle)
-                            put!(ctx.done_ch, nothing)
+                        handle = read_end.io_handle
+                        unsub_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                            EventLoops.event_loop_unsubscribe_from_io_events!(el, handle)
+                            put!(done_ch, nothing)
                             return nothing
-                        end
-                        unsub_task = Threads.ScheduledTask(unsub_fn, unsub_ctx; type_tag = "handle_unsubscribe")
+                        end); type_tag = "handle_unsubscribe")
                         EventLoops.event_loop_schedule_task_now!(el, unsub_task)
 
                         deadline = Base.time_ns() + 2_000_000_000
@@ -1182,14 +1174,13 @@ end
 
                 try
                     done_ch = Channel{Int}(1)
-                    ctx = (el = el, handle = EventLoops.IoHandle(), done_ch = done_ch)
-                    task_fn = (ctx, status) -> begin
-                        res = EventLoops.event_loop_unsubscribe_from_io_events!(ctx.el, ctx.handle)
+                    bad_handle = EventLoops.IoHandle()
+                    task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                        res = EventLoops.event_loop_unsubscribe_from_io_events!(el, bad_handle)
                         code = res isa Reseau.ErrorResult ? Reseau.last_error() : 0
-                        put!(ctx.done_ch, code)
+                        put!(done_ch, code)
                         return nothing
-                    end
-                    task = Threads.ScheduledTask(task_fn, ctx; type_tag = "unsubscribe_error")
+                    end); type_tag = "unsubscribe_error")
                     EventLoops.event_loop_schedule_task_now!(el, task)
 
                     deadline = Base.time_ns() + 2_000_000_000
@@ -1310,20 +1301,20 @@ end
                     total = 5
 
                     for i in 1:total
-                        ctx = (order = order, lock = order_lock, done_ch = done_ch, i = i, total = total)
-                        task_fn = (ctx, status) -> begin
-                            local count
-                            Base.lock(ctx.lock) do
-                                push!(ctx.order, ctx.i)
-                                count = length(ctx.order)
-                            end
-                            if count == ctx.total
-                                put!(ctx.done_ch, nothing)
-                            end
-                            return nothing
+                        let i = i
+                            task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                                local count
+                                Base.lock(order_lock) do
+                                    push!(order, i)
+                                    count = length(order)
+                                end
+                                if count == total
+                                    put!(done_ch, nothing)
+                                end
+                                return nothing
+                            end); type_tag = "serialized_order")
+                            EventLoops.event_loop_schedule_task_now_serialized!(el, task)
                         end
-                        task = Threads.ScheduledTask(task_fn, ctx; type_tag = "serialized_order")
-                        EventLoops.event_loop_schedule_task_now_serialized!(el, task)
                     end
 
                     deadline = Base.time_ns() + 2_000_000_000
@@ -1357,13 +1348,11 @@ end
                 @test run_res === nothing
 
                 try
-                    status_ch = Channel{Tuple{Threads.TaskStatus.T, Bool}}(1)
-                    ctx = (el = el, status_ch = status_ch)
-                    future_fn = (ctx, status) -> begin
-                        put!(ctx.status_ch, (status, EventLoops.event_loop_thread_is_callers_thread(ctx.el)))
+                    status_ch = Channel{Tuple{Reseau.TaskStatus.T, Bool}}(1)
+                    future_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                        put!(status_ch, (Reseau.TaskStatus.T(status), EventLoops.event_loop_thread_is_callers_thread(el)))
                         return nothing
-                    end
-                    future_task = Threads.ScheduledTask(future_fn, ctx; type_tag = "future_task")
+                    end); type_tag = "future_task")
 
                     now = EventLoops.event_loop_current_clock_time(el)
                     if now isa Reseau.ErrorResult
@@ -1371,12 +1360,10 @@ end
                     else
                         EventLoops.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
 
-                        cancel_ctx = (el = el, task = future_task)
-                        cancel_fn = (ctx, status) -> begin
-                            EventLoops.event_loop_cancel_task!(ctx.el, ctx.task)
+                        cancel_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                            EventLoops.event_loop_cancel_task!(el, future_task)
                             return nothing
-                        end
-                        cancel_task = Threads.ScheduledTask(cancel_fn, cancel_ctx; type_tag = "cancel_task")
+                        end); type_tag = "cancel_task")
                         EventLoops.event_loop_schedule_task_now!(el, cancel_task)
 
                         deadline = Base.time_ns() + 2_000_000_000
@@ -1387,7 +1374,7 @@ end
                         @test isready(status_ch)
                         if isready(status_ch)
                             status, thread_ok = take!(status_ch)
-                            @test status == Threads.TaskStatus.CANCELED
+                            @test status == Reseau.TaskStatus.CANCELED
                             @test thread_ok
                         end
                     end
@@ -1411,13 +1398,11 @@ end
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
 
-                status_ch = Channel{Threads.TaskStatus.T}(1)
-                ctx = (status_ch = status_ch,)
-                future_fn = (ctx, status) -> begin
-                    put!(ctx.status_ch, status)
+                status_ch = Channel{Reseau.TaskStatus.T}(1)
+                future_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    put!(status_ch, Reseau.TaskStatus.T(status))
                     return nothing
-                end
-                future_task = Threads.ScheduledTask(future_fn, ctx; type_tag = "future_task_destroy")
+                end); type_tag = "future_task_destroy")
 
                 now = EventLoops.event_loop_current_clock_time(el)
                 if now isa Reseau.ErrorResult
@@ -1429,7 +1414,7 @@ end
                     @test isready(status_ch)
                     if isready(status_ch)
                         status = take!(status_ch)
-                        @test status == Threads.TaskStatus.CANCELED
+                        @test status == Reseau.TaskStatus.CANCELED
                     end
                 end
             end
@@ -1449,20 +1434,16 @@ end
                 @test run_res === nothing
                 destroy_called = Ref(false)
                 destroy_threw = Ref(false)
-                task = Threads.ScheduledTask(
-                    (ctx, status) -> begin
-                        status == Threads.TaskStatus.RUN_READY || return nothing
-                        ctx.destroy_called[] = true
-                        try
-                            EventLoops.event_loop_destroy!(ctx.el)
-                        catch err
-                            ctx.destroy_threw[] = err isa ErrorException
-                        end
-                        return nothing
-                    end,
-                    (el = el, destroy_called = destroy_called, destroy_threw = destroy_threw);
-                    type_tag = "destroy_on_loop",
-                )
+                task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                    destroy_called[] = true
+                    try
+                        EventLoops.event_loop_destroy!(el)
+                    catch err
+                        destroy_threw[] = err isa ErrorException
+                    end
+                    return nothing
+                end); type_tag = "destroy_on_loop")
                 EventLoops.event_loop_schedule_task_now!(el, task)
                 deadline = Base.time_ns() + 2_000_000_000
                 while !destroy_called[] && Base.time_ns() < deadline
@@ -1525,14 +1506,10 @@ end
                     return
                 end
 
-                release_task = Threads.ScheduledTask(
-                    (ctx, status) -> begin
-                        EventLoops.event_loop_group_release!(ctx.elg)
-                        return nothing
-                    end,
-                    (elg = elg,);
-                    type_tag = "elg_release_async",
-                )
+                release_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    EventLoops.event_loop_group_release!(elg)
+                    return nothing
+                end); type_tag = "elg_release_async")
                 EventLoops.event_loop_schedule_task_now!(el, release_task)
                 done = _wait_for_channel(shutdown_ch)
                 @test done
@@ -1574,12 +1551,12 @@ end
                 @test run_res === nothing
 
                 done1 = Channel{Bool}(1)
-                task1 = Threads.ScheduledTask((ctx, status) -> begin
-                    if status == Threads.TaskStatus.RUN_READY
+                task1 = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    if Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY
                         put!(done1, EventLoops.event_loop_thread_is_callers_thread(el))
                     end
                     return nothing
-                end, nothing; type_tag = "event_loop_stop_restart_first")
+                end); type_tag = "event_loop_stop_restart_first")
                 EventLoops.event_loop_schedule_task_now!(el, task1)
                 @test _wait_for_channel(done1)
                 @test take!(done1)
@@ -1589,12 +1566,12 @@ end
                 @test EventLoops.event_loop_run!(el) === nothing
 
                 done2 = Channel{Bool}(1)
-                task2 = Threads.ScheduledTask((ctx, status) -> begin
-                    if status == Threads.TaskStatus.RUN_READY
+                task2 = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    if Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY
                         put!(done2, EventLoops.event_loop_thread_is_callers_thread(el))
                     end
                     return nothing
-                end, nothing; type_tag = "event_loop_stop_restart_second")
+                end); type_tag = "event_loop_stop_restart_second")
                 EventLoops.event_loop_schedule_task_now!(el, task2)
                 @test _wait_for_channel(done2)
                 @test take!(done2)
@@ -1701,50 +1678,37 @@ end
                     key_obj = Ref(0)
                     key = pointer_from_objref(key_obj)
 
-                    ctx = (
-                        el = el,
-                        key = key,
-                        missing_err1 = missing_err1,
-                        missing_err2 = missing_err2,
-                        removed_calls = removed_calls,
-                        fetched_value = fetched_value,
-                        removed_value = removed_value,
-                        done = done,
-                    )
-
-                    task_fn = (ctx, status) -> begin
-                        res = EventLoops.event_loop_fetch_local_object(ctx.el, ctx.key)
+                    task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                        res = EventLoops.event_loop_fetch_local_object(el, key)
                         if res isa Reseau.ErrorResult
-                            ctx.missing_err1[] = Reseau.last_error()
+                            missing_err1[] = Reseau.last_error()
                         end
 
-                        on_removed = obj -> (ctx.removed_calls[] += 1)
-                        obj1 = EventLoops.EventLoopLocalObject(ctx.key, "one", on_removed)
-                        EventLoops.event_loop_put_local_object!(ctx.el, obj1)
+                        on_removed = obj -> (removed_calls[] += 1)
+                        obj1 = EventLoops.EventLoopLocalObject(key, "one", on_removed)
+                        EventLoops.event_loop_put_local_object!(el, obj1)
 
-                        obj2 = EventLoops.EventLoopLocalObject(ctx.key, "two", on_removed)
-                        EventLoops.event_loop_put_local_object!(ctx.el, obj2)
+                        obj2 = EventLoops.EventLoopLocalObject(key, "two", on_removed)
+                        EventLoops.event_loop_put_local_object!(el, obj2)
 
-                        fetched = EventLoops.event_loop_fetch_local_object(ctx.el, ctx.key)
+                        fetched = EventLoops.event_loop_fetch_local_object(el, key)
                         if !(fetched isa Reseau.ErrorResult)
-                            ctx.fetched_value[] = fetched.object
+                            fetched_value[] = fetched.object
                         end
 
-                        removed_obj = EventLoops.event_loop_remove_local_object!(ctx.el, ctx.key)
+                        removed_obj = EventLoops.event_loop_remove_local_object!(el, key)
                         if removed_obj !== nothing
-                            ctx.removed_value[] = removed_obj.object
+                            removed_value[] = removed_obj.object
                         end
 
-                        res2 = EventLoops.event_loop_fetch_local_object(ctx.el, ctx.key)
+                        res2 = EventLoops.event_loop_fetch_local_object(el, key)
                         if res2 isa Reseau.ErrorResult
-                            ctx.missing_err2[] = Reseau.last_error()
+                            missing_err2[] = Reseau.last_error()
                         end
 
-                        ctx.done[] = true
+                        done[] = true
                         return nothing
-                    end
-
-                    task = Threads.ScheduledTask(task_fn, ctx; type_tag = "event_loop_local_object_test")
+                    end); type_tag = "event_loop_local_object_test")
                     EventLoops.event_loop_schedule_task_now!(el, task)
 
                     deadline = Base.time_ns() + 2_000_000_000
@@ -1759,22 +1723,13 @@ end
                     @test removed_value[] == "two"
                     @test removed_calls[] == 1
 
-                    cleanup_ctx = (
-                        el = el,
-                        key = key,
-                        cleanup_calls = cleanup_calls,
-                        done_cleanup = done_cleanup,
-                    )
-
-                    cleanup_task_fn = (ctx, status) -> begin
-                        on_removed = obj -> (ctx.cleanup_calls[] += 1)
-                        obj = EventLoops.EventLoopLocalObject(ctx.key, "cleanup", on_removed)
-                        EventLoops.event_loop_put_local_object!(ctx.el, obj)
-                        ctx.done_cleanup[] = true
+                    cleanup_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                        on_removed = obj -> (cleanup_calls[] += 1)
+                        obj = EventLoops.EventLoopLocalObject(key, "cleanup", on_removed)
+                        EventLoops.event_loop_put_local_object!(el, obj)
+                        done_cleanup[] = true
                         return nothing
-                    end
-
-                    cleanup_task = Threads.ScheduledTask(cleanup_task_fn, cleanup_ctx; type_tag = "event_loop_local_object_cleanup")
+                    end); type_tag = "event_loop_local_object_cleanup")
                     EventLoops.event_loop_schedule_task_now!(el, cleanup_task)
 
                     deadline = Base.time_ns() + 2_000_000_000
@@ -1875,11 +1830,9 @@ end
             if !(el isa Reseau.ErrorResult)
                 impl = el.impl_data
 
-                noop_ctx = (nothing = nothing,)
-                noop_fn = (ctx, status) -> nothing
                 tasks = [
-                    Threads.ScheduledTask(noop_fn, noop_ctx; type_tag = "pre_queue_task_1"),
-                    Threads.ScheduledTask(noop_fn, noop_ctx; type_tag = "pre_queue_task_2"),
+                    Reseau.ScheduledTask(Reseau.TaskFn(status -> nothing); type_tag = "pre_queue_task_1"),
+                    Reseau.ScheduledTask(Reseau.TaskFn(status -> nothing); type_tag = "pre_queue_task_2"),
                 ]
 
                 lock(impl.task_pre_queue_mutex)

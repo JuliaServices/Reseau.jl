@@ -81,9 +81,7 @@ function _async_test_read(stream::Sockets.AsyncInputStream, dest::Reseau.ByteBuf
 
     if state.completion_strategy == :event_loop
         if state.event_loop !== nothing
-            task = Threads.ScheduledTask(
-                (t, status) -> do_read!(),
-                nothing;
+            task = Reseau.ScheduledTask(Reseau.TaskFn(status -> do_read!());
                 type_tag = "async_stream_test_read",
             )
             EventLoops.event_loop_schedule_task_now!(state.event_loop, task)
@@ -93,9 +91,7 @@ function _async_test_read(stream::Sockets.AsyncInputStream, dest::Reseau.ByteBuf
     elseif state.completion_strategy == :random
         next_read = state.read_count + 1
         if isodd(next_read) && state.event_loop !== nothing
-            task = Threads.ScheduledTask(
-                (t, status) -> do_read!(),
-                nothing;
+            task = Reseau.ScheduledTask(Reseau.TaskFn(status -> do_read!());
                 type_tag = "async_stream_test_read",
             )
             EventLoops.event_loop_schedule_task_now!(state.event_loop, task)

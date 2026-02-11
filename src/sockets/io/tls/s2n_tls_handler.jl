@@ -255,7 +255,7 @@ function _s2n_schedule_thread_cleanup(slot::ChannelSlot)
         local_obj = EventLoopLocalObject(_s2n_tls_cleanup_key, nothing)
         put_res = channel_put_local_object!(channel, local_obj)
         put_res isa ErrorResult && return put_res
-        _ = thread_current_at_exit(_s2n_cleanup_thread)
+        # thread_current_at_exit removed: event loop thread entry handles s2n cleanup
     end
     return nothing
 end

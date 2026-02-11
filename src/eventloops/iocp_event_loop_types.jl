@@ -40,14 +40,14 @@
 
     mutable struct IocpEventLoop
         iocp_handle::Ptr{Cvoid}
-        thread_created_on::Union{Nothing, ThreadHandle}
+        thread_created_on::Union{Nothing, ForeignThread}
         thread_joined_to::UInt64
         @atomic running_thread_id::UInt64
-        startup_event::Threads.Event
+        startup_event::Base.Threads.Event
+        completion_event::Base.Threads.Event
         @atomic startup_error::Int
         synced_data::IocpSyncedData
         thread_data::IocpThreadData
-        thread_options::ThreadOptions
     end
 
     function IocpEventLoop()
@@ -56,11 +56,11 @@
             nothing,
             UInt64(0),
             UInt64(0),
-            Threads.Event(),
+            Base.Threads.Event(),
+            Base.Threads.Event(),
             0,
             IocpSyncedData(),
             IocpThreadData(),
-            ThreadOptions(),
         )
     end
 

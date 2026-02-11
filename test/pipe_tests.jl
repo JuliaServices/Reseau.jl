@@ -106,11 +106,11 @@ function _pipe_state_check_copied_data(state::PipeState)
 end
 
 function _schedule_task(state::PipeState, loop::EventLoops.EventLoop, fn; delay_secs::Int = 0, serialized::Bool = false)
-    task = Threads.ScheduledTask((ctx, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return _signal_error!(state)
+    task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return _signal_error!(state)
         fn(state)
         return nothing
-    end, nothing; type_tag = "pipe_state_task")
+    end); type_tag = "pipe_state_task")
 
     if delay_secs == 0
         if serialized

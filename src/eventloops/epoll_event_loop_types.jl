@@ -75,10 +75,11 @@
     # Epoll event loop implementation data
     mutable struct EpollEventLoop
         scheduler::TaskScheduler
-        thread_created_on::Union{Nothing, ThreadHandle}
+        thread_created_on::Union{Nothing, ForeignThread}
         thread_joined_to::UInt64
         @atomic running_thread_id::UInt64
-        startup_event::Threads.Event
+        startup_event::Base.Threads.Event
+        completion_event::Base.Threads.Event
         @atomic startup_error::Int
         read_task_handle::IoHandle
         write_task_handle::IoHandle
@@ -89,7 +90,6 @@
         epoll_fd::Int32
         should_process_task_pre_queue::Bool
         should_continue::Bool
-        thread_options::ThreadOptions
         use_eventfd::Bool  # true if using eventfd, false if using pipe
     end
 
@@ -99,7 +99,8 @@
             nothing,
             UInt64(0),
             UInt64(0),
-            Threads.Event(),
+            Base.Threads.Event(),
+            Base.Threads.Event(),
             0,
             IoHandle(),
             IoHandle(),
@@ -110,7 +111,6 @@
             Int32(-1),
             false,
             false,
-            ThreadOptions(),
             false,
         )
     end

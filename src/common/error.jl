@@ -170,7 +170,7 @@ const _thread_handler = Dict{UInt64, Function}()
 const _global_handler = Ref{Union{Nothing, Function}}(nothing)
 
 @inline function _error_thread_key()
-    return UInt64(Threads.thread_current_thread_id())
+    return UInt64(Base.Threads.threadid())
 end
 
 function last_error()

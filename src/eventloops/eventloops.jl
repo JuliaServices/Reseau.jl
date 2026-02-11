@@ -15,6 +15,8 @@ for name in names(_PARENT; all = true, imported = false)
     startswith(str, "@") && continue
     # Do not shadow stdlib `Threads` inside this module (implementation uses `Base.Threads.*`).
     name === :Threads && continue
+    # Do not shadow Base.put!/Base.take! (lru_cache.jl defines Reseau.put! which would mask them).
+    name === :put! && continue
     # Avoid self-aliasing.
     name === :EventLoops && continue
     if isdefined(@__MODULE__, name)
@@ -28,13 +30,14 @@ for name in names(_PARENT; all = true, imported = false)
     @eval const $(name) = $(_PARENT).$(name)
 end
 
-# Pull in thread/runtime primitives from the sibling `Reseau.Threads` module so
+# Pull in thread/runtime primitives from the sibling `Reseau.ForeignThreads` module so
 # the implementation can refer to them unqualified.
-const _THREADS = getfield(_PARENT, :Threads)
+const _THREADS = getfield(_PARENT, :ForeignThreads)
 for name in names(_THREADS; all = true, imported = false)
     str = String(name)
     startswith(str, "@") && continue
-    name === :Threads && continue
+    name === :ForeignThreads && continue
+    name === :__init__ && continue
     if isdefined(@__MODULE__, name)
         owner = Base.binding_module(@__MODULE__, name)
         owner === (@__MODULE__) && continue
@@ -43,6 +46,8 @@ for name in names(_THREADS; all = true, imported = false)
     val = getfield(_THREADS, name)
     @eval const $(name) = $(_THREADS).$(name)
 end
+# Macros are skipped by the name-loop above; import them explicitly.
+using ..ForeignThreads: @wrap_thread_fn
 
 include("tracing.jl")
 include("io.jl")
@@ -58,6 +63,17 @@ include("epoll_event_loop.jl")
 include("iocp_event_loop.jl")
 
 include("future.jl")
+
+function __init__()
+    @static if Sys.isapple() || Sys.isbsd()
+        _kqueue_init_cfunctions!()
+    elseif Sys.islinux()
+        _epoll_init_cfunctions!()
+    elseif Sys.iswindows()
+        _iocp_init_cfunctions!()
+    end
+    return nothing
+end
 
 export
     EventLoop,

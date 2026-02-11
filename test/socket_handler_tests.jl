@@ -204,8 +204,8 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     payload = "abcdefghij"
     cursor = Reseau.ByteCursor(payload)
 
-    write_task = Threads.ScheduledTask((ctx, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+    write_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
         res = Sockets.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
             write_err[] = err
             write_bytes[] = Int(num_bytes)
@@ -217,7 +217,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
             write_done[] = true
         end
         return nothing
-    end, nothing; type_tag = "client_write")
+    end); type_tag = "client_write")
     EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
@@ -235,7 +235,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
     trigger_done = Ref(false)
     trigger_task = Sockets.ChannelTask((task, arg, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+        status == Reseau.TaskStatus.RUN_READY || return nothing
         Sockets.channel_trigger_read(channel)
         trigger_done[] = true
         return nothing
@@ -248,7 +248,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
     update_done = Ref(false)
     update_task = Sockets.ChannelTask((task, arg, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+        status == Reseau.TaskStatus.RUN_READY || return nothing
         app_handler.slot.window_size = app_handler.slot.window_size + Csize_t(6)
         Sockets.handler_increment_read_window(socket_handler, socket_handler.slot, Csize_t(6))
         update_done[] = true
@@ -373,8 +373,8 @@ end
     read_err = Ref(0)
     read_payload = Ref("")
     subscribe_done = Ref(false)
-    subscribe_task = Threads.ScheduledTask((ctx, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+    subscribe_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
         res = Sockets.socket_subscribe_to_readable_events(client, (sock, err, ud) -> begin
             read_err[] = err
             if err != Reseau.AWS_OP_SUCCESS
@@ -397,7 +397,7 @@ end
         end
         subscribe_done[] = true
         return nothing
-    end, nothing; type_tag = "client_subscribe")
+    end); type_tag = "client_subscribe")
     EventLoops.event_loop_schedule_task_now!(event_loop, subscribe_task)
     @test wait_for(() -> subscribe_done[])
 
@@ -420,7 +420,7 @@ end
     send_err = Ref(0)
     payload = "hello"
     send_task = Sockets.ChannelTask((task, arg, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+        status == Reseau.TaskStatus.RUN_READY || return nothing
         msg = Sockets.channel_acquire_message_from_pool(channel, EventLoops.IoMessageType.APPLICATION_DATA, length(payload))
         if msg === nothing
             send_err[] = Reseau.ERROR_OOM
@@ -567,8 +567,8 @@ end
     payload = "pending"
     cursor = Reseau.ByteCursor(payload)
 
-    write_task = Threads.ScheduledTask((ctx, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+    write_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
         res = Sockets.socket_write(client, cursor, (sock, err, num_bytes, ud) -> begin
             write_err[] = err
             write_done[] = true
@@ -579,7 +579,7 @@ end
             write_done[] = true
         end
         return nothing
-    end, nothing; type_tag = "client_write_pending")
+    end); type_tag = "client_write_pending")
     EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
@@ -599,7 +599,7 @@ end
     app_handler_ref = Ref{Any}(nothing)
 
     setup_task = Sockets.ChannelTask((task, arg, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+        status == Reseau.TaskStatus.RUN_READY || return nothing
         ch = arg::Sockets.Channel
 
         app_handler = TestReadHandler(64)
