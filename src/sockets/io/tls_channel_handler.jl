@@ -1506,7 +1506,7 @@ function _tls_backend_init()
     elseif Sys.islinux()
         return _s2n_init_once()
     else
-        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
+        return nothing
     end
 end
 

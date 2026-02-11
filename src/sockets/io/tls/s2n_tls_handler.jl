@@ -162,7 +162,7 @@ function _s2n_init_once()
     @static if !Sys.islinux()
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
-    !_s2n_available[] && throw_error(ERROR_IO_TLS_CTX_ERROR)
+    !_s2n_available[] && return nothing
     _s2n_initialized[] && return nothing
 
     lock(_s2n_init_lock) do
