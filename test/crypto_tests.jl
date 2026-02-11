@@ -24,8 +24,8 @@ mutable struct ByoCryptoTestArgs
     lock::ReentrantLock
     channel::Any
     rw_handler::ReadWriteTestHandler
-    tls_ctx::Reseau.TlsContext
-    tls_options::Reseau.TlsConnectionOptions
+    tls_ctx::Sockets.TlsContext
+    tls_options::Sockets.TlsConnectionOptions
     negotiation_result_fn::Any
     cb_data::Any
     error_code::Int
@@ -72,7 +72,7 @@ function _byo_handle_write(handler, slot, data_read, user_data)
     _ = slot
     _ = data_read
     _ = user_data
-    return Reseau.null_buffer()
+    return Sockets.null_buffer()
 end
 
 const _BYO_WRITE_TAG = "I'm a big teapot"
@@ -105,11 +105,11 @@ end
     # The BYO crypto setup is global. Make sure this test restores any prior
     # configuration so later TLS tests (including compat smoke tests) continue
     # to use the default TLS handlers.
-    old_client_setup = Reseau._tls_byo_client_setup[]
-    old_server_setup = Reseau._tls_byo_server_setup[]
+    old_client_setup = Sockets._tls_byo_client_setup[]
+    old_server_setup = Sockets._tls_byo_server_setup[]
     try
-    elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-    resolver = Reseau.HostResolver(elg)
+    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    resolver = Sockets.HostResolver(elg)
 
     incoming_rw_args = ByoCryptoRwArgs(ReentrantLock(), Reseau.ByteBuffer(128), false, nothing)
     outgoing_rw_args = ByoCryptoRwArgs(ReentrantLock(), Reseau.ByteBuffer(128), false, nothing)
@@ -129,17 +129,17 @@ end
         outgoing_rw_args,
     )
 
-    server_ctx = Reseau.tls_context_new(Reseau.TlsContextOptions(; is_server = true, verify_peer = false))
-    @test server_ctx isa Reseau.TlsContext
-    client_ctx = Reseau.tls_context_new(Reseau.TlsContextOptions(; is_server = false, verify_peer = false))
-    @test client_ctx isa Reseau.TlsContext
+    server_ctx = Sockets.tls_context_new(Sockets.TlsContextOptions(; is_server = true, verify_peer = false))
+    @test server_ctx isa Sockets.TlsContext
+    client_ctx = Sockets.tls_context_new(Sockets.TlsContextOptions(; is_server = false, verify_peer = false))
+    @test client_ctx isa Sockets.TlsContext
 
     incoming_args = ByoCryptoTestArgs(
         ReentrantLock(),
         nothing,
         incoming_rw_handler,
         server_ctx,
-        Reseau.TlsConnectionOptions(
+        Sockets.TlsConnectionOptions(
             server_ctx;
             on_negotiation_result = (handler, slot, err, ud) -> begin
                 _ = handler
@@ -162,7 +162,7 @@ end
         nothing,
         outgoing_rw_handler,
         client_ctx,
-        Reseau.TlsConnectionOptions(
+        Sockets.TlsConnectionOptions(
             client_ctx;
             on_negotiation_result = (handler, slot, err, ud) -> begin
                 _ = handler
@@ -184,22 +184,22 @@ end
     incoming_rw_args.test_args = incoming_args
     outgoing_rw_args.test_args = outgoing_args
 
-    client_setup = Reseau.TlsByoCryptoSetupOptions(
+    client_setup = Sockets.TlsByoCryptoSetupOptions(
         new_handler_fn = _byo_tls_handler_new,
         start_negotiation_fn = _byo_start_negotiation,
         user_data = outgoing_args,
     )
-    @test Reseau.tls_byo_crypto_set_client_setup_options(client_setup) === nothing
+    @test Sockets.tls_byo_crypto_set_client_setup_options(client_setup) === nothing
 
-    server_setup = Reseau.TlsByoCryptoSetupOptions(
+    server_setup = Sockets.TlsByoCryptoSetupOptions(
         new_handler_fn = _byo_tls_handler_new,
         user_data = incoming_args,
     )
-    @test Reseau.tls_byo_crypto_set_server_setup_options(server_setup) === nothing
+    @test Sockets.tls_byo_crypto_set_server_setup_options(server_setup) === nothing
 
     listener_setup_called = Ref(false)
     listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
-    server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         host = "127.0.0.1",
         port = 0,
@@ -245,22 +245,22 @@ end
     @test listener !== nothing
     @test wait_for_pred(() -> listener_setup_called[])
     @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
-    bound = Reseau.socket_get_bound_address(listener)
-    @test bound isa Reseau.SocketEndpoint
-    port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
+    bound = Sockets.socket_get_bound_address(listener)
+    @test bound isa Sockets.SocketEndpoint
+    port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
 
-    resolution_config = Reseau.HostResolutionConfig(impl = (host, impl_data) -> begin
+    resolution_config = Sockets.HostResolutionConfig(impl = (host, impl_data) -> begin
         _ = impl_data
-        return [Reseau.HostAddress("127.0.0.1", Reseau.HostAddressType.A, host, UInt64(0))]
+        return [Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, UInt64(0))]
     end)
 
-    @test Reseau.client_bootstrap_connect!(
+    @test Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port;
@@ -302,23 +302,23 @@ end
     @test outgoing_args.negotiated
 
     if incoming_args.channel !== nothing
-        Reseau.channel_shutdown!(incoming_args.channel, Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(incoming_args.channel, Reseau.AWS_OP_SUCCESS)
     end
     if outgoing_args.channel !== nothing
-        Reseau.channel_shutdown!(outgoing_args.channel, Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(outgoing_args.channel, Reseau.AWS_OP_SUCCESS)
     end
 
     @test wait_for_pred(() -> incoming_args.shutdown_invoked)
     @test wait_for_pred(() -> outgoing_args.shutdown_invoked)
 
-    Reseau.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
     @test wait_for_pred(() -> incoming_args.listener_destroyed)
 
-    Reseau.host_resolver_shutdown!(resolver)
-    Reseau.event_loop_group_destroy!(elg)
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
     finally
-        Reseau._tls_byo_client_setup[] = old_client_setup
-        Reseau._tls_byo_server_setup[] = old_server_setup
+        Sockets._tls_byo_client_setup[] = old_client_setup
+        Sockets._tls_byo_server_setup[] = old_server_setup
     end
 end
 

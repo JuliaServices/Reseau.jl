@@ -1347,11 +1347,11 @@ end
             end,
         )
 
-        cleanup_task = Threads.ScheduledTask((ctx, status) -> begin
+        cleanup_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             Sockets.socket_cleanup!(socket_val)
             cleanup_done[] = true
             return nothing
-        end, nothing; type_tag = "socket_cleanup_before_connect")
+        end); type_tag = "socket_cleanup_before_connect")
 
         try
             res = Sockets.socket_connect(socket_val, connect_opts)
@@ -1535,7 +1535,7 @@ end
         write_done_server = Threads.Atomic{Bool}(false)
         write_err_server = Ref{Int}(0)
 
-        write_task_client = Threads.ScheduledTask((ctx, status) -> begin
+        write_task_client = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             cursor = Reseau.ByteCursor("teapot")
             res = Sockets.socket_write(
                 client_socket,
@@ -1554,9 +1554,9 @@ end
                 write_done_client[] = true
             end
             return nothing
-        end, nothing; type_tag = "socket_write_cleanup_client")
+        end); type_tag = "socket_write_cleanup_client")
 
-        write_task_server = Threads.ScheduledTask((ctx, status) -> begin
+        write_task_server = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             cursor = Reseau.ByteCursor("spout")
             res = Sockets.socket_write(
                 server_sock,
@@ -1575,7 +1575,7 @@ end
                 write_done_server[] = true
             end
             return nothing
-        end, nothing; type_tag = "socket_write_cleanup_server")
+        end); type_tag = "socket_write_cleanup_server")
 
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_client)
         @test wait_for_flag(write_done_client)
@@ -2092,11 +2092,11 @@ end
             write_res isa Reseau.ErrorResult && @test write_res.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
 
             close_done = Threads.Atomic{Bool}(false)
-            close_task = Threads.ScheduledTask((ctx, status) -> begin
+            close_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 Sockets.socket_close(socket_val)
                 close_done[] = true
                 return nothing
-            end, nothing; type_tag = "socket_close_wrong_thread")
+            end); type_tag = "socket_close_wrong_thread")
             EventLoops.event_loop_schedule_task_now!(el_val, close_task)
             @test wait_for_flag(close_done)
         finally

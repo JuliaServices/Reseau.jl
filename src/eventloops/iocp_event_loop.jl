@@ -5,6 +5,29 @@
 @static if Sys.iswindows()
     using LibAwsCal
 
+    # Channel-based rendezvous for passing EventLoop to the thread function.
+    const _IOCP_THREAD_STARTUP = Channel{Any}(1)
+
+    @wrap_thread_fn function _iocp_event_loop_thread_entry()
+        event_loop = take!(_IOCP_THREAD_STARTUP)::EventLoop
+        try
+            _iocp_event_loop_thread(event_loop)
+        catch e
+            Core.println("iocp event loop thread errored: $e")
+        finally
+            impl = event_loop.impl_data
+            notify(impl.completion_event)
+            managed_thread_finished!()
+        end
+    end
+
+    const _IOCP_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+
+    function _iocp_init_cfunctions!()
+        _IOCP_THREAD_ENTRY_C[] = @cfunction(_iocp_event_loop_thread_entry, UInt32, (Ptr{Cvoid},))
+        return nothing
+    end
+
     const _KERNEL32 = "Kernel32"
     const _NTDLL = "ntdll"
 
@@ -197,10 +220,6 @@
 
         impl = IocpEventLoop()
 
-        if options.thread_options !== nothing
-            impl.thread_options = options.thread_options
-        end
-
         # Create IOCP by passing INVALID_HANDLE_VALUE as FileHandle.
         iocp_handle = _win_create_io_completion_port(
             INVALID_HANDLE_VALUE,
@@ -268,11 +287,11 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "main loop started")
         impl = event_loop.impl_data
 
-        @atomic impl.running_thread_id = thread_current_thread_id()
+        @atomic impl.running_thread_id = UInt64(Base.Threads.threadid())
         impl.thread_data.state = IocpEventThreadState.RUNNING
         notify(impl.startup_event)
 
-        _ = thread_current_at_exit(() -> LibAwsCal.aws_cal_thread_clean_up())
+        # Cal cleanup is handled in the thread entry finally block
 
         timeout_ms = DEFAULT_TIMEOUT_MS
         entries = Memory{OverlappedEntry}(undef, Int(MAX_COMPLETION_PACKETS_PER_LOOP))
@@ -365,6 +384,7 @@
 
         logf(LogLevel.DEBUG, LS_IO_EVENT_LOOP, "exiting main loop")
         @atomic impl.running_thread_id = UInt64(0)
+        LibAwsCal.aws_cal_thread_clean_up()
         return nothing
     end
 
@@ -374,7 +394,8 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
 
         # Thread startup synchronization (avoid libuv-backed `sleep`/`time_ns` polling).
-        impl.startup_event = Threads.Event()
+        impl.startup_event = Base.Threads.Event()
+        impl.completion_event = Base.Threads.Event()
         @atomic impl.startup_error = 0
         @atomic impl.running_thread_id = UInt64(0)
 
@@ -387,15 +408,15 @@
 
         impl.synced_data.state = IocpEventThreadState.RUNNING
 
-        thread_fn = el -> _iocp_event_loop_thread(el)
-        impl.thread_created_on = ThreadHandle()
-        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-iocp")
-
-        result = thread_launch(impl.thread_created_on, thread_fn, event_loop, thread_options)
-        if result != OP_SUCCESS
+        # Launch the event loop thread via ForeignThread
+        put!(_IOCP_THREAD_STARTUP, event_loop)
+        try
+            impl.thread_created_on = ForeignThread("aws-el-iocp", _IOCP_THREAD_ENTRY_C)
+        catch
+            take!(_IOCP_THREAD_STARTUP)  # drain on failure
             impl.synced_data.state = IocpEventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
-            return ErrorResult(last_error())
+            return ErrorResult(raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID))
         end
 
         event_loop.thread = impl.thread_created_on
@@ -446,10 +467,7 @@
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
-            result = thread_join(impl.thread_created_on)
-            if result != OP_SUCCESS
-                return ErrorResult(last_error())
-            end
+            wait(impl.completion_event)
         end
 
         impl.synced_data.state = IocpEventThreadState.READY_TO_RUN
@@ -545,7 +563,7 @@
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         impl = event_loop.impl_data
         running_id = @atomic impl.running_thread_id
-        return running_id != 0 && running_id == thread_current_thread_id()
+        return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
     end
 
     function event_loop_connect_to_io_completion_port!(
@@ -630,7 +648,7 @@
         event_loop_wait_for_stop_completion!(event_loop)
 
         # Make cancellation callbacks that check `event_loop_thread_is_callers_thread` behave.
-        impl.thread_joined_to = thread_current_thread_id()
+        impl.thread_joined_to = UInt64(Base.Threads.threadid())
         @atomic impl.running_thread_id = impl.thread_joined_to
 
         task_scheduler_clean_up!(impl.thread_data.scheduler)

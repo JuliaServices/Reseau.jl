@@ -229,9 +229,15 @@ function retry_strategy_acquire_token!(
 
     # Schedule callback
     task = ScheduledTask(
-        (t, status) -> on_acquired(token, AWS_OP_SUCCESS, user_data),
-        nothing;
-        type_tag = "retry_token_acquired"
+        TaskFn(function(status)
+            try
+                on_acquired(token, AWS_OP_SUCCESS, user_data)
+            catch e
+                Core.println("retry_token_acquired task errored: $e")
+            end
+            return nothing
+        end);
+        type_tag = "retry_token_acquired",
     )
     event_loop_schedule_task_now!(event_loop, task)
 
@@ -388,9 +394,15 @@ function retry_token_schedule_retry(
     end
 
     task = ScheduledTask(
-        _exponential_backoff_retry_task,
-        token;
-        type_tag = "exponential_backoff_retry"
+        TaskFn(function(status)
+            try
+                _exponential_backoff_retry_task(token, TaskStatus.T(status))
+            catch e
+                Core.println("exponential_backoff_retry task errored: $e")
+            end
+            return nothing
+        end);
+        type_tag = "exponential_backoff_retry",
     )
     already_scheduled = false
     lock(token.lock) do

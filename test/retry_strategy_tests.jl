@@ -131,7 +131,7 @@ end
             lock(mtx) do
                 retry_count[] += 1
             end
-            err_type = Reseau.RetryErrorType.SERVER_ERROR
+            err_type = Sockets.RetryErrorType.SERVER_ERROR
             lock(mtx) do
                 if client_errors[] > 0
                     client_errors[] -= 1

@@ -10,12 +10,43 @@ const _TASK_STATUS_STRINGS = (
     "<Canceled>", # TaskStatus.CANCELED == 1
 )
 
-struct TaskFn
-    f::Any
-    ctx::Any
+# ── TaskFn: trim-safe type-erased callable for task callbacks ──
+# Uses a @generated function to create per-closure-type @cfunction pointers.
+# The callable is passed as the first C argument (Ref{F}), so no runtime
+# closure trampolines are needed (works on ARM64).
+
+struct _TaskCallWrapper <: Function end
+
+function (::_TaskCallWrapper)(f, status::UInt8)
+    f(status)
+    return nothing
 end
 
-(task::TaskFn)(status::TaskStatus.T) = Base.invokelatest(task.f, task.ctx, status)
+@generated function _task_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_TaskCallWrapper()), Cvoid, (Ref{$F}, UInt8))
+    end
+end
+
+struct TaskFn
+    ptr::Ptr{Cvoid}       # @cfunction pointer (specialized per callable type F)
+    objptr::Ptr{Cvoid}    # pointer to the callable object
+    _root::Any            # GC root — prevents collection, never dispatched on
+end
+
+function TaskFn(callable::F) where F
+    ptr = _task_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return TaskFn(ptr, objptr, objref)
+end
+
+@inline function (f::TaskFn)(status::UInt8)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, UInt8), f.objptr, status)
+    return nothing
+end
+
+# ── ScheduledTask ──
 
 mutable struct ScheduledTask
     fn::TaskFn
@@ -24,22 +55,23 @@ mutable struct ScheduledTask
     scheduled::Bool
 end
 
-function ScheduledTask(fn, ctx; type_tag::AbstractString = "task")
-    return ScheduledTask(TaskFn(fn, ctx), String(type_tag), UInt64(0), false)
+function ScheduledTask(fn::TaskFn; type_tag::AbstractString = "task")
+    return ScheduledTask(fn, String(type_tag), UInt64(0), false)
 end
 
-mutable struct TaskScheduler{Less}
-    timed::PriorityQueue{ScheduledTask, Less}
+timestamp_less(a, b) = a.timestamp < b.timestamp
+
+mutable struct TaskScheduler
+    timed::PriorityQueue{ScheduledTask, typeof(timestamp_less)}
     asap::Vector{ScheduledTask}
     running::Vector{ScheduledTask}
 end
 
 function TaskScheduler(; capacity::Integer = 8)
-    less = (a::ScheduledTask, b::ScheduledTask) -> a.timestamp < b.timestamp
-    timed = PriorityQueue{ScheduledTask}(less; capacity = capacity)
+    timed = PriorityQueue{ScheduledTask}(timestamp_less; capacity = capacity)
     asap = ScheduledTask[]
     running = ScheduledTask[]
-    return TaskScheduler{typeof(less)}(timed, asap, running)
+    return TaskScheduler(timed, asap, running)
 end
 
 @inline function task_status_to_string(status::TaskStatus.T)
@@ -57,7 +89,7 @@ function task_run!(task::ScheduledTask, status::TaskStatus.T)
         task_status_to_string(status),
     )
     task.scheduled = false
-    task.fn(status)
+    task.fn(UInt8(status))
     return nothing
 end
 

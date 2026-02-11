@@ -196,7 +196,7 @@ mutable struct HostEntry
     expired_addresses::Vector{HostAddress}
     on_host_purge_complete::Union{Function, Nothing}  # late-init: nothing → Function
     on_host_purge_complete_user_data::Any              # late-init
-    resolver_thread::ThreadHandle
+    resolver_thread::Union{ForeignThread, Nothing}
 end
 
 function _entry_cache_capacity(resolver::HostResolver, config::HostResolutionConfig)
@@ -235,7 +235,7 @@ function HostEntry(
         HostAddress[],
         nothing,
         nothing,
-        ThreadHandle(),
+        nothing,
     )
 end
 
@@ -276,9 +276,15 @@ function _dispatch_simple_callback(
     event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
     if event_loop !== nothing
         task = ScheduledTask(
-            (t, status) -> Base.invokelatest(callback, user_data),
-            nothing;
-            type_tag = "dns_purge_callback"
+            TaskFn(function(status)
+                try
+                    Base.invokelatest(callback, user_data)
+                catch e
+                    Core.println("dns_purge_callback task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "dns_purge_callback",
         )
         event_loop_schedule_task_now!(event_loop, task)
     else
@@ -332,7 +338,7 @@ function _update_address_cache!(
 
         addr_copy = copy(addr)
         addr_copy.expiry = new_expiry
-        put!(primary, addr_copy.address, addr_copy)
+        _PARENT.put!(primary, addr_copy.address, addr_copy)
         push!(entry.new_addresses, copy(addr_copy))
     end
     return nothing
@@ -368,7 +374,7 @@ function _process_records!(
             _cache_remove_failed!(failed_records, addr.address)
         elseif should_promote
             addr_copy = copy(addr)
-            put!(records, addr_copy.address, addr_copy)
+            _PARENT.put!(records, addr_copy.address, addr_copy)
             push!(entry.new_addresses, copy(addr_copy))
             _cache_remove_failed!(failed_records, addr.address)
             should_promote = false
@@ -485,6 +491,27 @@ function _resolve_addresses(entry::HostEntry)
     end
 
     return addresses, error_code
+end
+
+# Channel-based rendezvous for passing HostEntry to the resolver thread.
+const _RESOLVER_THREAD_STARTUP = Base.Channel{Any}(1)
+
+@wrap_thread_fn function _resolver_thread_entry()
+    entry = take!(_RESOLVER_THREAD_STARTUP)::HostEntry
+    try
+        _host_resolver_thread(entry)
+    catch e
+        Core.println("host resolver thread errored: $e")
+    finally
+        managed_thread_finished!()
+    end
+end
+
+const _RESOLVER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+
+function _host_resolver_init_cfunctions!()
+    _RESOLVER_THREAD_ENTRY_C[] = @cfunction(_resolver_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+    return nothing
 end
 
 function _host_resolver_thread(entry::HostEntry)
@@ -662,12 +689,11 @@ function host_resolver_resolve!(
             PendingCallback(on_resolved, user_data),
         )
         resolver.cache[host] = new_entry
-        thread_options = ThreadOptions(;
-            join_strategy = ThreadJoinStrategy.MANAGED,
-            name = "ReseauHostResolver",
-        )
-        launch_result = thread_launch(new_entry.resolver_thread, _host_resolver_thread, new_entry, thread_options)
-        if launch_result != OP_SUCCESS
+        put!(_RESOLVER_THREAD_STARTUP, new_entry)
+        try
+            new_entry.resolver_thread = ForeignThread("ReseauHostResolver", _RESOLVER_THREAD_ENTRY_C)
+        catch
+            take!(_RESOLVER_THREAD_STARTUP)  # drain on failure
             delete!(resolver.cache, host)
             unlock(resolver.resolver_lock)
             return ErrorResult(last_error())
@@ -830,7 +856,7 @@ function host_resolver_record_connection_failure!(
         _cache_remove_good!(entry, primary, address.address)
         addr_copy = copy(cached)
         addr_copy.connection_failure_count += 1
-        put!(failed, addr_copy.address, addr_copy)
+        _PARENT.put!(failed, addr_copy.address, addr_copy)
     else
         cached_failed = _cache_find(failed, address.address)
         if cached_failed !== nothing

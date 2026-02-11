@@ -274,12 +274,15 @@ function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, ad
     )
 
     task = ScheduledTask(
-        (ctx, status) -> begin
-            status == TaskStatus.RUN_READY || return nothing
-            _start_connection_attempts(ctx.request, ctx.addresses, ctx.event_loop)
+        TaskFn(function(status)
+            try
+                TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                _start_connection_attempts(request, addresses, event_loop)
+            catch e
+                Core.println("client_bootstrap_attempts task errored: $e")
+            end
             return nothing
-        end,
-        (request = request, addresses = addresses, event_loop = event_loop);
+        end);
         type_tag = "client_bootstrap_attempts",
     )
     event_loop_schedule_task_now!(event_loop, task)
@@ -659,12 +662,15 @@ function _connection_request_complete(request::SocketConnectionRequest, error_co
         requested_loop = request.requested_event_loop
         if requested_loop !== nothing && !event_loop_thread_is_callers_thread(requested_loop)
             task = ScheduledTask(
-                (ctx, status) -> begin
-                    status == TaskStatus.RUN_READY || return nothing
-                    _connection_request_invoke_on_setup(ctx.request, ctx.error_code, ctx.channel)
+                TaskFn(function(status)
+                    try
+                        TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                        _connection_request_invoke_on_setup(request, error_code, channel)
+                    catch e
+                        Core.println("client_bootstrap_on_setup task errored: $e")
+                    end
                     return nothing
-                end,
-                (request = request, error_code = error_code, channel = channel);
+                end);
                 type_tag = "client_bootstrap_on_setup",
             )
             event_loop_schedule_task_now!(requested_loop, task)
@@ -897,12 +903,15 @@ function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
     listener_loop = bootstrap.listener_event_loop
     if listener_loop !== nothing && !event_loop_thread_is_callers_thread(listener_loop)
         task = ScheduledTask(
-            (ctx, status) -> begin
-                ctx.bootstrap.on_listener_destroy === nothing && return nothing
-                Base.invokelatest(ctx.bootstrap.on_listener_destroy, ctx.bootstrap, ctx.bootstrap.user_data)
+            TaskFn(function(status)
+                try
+                    bootstrap.on_listener_destroy === nothing && return nothing
+                    Base.invokelatest(bootstrap.on_listener_destroy, bootstrap, bootstrap.user_data)
+                catch e
+                    Core.println("server_listener_destroy task errored: $e")
+                end
                 return nothing
-            end,
-            (bootstrap = bootstrap,);
+            end);
             type_tag = "server_listener_destroy",
         )
         event_loop_schedule_task_now!(listener_loop, task)
@@ -1158,8 +1167,14 @@ function server_bootstrap_shutdown!(bootstrap::ServerBootstrap)
 
     if bootstrap.listener_socket !== nothing && bootstrap.listener_event_loop !== nothing
         task = ScheduledTask(
-            _server_bootstrap_listener_destroy_task,
-            (bootstrap = bootstrap,);
+            TaskFn(function(status)
+                try
+                    _server_bootstrap_listener_destroy_task((bootstrap = bootstrap,), TaskStatus.T(status))
+                catch e
+                    Core.println("server_listener_shutdown task errored: $e")
+                end
+                return nothing
+            end);
             type_tag = "server_listener_shutdown",
         )
         event_loop_schedule_task_now!(bootstrap.listener_event_loop, task)

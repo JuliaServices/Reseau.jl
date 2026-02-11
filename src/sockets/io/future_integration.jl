@@ -13,8 +13,14 @@ function future_on_event_loop!(
     )
     schedule_callback = () -> begin
         task = ScheduledTask(
-            (_ctx, _status) -> callback(future, user_data),
-            nothing;
+            TaskFn(function(status)
+                try
+                    callback(future, user_data)
+                catch e
+                    Core.println("future_event_loop_callback task errored: $e")
+                end
+                return nothing
+            end);
             type_tag = "future_event_loop_callback",
         )
         event_loop_schedule_task_now!(event_loop, task)
@@ -37,8 +43,14 @@ function future_on_channel!(
     )
     schedule_callback = () -> begin
         task = ScheduledTask(
-            (_ctx, _status) -> callback(future, user_data),
-            nothing;
+            TaskFn(function(status)
+                try
+                    callback(future, user_data)
+                catch e
+                    Core.println("future_channel_callback task errored: $e")
+                end
+                return nothing
+            end);
             type_tag = "future_channel_callback",
         )
         event_loop_schedule_task_now!(channel.event_loop, task)

@@ -782,7 +782,17 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: connected immediately")
 
         # Schedule success callback
-        connect_args.task = ScheduledTask(_run_connect_success, connect_args; type_tag = "posix_connect_success")
+        connect_args.task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    _run_connect_success(connect_args, TaskStatus.T(status))
+                catch e
+                    Core.println("posix_connect_success task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "posix_connect_success",
+        )
         event_loop_schedule_task_now!(event_loop, connect_args.task)
         return nothing
     end
@@ -791,7 +801,17 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: connection pending")
 
         # Create timeout task
-        timeout_task = ScheduledTask(_handle_socket_timeout, connect_args; type_tag = "posix_connect_timeout")
+        timeout_task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    _handle_socket_timeout(connect_args, TaskStatus.T(status))
+                catch e
+                    Core.println("posix_connect_timeout task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "posix_connect_timeout",
+        )
         connect_args.task = timeout_task
 
         # Subscribe to write events (connection completion triggers writable)
@@ -1553,7 +1573,17 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
     # Schedule written task if needed
     if pushed_to_written_queue && !socket_impl.written_task_scheduled
         socket_impl.written_task_scheduled = true
-        socket_impl.written_task = ScheduledTask(_written_task_fn, sock; type_tag = "socket_written_task")
+        socket_impl.written_task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    _written_task_fn(sock, TaskStatus.T(status))
+                catch e
+                    Core.println("socket_written_task task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "socket_written_task",
+        )
         event_loop_schedule_task_now!(sock.event_loop, socket_impl.written_task)
     end
 

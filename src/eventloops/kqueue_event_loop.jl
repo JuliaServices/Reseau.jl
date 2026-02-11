@@ -5,6 +5,30 @@
 @static if Sys.isapple() || Sys.isbsd()
     using LibAwsCal
 
+    # Channel-based rendezvous for passing EventLoop to the thread function.
+    const _KQUEUE_THREAD_STARTUP = Channel{Any}(1)
+
+    # Thread entry point for the kqueue event loop.
+    @wrap_thread_fn function _kqueue_event_loop_thread_entry()
+        event_loop = take!(_KQUEUE_THREAD_STARTUP)::EventLoop
+        try
+            kqueue_event_loop_thread(event_loop)
+        catch e
+            Core.println("kqueue event loop thread errored: $e")
+        finally
+            impl = event_loop.impl_data
+            notify(impl.completion_event)
+            managed_thread_finished!()
+        end
+    end
+
+    const _KQUEUE_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+
+    function _kqueue_init_cfunctions!()
+        _KQUEUE_THREAD_ENTRY_C[] = @cfunction(_kqueue_event_loop_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+        return nothing
+    end
+
     # libdispatch helpers for NW socket support (Apple only)
     @static if Sys.isapple()
         const _libdispatch = "libSystem"
@@ -72,10 +96,6 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered kqueue event loop")
 
         impl = KqueueEventLoop()
-
-        if options.thread_options !== nothing
-            impl.thread_options = options.thread_options
-        end
 
         # Create kqueue
         kq_fd = @ccall kqueue()::Cint
@@ -209,7 +229,8 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
 
         # Thread startup synchronization (avoid libuv-backed `sleep`/`time_ns` polling).
-        impl.startup_event = Threads.Event()
+        impl.startup_event = Base.Threads.Event()
+        impl.completion_event = Base.Threads.Event()
         @atomic impl.startup_error = 0
         @atomic impl.running_thread_id = UInt64(0)
 
@@ -223,16 +244,15 @@
 
         impl.cross_thread_data.state = EventThreadState.RUNNING
 
-        # Launch the event loop thread
-        thread_fn = el -> kqueue_event_loop_thread(el)
-        impl.thread_created_on = ThreadHandle()
-        thread_options = thread_options_with_defaults(impl.thread_options; name = "aws-el-kqueue")
-
-        result = thread_launch(impl.thread_created_on, thread_fn, event_loop, thread_options)
-        if result != OP_SUCCESS
+        # Launch the event loop thread via ForeignThread
+        put!(_KQUEUE_THREAD_STARTUP, event_loop)
+        try
+            impl.thread_created_on = ForeignThread("aws-el-kqueue", _KQUEUE_THREAD_ENTRY_C)
+        catch
+            take!(_KQUEUE_THREAD_STARTUP)  # drain on failure
             impl.cross_thread_data.state = EventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
-            return ErrorResult(last_error())
+            return ErrorResult(raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID))
         end
 
         event_loop.thread = impl.thread_created_on
@@ -277,10 +297,7 @@
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
-            result = thread_join(impl.thread_created_on)
-            if result != OP_SUCCESS
-                return ErrorResult(last_error())
-            end
+            wait(impl.completion_event)
         end
 
         impl.cross_thread_data.state = EventThreadState.READY_TO_RUN
@@ -393,7 +410,7 @@
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         impl = event_loop.impl_data
         running_id = @atomic impl.running_thread_id
-        return running_id != 0 && running_id == thread_current_thread_id()
+        return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
     end
 
     # Subscribe task callback
@@ -528,8 +545,17 @@
         event_loop.impl_data.handle_registry[handle_data_ptr] = handle_data
 
         # Create subscribe task
-        subscribe_fn = (ctx, status) -> kqueue_subscribe_task_callback(ctx, status)
-        handle_data.subscribe_task = ScheduledTask(subscribe_fn, handle_data; type_tag = "kqueue_subscribe")
+        handle_data.subscribe_task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    kqueue_subscribe_task_callback(handle_data, TaskStatus.T(status))
+                catch e
+                    Core.println("kqueue_subscribe task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "kqueue_subscribe",
+        )
 
         event_loop_schedule_task_now!(event_loop, handle_data.subscribe_task)
 
@@ -590,8 +616,17 @@
 
         if @atomic event_loop.running
             # Schedule cleanup task
-            cleanup_fn = (ctx, status) -> kqueue_cleanup_task_callback(ctx, status)
-            handle_data.cleanup_task = ScheduledTask(cleanup_fn, handle_data; type_tag = "kqueue_cleanup")
+            handle_data.cleanup_task = ScheduledTask(
+                TaskFn(function(status)
+                    try
+                        kqueue_cleanup_task_callback(handle_data, TaskStatus.T(status))
+                    catch e
+                        Core.println("kqueue_cleanup task errored: $e")
+                    end
+                    return nothing
+                end);
+                type_tag = "kqueue_cleanup",
+            )
             event_loop_schedule_task_now!(event_loop, handle_data.cleanup_task)
         else
             # Event loop is no longer running, so task scheduling won't make forward progress.
@@ -688,11 +723,9 @@
         impl = event_loop.impl_data
 
         # Set running thread ID
-        @atomic impl.running_thread_id = thread_current_thread_id()
+        @atomic impl.running_thread_id = UInt64(Base.Threads.threadid())
         impl.thread_data.state = EventThreadState.RUNNING
         notify(impl.startup_event)
-
-        _ = thread_current_at_exit(() -> LibAwsCal.aws_cal_thread_clean_up())
 
         kevents = Memory{Kevent}(undef, MAX_EVENTS)
         io_handle_events = Vector{KqueueHandleData}()
@@ -875,6 +908,7 @@
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "exiting main loop")
         @atomic impl.running_thread_id = UInt64(0)
+        LibAwsCal.aws_cal_thread_clean_up()
         return nothing
     end
 
@@ -888,7 +922,7 @@
         event_loop_wait_for_stop_completion!(event_loop)
 
         # Set thread ID for cancellation callbacks
-        impl.thread_joined_to = thread_current_thread_id()
+        impl.thread_joined_to = UInt64(Base.Threads.threadid())
         @atomic impl.running_thread_id = impl.thread_joined_to
 
         # Clean up scheduler (cancels remaining tasks)

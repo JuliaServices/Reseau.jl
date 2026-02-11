@@ -642,7 +642,17 @@
 
         # Create connect args and timeout task. Note: ScheduledTask is parametric on ctx type.
         args = WinsockSocketConnectArgs(sock, nothing, impl.read_io_data)
-        task = ScheduledTask((ctx, st) -> _winsock_handle_socket_timeout(ctx, st), args; type_tag = "winsock_connect_timeout")
+        task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    _winsock_handle_socket_timeout(args, TaskStatus.T(status))
+                catch e
+                    Core.println("winsock_connect_timeout task errored: $e")
+                end
+                return nothing
+            end);
+            type_tag = "winsock_connect_timeout",
+        )
         args.timeout_task = task
 
         impl.connect_args = args
@@ -747,11 +757,18 @@
             end
 
             # Schedule success on the loop.
-            task = ScheduledTask((ctx, st) -> begin
-                st == TaskStatus.RUN_READY || return nothing
-                _winsock_local_and_udp_connection_success(ctx)
-                return nothing
-            end, sock; type_tag = "winsock_local_connect_success")
+            task = ScheduledTask(
+                TaskFn(function(status)
+                    try
+                        TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                        _winsock_local_and_udp_connection_success(sock)
+                    catch e
+                        Core.println("winsock_local_connect_success task errored: $e")
+                    end
+                    return nothing
+                end);
+                type_tag = "winsock_local_connect_success",
+            )
             event_loop_schedule_task_now!(connect_loop, task)
             return nothing
         end
@@ -808,11 +825,18 @@
                     sock.state = SocketState.ERROR
                     return ErrorResult(last_error())
                 end
-                task = ScheduledTask((ctx, st) -> begin
-                    st == TaskStatus.RUN_READY || return nothing
-                    _winsock_local_and_udp_connection_success(ctx)
-                    return nothing
-                end, sock; type_tag = "winsock_udp_connect_success")
+                task = ScheduledTask(
+                    TaskFn(function(status)
+                        try
+                            TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                            _winsock_local_and_udp_connection_success(sock)
+                        catch e
+                            Core.println("winsock_udp_connect_success task errored: $e")
+                        end
+                        return nothing
+                    end);
+                    type_tag = "winsock_udp_connect_success",
+                )
                 event_loop_schedule_task_now!(connect_loop, task)
             end
 
@@ -1381,7 +1405,17 @@
                 return ErrorResult(aws_err)
             elseif err == ERROR_PIPE_CONNECTED
                 # No IOCP event will fire; schedule a task to finish the accept.
-                task = ScheduledTask((ctx, st) -> _winsock_named_pipe_connected_immediately_task(ctx, st), impl.read_io_data; type_tag = "winsock_pipe_connected_immediately")
+                task = ScheduledTask(
+                    TaskFn(function(status)
+                        try
+                            _winsock_named_pipe_connected_immediately_task(impl.read_io_data, TaskStatus.T(status))
+                        catch e
+                            Core.println("winsock_pipe_connected_immediately task errored: $e")
+                        end
+                        return nothing
+                    end);
+                    type_tag = "winsock_pipe_connected_immediately",
+                )
                 event_loop_schedule_task_now!(sock.event_loop, task)
             end
         end

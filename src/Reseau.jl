@@ -24,14 +24,17 @@ include("common/clock.jl")
 include("common/log_formatter.jl")
 include("common/logging.jl")
 include("common/statistics.jl")
+include("common/condition_variable.jl")
 
 # --- public submodules (native implementations) ---
-include("threads/threads.jl")
+include("foreign_threads.jl")
+include("task_scheduler.jl")
 include("eventloops/eventloops.jl")
 include("sockets/sockets.jl")
 
 function __init__()
-    Threads._init_os_thread_cfunc!()
+    ForeignThreads.__init__()
+    EventLoops.__init__()
     Sockets.io_library_init()
 end
 

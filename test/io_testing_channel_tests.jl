@@ -92,7 +92,7 @@ end
 function _drain_channel_tasks(channel::Sockets.Channel; timeout_ns::Int = 2_000_000_000)
     done = Ref(false)
     task = Sockets.ChannelTask((_, arg, status) -> begin
-        status == Threads.TaskStatus.RUN_READY || return nothing
+        status == Reseau.TaskStatus.RUN_READY || return nothing
         arg[] = true
         return nothing
     end, done, "drain_channel_tasks")

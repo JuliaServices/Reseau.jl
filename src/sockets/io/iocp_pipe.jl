@@ -239,8 +239,17 @@
         impl.error_code_to_report = _iocp_pipe_translate_windows_error(_iocp_pipe_get_last_error())
 
         if impl.error_report_task === nothing
-            task_fn = (ctx, status) -> _iocp_pipe_read_end_report_error_task(ctx, status)
-            impl.error_report_task = ScheduledTask(task_fn, read_end; type_tag = "pipe_read_end_report_error")
+            impl.error_report_task = ScheduledTask(
+                TaskFn(function(status)
+                    try
+                        _iocp_pipe_read_end_report_error_task(read_end, TaskStatus.T(status))
+                    catch e
+                        Core.println("pipe_read_end_report_error task errored: $e")
+                    end
+                    return nothing
+                end);
+                type_tag = "pipe_read_end_report_error",
+            )
         end
 
         impl.error_task_active = true

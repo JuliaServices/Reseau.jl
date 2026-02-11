@@ -11,16 +11,14 @@ end
 # Event loop options
 struct EventLoopOptions
     clock::Function
-    thread_options::Union{Nothing, ThreadOptions}
     parent_elg::Any  # EventLoopGroup or nothing
 end
 
 function EventLoopOptions(;
         clock = high_res_clock,
-        thread_options::Union{Nothing, ThreadOptions} = nothing,
         parent_elg = nothing,
     )
-    return EventLoopOptions(clock, thread_options, parent_elg)
+    return EventLoopOptions(clock, parent_elg)
 end
 
 # Event loop group options
@@ -79,7 +77,7 @@ mutable struct EventLoop
     impl_data::PlatformEventLoop
     @atomic running::Bool
     @atomic should_stop::Bool
-    thread::Union{Nothing, ThreadHandle}
+    thread::Union{Nothing, ForeignThread}
 end
 
 function EventLoop(clock, impl_data::PlatformEventLoop)
@@ -466,11 +464,12 @@ function task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing
         return nothing
     end
 
-    wake = Threads.Event()
-    ctx = (wake = wake,)
+    wake = Base.Threads.Event()
     task = ScheduledTask(
-        (ctx, _status) -> (notify(ctx.wake); nothing),
-        ctx;
+        TaskFn(function(status)
+            try; notify(wake); catch; end
+            return nothing
+        end);
         type_tag = "task_sleep",
     )
 

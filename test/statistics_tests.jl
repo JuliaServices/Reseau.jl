@@ -112,22 +112,16 @@ end
         results = Channel{Tuple{Reseau.StatisticsSampleInterval, Vector{Any}}}(1)
         stats_handler = TestStatisticsHandler(UInt64(50), results)
 
-        set_task = Threads.ScheduledTask(
-            (ch, _status) -> Sockets.channel_set_statistics_handler!(ch, stats_handler),
-            channel;
-            type_tag = "set_stats_handler",
-        )
+        set_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+            Sockets.channel_set_statistics_handler!(channel, stats_handler)
+        end); type_tag = "set_stats_handler")
         EventLoops.event_loop_schedule_task_now!(event_loop, set_task)
 
-        update_task = Threads.ScheduledTask(
-            (h, _status) -> begin
-                h.stats.bytes_read = 111
-                h.stats.bytes_written = 222
-                return nothing
-            end,
-            handler;
-            type_tag = "update_stats",
-        )
+        update_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+            handler.stats.bytes_read = 111
+            handler.stats.bytes_written = 222
+            return nothing
+        end); type_tag = "update_stats")
         EventLoops.event_loop_schedule_task_now!(event_loop, update_task)
 
         @test _wait_ready_stats(results; timeout_ns = 5_000_000_000)
@@ -142,11 +136,9 @@ end
         @test handler.stats.bytes_read == 0
         @test handler.stats.bytes_written == 0
 
-        clear_task = Threads.ScheduledTask(
-            (ch, _status) -> Sockets.channel_set_statistics_handler!(ch, nothing),
-            channel;
-            type_tag = "clear_stats_handler",
-        )
+        clear_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+            Sockets.channel_set_statistics_handler!(channel, nothing)
+        end); type_tag = "clear_stats_handler")
         EventLoops.event_loop_schedule_task_now!(event_loop, clear_task)
 
         EventLoops.event_loop_group_release!(elg)

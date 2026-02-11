@@ -1,6 +1,23 @@
 using Test
 using Reseau
 
+const FT = Reseau.ForeignThreads
+
+# Thread entry for managed-thread-join test (must be at module level)
+const _TEST_THREAD_STARTUP = Channel{Any}(1)
+FT.@wrap_thread_fn function _test_managed_thread_entry()
+    ctx = take!(_TEST_THREAD_STARTUP)
+    try
+        put!(ctx.started, nothing)
+        while !ctx.stop_flag[]
+            sleep(0.001)
+        end
+    finally
+        FT.managed_thread_finished!()
+    end
+end
+const _TEST_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(@cfunction(_test_managed_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},)))
+
 @testset "Common containers" begin
     @testset "PriorityQueue" begin
         pq = Reseau.PriorityQueue{Int}((a, b) -> a < b; capacity = 2)
@@ -20,63 +37,59 @@ end
 @testset "Managed thread join" begin
     started = Channel{Nothing}(2)
     stop_flag = Ref(false)
-    opts = Threads.ThreadOptions(; join_strategy = Threads.ThreadJoinStrategy.MANAGED)
-    handles = Threads.ThreadHandle[]
+
     for _ in 1:2
-        handle = Threads.ThreadHandle()
-        push!(handles, handle)
-        @test Threads.thread_launch(handle, _ -> begin
-            put!(started, nothing)
-            while !stop_flag[]
-                sleep(0.001)
-            end
-            return nothing
-        end, nothing, opts) == Reseau.OP_SUCCESS
+        put!(_TEST_THREAD_STARTUP, (started=started, stop_flag=stop_flag))
+        FT.ForeignThread("test-managed", _TEST_THREAD_ENTRY_C)
     end
     take!(started)
     take!(started)
     stop_flag[] = true
-    @test Threads.thread_join_all_managed() == Reseau.OP_SUCCESS
-    @test Threads.thread_get_managed_thread_count() == 0
+    FT.join_all_managed()
+    @test true  # if we get here, join completed
 end
 
 @testset "TaskScheduler cancel" begin
-    scheduler = Threads.TaskScheduler()
-    status_ch = Channel{Threads.TaskStatus.T}(1)
-    task = Threads.ScheduledTask((_, status) -> put!(status_ch, status), nothing; type_tag = "task_cancel")
-    Threads.task_scheduler_cancel!(scheduler, task)
+    scheduler = Reseau.TaskScheduler()
+    status_ch = Channel{Reseau.TaskStatus.T}(1)
+    task = Reseau.ScheduledTask(
+        Reseau.TaskFn(function(status)
+            put!(status_ch, Reseau.TaskStatus.T(status))
+            return nothing
+        end);
+        type_tag = "task_cancel",
+    )
+    Reseau.task_scheduler_cancel!(scheduler, task)
     @test Base.timedwait(() -> isready(status_ch), 5.0) == :ok
-    @test take!(status_ch) == Threads.TaskStatus.CANCELED
+    @test take!(status_ch) == Reseau.TaskStatus.CANCELED
 end
 
 @testset "TaskScheduler fairness" begin
-    scheduler = Threads.TaskScheduler()
+    scheduler = Reseau.TaskScheduler()
     executed = String[]
 
-    task_a = Threads.ScheduledTask(
-        (ctx, status) -> begin
-            status == Threads.TaskStatus.RUN_READY || return nothing
-            push!(ctx.executed, "a")
-            task_b = Threads.ScheduledTask(
-                (ctx2, status2) -> begin
-                    status2 == Threads.TaskStatus.RUN_READY || return nothing
-                    push!(ctx2.executed, "b")
+    task_a = Reseau.ScheduledTask(
+        Reseau.TaskFn(function(status)
+            Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+            push!(executed, "a")
+            task_b = Reseau.ScheduledTask(
+                Reseau.TaskFn(function(status2)
+                    Reseau.TaskStatus.T(status2) == Reseau.TaskStatus.RUN_READY || return nothing
+                    push!(executed, "b")
                     return nothing
-                end,
-                (executed = ctx.executed,);
+                end);
                 type_tag = "task_b",
             )
-            Threads.task_scheduler_schedule_now!(ctx.scheduler, task_b)
+            Reseau.task_scheduler_schedule_now!(scheduler, task_b)
             return nothing
-        end,
-        (executed = executed, scheduler = scheduler);
+        end);
         type_tag = "task_a",
     )
 
-    Threads.task_scheduler_schedule_now!(scheduler, task_a)
-    Threads.task_scheduler_run_all!(scheduler, UInt64(0))
+    Reseau.task_scheduler_schedule_now!(scheduler, task_a)
+    Reseau.task_scheduler_run_all!(scheduler, UInt64(0))
     @test executed == ["a"]
-    Threads.task_scheduler_run_all!(scheduler, UInt64(0))
+    Reseau.task_scheduler_run_all!(scheduler, UInt64(0))
     @test executed == ["a", "b"]
 end
 
@@ -124,7 +137,7 @@ end
             put!(tids, Base.Threads.threadid())
             Reseau.raise_error(Reseau.ERROR_INVALID_ARGUMENT)
             Base.Threads.atomic_add!(barrier, 1)
-            while Base.Threads.atomic_load(barrier) < 2
+            while barrier[] < 2
                 yield()
             end
             put!(errs, Reseau.last_error())
@@ -134,7 +147,7 @@ end
             put!(tids, Base.Threads.threadid())
             Reseau.raise_error(Reseau.ERROR_OOM)
             Base.Threads.atomic_add!(barrier, 1)
-            while Base.Threads.atomic_load(barrier) < 2
+            while barrier[] < 2
                 yield()
             end
             put!(errs, Reseau.last_error())

@@ -977,11 +977,11 @@ end
                     Sockets.CKK_RSA,
                     message,
                     digest_alg,
-                    Reseau.TlsSignatureAlgorithm.RSA,
+                    Sockets.TlsSignatureAlgorithm.RSA,
                 )
                 @test signature isa Reseau.ByteBuffer
                 if signature isa Reseau.ByteBuffer
-                    prefix = Reseau.get_prefix_to_rsa_sig(digest_alg)
+                    prefix = Sockets.get_prefix_to_rsa_sig(digest_alg)
                     @test prefix isa Reseau.ByteCursor
                     if prefix isa Reseau.ByteCursor
                         prefixed = Reseau.ByteBuffer(Int(prefix.len + message.len))
@@ -1007,18 +1007,18 @@ end
                     Sockets.CKK_GENERIC_SECRET,
                     message,
                     digest_alg,
-                    Reseau.TlsSignatureAlgorithm.RSA,
+                    Sockets.TlsSignatureAlgorithm.RSA,
                 )
                 @test unsupported isa Reseau.ErrorResult
             finally
                 pkcs11_tester_cleanup!(tester)
             end
         end
-        sign_rsa(Reseau.TlsHashAlgorithm.SHA1)
-        sign_rsa(Reseau.TlsHashAlgorithm.SHA512)
-        sign_rsa(Reseau.TlsHashAlgorithm.SHA384)
-        sign_rsa(Reseau.TlsHashAlgorithm.SHA256)
-        sign_rsa(Reseau.TlsHashAlgorithm.SHA224)
+        sign_rsa(Sockets.TlsHashAlgorithm.SHA1)
+        sign_rsa(Sockets.TlsHashAlgorithm.SHA512)
+        sign_rsa(Sockets.TlsHashAlgorithm.SHA384)
+        sign_rsa(Sockets.TlsHashAlgorithm.SHA256)
+        sign_rsa(Sockets.TlsHashAlgorithm.SHA224)
     end
 
     @testset "pkcs11 sign ec 256" begin
@@ -1034,8 +1034,8 @@ end
                 priv,
                 Sockets.CKK_EC,
                 message,
-                Reseau.TlsHashAlgorithm.UNKNOWN,
-                Reseau.TlsSignatureAlgorithm.ECDSA,
+                Sockets.TlsHashAlgorithm.UNKNOWN,
+                Sockets.TlsSignatureAlgorithm.ECDSA,
             )
             @test signature isa Reseau.ByteBuffer
 
@@ -1045,8 +1045,8 @@ end
                 priv,
                 Sockets.CKK_GENERIC_SECRET,
                 message,
-                Reseau.TlsHashAlgorithm.UNKNOWN,
-                Reseau.TlsSignatureAlgorithm.ECDSA,
+                Sockets.TlsHashAlgorithm.UNKNOWN,
+                Sockets.TlsSignatureAlgorithm.ECDSA,
             )
             @test unsupported isa Reseau.ErrorResult
         finally
@@ -1075,30 +1075,30 @@ end
 
             @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
-            elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-            resolver = Reseau.HostResolver(elg)
+            elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+            resolver = Sockets.HostResolver(elg)
 
-            server_tls_opts = Reseau.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
+            server_tls_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
             maybe_apply_test_keychain!(server_tls_opts)
-            @test server_tls_opts isa Reseau.TlsContextOptions
-            if server_tls_opts isa Reseau.TlsContextOptions
-                _ = Reseau.tls_ctx_options_override_default_trust_store_from_path(
+            @test server_tls_opts isa Sockets.TlsContextOptions
+            if server_tls_opts isa Sockets.TlsContextOptions
+                _ = Sockets.tls_ctx_options_override_default_trust_store_from_path(
                     server_tls_opts;
                     ca_file = cert_path,
                 )
-                Reseau.tls_ctx_options_set_verify_peer(server_tls_opts, true)
+                Sockets.tls_ctx_options_set_verify_peer(server_tls_opts, true)
             end
-            server_ctx = Reseau.tls_context_new(server_tls_opts)
-            @test server_ctx isa Reseau.TlsContext
+            server_ctx = Sockets.tls_context_new(server_tls_opts)
+            @test server_ctx isa Sockets.TlsContext
 
             server_ready = Ref(false)
             server_shutdown = Ref(false)
 
-            server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+            server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
                 event_loop_group = elg,
                 host = "127.0.0.1",
                 port = 0,
-                tls_connection_options = Reseau.TlsConnectionOptions(server_ctx),
+                tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
                 on_incoming_channel_setup = (bs, err, channel, ud) -> begin
                     server_ready[] = err == Reseau.AWS_OP_SUCCESS
                     return nothing
@@ -1110,37 +1110,37 @@ end
             ))
             listener = server_bootstrap.listener_socket
             @test listener !== nothing
-            bound = Reseau.socket_get_bound_address(listener)
-            port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
+            bound = Sockets.socket_get_bound_address(listener)
+            port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             @test port != 0
 
-            client_opts = Reseau.TlsCtxPkcs11Options(
+            client_opts = Sockets.TlsCtxPkcs11Options(
                 pkcs11_lib = tester.lib,
                 token_label = TOKEN_LABEL_RSA,
                 user_pin = USER_PIN,
                 private_key_object_label = DEFAULT_KEY_LABEL,
                 cert_file_path = cert_path,
             )
-            client_tls_opts = Reseau.tls_ctx_options_init_client_mtls_with_pkcs11(client_opts)
-            @test client_tls_opts isa Reseau.TlsContextOptions
-            client_ctx = Reseau.tls_context_new(client_tls_opts)
-            @test client_ctx isa Reseau.TlsContext
+            client_tls_opts = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(client_opts)
+            @test client_tls_opts isa Sockets.TlsContextOptions
+            client_ctx = Sockets.tls_context_new(client_tls_opts)
+            @test client_ctx isa Sockets.TlsContext
 
             client_ready = Ref(false)
             client_shutdown = Ref(false)
-            client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+            client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
                 event_loop_group = elg,
                 host_resolver = resolver,
             ))
-            @test Reseau.client_bootstrap_connect!(
+            @test Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
                 port;
-                tls_connection_options = Reseau.TlsConnectionOptions(client_ctx; server_name = "localhost"),
+                tls_connection_options = Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
                 on_setup = (bs, err, channel, ud) -> begin
                     client_ready[] = err == Reseau.AWS_OP_SUCCESS
                     if err == Reseau.AWS_OP_SUCCESS
-                        Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                     end
                     return nothing
                 end,
@@ -1162,9 +1162,9 @@ end
             @test client_shutdown[]
             @test server_shutdown[]
 
-            Reseau.server_bootstrap_shutdown!(server_bootstrap)
-            Reseau.host_resolver_shutdown!(resolver)
-            Reseau.event_loop_group_destroy!(elg)
+            Sockets.server_bootstrap_shutdown!(server_bootstrap)
+            Sockets.host_resolver_shutdown!(resolver)
+            EventLoops.event_loop_group_destroy!(elg)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -1191,30 +1191,30 @@ end
 
             @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
-            elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
-            resolver = Reseau.HostResolver(elg)
+            elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+            resolver = Sockets.HostResolver(elg)
 
-            server_tls_opts = Reseau.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
+            server_tls_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
             maybe_apply_test_keychain!(server_tls_opts)
-            @test server_tls_opts isa Reseau.TlsContextOptions
-            if server_tls_opts isa Reseau.TlsContextOptions
-                _ = Reseau.tls_ctx_options_override_default_trust_store_from_path(
+            @test server_tls_opts isa Sockets.TlsContextOptions
+            if server_tls_opts isa Sockets.TlsContextOptions
+                _ = Sockets.tls_ctx_options_override_default_trust_store_from_path(
                     server_tls_opts;
                     ca_file = cert_path,
                 )
-                Reseau.tls_ctx_options_set_verify_peer(server_tls_opts, true)
+                Sockets.tls_ctx_options_set_verify_peer(server_tls_opts, true)
             end
-            server_ctx = Reseau.tls_context_new(server_tls_opts)
-            @test server_ctx isa Reseau.TlsContext
+            server_ctx = Sockets.tls_context_new(server_tls_opts)
+            @test server_ctx isa Sockets.TlsContext
 
             server_ready = Ref(false)
             server_shutdown = Ref(false)
 
-            server_bootstrap = Reseau.ServerBootstrap(Reseau.ServerBootstrapOptions(
+            server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
                 event_loop_group = elg,
                 host = "127.0.0.1",
                 port = 0,
-                tls_connection_options = Reseau.TlsConnectionOptions(server_ctx),
+                tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
                 on_incoming_channel_setup = (bs, err, channel, ud) -> begin
                     server_ready[] = err == Reseau.AWS_OP_SUCCESS
                     return nothing
@@ -1226,37 +1226,37 @@ end
             ))
             listener = server_bootstrap.listener_socket
             @test listener !== nothing
-            bound = Reseau.socket_get_bound_address(listener)
-            port = bound isa Reseau.SocketEndpoint ? Int(bound.port) : 0
+            bound = Sockets.socket_get_bound_address(listener)
+            port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             @test port != 0
 
-            client_opts = Reseau.TlsCtxPkcs11Options(
+            client_opts = Sockets.TlsCtxPkcs11Options(
                 pkcs11_lib = tester.lib,
                 token_label = TOKEN_LABEL_EC,
                 user_pin = USER_PIN,
                 private_key_object_label = DEFAULT_KEY_LABEL,
                 cert_file_path = cert_path,
             )
-            client_tls_opts = Reseau.tls_ctx_options_init_client_mtls_with_pkcs11(client_opts)
-            @test client_tls_opts isa Reseau.TlsContextOptions
-            client_ctx = Reseau.tls_context_new(client_tls_opts)
-            @test client_ctx isa Reseau.TlsContext
+            client_tls_opts = Sockets.tls_ctx_options_init_client_mtls_with_pkcs11(client_opts)
+            @test client_tls_opts isa Sockets.TlsContextOptions
+            client_ctx = Sockets.tls_context_new(client_tls_opts)
+            @test client_ctx isa Sockets.TlsContext
 
             client_ready = Ref(false)
             client_shutdown = Ref(false)
-            client_bootstrap = Reseau.ClientBootstrap(Reseau.ClientBootstrapOptions(
+            client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
                 event_loop_group = elg,
                 host_resolver = resolver,
             ))
-            @test Reseau.client_bootstrap_connect!(
+            @test Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
                 port;
-                tls_connection_options = Reseau.TlsConnectionOptions(client_ctx; server_name = "localhost"),
+                tls_connection_options = Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
                 on_setup = (bs, err, channel, ud) -> begin
                     client_ready[] = err == Reseau.AWS_OP_SUCCESS
                     if err == Reseau.AWS_OP_SUCCESS
-                        Reseau.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                     end
                     return nothing
                 end,
@@ -1278,9 +1278,9 @@ end
             @test client_shutdown[]
             @test server_shutdown[]
 
-            Reseau.server_bootstrap_shutdown!(server_bootstrap)
-            Reseau.host_resolver_shutdown!(resolver)
-            Reseau.event_loop_group_destroy!(elg)
+            Sockets.server_bootstrap_shutdown!(server_bootstrap)
+            Sockets.host_resolver_shutdown!(resolver)
+            EventLoops.event_loop_group_destroy!(elg)
         finally
             pkcs11_tester_cleanup!(tester)
         end
