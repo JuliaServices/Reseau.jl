@@ -138,11 +138,8 @@ macro wrap_thread_fn(fndef)
     Meta.isexpr(sig, :call) || error("@wrap_thread_fn: expected `function name() ... end`")
     name = sig.args[1]
     length(sig.args) == 1 || error("@wrap_thread_fn: function must take zero arguments")
-    # Windows CreateThread expects DWORD (UInt32) return; POSIX pthread expects Ptr{Cvoid}.
-    ret_type = Sys.iswindows() ? :UInt32 : :(Ptr{Cvoid})
-    ret_val  = Sys.iswindows() ? :(UInt32(0)) : :C_NULL
     return quote
-        function $(esc(name))(arg::Ptr{Cvoid})::$(ret_type)
+        function $(esc(name))(arg::Ptr{Cvoid})::Ptr{Cvoid}
             thread_id = UInt64(UInt(arg))
             try
                 @with FOREIGN_THREAD_ID => thread_id begin
@@ -151,7 +148,7 @@ macro wrap_thread_fn(fndef)
             catch e
                 Core.println("foreign thread ($thread_id) errored: $e")
             end
-            return $(ret_val)
+            return C_NULL
         end
     end
 end

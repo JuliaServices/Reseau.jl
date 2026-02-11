@@ -24,7 +24,7 @@
     const _IOCP_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 
     function _iocp_init_cfunctions!()
-        _IOCP_THREAD_ENTRY_C[] = @cfunction(_iocp_event_loop_thread_entry, UInt32, (Ptr{Cvoid},))
+        _IOCP_THREAD_ENTRY_C[] = @cfunction(_iocp_event_loop_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
         return nothing
     end
 
