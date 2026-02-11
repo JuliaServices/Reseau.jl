@@ -202,7 +202,7 @@ end
 
 @testset "host resolver ttl cache behavior" begin
     clock_ref = Ref{UInt64}(0)
-    clock_fn = EventLoops.ClockCallable(() -> clock_ref[])
+    clock_fn = EventLoops.RefClock(clock_ref)
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     resolver = Sockets.HostResolver(
@@ -348,7 +348,7 @@ end
 
 @testset "host resolver ttl refreshes on resolve" begin
     clock_ref = Ref{UInt64}(0)
-    clock_fn = EventLoops.ClockCallable(() -> clock_ref[])
+    clock_fn = EventLoops.RefClock(clock_ref)
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     resolver = Sockets.HostResolver(
@@ -408,7 +408,7 @@ end
 
 @testset "host resolver bad list expires eventually" begin
     clock_ref = Ref{UInt64}(0)
-    clock_fn = EventLoops.ClockCallable(() -> clock_ref[])
+    clock_fn = EventLoops.RefClock(clock_ref)
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     resolver = Sockets.HostResolver(

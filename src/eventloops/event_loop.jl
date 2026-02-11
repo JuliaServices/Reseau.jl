@@ -8,21 +8,60 @@ function high_res_clock()::UInt64
     return ticks[]
 end
 
-# Default clock callable (constructed once at module init)
-const _DEFAULT_CLOCK = Ref{ClockCallable}()
+# Concrete clock source variants used by event loops and host resolver.
+struct HighResClock end
+
+struct RefClock
+    value::Base.RefValue{UInt64}
+end
+
+RefClock(value::Integer) = RefClock(Ref(UInt64(value)))
+
+mutable struct SequenceClock
+    values::Vector{UInt64}
+    index::Int
+end
+
+function SequenceClock(values::AbstractVector{UInt64})
+    return SequenceClock(copy(values), 0)
+end
+
+function SequenceClock(values::AbstractVector{<:Integer})
+    converted = Vector{UInt64}(undef, length(values))
+    @inbounds for i in eachindex(values)
+        converted[i] = UInt64(values[i])
+    end
+    return SequenceClock(converted, 0)
+end
+
+const ClockSource = Union{HighResClock, RefClock, SequenceClock}
+
+@inline clock_now_ns(::HighResClock)::UInt64 = high_res_clock()
+@inline clock_now_ns(clock::RefClock)::UInt64 = clock.value[]
+
+@inline function clock_now_ns(clock::SequenceClock)::UInt64
+    values = clock.values
+    isempty(values) && return UInt64(0)
+    next_index = min(clock.index + 1, length(values))
+    clock.index = next_index
+    return values[next_index]
+end
+
+# Default clock source (constructed once at module init)
+const _DEFAULT_CLOCK = Ref{ClockSource}()
 
 function _init_default_clock()
-    _DEFAULT_CLOCK[] = ClockCallable(high_res_clock)
+    _DEFAULT_CLOCK[] = HighResClock()
 end
 
 # Event loop options
 struct EventLoopOptions
-    clock::ClockCallable
+    clock::ClockSource
     parent_elg::Any  # EventLoopGroup or nothing
 end
 
 function EventLoopOptions(;
-        clock::ClockCallable = _DEFAULT_CLOCK[],
+        clock::ClockSource = _DEFAULT_CLOCK[],
         parent_elg = nothing,
     )
     return EventLoopOptions(clock, parent_elg)
@@ -33,14 +72,14 @@ struct EventLoopGroupOptions
     loop_count::UInt16
     shutdown_options::Union{TaskFn, Nothing}
     cpu_group::Any
-    clock_override::Union{ClockCallable, Nothing}
+    clock_override::Union{ClockSource, Nothing}
 end
 
 function EventLoopGroupOptions(;
         loop_count::Integer = 0,
         shutdown_options::Union{TaskFn, Nothing} = nothing,
         cpu_group = nothing,
-        clock_override::Union{ClockCallable, Nothing} = nothing,
+        clock_override::Union{ClockSource, Nothing} = nothing,
     )
     return EventLoopGroupOptions(
         UInt16(loop_count),
@@ -74,7 +113,7 @@ end
 
 # Event loop base structure (non-parametric, concrete per platform)
 mutable struct EventLoop
-    clock::ClockCallable
+    clock::ClockSource
     message_pool::Any  # Sockets.MessagePool or nothing
     @atomic current_load_factor::Csize_t
     latest_tick_start::UInt64
@@ -87,7 +126,7 @@ mutable struct EventLoop
     thread::Union{Nothing, ForeignThread}
 end
 
-function EventLoop(clock, impl_data::PlatformEventLoop)
+function EventLoop(clock::ClockSource, impl_data::PlatformEventLoop)
     return EventLoop(
         clock,
         nothing,
@@ -145,7 +184,7 @@ end
 
 # Get current clock time
 function event_loop_current_clock_time(event_loop::EventLoop)::UInt64
-    return event_loop.clock()
+    return clock_now_ns(event_loop.clock)
 end
 
 # Shared resource cleanup used by all platform backends.
@@ -185,12 +224,12 @@ const LOAD_FACTOR_STALE_SECS = UInt64(10)
 end
 
 function event_loop_register_tick_start!(event_loop::EventLoop)
-    current_time = event_loop.clock()
+    current_time = clock_now_ns(event_loop.clock)
     return event_loop.latest_tick_start = current_time
 end
 
 function event_loop_register_tick_end!(event_loop::EventLoop)
-    current_time = event_loop.clock()
+    current_time = clock_now_ns(event_loop.clock)
     latency = current_time - event_loop.latest_tick_start
 
     # Saturating add into current_tick_latency_sum
@@ -213,7 +252,7 @@ function event_loop_register_tick_end!(event_loop::EventLoop)
 end
 
 function event_loop_get_load_factor(event_loop::EventLoop)::Csize_t
-    current_time = event_loop.clock()
+    current_time = clock_now_ns(event_loop.clock)
     current_time_secs = _clock_nanos_to_secs(current_time)
     next_flush_secs = @atomic event_loop.next_flush_time
 
@@ -456,7 +495,7 @@ function task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing
         type_tag = "task_sleep",
     )
 
-    now = event_loop.clock()
+    now = clock_now_ns(event_loop.clock)
     run_at = add_u64_saturating(now, UInt64(ns))
     event_loop_schedule_task_future!(event_loop, task, run_at)
 

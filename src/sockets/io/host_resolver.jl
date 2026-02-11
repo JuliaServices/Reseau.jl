@@ -72,7 +72,7 @@ struct HostResolverConfig
     max_addresses_per_host::UInt64
     resolve_frequency_ns::UInt64  # How often to re-resolve
     background_refresh::Bool  # retained for compatibility
-    clock_override::Union{ClockCallable, Nothing}
+    clock_override::Union{ClockSource, Nothing}
 end
 
 struct HostResolutionConfig
@@ -103,7 +103,7 @@ function HostResolverConfig(;
         max_addresses_per_host::Integer = 8,
         resolve_frequency_ns::Integer = 1_000_000_000,  # 1 second
         background_refresh::Bool = true,
-        clock_override::Union{ClockCallable, Nothing} = nothing,
+        clock_override::Union{ClockSource, Nothing} = nothing,
     )
     return HostResolverConfig(
         UInt64(max_entries),
@@ -132,7 +132,7 @@ end
 
 @inline function _resolver_clock(resolver::HostResolver)::UInt64
     clock_override = resolver.config.clock_override
-    return clock_override === nothing ? high_res_clock() : clock_override()::UInt64
+    return clock_override === nothing ? high_res_clock() : clock_now_ns(clock_override)
 end
 
 function HostResolver(

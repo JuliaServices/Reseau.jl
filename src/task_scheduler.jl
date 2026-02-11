@@ -121,40 +121,6 @@ end
     return nothing
 end
 
-# ── ClockCallable: trim-safe type-erased callable for () -> UInt64 ──
-# Covers: EventLoop.clock, EventLoopGroupOptions.clock_override,
-# HostResolverConfig.clock_override.
-
-struct _ClockCallWrapper <: Function end
-
-function (::_ClockCallWrapper)(f)
-    return UInt64(f())
-end
-
-@generated function _clock_gen_fptr(::Type{F}) where F
-    quote
-        @cfunction($(_ClockCallWrapper()), UInt64, (Ref{$F},))
-    end
-end
-
-struct ClockCallable
-    ptr::Ptr{Cvoid}
-    objptr::Ptr{Cvoid}
-    _root::Any
-end
-
-function ClockCallable(callable::F) where F
-    ptr = _clock_gen_fptr(F)
-    objref = Base.cconvert(Ref{F}, callable)
-    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
-    return ClockCallable(ptr, objptr, objref)
-end
-
-
-@inline function (f::ClockCallable)()::UInt64
-    return ccall(f.ptr, UInt64, (Ptr{Cvoid},), f.objptr)
-end
-
 # ── ChannelCallable: trim-safe type-erased callable for (Int, Any) -> Nothing ──
 # Covers: accept_result_fn (error_code, new_socket), on_incoming_channel_setup/shutdown
 # (error_code, channel), and similar callbacks needing a runtime object argument.

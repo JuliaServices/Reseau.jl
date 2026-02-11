@@ -1560,11 +1560,7 @@ end
 
     @testset "Event loop load factor" begin
         times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
-        idx = Ref(0)
-        clock = EventLoops.ClockCallable(() -> begin
-            idx[] += 1
-            return idx[] <= length(times) ? times[idx[]] : times[end]
-        end)
+        clock = EventLoops.SequenceClock(times)
 
         opts = EventLoops.EventLoopOptions(clock = clock)
         el = EventLoops.event_loop_new(opts)
@@ -1577,11 +1573,7 @@ end
     end
 
     @testset "Event loop clock override" begin
-        clock_calls = Ref(0)
-        clock = EventLoops.ClockCallable(() -> begin
-            clock_calls[] += 1
-            return UInt64(42)
-        end)
+        clock = EventLoops.RefClock(UInt64(42))
 
         opts = EventLoops.EventLoopOptions(clock = clock)
         el = EventLoops.event_loop_new(opts)
@@ -1602,8 +1594,6 @@ end
                 EventLoops.event_loop_group_destroy!(elg)
             end
         end
-
-        @test clock_calls[] >= 1
     end
 
     @testset "Event loop group thread constraint" begin

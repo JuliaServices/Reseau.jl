@@ -835,7 +835,7 @@
             end
 
             # Run scheduled tasks
-            now_ns = event_loop.clock()
+            now_ns = clock_now_ns(event_loop.clock)
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
             tracing_task_begin(tracing_event_loop_run_tasks)
@@ -848,7 +848,7 @@
             # Calculate next timeout
             use_default_timeout = false
 
-            now_ns = event_loop.clock()
+            now_ns = clock_now_ns(event_loop.clock)
 
             has_tasks, next_run_time = task_scheduler_has_tasks(impl.thread_data.scheduler)
             if !has_tasks

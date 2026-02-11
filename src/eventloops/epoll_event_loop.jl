@@ -652,7 +652,7 @@
 
             # Run scheduled tasks
             now_ns = try
-                event_loop.clock()
+                clock_now_ns(event_loop.clock)
             catch
                 UInt64(0)
             end
@@ -669,7 +669,7 @@
             use_default_timeout = false
 
             try
-                now_ns = event_loop.clock()
+                now_ns = clock_now_ns(event_loop.clock)
             catch
                 use_default_timeout = true
             end
