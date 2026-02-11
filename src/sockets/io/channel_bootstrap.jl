@@ -1,6 +1,22 @@
 # AWS IO Library - Channel Bootstrap
 # Port of aws-c-io/source/channel_bootstrap.c
 
+@inline _bootstrap_protocol_negotiated_callback(::Nothing) = nothing
+@inline _bootstrap_protocol_negotiated_callback(callback::ProtocolNegotiatedCallable) = callback
+@inline _bootstrap_protocol_negotiated_callback(callback) = ProtocolNegotiatedCallable(callback)
+
+@inline _bootstrap_channel_callback(::Nothing) = nothing
+@inline _bootstrap_channel_callback(callback::BootstrapChannelCallback) = callback
+@inline _bootstrap_channel_callback(callback) = BootstrapChannelCallback(callback)
+
+@inline _bootstrap_event_callback(::Nothing) = nothing
+@inline _bootstrap_event_callback(callback::BootstrapEventCallback) = callback
+@inline _bootstrap_event_callback(callback) = BootstrapEventCallback(callback)
+
+@inline _bootstrap_listener_destroy_callback(::Nothing) = nothing
+@inline _bootstrap_listener_destroy_callback(callback::BootstrapEventCallback) = callback
+@inline _bootstrap_listener_destroy_callback(callback) = BootstrapEventCallback((bootstrap, _error_code, user_data) -> callback(bootstrap, user_data))
+
 # Client bootstrap options
 struct ClientBootstrapOptions
     event_loop_group::EventLoopGroup
@@ -8,10 +24,10 @@ struct ClientBootstrapOptions
     host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
     tls_connection_options::Any  # TlsConnectionOptions or nothing
-    on_protocol_negotiated::Union{Function, Nothing}
-    on_creation_callback::Union{Function, Nothing}
-    on_setup_callback::Union{Function, Nothing}
-    on_shutdown_callback::Union{Function, Nothing}
+    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
+    on_creation_callback::Union{BootstrapChannelCallback, Nothing}
+    on_setup_callback::Union{BootstrapChannelCallback, Nothing}
+    on_shutdown_callback::Union{BootstrapChannelCallback, Nothing}
     user_data::Any
 end
 
@@ -33,10 +49,10 @@ function ClientBootstrapOptions(;
         host_resolution_config,
         socket_options,
         tls_connection_options,
-        on_protocol_negotiated,
-        on_creation_callback,
-        on_setup_callback,
-        on_shutdown_callback,
+        _bootstrap_protocol_negotiated_callback(on_protocol_negotiated),
+        _bootstrap_channel_callback(on_creation_callback),
+        _bootstrap_channel_callback(on_setup_callback),
+        _bootstrap_channel_callback(on_shutdown_callback),
         user_data,
     )
 end
@@ -48,10 +64,10 @@ mutable struct ClientBootstrap
     host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
     tls_connection_options::Any  # TlsConnectionOptions or nothing
-    on_protocol_negotiated::Union{Function, Nothing}
-    on_creation_callback::Union{Function, Nothing}
-    on_setup_callback::Union{Function, Nothing}
-    on_shutdown_callback::Union{Function, Nothing}
+    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
+    on_creation_callback::Union{BootstrapChannelCallback, Nothing}
+    on_setup_callback::Union{BootstrapChannelCallback, Nothing}
+    on_shutdown_callback::Union{BootstrapChannelCallback, Nothing}
     user_data::Any
     @atomic shutdown::Bool
 end
@@ -89,7 +105,7 @@ end
 function _install_protocol_handler_from_socket(
         channel::Channel,
         socket::Socket,
-        on_protocol_negotiated,
+        on_protocol_negotiated::ProtocolNegotiatedCallable,
     )::Nothing
     protocol = socket_get_protocol(socket)
     new_slot = channel_slot_new!(channel)
@@ -111,7 +127,7 @@ mutable struct SocketConnectionRequest
     socket::Union{Socket, Nothing}  # nullable
     channel::Union{Channel, Nothing}  # nullable
     tls_connection_options::Any  # TlsConnectionOptions or nothing
-    on_protocol_negotiated::Union{Function, Nothing}
+    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
     on_creation::Union{EventCallable, Nothing}
     on_setup::Union{EventCallable, Nothing}
     on_shutdown::Union{EventCallable, Nothing}
@@ -161,6 +177,11 @@ function client_bootstrap_connect!(
         "ClientBootstrap: initiating connection to $host_str:$port"
     )
 
+    protocol_negotiated_cb = _bootstrap_protocol_negotiated_callback(on_protocol_negotiated)
+    on_creation_cb = _bootstrap_channel_callback(on_creation)
+    on_setup_cb = _bootstrap_channel_callback(on_setup)
+    on_shutdown_cb = _bootstrap_channel_callback(on_shutdown)
+
     # Create connection request — callbacks are wrapped into EventCallables
     # that capture the user_data. The closures also capture `request` (set below)
     # so request.channel is accessible at callback time.
@@ -172,7 +193,7 @@ function client_bootstrap_connect!(
         nothing,
         nothing,
         tls_connection_options,
-        on_protocol_negotiated,
+        protocol_negotiated_cb,
         nothing,  # on_creation (set below)
         nothing,  # on_setup (set below)
         nothing,  # on_shutdown (set below)
@@ -185,14 +206,14 @@ function client_bootstrap_connect!(
         false,
     )
     # Wrap user callbacks into EventCallables that capture request + user_data
-    if on_creation !== nothing
-        request.on_creation = EventCallable(error_code -> on_creation(bootstrap, error_code, request.channel, user_data))
+    if on_creation_cb !== nothing
+        request.on_creation = EventCallable(error_code -> on_creation_cb(bootstrap, error_code, request.channel, user_data))
     end
-    if on_setup !== nothing
-        request.on_setup = EventCallable(error_code -> on_setup(bootstrap, error_code, request.channel, user_data))
+    if on_setup_cb !== nothing
+        request.on_setup = EventCallable(error_code -> on_setup_cb(bootstrap, error_code, request.channel, user_data))
     end
-    if on_shutdown !== nothing
-        request.on_shutdown = EventCallable(error_code -> on_shutdown(bootstrap, error_code, request.channel, user_data))
+    if on_shutdown_cb !== nothing
+        request.on_shutdown = EventCallable(error_code -> on_shutdown_cb(bootstrap, error_code, request.channel, user_data))
     end
 
     # Resolve host
@@ -702,11 +723,11 @@ struct ServerBootstrapOptions
     port::UInt32
     backlog::Int
     tls_connection_options::Any  # TlsConnectionOptions or nothing
-    on_protocol_negotiated::Union{Function, Nothing}
-    on_listener_setup::Union{Function, Nothing}
-    on_incoming_channel_setup::Union{Function, Nothing}
-    on_incoming_channel_shutdown::Union{Function, Nothing}
-    on_listener_destroy::Union{Function, Nothing}
+    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
+    on_listener_setup::Union{BootstrapEventCallback, Nothing}
+    on_incoming_channel_setup::Union{BootstrapChannelCallback, Nothing}
+    on_incoming_channel_shutdown::Union{BootstrapChannelCallback, Nothing}
+    on_listener_destroy::Union{BootstrapEventCallback, Nothing}
     user_data::Any
     enable_read_back_pressure::Bool
 end
@@ -733,11 +754,11 @@ function ServerBootstrapOptions(;
         UInt32(port),
         Int(backlog),
         tls_connection_options,
-        on_protocol_negotiated,
-        on_listener_setup,
-        on_incoming_channel_setup,
-        on_incoming_channel_shutdown,
-        on_listener_destroy,
+        _bootstrap_protocol_negotiated_callback(on_protocol_negotiated),
+        _bootstrap_event_callback(on_listener_setup),
+        _bootstrap_channel_callback(on_incoming_channel_setup),
+        _bootstrap_channel_callback(on_incoming_channel_shutdown),
+        _bootstrap_listener_destroy_callback(on_listener_destroy),
         user_data,
         enable_read_back_pressure,
     )
@@ -750,7 +771,7 @@ mutable struct ServerBootstrap
     listener_socket::Union{Socket, Nothing}
     listener_event_loop::Union{EventLoop, Nothing}
     tls_connection_options::Any  # TlsConnectionOptions or nothing
-    on_protocol_negotiated::Union{Function, Nothing}
+    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
     on_incoming_channel_setup::Union{ChannelCallable, Nothing}
     on_incoming_channel_shutdown::Union{ChannelCallable, Nothing}
     on_listener_destroy::Union{TaskFn, Nothing}
@@ -789,7 +810,7 @@ function ServerBootstrap(options::ServerBootstrapOptions)
         bootstrap.on_incoming_channel_shutdown = ChannelCallable((err, ch) -> options.on_incoming_channel_shutdown(bootstrap, err, ch, ud))
     end
     if options.on_listener_destroy !== nothing
-        bootstrap.on_listener_destroy = TaskFn(_ -> options.on_listener_destroy(bootstrap, ud))
+        bootstrap.on_listener_destroy = TaskFn(_ -> options.on_listener_destroy(bootstrap, AWS_OP_SUCCESS, ud))
     end
 
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ServerBootstrap: created")

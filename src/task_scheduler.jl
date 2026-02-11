@@ -372,6 +372,76 @@ end
     return nothing
 end
 
+# ── BootstrapChannelCallback: trim-safe (Any, Int, Any, Any) -> Nothing ──
+# Covers channel-bootstrap user callbacks:
+#   (bootstrap, error_code, channel, user_data) -> nothing.
+
+struct _BootstrapChannelCallbackWrapper <: Function end
+
+function (::_BootstrapChannelCallbackWrapper)(f, bootstrap, error_code::Int, channel, user_data)
+    f(bootstrap, error_code, channel, user_data)
+    return nothing
+end
+
+@generated function _bootstrap_channel_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_BootstrapChannelCallbackWrapper()), Cvoid, (Ref{$F}, Any, Int, Any, Any))
+    end
+end
+
+struct BootstrapChannelCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function BootstrapChannelCallback(callable::F) where F
+    ptr = _bootstrap_channel_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return BootstrapChannelCallback(ptr, objptr, objref)
+end
+
+@inline function (f::BootstrapChannelCallback)(bootstrap, error_code::Int, channel, user_data)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Int, Any, Any), f.objptr, bootstrap, error_code, channel, user_data)
+    return nothing
+end
+
+# ── BootstrapEventCallback: trim-safe (Any, Int, Any) -> Nothing ──
+# Covers server-bootstrap lifecycle callbacks:
+#   (bootstrap, error_code, user_data) -> nothing.
+
+struct _BootstrapEventCallbackWrapper <: Function end
+
+function (::_BootstrapEventCallbackWrapper)(f, bootstrap, error_code::Int, user_data)
+    f(bootstrap, error_code, user_data)
+    return nothing
+end
+
+@generated function _bootstrap_event_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_BootstrapEventCallbackWrapper()), Cvoid, (Ref{$F}, Any, Int, Any))
+    end
+end
+
+struct BootstrapEventCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function BootstrapEventCallback(callable::F) where F
+    ptr = _bootstrap_event_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return BootstrapEventCallback(ptr, objptr, objref)
+end
+
+@inline function (f::BootstrapEventCallback)(bootstrap, error_code::Int, user_data)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Int, Any), f.objptr, bootstrap, error_code, user_data)
+    return nothing
+end
+
 # ── ScheduledTask ──
 
 mutable struct ScheduledTask
