@@ -89,6 +89,15 @@ function EventLoopGroupOptions(;
     )
 end
 
+# Event types for IO event subscriptions (bitmask)
+@enumx IoEventType::UInt32 begin
+    READABLE = 1
+    WRITABLE = 2
+    REMOTE_HANG_UP = 4
+    CLOSED = 8
+    ERROR = 16
+end
+
 function _cpu_group_value(cpu_group)
     if cpu_group === nothing
         return nothing
@@ -114,7 +123,7 @@ end
 # Event loop base structure (non-parametric, concrete per platform)
 mutable struct EventLoop
     clock::ClockSource
-    message_pool::Any  # Sockets.MessagePool or nothing
+    message_pool::Union{MessagePool, Nothing}
     @atomic current_load_factor::Csize_t
     latest_tick_start::UInt64
     current_tick_latency_sum::Csize_t
@@ -193,12 +202,7 @@ function _event_loop_clean_up_shared_resources!(event_loop::EventLoop)
     pool === nothing && return nothing
 
     try
-        if isdefined(_PARENT, :Sockets)
-            sockets_mod = getfield(_PARENT, :Sockets)
-            if isdefined(sockets_mod, :message_pool_clean_up!)
-                getfield(sockets_mod, :message_pool_clean_up!)(pool)
-            end
-        end
+        message_pool_clean_up!(pool)
     finally
         event_loop.message_pool = nothing
     end

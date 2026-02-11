@@ -3,11 +3,21 @@
 
 mutable struct AlpnHandler <: AbstractChannelHandler
     slot::Union{ChannelSlot, Nothing}
-    on_protocol_negotiated::Union{Function, Nothing}
+    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
+end
+
+@inline _alpn_protocol_negotiated_callback(::Nothing) = nothing
+@inline _alpn_protocol_negotiated_callback(callback::ProtocolNegotiatedCallable) = callback
+@inline _alpn_protocol_negotiated_callback(callback) = ProtocolNegotiatedCallable(callback)
+
+function _alpn_protocol_negotiated_callback_or_throw(callback)
+    callback === nothing && throw_error(ERROR_INVALID_ARGUMENT)
+    return callback
 end
 
 function tls_alpn_handler_new(on_protocol_negotiated)
-    return AlpnHandler(nothing, on_protocol_negotiated)
+    callback = _alpn_protocol_negotiated_callback(on_protocol_negotiated)
+    return AlpnHandler(nothing, _alpn_protocol_negotiated_callback_or_throw(callback))
 end
 
 function setchannelslot!(handler::AlpnHandler, slot::ChannelSlot)::Nothing
@@ -48,7 +58,9 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
     end
 
     new_slot = channel_slot_new!(channel)
-    new_handler = handler.on_protocol_negotiated(new_slot, protocol)
+    callback = handler.on_protocol_negotiated
+    callback === nothing && throw_error(ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE)
+    new_handler = callback(new_slot, protocol)
 
     if new_handler === nothing
         channel_release_message_to_pool!(channel, message)

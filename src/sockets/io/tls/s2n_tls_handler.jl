@@ -272,9 +272,9 @@ mutable struct S2nTlsHandler <: TlsChannelHandler
     protocol::ByteBuffer
     server_name::ByteBuffer
     latest_message_on_completion::Union{EventCallable, Nothing}
-    on_negotiation_result::Union{Function, Nothing}
-    on_data_read::Union{Function, Nothing}
-    on_error::Union{Function, Nothing}
+    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
+    on_data_read::Union{TlsDataReadCallback, Nothing}
+    on_error::Union{TlsErrorCallback, Nothing}
     advertise_alpn_message::Bool
     state::TlsNegotiationState.T
     read_task::ChannelTask

@@ -51,8 +51,8 @@ using ..ForeignThreads: @wrap_thread_fn
 
 include("tracing.jl")
 include("io.jl")
+include("message_pool.jl")
 
-include("event_loop_types.jl")
 include("kqueue_event_loop_types.jl")
 include("epoll_event_loop_types.jl")
 include("iocp_event_loop_types.jl")

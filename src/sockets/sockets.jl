@@ -88,7 +88,6 @@ function io_library_clean_up()
 end
 
 # --- IO implementation (moved from `src/io/*`) ---
-include("io/message_pool.jl")
 include("io/posix_socket_types.jl")
 include("io/apple_nw_socket_types.jl")
 include("io/winsock_socket_types.jl")
