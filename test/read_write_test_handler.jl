@@ -69,7 +69,7 @@ function Sockets.handler_process_read_message(
         handler::ReadWriteTestHandler,
         slot::Sockets.ChannelSlot,
         message::EventLoops.IoMessage,
-    )::Union{Nothing, Reseau.ErrorResult}
+    )::Nothing
     next_data = handler.on_read(handler, slot, message.message_data, handler.ctx)
 
     if slot.channel !== nothing
@@ -83,12 +83,12 @@ function Sockets.handler_process_read_message(
             Int(next_data.len),
         )
         if msg === nothing
-            return Reseau.ErrorResult(Reseau.ERROR_OOM)
+            Reseau.throw_error(Reseau.ERROR_OOM)
         end
         msg_ref = Ref(msg.message_data)
         Reseau.byte_buf_write_from_whole_buffer(msg_ref, next_data)
         msg.message_data = msg_ref[]
-        return Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.READ)
+        Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.READ)
     end
 
     return nothing
@@ -98,7 +98,7 @@ function Sockets.handler_process_write_message(
         handler::ReadWriteTestHandler,
         slot::Sockets.ChannelSlot,
         message::EventLoops.IoMessage,
-    )::Union{Nothing, Reseau.ErrorResult}
+    )::Nothing
     next_data = handler.on_write(handler, slot, message.message_data, handler.ctx)
 
     if slot.channel !== nothing
@@ -112,12 +112,12 @@ function Sockets.handler_process_write_message(
             Int(next_data.len),
         )
         if msg === nothing
-            return Reseau.ErrorResult(Reseau.ERROR_OOM)
+            Reseau.throw_error(Reseau.ERROR_OOM)
         end
         msg_ref = Ref(msg.message_data)
         Reseau.byte_buf_write_from_whole_buffer(msg_ref, next_data)
         msg.message_data = msg_ref[]
-        return Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.WRITE)
+        Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.WRITE)
     end
 
     return nothing
@@ -127,10 +127,11 @@ function Sockets.handler_increment_read_window(
         handler::ReadWriteTestHandler,
         slot::Sockets.ChannelSlot,
         size::Csize_t,
-    )::Union{Nothing, Reseau.ErrorResult}
+    )::Nothing
     handler.increment_read_window_called = true
     handler.window = Reseau.add_size_saturating(handler.window, size)
-    return Sockets.channel_slot_increment_read_window!(slot, size)
+    Sockets.channel_slot_increment_read_window!(slot, size)
+    return nothing
 end
 
 function Sockets.handler_shutdown(
@@ -139,7 +140,7 @@ function Sockets.handler_shutdown(
         direction::Sockets.ChannelDirection.T,
         error_code::Int,
         free_scarce_resources_immediately::Bool,
-    )::Union{Nothing, Reseau.ErrorResult}
+    )::Nothing
     lock(handler.lock) do
         handler.shutdown_called = true
         handler.shutdown_error = error_code
@@ -197,7 +198,7 @@ function _rw_handler_write_now(
             EventLoops.IoMessageType.APPLICATION_DATA,
             remaining,
         )
-        msg === nothing && return Reseau.ErrorResult(Reseau.ERROR_OOM)
+        msg === nothing && return Reseau.ERROR_OOM
 
         chunk_size = min(remaining, Int(Reseau.capacity(msg.message_data) - msg.message_data.len))
         msg.on_completion = on_completion
@@ -208,8 +209,7 @@ function _rw_handler_write_now(
         Reseau.byte_buf_write_from_whole_cursor(msg_ref, chunk_cursor)
         msg.message_data = msg_ref[]
 
-        send_res = Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.WRITE)
-        send_res isa Reseau.ErrorResult && return send_res
+        Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.WRITE)
         remaining -= chunk_size
     end
     return nothing
@@ -255,11 +255,12 @@ function rw_handler_trigger_read(handler::ReadWriteTestHandler, slot::Sockets.Ch
         EventLoops.IoMessageType.APPLICATION_DATA,
         Int(next_data.len),
     )
-    msg === nothing && return Reseau.ErrorResult(Reseau.ERROR_OOM)
+    msg === nothing && Reseau.throw_error(Reseau.ERROR_OOM)
     msg_ref = Ref(msg.message_data)
     Reseau.byte_buf_write_from_whole_buffer(msg_ref, next_data)
     msg.message_data = msg_ref[]
-    return Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.READ)
+    Sockets.channel_slot_send_message(slot, msg, Sockets.ChannelDirection.READ)
+    return nothing
 end
 
 mutable struct RwWindowTaskArgs

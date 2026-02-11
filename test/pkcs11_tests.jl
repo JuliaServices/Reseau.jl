@@ -64,7 +64,7 @@ function pkcs11_tester_init!(
     )
     lib = Sockets.pkcs11_lib_new(opts)
     @test lib isa Sockets.Pkcs11Lib
-    tester.lib = lib isa Sockets.Pkcs11Lib ? lib : nothing
+    tester.lib = lib
     return tester.lib
 end
 
@@ -91,7 +91,7 @@ function pkcs11_reload_hsm!(tester::Pkcs11Tester)
     )
     lib = Sockets.pkcs11_lib_new(opts)
     @test lib isa Sockets.Pkcs11Lib
-    tester.lib = lib isa Sockets.Pkcs11Lib ? lib : nothing
+    tester.lib = lib
     return tester.lib
 end
 
@@ -597,11 +597,14 @@ end
                 filename = tester.lib_path,
                 initialize_finalize_behavior = Sockets.Pkcs11LibBehavior.OMIT_INITIALIZE,
             )
-            lib_fail = Sockets.pkcs11_lib_new(opts)
-            @test lib_fail isa Reseau.ErrorResult
-            if lib_fail isa Reseau.ErrorResult
-                @test lib_fail.code == EventLoops.ERROR_IO_PKCS11_CKR_CRYPTOKI_NOT_INITIALIZED
+            err = try
+                Sockets.pkcs11_lib_new(opts)
+                nothing
+            catch e
+                e
             end
+            @test err isa Reseau.ReseauError
+            @test err.code == EventLoops.ERROR_IO_PKCS11_CKR_CRYPTOKI_NOT_INITIALIZED
 
             opts_strict = Sockets.Pkcs11LibOptions(;
                 filename = tester.lib_path,
@@ -612,12 +615,8 @@ end
 
             lib2 = Sockets.pkcs11_lib_new(opts)
             @test lib2 isa Sockets.Pkcs11Lib
-            if lib2 isa Sockets.Pkcs11Lib
-                Sockets.pkcs11_lib_release(lib2)
-            end
-            if lib1 isa Sockets.Pkcs11Lib
-                Sockets.pkcs11_lib_release(lib1)
-            end
+            Sockets.pkcs11_lib_release(lib2)
+            Sockets.pkcs11_lib_release(lib1)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -648,8 +647,7 @@ end
             @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL, SO_PIN, USER_PIN)
 
-            invalid = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(9999))
-            @test invalid isa Reseau.ErrorResult
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(9999))
 
             session1 = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
             @test session1 isa Sockets.CK_SESSION_HANDLE
@@ -670,22 +668,20 @@ end
             @test pkcs11_tester_init!(tester) isa Sockets.Pkcs11Lib
             slot = pkcs11_softhsm_create_slot(tester, TOKEN_LABEL, SO_PIN, USER_PIN)
 
-            bad_login = Sockets.pkcs11_lib_login_user(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_login_user(
                 tester.lib::Sockets.Pkcs11Lib,
                 Sockets.CK_SESSION_HANDLE(1),
                 Reseau.ByteCursor(USER_PIN),
             )
-            @test bad_login isa Reseau.ErrorResult
 
             session = Sockets.pkcs11_lib_open_session(tester.lib::Sockets.Pkcs11Lib, UInt64(slot))
             @test session isa Sockets.CK_SESSION_HANDLE
 
-            invalid_pin = Sockets.pkcs11_lib_login_user(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_login_user(
                 tester.lib::Sockets.Pkcs11Lib,
                 session,
                 Reseau.ByteCursor("INVALID_PIN"),
             )
-            @test invalid_pin isa Reseau.ErrorResult
 
             @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN)) === nothing
             @test Sockets.pkcs11_lib_login_user(tester.lib::Sockets.Pkcs11Lib, session, Reseau.ByteCursor(USER_PIN)) === nothing
@@ -791,8 +787,7 @@ end
             k1, _ = pkcs11_create_rsa_key(tester, session_create1, "RSA_KEY", "BEEFCAFE", 1024)
             k2, _ = pkcs11_create_rsa_key(tester, session_create2, "DES_KEY_2", "BEEFCAFEDEAD", 1024)
 
-            res = Sockets.pkcs11_lib_find_private_key(tester.lib::Sockets.Pkcs11Lib, session_access, nothing)
-            @test res isa Reseau.ErrorResult
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_find_private_key(tester.lib::Sockets.Pkcs11Lib, session_access, nothing)
 
             res1 = Sockets.pkcs11_lib_find_private_key(
                 tester.lib::Sockets.Pkcs11Lib,
@@ -846,12 +841,11 @@ end
                 @test res1[2] == Sockets.CKK_RSA
             end
 
-            res_none = Sockets.pkcs11_lib_find_private_key(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_find_private_key(
                 tester.lib::Sockets.Pkcs11Lib,
                 session_access,
                 Reseau.ByteCursor("NON_EXISTENT"),
             )
-            @test res_none isa Reseau.ErrorResult
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -916,47 +910,41 @@ end
                 cipher_cur,
             )
             @test decrypted isa Reseau.ByteBuffer
-            if decrypted isa Reseau.ByteBuffer
-                out = Vector{UInt8}(undef, Int(decrypted.len))
-                copyto!(out, 1, decrypted.mem, 1, Int(decrypted.len))
-                @test out == Vector{UInt8}(codeunits("ABCDEFGHIJKL"))
-            end
+            out = Vector{UInt8}(undef, Int(decrypted.len))
+            copyto!(out, 1, decrypted.mem, 1, Int(decrypted.len))
+            @test out == Vector{UInt8}(codeunits("ABCDEFGHIJKL"))
 
-            unsupported = Sockets.pkcs11_lib_decrypt(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_decrypt(
                 tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
                 Sockets.CKK_GENERIC_SECRET,
                 cipher_cur,
             )
-            @test unsupported isa Reseau.ErrorResult
 
-            bad_session = Sockets.pkcs11_lib_decrypt(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_decrypt(
                 tester.lib::Sockets.Pkcs11Lib,
                 Sockets.CK_SESSION_HANDLE(0),
                 priv,
                 Sockets.CKK_RSA,
                 cipher_cur,
             )
-            @test bad_session isa Reseau.ErrorResult
 
-            bad_key = Sockets.pkcs11_lib_decrypt(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_decrypt(
                 tester.lib::Sockets.Pkcs11Lib,
                 session,
                 Sockets.CK_INVALID_HANDLE,
                 Sockets.CKK_RSA,
                 cipher_cur,
             )
-            @test bad_key isa Reseau.ErrorResult
 
-            empty = Sockets.pkcs11_lib_decrypt(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_decrypt(
                 tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
                 Sockets.CKK_RSA,
                 Reseau.ByteCursor(""),
             )
-            @test empty isa Reseau.ErrorResult
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -980,27 +968,23 @@ end
                     Sockets.TlsSignatureAlgorithm.RSA,
                 )
                 @test signature isa Reseau.ByteBuffer
-                if signature isa Reseau.ByteBuffer
-                    prefix = Sockets.get_prefix_to_rsa_sig(digest_alg)
-                    @test prefix isa Reseau.ByteCursor
-                    if prefix isa Reseau.ByteCursor
-                        prefixed = Reseau.ByteBuffer(Int(prefix.len + message.len))
-                        pref_ref = Ref(prefixed)
-                        @test Reseau.byte_buf_write_from_whole_cursor(pref_ref, prefix)
-                        @test Reseau.byte_buf_write_from_whole_cursor(pref_ref, message)
-                        prefixed = pref_ref[]
-                        pkcs11_verify_signature(
-                            tester,
-                            Reseau.byte_cursor_from_buf(prefixed),
-                            signature,
-                            session,
-                            pub,
-                            Sockets.CKM_RSA_PKCS,
-                        )
-                    end
-                end
+                prefix = Sockets.get_prefix_to_rsa_sig(digest_alg)
+                @test prefix isa Reseau.ByteCursor
+                prefixed = Reseau.ByteBuffer(Int(prefix.len + message.len))
+                pref_ref = Ref(prefixed)
+                @test Reseau.byte_buf_write_from_whole_cursor(pref_ref, prefix)
+                @test Reseau.byte_buf_write_from_whole_cursor(pref_ref, message)
+                prefixed = pref_ref[]
+                pkcs11_verify_signature(
+                    tester,
+                    Reseau.byte_cursor_from_buf(prefixed),
+                    signature,
+                    session,
+                    pub,
+                    Sockets.CKM_RSA_PKCS,
+                )
 
-                unsupported = Sockets.pkcs11_lib_sign(
+                @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
                     tester.lib::Sockets.Pkcs11Lib,
                     session,
                     priv,
@@ -1009,7 +993,6 @@ end
                     digest_alg,
                     Sockets.TlsSignatureAlgorithm.RSA,
                 )
-                @test unsupported isa Reseau.ErrorResult
             finally
                 pkcs11_tester_cleanup!(tester)
             end
@@ -1039,7 +1022,7 @@ end
             )
             @test signature isa Reseau.ByteBuffer
 
-            unsupported = Sockets.pkcs11_lib_sign(
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
                 tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
@@ -1048,7 +1031,6 @@ end
                 Sockets.TlsHashAlgorithm.UNKNOWN,
                 Sockets.TlsSignatureAlgorithm.ECDSA,
             )
-            @test unsupported isa Reseau.ErrorResult
         finally
             pkcs11_tester_cleanup!(tester)
         end

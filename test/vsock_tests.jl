@@ -10,9 +10,9 @@ import Reseau: Sockets
         cid_any = Sockets._parse_vsock_cid("-1")
         @test cid_any == Sockets.VMADDR_CID_ANY
 
-        @test Sockets._parse_vsock_cid("not-a-number") isa Reseau.ErrorResult
-        @test Sockets._parse_vsock_cid("-2") isa Reseau.ErrorResult
-        @test Sockets._parse_vsock_cid(string(typemax(UInt32) + 1)) isa Reseau.ErrorResult
+        @test_throws Reseau.ReseauError Sockets._parse_vsock_cid("not-a-number")
+        @test_throws Reseau.ReseauError Sockets._parse_vsock_cid("-2")
+        @test_throws Reseau.ReseauError Sockets._parse_vsock_cid(string(typemax(UInt32) + 1))
     else
         @test true
     end

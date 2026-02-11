@@ -121,13 +121,13 @@
         return event_loop !== nothing
     end
 
-    function _nw_set_event_loop!(socket::Socket, event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function _nw_set_event_loop!(socket::Socket, event_loop::EventLoop)::Nothing
         socket.event_loop = event_loop
         nw_socket = socket.impl::NWSocket
-        nw_socket.event_loop !== nothing && return ErrorResult(raise_error(ERROR_INVALID_STATE))
+        nw_socket.event_loop !== nothing && throw_error(ERROR_INVALID_STATE)
         if event_loop_group_acquire_from_event_loop(event_loop) === nothing
             logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket=%p: failed to acquire event loop group.", _nw_socket_ptr(nw_socket))
-            return ErrorResult(raise_error(ERROR_INVALID_STATE))
+            throw_error(ERROR_INVALID_STATE)
         end
         nw_socket.event_loop = event_loop
         return nothing
@@ -665,7 +665,7 @@
         return nothing
     end
 
-    function _nw_setup_socket_params!(nw_socket::NWSocket, options::SocketOptions)::Union{Nothing, ErrorResult}
+    function _nw_setup_socket_params!(nw_socket::NWSocket, options::SocketOptions)::Nothing
         _nw_ensure_callbacks!()
         _nw_ensure_globals!()
         if nw_socket.parameters != C_NULL
@@ -681,13 +681,12 @@
 
         if options.type == SocketType.STREAM
             if setup_tls
-                nw_socket.event_loop === nothing && return ErrorResult(raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+                nw_socket.event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
                 transport_ctx = nw_socket.tls_ctx.impl
                 if transport_ctx.minimum_tls_version == TlsVersion.SSLv3 ||
                         transport_ctx.minimum_tls_version == TlsVersion.TLSv1 ||
                         transport_ctx.minimum_tls_version == TlsVersion.TLSv1_1
-                    raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-                    return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+                    throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
 
                 if options.domain == SocketDomain.IPV4 || options.domain == SocketDomain.IPV6 || options.domain == SocketDomain.LOCAL
@@ -710,8 +709,7 @@
                         BlocksABI.free!(tcp_blk)
                     end
                 else
-                    raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-                    return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+                    throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
                 end
             else
                 if options.domain == SocketDomain.IPV4 || options.domain == SocketDomain.IPV6 || options.domain == SocketDomain.LOCAL
@@ -732,8 +730,7 @@
                         BlocksABI.free!(tcp_blk)
                     end
                 else
-                    raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-                    return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+                    throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
                 end
             end
 
@@ -748,8 +745,7 @@
             end
         elseif options.type == SocketType.DGRAM
             if setup_tls
-                raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-                return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+                throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
             ctx = NWParametersContext(nw_socket, options)
             nw_socket.parameters_context = ctx
@@ -770,8 +766,7 @@
         end
 
         if nw_socket.parameters == C_NULL
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
         return nothing
     end
@@ -1016,7 +1011,7 @@
         return nothing
     end
 
-    function _nw_schedule_next_read!(nw_socket::NWSocket)::Union{Nothing, ErrorResult}
+    function _nw_schedule_next_read!(nw_socket::NWSocket)::Nothing
         _nw_lock_synced(nw_socket)
         if nw_socket.read_scheduled
             _nw_unlock_synced(nw_socket)
@@ -1033,7 +1028,7 @@
         _nw_unlock_synced(nw_socket)
 
         if connection == C_NULL
-            return ErrorResult(raise_error(ERROR_IO_SOCKET_NOT_CONNECTED))
+            throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         end
 
         _nw_ensure_callbacks!()
@@ -1446,7 +1441,7 @@
                     end
 
                     now = event_loop_current_clock_time(nw_socket.event_loop)
-                    run_at = now isa ErrorResult ? UInt64(time_ns()) + 1_000_000 : now + 1_000_000
+                    run_at = now + 1_000_000
                     event_loop_schedule_task_future!(nw_socket.event_loop, task, run_at)
                 catch e
                     Core.println("nw_listener_port_poll task errored: $e")
@@ -1457,7 +1452,7 @@
         )
 
         now = event_loop_current_clock_time(nw_socket.event_loop)
-        run_at = now isa ErrorResult ? UInt64(time_ns()) + 1_000_000 : now + 1_000_000
+        run_at = now + 1_000_000
         event_loop_schedule_task_future!(nw_socket.event_loop, task, run_at)
         return nothing
     end
@@ -1485,9 +1480,12 @@
                     end
 
                     options = copy(listener.options)
-                    new_socket = socket_init_apple_nw(options)
-                    if new_socket isa ErrorResult
-                        listener.accept_result_fn(listener, new_socket.code, nothing, listener.connect_accept_user_data)
+                    local new_socket
+                    try
+                        new_socket = socket_init_apple_nw(options)
+                    catch e
+                        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                        listener.accept_result_fn(listener, err, nothing, listener.connect_accept_user_data)
                         _nw_unlock_base(nw_socket)
                         ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
                         return nothing
@@ -1593,10 +1591,9 @@
         return nothing
     end
 
-    function _nw_setup_tls_from_connection_options!(nw_socket::NWSocket, options::Union{Any, Nothing})
+    function _nw_setup_tls_from_connection_options!(nw_socket::NWSocket, options::Union{Any, Nothing})::Nothing
         if nw_socket.tls_ctx !== nothing || nw_socket.host_name !== nothing || nw_socket.alpn_list !== nothing
-            raise_error(ERROR_INVALID_STATE)
-            return ErrorResult(ERROR_INVALID_STATE)
+            throw_error(ERROR_INVALID_STATE)
         end
         options === nothing && return nothing
 
@@ -1618,10 +1615,9 @@
         return nothing
     end
 
-    function socket_init_apple_nw(options::SocketOptions)::Union{Socket, ErrorResult}
+    function socket_init_apple_nw(options::SocketOptions)::Socket
         if options.network_interface_name[1] != 0
-            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+            throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
         end
 
         _nw_ensure_callbacks!()
@@ -1678,40 +1674,31 @@
             ::NWSocket,
             socket::Socket,
             options::SocketConnectOptions,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         nw_socket = socket.impl
         if socket.event_loop !== nothing
-            raise_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
+            throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
 
-        tls_res = _nw_setup_tls_from_connection_options!(nw_socket, options.tls_connection_options)
-        tls_res isa ErrorResult && return tls_res
+        _nw_setup_tls_from_connection_options!(nw_socket, options.tls_connection_options)
 
         event_loop = options.event_loop
-        event_loop === nothing && return ErrorResult(raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+        event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
-        set_el = _nw_set_event_loop!(socket, event_loop)
-        set_el isa ErrorResult && return set_el
+        _nw_set_event_loop!(socket, event_loop)
 
-        setup_params = _nw_setup_socket_params!(nw_socket, socket.options)
-        setup_params isa ErrorResult && return setup_params
+        _nw_setup_socket_params!(nw_socket, socket.options)
 
 	        _nw_lock_synced(nw_socket)
+	        try
 	        if nw_socket.state != _nw_state_mask(NWSocketState.INIT)
-	            _nw_unlock_synced(nw_socket)
-	            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-	            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+	            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
 	        end
 
 	        # Mirror the POSIX/Winsock implementations: record the requested remote endpoint.
 	        copy!(socket.remote_endpoint, options.remote_endpoint)
 
 	        endpoint = _nw_endpoint_from_socket_endpoint(options.remote_endpoint, socket.options.domain)
-	        if endpoint isa ErrorResult
-	            _nw_unlock_synced(nw_socket)
-	            return endpoint
-	        end
 
         connection = ccall(
             (:nw_connection_create, _NW_NETWORK_LIB),
@@ -1723,9 +1710,7 @@
         ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
 
         if connection == C_NULL
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
 
         socket.io_handle.handle = connection
@@ -1749,7 +1734,9 @@
         end
 
         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTING)))
-        _nw_unlock_synced(nw_socket)
+        finally
+            _nw_unlock_synced(nw_socket)
+        end
 
         if options.on_connection_result !== nothing
             nw_socket.on_connection_result = options.on_connection_result
@@ -1769,18 +1756,12 @@
             )
         end
 
-        if event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle) isa ErrorResult
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        end
+        event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)
 
-        ccall((:nw_connection_start, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), connection)
+        ccall((:nw_connection_start, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), nw_socket.connection)
 
         if socket.options.connect_timeout_ms > 0
             now = event_loop_current_clock_time(event_loop)
-            if now isa ErrorResult
-                return now
-            end
             timeout = UInt64(socket.options.connect_timeout_ms) * 1_000_000 + now
             nw_socket.timeout_task = ScheduledTask(
                 TaskFn(function(status)
@@ -1812,36 +1793,32 @@
             ::NWSocket,
             socket::Socket,
             options::SocketBindOptions,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         nw_socket = socket.impl
 
         _nw_lock_synced(nw_socket)
+        try
         if nw_socket.state != _nw_state_mask(NWSocketState.INIT)
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         socket.local_endpoint.address = options.local_endpoint.address
         socket.local_endpoint.port = options.local_endpoint.port
 
         if nw_socket.parameters == C_NULL
-            tls_res = _nw_setup_tls_from_connection_options!(nw_socket, options.tls_connection_options)
-            tls_res isa ErrorResult && ( _nw_unlock_synced(nw_socket); return tls_res )
+            _nw_setup_tls_from_connection_options!(nw_socket, options.tls_connection_options)
 
             if options.event_loop !== nothing
                 nw_socket.event_loop = options.event_loop
             end
-            setup_params = _nw_setup_socket_params!(nw_socket, socket.options)
-            nw_socket.event_loop = nothing
-            setup_params isa ErrorResult && ( _nw_unlock_synced(nw_socket); return setup_params )
+            try
+                _nw_setup_socket_params!(nw_socket, socket.options)
+            finally
+                nw_socket.event_loop = nothing
+            end
         end
 
         endpoint = _nw_endpoint_from_socket_endpoint(options.local_endpoint, socket.options.domain)
-        if endpoint isa ErrorResult
-            _nw_unlock_synced(nw_socket)
-            return endpoint
-        end
 
         ccall(
             (:nw_parameters_set_local_endpoint, _NW_NETWORK_LIB),
@@ -1853,7 +1830,9 @@
         ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
 
         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.BOUND)))
-        _nw_unlock_synced(nw_socket)
+        finally
+            _nw_unlock_synced(nw_socket)
+        end
         return nothing
     end
 
@@ -1861,26 +1840,21 @@
             ::NWSocket,
             socket::Socket,
             backlog_size::Integer,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         _ = backlog_size
         nw_socket = socket.impl
         _nw_lock_synced(nw_socket)
+        try
         if nw_socket.state != _nw_state_mask(NWSocketState.BOUND)
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
         if nw_socket.parameters == C_NULL
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
 
         listener = ccall((:nw_listener_create, _NW_NETWORK_LIB), nw_listener_t, (nw_parameters_t,), nw_socket.parameters)
         if listener == C_NULL
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
 
         # When binding to port 0, Network.framework may already have chosen an ephemeral port
@@ -1896,7 +1870,9 @@
         nw_socket.listener = listener
         nw_socket.mode = NWSocketMode.LISTENER
         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.LISTENING)))
-        _nw_unlock_synced(nw_socket)
+        finally
+            _nw_unlock_synced(nw_socket)
+        end
         return nothing
     end
 
@@ -1905,13 +1881,12 @@
 	            socket::Socket,
 	            accept_loop::EventLoop,
 	            options::SocketListenerOptions,
-	        )::Union{Nothing, ErrorResult}
+	        )::Nothing
         nw_socket = socket.impl
         _nw_lock_synced(nw_socket)
+        try
         if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
         nw_socket.on_accept_started = options.on_accept_start
@@ -1919,17 +1894,9 @@
         socket.accept_result_fn = options.on_accept_result
         socket.connect_accept_user_data = options.on_accept_result_user_data
 
-        set_el = _nw_set_event_loop!(socket, accept_loop)
-        if set_el isa ErrorResult
-            _nw_unlock_synced(nw_socket)
-            return set_el
-        end
+        _nw_set_event_loop!(socket, accept_loop)
 
-        if event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle) isa ErrorResult
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        end
+        event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle)
 
         _nw_ensure_callbacks!()
         lctx = pointer_from_objref(nw_socket)
@@ -1956,25 +1923,28 @@
 	        end
 
 	        ccall((:nw_listener_start, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
+        finally
 	        _nw_unlock_synced(nw_socket)
+        end
 	        return nothing
 	    end
 
-    function socket_stop_accept_impl(::NWSocket, socket::Socket)::Union{Nothing, ErrorResult}
+    function socket_stop_accept_impl(::NWSocket, socket::Socket)::Nothing
         nw_socket = socket.impl
         _nw_lock_synced(nw_socket)
+        try
         if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
         ccall((:nw_listener_cancel, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.STOPPED)))
-        _nw_unlock_synced(nw_socket)
+        finally
+            _nw_unlock_synced(nw_socket)
+        end
         return nothing
     end
 
-    function socket_close_impl(::NWSocket, socket::Socket)::Union{Nothing, ErrorResult}
+    function socket_close_impl(::NWSocket, socket::Socket)::Nothing
         nw_socket = socket.impl
         _nw_lock_synced(nw_socket)
         if nw_socket.state < _nw_state_mask(NWSocketState.CLOSING)
@@ -1989,44 +1959,38 @@
         return nothing
     end
 
-    function socket_shutdown_dir_impl(::NWSocket, socket::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
+    function socket_shutdown_dir_impl(::NWSocket, socket::Socket, dir::ChannelDirection.T)::Nothing
         _ = dir
-        raise_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
+        throw_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
     end
 
     function socket_set_options_impl(
             ::NWSocket,
             socket::Socket,
             options::SocketOptions,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         if socket.options.domain != options.domain || socket.options.type != options.type
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
         socket.options = copy(options)
         nw_socket = socket.impl
-        return _nw_setup_socket_params!(nw_socket, options)
+        _nw_setup_socket_params!(nw_socket, options)
+        return nothing
     end
 
     function socket_assign_to_event_loop_impl(
             ::NWSocket,
             socket::Socket,
             event_loop::EventLoop,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         nw_socket = socket.impl
         if socket.event_loop !== nothing
-            raise_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
+            throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
 
-        set_el = _nw_set_event_loop!(socket, event_loop)
-        set_el isa ErrorResult && return set_el
+        _nw_set_event_loop!(socket, event_loop)
 
-        if event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle) isa ErrorResult
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        end
+        event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)
 
         if nw_socket.mode == NWSocketMode.CONNECTION && socket.io_handle.handle != C_NULL
             ccall((:nw_connection_start, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), socket.io_handle.handle)
@@ -2039,26 +2003,25 @@
             socket::Socket,
             on_readable::SocketOnReadableFn,
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         nw_socket = socket.impl
         if nw_socket.mode == NWSocketMode.LISTENER
-            raise_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
         end
         nw_socket.on_readable = on_readable
         nw_socket.on_readable_user_data = user_data
-        return _nw_schedule_next_read!(nw_socket)
+        _nw_schedule_next_read!(nw_socket)
+        return nothing
     end
 
     function socket_read_impl(
             ::NWSocket,
             socket::Socket,
             buffer::ByteBuffer,
-        )::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+        )::Tuple{Nothing, Csize_t}
         nw_socket = socket.impl
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
 
         max_to_read = buffer.capacity - buffer.len
@@ -2066,13 +2029,11 @@
             _nw_lock_synced(nw_socket)
             if (nw_socket.state & _nw_state_mask(NWSocketState.CONNECTED_READ)) == 0
                 _nw_unlock_synced(nw_socket)
-                raise_error(ERROR_IO_SOCKET_CLOSED)
-                return ErrorResult(ERROR_IO_SOCKET_CLOSED)
+                throw_error(ERROR_IO_SOCKET_CLOSED)
             end
             _nw_unlock_synced(nw_socket)
             _nw_schedule_next_read!(nw_socket)
-            raise_error(ERROR_IO_READ_WOULD_BLOCK)
-            return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+            throw_error(ERROR_IO_READ_WOULD_BLOCK)
         end
 
         amount_read = Csize_t(0)
@@ -2111,33 +2072,31 @@
             cursor::ByteCursor,
             written_fn::Union{SocketOnWriteCompletedFn, Nothing},
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         nw_socket = socket.impl
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
         if written_fn === nothing
-            raise_error(ERROR_INVALID_ARGUMENT)
-            return ErrorResult(ERROR_INVALID_ARGUMENT)
+            throw_error(ERROR_INVALID_ARGUMENT)
         end
 
+        local data
         _nw_lock_synced(nw_socket)
+        try
         if (nw_socket.state & _nw_state_mask(NWSocketState.CONNECTED_WRITE)) == 0
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-            return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
+            throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
         end
 
         data = _nw_create_dispatch_data(cursor)
         if data == C_NULL
-            _nw_unlock_synced(nw_socket)
-            raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
 
         nw_socket.pending_writes += 1
-        _nw_unlock_synced(nw_socket)
+        finally
+            _nw_unlock_synced(nw_socket)
+        end
 
         send_ctx = NWSendContext(nw_socket, written_fn, user_data)
         send_ctx_ptr = _nw_register_send!(send_ctx)
@@ -2187,7 +2146,7 @@
             socket::Socket,
             fn::SocketOnShutdownCompleteFn,
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         nw_socket = socket.impl
         nw_socket.on_close_complete = fn
         nw_socket.close_user_data = user_data
@@ -2199,7 +2158,7 @@
             socket::Socket,
             fn::SocketOnShutdownCompleteFn,
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         nw_socket = socket.impl
         nw_socket.on_cleanup_complete = fn
         nw_socket.cleanup_user_data = user_data
@@ -2219,7 +2178,7 @@
     function _nw_endpoint_from_socket_endpoint(
             endpoint::SocketEndpoint,
             domain::SocketDomain.T,
-        )::Union{nw_endpoint_t, ErrorResult}
+        )::nw_endpoint_t
         addr = get_address(endpoint)
         port = Int(endpoint.port)
 
@@ -2243,13 +2202,11 @@
                 sockaddr_buf[2 + i] = addr_bytes[i]
             end
         else
-            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
         end
 
         if pton_err != 1
-            raise_error(_nw_convert_pton_error(pton_err))
-            return ErrorResult(_nw_convert_pton_error(pton_err))
+            throw_error(_nw_convert_pton_error(pton_err))
         end
 
         endpoint_ptr = ccall(
@@ -2259,14 +2216,13 @@
             pointer(sockaddr_buf),
         )
 
-        endpoint_ptr == C_NULL && return ErrorResult(raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS))
+        endpoint_ptr == C_NULL && throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         return endpoint_ptr
     end
 
 else
-    function socket_init_apple_nw(options::SocketOptions)::Union{Socket, ErrorResult}
+    function socket_init_apple_nw(options::SocketOptions)::Socket
         _ = options
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end

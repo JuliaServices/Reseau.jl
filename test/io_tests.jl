@@ -259,11 +259,8 @@ end
     temp_dir = mktempdir()
     missing_path = joinpath(temp_dir, "missing_pkcs11_lib")
     opts = Sockets.Pkcs11LibOptions(; filename = missing_path)
-    lib = Sockets.pkcs11_lib_new(opts)
-    @test lib isa Reseau.ErrorResult
-    if lib isa Reseau.ErrorResult
-        @test lib.code == EventLoops.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
-    end
+    err = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_new(opts)
+    @test err.value.code == EventLoops.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
 end
 
 @testset "PKCS11 CKR mapping" begin
@@ -317,24 +314,19 @@ end
         _pkcs11_test_init_rv[] = Sockets.CKR_CRYPTOKI_ALREADY_INITIALIZED
         _pkcs11_test_get_info_called[] = false
         lib_default = build_lib(Sockets.Pkcs11LibBehavior.DEFAULT_BEHAVIOR)
-        res_default = Sockets._pkcs11_init_with_function_list!(lib_default)
-        @test res_default === nothing
+        Sockets._pkcs11_init_with_function_list!(lib_default)
         @test _pkcs11_test_get_info_called[]
         @test !lib_default.finalize_on_cleanup
 
         _pkcs11_test_init_rv[] = Sockets.CKR_CRYPTOKI_ALREADY_INITIALIZED
         lib_strict = build_lib(Sockets.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
-        res_strict = Sockets._pkcs11_init_with_function_list!(lib_strict)
-        @test res_strict isa Reseau.ErrorResult
-        if res_strict isa Reseau.ErrorResult
-            @test res_strict.code == EventLoops.ERROR_IO_PKCS11_CKR_CRYPTOKI_ALREADY_INITIALIZED
-        end
+        err_strict = @test_throws Reseau.ReseauError Sockets._pkcs11_init_with_function_list!(lib_strict)
+        @test err_strict.value.code == EventLoops.ERROR_IO_PKCS11_CKR_CRYPTOKI_ALREADY_INITIALIZED
 
         _pkcs11_test_init_rv[] = Sockets.CKR_OK
         _pkcs11_test_finalize_called[] = false
         lib_finalize = build_lib(Sockets.Pkcs11LibBehavior.STRICT_INITIALIZE_FINALIZE)
-        res_finalize = Sockets._pkcs11_init_with_function_list!(lib_finalize)
-        @test res_finalize === nothing
+        Sockets._pkcs11_init_with_function_list!(lib_finalize)
         @test lib_finalize.finalize_on_cleanup
         Sockets.pkcs11_lib_release(lib_finalize)
         @test _pkcs11_test_finalize_called[]
@@ -382,18 +374,12 @@ end
 
     GC.@preserve fl_ref begin
         _pkcs11_test_slots[] = Sockets.CK_SLOT_ID[]
-        res_empty = Sockets.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
-        @test res_empty isa Reseau.ErrorResult
-        if res_empty isa Reseau.ErrorResult
-            @test res_empty.code == EventLoops.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
-        end
+        err_empty = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
+        @test err_empty.value.code == EventLoops.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
 
         _pkcs11_test_slots[] = Sockets.CK_SLOT_ID[1, 2]
-        res_multi = Sockets.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
-        @test res_multi isa Reseau.ErrorResult
-        if res_multi isa Reseau.ErrorResult
-            @test res_multi.code == EventLoops.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
-        end
+        err_multi = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_find_slot_with_token(lib, nothing, nothing)
+        @test err_multi.value.code == EventLoops.ERROR_IO_PKCS11_TOKEN_NOT_FOUND
 
         res_match = Sockets.pkcs11_lib_find_slot_with_token(lib, UInt64(2), nothing)
         @test res_match == 2
@@ -408,32 +394,23 @@ end
         @test session == Sockets.CK_SESSION_HANDLE(0x55)
 
         _pkcs11_test_open_session_rv[] = Sockets.CKR_FUNCTION_NOT_SUPPORTED
-        bad_session = Sockets.pkcs11_lib_open_session(lib, UInt64(1))
-        @test bad_session isa Reseau.ErrorResult
-        if bad_session isa Reseau.ErrorResult
-            @test bad_session.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
-        end
+        err_session = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_open_session(lib, UInt64(1))
+        @test err_session.value.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
 
         _pkcs11_test_close_session_rv[] = Sockets.CKR_OK
         @test Sockets.pkcs11_lib_close_session(lib, Sockets.CK_SESSION_HANDLE(0x55)) === nothing
 
         _pkcs11_test_close_session_rv[] = Sockets.CKR_FUNCTION_NOT_SUPPORTED
-        bad_close = Sockets.pkcs11_lib_close_session(lib, Sockets.CK_SESSION_HANDLE(0x55))
-        @test bad_close isa Reseau.ErrorResult
-        if bad_close isa Reseau.ErrorResult
-            @test bad_close.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
-        end
+        err_close = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_close_session(lib, Sockets.CK_SESSION_HANDLE(0x55))
+        @test err_close.value.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
 
         _pkcs11_test_login_rv[] = Sockets.CKR_USER_ALREADY_LOGGED_IN
         @test Sockets.pkcs11_lib_login_user(lib, Sockets.CK_SESSION_HANDLE(0x55), Reseau.ByteCursor("1234")) ===
               nothing
 
         _pkcs11_test_login_rv[] = Sockets.CKR_FUNCTION_NOT_SUPPORTED
-        bad_login = Sockets.pkcs11_lib_login_user(lib, Sockets.CK_SESSION_HANDLE(0x55), Reseau.ByteCursor("1234"))
-        @test bad_login isa Reseau.ErrorResult
-        if bad_login isa Reseau.ErrorResult
-            @test bad_login.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
-        end
+        err_login = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_login_user(lib, Sockets.CK_SESSION_HANDLE(0x55), Reseau.ByteCursor("1234"))
+        @test err_login.value.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
     end
 end
 
@@ -496,26 +473,17 @@ end
 
     GC.@preserve fl_ref begin
         _pkcs11_test_find_objects[] = Sockets.CK_OBJECT_HANDLE[]
-        res_none = Sockets.pkcs11_lib_find_private_key(lib, Sockets.CK_SESSION_HANDLE(1), nothing)
-        @test res_none isa Reseau.ErrorResult
-        if res_none isa Reseau.ErrorResult
-            @test res_none.code == EventLoops.ERROR_IO_PKCS11_KEY_NOT_FOUND
-        end
+        err_none = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_find_private_key(lib, Sockets.CK_SESSION_HANDLE(1), nothing)
+        @test err_none.value.code == EventLoops.ERROR_IO_PKCS11_KEY_NOT_FOUND
 
         _pkcs11_test_find_objects[] = Sockets.CK_OBJECT_HANDLE[1, 2]
-        res_multi = Sockets.pkcs11_lib_find_private_key(lib, Sockets.CK_SESSION_HANDLE(1), nothing)
-        @test res_multi isa Reseau.ErrorResult
-        if res_multi isa Reseau.ErrorResult
-            @test res_multi.code == EventLoops.ERROR_IO_PKCS11_KEY_NOT_FOUND
-        end
+        err_multi = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_find_private_key(lib, Sockets.CK_SESSION_HANDLE(1), nothing)
+        @test err_multi.value.code == EventLoops.ERROR_IO_PKCS11_KEY_NOT_FOUND
 
         _pkcs11_test_find_objects[] = Sockets.CK_OBJECT_HANDLE[3]
         _pkcs11_test_key_type[] = Sockets.CK_KEY_TYPE(0xdead)
-        res_bad_type = Sockets.pkcs11_lib_find_private_key(lib, Sockets.CK_SESSION_HANDLE(1), nothing)
-        @test res_bad_type isa Reseau.ErrorResult
-        if res_bad_type isa Reseau.ErrorResult
-            @test res_bad_type.code == EventLoops.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
-        end
+        err_bad_type = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_find_private_key(lib, Sockets.CK_SESSION_HANDLE(1), nothing)
+        @test err_bad_type.value.code == EventLoops.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
 
         _pkcs11_test_key_type[] = Sockets.CKK_RSA
         res_ok = Sockets.pkcs11_lib_find_private_key(lib, Sockets.CK_SESSION_HANDLE(1), Reseau.ByteCursor("key"))
@@ -531,34 +499,26 @@ end
             Reseau.ByteCursor("cipher"),
         )
         @test dec isa Reseau.ByteBuffer
-        if dec isa Reseau.ByteBuffer
-            @test collect(dec.mem[1:Int(dec.len)]) == _pkcs11_test_decrypt_output[]
-        end
+        @test collect(dec.mem[1:Int(dec.len)]) == _pkcs11_test_decrypt_output[]
 
-        bad_dec = Sockets.pkcs11_lib_decrypt(
+        err_dec = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_decrypt(
             lib,
             Sockets.CK_SESSION_HANDLE(1),
             Sockets.CK_OBJECT_HANDLE(3),
             Sockets.CKK_EC,
             Reseau.ByteCursor("cipher"),
         )
-        @test bad_dec isa Reseau.ErrorResult
-        if bad_dec isa Reseau.ErrorResult
-            @test bad_dec.code == EventLoops.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
-        end
+        @test err_dec.value.code == EventLoops.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
 
         _pkcs11_test_decrypt_rv[] = Sockets.CKR_FUNCTION_NOT_SUPPORTED
-        bad_dec_rv = Sockets.pkcs11_lib_decrypt(
+        err_dec_rv = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_decrypt(
             lib,
             Sockets.CK_SESSION_HANDLE(1),
             Sockets.CK_OBJECT_HANDLE(3),
             Sockets.CKK_RSA,
             Reseau.ByteCursor("cipher"),
         )
-        @test bad_dec_rv isa Reseau.ErrorResult
-        if bad_dec_rv isa Reseau.ErrorResult
-            @test bad_dec_rv.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
-        end
+        @test err_dec_rv.value.code == EventLoops.ERROR_IO_PKCS11_CKR_FUNCTION_NOT_SUPPORTED
         _pkcs11_test_decrypt_rv[] = Sockets.CKR_OK
 
         rsa_prefix = UInt8[
@@ -579,12 +539,10 @@ end
             Sockets.TlsSignatureAlgorithm.RSA,
         )
         @test sig isa Reseau.ByteBuffer
-        if sig isa Reseau.ByteBuffer
-            @test collect(sig.mem[1:Int(sig.len)]) == _pkcs11_test_sign_output[]
-        end
+        @test collect(sig.mem[1:Int(sig.len)]) == _pkcs11_test_sign_output[]
         @test _pkcs11_test_sign_input[] == vcat(rsa_prefix, digest)
 
-        bad_sig_alg = Sockets.pkcs11_lib_sign(
+        err_sig_alg = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
             lib,
             Sockets.CK_SESSION_HANDLE(1),
             Sockets.CK_OBJECT_HANDLE(3),
@@ -593,12 +551,9 @@ end
             Sockets.TlsHashAlgorithm.SHA256,
             Sockets.TlsSignatureAlgorithm.ECDSA,
         )
-        @test bad_sig_alg isa Reseau.ErrorResult
-        if bad_sig_alg isa Reseau.ErrorResult
-            @test bad_sig_alg.code == EventLoops.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
-        end
+        @test err_sig_alg.value.code == EventLoops.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
 
-        bad_digest = Sockets.pkcs11_lib_sign(
+        err_digest = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
             lib,
             Sockets.CK_SESSION_HANDLE(1),
             Sockets.CK_OBJECT_HANDLE(3),
@@ -607,10 +562,7 @@ end
             Sockets.TlsHashAlgorithm.UNKNOWN,
             Sockets.TlsSignatureAlgorithm.RSA,
         )
-        @test bad_digest isa Reseau.ErrorResult
-        if bad_digest isa Reseau.ErrorResult
-            @test bad_digest.code == EventLoops.ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED
-        end
+        @test err_digest.value.code == EventLoops.ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED
 
         _pkcs11_test_sign_output[] = UInt8[0x01, 0x02, 0x03, 0x04]
         sig_ec = Sockets.pkcs11_lib_sign(
@@ -623,12 +575,10 @@ end
             Sockets.TlsSignatureAlgorithm.ECDSA,
         )
         @test sig_ec isa Reseau.ByteBuffer
-        if sig_ec isa Reseau.ByteBuffer
-            @test collect(sig_ec.mem[1:Int(sig_ec.len)]) ==
-                  UInt8[0x30, 0x08, 0x02, 0x02, 0x01, 0x02, 0x02, 0x02, 0x03, 0x04]
-        end
+        @test collect(sig_ec.mem[1:Int(sig_ec.len)]) ==
+              UInt8[0x30, 0x08, 0x02, 0x02, 0x01, 0x02, 0x02, 0x02, 0x03, 0x04]
 
-        bad_ec_sig_alg = Sockets.pkcs11_lib_sign(
+        err_ec_sig_alg = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
             lib,
             Sockets.CK_SESSION_HANDLE(1),
             Sockets.CK_OBJECT_HANDLE(3),
@@ -637,12 +587,9 @@ end
             Sockets.TlsHashAlgorithm.SHA256,
             Sockets.TlsSignatureAlgorithm.RSA,
         )
-        @test bad_ec_sig_alg isa Reseau.ErrorResult
-        if bad_ec_sig_alg isa Reseau.ErrorResult
-            @test bad_ec_sig_alg.code == EventLoops.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
-        end
+        @test err_ec_sig_alg.value.code == EventLoops.ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED
 
-        bad_key = Sockets.pkcs11_lib_sign(
+        err_key = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
             lib,
             Sockets.CK_SESSION_HANDLE(1),
             Sockets.CK_OBJECT_HANDLE(3),
@@ -651,10 +598,7 @@ end
             Sockets.TlsHashAlgorithm.SHA256,
             Sockets.TlsSignatureAlgorithm.RSA,
         )
-        @test bad_key isa Reseau.ErrorResult
-        if bad_key isa Reseau.ErrorResult
-            @test bad_key.code == EventLoops.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
-        end
+        @test err_key.value.code == EventLoops.ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED
     end
 end
 

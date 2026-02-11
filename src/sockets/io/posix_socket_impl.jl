@@ -177,12 +177,11 @@ function determine_socket_error(errno_val::Integer)::Int
     end
 end
 
-# Parse VSOCK CID from string (Linux only). Returns UInt32 or ErrorResult.
-function _parse_vsock_cid(address::AbstractString)::Union{UInt32, ErrorResult}
+# Parse VSOCK CID from string (Linux only).
+function _parse_vsock_cid(address::AbstractString)::UInt32
     @static if Sys.islinux()
         if isempty(address)
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         if address == "-1"
             return VMADDR_CID_ANY
@@ -190,17 +189,14 @@ function _parse_vsock_cid(address::AbstractString)::Union{UInt32, ErrorResult}
         cid_val = try
             parse(Int64, address)
         catch
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         if cid_val < 0 || cid_val > typemax(UInt32)
-            raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-            return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
         return UInt32(cid_val)
     else
-        raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-        return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
     end
 end
 
@@ -228,11 +224,10 @@ function set_errno(val::Integer)
 end
 
 # Create the underlying socket file descriptor
-function create_posix_socket_fd(options::SocketOptions)::Union{Cint, ErrorResult}
+function create_posix_socket_fd(options::SocketOptions)::Cint
     if options.domain == SocketDomain.VSOCK
         @static if !Sys.islinux()
-            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
         end
     end
 
@@ -244,8 +239,7 @@ function create_posix_socket_fd(options::SocketOptions)::Union{Cint, ErrorResult
 
     if fd == -1
         aws_error = determine_socket_error(errno_val)
-        raise_error(aws_error)
-        return ErrorResult(aws_error)
+        throw_error(aws_error)
     end
 
     # Set non-blocking and close-on-exec
@@ -264,17 +258,13 @@ end
 function socket_init_posix(
         options::SocketOptions;
         existing_fd::Cint = Cint(-1),
-    )::Union{Socket, ErrorResult}
+    )::Socket
 
     socket_impl = PosixSocket()
 
     io_handle = IoHandle()
     if existing_fd < 0
-        fd_result = create_posix_socket_fd(options)
-        if fd_result isa ErrorResult
-            return fd_result
-        end
-        io_handle.fd = fd_result
+        io_handle.fd = create_posix_socket_fd(options)
     else
         io_handle.fd = existing_fd
     end
@@ -299,10 +289,11 @@ function socket_init_posix(
     sock.options = options
 
     # Set socket options
-    result = set_posix_socket_options!(sock, options)
-    if result isa ErrorResult
+    try
+        set_posix_socket_options!(sock, options)
+    catch
         ccall(:close, Cint, (Cint,), io_handle.fd)
-        return result
+        rethrow()
     end
 
     logf(
@@ -328,7 +319,7 @@ function Base.copy(options::SocketOptions)
 end
 
 # Set socket options on the underlying fd
-function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
+function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothing
     fd = sock.io_handle.fd
 
     # Set NOSIGPIPE on macOS
@@ -365,8 +356,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{
             fd,
             NETWORK_INTERFACE_NAME_MAX,
         )
-        raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+        throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
     end
 
     if iface_len != 0
@@ -399,8 +389,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{
                     iface_name,
                     errno_val,
                 )
-                raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-                return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+                throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
         elseif IP_BOUND_IF != 0
             iface_name = get_network_interface_name(options)
@@ -416,8 +405,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{
                     iface_name,
                     errno_val,
                 )
-                raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-                return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+                throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
 
             idx_ref = Ref{Cuint}(iface_index)
@@ -443,8 +431,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{
                         iface_name,
                         errno_val,
                     )
-                    raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-                    return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+                    throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
             else
                 ret = ccall(
@@ -468,8 +455,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{
                         iface_name,
                         errno_val,
                     )
-                    raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-                    return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+                    throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
             end
         else
@@ -480,8 +466,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Union{
                 sock,
                 fd,
             )
-            raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-            return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+            throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
         end
     end
 
@@ -559,23 +544,21 @@ end
 SockaddrStorage() = SockaddrStorage(ntuple(_ -> UInt8(0), 128))
 
 # Parse IPv4 address using inet_pton
-function inet_pton_ipv4(address::AbstractString)::Union{UInt32, ErrorResult}
+function inet_pton_ipv4(address::AbstractString)::UInt32
     addr_ref = Ref{UInt32}(0)
     result = ccall(:inet_pton, Cint, (Cint, Cstring, Ptr{UInt32}), AF_INET, address, addr_ref)
     if result != 1
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
     return addr_ref[]
 end
 
 # Parse IPv6 address using inet_pton
-function inet_pton_ipv6(address::AbstractString)::Union{NTuple{16, UInt8}, ErrorResult}
+function inet_pton_ipv6(address::AbstractString)::NTuple{16, UInt8}
     addr = Memory{UInt8}(undef, 16)
     result = GC.@preserve addr ccall(:inet_pton, Cint, (Cint, Cstring, Ptr{UInt8}), AF_INET6, address, pointer(addr))
     if result != 1
-        raise_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_ADDRESS)
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
     return Tuple(addr)
 end
@@ -644,7 +627,7 @@ function socket_cleanup_impl(::PosixSocket, sock::Socket)
 end
 
 # POSIX impl - connect
-function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnectOptions)::Union{Nothing, ErrorResult}
+function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnectOptions)::Nothing
     remote_endpoint = options.remote_endpoint
     event_loop = options.event_loop
     on_connection_result = options.on_connection_result
@@ -654,28 +637,22 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: beginning connect")
 
     if sock.event_loop !== nothing
-        raise_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
+        throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
     end
 
     if sock.options.type != SocketType.DGRAM
         if sock.state != SocketState.INIT
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
     else
         # UDP sockets can be in INIT or CONNECTED_READ (if bound first)
         if sock.state != SocketState.INIT && !socket_state_has(sock.state, SocketState.CONNECTED_READ)
-            raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-            return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
     end
 
     # Validate port
-    port_result = socket_validate_port_for_connect(remote_endpoint.port, sock.options.domain)
-    if port_result isa ErrorResult
-        return port_result
-    end
+    socket_validate_port_for_connect(remote_endpoint.port, sock.options.domain)
 
     address = get_address(remote_endpoint)
     port = remote_endpoint.port
@@ -689,9 +666,6 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
 
     if sock.options.domain == SocketDomain.IPV4
         addr_result = inet_pton_ipv4(address)
-        if addr_result isa ErrorResult
-            return addr_result
-        end
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
@@ -704,9 +678,6 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
 
     elseif sock.options.domain == SocketDomain.IPV6
         addr_result = inet_pton_ipv6(address)
-        if addr_result isa ErrorResult
-            return addr_result
-        end
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
@@ -738,9 +709,6 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         # `sockaddr_len` already set above.
     elseif sock.options.domain == SocketDomain.VSOCK
         cid_result = _parse_vsock_cid(address)
-        if cid_result isa ErrorResult
-            return cid_result
-        end
         @static if Sys.islinux()
             vm_addr = SockAddrVM(Cushort(AF_VSOCK), Cushort(0), UInt32(port), cid_result, _VSOCK_ZERO)
             vm_ref = Ref(vm_addr)
@@ -748,12 +716,10 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
             sockaddr_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrVM}, vm_ref))
             sockaddr_len = Cuint(sizeof(SockAddrVM))
         else
-            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
         end
     else
-        raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-        return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
     end
 
     # Set socket state
@@ -816,27 +782,24 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
 
         # Subscribe to write events (connection completion triggers writable)
         socket_impl.currently_subscribed = true
-        sub_result = event_loop_subscribe_to_io_events!(
-            event_loop,
-            sock.io_handle,
-            Int(IoEventType.WRITABLE),
-            (el, handle, events, ud) -> _socket_connect_event(el, handle, events, ud),
-            connect_args,
-        )
-
-        if sub_result isa ErrorResult
+        try
+            event_loop_subscribe_to_io_events!(
+                event_loop,
+                sock.io_handle,
+                Int(IoEventType.WRITABLE),
+                (el, handle, events, ud) -> _socket_connect_event(el, handle, events, ud),
+                connect_args,
+            )
+        catch
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to subscribe to event loop")
             socket_impl.currently_subscribed = false
             sock.event_loop = nothing
             socket_impl.connect_args = nothing
-            return sub_result
+            rethrow()
         end
 
         # Schedule timeout
         timeout_ns = event_loop_current_clock_time(event_loop)
-        if timeout_ns isa ErrorResult
-            timeout_ns = UInt64(0)
-        end
         timeout_ns += UInt64(sock.options.connect_timeout_ms) * 1_000_000  # ms to ns
 
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: scheduling timeout at $timeout_ns")
@@ -848,10 +811,9 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
     # Connection failed immediately
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: connect failed with errno=$errno_val")
     aws_error = determine_socket_error(errno_val)
-    raise_error(aws_error)
     sock.event_loop = nothing
     socket_impl.connect_args = nothing
-    return ErrorResult(aws_error)
+    throw_error(aws_error)
 end
 
 # Connection success callback
@@ -896,8 +858,9 @@ function _on_connection_success(sock::Socket)
     sock.state = socket_state_mask(SocketState.CONNECTED_READ, SocketState.CONNECTED_WRITE)
 
     # Re-assign to event loop
-    assign_result = socket_assign_to_event_loop(sock, event_loop)
-    if assign_result isa ErrorResult
+    try
+        socket_assign_to_event_loop(sock, event_loop)
+    catch
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to assign to event loop")
         _on_connection_error(sock, last_error())
         return
@@ -1075,21 +1038,17 @@ function _update_local_endpoint!(sock::Socket)
 end
 
 # POSIX impl - bind
-function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOptions)::Union{Nothing, ErrorResult}
+function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOptions)::Nothing
     local_endpoint = options.local_endpoint
     fd = sock.io_handle.fd
 
     if sock.state != SocketState.INIT
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: invalid state for bind operation")
-        raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+        throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
 
     # Validate port
-    port_result = socket_validate_port_for_bind(local_endpoint.port, sock.options.domain)
-    if port_result isa ErrorResult
-        return port_result
-    end
+    socket_validate_port_for_bind(local_endpoint.port, sock.options.domain)
 
     address = get_address(local_endpoint)
     port = local_endpoint.port
@@ -1103,9 +1062,6 @@ function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOption
 
     if sock.options.domain == SocketDomain.IPV4
         addr_result = inet_pton_ipv4(address)
-        if addr_result isa ErrorResult
-            return addr_result
-        end
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
@@ -1118,9 +1074,6 @@ function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOption
 
     elseif sock.options.domain == SocketDomain.IPV6
         addr_result = inet_pton_ipv6(address)
-        if addr_result isa ErrorResult
-            return addr_result
-        end
 
         sockaddr_buf = Memory{UInt8}(undef, 128)
         fill!(sockaddr_buf, 0x00)
@@ -1152,9 +1105,6 @@ function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOption
         # `sockaddr_len` already set above.
     elseif sock.options.domain == SocketDomain.VSOCK
         cid_result = _parse_vsock_cid(address)
-        if cid_result isa ErrorResult
-            return cid_result
-        end
         @static if Sys.islinux()
             vm_addr = SockAddrVM(Cushort(AF_VSOCK), Cushort(0), UInt32(port), cid_result, _VSOCK_ZERO)
             vm_ref = Ref(vm_addr)
@@ -1162,12 +1112,10 @@ function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOption
             sockaddr_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrVM}, vm_ref))
             sockaddr_len = Cuint(sizeof(SockAddrVM))
         else
-            raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-            return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+            throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
         end
     else
-        raise_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
-        return ErrorResult(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
+        throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
     end
 
     # Bind
@@ -1180,9 +1128,8 @@ function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOption
         errno_val = get_errno()
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: bind failed with errno=$errno_val")
         aws_error = determine_socket_error(errno_val)
-        raise_error(aws_error)
         sock.state = SocketState.ERROR
-        return ErrorResult(aws_error)
+        throw_error(aws_error)
     end
 
     _update_local_endpoint!(sock)
@@ -1203,13 +1150,12 @@ function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOption
 end
 
 # POSIX impl - listen
-function socket_listen_impl(::PosixSocket, sock::Socket, backlog_size::Integer)::Union{Nothing, ErrorResult}
+function socket_listen_impl(::PosixSocket, sock::Socket, backlog_size::Integer)::Nothing
     fd = sock.io_handle.fd
 
     if sock.state != SocketState.BOUND
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: invalid state for listen. Must call bind first.")
-        raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+        throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
 
     error_code = ccall(:listen, Cint, (Cint, Cint), fd, Cint(backlog_size))
@@ -1224,12 +1170,11 @@ function socket_listen_impl(::PosixSocket, sock::Socket, backlog_size::Integer):
     logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: listen failed with errno=$errno_val")
     sock.state = SocketState.ERROR
     aws_error = determine_socket_error(errno_val)
-    raise_error(aws_error)
-    return ErrorResult(aws_error)
+    throw_error(aws_error)
 end
 
 # POSIX impl - close
-function socket_close_impl(::PosixSocket, sock::Socket)::Union{Nothing, ErrorResult}
+function socket_close_impl(::PosixSocket, sock::Socket)::Nothing
     socket_impl = sock.impl
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: closing")
@@ -1294,7 +1239,7 @@ function socket_close_impl(::PosixSocket, sock::Socket)::Union{Nothing, ErrorRes
 end
 
 # POSIX impl - shutdown direction
-function socket_shutdown_dir_impl(::PosixSocket, sock::Socket, dir::ChannelDirection.T)::Union{Nothing, ErrorResult}
+function socket_shutdown_dir_impl(::PosixSocket, sock::Socket, dir::ChannelDirection.T)::Nothing
     fd = sock.io_handle.fd
     how = dir == ChannelDirection.READ ? SHUT_RD : SHUT_WR
 
@@ -1303,8 +1248,7 @@ function socket_shutdown_dir_impl(::PosixSocket, sock::Socket, dir::ChannelDirec
     if ccall(:shutdown, Cint, (Cint, Cint), fd, how) != 0
         errno_val = get_errno()
         aws_error = determine_socket_error(errno_val)
-        raise_error(aws_error)
-        return ErrorResult(aws_error)
+        throw_error(aws_error)
     end
 
     if dir == ChannelDirection.READ
@@ -1317,21 +1261,19 @@ function socket_shutdown_dir_impl(::PosixSocket, sock::Socket, dir::ChannelDirec
 end
 
 # POSIX impl - set options
-function socket_set_options_impl(::PosixSocket, sock::Socket, options::SocketOptions)::Union{Nothing, ErrorResult}
+function socket_set_options_impl(::PosixSocket, sock::Socket, options::SocketOptions)::Nothing
     if sock.options.domain != options.domain || sock.options.type != options.type
-        raise_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        return ErrorResult(ERROR_IO_SOCKET_INVALID_OPTIONS)
+        throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
     end
     return set_posix_socket_options!(sock, options)
 end
 
 # POSIX impl - assign to event loop
-function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loop::EventLoop)::Union{Nothing, ErrorResult}
+function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loop::EventLoop)::Nothing
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing
-        raise_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
+        throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
     end
 
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: assigning to event loop")
@@ -1340,19 +1282,19 @@ function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loo
     socket_impl = sock.impl
     socket_impl.currently_subscribed = true
 
-    sub_result = event_loop_subscribe_to_io_events!(
-        event_loop,
-        sock.io_handle,
-        Int(IoEventType.WRITABLE) | Int(IoEventType.READABLE),
-        (el, handle, events, ud) -> _on_socket_io_event(el, handle, events, ud),
-        sock,
-    )
-
-    if sub_result isa ErrorResult
+    try
+        event_loop_subscribe_to_io_events!(
+            event_loop,
+            sock.io_handle,
+            Int(IoEventType.WRITABLE) | Int(IoEventType.READABLE),
+            (el, handle, events, ud) -> _on_socket_io_event(el, handle, events, ud),
+            sock,
+        )
+    catch
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to assign to event loop")
         socket_impl.currently_subscribed = false
         sock.event_loop = nothing
-        return sub_result
+        rethrow()
     end
 
     return nothing
@@ -1398,20 +1340,18 @@ function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_dat
 end
 
 # POSIX impl - subscribe to readable events
-function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, on_readable::SocketOnReadableFn, user_data)::Union{Nothing, ErrorResult}
+function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, on_readable::SocketOnReadableFn, user_data)::Nothing
     fd = sock.io_handle.fd
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: subscribing to readable events")
 
     if !socket_state_has(sock.state, SocketState.CONNECTED_READ)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: can't subscribe, not connected")
-        raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-        return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
+        throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
     end
 
     if sock.readable_fn !== nothing
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: already subscribed to readable events")
-        raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
-        return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
+        throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
     end
 
     sock.readable_user_data = user_data
@@ -1421,19 +1361,17 @@ function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, o
 end
 
 # POSIX impl - read
-function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: cannot read from different thread")
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
 
     if !socket_state_has(sock.state, SocketState.CONNECTED_READ)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: cannot read, not connected")
-        raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-        return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
+        throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
     end
 
     # Calculate remaining capacity
@@ -1459,8 +1397,7 @@ function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Unio
     if read_val == 0
         logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: zero read, socket closed")
         if remaining > 0
-            raise_error(ERROR_IO_SOCKET_CLOSED)
-            return ErrorResult(ERROR_IO_SOCKET_CLOSED)
+            throw_error(ERROR_IO_SOCKET_CLOSED)
         end
         return (nothing, Csize_t(0))
     end
@@ -1468,26 +1405,22 @@ function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Unio
     # Error handling
     if errno_val == EAGAIN || errno_val == EWOULDBLOCK
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: read would block")
-        raise_error(ERROR_IO_READ_WOULD_BLOCK)
-        return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+        throw_error(ERROR_IO_READ_WOULD_BLOCK)
     end
 
     if errno_val == EPIPE || errno_val == ECONNRESET
         logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: socket closed")
-        raise_error(ERROR_IO_SOCKET_CLOSED)
-        return ErrorResult(ERROR_IO_SOCKET_CLOSED)
+        throw_error(ERROR_IO_SOCKET_CLOSED)
     end
 
     if errno_val == ETIMEDOUT
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: socket timed out")
-        raise_error(ERROR_IO_SOCKET_TIMEOUT)
-        return ErrorResult(ERROR_IO_SOCKET_TIMEOUT)
+        throw_error(ERROR_IO_SOCKET_TIMEOUT)
     end
 
     aws_error = determine_socket_error(errno_val)
     logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: read failed with errno=$errno_val")
-    raise_error(aws_error)
-    return ErrorResult(aws_error)
+    throw_error(aws_error)
 end
 
 # Process socket write requests
@@ -1616,18 +1549,16 @@ function _written_task_fn(sock::Socket, status::TaskStatus.T)
 end
 
 # POSIX impl - write
-function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Union{Nothing, ErrorResult}
+function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Nothing
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
 
     if !socket_state_has(sock.state, SocketState.CONNECTED_WRITE)
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: cannot write, not connected")
-        raise_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-        return ErrorResult(ERROR_IO_SOCKET_NOT_CONNECTED)
+        throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
     end
 
     socket_impl = sock.impl
@@ -1646,7 +1577,7 @@ function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, writ
     push!(socket_impl.write_queue, write_request)
 
     if !_process_socket_write_requests(sock, write_request)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     return nothing
@@ -1678,19 +1609,17 @@ function socket_is_open_impl(::PosixSocket, sock::Socket)::Bool
 end
 
 # POSIX impl - start accept
-function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Union{Nothing, ErrorResult}
+function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: already assigned to event loop")
-        raise_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
+        throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
     end
 
     if sock.state != SocketState.LISTENING
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: invalid state for start_accept. Must call listen first.")
-        raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+        throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
 
     sock.accept_result_fn = options.on_accept_result
@@ -1701,20 +1630,20 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
     socket_impl.continue_accept = true
     socket_impl.currently_subscribed = true
 
-    sub_result = event_loop_subscribe_to_io_events!(
-        accept_loop,
-        sock.io_handle,
-        Int(IoEventType.READABLE),
-        (el, handle, events, ud) -> _socket_accept_event(el, handle, events, ud),
-        sock,
-    )
-
-    if sub_result isa ErrorResult
+    try
+        event_loop_subscribe_to_io_events!(
+            accept_loop,
+            sock.io_handle,
+            Int(IoEventType.READABLE),
+            (el, handle, events, ud) -> _socket_accept_event(el, handle, events, ud),
+            sock,
+        )
+    catch
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to subscribe to event loop")
         socket_impl.continue_accept = false
         socket_impl.currently_subscribed = false
         sock.event_loop = nothing
-        return sub_result
+        rethrow()
     end
 
     # Invoke on_accept_start callback if provided
@@ -1766,14 +1695,13 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
                 accept_options = copy(accept_options)
                 accept_options.network_interface_name = ntuple(_ -> UInt8(0), NETWORK_INTERFACE_NAME_MAX)
             end
-            new_sock_result = socket_init_posix(accept_options; existing_fd = Cint(in_fd))
-            if new_sock_result isa ErrorResult
+            new_sock = try
+                socket_init_posix(accept_options; existing_fd = Cint(in_fd))
+            catch
                 ccall(:close, Cint, (Cint,), in_fd)
                 _on_connection_error(sock, last_error())
                 continue
             end
-
-            new_sock = new_sock_result
             copy!(new_sock.local_endpoint, sock.local_endpoint)
             new_sock.state = socket_state_mask(SocketState.CONNECTED_READ, SocketState.CONNECTED_WRITE)
 
@@ -1842,13 +1770,12 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
 end
 
 # POSIX impl - stop accept
-function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Union{Nothing, ErrorResult}
+function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Nothing
     fd = sock.io_handle.fd
 
     if sock.state != SocketState.LISTENING
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: not in listening state")
-        raise_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        return ErrorResult(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+        throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
 
     logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: stopping accepting new connections")
@@ -1865,7 +1792,7 @@ function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Union{Nothing, Er
 end
 
 # POSIX impl - set close callback
-function socket_set_close_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+function socket_set_close_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
     socket_impl = sock.impl
     socket_impl.close_user_data = user_data
     socket_impl.on_close_complete = fn
@@ -1873,7 +1800,7 @@ function socket_set_close_callback_impl(::PosixSocket, sock::Socket, fn::SocketO
 end
 
 # POSIX impl - set cleanup callback
-function socket_set_cleanup_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Union{Nothing, ErrorResult}
+function socket_set_cleanup_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
     socket_impl = sock.impl
     socket_impl.cleanup_user_data = user_data
     socket_impl.on_cleanup_complete = fn

@@ -14,9 +14,14 @@ end
     Sockets.io_library_init()
 
     strategy = Sockets.NoRetryStrategy()
-    res = Sockets.retry_strategy_acquire_token!(strategy, (token, code, ud) -> nothing, nothing)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
+    err = try
+        Sockets.retry_strategy_acquire_token!(strategy, (token, code, ud) -> nothing, nothing)
+        nothing
+    catch e
+        e
+    end
+    @test err isa Reseau.ReseauError
+    @test err.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
     Sockets.retry_strategy_shutdown!(strategy)
     Sockets.io_library_clean_up()
@@ -31,8 +36,6 @@ end
                 Sockets.io_library_init()
 
                 elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
-                @test !(elg isa Reseau.ErrorResult)
-                elg isa Reseau.ErrorResult && return
 
                 config = Sockets.ExponentialBackoffConfig(;
                     backoff_scale_factor_ms = 1,
@@ -41,12 +44,6 @@ end
                     jitter_mode = jitter_mode,
                 )
                 strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
-                @test !(strategy isa Reseau.ErrorResult)
-                if strategy isa Reseau.ErrorResult
-                    EventLoops.event_loop_group_release!(elg)
-                    Sockets.io_library_clean_up()
-                    return
-                end
 
                 mtx = ReentrantLock()
                 retry_count = Ref(0)
@@ -56,18 +53,22 @@ end
                     lock(mtx) do
                         retry_count[] += 1
                     end
-                    res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
-                    if res isa Reseau.ErrorResult
-                        put!(done_ch, res.code)
+                    try
+                        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                    catch e
+                        e isa Reseau.ReseauError || rethrow()
+                        put!(done_ch, e.code)
                         Sockets.retry_token_release!(token)
                     end
                     return nothing
                 end
 
                 on_acquired = function (token, code, ud)
-                    res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
-                    if res isa Reseau.ErrorResult
-                        put!(done_ch, res.code)
+                    try
+                        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                    catch e
+                        e isa Reseau.ReseauError || rethrow()
+                        put!(done_ch, e.code)
                         Sockets.retry_token_release!(token)
                     end
                     return nothing
@@ -105,8 +106,6 @@ end
         Sockets.io_library_init()
 
         elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
-        @test !(elg isa Reseau.ErrorResult)
-        elg isa Reseau.ErrorResult && return
 
         config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
@@ -115,12 +114,6 @@ end
             jitter_mode = :none,
         )
         strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
-        @test !(strategy isa Reseau.ErrorResult)
-        if strategy isa Reseau.ErrorResult
-            EventLoops.event_loop_group_release!(elg)
-            Sockets.io_library_clean_up()
-            return
-        end
 
         mtx = ReentrantLock()
         retry_count = Ref(0)
@@ -138,18 +131,22 @@ end
                     err_type = Sockets.RetryErrorType.CLIENT_ERROR
                 end
             end
-            res = Sockets.retry_token_schedule_retry(token, err_type, on_ready, ud)
-            if res isa Reseau.ErrorResult
-                put!(done_ch, res.code)
+            try
+                Sockets.retry_token_schedule_retry(token, err_type, on_ready, ud)
+            catch e
+                e isa Reseau.ReseauError || rethrow()
+                put!(done_ch, e.code)
                 Sockets.retry_token_release!(token)
             end
             return nothing
         end
 
         on_acquired = function (token, code, ud)
-            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
-            if res isa Reseau.ErrorResult
-                put!(done_ch, res.code)
+            try
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            catch e
+                e isa Reseau.ReseauError || rethrow()
+                put!(done_ch, e.code)
                 Sockets.retry_token_release!(token)
             end
             return nothing
@@ -185,8 +182,6 @@ end
         Sockets.io_library_init()
 
         elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
-        @test !(elg isa Reseau.ErrorResult)
-        elg isa Reseau.ErrorResult && return
 
         config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 5,
@@ -195,12 +190,6 @@ end
             jitter_mode = :none,
         )
         strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
-        @test !(strategy isa Reseau.ErrorResult)
-        if strategy isa Reseau.ErrorResult
-            EventLoops.event_loop_group_release!(elg)
-            Sockets.io_library_clean_up()
-            return
-        end
 
         mtx = ReentrantLock()
         retry_count = Ref(0)
@@ -210,18 +199,22 @@ end
             lock(mtx) do
                 retry_count[] += 1
             end
-            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
-            if res isa Reseau.ErrorResult
-                put!(done_ch, res.code)
+            try
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            catch e
+                e isa Reseau.ReseauError || rethrow()
+                put!(done_ch, e.code)
                 Sockets.retry_token_release!(token)
             end
             return nothing
         end
 
         on_acquired = function (token, code, ud)
-            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
-            if res isa Reseau.ErrorResult
-                put!(done_ch, res.code)
+            try
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            catch e
+                e isa Reseau.ReseauError || rethrow()
+                put!(done_ch, e.code)
                 Sockets.retry_token_release!(token)
             end
             return nothing
@@ -267,8 +260,6 @@ end
         Sockets.io_library_init()
 
         elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
-        @test !(elg isa Reseau.ErrorResult)
-        elg isa Reseau.ErrorResult && return
 
         config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 400,
@@ -277,12 +268,6 @@ end
             jitter_mode = :none,
         )
         strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
-        @test !(strategy isa Reseau.ErrorResult)
-        if strategy isa Reseau.ErrorResult
-            EventLoops.event_loop_group_release!(elg)
-            Sockets.io_library_clean_up()
-            return
-        end
 
         mtx = ReentrantLock()
         retry_count = Ref(0)
@@ -292,18 +277,22 @@ end
             lock(mtx) do
                 retry_count[] += 1
             end
-            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
-            if res isa Reseau.ErrorResult
-                put!(done_ch, res.code)
+            try
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            catch e
+                e isa Reseau.ReseauError || rethrow()
+                put!(done_ch, e.code)
                 Sockets.retry_token_release!(token)
             end
             return nothing
         end
 
         on_acquired = function (token, code, ud)
-            res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
-            if res isa Reseau.ErrorResult
-                put!(done_ch, res.code)
+            try
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+            catch e
+                e isa Reseau.ReseauError || rethrow()
+                put!(done_ch, e.code)
                 Sockets.retry_token_release!(token)
             end
             return nothing
@@ -350,17 +339,18 @@ end
     Sockets.io_library_init()
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
-    @test !(elg isa Reseau.ErrorResult)
-    elg isa Reseau.ErrorResult && return
 
     config = Sockets.ExponentialBackoffConfig(;
         max_retries = 64,
     )
-    strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
-    @test strategy isa Reseau.ErrorResult
-    if strategy isa Reseau.ErrorResult
-        @test strategy.code == Reseau.ERROR_INVALID_ARGUMENT
+    err = try
+        Sockets.ExponentialBackoffRetryStrategy(elg, config)
+        nothing
+    catch e
+        e
     end
+    @test err isa Reseau.ReseauError
+    @test err.code == Reseau.ERROR_INVALID_ARGUMENT
 
     EventLoops.event_loop_group_release!(elg)
     Sockets.io_library_clean_up()
@@ -373,8 +363,6 @@ end
         Sockets.io_library_init()
 
         elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
-        @test !(elg isa Reseau.ErrorResult)
-        elg isa Reseau.ErrorResult && return
 
         backoff_config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
@@ -387,12 +375,6 @@ end
             backoff_config = backoff_config,
         )
         strategy = Sockets.StandardRetryStrategy(elg, config)
-        @test !(strategy isa Reseau.ErrorResult)
-        if strategy isa Reseau.ErrorResult
-            EventLoops.event_loop_group_release!(elg)
-            Sockets.io_library_clean_up()
-            return
-        end
 
         partition = "us-east-1:super-badly-named-aws-service"
 
@@ -412,8 +394,7 @@ end
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        res = Sockets.retry_token_schedule_retry(token1, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
-        @test !(res isa Reseau.ErrorResult)
+        Sockets.retry_token_schedule_retry(token1, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
         @test _wait_ready(ready_ch)
         ready_token, ready_code = take!(ready_ch)
         @test ready_token === token1
@@ -421,30 +402,39 @@ end
 
         ready_ch2 = Channel{Tuple{Any, Int}}(1)
         on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
-        res = Sockets.retry_token_schedule_retry(token2, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
-        @test !(res isa Reseau.ErrorResult)
+        Sockets.retry_token_schedule_retry(token2, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
         @test _wait_ready(ready_ch2)
         ready_token2, ready_code2 = take!(ready_ch2)
         @test ready_token2 === token2
         @test ready_code2 == Reseau.AWS_OP_SUCCESS
 
-        res = Sockets.retry_token_schedule_retry(
-            token1,
-            Sockets.RetryErrorType.SERVER_ERROR,
-            on_ready,
-            nothing,
-        )
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
+        err1 = try
+            Sockets.retry_token_schedule_retry(
+                token1,
+                Sockets.RetryErrorType.SERVER_ERROR,
+                on_ready,
+                nothing,
+            )
+            nothing
+        catch e
+            e
+        end
+        @test err1 isa Reseau.ReseauError
+        @test err1.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
-        res = Sockets.retry_token_schedule_retry(
-            token2,
-            Sockets.RetryErrorType.SERVER_ERROR,
-            on_ready2,
-            nothing,
-        )
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
+        err2 = try
+            Sockets.retry_token_schedule_retry(
+                token2,
+                Sockets.RetryErrorType.SERVER_ERROR,
+                on_ready2,
+                nothing,
+            )
+            nothing
+        catch e
+            e
+        end
+        @test err2 isa Reseau.ReseauError
+        @test err2.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
         Sockets.retry_token_release!(token1)
         Sockets.retry_token_release!(token2)
@@ -458,8 +448,7 @@ end
 
         ready_ch3 = Channel{Tuple{Any, Int}}(1)
         on_ready3 = (token, code, ud) -> put!(ready_ch3, (token, code))
-        res = Sockets.retry_token_schedule_retry(token3, Sockets.RetryErrorType.SERVER_ERROR, on_ready3, nothing)
-        @test !(res isa Reseau.ErrorResult)
+        Sockets.retry_token_schedule_retry(token3, Sockets.RetryErrorType.SERVER_ERROR, on_ready3, nothing)
         @test _wait_ready(ready_ch3)
         ready_token3, ready_code3 = take!(ready_ch3)
         @test ready_token3 === token3
@@ -480,8 +469,6 @@ end
         Sockets.io_library_init()
 
         elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
-        @test !(elg isa Reseau.ErrorResult)
-        elg isa Reseau.ErrorResult && return
 
         backoff_config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
@@ -494,12 +481,6 @@ end
             backoff_config = backoff_config,
         )
         strategy = Sockets.StandardRetryStrategy(elg, config)
-        @test !(strategy isa Reseau.ErrorResult)
-        if strategy isa Reseau.ErrorResult
-            EventLoops.event_loop_group_release!(elg)
-            Sockets.io_library_clean_up()
-            return
-        end
 
         partition = "us-west-2:elastic-something-something-manager-manager"
 
@@ -512,21 +493,24 @@ end
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
-        @test !(res isa Reseau.ErrorResult)
+        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
         @test _wait_ready(ready_ch)
         _ = take!(ready_ch)
 
         ready_ch2 = Channel{Tuple{Any, Int}}(1)
         on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
-        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
-        @test !(res isa Reseau.ErrorResult)
+        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
         @test _wait_ready(ready_ch2)
         _ = take!(ready_ch2)
 
-        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
+        err = try
+            Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+            nothing
+        catch e
+            e
+        end
+        @test err isa Reseau.ReseauError
+        @test err.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
         Sockets.retry_token_release!(token)
 
@@ -550,14 +534,18 @@ end
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
-        @test !(res isa Reseau.ErrorResult)
+        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
         @test _wait_ready(ready_ch)
         _ = take!(ready_ch)
 
-        res = Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
+        err2 = try
+            Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+            nothing
+        catch e
+            e
+        end
+        @test err2 isa Reseau.ReseauError
+        @test err2.code == EventLoops.ERROR_IO_RETRY_PERMISSION_DENIED
 
         Sockets.retry_token_release!(token)
 

@@ -180,7 +180,7 @@
     const FileReplaceCompletionInformation = UInt32(0x3D)
 
     # Removes a handle's IOCP association.
-    function _win_unsubscribe_handle_from_iocp(handle::Ptr{Cvoid})::Union{Nothing, ErrorResult}
+    function _win_unsubscribe_handle_from_iocp(handle::Ptr{Cvoid})::Nothing
         info = Ref(FILE_COMPLETION_INFORMATION(C_NULL, C_NULL))
         status_block = Ref(IO_STATUS_BLOCK(UInt(0), UInt(0)))
         status = ccall(
@@ -196,8 +196,7 @@
         if status == 0
             return nothing
         end
-        raise_error(ERROR_SYS_CALL_FAILURE)
-        return ErrorResult(ERROR_SYS_CALL_FAILURE)
+        throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
     function _iocp_signal_synced_data_changed(event_loop::EventLoop)
@@ -215,7 +214,7 @@
         return nothing
     end
 
-    function event_loop_new_with_iocp(options::EventLoopOptions)::Union{EventLoop, ErrorResult}
+    function event_loop_new_with_iocp(options::EventLoopOptions)::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing IO Completion Port event loop")
 
         impl = IocpEventLoop()
@@ -234,8 +233,7 @@
                 "CreateIoCompletionPort() failed with error %d",
                 _win_get_last_error(),
             )
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         impl.iocp_handle = iocp_handle
 
@@ -352,19 +350,12 @@
             end
 
             # Run scheduled tasks.
-            now_ns_result = event_loop.clock()
-            now_ns = now_ns_result isa ErrorResult ? UInt64(0) : now_ns_result
+            now_ns = event_loop.clock()
             task_scheduler_run_all!(impl.thread_data.scheduler, now_ns)
 
             # Compute next timeout.
             use_default_timeout = false
-            now2_result = event_loop.clock()
-            now2 = UInt64(0)
-            if now2_result isa ErrorResult
-                use_default_timeout = true
-            else
-                now2 = now2_result
-            end
+            now2 = event_loop.clock()
 
             has_tasks, next_run_time = task_scheduler_has_tasks(impl.thread_data.scheduler)
             if !has_tasks
@@ -388,7 +379,7 @@
         return nothing
     end
 
-    function event_loop_run!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_run!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
@@ -400,10 +391,10 @@
         @atomic impl.running_thread_id = UInt64(0)
 
         if impl.synced_data.state != IocpEventThreadState.READY_TO_RUN
-            return ErrorResult(raise_error(ERROR_INVALID_STATE))
+            throw_error(ERROR_INVALID_STATE)
         end
         if impl.thread_data.state != IocpEventThreadState.READY_TO_RUN
-            return ErrorResult(raise_error(ERROR_INVALID_STATE))
+            throw_error(ERROR_INVALID_STATE)
         end
 
         impl.synced_data.state = IocpEventThreadState.RUNNING
@@ -416,7 +407,7 @@
             take!(_IOCP_THREAD_STARTUP)  # drain on failure
             impl.synced_data.state = IocpEventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
-            return ErrorResult(raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID))
+            throw_error(ERROR_THREAD_NO_SUCH_THREAD_ID)
         end
 
         event_loop.thread = impl.thread_created_on
@@ -425,13 +416,13 @@
         wait(impl.startup_event)
         startup_error = @atomic impl.startup_error
         if startup_error != 0 || (@atomic impl.running_thread_id) == 0
-            return ErrorResult(raise_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN))
+            throw_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN)
         end
 
         return nothing
     end
 
-    function event_loop_stop!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_stop!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
         @atomic event_loop.should_stop = true
 
@@ -463,7 +454,7 @@
         return nothing
     end
 
-    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
@@ -569,12 +560,11 @@
     function event_loop_connect_to_io_completion_port!(
             event_loop::EventLoop,
             handle::IoHandle,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         impl = event_loop.impl_data
 
         if handle.handle == C_NULL
-            raise_error(ERROR_INVALID_ARGUMENT)
-            return ErrorResult(ERROR_INVALID_ARGUMENT)
+            throw_error(ERROR_INVALID_ARGUMENT)
         end
 
         iocp_handle = _win_create_io_completion_port(
@@ -600,8 +590,7 @@
                 "CreateIoCompletionPort() failed with error %d",
                 _win_get_last_error(),
             )
-            raise_error(ERROR_SYS_CALL_FAILURE)
-            return ErrorResult(ERROR_SYS_CALL_FAILURE)
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         _ = _win_set_file_completion_notification_modes(handle.handle, FILE_SKIP_SET_EVENT_ON_HANDLE)
@@ -618,24 +607,22 @@
             events::Int,
             on_event::OnEventCallback,
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         _ = event_loop
         _ = handle
         _ = events
         _ = on_event
         _ = user_data
-        raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-        return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
     function event_loop_unsubscribe_from_io_events!(
             event_loop::EventLoop,
             handle::IoHandle,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         _ = event_loop
         if handle.handle == C_NULL
-            raise_error(ERROR_IO_NOT_SUBSCRIBED)
-            return ErrorResult(ERROR_IO_NOT_SUBSCRIBED)
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
         end
         return _win_unsubscribe_handle_from_iocp(handle.handle)
     end
@@ -680,9 +667,8 @@
 end # @static if Sys.iswindows()
 
 @static if !Sys.iswindows()
-function event_loop_new_with_iocp(options::EventLoopOptions)::Union{EventLoop, ErrorResult}
+function event_loop_new_with_iocp(options::EventLoopOptions)::EventLoop
     _ = options
-    raise_error(ERROR_PLATFORM_NOT_SUPPORTED)
-    return ErrorResult(ERROR_PLATFORM_NOT_SUPPORTED)
+    throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 end

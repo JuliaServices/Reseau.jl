@@ -73,7 +73,7 @@ end
     Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
-    @test !(Sockets.channel_setup_complete!(channel) isa Reseau.ErrorResult)
+    Sockets.channel_setup_complete!(channel)
     @test wait_for_flag_alpn(setup_done)
 
     message = EventLoops.IoMessage(sizeof(Sockets.TlsNegotiatedProtocolMessage))
@@ -81,8 +81,7 @@ end
     message.user_data = Sockets.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
     message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
-    res = Sockets.handler_process_read_message(handler, slot, message)
-    @test !(res isa Reseau.ErrorResult)
+    @test Sockets.handler_process_read_message(handler, slot, message) === nothing
     @test args.protocol !== nothing
     @test String(Reseau.byte_cursor_from_buf(args.protocol)) == "h2"
     @test args.new_slot !== nothing
@@ -118,9 +117,13 @@ end
     message = EventLoops.IoMessage(0)
     message.message_tag = 0
 
-    res = Sockets.handler_process_read_message(handler, slot, message)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_MISSING_ALPN_MESSAGE
+    try
+        Sockets.handler_process_read_message(handler, slot, message)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_MISSING_ALPN_MESSAGE
+    end
 
     Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
     EventLoops.event_loop_group_destroy!(elg)
@@ -284,9 +287,13 @@ end
     message.user_data = Sockets.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
     message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
-    res = Sockets.handler_process_read_message(handler, slot, message)
-    @test res isa Reseau.ErrorResult
-    res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE
+    try
+        Sockets.handler_process_read_message(handler, slot, message)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE
+    end
 
     Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
     EventLoops.event_loop_group_destroy!(elg)

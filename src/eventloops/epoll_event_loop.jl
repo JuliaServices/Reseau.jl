@@ -38,12 +38,12 @@
     end
 
     # Helper to open a non-blocking pipe
-    function open_nonblocking_posix_pipe()::Union{NTuple{2, Int32}, ErrorResult}
+    function open_nonblocking_posix_pipe()::NTuple{2, Int32}
         pipe_fds = Ref{NTuple{2, Int32}}((Int32(-1), Int32(-1)))
 
         ret = @ccall pipe(pipe_fds::Ptr{Int32})::Cint
         if ret != 0
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         read_fd = pipe_fds[][1]
@@ -55,25 +55,25 @@
             if flags == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
             ret = _fcntl(fd, Cint(4), (flags | O_NONBLOCK))  # F_SETFL = 4
             if ret == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
             fd_flags = _fcntl(fd, Cint(1))  # F_GETFD = 1
             if fd_flags == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
             ret = _fcntl(fd, Cint(2), (fd_flags | Cint(1)))  # F_SETFD = 2, FD_CLOEXEC = 1
             if ret == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
         end
 
@@ -83,7 +83,7 @@
     # Create a new epoll event loop
     function event_loop_new_with_epoll(
             options::EventLoopOptions,
-        )::Union{EventLoop, ErrorResult}
+        )::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered epoll event loop")
 
         impl = EpollEventLoop()
@@ -92,7 +92,7 @@
         epoll_fd = @ccall epoll_create(100::Cint)::Cint
         if epoll_fd < 0
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "Failed to open epoll handle")
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         impl.epoll_fd = Int32(epoll_fd)
 
@@ -109,11 +109,6 @@
             impl.use_eventfd = false
 
             pipe_result = open_nonblocking_posix_pipe()
-            if pipe_result isa ErrorResult
-                @ccall close(epoll_fd::Cint)::Cint
-                logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "Failed to open pipe handle")
-                return pipe_result
-            end
 
             logf(
                 LogLevel.TRACE,
@@ -150,11 +145,11 @@
     end
 
     # Run the event loop
-    function event_loop_run!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_run!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
         if @atomic event_loop.running
-            return ErrorResult(raise_error(ERROR_INVALID_STATE))
+            throw_error(ERROR_INVALID_STATE)
         end
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Starting event-loop thread")
@@ -175,7 +170,7 @@
             take!(_EPOLL_THREAD_STARTUP)  # drain on failure
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             impl.should_continue = false
-            return ErrorResult(raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID))
+            throw_error(ERROR_THREAD_NO_SUCH_THREAD_ID)
         end
 
         event_loop.thread = impl.thread_created_on
@@ -184,14 +179,14 @@
         wait(impl.startup_event)
         startup_error = @atomic impl.startup_error
         if startup_error != 0 || (@atomic impl.running_thread_id) == 0
-            return ErrorResult(raise_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN))
+            throw_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN)
         end
 
         return nothing
     end
 
     # Stop the event loop
-    function event_loop_stop!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_stop!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
         # Use atomic CAS to ensure stop task is only scheduled once
@@ -221,7 +216,7 @@
     end
 
     # Wait for the event loop to stop
-    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
@@ -349,7 +344,7 @@
             events::Int,
             on_event::OnEventCallback,
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "subscribing to events on fd %d", handle.fd)
 
         epoll_event_data = EpollEventHandleData(handle, on_event, user_data)
@@ -386,7 +381,7 @@
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to events on fd %d", handle.fd)
             handle.additional_data = C_NULL
             handle.additional_ref = nothing
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         return nothing
@@ -406,17 +401,16 @@
     function event_loop_unsubscribe_from_io_events!(
             event_loop::EventLoop,
             handle::IoHandle,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "un-subscribing from events on fd %d", handle.fd)
 
         impl = event_loop.impl_data
 
         if handle.additional_data == C_NULL
-            return ErrorResult(raise_error(ERROR_IO_NOT_SUBSCRIBED))
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
         end
 
         event_data = unsafe_pointer_to_objref(handle.additional_data)::EpollEventHandleData
@@ -434,7 +428,7 @@
 
         if ret != 0
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to un-subscribe from events on fd %d", handle.fd)
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         # Mark as unsubscribed and schedule cleanup task
@@ -532,14 +526,15 @@
 
         # Subscribe to events on the read task handle for cross-thread notifications.
         # Signal `startup_event` once subscription is complete.
-        err = event_loop_subscribe_to_io_events!(
-            event_loop,
-            impl.read_task_handle,
-            Int(IoEventType.READABLE),
-            on_tasks_to_schedule,
-            nothing,
-        )
-        if err isa ErrorResult
+        try
+            event_loop_subscribe_to_io_events!(
+                event_loop,
+                impl.read_task_handle,
+                Int(IoEventType.READABLE),
+                on_tasks_to_schedule,
+                nothing,
+            )
+        catch
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to task notification events")
             @atomic impl.startup_error = ERROR_SYS_CALL_FAILURE
             notify(impl.startup_event)
@@ -642,8 +637,11 @@
             process_task_pre_queue(event_loop)
 
             # Run scheduled tasks
-            now_ns_result = event_loop.clock()
-            now_ns = now_ns_result isa ErrorResult ? UInt64(0) : now_ns_result
+            now_ns = try
+                event_loop.clock()
+            catch
+                UInt64(0)
+            end
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
             tracing_task_begin(tracing_event_loop_run_tasks)
@@ -656,11 +654,10 @@
             # Calculate next timeout
             use_default_timeout = false
 
-            now_ns_result = event_loop.clock()
-            if now_ns_result isa ErrorResult
+            try
+                now_ns = event_loop.clock()
+            catch
                 use_default_timeout = true
-            else
-                now_ns = now_ns_result
             end
 
             has_tasks, next_run_time = task_scheduler_has_tasks(impl.scheduler)

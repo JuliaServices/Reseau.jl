@@ -34,8 +34,7 @@ end
     if code == 0
         code = Int(last_error())
     end
-    raise_error(code)
-    return ErrorResult(code)
+    throw_error(code)
 end
 
 @inline function _ecc_curve_native(curve::EccCurveName.T)
@@ -72,11 +71,10 @@ function hkdf_derive(
         salt::AbstractVector{UInt8} = UInt8[],
         info::AbstractVector{UInt8} = UInt8[],
         length::Integer,
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     _cal_init()
     if hmac_type != HkdfHmacType.SHA512
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     allocator = LibAwsCommon.default_aws_allocator()
 
@@ -104,7 +102,7 @@ function hkdf_derive(
     return ByteBuffer(out.mem, out_buf.len)
 end
 
-function ecc_key_pair_generate(curve::EccCurveName.T = EccCurveName.P256)::Union{EccKeyPair, ErrorResult}
+function ecc_key_pair_generate(curve::EccCurveName.T = EccCurveName.P256)::EccKeyPair
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     handle = LibAwsCal.aws_ecc_key_pair_new_generate_random(allocator, _ecc_curve_native(curve))
@@ -119,7 +117,7 @@ end
 function ecc_sign(
         pair::EccKeyPair,
         message::AbstractVector{UInt8},
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     _cal_init()
     sig_len = LibAwsCal.aws_ecc_key_pair_signature_length(pair.handle)
     sig = Memory{UInt8}(undef, Int(sig_len))
@@ -140,7 +138,7 @@ function ecc_verify(
         pair::EccKeyPair,
         message::AbstractVector{UInt8},
         signature::ByteBuffer,
-    )::Union{Bool, ErrorResult}
+    )::Bool
     _cal_init()
     msg_cur = _aws_byte_cursor_from_vec(message)
     sig_cur = _aws_byte_cursor_from_buf(signature)
@@ -148,12 +146,12 @@ function ecc_verify(
         rv = LibAwsCal.aws_ecc_key_pair_verify_signature(pair.handle, Ref(msg_cur), Ref(sig_cur))
         rv == 0 && return true
     end
-    return _crypto_last_error()
+    _crypto_last_error()
 end
 
 function rsa_key_pair_new_from_public_key_pkcs1(
         key::Union{AbstractVector{UInt8}, ByteBuffer},
-    )::Union{RsaKeyPair, ErrorResult}
+    )::RsaKeyPair
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     key_cur = _aws_byte_cursor_from_key(key)
@@ -168,7 +166,7 @@ end
 
 function rsa_key_pair_new_from_private_key_pkcs1(
         key::Union{AbstractVector{UInt8}, ByteBuffer},
-    )::Union{RsaKeyPair, ErrorResult}
+    )::RsaKeyPair
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     key_cur = _aws_byte_cursor_from_key(key)
@@ -183,7 +181,7 @@ end
 
 function rsa_key_pair_new_from_private_key_pkcs8(
         key::Union{AbstractVector{UInt8}, ByteBuffer},
-    )::Union{RsaKeyPair, ErrorResult}
+    )::RsaKeyPair
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     key_cur = _aws_byte_cursor_from_key(key)
@@ -211,7 +209,7 @@ end
     return LibAwsCal.aws_rsa_key_pair_max_encrypt_plaintext_size(pair.handle, _rsa_encryption_native(algorithm))
 end
 
-function rsa_key_pair_get_public_key(pair::RsaKeyPair)::Union{ByteBuffer, ErrorResult}
+function rsa_key_pair_get_public_key(pair::RsaKeyPair)::ByteBuffer
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     buf_ref = Ref{LibAwsCommon.aws_byte_buf}()
@@ -241,7 +239,7 @@ function rsa_key_pair_get_public_key(pair::RsaKeyPair)::Union{ByteBuffer, ErrorR
     return ByteBuffer(out.mem, len)
 end
 
-function rsa_key_pair_get_private_key(pair::RsaKeyPair)::Union{ByteBuffer, ErrorResult}
+function rsa_key_pair_get_private_key(pair::RsaKeyPair)::ByteBuffer
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     buf_ref = Ref{LibAwsCommon.aws_byte_buf}()
@@ -275,7 +273,7 @@ function rsa_key_pair_encrypt(
         pair::RsaKeyPair,
         algorithm::RsaEncryptionAlgorithm.T,
         plaintext::AbstractVector{UInt8},
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     _cal_init()
     out = ByteBuffer(Int(rsa_key_pair_block_length(pair)))
     out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
@@ -290,7 +288,7 @@ function rsa_key_pair_decrypt(
         pair::RsaKeyPair,
         algorithm::RsaEncryptionAlgorithm.T,
         ciphertext::AbstractVector{UInt8},
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     _cal_init()
     out = ByteBuffer(Int(rsa_key_pair_block_length(pair)))
     out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
@@ -305,7 +303,7 @@ function rsa_key_pair_sign_message(
         pair::RsaKeyPair,
         algorithm::RsaSignatureAlgorithm.T,
         digest::AbstractVector{UInt8},
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     _cal_init()
     out = ByteBuffer(Int(rsa_key_pair_signature_length(pair)))
     out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
@@ -321,13 +319,13 @@ function rsa_key_pair_verify_signature(
         algorithm::RsaSignatureAlgorithm.T,
         digest::AbstractVector{UInt8},
         signature::AbstractVector{UInt8},
-    )::Union{Bool, ErrorResult}
+    )::Bool
     _cal_init()
     dig_cur = _aws_byte_cursor_from_vec(digest)
     sig_cur = _aws_byte_cursor_from_vec(signature)
     rv = LibAwsCal.aws_rsa_key_pair_verify_signature(pair.handle, _rsa_signature_native(algorithm), dig_cur, sig_cur)
     rv == 0 && return true
-    return _crypto_last_error()
+    _crypto_last_error()
 end
 
 function aes_gcm_256_encrypt(
@@ -335,7 +333,7 @@ function aes_gcm_256_encrypt(
         iv::AbstractVector{UInt8},
         aad::AbstractVector{UInt8},
         plaintext::AbstractVector{UInt8},
-    )::Union{NamedTuple{(:ciphertext, :tag), Tuple{ByteBuffer, ByteBuffer}}, ErrorResult}
+    )::NamedTuple{(:ciphertext, :tag), Tuple{ByteBuffer, ByteBuffer}}
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     key_cur = _aws_byte_cursor_from_vec(key)
@@ -383,7 +381,7 @@ function aes_gcm_256_decrypt(
         aad::AbstractVector{UInt8},
         ciphertext::AbstractVector{UInt8},
         tag::AbstractVector{UInt8},
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
     key_cur = _aws_byte_cursor_from_vec(key)

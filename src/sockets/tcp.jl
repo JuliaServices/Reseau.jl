@@ -189,22 +189,19 @@ function _tls_client_context(;
     opts = if ssl_cert !== nothing || ssl_key !== nothing
         (ssl_cert === nothing || ssl_key === nothing) && error("Both ssl_cert and ssl_key must be provided for client TLS")
         mtls_opts = tls_ctx_options_init_client_mtls_from_path(ssl_cert, ssl_key)
-        mtls_opts isa ErrorResult && error("TLS mTLS init failed: $(mtls_opts.code)")
         tls_ctx_options_set_verify_peer!(mtls_opts, !ssl_insecure)
         mtls_opts
     else
         tls_ctx_options_init_default_client(verify_peer = !ssl_insecure)
     end
     if ssl_cacert !== nothing || ssl_capath !== nothing
-        res = tls_ctx_options_override_default_trust_store_from_path!(
+        tls_ctx_options_override_default_trust_store_from_path!(
             opts;
             ca_path = ssl_capath,
             ca_file = ssl_cacert,
         )
-        res isa ErrorResult && error("TLS trust store override failed: $(res.code)")
     end
     ctx = tls_context_new(opts)
-    ctx isa ErrorResult && error("TLS context creation failed: $(ctx.code)")
     return ctx
 end
 
@@ -215,9 +212,7 @@ function _tls_server_context(;
     )::TlsContext
     (ssl_cert === nothing || ssl_key === nothing) && error("Both ssl_cert and ssl_key are required for server TLS")
     opts = tls_ctx_options_init_default_server_from_path(ssl_cert, ssl_key; alpn_list = alpn_list)
-    opts isa ErrorResult && error("TLS server init failed: $(opts.code)")
     ctx = tls_context_new(opts)
-    ctx isa ErrorResult && error("TLS context creation failed: $(ctx.code)")
     return ctx
 end
 
@@ -310,7 +305,6 @@ function TCPSocket(
         enable_read_back_pressure = enable_read_back_pressure,
         host_resolution_config = host_resolution_config,
     )
-    result isa ErrorResult && error("TCPSocket connect failed: $(result.code)")
     wait(io.connect_event)
     io.connect_error == AWS_OP_SUCCESS || error("TCPSocket connect failed: $(io.connect_error)")
     io.tls_enabled = tls_conn !== nothing
@@ -493,7 +487,6 @@ function listen(host::AbstractString, port::Integer;
         user_data = state,
         enable_read_back_pressure = enable_read_back_pressure,
     ))
-    bootstrap isa ErrorResult && error("listen failed: $(bootstrap.code)")
     wait(state.listen_event)
     state.listen_error == AWS_OP_SUCCESS || error("listen failed: $(state.listen_error)")
     return TCPServer(bootstrap, state)
@@ -537,7 +530,6 @@ function listenany(host::IPAddr, port_hint; backlog::Integer = 511, kwargs...)
             server = listen(addr; backlog = backlog, kwargs...)
             if default_port == 0
                 endpoint = socket_get_bound_address(server.bootstrap.listener_socket)
-                endpoint isa ErrorResult && error("listenany: failed to get bound address")
                 return (UInt16(endpoint.port), server)
             end
             return (addr.port, server)
@@ -555,7 +547,6 @@ listenany(port_hint; backlog::Integer = 511, kwargs...) = listenany(IPv4(0x7F000
 function getsockname(sock::TCPSocket)
     sock.socket === nothing && error("socket not connected")
     ep = socket_get_bound_address(sock.socket)
-    ep isa ErrorResult && error("getsockname failed: $(ep.code)")
     if sock.is_local
         return (get_address(ep), UInt16(0))
     end
@@ -566,7 +557,6 @@ function getsockname(server::TCPServer)
     listener = server.bootstrap.listener_socket
     listener === nothing && error("server is not listening")
     ep = socket_get_bound_address(listener)
-    ep isa ErrorResult && error("getsockname failed: $(ep.code)")
     if server.state.is_local
         return (get_address(ep), UInt16(0))
     end
@@ -641,11 +631,6 @@ function tlsupgrade!(
             "tcpsocket_tls_setup",
         )
         channel_schedule_task_now!(channel, task)
-    end
-
-    if setup_result[] isa ErrorResult
-        negotiation_error[] = setup_result[].code
-        notify(negotiation_event)
     end
 
     wait(negotiation_event)
@@ -827,10 +812,10 @@ function _finish_write!(ctx::_WriteCtx)::Nothing
     return nothing
 end
 
-function _write_fail!(ctx::_WriteCtx, error_code::Int)::ErrorResult
+function _write_fail!(ctx::_WriteCtx, error_code::Int)::Int
     ctx.error_code == AWS_OP_SUCCESS && (ctx.error_code = error_code)
     ctx.remaining == 0 && _finish_write!(ctx)
-    return ErrorResult(error_code)
+    return error_code
 end
 
 function _on_write_complete(channel, message::IoMessage, error_code::Int, user_data)::Nothing
@@ -845,7 +830,7 @@ function _on_write_complete(channel, message::IoMessage, error_code::Int, user_d
     return nothing
 end
 
-function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)
+function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)::Int
     channel = io.channel
     slot = io.slot
     channel === nothing && return _write_fail!(ctx, ERROR_IO_SOCKET_NOT_CONNECTED)
@@ -863,15 +848,17 @@ function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)
         ctx.remaining += 1
         msg.on_completion = _on_write_complete
         msg.user_data = ctx
-        send_res = channel_slot_send_message(slot, msg, ChannelDirection.WRITE)
-        if send_res isa ErrorResult
+        try
+            channel_slot_send_message(slot, msg, ChannelDirection.WRITE)
+        catch e
+            e isa ReseauError || rethrow()
             ctx.remaining -= 1
             channel_release_message_to_pool!(channel, msg)
-            return _write_fail!(ctx, send_res.code)
+            return _write_fail!(ctx, e.code)
         end
         remaining -= chunk_size
     end
-    return nothing
+    return OP_SUCCESS
 end
 
 function _write(io::TCPSocket, data::Vector{UInt8})::Nothing
@@ -882,8 +869,8 @@ function _write(io::TCPSocket, data::Vector{UInt8})::Nothing
     ctx = _begin_write!(io)
     if channel_thread_is_callers_thread(channel)
         res = _write_now(io, data, ctx)
-        if res isa ErrorResult
-            error("TCPSocket write failed: $(res.code)")
+        if res != OP_SUCCESS
+            error("TCPSocket write failed: $res")
         end
         return nothing
     end
@@ -963,7 +950,7 @@ function setchannelslot!(handler::_TCPSocketHandler, slot::ChannelSlot)::Nothing
     return nothing
 end
 
-function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
+function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
     io = handler.io
     data_len = Int(message.message_data.len)
     if data_len > 0
@@ -981,22 +968,23 @@ function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelS
     return nothing
 end
 
-function handler_process_write_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
+function handler_process_write_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
     _ = handler
     _ = slot
     _ = message
-    raise_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
-    return ErrorResult(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
+    throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
 end
 
-function handler_increment_read_window(handler::_TCPSocketHandler, slot::ChannelSlot, size::Csize_t)::Union{Nothing, ErrorResult}
+function handler_increment_read_window(handler::_TCPSocketHandler, slot::ChannelSlot, size::Csize_t)::Nothing
     _ = handler
-    return channel_slot_increment_read_window!(slot, size)
+    channel_slot_increment_read_window!(slot, size)
+    return nothing
 end
 
-function handler_shutdown(handler::_TCPSocketHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Union{Nothing, ErrorResult}
+function handler_shutdown(handler::_TCPSocketHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Nothing
     _mark_closed!(handler.io, error_code)
-    return channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
+    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
+    return nothing
 end
 
 function handler_initial_window_size(handler::_TCPSocketHandler)::Csize_t

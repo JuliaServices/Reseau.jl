@@ -27,16 +27,14 @@ function _alpn_extract_protocol(message::IoMessage)::Union{ByteBuffer, Nothing}
     return nothing
 end
 
-function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
+function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Nothing
     if message.message_tag != TLS_NEGOTIATED_PROTOCOL_MESSAGE
-        raise_error(ERROR_IO_MISSING_ALPN_MESSAGE)
-        return ErrorResult(ERROR_IO_MISSING_ALPN_MESSAGE)
+        throw_error(ERROR_IO_MISSING_ALPN_MESSAGE)
     end
 
     protocol = _alpn_extract_protocol(message)
     if protocol === nothing
-        raise_error(ERROR_IO_MISSING_ALPN_MESSAGE)
-        return ErrorResult(ERROR_IO_MISSING_ALPN_MESSAGE)
+        throw_error(ERROR_IO_MISSING_ALPN_MESSAGE)
     end
     protocol_str = byte_buffer_as_string(protocol)
     chan = slot.channel
@@ -51,8 +49,7 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
 
     channel = slot.channel
     if channel === nothing
-        raise_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
-        return ErrorResult(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
+        throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
     end
 
     new_slot = channel_slot_new!(channel)
@@ -60,8 +57,7 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
 
     if new_handler === nothing
         channel_release_message_to_pool!(channel, message)
-        raise_error(ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE)
-        return ErrorResult(ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE)
+        throw_error(ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE)
     end
 
     channel_slot_replace!(slot, new_slot)
@@ -71,16 +67,14 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
     return nothing
 end
 
-function handler_process_write_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Union{Nothing, ErrorResult}
+function handler_process_write_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Nothing
     logf(LogLevel.ERROR, LS_IO_ALPN, "ALPN handler received unexpected write message")
-    raise_error(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
-    return ErrorResult(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
+    throw_error(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
 end
 
-function handler_increment_read_window(handler::AlpnHandler, slot::ChannelSlot, size::Csize_t)::Union{Nothing, ErrorResult}
+function handler_increment_read_window(handler::AlpnHandler, slot::ChannelSlot, size::Csize_t)::Nothing
     logf(LogLevel.ERROR, LS_IO_ALPN, "ALPN handler does not accept window increments")
-    raise_error(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
-    return ErrorResult(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
+    throw_error(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
 end
 
 function handler_shutdown(
@@ -89,7 +83,7 @@ function handler_shutdown(
         direction::ChannelDirection.T,
         error_code::Int,
         free_scarce_resources_immediately::Bool,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end

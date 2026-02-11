@@ -48,12 +48,12 @@
         end
     end
 
-    function open_nonblocking_posix_pipe()::Union{NTuple{2, Int32}, ErrorResult}
+    function open_nonblocking_posix_pipe()::NTuple{2, Int32}
         pipe_fds = Ref{NTuple{2, Int32}}((Int32(-1), Int32(-1)))
 
         ret = @ccall pipe(pipe_fds::Ptr{Int32})::Cint
         if ret != 0
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         read_fd = pipe_fds[][1]
@@ -64,25 +64,25 @@
             if flags == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
             ret = _fcntl(fd, Cint(4), (flags | O_NONBLOCK))  # F_SETFL = 4
             if ret == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
             fdflags = _fcntl(fd, Cint(1))  # F_GETFD = 1
             if fdflags == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
             ret = _fcntl(fd, Cint(2), (fdflags | FD_CLOEXEC))  # F_SETFD = 2
             if ret == -1
                 @ccall close(read_fd::Cint)::Cint
                 @ccall close(write_fd::Cint)::Cint
-                return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+                throw_error(ERROR_SYS_CALL_FAILURE)
             end
         end
 
@@ -92,7 +92,7 @@
     # Create a new kqueue event loop
     function event_loop_new_with_kqueue(
             options::EventLoopOptions,
-        )::Union{EventLoop, ErrorResult}
+        )::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered kqueue event loop")
 
         impl = KqueueEventLoop()
@@ -101,15 +101,16 @@
         kq_fd = @ccall kqueue()::Cint
         if kq_fd == -1
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "Failed to open kqueue handle")
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
         impl.kq_fd = Int32(kq_fd)
 
-        pipe_result = open_nonblocking_posix_pipe()
-        if pipe_result isa ErrorResult
+        pipe_result = try
+            open_nonblocking_posix_pipe()
+        catch
             @ccall close(kq_fd::Cint)::Cint
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "failed to open pipe handle")
-            return pipe_result
+            rethrow()
         end
 
         logf(
@@ -147,7 +148,7 @@
             @ccall close(impl.cross_thread_signal_pipe[WRITE_FD]::Cint)::Cint
             @ccall close(kq_fd::Cint)::Cint
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "failed to register kevent for signal pipe")
-            return ErrorResult(raise_error(ERROR_SYS_CALL_FAILURE))
+            throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
         # Create dispatch queue for NW sockets (Apple only)
@@ -170,9 +171,9 @@
         function event_loop_connect_to_io_completion_port!(
                 event_loop::EventLoop,
                 handle::IoHandle,
-            )::Union{Nothing, ErrorResult}
+            )::Nothing
             if handle.set_queue == C_NULL
-                return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
+                throw_error(ERROR_INVALID_ARGUMENT)
             end
             impl = event_loop.impl_data
             ccall(
@@ -208,7 +209,7 @@
                 if errno_val == Libc.EINTR
                     continue
                 end
-                if errno_val != Libc.EAGAIN && errno_val != Libc.EWOULDBLOCK
+                if errno_val != Libc.EAGAIN
                     logf(
                         LogLevel.ERROR,
                         LS_IO_EVENT_LOOP,
@@ -223,7 +224,7 @@
     end
 
     # Run the event loop
-    function event_loop_run!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_run!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
@@ -236,10 +237,10 @@
 
         # Verify state
         if impl.cross_thread_data.state != EventThreadState.READY_TO_RUN
-            return ErrorResult(raise_error(ERROR_INVALID_STATE))
+            throw_error(ERROR_INVALID_STATE)
         end
         if impl.thread_data.state != EventThreadState.READY_TO_RUN
-            return ErrorResult(raise_error(ERROR_INVALID_STATE))
+            throw_error(ERROR_INVALID_STATE)
         end
 
         impl.cross_thread_data.state = EventThreadState.RUNNING
@@ -252,7 +253,7 @@
             take!(_KQUEUE_THREAD_STARTUP)  # drain on failure
             impl.cross_thread_data.state = EventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
-            return ErrorResult(raise_error(ERROR_THREAD_NO_SUCH_THREAD_ID))
+            throw_error(ERROR_THREAD_NO_SUCH_THREAD_ID)
         end
 
         event_loop.thread = impl.thread_created_on
@@ -261,14 +262,14 @@
         wait(impl.startup_event)
         startup_error = @atomic impl.startup_error
         if startup_error != 0 || (@atomic impl.running_thread_id) == 0
-            return ErrorResult(raise_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN))
+            throw_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN)
         end
 
         return nothing
     end
 
     # Stop the event loop
-    function event_loop_stop!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_stop!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
         @atomic event_loop.should_stop = true
 
@@ -293,7 +294,7 @@
     end
 
     # Wait for the event loop to stop
-    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Union{Nothing, ErrorResult}
+    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
         if impl.thread_created_on !== nothing
@@ -527,12 +528,12 @@
             events::Int,
             on_event::OnEventCallback,
             user_data,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         if handle.fd < 0
-            return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
+            throw_error(ERROR_INVALID_ARGUMENT)
         end
         if handle.additional_data != C_NULL
-            return ErrorResult(raise_error(ERROR_IO_ALREADY_SUBSCRIBED))
+            throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
         end
 
         handle_data = KqueueHandleData(handle, event_loop, on_event, user_data, events)
@@ -577,15 +578,14 @@
     function event_loop_unsubscribe_from_io_events!(
             event_loop::EventLoop,
             handle::IoHandle,
-        )::Union{Nothing, ErrorResult}
+        )::Nothing
         if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
-            raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-            return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "un-subscribing from events on fd %d", handle.fd)
 
         if handle.additional_data == C_NULL
-            return ErrorResult(raise_error(ERROR_IO_NOT_SUBSCRIBED))
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
         end
 
         handle_data = unsafe_pointer_to_objref(handle.additional_data)::KqueueHandleData
@@ -854,8 +854,7 @@
             end
 
             # Run scheduled tasks
-            now_ns_result = event_loop.clock()
-            now_ns = now_ns_result isa ErrorResult ? UInt64(0) : now_ns_result
+            now_ns = event_loop.clock()
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
             tracing_task_begin(tracing_event_loop_run_tasks)
@@ -868,12 +867,7 @@
             # Calculate next timeout
             use_default_timeout = false
 
-            now_ns_result = event_loop.clock()
-            if now_ns_result isa ErrorResult
-                use_default_timeout = true
-            else
-                now_ns = now_ns_result
-            end
+            now_ns = event_loop.clock()
 
             has_tasks, next_run_time = task_scheduler_has_tasks(impl.thread_data.scheduler)
             if !has_tasks

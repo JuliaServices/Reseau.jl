@@ -107,9 +107,7 @@ end
 function _setup_channel(; enable_read_back_pressure::Bool = false)
     opts = EventLoops.EventLoopOptions()
     el = EventLoops.event_loop_new(opts)
-    el isa Reseau.ErrorResult && return el
-    run_res = EventLoops.event_loop_run!(el)
-    run_res isa Reseau.ErrorResult && return run_res
+    EventLoops.event_loop_run!(el)
 
     setup_ch = Channel{Int}(1)
 
@@ -126,7 +124,6 @@ function _setup_channel(; enable_read_back_pressure::Bool = false)
     )
 
     channel = Sockets.channel_new(channel_opts)
-    channel isa Reseau.ErrorResult && return channel
 
     @test _wait_ready_channel(setup_ch)
     if isready(setup_ch)
@@ -143,48 +140,44 @@ end
         Sockets.io_library_init()
 
         setup = _setup_channel(enable_read_back_pressure = true)
-        if setup isa Reseau.ErrorResult
-            @test false
-        else
-            el = setup.el
-            channel = setup.channel
+        el = setup.el
+        channel = setup.channel
 
-            left_slot = Sockets.channel_slot_new!(channel)
-            left_handler = TestingChannelHandler(16 * 1024)
-            @test Sockets.channel_slot_set_handler!(left_slot, left_handler) === nothing
+        left_slot = Sockets.channel_slot_new!(channel)
+        left_handler = TestingChannelHandler(16 * 1024)
+        @test Sockets.channel_slot_set_handler!(left_slot, left_handler) === nothing
 
-            right_slot = Sockets.channel_slot_new!(channel)
-            @test Sockets.channel_slot_insert_end!(channel, right_slot) === nothing
-            right_handler = TestingChannelHandler(16 * 1024)
-            @test Sockets.channel_slot_set_handler!(right_slot, right_handler) === nothing
+        right_slot = Sockets.channel_slot_new!(channel)
+        @test Sockets.channel_slot_insert_end!(channel, right_slot) === nothing
+        right_handler = TestingChannelHandler(16 * 1024)
+        @test Sockets.channel_slot_set_handler!(right_slot, right_handler) === nothing
 
-            read_msg = Sockets.channel_acquire_message_from_pool(
-                channel,
-                EventLoops.IoMessageType.APPLICATION_DATA,
-                64,
-            )
-            @test read_msg !== nothing
-            @test Sockets.channel_slot_send_message(left_slot, read_msg, Sockets.ChannelDirection.READ) === nothing
-            @test length(right_handler.messages) == 1
-            @test right_handler.messages[1] === read_msg
+        read_msg = Sockets.channel_acquire_message_from_pool(
+            channel,
+            EventLoops.IoMessageType.APPLICATION_DATA,
+            64,
+        )
+        @test read_msg !== nothing
+        @test Sockets.channel_slot_send_message(left_slot, read_msg, Sockets.ChannelDirection.READ) === nothing
+        @test length(right_handler.messages) == 1
+        @test right_handler.messages[1] === read_msg
 
-            write_msg = Sockets.channel_acquire_message_from_pool(
-                channel,
-                EventLoops.IoMessageType.APPLICATION_DATA,
-                64,
-            )
-            @test write_msg !== nothing
-            @test Sockets.channel_slot_send_message(right_slot, write_msg, Sockets.ChannelDirection.WRITE) === nothing
-            @test length(left_handler.messages) == 1
-            @test left_handler.messages[1] === write_msg
+        write_msg = Sockets.channel_acquire_message_from_pool(
+            channel,
+            EventLoops.IoMessageType.APPLICATION_DATA,
+            64,
+        )
+        @test write_msg !== nothing
+        @test Sockets.channel_slot_send_message(right_slot, write_msg, Sockets.ChannelDirection.WRITE) === nothing
+        @test length(left_handler.messages) == 1
+        @test left_handler.messages[1] === write_msg
 
-            @test _drain_channel_tasks(channel)
-            @test Sockets.channel_slot_increment_read_window!(right_slot, Csize_t(12345)) === nothing
-            @test _wait_until(() -> left_handler.latest_window_update == Csize_t(12345))
-            @test left_handler.latest_window_update == Csize_t(12345)
+        @test _drain_channel_tasks(channel)
+        @test Sockets.channel_slot_increment_read_window!(right_slot, Csize_t(12345)) === nothing
+        @test _wait_until(() -> left_handler.latest_window_update == Csize_t(12345))
+        @test left_handler.latest_window_update == Csize_t(12345)
 
-            Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
-        end
+        Sockets.channel_destroy!(channel)
+        EventLoops.event_loop_destroy!(el)
     end
 end

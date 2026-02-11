@@ -9,22 +9,19 @@ end
 
 SharedLibrary() = SharedLibrary(C_NULL, "")
 
-function shared_library_init!(lib::SharedLibrary, path::AbstractString)::Union{Nothing, ErrorResult}
+function shared_library_init!(lib::SharedLibrary, path::AbstractString)::Nothing
     res = shared_library_load(path)
-    if res isa ErrorResult
-        return res
-    end
     lib.handle = res.handle
     lib.path = res.path
     return nothing
 end
 
-function shared_library_clean_up!(lib::SharedLibrary)::Union{Nothing, ErrorResult}
+function shared_library_clean_up!(lib::SharedLibrary)::Nothing
     return shared_library_unload!(lib)
 end
 
 # Load a shared library from path
-function shared_library_load(path::AbstractString)::Union{SharedLibrary, ErrorResult}
+function shared_library_load(path::AbstractString)::SharedLibrary
     # SECURITY: callers should avoid passing untrusted/relative paths (especially on Windows),
     # since platform loader search rules can enable DLL hijacking.
     logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY, "SharedLib: loading '$path'")
@@ -50,8 +47,7 @@ function shared_library_load(path::AbstractString)::Union{SharedLibrary, ErrorRe
                 "SharedLib: failed to load '$path': $err_msg"
             )
         end
-        raise_error(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
-        return ErrorResult(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
+        throw_error(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
     end
 
     logf(
@@ -63,7 +59,7 @@ function shared_library_load(path::AbstractString)::Union{SharedLibrary, ErrorRe
 end
 
 # Load a shared library with default system search
-function shared_library_load_default()::Union{SharedLibrary, ErrorResult}
+function shared_library_load_default()::SharedLibrary
     logf(LogLevel.DEBUG, LS_IO_SHARED_LIBRARY, "SharedLib: loading default library")
 
     handle = @static if Sys.iswindows()
@@ -75,18 +71,16 @@ function shared_library_load_default()::Union{SharedLibrary, ErrorResult}
     end
 
     if handle == C_NULL
-        raise_error(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
-        return ErrorResult(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
+        throw_error(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
     end
 
     return SharedLibrary(handle, "")
 end
 
 # Find a symbol in the shared library
-function shared_library_find_symbol(lib::SharedLibrary, symbol_name::AbstractString)::Union{Ptr{Cvoid}, ErrorResult}
+function shared_library_find_symbol(lib::SharedLibrary, symbol_name::AbstractString)::Ptr{Cvoid}
     if lib.handle == C_NULL
-        raise_error(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
-        return ErrorResult(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
+        throw_error(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
     end
 
     sym = @static if Sys.iswindows()
@@ -108,8 +102,7 @@ function shared_library_find_symbol(lib::SharedLibrary, symbol_name::AbstractStr
                 "SharedLib: symbol '$symbol_name' not found: $err_msg"
             )
         end
-        raise_error(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
-        return ErrorResult(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
+        throw_error(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
     end
 
     logf(
@@ -121,22 +114,23 @@ function shared_library_find_symbol(lib::SharedLibrary, symbol_name::AbstractStr
 end
 
 # Find a symbol and cast to function pointer
-function shared_library_find_function(lib::SharedLibrary, symbol_name::AbstractString, ::Type{T})::Union{Ptr{T}, ErrorResult} where {T}
+function shared_library_find_function(lib::SharedLibrary, symbol_name::AbstractString, ::Type{T})::Ptr{T} where {T}
     sym = shared_library_find_symbol(lib, symbol_name)
-    if sym isa ErrorResult
-        return sym
-    end
     return Ptr{T}(sym)
 end
 
 # Check if a symbol exists in the library
 function shared_library_has_symbol(lib::SharedLibrary, symbol_name::AbstractString)::Bool
-    result = shared_library_find_symbol(lib, symbol_name)
-    return !(result isa ErrorResult)
+    try
+        shared_library_find_symbol(lib, symbol_name)
+        return true
+    catch
+        return false
+    end
 end
 
 # Unload a shared library
-function shared_library_unload!(lib::SharedLibrary)::Union{Nothing, ErrorResult}
+function shared_library_unload!(lib::SharedLibrary)::Nothing
     if lib.handle == C_NULL
         return nothing
     end

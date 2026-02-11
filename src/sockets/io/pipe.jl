@@ -48,7 +48,7 @@ function PipeWriteEnd(fd::Integer)
 end
 
 # Create a pipe (returns read_end, write_end)
-function pipe_create()::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
+function pipe_create()::Tuple{PipeReadEnd, PipeWriteEnd}
     @static if Sys.iswindows()
         return pipe_create_iocp()
     end
@@ -60,8 +60,7 @@ function pipe_create()::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
     if result != 0
         errno_val = get_errno()
         logf(LogLevel.ERROR, LS_IO_GENERAL, "Pipe: creation failed with errno=$errno_val")
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
 
     read_fd = fds[1]
@@ -91,7 +90,7 @@ function _set_nonblocking(fd::Cint)
 end
 
 # Close pipe read end
-function pipe_read_end_close!(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+function pipe_read_end_close!(read_end::PipeReadEnd)::Nothing
     @static if Sys.iswindows()
         return _pipe_read_end_close_iocp!(read_end)
     end
@@ -117,7 +116,7 @@ function pipe_read_end_close!(read_end::PipeReadEnd)::Union{Nothing, ErrorResult
 end
 
 # Close pipe write end
-function pipe_write_end_close!(write_end::PipeWriteEnd)::Union{Nothing, ErrorResult}
+function pipe_write_end_close!(write_end::PipeWriteEnd)::Nothing
     @static if Sys.iswindows()
         return _pipe_write_end_close_iocp!(write_end)
     end
@@ -154,7 +153,7 @@ function pipe_read_end_subscribe!(
         event_loop::EventLoop,
         on_readable::OnPipeReadableFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     @static if Sys.iswindows()
         # event_loop is already stored on the read_end during pipe_init(); keep in sync.
         read_end.event_loop = event_loop
@@ -162,25 +161,20 @@ function pipe_read_end_subscribe!(
     end
 
     if read_end.is_subscribed
-        raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
-        return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
+        throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
     end
 
     read_end.on_readable = on_readable
     read_end.user_data = user_data
     read_end.event_loop = event_loop
 
-    result = event_loop_subscribe_to_io_events!(
+    event_loop_subscribe_to_io_events!(
         event_loop,
         read_end.io_handle,
         Int(IoEventType.READABLE),
         _pipe_read_event_handler,
         read_end,
     )
-
-    if result isa ErrorResult
-        return result
-    end
 
     read_end.is_subscribed = true
 
@@ -218,27 +212,21 @@ end
 function pipe_init(
         read_end_event_loop::EventLoop,
         write_end_event_loop::EventLoop,
-    )::Union{Tuple{PipeReadEnd, PipeWriteEnd}, ErrorResult}
-    result = pipe_create()
-    result isa ErrorResult && return result
-    read_end, write_end = result
+    )::Tuple{PipeReadEnd, PipeWriteEnd}
+    read_end, write_end = pipe_create()
 
     read_end.event_loop = read_end_event_loop
     write_end.event_loop = write_end_event_loop
 
     @static if Sys.iswindows()
         # Associate handles with each loop's IOCP.
-        res = event_loop_connect_to_io_completion_port!(write_end_event_loop, write_end.io_handle)
-        if res isa ErrorResult
+        try
+            event_loop_connect_to_io_completion_port!(write_end_event_loop, write_end.io_handle)
+            event_loop_connect_to_io_completion_port!(read_end_event_loop, read_end.io_handle)
+        catch
             pipe_read_end_close!(read_end)
             pipe_write_end_close!(write_end)
-            return res
-        end
-        res2 = event_loop_connect_to_io_completion_port!(read_end_event_loop, read_end.io_handle)
-        if res2 isa ErrorResult
-            pipe_read_end_close!(read_end)
-            pipe_write_end_close!(write_end)
-            return res2
+            rethrow()
         end
 
         # For IOCP, write-end does not require "writable" subscription; IO completion callbacks drive progress.
@@ -246,60 +234,54 @@ function pipe_init(
         return (read_end, write_end)
     end
 
-    sub_result = pipe_write_end_subscribe!(write_end, write_end_event_loop)
-    if sub_result isa ErrorResult
+    try
+        pipe_write_end_subscribe!(write_end, write_end_event_loop)
+    catch
         pipe_read_end_close!(read_end)
         pipe_write_end_close!(write_end)
-        return sub_result
+        rethrow()
     end
 
     return (read_end, write_end)
 end
 
-function pipe_clean_up_read_end(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+function pipe_clean_up_read_end(read_end::PipeReadEnd)::Nothing
     if read_end.event_loop === nothing
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
     if !event_loop_thread_is_callers_thread(read_end.event_loop)
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
     return pipe_read_end_close!(read_end)
 end
 
-function pipe_clean_up_write_end(write_end::PipeWriteEnd)::Union{Nothing, ErrorResult}
+function pipe_clean_up_write_end(write_end::PipeWriteEnd)::Nothing
     if write_end.event_loop === nothing
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
     if !event_loop_thread_is_callers_thread(write_end.event_loop)
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
     return pipe_write_end_close!(write_end)
 end
 
-function pipe_get_read_end_event_loop(read_end::PipeReadEnd)::Union{EventLoop, ErrorResult}
+function pipe_get_read_end_event_loop(read_end::PipeReadEnd)::EventLoop
     if read_end.event_loop === nothing
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
     return read_end.event_loop
 end
 
-function pipe_get_write_end_event_loop(write_end::PipeWriteEnd)::Union{EventLoop, ErrorResult}
+function pipe_get_write_end_event_loop(write_end::PipeWriteEnd)::EventLoop
     if write_end.event_loop === nothing
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
     return write_end.event_loop
 end
 
-function pipe_read(read_end::PipeReadEnd, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+function pipe_read(read_end::PipeReadEnd, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
     if read_end.event_loop !== nothing && !event_loop_thread_is_callers_thread(read_end.event_loop)
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
     return pipe_read!(read_end, buffer)
 end
@@ -309,10 +291,9 @@ function pipe_write(
         cursor::ByteCursor,
         on_complete::Union{OnPipeWriteCompleteFn, Nothing} = nothing,
         user_data = nothing,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if write_end.event_loop !== nothing && !event_loop_thread_is_callers_thread(write_end.event_loop)
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
     return pipe_write!(write_end, cursor, on_complete, user_data)
 end
@@ -321,46 +302,38 @@ function pipe_subscribe_to_readable_events(
         read_end::PipeReadEnd,
         on_readable::OnPipeReadableFn,
         user_data = nothing,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if read_end.event_loop === nothing
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
     if !event_loop_thread_is_callers_thread(read_end.event_loop)
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
     return pipe_read_end_subscribe!(read_end, read_end.event_loop, on_readable, user_data)
 end
 
-function pipe_unsubscribe_from_readable_events(read_end::PipeReadEnd)::Union{Nothing, ErrorResult}
+function pipe_unsubscribe_from_readable_events(read_end::PipeReadEnd)::Nothing
     @static if Sys.iswindows()
         return _pipe_read_end_unsubscribe_iocp!(read_end)
     end
 
     if read_end.event_loop === nothing
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
     if !event_loop_thread_is_callers_thread(read_end.event_loop)
-        raise_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
     if !read_end.is_subscribed
-        raise_error(ERROR_IO_NOT_SUBSCRIBED)
-        return ErrorResult(ERROR_IO_NOT_SUBSCRIBED)
+        throw_error(ERROR_IO_NOT_SUBSCRIBED)
     end
 
-    result = event_loop_unsubscribe_from_io_events!(read_end.event_loop, read_end.io_handle)
-    if result isa ErrorResult
-        return result
-    end
+    event_loop_unsubscribe_from_io_events!(read_end.event_loop, read_end.io_handle)
     read_end.is_subscribed = false
     return nothing
 end
 
 # Read from pipe
-function pipe_read!(read_end::PipeReadEnd, buffer::ByteBuffer)::Union{Tuple{Nothing, Csize_t}, ErrorResult}
+function pipe_read!(read_end::PipeReadEnd, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
     @static if Sys.iswindows()
         return _pipe_read_iocp!(read_end, buffer)
     end
@@ -368,8 +341,7 @@ function pipe_read!(read_end::PipeReadEnd, buffer::ByteBuffer)::Union{Tuple{Noth
     fd = read_end.io_handle.fd
 
     if fd < 0
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
 
     remaining = buffer.capacity - buffer.len
@@ -389,43 +361,35 @@ function pipe_read!(read_end::PipeReadEnd, buffer::ByteBuffer)::Union{Tuple{Noth
 
     if read_val == 0
         # EOF
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
 
     # Error
     if errno_val == EAGAIN || errno_val == EWOULDBLOCK
-        raise_error(ERROR_IO_READ_WOULD_BLOCK)
-        return ErrorResult(ERROR_IO_READ_WOULD_BLOCK)
+        throw_error(ERROR_IO_READ_WOULD_BLOCK)
     end
 
-    raise_error(ERROR_IO_BROKEN_PIPE)
-    return ErrorResult(ERROR_IO_BROKEN_PIPE)
+    throw_error(ERROR_IO_BROKEN_PIPE)
 end
 
 # Subscribe write end to event loop
 function pipe_write_end_subscribe!(
         write_end::PipeWriteEnd,
         event_loop::EventLoop,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if write_end.is_subscribed
-        raise_error(ERROR_IO_ALREADY_SUBSCRIBED)
-        return ErrorResult(ERROR_IO_ALREADY_SUBSCRIBED)
+        throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
     end
 
     write_end.event_loop = event_loop
 
-    result = event_loop_subscribe_to_io_events!(
+    event_loop_subscribe_to_io_events!(
         event_loop,
         write_end.io_handle,
         Int(IoEventType.WRITABLE),
         _pipe_write_event_handler,
         write_end,
     )
-
-    if result isa ErrorResult
-        return result
-    end
 
     write_end.is_subscribed = true
 
@@ -498,7 +462,7 @@ function pipe_write!(
         cursor::ByteCursor,
         on_complete::Union{OnPipeWriteCompleteFn, Nothing} = nothing,
         user_data = nothing,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     @static if Sys.iswindows()
         return _pipe_write_iocp!(write_end, cursor, on_complete, user_data)
     end
@@ -506,8 +470,7 @@ function pipe_write!(
     fd = write_end.io_handle.fd
 
     if fd < 0
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
 
     # Create write request
@@ -532,12 +495,11 @@ function pipe_write!(
 end
 
 # Synchronous write to pipe (blocking)
-function pipe_write_sync!(write_end::PipeWriteEnd, data::AbstractVector{UInt8})::Union{Csize_t, ErrorResult}
+function pipe_write_sync!(write_end::PipeWriteEnd, data::AbstractVector{UInt8})::Csize_t
     fd = write_end.io_handle.fd
 
     if fd < 0
-        raise_error(ERROR_IO_BROKEN_PIPE)
-        return ErrorResult(ERROR_IO_BROKEN_PIPE)
+        throw_error(ERROR_IO_BROKEN_PIPE)
     end
 
     total_written = Csize_t(0)
@@ -552,8 +514,7 @@ function pipe_write_sync!(write_end::PipeWriteEnd, data::AbstractVector{UInt8}):
             if errno_val == EAGAIN || errno_val == EWOULDBLOCK
                 continue  # Retry
             end
-            raise_error(ERROR_IO_BROKEN_PIPE)
-            return ErrorResult(ERROR_IO_BROKEN_PIPE)
+            throw_error(ERROR_IO_BROKEN_PIPE)
         end
 
         total_written += Csize_t(written)

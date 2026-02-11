@@ -252,19 +252,13 @@ end
     ))
 
     bad_loop = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
-    if bad_loop isa Reseau.ErrorResult
-        @test true
-    else
-        res = Sockets.client_bootstrap_connect!(
-            client_bootstrap,
-            "localhost",
-            80;
-            requested_event_loop = bad_loop,
-        )
-        @test res isa Reseau.ErrorResult
-        res isa Reseau.ErrorResult && @test res.code == EventLoops.ERROR_IO_PINNED_EVENT_LOOP_MISMATCH
-        EventLoops.event_loop_destroy!(bad_loop)
-    end
+    @test_throws Reseau.ReseauError Sockets.client_bootstrap_connect!(
+        client_bootstrap,
+        "localhost",
+        80;
+        requested_event_loop = bad_loop,
+    )
+    EventLoops.event_loop_destroy!(bad_loop)
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)

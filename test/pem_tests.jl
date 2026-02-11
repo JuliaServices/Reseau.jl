@@ -10,8 +10,6 @@ import Reseau: EventLoops, Sockets
     else
         pem_text = read(pem_path, String)
         objs = Sockets.pem_parse(pem_text)
-        @test !(objs isa Reseau.ErrorResult)
-        objs isa Reseau.ErrorResult && return
 
         @test length(objs) == 1
         obj = objs[1]
@@ -26,8 +24,6 @@ import Reseau: EventLoops, Sockets
         @test isempty(Sockets.pem_filter_private_keys(objs))
 
         from_file = Sockets.pem_parse_from_file(pem_path)
-        @test !(from_file isa Reseau.ErrorResult)
-        from_file isa Reseau.ErrorResult && return
         @test length(from_file) == 1
     end
 end
@@ -36,8 +32,6 @@ end
     data = Vector{UInt8}("pemdata")
     pem = Sockets.pem_encode(data, Sockets.PemObjectType.PUBLIC_KEY)
     parsed = Sockets.pem_parse(pem)
-    @test !(parsed isa Reseau.ErrorResult)
-    parsed isa Reseau.ErrorResult && return
 
     @test length(parsed) == 1
     @test parsed[1].object_type == Sockets.PemObjectType.PUBLIC_KEY
@@ -46,9 +40,7 @@ end
 
 @testset "PEM malformed" begin
     bad = "-----BEGIN CERTIFICATE-----\nnot-base64!!\n-----END CERTIFICATE-----"
-    res = Sockets.pem_parse(bad)
-    @test res isa Reseau.ErrorResult
-    @test res.code == EventLoops.ERROR_IO_PEM_MALFORMED
+    @test_throws Reseau.ReseauError Sockets.pem_parse(bad)
 end
 
 @testset "PEM CRLF and multiple objects" begin
@@ -59,15 +51,11 @@ end
 
     pem_combo = "junk line\n" * pem1 * "\nextra\n" * pem2
     parsed = Sockets.pem_parse(pem_combo)
-    @test !(parsed isa Reseau.ErrorResult)
-    parsed isa Reseau.ErrorResult && return
     @test length(parsed) == 2
     @test String(Reseau.byte_cursor_from_buf(parsed[1].data)) == "one"
     @test String(Reseau.byte_cursor_from_buf(parsed[2].data)) == "two"
 
     pem_crlf = replace(pem1, "\n" => "\r\n")
     parsed_crlf = Sockets.pem_parse(pem_crlf)
-    @test !(parsed_crlf isa Reseau.ErrorResult)
-    parsed_crlf isa Reseau.ErrorResult && return
     @test length(parsed_crlf) == 1
 end

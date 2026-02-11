@@ -76,24 +76,22 @@ function retry_strategy_acquire_token!(
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
         timeout_ms::Integer = 0,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     _ = partition_id
     _ = timeout_ms
     _ = on_acquired
     _ = user_data
     if @atomic strategy.shutdown
-        raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
-    raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
-    return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
+    throw_error(ERROR_IO_RETRY_PERMISSION_DENIED)
 end
 
 function retry_strategy_acquire_token!(
         strategy::NoRetryStrategy,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
 end
 
@@ -168,12 +166,10 @@ function ExponentialBackoffRetryStrategy(
         config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
     )
     if config.max_retries > 63
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     if !(config.jitter_mode in (:default, :none, :full, :decorrelated, :equal))
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
     strategy = ExponentialBackoffRetryStrategy(
         event_loop_group,
@@ -190,7 +186,7 @@ function retry_strategy_acquire_token!(
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
         timeout_ms::Integer = 0,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     _ = partition_id
     _ = timeout_ms
     if @atomic strategy.shutdown
@@ -198,14 +194,12 @@ function retry_strategy_acquire_token!(
             LogLevel.ERROR, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
             "Exponential backoff: acquire token called after shutdown"
         )
-        raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
     event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
     if event_loop === nothing
-        raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-        return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
+        throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
 
     token = RetryToken(
@@ -248,7 +242,7 @@ function retry_strategy_acquire_token!(
         strategy::ExponentialBackoffRetryStrategy,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
 end
 
@@ -342,7 +336,7 @@ function retry_token_schedule_retry(
         token::RetryToken,
         on_retry_ready::OnRetryReadyFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     return retry_token_schedule_retry(token, token.error_type, on_retry_ready, user_data)
 end
 
@@ -352,7 +346,7 @@ function retry_token_schedule_retry(
         error_type::RetryErrorType.T,
         on_retry_ready::OnRetryReadyFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     strategy = token.strategy::ExponentialBackoffRetryStrategy
     config = strategy.config
     token.error_type = error_type
@@ -365,8 +359,7 @@ function retry_token_schedule_retry(
                 LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
                 "Exponential backoff: max retries ($(config.max_retries)) exceeded"
             )
-            raise_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
-            return ErrorResult(ERROR_IO_MAX_RETRIES_EXCEEDED)
+            throw_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
         end
 
         last_backoff = @atomic token.last_backoff
@@ -374,14 +367,10 @@ function retry_token_schedule_retry(
 
         event_loop = token.bound_loop
         if event_loop === nothing
-            raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-            return ErrorResult(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
+            throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         end
 
         current_time = event_loop_current_clock_time(event_loop)
-        if current_time isa ErrorResult
-            return current_time
-        end
 
         schedule_at = current_time + backoff_ns
         @atomic token.last_backoff = backoff_ns
@@ -389,8 +378,7 @@ function retry_token_schedule_retry(
     end
 
     if @atomic strategy.shutdown
-        raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
     task = ScheduledTask(
@@ -420,12 +408,11 @@ function retry_token_schedule_retry(
             LogLevel.ERROR, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
             "Exponential backoff: token already scheduled"
         )
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
 
     event_loop = token.bound_loop
-    event_loop === nothing && return ErrorResult(raise_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+    event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     event_loop_schedule_task_future!(event_loop, task, schedule_at)
 
     return nothing
@@ -541,9 +528,6 @@ function StandardRetryStrategy(
         config::StandardRetryConfig = StandardRetryConfig(),
     )
     backoff_strategy = ExponentialBackoffRetryStrategy(event_loop_group, config.backoff_config)
-    if backoff_strategy isa ErrorResult
-        return backoff_strategy
-    end
     strategy = StandardRetryStrategy(
         event_loop_group,
         config,
@@ -597,14 +581,13 @@ function retry_strategy_acquire_token!(
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
         timeout_ms::Integer = 0,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if @atomic strategy.shutdown
         logf(
             LogLevel.ERROR, LS_IO_STANDARD_RETRY_STRATEGY,
             "Standard retry: acquire token called after shutdown"
         )
-        raise_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-        return ErrorResult(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
     bucket = _standard_get_bucket!(strategy, partition_id)
@@ -638,16 +621,13 @@ function retry_strategy_acquire_token!(
         return nothing
     end
 
-    result = retry_strategy_acquire_token!(
+    retry_strategy_acquire_token!(
         strategy.backoff_strategy,
         partition_id,
         on_backoff_acquired,
         token,
         timeout_ms,
     )
-    if result isa ErrorResult
-        return result
-    end
     return nothing
 end
 
@@ -655,7 +635,7 @@ function retry_strategy_acquire_token!(
         strategy::StandardRetryStrategy,
         on_acquired::OnRetryTokenAcquiredFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
 end
 
@@ -687,10 +667,9 @@ function retry_token_schedule_retry(
         error_type::RetryErrorType.T,
         on_retry_ready::OnRetryReadyFn,
         user_data,
-    )::Union{Nothing, ErrorResult}
+    )::Nothing
     if error_type == RetryErrorType.CLIENT_ERROR
-        raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
-        return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
+        throw_error(ERROR_IO_RETRY_PERMISSION_DENIED)
     end
 
     bucket = token.bucket
@@ -713,8 +692,7 @@ function retry_token_schedule_retry(
     end
 
     if capacity_consumed == 0
-        raise_error(ERROR_IO_RETRY_PERMISSION_DENIED)
-        return ErrorResult(ERROR_IO_RETRY_PERMISSION_DENIED)
+        throw_error(ERROR_IO_RETRY_PERMISSION_DENIED)
     end
 
     lock(token.lock) do
@@ -729,18 +707,18 @@ function retry_token_schedule_retry(
             desired_capacity = bucket.current_capacity + capacity_consumed
             bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
         end
-        raise_error(ERROR_INVALID_STATE)
-        return ErrorResult(ERROR_INVALID_STATE)
+        throw_error(ERROR_INVALID_STATE)
     end
 
-    result = retry_token_schedule_retry(exp_token, error_type, _standard_on_retry_ready, token)
-    if result isa ErrorResult
+    try
+        retry_token_schedule_retry(exp_token, error_type, _standard_on_retry_ready, token)
+    catch
         lock(bucket.lock) do
             token.last_retry_cost = previous_cost
             desired_capacity = bucket.current_capacity + capacity_consumed
             bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
         end
-        return result
+        rethrow()
     end
 
     return nothing

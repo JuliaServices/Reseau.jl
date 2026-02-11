@@ -27,27 +27,27 @@ import Base: readbytes!, eof
 # Stream vtable interface methods
 
 # Read from stream into buffer, returns (bytes_read, status)
-function stream_read(stream::AbstractInputStream, buffer::ByteBuffer, length::Integer)::Union{Tuple{Csize_t, StreamStatus.T}, ErrorResult}
+function stream_read(stream::AbstractInputStream, buffer::ByteBuffer, length::Integer)::Tuple{Csize_t, StreamStatus.T}
     error("stream_read must be implemented for $(typeof(stream))")
 end
 
 # Get stream status (valid + end-of-stream)
-function stream_get_status(stream::AbstractInputStream)::Union{InputStreamStatus, ErrorResult}
+function stream_get_status(stream::AbstractInputStream)::InputStreamStatus
     error("stream_get_status must be implemented for $(typeof(stream))")
 end
 
 # Seek to position in stream
-function stream_seek(stream::AbstractInputStream, offset::Int64, basis::StreamSeekBasis.T)::Union{Nothing, ErrorResult}
+function stream_seek(stream::AbstractInputStream, offset::Int64, basis::StreamSeekBasis.T)::Nothing
     error("stream_seek must be implemented for $(typeof(stream))")
 end
 
 # Get current stream length
-function stream_get_length(stream::AbstractInputStream)::Union{Int64, ErrorResult}
+function stream_get_length(stream::AbstractInputStream)::Int64
     error("stream_get_length must be implemented for $(typeof(stream))")
 end
 
 # Get current position in stream
-function stream_get_position(stream::AbstractInputStream)::Union{Int64, ErrorResult}
+function stream_get_position(stream::AbstractInputStream)::Int64
     error("stream_get_position must be implemented for $(typeof(stream))")
 end
 
@@ -62,18 +62,12 @@ function readbytes!(stream::AbstractInputStream, buf::Vector{UInt8}, nb::Int)
     to_read = min(nb, length(buf))
     to_read == 0 && return 0
     byte_buf = byte_buf_from_empty_array(buf, to_read)
-    result = stream_read(stream, byte_buf, to_read)
-    if result isa ErrorResult
-        raise_error(result.code)
-        error("stream_read failed with error code $(result.code)")
-    end
-    read_len, _ = result
+    read_len, _ = stream_read(stream, byte_buf, to_read)
     return Int(read_len)
 end
 
 function eof(stream::AbstractInputStream)::Bool
     status = stream_get_status(stream)
-    status isa ErrorResult && return true
     return status.is_end_of_stream
 end
 
@@ -122,7 +116,7 @@ function ByteBufferInputStream(data::AbstractVector{UInt8}; owns_buffer::Bool = 
     return ByteBufferInputStream(buf, Csize_t(0), owns_buffer)
 end
 
-function stream_read(stream::ByteBufferInputStream, buffer::ByteBuffer, length::Integer)::Union{Tuple{Csize_t, StreamStatus.T}, ErrorResult}
+function stream_read(stream::ByteBufferInputStream, buffer::ByteBuffer, length::Integer)::Tuple{Csize_t, StreamStatus.T}
     tracing_task_begin(tracing_input_stream_read)
     try
         available = stream.buffer.len - stream.position
@@ -148,30 +142,28 @@ function stream_read(stream::ByteBufferInputStream, buffer::ByteBuffer, length::
     end
 end
 
-function stream_seek(stream::ByteBufferInputStream, offset::Int64, basis::StreamSeekBasis.T)::Union{Nothing, ErrorResult}
+function stream_seek(stream::ByteBufferInputStream, offset::Int64, basis::StreamSeekBasis.T)::Nothing
     new_pos = if basis == StreamSeekBasis.BEGIN
         offset
     elseif basis == StreamSeekBasis.END
         Int64(stream.buffer.len) + offset
     else
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     if new_pos < 0 || new_pos > Int64(stream.buffer.len)
-        raise_error(ERROR_IO_STREAM_INVALID_SEEK_POSITION)
-        return ErrorResult(ERROR_IO_STREAM_INVALID_SEEK_POSITION)
+        throw_error(ERROR_IO_STREAM_INVALID_SEEK_POSITION)
     end
 
     stream.position = Csize_t(new_pos)
     return nothing
 end
 
-function stream_get_length(stream::ByteBufferInputStream)::Union{Int64, ErrorResult}
+function stream_get_length(stream::ByteBufferInputStream)::Int64
     return Int64(stream.buffer.len)
 end
 
-function stream_get_position(stream::ByteBufferInputStream)::Union{Int64, ErrorResult}
+function stream_get_position(stream::ByteBufferInputStream)::Int64
     return Int64(stream.position)
 end
 
@@ -188,7 +180,7 @@ function stream_destroy!(stream::ByteBufferInputStream)::Nothing
     return nothing
 end
 
-function stream_get_status(stream::ByteBufferInputStream)::Union{InputStreamStatus, ErrorResult}
+function stream_get_status(stream::ByteBufferInputStream)::InputStreamStatus
     is_end = stream.position >= stream.buffer.len
     return InputStreamStatus(is_end, true)
 end
@@ -231,21 +223,18 @@ else
     end
 end
 
-function _file_open_read(path::AbstractString)::Union{Libc.FILE, ErrorResult}
+function _file_open_read(path::AbstractString)::Libc.FILE
     file_ptr = ccall(:fopen, Ptr{Cvoid}, (Cstring, Cstring), path, _FILE_STREAM_READ_MODE)
     if file_ptr == C_NULL
         err = Libc.errno()
         translate_and_raise_io_error_or(err, ERROR_FILE_OPEN_FAILURE)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
     return Libc.FILE(file_ptr)
 end
 
-function FileInputStream(path::AbstractString)::Union{FileInputStream, ErrorResult}
+function FileInputStream(path::AbstractString)
     file = _file_open_read(path)
-    if file isa ErrorResult
-        return file
-    end
     stream = FileInputStream(file, true)
     finalizer(stream_destroy!, stream)
     return stream
@@ -259,12 +248,11 @@ function FileInputStream(file::Libc.FILE; close_on_cleanup::Bool = false)
     return stream
 end
 
-function stream_read(stream::FileInputStream, buffer::ByteBuffer, length::Integer)::Union{Tuple{Csize_t, StreamStatus.T}, ErrorResult}
+function stream_read(stream::FileInputStream, buffer::ByteBuffer, length::Integer)::Tuple{Csize_t, StreamStatus.T}
     tracing_task_begin(tracing_input_stream_read)
     try
         if stream.file === nothing
-            raise_error(ERROR_IO_STREAM_READ_FAILED)
-            return ErrorResult(ERROR_IO_STREAM_READ_FAILED)
+            throw_error(ERROR_IO_STREAM_READ_FAILED)
         end
 
         space = buffer.capacity - buffer.len
@@ -290,8 +278,7 @@ function stream_read(stream::FileInputStream, buffer::ByteBuffer, length::Intege
 
         if bytes_read == 0
             if ccall(:ferror, Cint, (Ptr{Cvoid},), stream.file.ptr) != 0
-                raise_error(ERROR_IO_STREAM_READ_FAILED)
-                return ErrorResult(ERROR_IO_STREAM_READ_FAILED)
+                throw_error(ERROR_IO_STREAM_READ_FAILED)
             end
         end
 
@@ -308,10 +295,9 @@ function stream_read(stream::FileInputStream, buffer::ByteBuffer, length::Intege
     end
 end
 
-function stream_seek(stream::FileInputStream, offset::Int64, basis::StreamSeekBasis.T)::Union{Nothing, ErrorResult}
+function stream_seek(stream::FileInputStream, offset::Int64, basis::StreamSeekBasis.T)::Nothing
     if stream.file === nothing
-        raise_error(ERROR_STREAM_UNSEEKABLE)
-        return ErrorResult(ERROR_STREAM_UNSEEKABLE)
+        throw_error(ERROR_STREAM_UNSEEKABLE)
     end
 
     whence = if basis == StreamSeekBasis.BEGIN
@@ -319,24 +305,22 @@ function stream_seek(stream::FileInputStream, offset::Int64, basis::StreamSeekBa
     elseif basis == StreamSeekBasis.END
         _FILE_STREAM_SEEK_END
     else
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     rc = _file_stream_seek(stream.file, offset, whence)
     if rc != 0
         err = Libc.errno()
         translate_and_raise_io_error_or(err, ERROR_STREAM_UNSEEKABLE)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     return nothing
 end
 
-function stream_get_length(stream::FileInputStream)::Union{Int64, ErrorResult}
+function stream_get_length(stream::FileInputStream)::Int64
     if stream.file === nothing
-        raise_error(ERROR_INVALID_FILE_HANDLE)
-        return ErrorResult(ERROR_INVALID_FILE_HANDLE)
+        throw_error(ERROR_INVALID_FILE_HANDLE)
     end
 
     # Use seek/tell instead of `fileno`+`stat` for Windows portability.
@@ -344,44 +328,43 @@ function stream_get_length(stream::FileInputStream)::Union{Int64, ErrorResult}
     if old_pos < 0
         err = Libc.errno()
         translate_and_raise_io_error(err)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     rc = _file_stream_seek(stream.file, Int64(0), _FILE_STREAM_SEEK_END)
     if rc != 0
         err = Libc.errno()
         translate_and_raise_io_error_or(err, ERROR_STREAM_UNSEEKABLE)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     end_pos = _file_stream_tell(stream.file)
     if end_pos < 0
         err = Libc.errno()
         translate_and_raise_io_error(err)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     rc = _file_stream_seek(stream.file, old_pos, _FILE_STREAM_SEEK_SET)
     if rc != 0
         err = Libc.errno()
         translate_and_raise_io_error_or(err, ERROR_STREAM_UNSEEKABLE)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     return end_pos
 end
 
-function stream_get_position(stream::FileInputStream)::Union{Int64, ErrorResult}
+function stream_get_position(stream::FileInputStream)::Int64
     if stream.file === nothing
-        raise_error(ERROR_INVALID_FILE_HANDLE)
-        return ErrorResult(ERROR_INVALID_FILE_HANDLE)
+        throw_error(ERROR_INVALID_FILE_HANDLE)
     end
 
     pos = _file_stream_tell(stream.file)
     if pos < 0
         err = Libc.errno()
         translate_and_raise_io_error(err)
-        return ErrorResult(last_error())
+        throw(ReseauError(last_error()))
     end
 
     return pos
@@ -407,7 +390,7 @@ function stream_destroy!(stream::FileInputStream)::Nothing
     return nothing
 end
 
-function stream_get_status(stream::FileInputStream)::Union{InputStreamStatus, ErrorResult}
+function stream_get_status(stream::FileInputStream)::InputStreamStatus
     if stream.file === nothing
         return InputStreamStatus(true, false)
     end
@@ -429,7 +412,7 @@ function CursorInputStream(cursor::ByteCursor)
     return CursorInputStream(cursor, Csize_t(0))
 end
 
-function stream_read(stream::CursorInputStream, buffer::ByteBuffer, length::Integer)::Union{Tuple{Csize_t, StreamStatus.T}, ErrorResult}
+function stream_read(stream::CursorInputStream, buffer::ByteBuffer, length::Integer)::Tuple{Csize_t, StreamStatus.T}
     tracing_task_begin(tracing_input_stream_read)
     try
         available = stream.cursor.len - stream.position
@@ -455,30 +438,28 @@ function stream_read(stream::CursorInputStream, buffer::ByteBuffer, length::Inte
     end
 end
 
-function stream_seek(stream::CursorInputStream, offset::Int64, basis::StreamSeekBasis.T)::Union{Nothing, ErrorResult}
+function stream_seek(stream::CursorInputStream, offset::Int64, basis::StreamSeekBasis.T)::Nothing
     new_pos = if basis == StreamSeekBasis.BEGIN
         offset
     elseif basis == StreamSeekBasis.END
         Int64(stream.cursor.len) + offset
     else
-        raise_error(ERROR_INVALID_ARGUMENT)
-        return ErrorResult(ERROR_INVALID_ARGUMENT)
+        throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     if new_pos < 0 || new_pos > Int64(stream.cursor.len)
-        raise_error(ERROR_IO_STREAM_INVALID_SEEK_POSITION)
-        return ErrorResult(ERROR_IO_STREAM_INVALID_SEEK_POSITION)
+        throw_error(ERROR_IO_STREAM_INVALID_SEEK_POSITION)
     end
 
     stream.position = Csize_t(new_pos)
     return nothing
 end
 
-function stream_get_length(stream::CursorInputStream)::Union{Int64, ErrorResult}
+function stream_get_length(stream::CursorInputStream)::Int64
     return Int64(stream.cursor.len)
 end
 
-function stream_get_position(stream::CursorInputStream)::Union{Int64, ErrorResult}
+function stream_get_position(stream::CursorInputStream)::Int64
     return Int64(stream.position)
 end
 
@@ -490,7 +471,7 @@ function stream_has_known_length(stream::CursorInputStream)::Bool
     return true
 end
 
-function stream_get_status(stream::CursorInputStream)::Union{InputStreamStatus, ErrorResult}
+function stream_get_status(stream::CursorInputStream)::InputStreamStatus
     is_end = stream.position >= stream.cursor.len
     return InputStreamStatus(is_end, true)
 end
@@ -517,15 +498,10 @@ end
 function stream_read_all(
         stream::AbstractInputStream,
         max_size::Integer = SIZE_MAX,
-    )::Union{ByteBuffer, ErrorResult}
+    )::ByteBuffer
     # Try to get length if possible
     initial_size = if stream_has_known_length(stream)
-        len_result = stream_get_length(stream)
-        if len_result isa ErrorResult
-            Csize_t(4096)
-        else
-            min(Csize_t(len_result), Csize_t(max_size))
-        end
+        min(Csize_t(stream_get_length(stream)), Csize_t(max_size))
     else
         Csize_t(4096)
     end
@@ -554,13 +530,7 @@ function stream_read_all(
         end
 
         # Read chunk
-        read_result = stream_read(stream, buffer, chunk_size)
-
-        if read_result isa ErrorResult
-            return read_result
-        end
-
-        bytes_read, status = read_result
+        bytes_read, status = stream_read(stream, buffer, chunk_size)
 
         if status == StreamStatus.END_OF_STREAM || bytes_read == 0
             break
@@ -579,7 +549,7 @@ function stream_copy(
         source::AbstractInputStream,
         dest_buffer::ByteBuffer,
         max_bytes::Integer = SIZE_MAX,
-    )::Union{Csize_t, ErrorResult}
+    )::Csize_t
     total_copied = Csize_t(0)
 
     while total_copied < Csize_t(max_bytes)
@@ -589,13 +559,7 @@ function stream_copy(
             break
         end
 
-        read_result = stream_read(source, dest_buffer, remaining)
-
-        if read_result isa ErrorResult
-            return read_result
-        end
-
-        bytes_read, status = read_result
+        bytes_read, status = stream_read(source, dest_buffer, remaining)
         total_copied += bytes_read
 
         if status == StreamStatus.END_OF_STREAM || bytes_read == 0
@@ -607,10 +571,9 @@ function stream_copy(
 end
 
 # Reset stream to beginning
-function stream_reset(stream::AbstractInputStream)::Union{Nothing, ErrorResult}
+function stream_reset(stream::AbstractInputStream)::Nothing
     if !stream_is_seekable(stream)
-        raise_error(ERROR_IO_STREAM_SEEK_UNSUPPORTED)
-        return ErrorResult(ERROR_IO_STREAM_SEEK_UNSUPPORTED)
+        throw_error(ERROR_IO_STREAM_SEEK_UNSUPPORTED)
     end
 
     return stream_seek(stream, Int64(0), StreamSeekBasis.BEGIN)

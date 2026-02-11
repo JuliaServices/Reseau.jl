@@ -60,9 +60,11 @@ function resolve_and_wait(resolver, host; config=nothing, timeout_s::Float64 = 5
         invoked[] = true
         return nothing
     end
-    result = Sockets.host_resolver_resolve!(resolver, host, cb; resolution_config = config)
-    if result isa Reseau.ErrorResult
-        return result.code, Sockets.HostAddress[]
+    try
+        Sockets.host_resolver_resolve!(resolver, host, cb; resolution_config = config)
+    catch e
+        e isa Reseau.ReseauError || rethrow()
+        return e.code, Sockets.HostAddress[]
     end
     ok = wait_for_pred(() -> invoked[]; timeout_s = timeout_s)
     return ok ? (err_ref[], addrs_ref[]) : :timeout
@@ -84,7 +86,6 @@ end
     for (input, expected) in cases
         result = resolve_and_wait(resolver, input; config = config)
         @test result !== :timeout
-        @test !(result isa Reseau.ErrorResult)
         err, addrs = result
         @test err == Reseau.AWS_OP_SUCCESS
         addr6 = find_address(addrs, Sockets.HostAddressType.AAAA)
@@ -142,7 +143,6 @@ end
 
     result_v4 = resolve_and_wait(resolver, "127.0.0.1"; config = config)
     @test result_v4 !== :timeout
-    @test !(result_v4 isa Reseau.ErrorResult)
     err_v4, addrs_v4 = result_v4
     @test err_v4 == Reseau.AWS_OP_SUCCESS
     addr4 = find_address(addrs_v4, Sockets.HostAddressType.A)
@@ -155,7 +155,6 @@ end
 
     result_v6 = resolve_and_wait(resolver, "::1"; config = config)
     @test result_v6 !== :timeout
-    @test !(result_v6 isa Reseau.ErrorResult)
     err_v6, addrs_v6 = result_v6
     @test err_v6 == Reseau.AWS_OP_SUCCESS
     addr4 = find_address(addrs_v6, Sockets.HostAddressType.A)

@@ -34,9 +34,13 @@ end
     EventLoops.future_on_complete!(future, (f, ud) -> (ud[] = true), immediate)
     @test immediate[]
 
-    err = EventLoops.future_complete!(future, 7)
-    @test err isa Reseau.ErrorResult
-    @test err.code == EventLoops.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE
+    try
+        EventLoops.future_complete!(future, 7)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE
+    end
 end
 
 @testset "Future fail/cancel" begin

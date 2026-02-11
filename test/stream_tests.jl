@@ -9,9 +9,7 @@ function collect_stream_bytes(stream, read_buf_size::Integer)
 
     while status != Sockets.StreamStatus.END_OF_STREAM
         read_buf.len = 0
-        read_result = Sockets.stream_read(stream, read_buf, read_buf_size)
-        @test !(read_result isa Reseau.ErrorResult)
-        bytes, status = read_result
+        bytes, status = Sockets.stream_read(stream, read_buf, read_buf_size)
         if bytes > 0
             append!(result, read_buf.mem[1:Int(read_buf.len)])
         end
@@ -88,7 +86,6 @@ end
 
         stream = Sockets.FileInputStream(path)
         @test stream isa Sockets.FileInputStream
-        stream isa Reseau.ErrorResult && return
 
         @test Sockets.stream_is_seekable(stream)
         @test Sockets.stream_has_known_length(stream)
@@ -169,7 +166,6 @@ end
             write(io, test_data)
             close(io)
             stream = Sockets.FileInputStream(path)
-            @test !(stream isa Reseau.ErrorResult)
             status = Sockets.stream_get_status(stream)
             @test status.is_valid
             @test !status.is_end_of_stream
@@ -245,21 +241,10 @@ end
 
     @testset "seek invalid positions" begin
         stream = Sockets.CursorInputStream(Reseau.ByteCursor(test_data))
-        result = Sockets.stream_seek(stream, 13, Sockets.StreamSeekBasis.BEGIN)
-        @test result isa Reseau.ErrorResult
-        @test result.code == EventLoops.ERROR_IO_STREAM_INVALID_SEEK_POSITION
-
-        result = Sockets.stream_seek(stream, 1, Sockets.StreamSeekBasis.END)
-        @test result isa Reseau.ErrorResult
-        @test result.code == EventLoops.ERROR_IO_STREAM_INVALID_SEEK_POSITION
-
-        result = Sockets.stream_seek(stream, -13, Sockets.StreamSeekBasis.END)
-        @test result isa Reseau.ErrorResult
-        @test result.code == EventLoops.ERROR_IO_STREAM_INVALID_SEEK_POSITION
-
-        result = Sockets.stream_seek(stream, -1, Sockets.StreamSeekBasis.BEGIN)
-        @test result isa Reseau.ErrorResult
-        @test result.code == EventLoops.ERROR_IO_STREAM_INVALID_SEEK_POSITION
+        @test_throws Reseau.ReseauError Sockets.stream_seek(stream, 13, Sockets.StreamSeekBasis.BEGIN)
+        @test_throws Reseau.ReseauError Sockets.stream_seek(stream, 1, Sockets.StreamSeekBasis.END)
+        @test_throws Reseau.ReseauError Sockets.stream_seek(stream, -13, Sockets.StreamSeekBasis.END)
+        @test_throws Reseau.ReseauError Sockets.stream_seek(stream, -1, Sockets.StreamSeekBasis.BEGIN)
     end
 
     @testset "stream length invariant under seek" begin
@@ -273,7 +258,6 @@ end
             write(io, test_data)
             close(io)
             fstream = Sockets.FileInputStream(path)
-            @test !(fstream isa Reseau.ErrorResult)
             @test Sockets.stream_get_length(fstream) == length(test_data)
             @test Sockets.stream_seek(fstream, 3, Sockets.StreamSeekBasis.BEGIN) === nothing
             @test Sockets.stream_get_length(fstream) == length(test_data)
@@ -287,7 +271,6 @@ end
             write(io, binary)
             close(io)
             stream = Sockets.FileInputStream(path)
-            @test !(stream isa Reseau.ErrorResult)
             assert_stream_contents(stream, binary, 100)
             Sockets.stream_destroy!(stream)
         end
@@ -301,7 +284,6 @@ end
                 chmod(path, 0o444)
             end
             stream = Sockets.FileInputStream(path)
-            @test !(stream isa Reseau.ErrorResult)
             assert_stream_contents(stream, test_data, 100)
             Sockets.stream_destroy!(stream)
         end

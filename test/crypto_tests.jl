@@ -80,8 +80,7 @@ const _BYO_READ_TAG = "I'm a little teapot."
 
 function _byo_start_negotiation(handler::ReadWriteTestHandler, test_args::ByoCryptoTestArgs)
     write_buf = _buf_from_string(_BYO_WRITE_TAG)
-    res = rw_handler_write(handler, handler.slot, write_buf)
-    res isa Reseau.ErrorResult && return res
+    rw_handler_write(handler, handler.slot, write_buf)
     if test_args.negotiation_result_fn !== nothing
         test_args.negotiation_result_fn(
             handler,

@@ -94,8 +94,6 @@ end
 
         elg_opts = EventLoops.EventLoopGroupOptions(; loop_count = 1)
         elg = EventLoops.EventLoopGroup(elg_opts)
-        @test !(elg isa Reseau.ErrorResult)
-        elg isa Reseau.ErrorResult && return
 
         event_loop = EventLoops.event_loop_group_get_next_loop(elg)
         @test event_loop !== nothing
