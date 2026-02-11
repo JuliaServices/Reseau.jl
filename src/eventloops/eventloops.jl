@@ -65,6 +65,7 @@ include("iocp_event_loop.jl")
 include("future.jl")
 
 function __init__()
+    _init_default_clock()
     @static if Sys.isapple() || Sys.isbsd()
         _kqueue_init_cfunctions!()
     elseif Sys.islinux()
@@ -90,33 +91,8 @@ export
     event_loop_subscribe_to_io_events!,
     event_loop_unsubscribe_from_io_events!,
     event_loop_thread_is_callers_thread,
-    # Futures/promises
-    OnFutureCompleteFn,
+    # Futures
     Future,
-    Promise,
-    VoidFuture,
-    future_is_done,
-    future_is_success,
-    future_is_failed,
-    future_is_cancelled,
-    future_complete!,
-    future_fail!,
-    future_cancel!,
-    future_get_error,
-    future_get_result,
-    future_get_result_by_move!,
-    future_wait,
-    future_wait_ns,
-    future_on_complete!,
-    future_on_complete_if_not_done!,
-    future_on_event_loop!,
-    future_on_channel!,
-    promise_complete!,
-    promise_fail!,
-    promise_cancel!,
-    void_future_complete!,
-    future_all,
-    future_any,
-    future_then
+    cancel!
 
 end # module EventLoops

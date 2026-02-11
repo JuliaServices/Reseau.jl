@@ -161,20 +161,11 @@ function get_network_interface_name(options::SocketOptions)::String
     return String(UInt8[iface[i] for i in 1:len])
 end
 
-# Callback types
-const SocketOnShutdownCompleteFn = Function  # (user_data) -> Nothing
-const SocketOnConnectionResultFn = Function  # (socket, error_code, user_data) -> Nothing
-const SocketOnAcceptStartedFn = Function     # (socket, error_code, user_data) -> Nothing
-const SocketOnAcceptResultFn = Function      # (socket, error_code, new_socket, user_data) -> Nothing
-const SocketOnWriteCompletedFn = Function    # (socket, error_code, bytes_written, user_data) -> Nothing
-const SocketOnReadableFn = Function          # (socket, error_code, user_data) -> Nothing
-
 # Socket connect options
 struct SocketConnectOptions
     remote_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
-    on_connection_result::Union{Function, Nothing}
-    user_data::Any
+    on_connection_result::Union{EventCallable, Nothing}
     tls_connection_options::Any  # TlsConnectionOptions or nothing
 end
 
@@ -182,14 +173,12 @@ function SocketConnectOptions(
         remote_endpoint::SocketEndpoint;
         event_loop = nothing,
         on_connection_result = nothing,
-        user_data = nothing,
         tls_connection_options = nothing,
     )
     return SocketConnectOptions(
         remote_endpoint,
         event_loop,
         on_connection_result,
-        user_data,
         tls_connection_options,
     )
 end
@@ -197,20 +186,17 @@ end
 # Socket bind options
 struct SocketBindOptions
     local_endpoint::SocketEndpoint
-    user_data::Any
     event_loop::Union{EventLoop, Nothing}
     tls_connection_options::Any  # TlsConnectionOptions or nothing
 end
 
 function SocketBindOptions(
         local_endpoint::SocketEndpoint;
-        user_data = nothing,
         event_loop = nothing,
         tls_connection_options = nothing,
     )
     return SocketBindOptions(
         local_endpoint,
-        user_data,
         event_loop,
         tls_connection_options,
     )
@@ -218,23 +204,17 @@ end
 
 # Socket listener options
 struct SocketListenerOptions
-    on_accept_result::Union{Function, Nothing}
-    on_accept_result_user_data::Any
-    on_accept_start::Union{Function, Nothing}
-    on_accept_start_user_data::Any
+    on_accept_result::Union{ChannelCallable, Nothing}
+    on_accept_start::Union{EventCallable, Nothing}
 end
 
 function SocketListenerOptions(;
         on_accept_result = nothing,
-        on_accept_result_user_data = nothing,
         on_accept_start = nothing,
-        on_accept_start_user_data = nothing,
     )
     return SocketListenerOptions(
         on_accept_result,
-        on_accept_result_user_data,
         on_accept_start,
-        on_accept_start_user_data,
     )
 end
 
@@ -256,11 +236,9 @@ mutable struct Socket
     event_loop::Union{EventLoop, Nothing}
     handler::Union{AbstractChannelHandler, Nothing}
     state::SocketState.T
-    readable_fn::Union{Function, Nothing}
-    readable_user_data::Any
-    connection_result_fn::Union{Function, Nothing}
-    accept_result_fn::Union{Function, Nothing}
-    connect_accept_user_data::Any
+    readable_fn::Union{EventCallable, Nothing}
+    connection_result_fn::Union{EventCallable, Nothing}
+    accept_result_fn::Union{ChannelCallable, Nothing}
     impl::Union{PlatformSocketImpl, Nothing}
 end
 
@@ -322,25 +300,17 @@ function socket_close(socket::Socket)::Nothing
     task = ScheduledTask(
         TaskFn(function(status)
             try
-                sock = socket
-                try
-                    socket_close_impl(sock.impl, sock)
-                    future_complete!(fut, nothing)
-                catch e
-                    e isa ReseauError ? future_fail!(fut, e.code) : rethrow()
-                end
+                socket_close_impl(socket.impl, socket)
+                notify(fut, nothing)
             catch e
-                Core.println("socket_close_on_event_loop task errored: $e")
+                notify(fut, e isa ReseauError ? e : CapturedException(e, catch_backtrace()))
             end
             return nothing
         end);
         type_tag = "socket_close_on_event_loop",
     )
     event_loop_schedule_task_now!(event_loop, task)
-    future_wait(fut)
-
-    err = future_get_error(fut)
-    err != 0 && throw_error(err)
+    wait(fut)
     return nothing
 end
 
@@ -356,16 +326,16 @@ function socket_assign_to_event_loop(socket::Socket, event_loop::EventLoop)::Not
     return socket_assign_to_event_loop_impl(socket.impl, socket, event_loop)
 end
 
-function socket_subscribe_to_readable_events(socket::Socket, on_readable::SocketOnReadableFn, user_data)::Nothing
-    return socket_subscribe_to_readable_events_impl(socket.impl, socket, on_readable, user_data)
+function socket_subscribe_to_readable_events(socket::Socket, on_readable::EventCallable)::Nothing
+    return socket_subscribe_to_readable_events_impl(socket.impl, socket, on_readable)
 end
 
 function socket_read(socket::Socket, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
     return socket_read_impl(socket.impl, socket, buffer)
 end
 
-function socket_write(socket::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Nothing
-    return socket_write_impl(socket.impl, socket, cursor, written_fn, user_data)
+function socket_write(socket::Socket, cursor::ByteCursor, written_fn::Union{WriteCallable, Nothing})::Nothing
+    return socket_write_impl(socket.impl, socket, cursor, written_fn)
 end
 
 function socket_get_error(socket::Socket)::Int
@@ -376,12 +346,12 @@ function socket_is_open(socket::Socket)::Bool
     return socket_is_open_impl(socket.impl, socket)
 end
 
-function socket_set_close_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
-    return socket_set_close_callback_impl(socket.impl, socket, fn, user_data)
+function socket_set_close_complete_callback(socket::Socket, fn::TaskFn)::Nothing
+    return socket_set_close_callback_impl(socket.impl, socket, fn)
 end
 
-function socket_set_cleanup_complete_callback(socket::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
-    return socket_set_cleanup_callback_impl(socket.impl, socket, fn, user_data)
+function socket_set_cleanup_complete_callback(socket::Socket, fn::TaskFn)::Nothing
+    return socket_set_cleanup_callback_impl(socket.impl, socket, fn)
 end
 
 function socket_get_protocol(socket::Socket)::ByteBuffer

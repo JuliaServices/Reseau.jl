@@ -278,10 +278,8 @@ function socket_init_posix(
         nothing,  # handler
         SocketState.INIT,
         nothing,  # readable_fn
-        nothing,  # readable_user_data
         nothing,  # connection_result_fn
         nothing,  # accept_result_fn
-        nothing,  # connect_accept_user_data
         socket_impl,
     )
 
@@ -613,14 +611,13 @@ function socket_cleanup_impl(::PosixSocket, sock::Socket)
     end
 
     on_cleanup_complete = socket_impl.on_cleanup_complete
-    cleanup_user_data = socket_impl.cleanup_user_data
 
     # Reset socket fields
     sock.io_handle = IoHandle()
     sock.impl = nothing
 
     if on_cleanup_complete !== nothing
-        Base.invokelatest(on_cleanup_complete, cleanup_user_data)
+        on_cleanup_complete(UInt8(0))
     end
 
     return nothing
@@ -631,7 +628,6 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
     remote_endpoint = options.remote_endpoint
     event_loop = options.event_loop
     on_connection_result = options.on_connection_result
-    user_data = options.user_data
 
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: beginning connect")
@@ -725,7 +721,6 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
     # Set socket state
     sock.state = SocketState.CONNECTING
     copy!(sock.remote_endpoint, remote_endpoint)
-    sock.connect_accept_user_data = user_data
     sock.connection_result_fn = on_connection_result
 
     socket_impl = sock.impl
@@ -787,8 +782,7 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
                 event_loop,
                 sock.io_handle,
                 Int(IoEventType.WRITABLE),
-                (el, handle, events, ud) -> _socket_connect_event(el, handle, events, ud),
-                connect_args,
+                EventCallable(events -> _socket_connect_event(connect_args, events)),
             )
         catch
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to subscribe to event loop")
@@ -867,9 +861,10 @@ function _on_connection_success(sock::Socket)
     end
 
     # Invoke success callback
-    return if sock.connection_result_fn !== nothing
-        Base.invokelatest(sock.connection_result_fn, sock, AWS_OP_SUCCESS, sock.connect_accept_user_data)
+    if sock.connection_result_fn !== nothing
+        sock.connection_result_fn(AWS_OP_SUCCESS)
     end
+    return nothing
 end
 
 # Connection error callback
@@ -878,17 +873,17 @@ function _on_connection_error(sock::Socket, error_code::Integer)
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: connection failure, error=$error_code")
 
-    return if sock.connection_result_fn !== nothing
-        Base.invokelatest(sock.connection_result_fn, sock, error_code, sock.connect_accept_user_data)
+    if sock.connection_result_fn !== nothing
+        sock.connection_result_fn(Int(error_code))
     elseif sock.accept_result_fn !== nothing
-        Base.invokelatest(sock.accept_result_fn, sock, error_code, nothing, sock.connect_accept_user_data)
+        sock.accept_result_fn(Int(error_code), nothing)
     end
+    return nothing
 end
 
 # Socket connect event handler
-function _socket_connect_event(event_loop, handle::IoHandle, events::Int, user_data)
-    connect_args = user_data
-    fd = handle.fd
+function _socket_connect_event(connect_args, events::Int)
+    fd = connect_args.socket !== nothing ? connect_args.socket.io_handle.fd : -1
 
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: connection activity handler triggered")
 
@@ -1218,7 +1213,7 @@ function socket_close_impl(::PosixSocket, sock::Socket)::Nothing
             write_request = popfirst!(socket_impl.written_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
-                Base.invokelatest(write_request.written_fn, sock, write_request.error_code, bytes_written, write_request.user_data)
+                write_request.written_fn(write_request.error_code, bytes_written)
             end
         end
 
@@ -1226,13 +1221,13 @@ function socket_close_impl(::PosixSocket, sock::Socket)::Nothing
             write_request = popfirst!(socket_impl.write_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
-                Base.invokelatest(write_request.written_fn, sock, ERROR_IO_SOCKET_CLOSED, bytes_written, write_request.user_data)
+                write_request.written_fn(ERROR_IO_SOCKET_CLOSED, bytes_written)
             end
         end
     end
 
     if socket_impl.on_close_complete !== nothing
-        Base.invokelatest(socket_impl.on_close_complete, socket_impl.close_user_data)
+        socket_impl.on_close_complete(UInt8(0))
     end
 
     return nothing
@@ -1287,8 +1282,7 @@ function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loo
             event_loop,
             sock.io_handle,
             Int(IoEventType.WRITABLE) | Int(IoEventType.READABLE),
-            (el, handle, events, ud) -> _on_socket_io_event(el, handle, events, ud),
-            sock,
+            EventCallable(events -> _on_socket_io_event(sock, events)),
         )
     catch
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to assign to event loop")
@@ -1301,16 +1295,15 @@ function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loo
 end
 
 # Socket IO event handler
-function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_data)
-    sock = user_data
+function _on_socket_io_event(sock, events::Int)
     socket_impl = sock.impl
-    fd = handle.fd
+    fd = sock.io_handle.fd
 
     # Handle readable events first
     if socket_impl.currently_subscribed && (events & Int(IoEventType.READABLE)) != 0
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: is readable")
         if sock.readable_fn !== nothing
-            Base.invokelatest(sock.readable_fn, sock, AWS_OP_SUCCESS, sock.readable_user_data)
+            sock.readable_fn(AWS_OP_SUCCESS)
         end
     end
 
@@ -1325,14 +1318,14 @@ function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_dat
         raise_error(ERROR_IO_SOCKET_CLOSED)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: closed remotely")
         if sock.readable_fn !== nothing
-            Base.invokelatest(sock.readable_fn, sock, ERROR_IO_SOCKET_CLOSED, sock.readable_user_data)
+            sock.readable_fn(ERROR_IO_SOCKET_CLOSED)
         end
     elseif socket_impl.currently_subscribed && (events & Int(IoEventType.ERROR)) != 0
         aws_error = socket_get_error(sock)
         raise_error(aws_error)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: error event occurred")
         if sock.readable_fn !== nothing
-            Base.invokelatest(sock.readable_fn, sock, aws_error, sock.readable_user_data)
+            sock.readable_fn(aws_error)
         end
     end
 
@@ -1340,7 +1333,7 @@ function _on_socket_io_event(event_loop, handle::IoHandle, events::Int, user_dat
 end
 
 # POSIX impl - subscribe to readable events
-function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, on_readable::SocketOnReadableFn, user_data)::Nothing
+function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, on_readable::EventCallable)::Nothing
     fd = sock.io_handle.fd
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: subscribing to readable events")
 
@@ -1354,7 +1347,6 @@ function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, o
         throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
     end
 
-    sock.readable_user_data = user_data
     sock.readable_fn = on_readable
 
     return nothing
@@ -1540,7 +1532,7 @@ function _written_task_fn(sock::Socket, status::TaskStatus.T)
             write_request = popfirst!(socket_impl.written_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
-                Base.invokelatest(write_request.written_fn, sock, write_request.error_code, bytes_written, write_request.user_data)
+                write_request.written_fn(write_request.error_code, bytes_written)
             end
         end
     end
@@ -1549,7 +1541,7 @@ function _written_task_fn(sock::Socket, status::TaskStatus.T)
 end
 
 # POSIX impl - write
-function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Nothing
+function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{WriteCallable, Nothing})::Nothing
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
@@ -1568,7 +1560,6 @@ function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, writ
         cursor,
         cursor.len,
         written_fn,
-        user_data,
         0,
         nothing,
         nothing,
@@ -1623,7 +1614,6 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
     end
 
     sock.accept_result_fn = options.on_accept_result
-    sock.connect_accept_user_data = options.on_accept_result_user_data
     sock.event_loop = accept_loop
 
     socket_impl = sock.impl
@@ -1635,8 +1625,7 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
             accept_loop,
             sock.io_handle,
             Int(IoEventType.READABLE),
-            (el, handle, events, ud) -> _socket_accept_event(el, handle, events, ud),
-            sock,
+            EventCallable(events -> _socket_accept_event(sock, events)),
         )
     catch
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to subscribe to event loop")
@@ -1648,17 +1637,16 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
 
     # Invoke on_accept_start callback if provided
     if options.on_accept_start !== nothing
-        Base.invokelatest(options.on_accept_start, sock, AWS_OP_SUCCESS, options.on_accept_start_user_data)
+        options.on_accept_start(AWS_OP_SUCCESS)
     end
 
     return nothing
 end
 
 # Socket accept event handler
-function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_data)
-    sock = user_data
+function _socket_accept_event(sock, events::Int)
     socket_impl = sock.impl
-    fd = handle.fd
+    fd = sock.io_handle.fd
 
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: listening event received")
 
@@ -1755,7 +1743,7 @@ function _socket_accept_event(event_loop, handle::IoHandle, events::Int, user_da
             close_occurred = Ref(false)
             socket_impl.close_happened = close_occurred
 
-            Base.invokelatest(sock.accept_result_fn, sock, AWS_OP_SUCCESS, new_sock, sock.connect_accept_user_data)
+            sock.accept_result_fn(AWS_OP_SUCCESS, new_sock)
 
             if close_occurred[]
                 return nothing
@@ -1792,17 +1780,15 @@ function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Nothing
 end
 
 # POSIX impl - set close callback
-function socket_set_close_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
+function socket_set_close_callback_impl(::PosixSocket, sock::Socket, fn::TaskFn)::Nothing
     socket_impl = sock.impl
-    socket_impl.close_user_data = user_data
     socket_impl.on_close_complete = fn
     return nothing
 end
 
 # POSIX impl - set cleanup callback
-function socket_set_cleanup_callback_impl(::PosixSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
+function socket_set_cleanup_callback_impl(::PosixSocket, sock::Socket, fn::TaskFn)::Nothing
     socket_impl = sock.impl
-    socket_impl.cleanup_user_data = user_data
     socket_impl.on_cleanup_complete = fn
     return nothing
 end

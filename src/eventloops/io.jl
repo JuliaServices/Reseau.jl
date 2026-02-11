@@ -238,7 +238,7 @@ mutable struct IoMessage
     message_tag::Int32
     copy_mark::Csize_t
     owning_channel::Any  # Channel or nothing
-    on_completion::Union{Function, Nothing}
+    on_completion::Union{EventCallable, Nothing}
     user_data::Any
     # Intrusive list node for queueing
     queueing_handle_next::Union{IoMessage, Nothing}  # nullable
@@ -261,9 +261,6 @@ function IoMessage(capacity::Integer)
         nothing,
     )
 end
-
-# Clock function type for event loops
-const IoClock = Function  # signature: () -> UInt64 (nanoseconds)
 
 const _pkcs11_ckr_names = (
     "CANCEL",

@@ -83,10 +83,12 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
     socket = handler.socket
     _ = slot
 
+    write_complete = WriteCallable((error_code, bytes_written) -> _on_socket_write_complete(socket, message, error_code, bytes_written))
+
     if !socket_is_open(socket)
         # Preserve async completion semantics: report error via completion path
         # and let channel shutdown cascade there, rather than throwing on loop thread.
-        _on_socket_write_complete(socket, ERROR_IO_SOCKET_CLOSED, Csize_t(0), message)
+        write_complete(ERROR_IO_SOCKET_CLOSED, Csize_t(0))
         return nothing
     end
 
@@ -100,18 +102,17 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
 
     # Write to socket
     try
-        socket_write(socket, cursor, _on_socket_write_complete, message)
+        socket_write(socket, cursor, write_complete)
     catch e
         e isa ReseauError || rethrow()
-        _on_socket_write_complete(socket, e.code, Csize_t(0), message)
+        write_complete(e.code, Csize_t(0))
     end
 
     return nothing
 end
 
 # Socket write completion callback
-function _on_socket_write_complete(socket, error_code::Int, bytes_written::Csize_t, user_data)
-    message = user_data
+function _on_socket_write_complete(socket, message, error_code::Int, bytes_written::Csize_t)
     channel = message isa IoMessage ? message.owning_channel : nothing
 
     if error_code != AWS_OP_SUCCESS
@@ -133,7 +134,7 @@ function _on_socket_write_complete(socket, error_code::Int, bytes_written::Csize
     end
 
     if message isa IoMessage && message.on_completion !== nothing
-        Base.invokelatest(message.on_completion, channel, message, error_code, message.user_data)
+        message.on_completion(error_code)
     end
 
     # Release the message back to pool
@@ -175,9 +176,7 @@ struct SocketHandlerShutdownArgs
     free_scarce_resources_immediately::Bool
 end
 
-function _socket_handler_close_task(task::ChannelTask, handler::SocketChannelHandler, status::TaskStatus.T)
-    _ = task
-    _ = status
+function _socket_handler_close_task(handler::SocketChannelHandler)
     slot = handler.slot
     if slot === nothing
         return nothing
@@ -189,7 +188,7 @@ end
 function _socket_handler_shutdown_complete_fn(user_data)
     args = user_data
     handler = args.handler
-    channel_task_init!(handler.shutdown_task_storage, _socket_handler_close_task, handler, "socket_handler_close")
+    channel_task_init!(handler.shutdown_task_storage, EventCallable(_ -> _socket_handler_close_task(handler)), "socket_handler_close")
     handler.shutdown_error_code = args.error_code
     channel_schedule_task_now!(args.channel, handler.shutdown_task_storage)
     return nothing
@@ -232,7 +231,7 @@ function handler_shutdown(
         if free_scarce_resources_immediately && socket_is_open(socket)
             channel === nothing && return nothing
             args = SocketHandlerShutdownArgs(handler, channel, slot, error_code, direction, free_scarce_resources_immediately)
-            socket_set_close_complete_callback(socket, _socket_handler_shutdown_read_complete_fn, args)
+            socket_set_close_complete_callback(socket, TaskFn(_ -> _socket_handler_shutdown_read_complete_fn(args)))
             socket_close(socket)
             return nothing
         end
@@ -248,11 +247,11 @@ function handler_shutdown(
     if socket_is_open(socket)
         channel === nothing && return nothing
         args = SocketHandlerShutdownArgs(handler, channel, slot, error_code, direction, free_scarce_resources_immediately)
-        socket_set_close_complete_callback(socket, _socket_handler_shutdown_complete_fn, args)
+        socket_set_close_complete_callback(socket, TaskFn(_ -> _socket_handler_shutdown_complete_fn(args)))
         socket_close(socket)
     else
         channel === nothing && return nothing
-        channel_task_init!(handler.shutdown_task_storage, _socket_handler_close_task, handler, "socket_handler_close")
+        channel_task_init!(handler.shutdown_task_storage, EventCallable(_ -> _socket_handler_close_task(handler)), "socket_handler_close")
         handler.shutdown_error_code = error_code
         channel_schedule_task_now!(channel, handler.shutdown_task_storage)
     end
@@ -312,7 +311,7 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)
         return nothing
     end
 
-    channel_task_init!(handler.read_task_storage, _socket_handler_read_task, handler, "socket_handler_read_now")
+    channel_task_init!(handler.read_task_storage, EventCallable(s -> _socket_handler_read_task(handler, _coerce_task_status(s))), "socket_handler_read_now")
     channel_schedule_task_now!(channel, handler.read_task_storage)
 
     return nothing
@@ -323,27 +322,17 @@ function _socket_handler_subscribe_to_read(handler::SocketChannelHandler)
     socket = handler.socket
 
     # Set readable callback
-    return socket_subscribe_to_readable_events(socket, _on_socket_readable, handler)
+    return socket_subscribe_to_readable_events(socket, EventCallable(error_code -> begin
+        logf(
+            LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+            "Socket handler: readable event with error $error_code"
+        )
+        _socket_handler_trigger_read(handler)
+        return nothing
+    end))
 end
 
-# Socket readable callback - called when socket has data to read
-function _on_socket_readable(socket, error_code::Int, user_data)
-    _ = socket
-    handler = user_data
-
-    logf(
-        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-        "Socket handler: readable event with error $error_code"
-    )
-
-    _ = error_code
-    _socket_handler_trigger_read(handler)
-
-    return nothing
-end
-
-function _socket_handler_read_task(task::ChannelTask, handler::SocketChannelHandler, status::TaskStatus.T)
-    _ = task
+function _socket_handler_read_task(handler::SocketChannelHandler, status::TaskStatus.T)
     if status == TaskStatus.RUN_READY
         _socket_handler_do_read(handler)
     end
@@ -442,7 +431,7 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
     end
 
     if total_read == handler.max_rw_size && !handler.read_task_storage.wrapper_task.scheduled
-        channel_task_init!(handler.read_task_storage, _socket_handler_read_task, handler, "socket_handler_re_read")
+        channel_task_init!(handler.read_task_storage, EventCallable(s -> _socket_handler_read_task(handler, _coerce_task_status(s))), "socket_handler_re_read")
         channel_schedule_task_now!(channel, handler.read_task_storage)
     end
 
@@ -451,19 +440,19 @@ end
 
 function _socket_handler_wrap_channel_setup!(handler::SocketChannelHandler, channel::Channel)
     original_cb = channel.on_setup_completed
-    channel.on_setup_completed = (ch, err, ud) -> begin
+    channel.on_setup_completed = EventCallable(err -> begin
         if original_cb !== nothing
-            Base.invokelatest(original_cb, ch, err, ud)
+            original_cb(err)
         end
         if err == AWS_OP_SUCCESS &&
-                ch.channel_state == ChannelState.ACTIVE &&
+                channel.channel_state == ChannelState.ACTIVE &&
                 handler.pending_read &&
                 !handler.shutdown_in_progress
             handler.pending_read = false
             _socket_handler_trigger_read(handler)
         end
         return nothing
-    end
+    end)
     return nothing
 end
 

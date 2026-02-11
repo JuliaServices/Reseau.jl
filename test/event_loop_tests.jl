@@ -259,14 +259,14 @@ end
                 done_ch = Channel{Nothing}(1)
                 read_lock = ReentrantLock()
 
-                on_readable = (pipe, err, user_data) -> begin
+                on_readable = Reseau.EventCallable(err -> begin
                     if err != Reseau.AWS_OP_SUCCESS
                         return nothing
                     end
 
                     buf = Reseau.ByteBuffer(64)
                     amount = try
-                        _, amt = Sockets.pipe_read!(pipe, buf)
+                        _, amt = Sockets.pipe_read!(read_end, buf)
                         amt
                     catch e
                         e isa Reseau.ReseauError || rethrow()
@@ -284,9 +284,9 @@ end
                     end
 
                     return nothing
-                end
+                end)
 
-                sub_res = Sockets.pipe_read_end_subscribe!(read_end, el, on_readable, nothing)
+                sub_res = Sockets.pipe_read_end_subscribe!(read_end, el, on_readable)
                 @test sub_res === nothing
 
                 for _ in 1:total_writes
@@ -1371,13 +1371,10 @@ end
             @test true
         else
             shutdown_ch = Channel{Bool}(1)
-            shutdown_opts = Reseau.shutdown_callback_options(
-                (ud) -> begin
-                    put!(shutdown_ch, true)
-                    return nothing
-                end,
-                nothing,
-            )
+            shutdown_opts = Reseau.TaskFn((_) -> begin
+                put!(shutdown_ch, true)
+                return nothing
+            end)
 
             opts = EventLoops.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts)
             elg = EventLoops.event_loop_group_new(opts)
@@ -1501,17 +1498,14 @@ end
             shutdown_thread = Ref(0)
             done_ch = Channel{Nothing}(1)
 
-            shutdown_opts = Reseau.shutdown_callback_options(
-                (user_data) -> begin
-                    shutdown_called[] = true
-                    shutdown_thread[] = Base.Threads.threadid()
-                    if !isready(done_ch)
-                        put!(done_ch, nothing)
-                    end
-                    return nothing
-                end,
-                nothing,
-            )
+            shutdown_opts = Reseau.TaskFn((_) -> begin
+                shutdown_called[] = true
+                shutdown_thread[] = Base.Threads.threadid()
+                if !isready(done_ch)
+                    put!(done_ch, nothing)
+                end
+                return nothing
+            end)
 
             elg = EventLoops.event_loop_group_new(EventLoops.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts))
 
@@ -1522,7 +1516,7 @@ end
         end
     end
 
-    @testset "Event loop local objects" begin
+    @testset "Event loop message pool sharing" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1533,91 +1527,44 @@ end
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
 
-            done = Ref(false)
-            done_cleanup = Ref(false)
-            missing1 = Ref(false)
-            missing2 = Ref(false)
-            removed_calls = Ref(0)
-            cleanup_calls = Ref(0)
-            fetched_value = Ref{Any}(nothing)
-            removed_value = Ref{Any}(nothing)
-
-            key_obj = Ref(0)
-            key = pointer_from_objref(key_obj)
-
-            task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                res = EventLoops.event_loop_fetch_local_object(el, key)
-                if res === nothing
-                    missing1[] = true
-                end
-
-                on_removed = obj -> (removed_calls[] += 1)
-                obj1 = EventLoops.EventLoopLocalObject(key, "one", on_removed)
-                EventLoops.event_loop_put_local_object!(el, obj1)
-
-                obj2 = EventLoops.EventLoopLocalObject(key, "two", on_removed)
-                EventLoops.event_loop_put_local_object!(el, obj2)
-
-                fetched = EventLoops.event_loop_fetch_local_object(el, key)
-                if fetched !== nothing
-                    fetched_value[] = fetched.object
-                end
-
-                removed_obj = EventLoops.event_loop_remove_local_object!(el, key)
-                if removed_obj !== nothing
-                    removed_value[] = removed_obj.object
-                end
-
-                res2 = EventLoops.event_loop_fetch_local_object(el, key)
-                if res2 === nothing
-                    missing2[] = true
-                end
-
-                done[] = true
+            setup_ch = Channel{Int}(2)
+            on_setup = Reseau.EventCallable(err -> begin
+                put!(setup_ch, err)
                 return nothing
-            end); type_tag = "event_loop_local_object_test")
-            EventLoops.event_loop_schedule_task_now!(el, task)
+            end)
 
-            deadline = Base.time_ns() + 2_000_000_000
-            while !done[] && Base.time_ns() < deadline
-                yield()
+            ch1 = Sockets.channel_new(Sockets.ChannelOptions(; event_loop = el, on_setup_completed = on_setup))
+            ch2 = Sockets.channel_new(Sockets.ChannelOptions(; event_loop = el, on_setup_completed = on_setup))
+
+            @test _wait_for_channel(setup_ch)
+            @test _wait_for_channel(setup_ch)
+            if isready(setup_ch)
+                @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
+            end
+            if isready(setup_ch)
+                @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
             end
 
-            @test done[]
-            @test missing1[]
-            @test missing2[]
-            @test fetched_value[] == "two"
-            @test removed_value[] == "two"
-            @test removed_calls[] == 1
+            @test ch1.message_pool isa Sockets.MessagePool
+            @test ch2.message_pool isa Sockets.MessagePool
+            @test ch1.message_pool === ch2.message_pool
+            @test el.message_pool === ch1.message_pool
 
-            cleanup_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                on_removed = obj -> (cleanup_calls[] += 1)
-                obj = EventLoops.EventLoopLocalObject(key, "cleanup", on_removed)
-                EventLoops.event_loop_put_local_object!(el, obj)
-                done_cleanup[] = true
-                return nothing
-            end); type_tag = "event_loop_local_object_cleanup")
-            EventLoops.event_loop_schedule_task_now!(el, cleanup_task)
-
-            deadline = Base.time_ns() + 2_000_000_000
-            while !done_cleanup[] && Base.time_ns() < deadline
-                yield()
-            end
-
-            @test done_cleanup[]
+            Sockets.channel_destroy!(ch1)
+            Sockets.channel_destroy!(ch2)
 
             EventLoops.event_loop_destroy!(el)
-            @test cleanup_calls[] == 1
+            @test el.message_pool === nothing
         end
     end
 
     @testset "Event loop load factor" begin
         times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
         idx = Ref(0)
-        clock = () -> begin
+        clock = EventLoops.ClockCallable(() -> begin
             idx[] += 1
             return idx[] <= length(times) ? times[idx[]] : times[end]
-        end
+        end)
 
         opts = EventLoops.EventLoopOptions(clock = clock)
         el = EventLoops.event_loop_new(opts)
@@ -1631,10 +1578,10 @@ end
 
     @testset "Event loop clock override" begin
         clock_calls = Ref(0)
-        clock = () -> begin
+        clock = EventLoops.ClockCallable(() -> begin
             clock_calls[] += 1
             return UInt64(42)
-        end
+        end)
 
         opts = EventLoops.EventLoopOptions(clock = clock)
         el = EventLoops.event_loop_new(opts)

@@ -8,14 +8,21 @@ function high_res_clock()::UInt64
     return ticks[]
 end
 
+# Default clock callable (constructed once at module init)
+const _DEFAULT_CLOCK = Ref{ClockCallable}()
+
+function _init_default_clock()
+    _DEFAULT_CLOCK[] = ClockCallable(high_res_clock)
+end
+
 # Event loop options
 struct EventLoopOptions
-    clock::Function
+    clock::ClockCallable
     parent_elg::Any  # EventLoopGroup or nothing
 end
 
 function EventLoopOptions(;
-        clock = high_res_clock,
+        clock::ClockCallable = _DEFAULT_CLOCK[],
         parent_elg = nothing,
     )
     return EventLoopOptions(clock, parent_elg)
@@ -24,16 +31,16 @@ end
 # Event loop group options
 struct EventLoopGroupOptions
     loop_count::UInt16
-    shutdown_options::Union{shutdown_callback_options, Nothing}
+    shutdown_options::Union{TaskFn, Nothing}
     cpu_group::Any
-    clock_override::Union{Function, Nothing}
+    clock_override::Union{ClockCallable, Nothing}
 end
 
 function EventLoopGroupOptions(;
         loop_count::Integer = 0,
-        shutdown_options = nothing,
+        shutdown_options::Union{TaskFn, Nothing} = nothing,
         cpu_group = nothing,
-        clock_override = nothing,
+        clock_override::Union{ClockCallable, Nothing} = nothing,
     )
     return EventLoopGroupOptions(
         UInt16(loop_count),
@@ -67,8 +74,8 @@ end
 
 # Event loop base structure (non-parametric, concrete per platform)
 mutable struct EventLoop
-    clock::Function
-    local_data::IdDict{Any, EventLoopLocalObject}
+    clock::ClockCallable
+    message_pool::Any  # Sockets.MessagePool or nothing
     @atomic current_load_factor::Csize_t
     latest_tick_start::UInt64
     current_tick_latency_sum::Csize_t
@@ -81,10 +88,9 @@ mutable struct EventLoop
 end
 
 function EventLoop(clock, impl_data::PlatformEventLoop)
-    local_data = IdDict{Any, EventLoopLocalObject}()
     return EventLoop(
         clock,
-        local_data,
+        nothing,
         Csize_t(0),
         UInt64(0),
         Csize_t(0),
@@ -142,42 +148,32 @@ function event_loop_current_clock_time(event_loop::EventLoop)::UInt64
     return event_loop.clock()
 end
 
-# Local object management
-function event_loop_fetch_local_object(
-        event_loop::EventLoop,
-        key,
-    )::Union{EventLoopLocalObject, Nothing}
-    debug_assert(event_loop_thread_is_callers_thread(event_loop))
-    obj = get(event_loop.local_data, key, nothing)
-    if obj === nothing
-        return nothing
-    end
-    return obj::EventLoopLocalObject
-end
+# Shared resource cleanup used by all platform backends.
+function _event_loop_clean_up_shared_resources!(event_loop::EventLoop)
+    pool = event_loop.message_pool
+    pool === nothing && return nothing
 
-function event_loop_put_local_object!(
-        event_loop::EventLoop,
-        obj::EventLoopLocalObject,
-    )::Nothing
-    debug_assert(event_loop_thread_is_callers_thread(event_loop))
-    event_loop.local_data[obj.key] = obj
+    try
+        if isdefined(_PARENT, :Sockets)
+            sockets_mod = getfield(_PARENT, :Sockets)
+            if isdefined(sockets_mod, :message_pool_clean_up!)
+                getfield(sockets_mod, :message_pool_clean_up!)(pool)
+            end
+        end
+    finally
+        event_loop.message_pool = nothing
+    end
+
     return nothing
 end
 
-function event_loop_remove_local_object!(
-        event_loop::EventLoop,
-        key,
-    )::Union{EventLoopLocalObject, Nothing}
-    debug_assert(event_loop_thread_is_callers_thread(event_loop))
-    obj = get(event_loop.local_data, key, nothing)
-    if obj === nothing
-        return nothing
-    end
-    removed_copy = EventLoopLocalObject(obj.key, obj.object, obj.on_object_removed)
-    delete!(event_loop.local_data, key)
-    _event_loop_local_object_destroy(obj)
-    return removed_copy
+# s2n thread-exit cleanup hook point.
+# Backends call this unconditionally on thread exit; default behavior is no-op.
+@inline function event_loop_thread_exit_s2n_cleanup!(event_loop::EventLoop)::Nothing
+    return event_loop_thread_exit_s2n_cleanup!(event_loop.impl_data)
 end
+
+event_loop_thread_exit_s2n_cleanup!(::Any)::Nothing = nothing
 
 # Load factor for load balancing
 const LOAD_FACTOR_SLIDING_WINDOW_SIZE = 64
@@ -244,7 +240,7 @@ end
 # Event Loop Group for managing multiple event loops
 mutable struct EventLoopGroup
     event_loops::Vector{EventLoop}
-    shutdown_options::Union{shutdown_callback_options, Nothing}
+    shutdown_options::Union{TaskFn, Nothing}
     @atomic ref_count::Int
 end
 
@@ -266,7 +262,7 @@ function event_loop_group_new(options::EventLoopGroupOptions)
         loop_count = UInt16(max(1, Sys.CPU_THREADS >> 1))
     end
 
-    clock = options.clock_override === nothing ? high_res_clock : options.clock_override
+    clock = options.clock_override === nothing ? _DEFAULT_CLOCK[] : options.clock_override
 
     elg = EventLoopGroup(
         Vector{EventLoop}(),
@@ -351,10 +347,7 @@ function event_loop_group_destroy!(elg::EventLoopGroup)
     end
     empty!(elg.event_loops)
     if elg.shutdown_options !== nothing
-        Base.invokelatest(
-            elg.shutdown_options.shutdown_callback_fn,
-            elg.shutdown_options.shutdown_callback_user_data,
-        )
+        elg.shutdown_options(UInt8(0))
     end
     return nothing
 end

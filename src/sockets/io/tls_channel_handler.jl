@@ -4,9 +4,10 @@ using LibAwsCal
 using LibAwsCommon
 using Libdl
 
-const TlsOnNegotiationResultFn = Function  # (handler, slot, error_code, user_data) -> nothing
-const TlsOnDataReadFn = Function           # (handler, slot, buffer, user_data) -> nothing
-const TlsOnErrorFn = Function              # (handler, slot, error_code, message, user_data) -> nothing
+# TLS callback types — closures capture context for trim-safe dispatch
+# on_negotiation_result: (handler, slot, error_code) -> nothing
+# on_data_read: (handler, slot, buffer) -> nothing
+# on_error: (handler, slot, error_code, message) -> nothing
 
 const TLS_DEFAULT_TIMEOUT_MS = 10_000
 const TLS_MAX_RECORD_SIZE = 16 * 1024
@@ -96,17 +97,18 @@ end
 
 mutable struct CustomKeyOpHandler
     on_key_operation::Union{Function, Nothing}
-    user_data::Any
+    pkcs11_state::Any  # Union{Pkcs11KeyOpState, Nothing} — can't forward-ref
 end
 
-function CustomKeyOpHandler(on_key_operation; user_data = nothing)
-    return CustomKeyOpHandler(on_key_operation, user_data)
+function CustomKeyOpHandler(on_key_operation; pkcs11_state = nothing)
+    return CustomKeyOpHandler(on_key_operation, pkcs11_state)
 end
 
 custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
 function custom_key_op_handler_release(handler::CustomKeyOpHandler)
-    if handler.user_data isa Pkcs11KeyOpState
-        _pkcs11_key_op_state_close!(handler.user_data)
+    state = handler.pkcs11_state
+    if state !== nothing
+        _pkcs11_key_op_state_close!(state)
     end
     return nothing
 end
@@ -114,7 +116,7 @@ custom_key_op_handler_release(::Nothing) = nothing
 
 function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)
     if handler.on_key_operation !== nothing
-        Base.invokelatest(handler.on_key_operation, handler, operation)
+        handler.on_key_operation(handler, operation)
     end
     return nothing
 end
@@ -351,7 +353,7 @@ function pkcs11_tls_op_handler_new(
             end
         end
     end
-    return CustomKeyOpHandler(on_op; user_data = state)
+    return CustomKeyOpHandler(on_op; pkcs11_state = state)
 end
 
 function TlsCtxPkcs11Options(;
@@ -763,8 +765,7 @@ function _tls_key_operation_destroy!(operation::TlsKeyOperation)
     return nothing
 end
 
-function _tls_key_operation_completion_task(task::ChannelTask, operation::TlsKeyOperation, status::TaskStatus.T)
-    _ = task
+function _tls_key_operation_completion_task(operation::TlsKeyOperation, status::TaskStatus.T)
     if status != TaskStatus.RUN_READY
         _tls_key_operation_destroy!(operation)
         return nothing
@@ -862,8 +863,7 @@ function _tls_key_operation_complete_common(
         if handler isa S2nTlsHandler && handler.slot !== nothing && handler.slot.channel !== nothing
             channel_task_init!(
                 operation.completion_task,
-                _tls_key_operation_completion_task,
-                operation,
+                EventCallable(s -> _tls_key_operation_completion_task(operation, _coerce_task_status(s))),
                 "tls_key_operation_completion_task",
             )
             channel_schedule_task_now!(handler.slot.channel, operation.completion_task)
@@ -1342,10 +1342,9 @@ mutable struct TlsConnectionOptions
     server_name::Union{String, Nothing}
     alpn_list::Union{String, Nothing}
     advertise_alpn_message::Bool
-    on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing}
-    on_data_read::Union{TlsOnDataReadFn, Nothing}
-    on_error::Union{TlsOnErrorFn, Nothing}
-    user_data::Any
+    on_negotiation_result::Union{Function, Nothing}
+    on_data_read::Union{Function, Nothing}
+    on_error::Union{Function, Nothing}
     timeout_ms::UInt32
 end
 
@@ -1354,10 +1353,9 @@ function TlsConnectionOptions(
         server_name::Union{String, Nothing} = nothing,
         alpn_list::Union{String, Nothing} = ctx.options.alpn_list,
         advertise_alpn_message::Bool = false,
-        on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing} = nothing,
-        on_data_read::Union{TlsOnDataReadFn, Nothing} = nothing,
-        on_error::Union{TlsOnErrorFn, Nothing} = nothing,
-        user_data = nothing,
+        on_negotiation_result::Union{Function, Nothing} = nothing,
+        on_data_read::Union{Function, Nothing} = nothing,
+        on_error::Union{Function, Nothing} = nothing,
         timeout_ms::Integer = TLS_DEFAULT_TIMEOUT_MS,
     )
     return TlsConnectionOptions(
@@ -1368,7 +1366,6 @@ function TlsConnectionOptions(
         on_negotiation_result,
         on_data_read,
         on_error,
-        user_data,
         UInt32(timeout_ms),
     )
 end
@@ -1385,22 +1382,19 @@ function tls_connection_options_copy(options::TlsConnectionOptions)
         on_negotiation_result = options.on_negotiation_result,
         on_data_read = options.on_data_read,
         on_error = options.on_error,
-        user_data = options.user_data,
         timeout_ms = options.timeout_ms,
     )
 end
 
 function tls_connection_options_set_callbacks!(
         options::TlsConnectionOptions,
-        on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing},
-        on_data_read::Union{TlsOnDataReadFn, Nothing},
-        on_error::Union{TlsOnErrorFn, Nothing},
-        user_data = options.user_data,
+        on_negotiation_result::Union{Function, Nothing},
+        on_data_read::Union{Function, Nothing},
+        on_error::Union{Function, Nothing},
     )
     options.on_negotiation_result = on_negotiation_result
     options.on_data_read = on_data_read
     options.on_error = on_error
-    options.user_data = user_data
     return nothing
 end
 
@@ -1428,17 +1422,15 @@ tls_connection_options_init_from_ctx(ctx::TlsContext) = TlsConnectionOptions(ctx
 tls_connection_options_clean_up(options::TlsConnectionOptions) = tls_connection_options_clean_up!(options)
 function tls_connection_options_set_callbacks(
         options::TlsConnectionOptions,
-        on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing},
-        on_data_read::Union{TlsOnDataReadFn, Nothing},
-        on_error::Union{TlsOnErrorFn, Nothing},
-        user_data = options.user_data,
+        on_negotiation_result::Union{Function, Nothing},
+        on_data_read::Union{Function, Nothing},
+        on_error::Union{Function, Nothing},
     )
     return tls_connection_options_set_callbacks!(
         options,
         on_negotiation_result,
         on_data_read,
         on_error,
-        user_data,
     )
 end
 tls_connection_options_set_server_name(options::TlsConnectionOptions, server_name::Union{String, Nothing}) =
@@ -1457,8 +1449,7 @@ end
 # TLS handler base type
 abstract type TlsChannelHandler <: AbstractChannelHandler end
 
-function _tls_timeout_task(task::ChannelTask, handler, status::TaskStatus.T)
-    _ = task
+function _tls_timeout_task(handler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     handler isa TlsChannelHandler || return nothing
     handler.stats.handshake_status == TlsNegotiationStatus.ONGOING || return nothing
@@ -1627,7 +1618,7 @@ function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)::
             _ = _s2n_drive_negotiation(handler)
             return nothing
         end
-        channel_task_init!(handler.negotiation_task, _s2n_negotiation_task, handler, "s2n_channel_handler_negotiation")
+        channel_task_init!(handler.negotiation_task, EventCallable(s -> _s2n_negotiation_task(handler, _coerce_task_status(s))), "s2n_channel_handler_negotiation")
         channel_schedule_task_now!(handler.slot.channel, handler.negotiation_task)
         return nothing
     elseif Sys.isapple()
@@ -1638,7 +1629,7 @@ function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)::
             _secure_transport_drive_negotiation(handler)
             return nothing
         end
-        channel_task_init!(handler.negotiation_task, _secure_transport_negotiation_task, handler, "secure_transport_channel_handler_start_negotiation")
+        channel_task_init!(handler.negotiation_task, EventCallable(s -> _secure_transport_negotiation_task(handler, _coerce_task_status(s))), "secure_transport_channel_handler_start_negotiation")
         channel_schedule_task_now!(handler.slot.channel, handler.negotiation_task)
         return nothing
     else

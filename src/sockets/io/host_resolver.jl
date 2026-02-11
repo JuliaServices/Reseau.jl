@@ -53,9 +53,7 @@ function Base.copy(addr::HostAddress)
     )
 end
 
-# Host resolver callback types
-const OnHostResolvedFn = Function  # (resolver, host_name, error_code, addresses::Vector{HostAddress}) -> nothing
-const OnHostResolveCompleteFn = Function  # (resolver, user_data) -> nothing
+# Host resolver callback types (closures capture context for trim-safe dispatch)
 
 @enumx DefaultResolverState::UInt8 begin
     ACTIVE = 0
@@ -63,8 +61,7 @@ const OnHostResolveCompleteFn = Function  # (resolver, user_data) -> nothing
 end
 
 mutable struct PendingCallback
-    callback::OnHostResolvedFn
-    user_data::Any
+    callback::Function  # (resolver, host_name, error_code, addresses) -> nothing
 end
 
 # Host resolver configuration
@@ -75,7 +72,7 @@ struct HostResolverConfig
     max_addresses_per_host::UInt64
     resolve_frequency_ns::UInt64  # How often to re-resolve
     background_refresh::Bool  # retained for compatibility
-    clock_override::Union{Function, Nothing}
+    clock_override::Union{ClockCallable, Nothing}
 end
 
 struct HostResolutionConfig
@@ -106,7 +103,7 @@ function HostResolverConfig(;
         max_addresses_per_host::Integer = 8,
         resolve_frequency_ns::Integer = 1_000_000_000,  # 1 second
         background_refresh::Bool = true,
-        clock_override::Union{Function, Nothing} = nothing,
+        clock_override::Union{ClockCallable, Nothing} = nothing,
     )
     return HostResolverConfig(
         UInt64(max_entries),
@@ -135,7 +132,7 @@ end
 
 @inline function _resolver_clock(resolver::HostResolver)::UInt64
     clock_override = resolver.config.clock_override
-    return clock_override === nothing ? high_res_clock() : clock_override()
+    return clock_override === nothing ? high_res_clock() : clock_override()::UInt64
 end
 
 function HostResolver(
@@ -194,8 +191,7 @@ mutable struct HostEntry
     @atomic state::DefaultResolverState.T
     new_addresses::Vector{HostAddress}
     expired_addresses::Vector{HostAddress}
-    on_host_purge_complete::Union{Function, Nothing}  # late-init: nothing → Function
-    on_host_purge_complete_user_data::Any              # late-init
+    on_host_purge_complete::Union{TaskFn, Nothing}  # late-init: nothing → TaskFn
     resolver_thread::Union{ForeignThread, Nothing}
 end
 
@@ -235,7 +231,6 @@ function HostEntry(
         HostAddress[],
         nothing,
         nothing,
-        nothing,
     )
 end
 
@@ -269,26 +264,46 @@ end
 
 function _dispatch_simple_callback(
         resolver::HostResolver,
-        callback::Union{Function, Nothing},
-        user_data,
+        callback::Union{TaskFn, Nothing},
     )
     callback === nothing && return nothing
     event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
     if event_loop !== nothing
+        task = ScheduledTask(callback; type_tag = "dns_purge_callback")
+        event_loop_schedule_task_now!(event_loop, task)
+    else
+        callback(UInt8(0))
+    end
+    return nothing
+end
+
+function _dispatch_resolve_callback(
+        resolver::HostResolver,
+        callback::Function,
+        host_name::String,
+        error_code::Int,
+        addresses::Vector{HostAddress},
+    )
+    event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
+    if event_loop !== nothing
         task = ScheduledTask(
-            TaskFn(function(status)
+            TaskFn(function(_status)
                 try
-                    Base.invokelatest(callback, user_data)
-                catch e
-                    Core.println("dns_purge_callback task errored: $e")
+                    callback(resolver, host_name, error_code, addresses)
+                catch err
+                    logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name': $err")
                 end
                 return nothing
             end);
-            type_tag = "dns_purge_callback",
+            type_tag = "dns_resolve_callback",
         )
         event_loop_schedule_task_now!(event_loop, task)
     else
-        Base.invokelatest(callback, user_data)
+        try
+            callback(resolver, host_name, error_code, addresses)
+        catch err
+            logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name': $err")
+        end
     end
     return nothing
 end
@@ -554,40 +569,13 @@ function _host_resolver_thread(entry::HostEntry)
                     unlock(entry.entry_lock)
                 end
 
-                if isempty(callback_addresses)
-                    error_code = err_code == AWS_OP_SUCCESS ? ERROR_IO_DNS_QUERY_FAILED : err_code
-                    try
-                        Base.invokelatest(
-                            pending_callback.callback,
-                            entry.resolver,
-                            entry.host_name,
-                            error_code,
-                            HostAddress[],
-                        )
-                    catch err
-                        logf(
-                            LogLevel.ERROR,
-                            LS_IO_DNS,
-                            "Host resolver: callback failed for '$(entry.host_name)': $err",
-                        )
-                    end
+                error_code = if isempty(callback_addresses)
+                    err_code == AWS_OP_SUCCESS ? ERROR_IO_DNS_QUERY_FAILED : err_code
                 else
-                    try
-                        Base.invokelatest(
-                            pending_callback.callback,
-                            entry.resolver,
-                            entry.host_name,
-                            AWS_OP_SUCCESS,
-                            callback_addresses,
-                        )
-                    catch err
-                        logf(
-                            LogLevel.ERROR,
-                            LS_IO_DNS,
-                            "Host resolver: callback failed for '$(entry.host_name)': $err",
-                        )
-                    end
+                    AWS_OP_SUCCESS
                 end
+                addrs = isempty(callback_addresses) ? HostAddress[] : callback_addresses
+                _dispatch_resolve_callback(entry.resolver, pending_callback.callback, entry.host_name, error_code, addrs)
             end
 
             empty!(entry.new_addresses)
@@ -644,7 +632,7 @@ function _host_resolver_thread(entry::HostEntry)
         end
 
         if entry.on_host_purge_complete !== nothing
-            Base.invokelatest(entry.on_host_purge_complete, entry.on_host_purge_complete_user_data)
+            entry.on_host_purge_complete(UInt8(0))
         end
     catch err
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: thread failed for '$(entry.host_name)': $err")
@@ -667,8 +655,7 @@ end
 function host_resolver_resolve!(
         resolver::HostResolver,
         host_name::AbstractString,
-        on_resolved::OnHostResolvedFn,
-        user_data = nothing;
+        on_resolved::Function;
         resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
     )::Nothing
     if @atomic resolver.shutdown
@@ -685,7 +672,7 @@ function host_resolver_resolve!(
         new_entry = HostEntry(resolver, host, resolution_config, timestamp)
         push!(
             new_entry.pending_callbacks,
-            PendingCallback(on_resolved, user_data),
+            PendingCallback(on_resolved),
         )
         resolver.cache[host] = new_entry
         put!(_RESOLVER_THREAD_STARTUP, new_entry)
@@ -710,13 +697,13 @@ function host_resolver_resolve!(
 
     if !isempty(cached_addresses)
         unlock(entry.entry_lock)
-        Base.invokelatest(on_resolved, resolver, host, AWS_OP_SUCCESS, cached_addresses)
+        on_resolved(resolver, host, AWS_OP_SUCCESS, cached_addresses)
         return nothing
     end
 
     push!(
         entry.pending_callbacks,
-        PendingCallback(on_resolved, user_data),
+        PendingCallback(on_resolved),
     )
     condition_variable_notify_all(entry.entry_signal)
     unlock(entry.entry_lock)
@@ -740,19 +727,17 @@ end
 
 function host_resolver_purge_cache_with_callback!(
         resolver::HostResolver,
-        on_purge_cache_complete::Union{Function, Nothing},
-        user_data = nothing,
+        on_purge_cache_complete::Union{TaskFn, Nothing} = nothing,
     )::Nothing
     host_resolver_purge_cache!(resolver)
-    _dispatch_simple_callback(resolver, on_purge_cache_complete, user_data)
+    _dispatch_simple_callback(resolver, on_purge_cache_complete)
     return nothing
 end
 
 function host_resolver_purge_host_cache!(
         resolver::HostResolver,
         host_name::AbstractString;
-        on_host_purge_complete::Union{Function, Nothing} = nothing,
-        user_data = nothing,
+        on_host_purge_complete::Union{TaskFn, Nothing} = nothing,
     )::Nothing
     host = String(host_name)
 
@@ -760,13 +745,12 @@ function host_resolver_purge_host_cache!(
     entry = get(resolver.cache, host, nothing)
     if entry === nothing
         unlock(resolver.resolver_lock)
-        _dispatch_simple_callback(resolver, on_host_purge_complete, user_data)
+        _dispatch_simple_callback(resolver, on_host_purge_complete)
         return nothing
     end
 
     lock(entry.entry_lock)
     entry.on_host_purge_complete = on_host_purge_complete
-    entry.on_host_purge_complete_user_data = user_data
     unlock(entry.entry_lock)
 
     delete!(resolver.cache, host)

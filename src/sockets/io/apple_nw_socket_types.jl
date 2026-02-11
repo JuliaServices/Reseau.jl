@@ -76,16 +76,11 @@
         parameters_context::Union{NWParametersContext, Nothing}
         mode::NWSocketMode.T
         read_queue::Vector{ReadQueueNode}
-        on_readable::Union{Function, Nothing}
-        on_readable_user_data::Any
-        on_connection_result::Union{Function, Nothing}
-        connect_result_user_data::Any
-        on_accept_started::Union{Function, Nothing}
-        listen_accept_started_user_data::Any
-        on_close_complete::Union{Function, Nothing}
-        close_user_data::Any
-        on_cleanup_complete::Union{Function, Nothing}
-        cleanup_user_data::Any
+        on_readable::Union{EventCallable, Nothing}
+        on_connection_result::Union{EventCallable, Nothing}
+        on_accept_started::Union{EventCallable, Nothing}
+        on_close_complete::Union{TaskFn, Nothing}
+        on_cleanup_complete::Union{TaskFn, Nothing}
         cleanup_requested::Bool
         event_loop::Union{EventLoop, Nothing}
         connection_setup::Bool
@@ -117,11 +112,6 @@
             nothing,
             nothing,
             nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
-            nothing,
             false,
             nothing,
             false,
@@ -142,7 +132,6 @@
 
     mutable struct NWSendContext
         socket::NWSocket
-        written_fn::Union{Function, Nothing}
-        user_data::Any
+        written_fn::Union{WriteCallable, Nothing}
     end
 end

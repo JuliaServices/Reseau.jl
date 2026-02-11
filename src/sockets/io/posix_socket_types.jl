@@ -5,8 +5,7 @@
 mutable struct SocketWriteRequest
     cursor::ByteCursor
     original_len::Csize_t
-    written_fn::Union{Function, Nothing}
-    user_data::Any
+    written_fn::Union{WriteCallable, Nothing}
     error_code::Int
     node_next::Union{SocketWriteRequest, Nothing}  # nullable
     node_prev::Union{SocketWriteRequest, Nothing}  # nullable
@@ -28,10 +27,8 @@ mutable struct PosixSocket
     currently_subscribed::Bool
     continue_accept::Bool
     close_happened::Union{Ref{Bool}, Nothing}  # nullable
-    on_close_complete::Union{Function, Nothing}
-    close_user_data::Any
-    on_cleanup_complete::Union{Function, Nothing}
-    cleanup_user_data::Any
+    on_close_complete::Union{TaskFn, Nothing}
+    on_cleanup_complete::Union{TaskFn, Nothing}
 end
 
 function PosixSocket()
@@ -43,8 +40,6 @@ function PosixSocket()
         false,
         false,
         false,
-        nothing,
-        nothing,
         nothing,
         nothing,
         nothing,

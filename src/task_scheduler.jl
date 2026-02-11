@@ -44,8 +44,150 @@ function TaskFn(callable::F) where F
     return TaskFn(ptr, objptr, objref)
 end
 
+
 @inline function (f::TaskFn)(status::UInt8)::Nothing
     ccall(f.ptr, Cvoid, (Ptr{Cvoid}, UInt8), f.objptr, status)
+    return nothing
+end
+
+# ── EventCallable: trim-safe type-erased callable for (Int) -> Nothing ──
+# Covers: on_event (kqueue/epoll), readable_fn, on_readable (pipe),
+# on_completion (IoMessage), ChannelTask.task_fn.
+
+struct _EventCallWrapper <: Function end
+
+function (::_EventCallWrapper)(f, x::Int)
+    f(x)
+    return nothing
+end
+
+@generated function _event_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_EventCallWrapper()), Cvoid, (Ref{$F}, Int))
+    end
+end
+
+struct EventCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function EventCallable(callable::F) where F
+    ptr = _event_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return EventCallable(ptr, objptr, objref)
+end
+
+
+@inline function (f::EventCallable)(x::Int)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int), f.objptr, x)
+    return nothing
+end
+
+# ── WriteCallable: trim-safe type-erased callable for (Int, Csize_t) -> Nothing ──
+# Covers: written_fn (posix/winsock/NW write completion callbacks).
+
+struct _WriteCallWrapper <: Function end
+
+function (::_WriteCallWrapper)(f, err::Int, n::Csize_t)
+    f(err, n)
+    return nothing
+end
+
+@generated function _write_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_WriteCallWrapper()), Cvoid, (Ref{$F}, Int, Csize_t))
+    end
+end
+
+struct WriteCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function WriteCallable(callable::F) where F
+    ptr = _write_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return WriteCallable(ptr, objptr, objref)
+end
+
+
+@inline function (f::WriteCallable)(err::Int, n::Csize_t)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int, Csize_t), f.objptr, err, n)
+    return nothing
+end
+
+# ── ClockCallable: trim-safe type-erased callable for () -> UInt64 ──
+# Covers: EventLoop.clock, EventLoopGroupOptions.clock_override,
+# HostResolverConfig.clock_override.
+
+struct _ClockCallWrapper <: Function end
+
+function (::_ClockCallWrapper)(f)
+    return UInt64(f())
+end
+
+@generated function _clock_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_ClockCallWrapper()), UInt64, (Ref{$F},))
+    end
+end
+
+struct ClockCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function ClockCallable(callable::F) where F
+    ptr = _clock_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return ClockCallable(ptr, objptr, objref)
+end
+
+
+@inline function (f::ClockCallable)()::UInt64
+    return ccall(f.ptr, UInt64, (Ptr{Cvoid},), f.objptr)
+end
+
+# ── ChannelCallable: trim-safe type-erased callable for (Int, Any) -> Nothing ──
+# Covers: accept_result_fn (error_code, new_socket), on_incoming_channel_setup/shutdown
+# (error_code, channel), and similar callbacks needing a runtime object argument.
+
+struct _ChannelCallWrapper <: Function end
+
+function (::_ChannelCallWrapper)(f, error_code::Int, obj)
+    f(error_code, obj)
+    return nothing
+end
+
+@generated function _channel_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_ChannelCallWrapper()), Cvoid, (Ref{$F}, Int, Any))
+    end
+end
+
+struct ChannelCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function ChannelCallable(callable::F) where F
+    ptr = _channel_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return ChannelCallable(ptr, objptr, objref)
+end
+
+
+@inline function (f::ChannelCallable)(error_code::Int, obj)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int, Any), f.objptr, error_code, obj)
     return nothing
 end
 

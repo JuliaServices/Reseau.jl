@@ -52,21 +52,18 @@
     # Handle data attached to IoHandle while subscribed
     mutable struct EpollEventHandleData
         handle::IoHandle
-        on_event::OnEventCallback
-        user_data::Any
+        on_event::EventCallable
         cleanup_task::Union{Nothing, ScheduledTask}  # nullable
         is_subscribed::Bool  # false when handle is unsubscribed but struct not cleaned up yet
     end
 
     function EpollEventHandleData(
             handle::IoHandle,
-            on_event::OnEventCallback,
-            user_data,
+            on_event::EventCallable,
         )
         return EpollEventHandleData(
             handle,
             on_event,
-            user_data,
             nothing,
             true,
         )

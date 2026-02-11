@@ -1,16 +1,6 @@
 # AWS IO Library - Channel Bootstrap
 # Port of aws-c-io/source/channel_bootstrap.c
 
-# Callback types for bootstrap operations
-const OnBootstrapChannelCreationFn = Function  # (bootstrap, error_code, channel, user_data) -> nothing
-const OnBootstrapChannelSetupFn = Function     # (bootstrap, error_code, channel, user_data) -> nothing
-const OnBootstrapChannelShutdownFn = Function  # (bootstrap, error_code, channel, user_data) -> nothing
-const OnServerListenerSetupFn = Function       # (server_bootstrap, error_code, user_data) -> nothing
-const OnIncomingChannelSetupFn = Function      # (server_bootstrap, error_code, channel, user_data) -> nothing
-const OnIncomingChannelShutdownFn = Function   # (server_bootstrap, error_code, channel, user_data) -> nothing
-const OnServerListenerDestroyFn = Function     # (server_bootstrap, user_data) -> nothing
-const ChannelOnProtocolNegotiatedFn = Function # (new_slot, protocol::ByteBuffer, user_data) -> AbstractChannelHandler
-
 # Client bootstrap options
 struct ClientBootstrapOptions
     event_loop_group::EventLoopGroup
@@ -99,13 +89,12 @@ end
 function _install_protocol_handler_from_socket(
         channel::Channel,
         socket::Socket,
-        on_protocol_negotiated::ChannelOnProtocolNegotiatedFn,
-        user_data,
+        on_protocol_negotiated,
     )::Nothing
     protocol = socket_get_protocol(socket)
     new_slot = channel_slot_new!(channel)
     channel_slot_insert_end!(channel, new_slot)
-    handler = on_protocol_negotiated(new_slot, protocol, user_data)
+    handler = on_protocol_negotiated(new_slot, protocol)
     if handler === nothing
         throw_error(ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE)
     end
@@ -122,11 +111,10 @@ mutable struct SocketConnectionRequest
     socket::Union{Socket, Nothing}  # nullable
     channel::Union{Channel, Nothing}  # nullable
     tls_connection_options::Any  # TlsConnectionOptions or nothing
-    on_protocol_negotiated::Union{ChannelOnProtocolNegotiatedFn, Nothing}
-    on_creation::Union{OnBootstrapChannelCreationFn, Nothing}
-    on_setup::Union{OnBootstrapChannelSetupFn, Nothing}  # nullable
-    on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing}  # nullable
-    user_data::Any
+    on_protocol_negotiated::Union{Function, Nothing}
+    on_creation::Union{EventCallable, Nothing}
+    on_setup::Union{EventCallable, Nothing}
+    on_shutdown::Union{EventCallable, Nothing}
     enable_read_back_pressure::Bool
     requested_event_loop::Union{EventLoop, Nothing}
     event_loop::Union{EventLoop, Nothing}
@@ -149,9 +137,9 @@ function client_bootstrap_connect!(
         socket_options::SocketOptions = bootstrap.socket_options,
         tls_connection_options = bootstrap.tls_connection_options,
         on_protocol_negotiated = bootstrap.on_protocol_negotiated,
-        on_creation::Union{OnBootstrapChannelCreationFn, Nothing} = bootstrap.on_creation_callback,
-        on_setup::Union{OnBootstrapChannelSetupFn, Nothing} = bootstrap.on_setup_callback,
-        on_shutdown::Union{OnBootstrapChannelShutdownFn, Nothing} = bootstrap.on_shutdown_callback,
+        on_creation = bootstrap.on_creation_callback,
+        on_setup = bootstrap.on_setup_callback,
+        on_shutdown = bootstrap.on_shutdown_callback,
         user_data = bootstrap.user_data,
         enable_read_back_pressure::Bool = false,
         requested_event_loop::Union{EventLoop, Nothing} = nothing,
@@ -173,7 +161,9 @@ function client_bootstrap_connect!(
         "ClientBootstrap: initiating connection to $host_str:$port"
     )
 
-    # Create connection request
+    # Create connection request — callbacks are wrapped into EventCallables
+    # that capture the user_data. The closures also capture `request` (set below)
+    # so request.channel is accessible at callback time.
     request = SocketConnectionRequest(
         bootstrap,
         host_str,
@@ -183,10 +173,9 @@ function client_bootstrap_connect!(
         nothing,
         tls_connection_options,
         on_protocol_negotiated,
-        on_creation,
-        on_setup,
-        on_shutdown,
-        user_data,
+        nothing,  # on_creation (set below)
+        nothing,  # on_setup (set below)
+        nothing,  # on_shutdown (set below)
         enable_read_back_pressure,
         requested_event_loop,
         nothing,
@@ -195,13 +184,22 @@ function client_bootstrap_connect!(
         0,
         false,
     )
+    # Wrap user callbacks into EventCallables that capture request + user_data
+    if on_creation !== nothing
+        request.on_creation = EventCallable(error_code -> on_creation(bootstrap, error_code, request.channel, user_data))
+    end
+    if on_setup !== nothing
+        request.on_setup = EventCallable(error_code -> on_setup(bootstrap, error_code, request.channel, user_data))
+    end
+    if on_shutdown !== nothing
+        request.on_shutdown = EventCallable(error_code -> on_shutdown(bootstrap, error_code, request.channel, user_data))
+    end
 
     # Resolve host
     resolve_result = host_resolver_resolve!(
         bootstrap.host_resolver,
         host_str,
-        (resolver, host, error_code, addresses) -> _on_host_resolved(request, error_code, addresses),
-        request,
+        (resolver, host, error_code, addresses) -> _on_host_resolved(request, error_code, addresses);
         resolution_config = host_resolution_config,
     )
 
@@ -363,8 +361,7 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Hos
     connect_opts = SocketConnectOptions(
         remote_endpoint;
         event_loop = event_loop,
-        on_connection_result = (sock, err, ud) -> _on_socket_connect_complete(sock, err, ud),
-        user_data = attempt,
+        on_connection_result = EventCallable(err -> _on_socket_connect_complete(socket, err, attempt)),
         tls_connection_options = request.tls_connection_options,
     )
 
@@ -443,13 +440,16 @@ function _setup_client_channel(request::SocketConnectionRequest)
         _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
         return nothing
     end
-    on_shutdown = (ch, err, ud) -> begin
+    channel_box = Ref{Any}(nothing)
+    on_shutdown = EventCallable(err -> begin
+        request.channel = channel_box[]
         if request.on_shutdown !== nothing
-            Base.invokelatest(request.on_shutdown, bootstrap, err, ch, request.user_data)
+            request.on_shutdown(err)
         end
         return nothing
-    end
-    on_setup = (channel, error_code, ud) -> begin
+    end)
+    on_setup = EventCallable(error_code -> begin
+        channel = channel_box[]::Channel
         if error_code != AWS_OP_SUCCESS
             logf(
                 LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
@@ -479,7 +479,7 @@ function _setup_client_channel(request::SocketConnectionRequest)
             tls_options = request.tls_connection_options
             if request.on_protocol_negotiated !== nothing
                 try
-                    _install_protocol_handler_from_socket(channel, socket, request.on_protocol_negotiated, request.user_data)
+                    _install_protocol_handler_from_socket(channel, socket, request.on_protocol_negotiated)
                 catch e
                     err = e isa ReseauError ? e.code : ERROR_UNKNOWN
                     request.on_shutdown = nothing
@@ -490,13 +490,7 @@ function _setup_client_channel(request::SocketConnectionRequest)
                 end
             end
             if tls_options.on_negotiation_result !== nothing
-                Base.invokelatest(
-                    tls_options.on_negotiation_result,
-                    handler_result,
-                    channel.first,
-                    AWS_OP_SUCCESS,
-                    tls_options.user_data,
-                )
+                tls_options.on_negotiation_result(handler_result, channel.first, AWS_OP_SUCCESS)
             end
             _connection_request_complete(request, AWS_OP_SUCCESS, channel)
             if channel_thread_is_callers_thread(channel)
@@ -511,26 +505,25 @@ function _setup_client_channel(request::SocketConnectionRequest)
                     return nothing
                 end
             else
-                trigger_task = ChannelTask((task, ctx, status) -> begin
-                    _ = task
-                    status == TaskStatus.RUN_READY || return nothing
+                trigger_task = ChannelTask(EventCallable(s -> begin
+                    _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
                     try
-                        channel_trigger_read(ctx.channel)
+                        channel_trigger_read(channel)
                     catch e
                         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        channel_shutdown!(ctx.channel, err)
+                        channel_shutdown!(channel, err)
                     end
                     return nothing
-                end, (channel = channel,), "client_tls_trigger_read")
+                end), "client_tls_trigger_read")
                 channel_schedule_task_now!(channel, trigger_task)
             end
             return nothing
         elseif request.tls_connection_options !== nothing
             tls_options = request.tls_connection_options
             advertise_alpn = request.on_protocol_negotiated !== nothing && tls_is_alpn_available()
-            on_negotiation = (handler, slot, err, ud) -> begin
+            on_negotiation = (handler, slot, err) -> begin
                 if tls_options.on_negotiation_result !== nothing
-                    Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
+                    tls_options.on_negotiation_result(handler, slot, err)
                 end
                 if err == AWS_OP_SUCCESS
                     _connection_request_complete(request, AWS_OP_SUCCESS, channel)
@@ -550,7 +543,6 @@ function _setup_client_channel(request::SocketConnectionRequest)
                 on_negotiation_result = on_negotiation,
                 on_data_read = tls_options.on_data_read,
                 on_error = tls_options.on_error,
-                user_data = tls_options.user_data,
                 timeout_ms = tls_options.timeout_ms,
             )
             local tls_handler
@@ -567,7 +559,7 @@ function _setup_client_channel(request::SocketConnectionRequest)
             if advertise_alpn
                 alpn_slot = channel_slot_new!(channel)
                 channel_slot_insert_right!(tls_handler.slot, alpn_slot)
-                alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated, request.user_data)
+                alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated)
                 channel_slot_set_handler!(alpn_slot, alpn_handler)
             end
             try
@@ -592,17 +584,16 @@ function _setup_client_channel(request::SocketConnectionRequest)
                     return nothing
                 end
             else
-                trigger_task = ChannelTask((task, ctx, status) -> begin
-                    _ = task
-                    status == TaskStatus.RUN_READY || return nothing
+                trigger_task = ChannelTask(EventCallable(s -> begin
+                    _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
                     try
-                        channel_trigger_read(ctx.channel)
+                        channel_trigger_read(channel)
                     catch e
                         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        channel_shutdown!(ctx.channel, err)
+                        channel_shutdown!(channel, err)
                     end
                     return nothing
-                end, (channel = channel,), "client_tls_trigger_read")
+                end), "client_tls_trigger_read")
                 channel_schedule_task_now!(channel, trigger_task)
             end
             return nothing
@@ -613,13 +604,11 @@ function _setup_client_channel(request::SocketConnectionRequest)
         )
         _connection_request_complete(request, AWS_OP_SUCCESS, channel)
         return nothing
-    end
+    end)
     options = ChannelOptions(
         event_loop = event_loop,
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
-        setup_user_data = request,
-        shutdown_user_data = request,
         enable_read_back_pressure = request.enable_read_back_pressure,
     )
     local channel
@@ -635,9 +624,10 @@ function _setup_client_channel(request::SocketConnectionRequest)
         _connection_request_complete(request, err, nothing)
         return nothing
     end
+    channel_box[] = channel
     request.channel = channel
     if request.on_creation !== nothing
-        Base.invokelatest(request.on_creation, bootstrap, AWS_OP_SUCCESS, channel, request.user_data)
+        request.on_creation(AWS_OP_SUCCESS)
     end
     return nothing
 end
@@ -649,8 +639,9 @@ function _connection_request_invoke_on_setup(
         channel::Union{Channel, Nothing},
     )
     request.on_setup === nothing && return nothing
+    request.channel = channel  # ensure closure can see the channel
     try
-        Base.invokelatest(request.on_setup, request.bootstrap, error_code, channel, request.user_data)
+        request.on_setup(error_code)
     catch err
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
@@ -760,10 +751,9 @@ mutable struct ServerBootstrap
     listener_event_loop::Union{EventLoop, Nothing}
     tls_connection_options::Any  # TlsConnectionOptions or nothing
     on_protocol_negotiated::Union{Function, Nothing}
-    on_listener_setup::Union{Function, Nothing}
-    on_incoming_channel_setup::Union{Function, Nothing}
-    on_incoming_channel_shutdown::Union{Function, Nothing}
-    on_listener_destroy::Union{Function, Nothing}
+    on_incoming_channel_setup::Union{ChannelCallable, Nothing}
+    on_incoming_channel_shutdown::Union{ChannelCallable, Nothing}
+    on_listener_destroy::Union{TaskFn, Nothing}
     user_data::Any
     enable_read_back_pressure::Bool
     @atomic inflight_channels::Int
@@ -773,6 +763,7 @@ mutable struct ServerBootstrap
 end
 
 function ServerBootstrap(options::ServerBootstrapOptions)
+    ud = options.user_data
     bootstrap = ServerBootstrap(
         options.event_loop_group,
         options.socket_options,
@@ -780,17 +771,26 @@ function ServerBootstrap(options::ServerBootstrapOptions)
         nothing,
         options.tls_connection_options,
         options.on_protocol_negotiated,
-        options.on_listener_setup,
-        options.on_incoming_channel_setup,
-        options.on_incoming_channel_shutdown,
-        options.on_listener_destroy,
-        options.user_data,
+        nothing,  # on_incoming_channel_setup (set below)
+        nothing,  # on_incoming_channel_shutdown (set below)
+        nothing,  # on_listener_destroy (set below)
+        ud,
         options.enable_read_back_pressure,
         0,
         false,
         false,
         false,
     )
+    # Wrap user callbacks — closures capture bootstrap + user_data
+    if options.on_incoming_channel_setup !== nothing
+        bootstrap.on_incoming_channel_setup = ChannelCallable((err, ch) -> options.on_incoming_channel_setup(bootstrap, err, ch, ud))
+    end
+    if options.on_incoming_channel_shutdown !== nothing
+        bootstrap.on_incoming_channel_shutdown = ChannelCallable((err, ch) -> options.on_incoming_channel_shutdown(bootstrap, err, ch, ud))
+    end
+    if options.on_listener_destroy !== nothing
+        bootstrap.on_listener_destroy = TaskFn(_ -> options.on_listener_destroy(bootstrap, ud))
+    end
 
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ServerBootstrap: created")
 
@@ -830,14 +830,12 @@ function ServerBootstrap(options::ServerBootstrapOptions)
         bootstrap.listener_event_loop = event_loop
 
         listener_options = SocketListenerOptions(
-            on_accept_result = (sock, err, new_sock, ud) -> _on_incoming_connection(bootstrap, err, new_sock),
-            on_accept_result_user_data = bootstrap,
-            on_accept_start = (sock, err, ud) -> begin
-                if options.on_listener_setup !== nothing
-                    options.on_listener_setup(bootstrap, err, options.user_data)
-                end
+            on_accept_result = ChannelCallable((err, new_sock) -> _on_incoming_connection(bootstrap, err, new_sock)),
+            on_accept_start = if options.on_listener_setup !== nothing
+                EventCallable(err -> options.on_listener_setup(bootstrap, err, ud))
+            else
+                nothing
             end,
-            on_accept_start_user_data = bootstrap,
         )
 
         socket_start_accept(listener, event_loop, listener_options)
@@ -901,7 +899,7 @@ function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
             TaskFn(function(status)
                 try
                     bootstrap.on_listener_destroy === nothing && return nothing
-                    Base.invokelatest(bootstrap.on_listener_destroy, bootstrap, bootstrap.user_data)
+                    bootstrap.on_listener_destroy(UInt8(0))
                 catch e
                     Core.println("server_listener_destroy task errored: $e")
                 end
@@ -911,7 +909,7 @@ function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
         )
         event_loop_schedule_task_now!(listener_loop, task)
     else
-        Base.invokelatest(bootstrap.on_listener_destroy, bootstrap, bootstrap.user_data)
+        bootstrap.on_listener_destroy(UInt8(0))
     end
 
     return nothing
@@ -967,7 +965,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         end
         incoming_called[] = true
         if bootstrap.on_incoming_channel_setup !== nothing
-            bootstrap.on_incoming_channel_setup(bootstrap, err, channel, bootstrap.user_data)
+            bootstrap.on_incoming_channel_setup(err, channel)
         end
         return nothing
     end
@@ -997,7 +995,9 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
-    on_shutdown = (ch, err, ud) -> begin
+    channel_box = Ref{Any}(nothing)
+    on_shutdown = EventCallable(err -> begin
+        ch = channel_box[]
         shutdown_err = err
         if !incoming_called[]
             if shutdown_err == AWS_OP_SUCCESS
@@ -1006,12 +1006,13 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             invoke_incoming_callback(shutdown_err, nothing)
         end
         if setup_succeeded[] && bootstrap.on_incoming_channel_shutdown !== nothing
-            bootstrap.on_incoming_channel_shutdown(bootstrap, err, ch, bootstrap.user_data)
+            bootstrap.on_incoming_channel_shutdown(err, ch)
         end
         _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
-    end
-    on_setup = (channel, error_code, ud) -> begin
+    end)
+    on_setup = EventCallable(error_code -> begin
+        channel = channel_box[]::Channel
         if error_code != AWS_OP_SUCCESS
             logf(
                 LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
@@ -1038,7 +1039,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             tls_options = bootstrap.tls_connection_options
             if bootstrap.on_protocol_negotiated !== nothing
                 try
-                    _install_protocol_handler_from_socket(channel, socket, bootstrap.on_protocol_negotiated, bootstrap.user_data)
+                    _install_protocol_handler_from_socket(channel, socket, bootstrap.on_protocol_negotiated)
                 catch e
                     err = e isa ReseauError ? e.code : ERROR_UNKNOWN
                     channel_shutdown!(channel, err)
@@ -1047,13 +1048,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
                 end
             end
             if tls_options.on_negotiation_result !== nothing
-                Base.invokelatest(
-                    tls_options.on_negotiation_result,
-                    handler_result,
-                    channel.first,
-                    AWS_OP_SUCCESS,
-                    tls_options.user_data,
-                )
+                tls_options.on_negotiation_result(handler_result, channel.first, AWS_OP_SUCCESS)
             end
             setup_succeeded[] = true
             invoke_incoming_callback(AWS_OP_SUCCESS, channel)
@@ -1066,26 +1061,25 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
                     return nothing
                 end
             else
-                trigger_task = ChannelTask((task, ctx, status) -> begin
-                    _ = task
-                    status == TaskStatus.RUN_READY || return nothing
+                trigger_task = ChannelTask(EventCallable(s -> begin
+                    _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
                     try
-                        channel_trigger_read(ctx.channel)
+                        channel_trigger_read(channel)
                     catch e
                         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        channel_shutdown!(ctx.channel, err)
+                        channel_shutdown!(channel, err)
                     end
                     return nothing
-                end, (channel = channel,), "server_tls_trigger_read")
+                end), "server_tls_trigger_read")
                 channel_schedule_task_now!(channel, trigger_task)
             end
             return nothing
         elseif bootstrap.tls_connection_options !== nothing
             tls_options = bootstrap.tls_connection_options
             advertise_alpn = bootstrap.on_protocol_negotiated !== nothing && tls_is_alpn_available()
-            on_negotiation = (handler, slot, err, ud) -> begin
+            on_negotiation = (handler, slot, err) -> begin
                 if tls_options.on_negotiation_result !== nothing
-                    Base.invokelatest(tls_options.on_negotiation_result, handler, slot, err, tls_options.user_data)
+                    tls_options.on_negotiation_result(handler, slot, err)
                 end
                 if err == AWS_OP_SUCCESS
                     setup_succeeded[] = true
@@ -1103,7 +1097,6 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
                 on_negotiation_result = on_negotiation,
                 on_data_read = tls_options.on_data_read,
                 on_error = tls_options.on_error,
-                user_data = tls_options.user_data,
                 timeout_ms = tls_options.timeout_ms,
             )
             local tls_handler
@@ -1118,7 +1111,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
             if advertise_alpn
                 alpn_slot = channel_slot_new!(channel)
                 channel_slot_insert_right!(tls_handler.slot, alpn_slot)
-                alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated, bootstrap.user_data)
+                alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated)
                 channel_slot_set_handler!(alpn_slot, alpn_handler)
             end
             if channel_thread_is_callers_thread(channel)
@@ -1130,17 +1123,16 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
                     return nothing
                 end
             else
-                trigger_task = ChannelTask((task, ctx, status) -> begin
-                    _ = task
-                    status == TaskStatus.RUN_READY || return nothing
+                trigger_task = ChannelTask(EventCallable(s -> begin
+                    _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
                     try
-                        channel_trigger_read(ctx.channel)
+                        channel_trigger_read(channel)
                     catch e
                         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        channel_shutdown!(ctx.channel, err)
+                        channel_shutdown!(channel, err)
                     end
                     return nothing
-                end, (channel = channel,), "server_tls_trigger_read")
+                end), "server_tls_trigger_read")
                 channel_schedule_task_now!(channel, trigger_task)
             end
             return nothing
@@ -1152,13 +1144,11 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         )
         invoke_incoming_callback(AWS_OP_SUCCESS, channel)
         return nothing
-    end
+    end)
     options = ChannelOptions(
         event_loop = event_loop,
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
-        setup_user_data = nothing,
-        shutdown_user_data = nothing,
         enable_read_back_pressure = bootstrap.enable_read_back_pressure,
     )
     local channel
@@ -1175,6 +1165,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket)
         _server_bootstrap_incoming_finished!(bootstrap)
         return nothing
     end
+    channel_box[] = channel
     return nothing
 end
 

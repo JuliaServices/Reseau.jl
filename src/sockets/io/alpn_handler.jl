@@ -4,15 +4,10 @@
 mutable struct AlpnHandler <: AbstractChannelHandler
     slot::Union{ChannelSlot, Nothing}
     on_protocol_negotiated::Union{Function, Nothing}
-    user_data::Any
 end
 
-function AlpnHandler(on_protocol_negotiated, user_data)
-    return AlpnHandler(nothing, on_protocol_negotiated, user_data)
-end
-
-function tls_alpn_handler_new(on_protocol_negotiated::ChannelOnProtocolNegotiatedFn, user_data = nothing)
-    return AlpnHandler(on_protocol_negotiated, user_data)
+function tls_alpn_handler_new(on_protocol_negotiated)
+    return AlpnHandler(nothing, on_protocol_negotiated)
 end
 
 function setchannelslot!(handler::AlpnHandler, slot::ChannelSlot)::Nothing
@@ -53,7 +48,7 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
     end
 
     new_slot = channel_slot_new!(channel)
-    new_handler = handler.on_protocol_negotiated(new_slot, protocol, handler.user_data)
+    new_handler = handler.on_protocol_negotiated(new_slot, protocol)
 
     if new_handler === nothing
         channel_release_message_to_pool!(channel, message)

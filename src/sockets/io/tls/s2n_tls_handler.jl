@@ -211,6 +211,13 @@ function _s2n_cleanup()
     return nothing
 end
 
+@static if Sys.islinux()
+function event_loop_thread_exit_s2n_cleanup!(::EpollEventLoop)::Nothing
+    _s2n_cleanup_thread()
+    return nothing
+end
+end
+
 function _s2n_cleanup_thread()
     @static if Sys.islinux()
         try
@@ -245,20 +252,6 @@ const _s2n_wall_clock_time_nanoseconds_c =
 const _s2n_monotonic_clock_time_nanoseconds_c =
     @cfunction(_s2n_monotonic_clock_time_nanoseconds, Cint, (Ptr{Cvoid}, Ptr{UInt64}))
 
-const _s2n_tls_cleanup_key = Ref{UInt8}(0)
-
-function _s2n_schedule_thread_cleanup(slot::ChannelSlot)
-    channel = slot.channel
-    channel === nothing && throw_error(ERROR_INVALID_STATE)
-    existing = channel_fetch_local_object(channel, _s2n_tls_cleanup_key)
-    if existing === nothing
-        local_obj = EventLoopLocalObject(_s2n_tls_cleanup_key, nothing)
-        channel_put_local_object!(channel, local_obj)
-        # thread_current_at_exit removed: event loop thread entry handles s2n cleanup
-    end
-    return nothing
-end
-
 mutable struct S2nTlsCtx
     config::Ptr{Cvoid}
     custom_cert_chain_and_key::Ptr{Cvoid}
@@ -278,12 +271,10 @@ mutable struct S2nTlsHandler <: TlsChannelHandler
     input_queue::Vector{IoMessage}
     protocol::ByteBuffer
     server_name::ByteBuffer
-    latest_message_on_completion::Union{Function, Nothing}
-    latest_message_completion_user_data::Any
-    on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing}
-    on_data_read::Union{TlsOnDataReadFn, Nothing}
-    on_error::Union{TlsOnErrorFn, Nothing}
-    user_data::Any
+    latest_message_on_completion::Union{EventCallable, Nothing}
+    on_negotiation_result::Union{Function, Nothing}
+    on_data_read::Union{Function, Nothing}
+    on_error::Union{Function, Nothing}
     advertise_alpn_message::Bool
     state::TlsNegotiationState.T
     read_task::ChannelTask
@@ -389,9 +380,7 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
 
         if processed == len
             message.on_completion = handler.latest_message_on_completion
-            message.user_data = handler.latest_message_completion_user_data
             handler.latest_message_on_completion = nothing
-            handler.latest_message_completion_user_data = nothing
         end
 
         try
@@ -428,7 +417,7 @@ const _s2n_handler_send_c = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr
 function _s2n_on_negotiation_result(handler::S2nTlsHandler, slot::ChannelSlot, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
     if handler.on_negotiation_result !== nothing
-        Base.invokelatest(handler.on_negotiation_result, handler, slot, error_code, handler.user_data)
+        handler.on_negotiation_result(handler, slot, error_code)
     end
     return nothing
 end
@@ -508,16 +497,14 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
     end
 end
 
-function _s2n_negotiation_task(task::ChannelTask, handler::S2nTlsHandler, status::TaskStatus.T)
-    _ = task
+function _s2n_negotiation_task(handler::S2nTlsHandler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     handler.state == TlsNegotiationState.ONGOING || return nothing
     _s2n_drive_negotiation(handler)
     return nothing
 end
 
-function _s2n_delayed_shutdown_task(task::ChannelTask, handler::S2nTlsHandler, status::TaskStatus.T)
-    _ = task
+function _s2n_delayed_shutdown_task(handler::S2nTlsHandler, status::TaskStatus.T)
     if status == TaskStatus.RUN_READY
         try
             _s2n_lib_handle()
@@ -537,8 +524,7 @@ function _s2n_delayed_shutdown_task(task::ChannelTask, handler::S2nTlsHandler, s
     return nothing
 end
 
-function _s2n_read_task(task::ChannelTask, handler::S2nTlsHandler, status::TaskStatus.T)
-    _ = task
+function _s2n_read_task(handler::S2nTlsHandler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     handler.read_task_pending = false
     if handler.slot !== nothing
@@ -564,7 +550,7 @@ function _s2n_initialize_read_delay_shutdown(handler::S2nTlsHandler, slot::Chann
     handler.shutdown_error_code = error_code
     if !handler.read_task_pending
         handler.read_task_pending = true
-        channel_task_init!(handler.read_task, _s2n_read_task, handler, "s2n_read_on_delay_shutdown")
+        channel_task_init!(handler.read_task, EventCallable(s -> _s2n_read_task(handler, _coerce_task_status(s))), "s2n_read_on_delay_shutdown")
         channel_schedule_task_now!(slot.channel, handler.read_task)
     end
     return nothing
@@ -792,7 +778,7 @@ function handler_process_read_message(
         setfield!(outgoing.message_data, :len, Csize_t(read_val))
 
         if handler.on_data_read !== nothing
-            Base.invokelatest(handler.on_data_read, handler, slot, outgoing.message_data, handler.user_data)
+            handler.on_data_read(handler, slot, outgoing.message_data)
         end
 
         if slot.adj_right !== nothing
@@ -852,7 +838,6 @@ function handler_process_write_message(
     end
 
     handler.latest_message_on_completion = message.on_completion
-    handler.latest_message_completion_user_data = message.user_data
 
     _s2n_lib_handle()
     blocked = Ref{Cint}(S2N_NOT_BLOCKED)
@@ -936,7 +921,7 @@ function handler_increment_read_window(
 
     if handler.state == TlsNegotiationState.SUCCEEDED && !handler.read_task_pending
         handler.read_task_pending = true
-        channel_task_init!(handler.read_task, _s2n_read_task, handler, "s2n_read_on_window_increment")
+        channel_task_init!(handler.read_task, EventCallable(s -> _s2n_read_task(handler, _coerce_task_status(s))), "s2n_read_on_window_increment")
         channel_schedule_task_now!(slot.channel, handler.read_task)
     end
 
@@ -1341,11 +1326,9 @@ function _s2n_handler_new(
         null_buffer(),
         null_buffer(),
         nothing,
-        nothing,
         options.on_negotiation_result,
         options.on_data_read,
         options.on_error,
-        options.user_data,
         options.advertise_alpn_message,
         TlsNegotiationState.ONGOING,
         ChannelTask(),
@@ -1357,7 +1340,7 @@ function _s2n_handler_new(
     )
 
     crt_statistics_tls_init!(handler.stats)
-    channel_task_init!(handler.timeout_task, _tls_timeout_task, handler, "tls_timeout")
+    channel_task_init!(handler.timeout_task, EventCallable(s -> _tls_timeout_task(handler, _coerce_task_status(s))), "tls_timeout")
 
     handler.connection = ccall(_s2n_symbol(:s2n_connection_new), Ptr{Cvoid}, (Cint,), mode)
     handler.connection == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
@@ -1385,7 +1368,6 @@ function _s2n_handler_new(
         throw_error(ERROR_IO_TLS_CTX_ERROR)
     end
 
-    channel_task_init!(handler.delayed_shutdown_task, _s2n_delayed_shutdown_task, handler, "s2n_delayed_shutdown")
-    _ = _s2n_schedule_thread_cleanup(slot)
+    channel_task_init!(handler.delayed_shutdown_task, EventCallable(s -> _s2n_delayed_shutdown_task(handler, _coerce_task_status(s))), "s2n_delayed_shutdown")
     return handler
 end

@@ -17,23 +17,21 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
     setup_ch = Channel{Int}(1)
     shutdown_ch = Channel{Int}(1)
 
-    on_setup = (ch, err, _ud) -> begin
+    on_setup = Reseau.EventCallable(err -> begin
         put!(setup_ch, err)
         return nothing
-    end
+    end)
     on_shutdown = with_shutdown_cb ? (
-            (ch, err, _ud) -> begin
+            Reseau.EventCallable(err -> begin
                 put!(shutdown_ch, err)
                 return nothing
-            end
+            end)
         ) : nothing
 
     channel_opts = Sockets.ChannelOptions(
         event_loop = el,
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
-        setup_user_data = nothing,
-        shutdown_user_data = nothing,
     )
 
     channel = Sockets.channel_new(channel_opts)
@@ -90,17 +88,15 @@ end
             el = EventLoops.event_loop_new(opts)
 
             setup_ch = Channel{Int}(1)
-            on_setup = (ch, err, _ud) -> begin
+            on_setup = Reseau.EventCallable(err -> begin
                 put!(setup_ch, err)
                 return nothing
-            end
+            end)
 
             channel_opts = Sockets.ChannelOptions(
                 event_loop = el,
                 on_setup_completed = on_setup,
                 on_shutdown_completed = nothing,
-                setup_user_data = nothing,
-                shutdown_user_data = nothing,
             )
 
             channel = Sockets.channel_new(channel_opts)
@@ -130,14 +126,12 @@ end
             task_count = 4
             status_ch = Channel{Tuple{Int, Reseau.TaskStatus.T}}(task_count)
 
-            task_fn = (task, arg, status) -> begin
-                put!(status_ch, (Int(arg), status))
-                return nothing
-            end
-
             tasks = [Sockets.ChannelTask() for _ in 1:task_count]
             for i in 1:task_count
-                Sockets.channel_task_init!(tasks[i], task_fn, i, "test_channel_task")
+                Sockets.channel_task_init!(tasks[i], Reseau.EventCallable(status -> begin
+                    put!(status_ch, (i, Reseau.TaskStatus.T(status)))
+                    nothing
+                end), "test_channel_task")
             end
 
             Sockets.channel_schedule_task_now!(channel, tasks[1])
@@ -179,14 +173,12 @@ end
             task_count = 4
             status_ch = Channel{Tuple{Int, Reseau.TaskStatus.T}}(task_count)
 
-            task_fn = (task, arg, status) -> begin
-                put!(status_ch, (Int(arg), status))
-                return nothing
-            end
-
             tasks = [Sockets.ChannelTask() for _ in 1:task_count]
             for i in 1:task_count
-                Sockets.channel_task_init!(tasks[i], task_fn, i, "test_channel_task_cross_thread")
+                Sockets.channel_task_init!(tasks[i], Reseau.EventCallable(status -> begin
+                    put!(status_ch, (i, Reseau.TaskStatus.T(status)))
+                    nothing
+                end), "test_channel_task_cross_thread")
             end
 
             t1 = errormonitor(Threads.@spawn begin
@@ -228,14 +220,12 @@ end
             task_count = 4
             status_ch = Channel{Tuple{Int, Reseau.TaskStatus.T}}(task_count)
 
-            task_fn = (task, arg, status) -> begin
-                put!(status_ch, (Int(arg), status))
-                return nothing
-            end
-
             tasks = [Sockets.ChannelTask() for _ in 1:task_count]
             for i in 1:task_count
-                Sockets.channel_task_init!(tasks[i], task_fn, i, "test_channel_task_serialized")
+                Sockets.channel_task_init!(tasks[i], Reseau.EventCallable(status -> begin
+                    put!(status_ch, (i, Reseau.TaskStatus.T(status)))
+                    nothing
+                end), "test_channel_task_serialized")
             end
 
             Sockets.channel_schedule_task_now_serialized!(channel, tasks[1])
@@ -278,11 +268,10 @@ end
             task = Sockets.ChannelTask()
             Sockets.channel_task_init!(
                 task,
-                (task, arg, status) -> begin
-                    put!(status_ch, status)
-                    return nothing
-                end,
-                nothing,
+                Reseau.EventCallable(status -> begin
+                    put!(status_ch, Reseau.TaskStatus.T(status))
+                    nothing
+                end),
                 "test_channel_task_serialized_queue",
             )
 
@@ -345,12 +334,11 @@ end
             @test _wait_ready_channel(shutdown_ch)
 
             task_status = Ref{Reseau.TaskStatus.T}(Reseau.TaskStatus.RUN_READY)
-            task_fn = (task, arg, status) -> begin
-                arg[] = status
-                return nothing
-            end
             task = Sockets.ChannelTask()
-            Sockets.channel_task_init!(task, task_fn, task_status, "post_shutdown")
+            Sockets.channel_task_init!(task, Reseau.EventCallable(status -> begin
+                task_status[] = Reseau.TaskStatus.T(status)
+                nothing
+            end), "post_shutdown")
             Sockets.channel_schedule_task_now!(channel, task)
             @test task_status[] == Reseau.TaskStatus.CANCELED
 
@@ -365,12 +353,11 @@ end
             shutdown_ch = setup.shutdown_ch
 
             task_status = Ref{Int}(100)
-            task_fn = (task, arg, status) -> begin
-                arg[] = Int(status)
-                return nothing
-            end
             task = Sockets.ChannelTask()
-            Sockets.channel_task_init!(task, task_fn, task_status, "future_task")
+            Sockets.channel_task_init!(task, Reseau.EventCallable(status -> begin
+                task_status[] = status
+                nothing
+            end), "future_task")
             Sockets.channel_schedule_task_future!(channel, task, typemax(UInt64) - 1)
             @test task_status[] == 100
 

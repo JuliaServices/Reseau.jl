@@ -477,13 +477,7 @@
 
         if num_events == -1
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to events on fd %d", task_data.owner.fd)
-            Base.invokelatest(
-                task_data.on_event,
-                event_loop,
-                task_data.owner,
-                Int(IoEventType.ERROR),
-                task_data.on_event_user_data,
-            )
+            task_data.on_event(Int(IoEventType.ERROR))
             return nothing
         end
 
@@ -507,13 +501,7 @@
                     @ccall kevent(impl.kq_fd::Cint, del_ref::Ptr{Kevent}, 1::Cint, C_NULL::Ptr{Kevent}, 0::Cint, C_NULL::Ptr{Cvoid})::Cint
                 end
             end
-            Base.invokelatest(
-                task_data.on_event,
-                event_loop,
-                task_data.owner,
-                Int(IoEventType.ERROR),
-                task_data.on_event_user_data,
-            )
+            task_data.on_event(Int(IoEventType.ERROR))
             return nothing
         end
 
@@ -526,8 +514,7 @@
             event_loop::EventLoop,
             handle::IoHandle,
             events::Int,
-            on_event::OnEventCallback,
-            user_data,
+            on_event::EventCallable,
         )::Nothing
         if handle.fd < 0
             throw_error(ERROR_INVALID_ARGUMENT)
@@ -536,7 +523,7 @@
             throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
         end
 
-        handle_data = KqueueHandleData(handle, event_loop, on_event, user_data, events)
+        handle_data = KqueueHandleData(handle, event_loop, on_event, events)
 
         # Store handle data reference
         handle_data_ptr = pointer_from_objref(handle_data)
@@ -829,13 +816,7 @@
                         "activity on fd %d, invoking handler",
                         handle_data.owner.fd,
                     )
-                    Base.invokelatest(
-                        handle_data.on_event,
-                        event_loop,
-                        handle_data.owner,
-                        handle_data.events_this_loop,
-                        handle_data.on_event_user_data,
-                    )
+                    handle_data.on_event(handle_data.events_this_loop)
                 end
                 handle_data.events_this_loop = 0
             end
@@ -923,9 +904,17 @@
         task_scheduler_clean_up!(impl.thread_data.scheduler)
 
         # Cancel tasks in cross-thread queue
-        while !isempty(impl.cross_thread_data.tasks_to_schedule)
-            task = popfirst!(impl.cross_thread_data.tasks_to_schedule)
-            if task !== nothing
+        while true
+            tasks_to_cancel = nothing
+            lock(impl.cross_thread_data.mutex)
+            try
+                isempty(impl.cross_thread_data.tasks_to_schedule) && break
+                tasks_to_cancel = impl.cross_thread_data.tasks_to_schedule
+                impl.cross_thread_data.tasks_to_schedule = ScheduledTask[]
+            finally
+                unlock(impl.cross_thread_data.mutex)
+            end
+            for task in tasks_to_cancel
                 task_run!(task, TaskStatus.CANCELED)
             end
         end
@@ -953,11 +942,7 @@
             end
         end
 
-        # Clean up local data (invokes on_object_removed callbacks)
-        for (_, obj) in event_loop.local_data
-            _event_loop_local_object_destroy(obj)
-        end
-        empty!(event_loop.local_data)
+        _event_loop_clean_up_shared_resources!(event_loop)
 
         return nothing
     end

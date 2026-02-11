@@ -111,13 +111,11 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     protocol::ByteBuffer
     server_name::ByteBuffer
     alpn_list::Union{String, Nothing}
-    latest_message_on_completion::Union{Function, Nothing}
-    latest_message_completion_user_data::Any
+    latest_message_on_completion::Union{EventCallable, Nothing}
     ca_certs::CFArrayRef
-    on_negotiation_result::Union{TlsOnNegotiationResultFn, Nothing}
-    on_data_read::Union{TlsOnDataReadFn, Nothing}
-    on_error::Union{TlsOnErrorFn, Nothing}
-    user_data::Any
+    on_negotiation_result::Union{Function, Nothing}
+    on_data_read::Union{Function, Nothing}
+    on_error::Union{Function, Nothing}
     advertise_alpn_message::Bool
     negotiation_finished::Bool
     verify_peer::Bool
@@ -341,7 +339,7 @@ end
 function _secure_transport_on_negotiation_result(handler::SecureTransportTlsHandler, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
     if handler.on_negotiation_result !== nothing && handler.slot !== nothing
-        Base.invokelatest(handler.on_negotiation_result, handler, handler.slot, error_code, handler.user_data)
+        handler.on_negotiation_result(handler, handler.slot, error_code)
     end
     return nothing
 end
@@ -506,8 +504,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
     end
 end
 
-function _secure_transport_negotiation_task(task::ChannelTask, handler::SecureTransportTlsHandler, status::TaskStatus.T)
-    _ = task
+function _secure_transport_negotiation_task(handler::SecureTransportTlsHandler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     try
         _secure_transport_drive_negotiation(handler)
@@ -594,9 +591,7 @@ function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, le
 
         if processed == requested
             message.on_completion = handler.latest_message_on_completion
-            message.user_data = handler.latest_message_completion_user_data
             handler.latest_message_on_completion = nothing
-            handler.latest_message_completion_user_data = nothing
         end
 
         try
@@ -639,8 +634,7 @@ end
 const _secure_transport_read_cb_c = Ref{Ptr{Cvoid}}(C_NULL)
 const _secure_transport_write_cb_c = Ref{Ptr{Cvoid}}(C_NULL)
 
-function _secure_transport_read_task(task::ChannelTask, handler::SecureTransportTlsHandler, status::TaskStatus.T)
-    _ = task
+function _secure_transport_read_task(handler::SecureTransportTlsHandler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     handler.read_task_pending = false
     if handler.slot !== nothing
@@ -666,7 +660,7 @@ function _secure_transport_initialize_read_delay_shutdown(handler::SecureTranspo
     handler.delay_shutdown_error_code = error_code
     if !handler.read_task_pending
         handler.read_task_pending = true
-        channel_task_init!(handler.read_task, _secure_transport_read_task, handler, "secure_transport_read_on_delay_shutdown")
+        channel_task_init!(handler.read_task, EventCallable(s -> _secure_transport_read_task(handler, _coerce_task_status(s))), "secure_transport_read_on_delay_shutdown")
         channel_schedule_task_now!(slot.channel, handler.read_task)
     end
     return nothing
@@ -775,7 +769,7 @@ function handler_process_read_message(
             setfield!(outgoing.message_data, :len, Csize_t(read_size[]))
 
             if handler.on_data_read !== nothing
-                Base.invokelatest(handler.on_data_read, handler, slot, outgoing.message_data, handler.user_data)
+                handler.on_data_read(handler, slot, outgoing.message_data)
             end
 
             if slot.adj_right !== nothing
@@ -858,7 +852,6 @@ function handler_process_write_message(
     end
 
     handler.latest_message_on_completion = message.on_completion
-    handler.latest_message_completion_user_data = message.user_data
 
     processed = Ref{Csize_t}(0)
     status = ccall(
@@ -937,7 +930,7 @@ function handler_increment_read_window(
 
     if handler.negotiation_finished && !handler.read_task_pending
         handler.read_task_pending = true
-        channel_task_init!(handler.read_task, _secure_transport_read_task, handler, "secure_transport_read_on_window_increment")
+        channel_task_init!(handler.read_task, EventCallable(s -> _secure_transport_read_task(handler, _coerce_task_status(s))), "secure_transport_read_on_window_increment")
         channel_schedule_task_now!(slot.channel, handler.read_task)
     end
 
@@ -1042,12 +1035,10 @@ function _secure_transport_handler_new(
         null_buffer(),
         options.alpn_list === nothing ? st_ctx.alpn_list : options.alpn_list,
         nothing,
-        nothing,
         C_NULL,
         options.on_negotiation_result,
         options.on_data_read,
         options.on_error,
-        options.user_data,
         options.advertise_alpn_message,
         false,
         options.ctx.options.verify_peer,
@@ -1059,7 +1050,7 @@ function _secure_transport_handler_new(
     )
 
     crt_statistics_tls_init!(handler.stats)
-    channel_task_init!(handler.timeout_task, _tls_timeout_task, handler, "tls_timeout")
+    channel_task_init!(handler.timeout_task, EventCallable(s -> _tls_timeout_task(handler, _coerce_task_status(s))), "tls_timeout")
     _secure_transport_handler_registry[handler] = nothing
 
     handler.ctx = ccall((:SSLCreateContext, _SECURITY_LIB), SSLContextRef, (CFAllocatorRef, SSLProtocolSide, SSLConnectionType), C_NULL, protocol_side, _kSSLStreamType)

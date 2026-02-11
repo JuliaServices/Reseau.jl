@@ -3,20 +3,13 @@
 
 # Channel read/write directions are defined in socket.jl as ChannelDirection
 
-# Callbacks
-const ChannelOnSetupCompletedFn = Function  # (channel, error_code, user_data) -> nothing
-const ChannelOnShutdownCompletedFn = Function  # (channel, error_code, user_data) -> nothing
-
 const DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE = 16 * 1024
 const g_aws_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE))
-const _CHANNEL_MESSAGE_POOL_KEY = Ref{UInt8}(0)
 
 struct ChannelOptions
     event_loop::EventLoop
-    on_setup_completed::Union{Function, Nothing}
-    on_shutdown_completed::Union{Function, Nothing}
-    setup_user_data::Any
-    shutdown_user_data::Any
+    on_setup_completed::Union{EventCallable, Nothing}
+    on_shutdown_completed::Union{EventCallable, Nothing}
     enable_read_back_pressure::Bool
 end
 
@@ -24,16 +17,12 @@ function ChannelOptions(;
         event_loop,
         on_setup_completed = nothing,
         on_shutdown_completed = nothing,
-        setup_user_data = nothing,
-        shutdown_user_data = nothing,
         enable_read_back_pressure::Bool = false,
     )
     return ChannelOptions(
         event_loop,
         on_setup_completed,
         on_shutdown_completed,
-        setup_user_data,
-        shutdown_user_data,
         enable_read_back_pressure,
     )
 end
@@ -46,13 +35,14 @@ end
 
 mutable struct ChannelTask
     wrapper_task::ScheduledTask
-    task_fn::Function
-    arg::Any
+    task_fn::EventCallable
     type_tag::String
     ctx::ChannelTaskContext
 end
 
-function ChannelTask(task_fn, arg, type_tag::AbstractString)
+const _noop_event_callable = EventCallable((_::Int) -> nothing)
+
+function ChannelTask(task_fn::EventCallable, type_tag::AbstractString)
     ctx = ChannelTaskContext(nothing, nothing)
     wrapper_task = ScheduledTask(
         TaskFn(function(status)
@@ -65,18 +55,17 @@ function ChannelTask(task_fn, arg, type_tag::AbstractString)
         end);
         type_tag = type_tag,
     )
-    task = ChannelTask(wrapper_task, task_fn, arg, String(type_tag), ctx)
+    task = ChannelTask(wrapper_task, task_fn, String(type_tag), ctx)
     ctx.task = task
     return task
 end
 
 function ChannelTask()
-    return ChannelTask((task, arg, status) -> nothing, nothing, "channel_task")
+    return ChannelTask(_noop_event_callable, "channel_task")
 end
 
-function channel_task_init!(task::ChannelTask, task_fn, arg, type_tag::AbstractString)
+function channel_task_init!(task::ChannelTask, task_fn::EventCallable, type_tag::AbstractString)
     task.task_fn = task_fn
-    task.arg = arg
     task.type_tag = String(type_tag)
     task.wrapper_task.type_tag = task.type_tag
     task.wrapper_task.timestamp = UInt64(0)
@@ -223,10 +212,8 @@ mutable struct Channel
     setup_pending::Bool
     destroy_pending::Bool
     message_pool::Union{MessagePool, Nothing}  # nullable
-    on_setup_completed::Union{ChannelOnSetupCompletedFn, Nothing}  # nullable
-    on_shutdown_completed::Union{ChannelOnShutdownCompletedFn, Nothing}  # nullable
-    setup_user_data::Any
-    shutdown_user_data::Any
+    on_setup_completed::Union{EventCallable, Nothing}  # nullable
+    on_shutdown_completed::Union{EventCallable, Nothing}  # nullable
     shutdown_error_code::Int
     # Statistics tracking
     read_message_count::Csize_t
@@ -289,8 +276,6 @@ function Channel(
         message_pool,
         nothing,  # on_setup_completed
         nothing,  # on_shutdown_completed
-        nothing,  # setup_user_data
-        nothing,  # shutdown_user_data
         0,        # shutdown_error_code
         Csize_t(0),  # read_message_count
         Csize_t(0),  # write_message_count
@@ -350,10 +335,10 @@ function _channel_task_wrapper(ctx::ChannelTaskContext, status::TaskStatus.T)
         _channel_remove_pending_task!(channel, task)
         final_status = (status == TaskStatus.CANCELED || channel.channel_state == ChannelState.SHUT_DOWN) ?
             TaskStatus.CANCELED : status
-        task.task_fn(task, task.arg, final_status)
+        task.task_fn(Int(final_status))
         return nothing
     end
-    task.task_fn(task, task.arg, status)
+    task.task_fn(Int(status))
     return nothing
 end
 
@@ -430,32 +415,18 @@ function channel_trigger_read(channel::Channel)::Nothing
     return nothing
 end
 
-# Event loop local object wrappers
-channel_fetch_local_object(channel::Channel, key) = event_loop_fetch_local_object(channel.event_loop, key)
-channel_put_local_object!(channel::Channel, obj::EventLoopLocalObject) = event_loop_put_local_object!(channel.event_loop, obj)
-channel_remove_local_object!(channel::Channel, key) = event_loop_remove_local_object!(channel.event_loop, key)
-
 # Channel creation API matching aws_channel_new
 mutable struct ChannelSetupArgs
     channel::Channel
 end
 
-function _channel_message_pool_on_removed(obj::EventLoopLocalObject)
-    pool = obj.object
-    if pool isa MessagePool
-        message_pool_clean_up!(pool)
-    end
-    return nothing
-end
-
 function _channel_get_or_create_message_pool(channel::Channel)::MessagePool
-    local_obj = channel_fetch_local_object(channel, _CHANNEL_MESSAGE_POOL_KEY)
-    if local_obj !== nothing
-        obj = local_obj::EventLoopLocalObject
-        pool = obj.object
-        if pool isa MessagePool
-            return pool
-        end
+    pool = channel.event_loop.message_pool
+    if pool isa MessagePool
+        return pool
+    end
+    if pool !== nothing
+        channel.event_loop.message_pool = nothing
     end
 
     creation_args = MessagePoolCreationArgs(;
@@ -466,8 +437,7 @@ function _channel_get_or_create_message_pool(channel::Channel)::MessagePool
     )
 
     pool = MessagePool(creation_args)
-    local_object = EventLoopLocalObject(_CHANNEL_MESSAGE_POOL_KEY, pool, _channel_message_pool_on_removed)
-    channel_put_local_object!(channel, local_object)
+    channel.event_loop.message_pool = pool
     return pool
 end
 
@@ -476,7 +446,7 @@ function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
     channel.setup_pending = false
     if status != TaskStatus.RUN_READY
         if channel.on_setup_completed !== nothing
-            Base.invokelatest(channel.on_setup_completed, channel, ERROR_SYS_CALL_FAILURE, channel.setup_user_data)
+            channel.on_setup_completed(ERROR_SYS_CALL_FAILURE)
         end
         if channel.destroy_pending
             channel.destroy_pending = false
@@ -490,7 +460,7 @@ function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
     channel.channel_state = ChannelState.ACTIVE
 
     if channel.on_setup_completed !== nothing
-        Base.invokelatest(channel.on_setup_completed, channel, AWS_OP_SUCCESS, channel.setup_user_data)
+        channel.on_setup_completed(AWS_OP_SUCCESS)
     end
     if channel.destroy_pending
         channel.destroy_pending = false
@@ -511,8 +481,6 @@ function channel_new(options::ChannelOptions)::Channel
     )
     channel.on_setup_completed = options.on_setup_completed
     channel.on_shutdown_completed = options.on_shutdown_completed
-    channel.setup_user_data = options.setup_user_data
-    channel.shutdown_user_data = options.shutdown_user_data
     channel.channel_state = ChannelState.SETTING_UP
     channel.setup_pending = true
     channel.destroy_pending = false
@@ -552,7 +520,7 @@ function _channel_register_task!(
         serialized::Bool = false,
     )
     if channel.channel_state == ChannelState.SHUT_DOWN
-        task.task_fn(task, task.arg, TaskStatus.CANCELED)
+        task.task_fn(Int(TaskStatus.CANCELED))
         return nothing
     end
 
@@ -595,16 +563,14 @@ end
 channel_is_active(channel::Channel) = channel.channel_state == ChannelState.ACTIVE
 
 # Set the channel setup callback
-function channel_set_setup_callback!(channel::Channel, callback::ChannelOnSetupCompletedFn, user_data)
+function channel_set_setup_callback!(channel::Channel, callback::EventCallable)
     channel.on_setup_completed = callback
-    channel.setup_user_data = user_data
     return nothing
 end
 
 # Set the channel shutdown callback
-function channel_set_shutdown_callback!(channel::Channel, callback::ChannelOnShutdownCompletedFn, user_data)
+function channel_set_shutdown_callback!(channel::Channel, callback::EventCallable)
     channel.on_shutdown_completed = callback
-    channel.shutdown_user_data = user_data
     return nothing
 end
 
@@ -986,7 +952,7 @@ function channel_slot_increment_read_window!(slot::ChannelSlot, size::Csize_t)::
 
         if !channel.window_update_scheduled && slot.window_size <= channel.window_update_batch_emit_threshold
             channel.window_update_scheduled = true
-            channel_task_init!(channel.window_update_task, _channel_window_update_task, channel, "window_update_task")
+            channel_task_init!(channel.window_update_task, EventCallable(s -> _channel_window_update_task(channel, _coerce_task_status(s))), "window_update_task")
             channel_schedule_task_now!(channel, channel.window_update_task)
         end
     end
@@ -994,8 +960,7 @@ function channel_slot_increment_read_window!(slot::ChannelSlot, size::Csize_t)::
     return nothing
 end
 
-function _channel_window_update_task(task::ChannelTask, channel::Channel, status::TaskStatus.T)
-    _ = task
+function _channel_window_update_task(channel::Channel, status::TaskStatus.T)
     channel.window_update_scheduled = false
     status == TaskStatus.RUN_READY || return nothing
 
@@ -1076,7 +1041,7 @@ function channel_setup_complete!(channel::Channel)::Nothing
 
     # Invoke setup callback
     if channel.on_setup_completed !== nothing
-        Base.invokelatest(channel.on_setup_completed, channel, AWS_OP_SUCCESS, channel.setup_user_data)
+        channel.on_setup_completed(AWS_OP_SUCCESS)
     end
 
     return nothing
@@ -1119,7 +1084,7 @@ function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.
     end
 
     if channel.on_shutdown_completed !== nothing
-        Base.invokelatest(channel.on_shutdown_completed, channel, channel.shutdown_error_code, channel.shutdown_user_data)
+        channel.on_shutdown_completed(channel.shutdown_error_code)
     end
 
     return nothing
@@ -1145,7 +1110,7 @@ function _channel_schedule_shutdown_completion!(channel::Channel)
     return nothing
 end
 
-function _channel_shutdown_task(task::ChannelTask, channel::Channel, status::TaskStatus.T)
+function _channel_shutdown_task(channel::Channel, status::TaskStatus.T)
     if channel.channel_state == ChannelState.SHUT_DOWN ||
             channel.channel_state == ChannelState.SHUTTING_DOWN_READ ||
             channel.channel_state == ChannelState.SHUTTING_DOWN_WRITE
@@ -1180,7 +1145,7 @@ function channel_shutdown!(channel::Channel, error_code::Int = 0; shutdown_immed
         channel.shutdown_immediately = shutdown_immediately
         channel.shutdown_pending = true
 
-        channel_task_init!(channel.shutdown_task, _channel_shutdown_task, channel, "channel_shutdown")
+        channel_task_init!(channel.shutdown_task, EventCallable(s -> _channel_shutdown_task(channel, _coerce_task_status(s))), "channel_shutdown")
         schedule_task = true
         return nothing
     end

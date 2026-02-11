@@ -27,7 +27,6 @@ mutable struct ByoCryptoTestArgs
     tls_ctx::Sockets.TlsContext
     tls_options::Sockets.TlsConnectionOptions
     negotiation_result_fn::Any
-    cb_data::Any
     error_code::Int
     shutdown_invoked::Bool
     listener_destroyed::Bool
@@ -60,7 +59,6 @@ function _byo_handle_read(handler, slot, data_read, rw_args::ByoCryptoRwArgs)
             handler,
             slot,
             Reseau.AWS_OP_SUCCESS,
-            rw_args.test_args.cb_data,
         )
         rw_args.test_args.negotiation_result_fn = nothing
     end
@@ -86,7 +84,6 @@ function _byo_start_negotiation(handler::ReadWriteTestHandler, test_args::ByoCry
             handler,
             handler.slot,
             Reseau.AWS_OP_SUCCESS,
-            test_args.cb_data,
         )
         test_args.negotiation_result_fn = nothing
     end
@@ -96,7 +93,6 @@ end
 function _byo_tls_handler_new(options, slot, test_args::ByoCryptoTestArgs)
     _ = slot
     test_args.negotiation_result_fn = options.on_negotiation_result
-    test_args.cb_data = options.user_data
     return test_args.rw_handler
 end
 
@@ -140,15 +136,13 @@ end
         server_ctx,
         Sockets.TlsConnectionOptions(
             server_ctx;
-            on_negotiation_result = (handler, slot, err, ud) -> begin
+            on_negotiation_result = (handler, slot, err) -> begin
                 _ = handler
                 _ = slot
-                _ = ud
                 incoming_args.negotiated = true
                 return nothing
             end,
         ),
-        nothing,
         nothing,
         Reseau.AWS_OP_SUCCESS,
         false,
@@ -163,15 +157,13 @@ end
         client_ctx,
         Sockets.TlsConnectionOptions(
             client_ctx;
-            on_negotiation_result = (handler, slot, err, ud) -> begin
+            on_negotiation_result = (handler, slot, err) -> begin
                 _ = handler
                 _ = slot
-                _ = ud
                 outgoing_args.negotiated = true
                 return nothing
             end,
         ),
-        nothing,
         nothing,
         Reseau.AWS_OP_SUCCESS,
         false,

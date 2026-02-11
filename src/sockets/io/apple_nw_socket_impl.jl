@@ -809,7 +809,7 @@
         send_ctx = _nw_lookup_send(ctx)
         send_ctx === nothing && return nothing
         _nw_unregister_send!(send_ctx)
-        _nw_handle_send_completion(send_ctx.socket, error, data, send_ctx.written_fn, send_ctx.user_data)
+        _nw_handle_send_completion(send_ctx.socket, error, data, send_ctx.written_fn)
         return nothing
     end
 
@@ -1078,7 +1078,7 @@
                             _nw_unlock_synced(nw_socket)
                         end
                         if nw_socket.on_readable !== nothing
-                            nw_socket.on_readable(socket, error_code, nw_socket.on_readable_user_data)
+                            nw_socket.on_readable(error_code)
                         end
                     end
                 catch e
@@ -1129,18 +1129,14 @@
             nw_socket::NWSocket,
             error_code::Int,
             bytes_written::Csize_t,
-            written_fn::Union{SocketOnWriteCompletedFn, Nothing},
-            user_data,
+            written_fn::Union{WriteCallable, Nothing},
         )
         nw_socket.event_loop === nothing && return nothing
         task = ScheduledTask(
             TaskFn(function(status)
                 try
                     if _coerce_task_status(status) != TaskStatus.CANCELED && written_fn !== nothing
-                        _nw_lock_base(nw_socket)
-                        socket = nw_socket.base_socket
-                        written_fn(socket, error_code, bytes_written, user_data)
-                        _nw_unlock_base(nw_socket)
+                        written_fn(error_code, bytes_written)
                     end
                 catch e
                     Core.println("nw_written_task task errored: $e")
@@ -1157,8 +1153,7 @@
             nw_socket::NWSocket,
             error::nw_error_t,
             data::dispatch_data_t,
-            written_fn::SocketOnWriteCompletedFn,
-            user_data,
+            written_fn::WriteCallable,
         )
         err_code = _nw_convert_nw_error(error)
         if err_code != 0
@@ -1166,7 +1161,7 @@
         end
         size_written = data == C_NULL ? Csize_t(0) : _nw_dispatch_data_size(data)
 
-        _nw_handle_write_result(nw_socket, err_code, size_written, written_fn, user_data)
+        _nw_handle_write_result(nw_socket, err_code, size_written, written_fn)
 
         if data != C_NULL
             ccall((:dispatch_release, _NW_DISPATCH_LIB), Cvoid, (dispatch_data_t,), data)
@@ -1235,7 +1230,7 @@
         if nw_socket.on_connection_result !== nothing
             _nw_lock_base(nw_socket)
             socket = nw_socket.base_socket
-            nw_socket.on_connection_result(socket, 0, nw_socket.connect_result_user_data)
+            nw_socket.on_connection_result(0)
             _nw_unlock_base(nw_socket)
         else
             logf(
@@ -1269,7 +1264,7 @@
                         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
                         _nw_unlock_synced(nw_socket)
                         if nw_socket.on_close_complete !== nothing
-                            nw_socket.on_close_complete(nw_socket.close_user_data)
+                            nw_socket.on_close_complete(UInt8(0))
                         end
                         if nw_socket.connection != C_NULL
                             ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.connection)
@@ -1302,7 +1297,7 @@
                             if nw_socket.on_connection_result !== nothing
                                 _nw_lock_base(nw_socket)
                                 socket = nw_socket.base_socket
-                                nw_socket.on_connection_result(socket, err_code, nw_socket.connect_result_user_data)
+                                nw_socket.on_connection_result(err_code)
                                 _nw_unlock_base(nw_socket)
                             end
                             nw_socket.connection_setup = true
@@ -1357,7 +1352,7 @@
                         _nw_unlock_synced(nw_socket)
                         _nw_lock_base(nw_socket)
                         if nw_socket.on_accept_started !== nothing && nw_socket.base_socket !== nothing
-                            nw_socket.on_accept_started(nw_socket.base_socket, err_code, nw_socket.listen_accept_started_user_data)
+                            nw_socket.on_accept_started(err_code)
                         end
                         _nw_unlock_base(nw_socket)
                     elseif state == 4 # nw_listener_state_cancelled
@@ -1365,7 +1360,7 @@
                         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
                         _nw_unlock_synced(nw_socket)
                         if nw_socket.on_close_complete !== nothing
-                            nw_socket.on_close_complete(nw_socket.close_user_data)
+                            nw_socket.on_close_complete(UInt8(0))
                         end
                         if nw_socket.listener != C_NULL
                             ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.listener)
@@ -1405,7 +1400,7 @@
                 if port != 0
                     sock.local_endpoint.port = port
                     nw_socket.on_accept_started = nothing
-                    cb(sock, 0, nw_socket.listen_accept_started_user_data)
+                    cb(0)
                     return true
                 end
                 return false
@@ -1432,7 +1427,7 @@
                             cb = nw_socket.on_accept_started
                             if sock !== nothing && cb !== nothing
                                 nw_socket.on_accept_started = nothing
-                                cb(sock, 0, nw_socket.listen_accept_started_user_data)
+                                cb(0)
                             end
                         finally
                             _nw_unlock_base(nw_socket)
@@ -1485,7 +1480,7 @@
                         new_socket = socket_init_apple_nw(options)
                     catch e
                         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        listener.accept_result_fn(listener, err, nothing, listener.connect_accept_user_data)
+                        listener.accept_result_fn(err, nothing)
                         _nw_unlock_base(nw_socket)
                         ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
                         return nothing
@@ -1525,7 +1520,7 @@
                         BlocksABI.free!(st_blk)
                     end
 
-                    listener.accept_result_fn(listener, 0, new_socket, listener.connect_accept_user_data)
+                    listener.accept_result_fn(0, new_socket)
                     _nw_unlock_base(nw_socket)
                 catch e
                     Core.println("nw_listener_accept task errored: $e")
@@ -1582,12 +1577,10 @@
         nw_socket.alpn_list = nothing
 
         cleanup_fn = nw_socket.on_cleanup_complete
-        cleanup_ud = nw_socket.cleanup_user_data
 
         nw_socket.on_cleanup_complete = nothing
-        nw_socket.cleanup_user_data = nothing
 
-        cleanup_fn !== nothing && cleanup_fn(cleanup_ud)
+        cleanup_fn !== nothing && cleanup_fn(UInt8(0))
         return nothing
     end
 
@@ -1632,8 +1625,6 @@
             nothing,
             nothing,
             SocketState.INIT,
-            nothing,
-            nothing,
             nothing,
             nothing,
             nothing,
@@ -1740,7 +1731,6 @@
 
         if options.on_connection_result !== nothing
             nw_socket.on_connection_result = options.on_connection_result
-            nw_socket.connect_result_user_data = options.user_data
             logf(
                 LogLevel.TRACE,
                 LS_IO_SOCKET,
@@ -1772,7 +1762,7 @@
                             nw_socket.connection_setup = true
                             socket_close(nw_socket.base_socket)
                             if nw_socket.on_connection_result !== nothing
-                                nw_socket.on_connection_result(nw_socket.base_socket, err, nw_socket.connect_result_user_data)
+                                nw_socket.on_connection_result(err)
                             end
                         end
                         _nw_unlock_base(nw_socket)
@@ -1890,9 +1880,7 @@
         end
 
         nw_socket.on_accept_started = options.on_accept_start
-        nw_socket.listen_accept_started_user_data = options.on_accept_start_user_data
         socket.accept_result_fn = options.on_accept_result
-        socket.connect_accept_user_data = options.on_accept_result_user_data
 
         _nw_set_event_loop!(socket, accept_loop)
 
@@ -2001,15 +1989,13 @@
     function socket_subscribe_to_readable_events_impl(
             ::NWSocket,
             socket::Socket,
-            on_readable::SocketOnReadableFn,
-            user_data,
+            on_readable::EventCallable,
         )::Nothing
         nw_socket = socket.impl
         if nw_socket.mode == NWSocketMode.LISTENER
             throw_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
         end
         nw_socket.on_readable = on_readable
-        nw_socket.on_readable_user_data = user_data
         _nw_schedule_next_read!(nw_socket)
         return nothing
     end
@@ -2070,8 +2056,7 @@
             ::NWSocket,
             socket::Socket,
             cursor::ByteCursor,
-            written_fn::Union{SocketOnWriteCompletedFn, Nothing},
-            user_data,
+            written_fn::Union{WriteCallable, Nothing},
         )::Nothing
         nw_socket = socket.impl
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
@@ -2098,7 +2083,7 @@
             _nw_unlock_synced(nw_socket)
         end
 
-        send_ctx = NWSendContext(nw_socket, written_fn, user_data)
+        send_ctx = NWSendContext(nw_socket, written_fn)
         send_ctx_ptr = _nw_register_send!(send_ctx)
         _nw_ensure_callbacks!()
         _nw_ensure_globals!()
@@ -2144,24 +2129,20 @@
     function socket_set_close_callback_impl(
             ::NWSocket,
             socket::Socket,
-            fn::SocketOnShutdownCompleteFn,
-            user_data,
+            fn::TaskFn,
         )::Nothing
         nw_socket = socket.impl
         nw_socket.on_close_complete = fn
-        nw_socket.close_user_data = user_data
         return nothing
     end
 
     function socket_set_cleanup_callback_impl(
             ::NWSocket,
             socket::Socket,
-            fn::SocketOnShutdownCompleteFn,
-            user_data,
+            fn::TaskFn,
         )::Nothing
         nw_socket = socket.impl
         nw_socket.on_cleanup_complete = fn
-        nw_socket.cleanup_user_data = user_data
         return nothing
     end
 

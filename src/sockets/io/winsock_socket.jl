@@ -346,8 +346,6 @@
             nothing,
             nothing,
             nothing,
-            nothing,
-            nothing,
             impl,
         )
 
@@ -375,11 +373,9 @@
         end
 
         on_cleanup_complete = impl.on_cleanup_complete
-        cleanup_ud = impl.cleanup_user_data
 
         impl.cleaned_up = true
         impl.on_cleanup_complete = nothing
-        impl.cleanup_user_data = nothing
 
         # Keep impl alive if there are in-flight IOCP operations.
         pending = impl.read_io_data.in_use || !isempty(impl.pending_writes) || impl.incoming_socket !== nothing
@@ -388,7 +384,7 @@
             sock.impl = nothing
         end
 
-        on_cleanup_complete !== nothing && Base.invokelatest(on_cleanup_complete, cleanup_ud)
+        on_cleanup_complete !== nothing && on_cleanup_complete(UInt8(0))
         return nothing
     end
 
@@ -405,16 +401,14 @@
         return nothing
     end
 
-    function socket_set_close_callback_impl(::WinsockSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
+    function socket_set_close_callback_impl(::WinsockSocket, sock::Socket, fn::TaskFn)::Nothing
         impl = sock.impl::WinsockSocket
-        impl.close_user_data = user_data
         impl.on_close_complete = fn
         return nothing
     end
 
-    function socket_set_cleanup_callback_impl(::WinsockSocket, sock::Socket, fn::SocketOnShutdownCompleteFn, user_data)::Nothing
+    function socket_set_cleanup_callback_impl(::WinsockSocket, sock::Socket, fn::TaskFn)::Nothing
         impl = sock.impl::WinsockSocket
-        impl.cleanup_user_data = user_data
         impl.on_cleanup_complete = fn
         return nothing
     end
@@ -452,9 +446,9 @@
     function _winsock_connection_error(sock::Socket, error_code::Int)
         sock.state = SocketState.ERROR
         if sock.connection_result_fn !== nothing
-            Base.invokelatest(sock.connection_result_fn, sock, error_code, sock.connect_accept_user_data)
+            sock.connection_result_fn(error_code)
         elseif sock.accept_result_fn !== nothing
-            Base.invokelatest(sock.accept_result_fn, sock, error_code, nothing, sock.connect_accept_user_data)
+            sock.accept_result_fn(error_code, nothing)
         end
         return nothing
     end
@@ -462,7 +456,7 @@
     function _winsock_local_and_udp_connection_success(sock::Socket)
         sock.state = SocketState.CONNECTED
         if sock.connection_result_fn !== nothing
-            Base.invokelatest(sock.connection_result_fn, sock, AWS_OP_SUCCESS, sock.connect_accept_user_data)
+            sock.connection_result_fn(AWS_OP_SUCCESS)
         end
         return nothing
     end
@@ -509,7 +503,7 @@
         )
 
         sock.state = SocketState.CONNECTED
-        sock.connection_result_fn !== nothing && Base.invokelatest(sock.connection_result_fn, sock, AWS_OP_SUCCESS, sock.connect_accept_user_data)
+        sock.connection_result_fn !== nothing && sock.connection_result_fn(AWS_OP_SUCCESS)
         return nothing
     end
 
@@ -538,7 +532,6 @@
         if sock !== nothing
             impl = sock.impl::WinsockSocket
             sock.readable_fn = nothing
-            sock.readable_user_data = nothing
             impl.connect_args = nothing
             args.socket = nothing
 
@@ -578,12 +571,11 @@
         end
 
         conn_cb = sock.connection_result_fn
-        conn_ud = sock.connect_accept_user_data
 
         raise_error(error_code)
         socket_close(sock)
 
-        conn_cb !== nothing && Base.invokelatest(conn_cb, sock, error_code, conn_ud)
+        conn_cb !== nothing && conn_cb(error_code)
         args.socket = nothing
         return nothing
     end
@@ -685,7 +677,6 @@
         remote_endpoint = options.remote_endpoint
         connect_loop = options.event_loop
         on_connection_result = options.on_connection_result
-        user_data = options.user_data
 
         if sock.options.type != SocketType.DGRAM
             if sock.state != SocketState.INIT
@@ -703,7 +694,6 @@
         socket_validate_port_for_connect(remote_endpoint.port, sock.options.domain)
 
         sock.connection_result_fn = on_connection_result
-        sock.connect_accept_user_data = user_data
 
         if sock.options.domain == SocketDomain.LOCAL
             connect_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
@@ -1075,7 +1065,7 @@
         accepted = incoming
         impl.incoming_socket = nothing
 
-        sock.accept_result_fn !== nothing && Base.invokelatest(sock.accept_result_fn, sock, AWS_OP_SUCCESS, accepted, sock.connect_accept_user_data)
+        sock.accept_result_fn !== nothing && sock.accept_result_fn(AWS_OP_SUCCESS, accepted)
 
         io_data.socket === nothing && return nothing
 
@@ -1157,7 +1147,6 @@
         impl.stop_accept = false
 
         sock.accept_result_fn = options.on_accept_result
-        sock.connect_accept_user_data = options.on_accept_result_user_data
 
         if sock.options.domain == SocketDomain.LOCAL
             return _winsock_local_start_accept(sock, accept_loop, options)
@@ -1176,7 +1165,7 @@
             end
         end
         if options.on_accept_start !== nothing
-            Base.invokelatest(options.on_accept_start, sock, AWS_OP_SUCCESS, options.on_accept_start_user_data)
+            options.on_accept_start(AWS_OP_SUCCESS)
         end
         return nothing
     end
@@ -1293,7 +1282,7 @@
                 return nothing
             end
 
-            sock.accept_result_fn !== nothing && Base.invokelatest(sock.accept_result_fn, sock, AWS_OP_SUCCESS, new_sock, sock.connect_accept_user_data)
+            sock.accept_result_fn !== nothing && sock.accept_result_fn(AWS_OP_SUCCESS, new_sock)
 
             if io_data.socket === nothing
                 io_data.in_use = false
@@ -1395,7 +1384,7 @@
         end
 
         if options.on_accept_start !== nothing
-            Base.invokelatest(options.on_accept_start, sock, AWS_OP_SUCCESS, options.on_accept_start_user_data)
+            options.on_accept_start(AWS_OP_SUCCESS)
         end
 
         return nothing
@@ -1419,7 +1408,6 @@
 
         # Prevent user callbacks firing after close (in case IO completes concurrently).
         sock.readable_fn = nothing
-        sock.readable_user_data = nothing
         sock.connection_result_fn = nothing
         sock.accept_result_fn = nothing
 
@@ -1443,9 +1431,7 @@
         sock.state = SocketState.CLOSED
 
         if impl.on_close_complete !== nothing
-            cb = impl.on_close_complete
-            ud = impl.close_user_data
-            cb !== nothing && Base.invokelatest(cb, ud)
+            impl.on_close_complete(UInt8(0))
         end
 
         return nothing
@@ -1497,7 +1483,7 @@
             end
         end
 
-        sock.readable_fn !== nothing && Base.invokelatest(sock.readable_fn, sock, err_code, sock.readable_user_data)
+        sock.readable_fn !== nothing && sock.readable_fn(err_code)
 
         if !impl.waiting_on_readable
             impl.read_io_data.in_use = false
@@ -1533,7 +1519,7 @@
             end
         end
 
-        sock.readable_fn !== nothing && Base.invokelatest(sock.readable_fn, sock, err_code, sock.readable_user_data)
+        sock.readable_fn !== nothing && sock.readable_fn(err_code)
 
         if !impl.waiting_on_readable
             impl.read_io_data.in_use = false
@@ -1543,7 +1529,7 @@
         return nothing
     end
 
-    function socket_subscribe_to_readable_events_impl(::WinsockSocket, sock::Socket, on_readable::SocketOnReadableFn, user_data)::Nothing
+    function socket_subscribe_to_readable_events_impl(::WinsockSocket, sock::Socket, on_readable::EventCallable)::Nothing
         if sock.event_loop === nothing
             throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         end
@@ -1558,7 +1544,6 @@
         impl.read_io_data.in_use && throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
 
         sock.readable_fn = on_readable
-        sock.readable_user_data = user_data
 
         impl.read_io_data.in_use = true
         impl.waiting_on_readable = true
@@ -1832,7 +1817,7 @@
         throw_error(aws_err)
     end
 
-    function socket_write_impl(::WinsockSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{SocketOnWriteCompletedFn, Nothing}, user_data)::Nothing
+    function socket_write_impl(::WinsockSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{WriteCallable, Nothing})::Nothing
         if sock.event_loop === nothing || !event_loop_thread_is_callers_thread(sock.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
@@ -1844,7 +1829,7 @@
         end
 
         impl = sock.impl::WinsockSocket
-        req = WinsockSocketWriteRequest(sock, false, cursor, cursor.len, written_fn, user_data, IocpOverlapped())
+        req = WinsockSocketWriteRequest(sock, false, cursor, cursor.len, written_fn, IocpOverlapped())
         iocp_overlapped_init!(req.overlapped, _winsock_socket_written_event, req)
         push!(impl.pending_writes, req)
 
@@ -1890,8 +1875,7 @@
         end
 
         if req.written_fn !== nothing
-            cb_sock = req.detached ? nothing : sock
-            Base.invokelatest(req.written_fn, cb_sock, aws_err, num_bytes_transferred, req.user_data)
+            req.written_fn(aws_err, num_bytes_transferred)
         end
 
         req.socket = nothing

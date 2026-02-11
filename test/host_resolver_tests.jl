@@ -202,7 +202,7 @@ end
 
 @testset "host resolver ttl cache behavior" begin
     clock_ref = Ref{UInt64}(0)
-    clock_fn = () -> clock_ref[]
+    clock_fn = EventLoops.ClockCallable(() -> clock_ref[])
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     resolver = Sockets.HostResolver(
@@ -348,7 +348,7 @@ end
 
 @testset "host resolver ttl refreshes on resolve" begin
     clock_ref = Ref{UInt64}(0)
-    clock_fn = () -> clock_ref[]
+    clock_fn = EventLoops.ClockCallable(() -> clock_ref[])
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     resolver = Sockets.HostResolver(
@@ -408,7 +408,7 @@ end
 
 @testset "host resolver bad list expires eventually" begin
     clock_ref = Ref{UInt64}(0)
-    clock_fn = () -> clock_ref[]
+    clock_fn = EventLoops.ClockCallable(() -> clock_ref[])
 
     elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
     resolver = Sockets.HostResolver(
@@ -586,7 +586,7 @@ end
     @test Sockets.host_resolver_purge_host_cache!(
         resolver,
         "example.com";
-        on_host_purge_complete = _ -> (purge_host_done[] = true),
+        on_host_purge_complete = Reseau.TaskFn(_ -> (purge_host_done[] = true; nothing)),
     ) === nothing
     @test wait_for_pred(() -> purge_host_done[])
     @test Sockets.host_resolver_get_host_address_count(
@@ -599,7 +599,7 @@ end
     @test Sockets.host_resolver_purge_host_cache!(
         resolver,
         "example.com";
-        on_host_purge_complete = _ -> (purge_host_done[] = true),
+        on_host_purge_complete = Reseau.TaskFn(_ -> (purge_host_done[] = true; nothing)),
     ) === nothing
     @test wait_for_pred(() -> purge_host_done[])
 
@@ -610,7 +610,7 @@ end
     purge_done = Ref(false)
     @test Sockets.host_resolver_purge_cache_with_callback!(
         resolver,
-        _ -> (purge_done[] = true),
+        Reseau.TaskFn(_ -> (purge_done[] = true; nothing)),
     ) === nothing
     @test wait_for_pred(() -> purge_done[])
 
