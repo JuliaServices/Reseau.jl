@@ -84,7 +84,10 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
     _ = slot
 
     if !socket_is_open(socket)
-        throw_error(ERROR_IO_SOCKET_CLOSED)
+        # Preserve async completion semantics: report error via completion path
+        # and let channel shutdown cascade there, rather than throwing on loop thread.
+        _on_socket_write_complete(socket, ERROR_IO_SOCKET_CLOSED, Csize_t(0), message)
+        return nothing
     end
 
     logf(
@@ -96,7 +99,12 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
     cursor = byte_cursor_from_buf(message.message_data)
 
     # Write to socket
-    socket_write(socket, cursor, _on_socket_write_complete, message)
+    try
+        socket_write(socket, cursor, _on_socket_write_complete, message)
+    catch e
+        e isa ReseauError || rethrow()
+        _on_socket_write_complete(socket, e.code, Csize_t(0), message)
+    end
 
     return nothing
 end

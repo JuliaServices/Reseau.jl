@@ -622,13 +622,30 @@
                             "activity on fd %d, invoking handler",
                             event_data.handle.fd,
                         )
-                        Base.invokelatest(
-                            event_data.on_event,
-                            event_loop,
-                            event_data.handle,
-                            event_mask,
-                            event_data.user_data,
-                        )
+                        try
+                            Base.invokelatest(
+                                event_data.on_event,
+                                event_loop,
+                                event_data.handle,
+                                event_mask,
+                                event_data.user_data,
+                            )
+                        catch e
+                            if e isa ReseauError &&
+                                    (e.code == ERROR_IO_SOCKET_CLOSED ||
+                                     e.code == ERROR_IO_SOCKET_NOT_CONNECTED ||
+                                     e.code == ERROR_IO_READ_WOULD_BLOCK)
+                                logf(
+                                    LogLevel.DEBUG,
+                                    LS_IO_EVENT_LOOP,
+                                    "ignoring non-fatal IO callback error on fd %d: %d",
+                                    event_data.handle.fd,
+                                    e.code,
+                                )
+                            else
+                                rethrow()
+                            end
+                        end
                     end
                 finally
                     tracing_task_end(tracing_event_loop_event)
