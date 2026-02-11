@@ -27,8 +27,7 @@
         detached::Bool
         cursor::ByteCursor
         original_len::Csize_t
-        written_fn::Union{Function, Nothing}
-        user_data::Any
+        written_fn::Union{WriteCallable, Nothing}
         overlapped::IocpOverlapped
     end
 
@@ -41,10 +40,8 @@
         pending_writes::Vector{WinsockSocketWriteRequest}
         stop_accept::Bool
         waiting_on_readable::Bool
-        on_close_complete::Union{Function, Nothing}
-        close_user_data::Any
-        on_cleanup_complete::Union{Function, Nothing}
-        cleanup_user_data::Any
+        on_close_complete::Union{TaskFn, Nothing}
+        on_cleanup_complete::Union{TaskFn, Nothing}
         cleaned_up::Bool
     end
 
@@ -58,8 +55,6 @@
             WinsockSocketWriteRequest[],
             false,
             false,
-            nothing,
-            nothing,
             nothing,
             nothing,
             false,

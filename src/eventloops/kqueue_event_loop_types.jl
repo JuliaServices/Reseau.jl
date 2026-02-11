@@ -77,8 +77,7 @@
     mutable struct KqueueHandleData
         owner::IoHandle
         event_loop::Any  # EventLoop (not yet defined at include time)
-        on_event::OnEventCallback
-        on_event_user_data::Any
+        on_event::EventCallable
         events_subscribed::Int  # IoEventType bitmask
         events_this_loop::Int   # Events received during current loop iteration
         state::HandleState.T
@@ -90,15 +89,13 @@
     function KqueueHandleData(
             owner::IoHandle,
             event_loop,
-            on_event::OnEventCallback,
-            user_data,
+            on_event::EventCallable,
             events::Int,
         )
         return KqueueHandleData(
             owner,
             event_loop,
             on_event,
-            user_data,
             events,
             0,
             HandleState.SUBSCRIBING,

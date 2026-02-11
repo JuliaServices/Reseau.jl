@@ -66,8 +66,7 @@
     mutable struct IocpPipeWriteRequest
         write_end::PipeWriteEnd
         original_len::Csize_t
-        on_complete::Union{OnPipeWriteCompleteFn, Nothing}
-        user_data::Any
+        on_complete::Union{WriteCallable, Nothing}
         overlapped::IocpOverlapped
         cleaned_up::Bool
     end
@@ -167,7 +166,6 @@
 
         read_end.io_handle.handle = C_NULL
         read_end.on_readable = nothing
-        read_end.user_data = nothing
         read_end.event_loop = nothing
         read_end.is_subscribed = false
 
@@ -271,7 +269,7 @@
 
         if impl.state == IocpPipeReadEndState.SUBSCRIBE_ERROR
             if read_end.on_readable !== nothing
-                Base.invokelatest(read_end.on_readable, read_end, impl.error_code_to_report, read_end.user_data)
+                read_end.on_readable(impl.error_code_to_report)
             end
         end
 
@@ -305,7 +303,7 @@
             end
 
             if read_end.on_readable !== nothing
-                Base.invokelatest(read_end.on_readable, read_end, readable_error_code, read_end.user_data)
+                read_end.on_readable(readable_error_code)
             end
         end
 
@@ -320,8 +318,7 @@
 
     function _pipe_read_end_subscribe_iocp!(
             read_end::PipeReadEnd,
-            on_readable::OnPipeReadableFn,
-            user_data,
+            on_readable::EventCallable,
         )::Nothing
         impl = read_end.impl::IocpPipeReadEndImpl
 
@@ -341,7 +338,6 @@
 
         impl.state = IocpPipeReadEndState.SUBSCRIBING
         read_end.on_readable = on_readable
-        read_end.user_data = user_data
         read_end.is_subscribed = true
 
         _pipe_read_end_request_async_monitoring!(read_end, MONITORING_BECAUSE_SUBSCRIBING)
@@ -363,7 +359,6 @@
 
         impl.state = IocpPipeReadEndState.OPEN
         read_end.on_readable = nothing
-        read_end.user_data = nothing
         read_end.is_subscribed = false
         impl.monitoring_request_reasons = 0
         impl.error_code_to_report = 0
@@ -444,8 +439,7 @@
     function _pipe_write_iocp!(
             write_end::PipeWriteEnd,
             cursor::ByteCursor,
-            on_complete::Union{OnPipeWriteCompleteFn, Nothing},
-            user_data,
+            on_complete::Union{WriteCallable, Nothing},
         )::Nothing
         if write_end.event_loop === nothing
             throw_error(ERROR_IO_BROKEN_PIPE)
@@ -465,7 +459,6 @@
             write_end,
             cursor.len,
             on_complete,
-            user_data,
             IocpOverlapped(),
             false,
         )
@@ -512,7 +505,7 @@
         error_code = status_code == 0 ? AWS_OP_SUCCESS : _iocp_pipe_translate_windows_error(status_code)
 
         if req.on_complete !== nothing
-            Base.invokelatest(req.on_complete, write_end, error_code, num_bytes_transferred, req.user_data)
+            req.on_complete(error_code, num_bytes_transferred)
         end
 
         return nothing

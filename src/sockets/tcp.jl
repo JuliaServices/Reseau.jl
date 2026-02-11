@@ -157,15 +157,13 @@ function _on_setup(bootstrap, error_code::Int, channel, io::TCPSocket)
         return nothing
     end
     task = ChannelTask(
-        (t, ctx, status) -> begin
-            _ = t
-            status == TaskStatus.RUN_READY || return nothing
-            _install_handler!(ctx.io, ctx.channel)
-            ctx.io.connect_error = AWS_OP_SUCCESS
-            notify(ctx.io.connect_event)
+        EventCallable(s -> begin
+            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+            _install_handler!(io, channel)
+            io.connect_error = AWS_OP_SUCCESS
+            notify(io.connect_event)
             return nothing
-        end,
-        (io = io, channel = channel),
+        end),
         "tcpsocket_install_handler",
     )
     channel_schedule_task_now!(channel, task)
@@ -400,20 +398,18 @@ function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, chan
         end
     else
         task = ChannelTask(
-            (t, ctx, status) -> begin
-                _ = t
-                status == TaskStatus.RUN_READY || return nothing
-                _install_handler!(ctx.io, ctx.channel)
-                lock(ctx.state.cond)
+            EventCallable(s -> begin
+                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+                _install_handler!(io, channel)
+                lock(state.cond)
                 try
-                    push!(ctx.state.accept_queue, ctx.io)
-                    notify(ctx.state.cond)
+                    push!(state.accept_queue, io)
+                    notify(state.cond)
                 finally
-                    unlock(ctx.state.cond)
+                    unlock(state.cond)
                 end
                 return nothing
-            end,
-            (io = io, channel = channel, state = state),
+            end),
             "tcpserver_install_handler",
         )
         channel_schedule_task_now!(channel, task)
@@ -621,13 +617,11 @@ function tlsupgrade!(
         setup_result[] = channel_setup_client_tls(socket_slot, tls_options)
     else
         task = ChannelTask(
-            (t, ctx2, status) -> begin
-                _ = t
-                status == TaskStatus.RUN_READY || return nothing
-                ctx2.result[] = channel_setup_client_tls(ctx2.socket_slot, ctx2.tls_options)
+            EventCallable(s -> begin
+                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+                setup_result[] = channel_setup_client_tls(socket_slot, tls_options)
                 return nothing
-            end,
-            (socket_slot = socket_slot, tls_options = tls_options, result = setup_result),
+            end),
             "tcpsocket_tls_setup",
         )
         channel_schedule_task_now!(channel, task)
@@ -818,16 +812,15 @@ function _write_fail!(ctx::_WriteCtx, error_code::Int)::Int
     return error_code
 end
 
-function _on_write_complete(channel, message::IoMessage, error_code::Int, user_data)::Nothing
-    _ = channel
-    _ = message
-    ctx = user_data::_WriteCtx
-    error_code != AWS_OP_SUCCESS && ctx.error_code == AWS_OP_SUCCESS && (ctx.error_code = error_code)
-    ctx.remaining -= 1
-    if ctx.remaining <= 0
-        _finish_write!(ctx)
-    end
-    return nothing
+function _make_write_completion(ctx::_WriteCtx)::EventCallable
+    return EventCallable(error_code -> begin
+        error_code != AWS_OP_SUCCESS && ctx.error_code == AWS_OP_SUCCESS && (ctx.error_code = error_code)
+        ctx.remaining -= 1
+        if ctx.remaining <= 0
+            _finish_write!(ctx)
+        end
+        return nothing
+    end)
 end
 
 function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)::Int
@@ -837,6 +830,7 @@ function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)::Int
     slot === nothing && return _write_fail!(ctx, ERROR_IO_SOCKET_NOT_CONNECTED)
     remaining = length(data)
     cursor_ref = Ref(ByteCursor(data))
+    completion = _make_write_completion(ctx)
     while remaining > 0
         msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, remaining)
         msg === nothing && return _write_fail!(ctx, ERROR_OOM)
@@ -846,8 +840,7 @@ function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)::Int
         byte_buf_write_from_whole_cursor(msg_ref, chunk_cursor)
         msg.message_data = msg_ref[]
         ctx.remaining += 1
-        msg.on_completion = _on_write_complete
-        msg.user_data = ctx
+        msg.on_completion = completion
         try
             channel_slot_send_message(slot, msg, ChannelDirection.WRITE)
         catch e
@@ -875,13 +868,11 @@ function _write(io::TCPSocket, data::Vector{UInt8})::Nothing
         return nothing
     end
     task = ChannelTask(
-        (t, ctx, status) -> begin
-            _ = t
-            status == TaskStatus.RUN_READY || return nothing
-            _ = _write_now(ctx.io, ctx.data, ctx.write_ctx)
+        EventCallable(s -> begin
+            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+            _ = _write_now(io, data, ctx)
             return nothing
-        end,
-        (io = io, data = data, write_ctx = ctx),
+        end),
         "tcpsocket_write",
     )
     channel_schedule_task_now!(channel, task)

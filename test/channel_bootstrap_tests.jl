@@ -285,12 +285,11 @@ end
         nothing,
         nothing,
         nothing,
-        (bs, err, channel, ud) -> begin
+        Reseau.EventCallable(err -> begin
             setup_called[] = true
             setup_on_loop[] = EventLoops.event_loop_thread_is_callers_thread(requested_loop)
             return nothing
-        end,
-        nothing,
+        end),
         nothing,
         false,
         requested_loop,
@@ -331,7 +330,7 @@ if tls_tests_enabled()
 
     server_tls_opts = Sockets.TlsConnectionOptions(
         server_ctx;
-        on_negotiation_result = (handler, slot, err, ud) -> begin
+        on_negotiation_result = (handler, slot, err) -> begin
             server_negotiated[] = true
             return nothing
         end,
@@ -366,7 +365,7 @@ if tls_tests_enabled()
     client_tls_opts = Sockets.TlsConnectionOptions(
         client_ctx;
         server_name = "localhost",
-        on_negotiation_result = (handler, slot, err, ud) -> begin
+        on_negotiation_result = (handler, slot, err) -> begin
             client_negotiated[] = true
             return nothing
         end,

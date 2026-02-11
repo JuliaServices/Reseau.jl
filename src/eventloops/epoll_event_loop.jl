@@ -347,12 +347,11 @@
             event_loop::EventLoop,
             handle::IoHandle,
             events::Int,
-            on_event::OnEventCallback,
-            user_data,
+            on_event::EventCallable,
         )::Nothing
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "subscribing to events on fd %d", handle.fd)
 
-        epoll_event_data = EpollEventHandleData(handle, on_event, user_data)
+        epoll_event_data = EpollEventHandleData(handle, on_event)
 
         # Store handle data reference
         handle.additional_data = pointer_from_objref(epoll_event_data)
@@ -459,7 +458,7 @@
     end
 
     # Callback for cross-thread task pipe/eventfd
-    function on_tasks_to_schedule(event_loop::EventLoop, handle::IoHandle, events::Int, user_data)
+    function on_tasks_to_schedule(event_loop::EventLoop, events::Int)
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread tasks to schedule")
         impl = event_loop.impl_data
 
@@ -536,8 +535,7 @@
                 event_loop,
                 impl.read_task_handle,
                 Int(IoEventType.READABLE),
-                on_tasks_to_schedule,
-                nothing,
+                EventCallable(events -> on_tasks_to_schedule(event_loop, events)),
             )
         catch
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to task notification events")
@@ -623,13 +621,7 @@
                             event_data.handle.fd,
                         )
                         try
-                            Base.invokelatest(
-                                event_data.on_event,
-                                event_loop,
-                                event_data.handle,
-                                event_mask,
-                                event_data.user_data,
-                            )
+                            event_data.on_event(event_mask)
                         catch e
                             if e isa ReseauError &&
                                     (e.code == ERROR_IO_SOCKET_CLOSED ||
@@ -660,7 +652,7 @@
 
             # Run scheduled tasks
             now_ns = try
-                event_loop.clock()
+                clock_now_ns(event_loop.clock)
             catch
                 UInt64(0)
             end
@@ -677,7 +669,7 @@
             use_default_timeout = false
 
             try
-                now_ns = event_loop.clock()
+                now_ns = clock_now_ns(event_loop.clock)
             catch
                 use_default_timeout = true
             end
@@ -716,6 +708,8 @@
 
         # Unsubscribe from the task notification events
         event_loop_unsubscribe_from_io_events!(event_loop, impl.read_task_handle)
+
+        event_loop_thread_exit_s2n_cleanup!(event_loop)
 
         # Set thread ID back to NULL
         @atomic impl.running_thread_id = UInt64(0)
@@ -766,11 +760,7 @@
 
         @ccall close(impl.epoll_fd::Cint)::Cint
 
-        # Clean up local data (invokes on_object_removed callbacks)
-        for (_, obj) in event_loop.local_data
-            _event_loop_local_object_destroy(obj)
-        end
-        empty!(event_loop.local_data)
+        _event_loop_clean_up_shared_resources!(event_loop)
 
         return nothing
     end

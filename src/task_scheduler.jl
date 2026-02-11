@@ -44,8 +44,401 @@ function TaskFn(callable::F) where F
     return TaskFn(ptr, objptr, objref)
 end
 
+
 @inline function (f::TaskFn)(status::UInt8)::Nothing
     ccall(f.ptr, Cvoid, (Ptr{Cvoid}, UInt8), f.objptr, status)
+    return nothing
+end
+
+# ── EventCallable: trim-safe type-erased callable for (Int) -> Nothing ──
+# Covers: on_event (kqueue/epoll), readable_fn, on_readable (pipe),
+# on_completion (IoMessage), ChannelTask.task_fn.
+
+struct _EventCallWrapper <: Function end
+
+function (::_EventCallWrapper)(f, x::Int)
+    f(x)
+    return nothing
+end
+
+@generated function _event_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_EventCallWrapper()), Cvoid, (Ref{$F}, Int))
+    end
+end
+
+struct EventCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function EventCallable(callable::F) where F
+    ptr = _event_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return EventCallable(ptr, objptr, objref)
+end
+
+
+@inline function (f::EventCallable)(x::Int)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int), f.objptr, x)
+    return nothing
+end
+
+# ── WriteCallable: trim-safe type-erased callable for (Int, Csize_t) -> Nothing ──
+# Covers: written_fn (posix/winsock/NW write completion callbacks).
+
+struct _WriteCallWrapper <: Function end
+
+function (::_WriteCallWrapper)(f, err::Int, n::Csize_t)
+    f(err, n)
+    return nothing
+end
+
+@generated function _write_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_WriteCallWrapper()), Cvoid, (Ref{$F}, Int, Csize_t))
+    end
+end
+
+struct WriteCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function WriteCallable(callable::F) where F
+    ptr = _write_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return WriteCallable(ptr, objptr, objref)
+end
+
+
+@inline function (f::WriteCallable)(err::Int, n::Csize_t)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int, Csize_t), f.objptr, err, n)
+    return nothing
+end
+
+# ── ChannelCallable: trim-safe type-erased callable for (Int, Any) -> Nothing ──
+# Covers: accept_result_fn (error_code, new_socket), on_incoming_channel_setup/shutdown
+# (error_code, channel), and similar callbacks needing a runtime object argument.
+
+struct _ChannelCallWrapper <: Function end
+
+function (::_ChannelCallWrapper)(f, error_code::Int, obj)
+    f(error_code, obj)
+    return nothing
+end
+
+@generated function _channel_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_ChannelCallWrapper()), Cvoid, (Ref{$F}, Int, Any))
+    end
+end
+
+struct ChannelCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function ChannelCallable(callable::F) where F
+    ptr = _channel_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return ChannelCallable(ptr, objptr, objref)
+end
+
+
+@inline function (f::ChannelCallable)(error_code::Int, obj)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int, Any), f.objptr, error_code, obj)
+    return nothing
+end
+
+# ── ProtocolNegotiatedCallable: trim-safe (Any, Any) -> Any ──
+# Covers: ALPN protocol callback (slot, protocol) -> new_handler_or_nothing.
+
+struct _ProtocolNegotiatedCallWrapper <: Function end
+
+function (::_ProtocolNegotiatedCallWrapper)(f, slot, protocol)
+    return f(slot, protocol)
+end
+
+@generated function _protocol_negotiated_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_ProtocolNegotiatedCallWrapper()), Any, (Ref{$F}, Any, Any))
+    end
+end
+
+struct ProtocolNegotiatedCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function ProtocolNegotiatedCallable(callable::F) where F
+    ptr = _protocol_negotiated_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return ProtocolNegotiatedCallable(ptr, objptr, objref)
+end
+
+@inline function (f::ProtocolNegotiatedCallable)(slot, protocol)
+    return ccall(f.ptr, Any, (Ptr{Cvoid}, Any, Any), f.objptr, slot, protocol)
+end
+
+# ── HostResolveCallback: trim-safe (Any, Any, Int, Any) -> Nothing ──
+# Covers: host_resolver resolve callbacks
+# (resolver, host_name, error_code, addresses) -> nothing.
+
+struct _HostResolveCallbackWrapper <: Function end
+
+function (::_HostResolveCallbackWrapper)(f, resolver, host_name, error_code::Int, addresses)
+    f(resolver, host_name, error_code, addresses)
+    return nothing
+end
+
+@generated function _host_resolve_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_HostResolveCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Int, Any))
+    end
+end
+
+struct HostResolveCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function HostResolveCallback(callable::F) where F
+    ptr = _host_resolve_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return HostResolveCallback(ptr, objptr, objref)
+end
+
+@inline function (f::HostResolveCallback)(resolver, host_name, error_code::Int, addresses)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int, Any), f.objptr, resolver, host_name, error_code, addresses)
+    return nothing
+end
+
+# ── HostResolveImpl: trim-safe resolver implementation wrappers ──
+# Supports both forms:
+#   (host, impl_data) -> result
+#   (host, address_type, impl_data) -> result
+
+struct _HostResolveImplWrapper2 <: Function end
+
+function (::_HostResolveImplWrapper2)(f, host, impl_data)
+    return f(host, impl_data)
+end
+
+@generated function _host_resolve_impl_gen_fptr2(::Type{F}) where F
+    quote
+        @cfunction($(_HostResolveImplWrapper2()), Any, (Ref{$F}, Any, Any))
+    end
+end
+
+struct _HostResolveImplWrapper3 <: Function end
+
+function (::_HostResolveImplWrapper3)(f, host, address_type, impl_data)
+    return f(host, address_type, impl_data)
+end
+
+@generated function _host_resolve_impl_gen_fptr3(::Type{F}) where F
+    quote
+        @cfunction($(_HostResolveImplWrapper3()), Any, (Ref{$F}, Any, Any, Any))
+    end
+end
+
+struct HostResolveImpl
+    ptr2::Ptr{Cvoid}
+    ptr3::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function HostResolveImpl(callable::F) where F
+    ptr2 = _host_resolve_impl_gen_fptr2(F)
+    ptr3 = _host_resolve_impl_gen_fptr3(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return HostResolveImpl(ptr2, ptr3, objptr, objref)
+end
+
+@inline function (f::HostResolveImpl)(host, impl_data)
+    return ccall(f.ptr2, Any, (Ptr{Cvoid}, Any, Any), f.objptr, host, impl_data)
+end
+
+@inline function (f::HostResolveImpl)(host, address_type, impl_data)
+    return ccall(f.ptr3, Any, (Ptr{Cvoid}, Any, Any, Any), f.objptr, host, address_type, impl_data)
+end
+
+# ── TLS callback wrappers ──
+# Covers callback fields in TlsConnectionOptions + backend handlers.
+
+struct _TlsNegotiationResultCallbackWrapper <: Function end
+
+function (::_TlsNegotiationResultCallbackWrapper)(f, handler, slot, error_code::Int)
+    f(handler, slot, error_code)
+    return nothing
+end
+
+@generated function _tls_negotiation_result_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_TlsNegotiationResultCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Int))
+    end
+end
+
+struct TlsNegotiationResultCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function TlsNegotiationResultCallback(callable::F) where F
+    ptr = _tls_negotiation_result_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return TlsNegotiationResultCallback(ptr, objptr, objref)
+end
+
+@inline function (f::TlsNegotiationResultCallback)(handler, slot, error_code::Int)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int), f.objptr, handler, slot, error_code)
+    return nothing
+end
+
+struct _TlsDataReadCallbackWrapper <: Function end
+
+function (::_TlsDataReadCallbackWrapper)(f, handler, slot, buffer)
+    f(handler, slot, buffer)
+    return nothing
+end
+
+@generated function _tls_data_read_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_TlsDataReadCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Any))
+    end
+end
+
+struct TlsDataReadCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function TlsDataReadCallback(callable::F) where F
+    ptr = _tls_data_read_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return TlsDataReadCallback(ptr, objptr, objref)
+end
+
+@inline function (f::TlsDataReadCallback)(handler, slot, buffer)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Any), f.objptr, handler, slot, buffer)
+    return nothing
+end
+
+struct _TlsErrorCallbackWrapper <: Function end
+
+function (::_TlsErrorCallbackWrapper)(f, handler, slot, error_code::Int, message)
+    f(handler, slot, error_code, message)
+    return nothing
+end
+
+@generated function _tls_error_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_TlsErrorCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Int, Any))
+    end
+end
+
+struct TlsErrorCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function TlsErrorCallback(callable::F) where F
+    ptr = _tls_error_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return TlsErrorCallback(ptr, objptr, objref)
+end
+
+@inline function (f::TlsErrorCallback)(handler, slot, error_code::Int, message)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int, Any), f.objptr, handler, slot, error_code, message)
+    return nothing
+end
+
+# ── BootstrapChannelCallback: trim-safe (Any, Int, Any, Any) -> Nothing ──
+# Covers channel-bootstrap user callbacks:
+#   (bootstrap, error_code, channel, user_data) -> nothing.
+
+struct _BootstrapChannelCallbackWrapper <: Function end
+
+function (::_BootstrapChannelCallbackWrapper)(f, bootstrap, error_code::Int, channel, user_data)
+    f(bootstrap, error_code, channel, user_data)
+    return nothing
+end
+
+@generated function _bootstrap_channel_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_BootstrapChannelCallbackWrapper()), Cvoid, (Ref{$F}, Any, Int, Any, Any))
+    end
+end
+
+struct BootstrapChannelCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function BootstrapChannelCallback(callable::F) where F
+    ptr = _bootstrap_channel_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return BootstrapChannelCallback(ptr, objptr, objref)
+end
+
+@inline function (f::BootstrapChannelCallback)(bootstrap, error_code::Int, channel, user_data)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Int, Any, Any), f.objptr, bootstrap, error_code, channel, user_data)
+    return nothing
+end
+
+# ── BootstrapEventCallback: trim-safe (Any, Int, Any) -> Nothing ──
+# Covers server-bootstrap lifecycle callbacks:
+#   (bootstrap, error_code, user_data) -> nothing.
+
+struct _BootstrapEventCallbackWrapper <: Function end
+
+function (::_BootstrapEventCallbackWrapper)(f, bootstrap, error_code::Int, user_data)
+    f(bootstrap, error_code, user_data)
+    return nothing
+end
+
+@generated function _bootstrap_event_callback_gen_fptr(::Type{F}) where F
+    quote
+        @cfunction($(_BootstrapEventCallbackWrapper()), Cvoid, (Ref{$F}, Any, Int, Any))
+    end
+end
+
+struct BootstrapEventCallback
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function BootstrapEventCallback(callable::F) where F
+    ptr = _bootstrap_event_callback_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return BootstrapEventCallback(ptr, objptr, objref)
+end
+
+@inline function (f::BootstrapEventCallback)(bootstrap, error_code::Int, user_data)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Int, Any), f.objptr, bootstrap, error_code, user_data)
     return nothing
 end
 

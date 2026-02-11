@@ -8,14 +8,60 @@ function high_res_clock()::UInt64
     return ticks[]
 end
 
+# Concrete clock source variants used by event loops and host resolver.
+struct HighResClock end
+
+struct RefClock
+    value::Base.RefValue{UInt64}
+end
+
+RefClock(value::Integer) = RefClock(Ref(UInt64(value)))
+
+mutable struct SequenceClock
+    values::Vector{UInt64}
+    index::Int
+end
+
+function SequenceClock(values::AbstractVector{UInt64})
+    return SequenceClock(copy(values), 0)
+end
+
+function SequenceClock(values::AbstractVector{<:Integer})
+    converted = Vector{UInt64}(undef, length(values))
+    @inbounds for i in eachindex(values)
+        converted[i] = UInt64(values[i])
+    end
+    return SequenceClock(converted, 0)
+end
+
+const ClockSource = Union{HighResClock, RefClock, SequenceClock}
+
+@inline clock_now_ns(::HighResClock)::UInt64 = high_res_clock()
+@inline clock_now_ns(clock::RefClock)::UInt64 = clock.value[]
+
+@inline function clock_now_ns(clock::SequenceClock)::UInt64
+    values = clock.values
+    isempty(values) && return UInt64(0)
+    next_index = min(clock.index + 1, length(values))
+    clock.index = next_index
+    return values[next_index]
+end
+
+# Default clock source (constructed once at module init)
+const _DEFAULT_CLOCK = Ref{ClockSource}()
+
+function _init_default_clock()
+    _DEFAULT_CLOCK[] = HighResClock()
+end
+
 # Event loop options
 struct EventLoopOptions
-    clock::Function
+    clock::ClockSource
     parent_elg::Any  # EventLoopGroup or nothing
 end
 
 function EventLoopOptions(;
-        clock = high_res_clock,
+        clock::ClockSource = _DEFAULT_CLOCK[],
         parent_elg = nothing,
     )
     return EventLoopOptions(clock, parent_elg)
@@ -24,16 +70,16 @@ end
 # Event loop group options
 struct EventLoopGroupOptions
     loop_count::UInt16
-    shutdown_options::Union{shutdown_callback_options, Nothing}
+    shutdown_options::Union{TaskFn, Nothing}
     cpu_group::Any
-    clock_override::Union{Function, Nothing}
+    clock_override::Union{ClockSource, Nothing}
 end
 
 function EventLoopGroupOptions(;
         loop_count::Integer = 0,
-        shutdown_options = nothing,
+        shutdown_options::Union{TaskFn, Nothing} = nothing,
         cpu_group = nothing,
-        clock_override = nothing,
+        clock_override::Union{ClockSource, Nothing} = nothing,
     )
     return EventLoopGroupOptions(
         UInt16(loop_count),
@@ -41,6 +87,15 @@ function EventLoopGroupOptions(;
         cpu_group,
         clock_override,
     )
+end
+
+# Event types for IO event subscriptions (bitmask)
+@enumx IoEventType::UInt32 begin
+    READABLE = 1
+    WRITABLE = 2
+    REMOTE_HANG_UP = 4
+    CLOSED = 8
+    ERROR = 16
 end
 
 function _cpu_group_value(cpu_group)
@@ -67,8 +122,8 @@ end
 
 # Event loop base structure (non-parametric, concrete per platform)
 mutable struct EventLoop
-    clock::Function
-    local_data::IdDict{Any, EventLoopLocalObject}
+    clock::ClockSource
+    message_pool::Union{MessagePool, Nothing}
     @atomic current_load_factor::Csize_t
     latest_tick_start::UInt64
     current_tick_latency_sum::Csize_t
@@ -80,11 +135,10 @@ mutable struct EventLoop
     thread::Union{Nothing, ForeignThread}
 end
 
-function EventLoop(clock, impl_data::PlatformEventLoop)
-    local_data = IdDict{Any, EventLoopLocalObject}()
+function EventLoop(clock::ClockSource, impl_data::PlatformEventLoop)
     return EventLoop(
         clock,
-        local_data,
+        nothing,
         Csize_t(0),
         UInt64(0),
         Csize_t(0),
@@ -139,45 +193,30 @@ end
 
 # Get current clock time
 function event_loop_current_clock_time(event_loop::EventLoop)::UInt64
-    return event_loop.clock()
+    return clock_now_ns(event_loop.clock)
 end
 
-# Local object management
-function event_loop_fetch_local_object(
-        event_loop::EventLoop,
-        key,
-    )::Union{EventLoopLocalObject, Nothing}
-    debug_assert(event_loop_thread_is_callers_thread(event_loop))
-    obj = get(event_loop.local_data, key, nothing)
-    if obj === nothing
-        return nothing
+# Shared resource cleanup used by all platform backends.
+function _event_loop_clean_up_shared_resources!(event_loop::EventLoop)
+    pool = event_loop.message_pool
+    pool === nothing && return nothing
+
+    try
+        message_pool_clean_up!(pool)
+    finally
+        event_loop.message_pool = nothing
     end
-    return obj::EventLoopLocalObject
-end
 
-function event_loop_put_local_object!(
-        event_loop::EventLoop,
-        obj::EventLoopLocalObject,
-    )::Nothing
-    debug_assert(event_loop_thread_is_callers_thread(event_loop))
-    event_loop.local_data[obj.key] = obj
     return nothing
 end
 
-function event_loop_remove_local_object!(
-        event_loop::EventLoop,
-        key,
-    )::Union{EventLoopLocalObject, Nothing}
-    debug_assert(event_loop_thread_is_callers_thread(event_loop))
-    obj = get(event_loop.local_data, key, nothing)
-    if obj === nothing
-        return nothing
-    end
-    removed_copy = EventLoopLocalObject(obj.key, obj.object, obj.on_object_removed)
-    delete!(event_loop.local_data, key)
-    _event_loop_local_object_destroy(obj)
-    return removed_copy
+# s2n thread-exit cleanup hook point.
+# Backends call this unconditionally on thread exit; default behavior is no-op.
+@inline function event_loop_thread_exit_s2n_cleanup!(event_loop::EventLoop)::Nothing
+    return event_loop_thread_exit_s2n_cleanup!(event_loop.impl_data)
 end
+
+event_loop_thread_exit_s2n_cleanup!(::Any)::Nothing = nothing
 
 # Load factor for load balancing
 const LOAD_FACTOR_SLIDING_WINDOW_SIZE = 64
@@ -189,12 +228,12 @@ const LOAD_FACTOR_STALE_SECS = UInt64(10)
 end
 
 function event_loop_register_tick_start!(event_loop::EventLoop)
-    current_time = event_loop.clock()
+    current_time = clock_now_ns(event_loop.clock)
     return event_loop.latest_tick_start = current_time
 end
 
 function event_loop_register_tick_end!(event_loop::EventLoop)
-    current_time = event_loop.clock()
+    current_time = clock_now_ns(event_loop.clock)
     latency = current_time - event_loop.latest_tick_start
 
     # Saturating add into current_tick_latency_sum
@@ -217,7 +256,7 @@ function event_loop_register_tick_end!(event_loop::EventLoop)
 end
 
 function event_loop_get_load_factor(event_loop::EventLoop)::Csize_t
-    current_time = event_loop.clock()
+    current_time = clock_now_ns(event_loop.clock)
     current_time_secs = _clock_nanos_to_secs(current_time)
     next_flush_secs = @atomic event_loop.next_flush_time
 
@@ -244,7 +283,7 @@ end
 # Event Loop Group for managing multiple event loops
 mutable struct EventLoopGroup
     event_loops::Vector{EventLoop}
-    shutdown_options::Union{shutdown_callback_options, Nothing}
+    shutdown_options::Union{TaskFn, Nothing}
     @atomic ref_count::Int
 end
 
@@ -266,7 +305,7 @@ function event_loop_group_new(options::EventLoopGroupOptions)
         loop_count = UInt16(max(1, Sys.CPU_THREADS >> 1))
     end
 
-    clock = options.clock_override === nothing ? high_res_clock : options.clock_override
+    clock = options.clock_override === nothing ? _DEFAULT_CLOCK[] : options.clock_override
 
     elg = EventLoopGroup(
         Vector{EventLoop}(),
@@ -351,10 +390,7 @@ function event_loop_group_destroy!(elg::EventLoopGroup)
     end
     empty!(elg.event_loops)
     if elg.shutdown_options !== nothing
-        Base.invokelatest(
-            elg.shutdown_options.shutdown_callback_fn,
-            elg.shutdown_options.shutdown_callback_user_data,
-        )
+        elg.shutdown_options(UInt8(0))
     end
     return nothing
 end
@@ -463,7 +499,7 @@ function task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing
         type_tag = "task_sleep",
     )
 
-    now = event_loop.clock()
+    now = clock_now_ns(event_loop.clock)
     run_at = add_u64_saturating(now, UInt64(ns))
     event_loop_schedule_task_future!(event_loop, task, run_at)
 

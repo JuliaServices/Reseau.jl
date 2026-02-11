@@ -88,7 +88,6 @@ function io_library_clean_up()
 end
 
 # --- IO implementation (moved from `src/io/*`) ---
-include("io/message_pool.jl")
 include("io/posix_socket_types.jl")
 include("io/apple_nw_socket_types.jl")
 include("io/winsock_socket_types.jl")
@@ -111,12 +110,10 @@ include("io/pki_utils.jl")
 include("io/pipe.jl")
 include("io/iocp_pipe.jl")
 include("io/channel_bootstrap.jl")
-include("io/future_integration.jl")
 
 # Previously included directly from src/Reseau.jl
 include("io/aws_byte_helpers.jl")
 include("io/crypto_primitives.jl")
-include("io/async_stream.jl")
 include("io/tls_channel_handler.jl")
 include("io/alpn_handler.jl")
 

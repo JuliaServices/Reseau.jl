@@ -210,13 +210,12 @@ function _clean_up_write_end_task(state::PipeState)
     return nothing
 end
 
-function _clean_up_write_end_on_write_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
-    state = user_data
+function _clean_up_write_end_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
     if error_code == Reseau.AWS_OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
     try
-        Sockets.pipe_clean_up_write_end(write_end)
+        Sockets.pipe_clean_up_write_end(state.write_end::Sockets.PipeWriteEnd)
         _signal_done_on_write_end_closed!(state)
     catch
         _signal_error!(state)
@@ -227,7 +226,7 @@ end
 function _write_once_task(state::PipeState)
     cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
     try
-        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, _clean_up_write_end_on_write_completed, state)
+        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, Reseau.WriteCallable((err, nbytes) -> _clean_up_write_end_on_write_completed(state, err, nbytes)))
     catch
         _signal_error!(state)
     end
@@ -261,13 +260,12 @@ function _read_everything_task(state::PipeState)
     return nothing
 end
 
-function _on_readable_event(read_end, error_code::Int, user_data)
-    state = user_data
+function _on_readable_event(state::PipeState, error_code::Int)
     if error_code == state.readable_events.error_code_to_monitor
         state.readable_events.count += 1
         if state.readable_events.count == state.readable_events.close_read_end_after_n_events
             try
-                Sockets.pipe_clean_up_read_end(read_end)
+                Sockets.pipe_clean_up_read_end(state.read_end::Sockets.PipeReadEnd)
                 _signal_done_on_read_end_closed!(state)
             catch
                 _signal_error!(state)
@@ -280,17 +278,16 @@ end
 
 function _subscribe_task(state::PipeState)
     try
-        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, _on_readable_event, state)
+        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, Reseau.EventCallable(ec -> _on_readable_event(state, ec)))
     catch
         _signal_error!(state)
     end
     return nothing
 end
 
-function _sentonce_on_readable_event(read_end, error_code::Int, user_data)
-    state = user_data
+function _sentonce_on_readable_event(state::PipeState, error_code::Int)
     prev_count = state.readable_events.count
-    _on_readable_event(read_end, error_code, user_data)
+    _on_readable_event(state, error_code)
     state.results.status_code != 0 && return nothing
     if state.readable_events.count == 1 && prev_count == 0
         _schedule_read_end_task(state, _clean_up_read_end_task; delay_secs = 1)
@@ -300,20 +297,19 @@ end
 
 function _sentonce_subscribe_task(state::PipeState)
     try
-        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, _sentonce_on_readable_event, state)
+        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, Reseau.EventCallable(ec -> _sentonce_on_readable_event(state, ec)))
     catch
         _signal_error!(state)
     end
     return nothing
 end
 
-function _subscribe_on_write_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
-    state = user_data
+function _subscribe_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
     if error_code == Reseau.AWS_OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
     try
-        Sockets.pipe_clean_up_write_end(write_end)
+        Sockets.pipe_clean_up_write_end(state.write_end::Sockets.PipeWriteEnd)
     catch
         _signal_error!(state)
         return nothing
@@ -326,17 +322,16 @@ end
 function _write_once_then_subscribe_task(state::PipeState)
     cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
     try
-        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, _subscribe_on_write_completed, state)
+        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, Reseau.WriteCallable((err, nbytes) -> _subscribe_on_write_completed(state, err, nbytes)))
     catch
         _signal_error!(state)
     end
     return nothing
 end
 
-function _resubscribe_on_readable_event(read_end, error_code::Int, user_data)
-    state = user_data
+function _resubscribe_on_readable_event(state::PipeState, error_code::Int)
     prev_count = state.readable_events.count
-    _on_readable_event(read_end, error_code, user_data)
+    _on_readable_event(state, error_code)
     state.results.status_code != 0 && return nothing
 
     if state.readable_events.count == 1 && prev_count == 0
@@ -347,7 +342,7 @@ function _resubscribe_on_readable_event(read_end, error_code::Int, user_data)
             return nothing
         end
         try
-            Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, _on_readable_event, state)
+            Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, Reseau.EventCallable(ec -> _on_readable_event(state, ec)))
         catch
             _signal_error!(state)
         end
@@ -357,7 +352,7 @@ end
 
 function _resubscribe_1_task(state::PipeState)
     try
-        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, _resubscribe_on_readable_event, state)
+        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, Reseau.EventCallable(ec -> _resubscribe_on_readable_event(state, ec)))
     catch
         _signal_error!(state)
     end
@@ -367,7 +362,7 @@ end
 function _resubscribe_write_task(state::PipeState)
     cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
     try
-        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, _clean_up_write_end_on_write_completed, state)
+        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, Reseau.WriteCallable((err, nbytes) -> _clean_up_write_end_on_write_completed(state, err, nbytes)))
     catch
         _signal_error!(state)
         return nothing
@@ -376,8 +371,7 @@ function _resubscribe_write_task(state::PipeState)
     return nothing
 end
 
-function _readall_on_write_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
-    state = user_data
+function _readall_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
     if error_code != Reseau.AWS_OP_SUCCESS
         _signal_error!(state)
         return nothing
@@ -386,7 +380,7 @@ function _readall_on_write_completed(write_end, error_code::Int, bytes_written::
     state.buffers.num_bytes_written += bytes_written
     if is_second
         try
-            Sockets.pipe_clean_up_write_end(write_end)
+            Sockets.pipe_clean_up_write_end(state.write_end::Sockets.PipeWriteEnd)
             _signal_done_on_write_end_closed!(state)
         catch
             _signal_error!(state)
@@ -399,17 +393,17 @@ end
 function _readall_write_task(state::PipeState)
     cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
     try
-        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, _readall_on_write_completed, state)
+        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, Reseau.WriteCallable((err, nbytes) -> _readall_on_write_completed(state, err, nbytes)))
     catch
         _signal_error!(state)
     end
     return nothing
 end
 
-function _readall_on_readable(read_end, error_code::Int, user_data)
-    state = user_data
+function _readall_on_readable(state::PipeState, error_code::Int)
+    read_end = state.read_end::Sockets.PipeReadEnd
     prev_count = state.readable_events.count
-    _on_readable_event(read_end, error_code, user_data)
+    _on_readable_event(state, error_code)
     state.results.status_code != 0 && return nothing
 
     if state.readable_events.count == 1 && prev_count == 0
@@ -435,7 +429,7 @@ end
 
 function _readall_subscribe_task(state::PipeState)
     try
-        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, _readall_on_readable, state)
+        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, Reseau.EventCallable(ec -> _readall_on_readable(state, ec)))
     catch
         _signal_error!(state)
     end
@@ -444,7 +438,7 @@ end
 
 function _subscribe_and_schedule_write_end_clean_up_task(state::PipeState)
     try
-        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, _on_readable_event, state)
+        Sockets.pipe_subscribe_to_readable_events(state.read_end::Sockets.PipeReadEnd, Reseau.EventCallable(ec -> _on_readable_event(state, ec)))
     catch
         _signal_error!(state)
         return nothing
@@ -465,8 +459,7 @@ function _clean_up_write_end_then_schedule_subscribe_task(state::PipeState)
     return nothing
 end
 
-function _close_write_end_after_all_writes_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
-    state = user_data
+function _close_write_end_after_all_writes_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
     if error_code != Reseau.AWS_OP_SUCCESS
         _signal_error!(state)
         return nothing
@@ -474,7 +467,7 @@ function _close_write_end_after_all_writes_completed(write_end, error_code::Int,
     state.buffers.num_bytes_written += bytes_written
     if state.buffers.num_bytes_written == Csize_t(state.buffer_size)
         try
-            Sockets.pipe_clean_up_write_end(write_end)
+            Sockets.pipe_clean_up_write_end(state.write_end::Sockets.PipeWriteEnd)
             _signal_done_on_write_end_closed!(state)
         catch
             _signal_error!(state)
@@ -491,7 +484,7 @@ function _write_in_simultaneous_chunks_task(state::PipeState)
         bytes_to_write = chunk_size < Int(cursor_ref[].len) ? chunk_size : Int(cursor_ref[].len)
         chunk_cursor = Reseau.byte_cursor_from_array(cursor_ref[].ptr, bytes_to_write)
         try
-            Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, chunk_cursor, _close_write_end_after_all_writes_completed, state)
+            Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, chunk_cursor, Reseau.WriteCallable((err, nbytes) -> _close_write_end_after_all_writes_completed(state, err, nbytes)))
         catch
             _signal_error!(state)
             return nothing
@@ -501,8 +494,7 @@ function _write_in_simultaneous_chunks_task(state::PipeState)
     return nothing
 end
 
-function _cancelled_on_write_completed(write_end, error_code::Int, bytes_written::Csize_t, user_data)
-    state = user_data
+function _cancelled_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
     status_ref = state.test_data::Base.RefValue{Int}
     status_ref[] = error_code
     if error_code == Reseau.AWS_OP_SUCCESS
@@ -515,7 +507,7 @@ end
 function _write_then_clean_up_task(state::PipeState)
     cursor = Reseau.byte_cursor_from_buf(state.buffers.src)
     try
-        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, _cancelled_on_write_completed, state)
+        Sockets.pipe_write(state.write_end::Sockets.PipeWriteEnd, cursor, Reseau.WriteCallable((err, nbytes) -> _cancelled_on_write_completed(state, err, nbytes)))
     catch
         _signal_error!(state)
         return nothing

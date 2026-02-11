@@ -39,20 +39,18 @@ end
 
     Sockets.channel_set_setup_callback!(
         channel,
-        (ch, err, ud) -> begin
+        Reseau.EventCallable(err -> begin
             setup_done[] = true
             return nothing
-        end,
-        nothing,
+        end),
     )
 
     Sockets.channel_set_shutdown_callback!(
         channel,
-        (ch, err, ud) -> begin
+        Reseau.EventCallable(err -> begin
             shutdown_done[] = true
             return nothing
-        end,
-        nothing,
+        end),
     )
 
     slot = Sockets.channel_slot_new!(channel)
@@ -61,15 +59,15 @@ end
     end
 
     args = AlpnNegotiationArgs()
-    on_protocol = (new_slot, protocol, user_data) -> begin
-        user_data.new_slot = new_slot
-        user_data.protocol = protocol
+    on_protocol = (new_slot, protocol) -> begin
+        args.new_slot = new_slot
+        args.protocol = protocol
         handler = Sockets.PassthroughHandler()
-        user_data.new_handler = handler
+        args.new_handler = handler
         return handler
     end
 
-    handler = Sockets.tls_alpn_handler_new(on_protocol, args)
+    handler = Sockets.tls_alpn_handler_new(on_protocol)
     Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
@@ -110,7 +108,7 @@ end
     end
 
     args = AlpnNegotiationArgs()
-    handler = Sockets.tls_alpn_handler_new((new_slot, protocol, ud) -> Sockets.PassthroughHandler(), args)
+    handler = Sockets.tls_alpn_handler_new((new_slot, protocol) -> Sockets.PassthroughHandler())
     Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
@@ -168,9 +166,7 @@ end
         Reseau.null_buffer(),
         nothing,
         nothing,
-        nothing,
         C_NULL,
-        nothing,
         nothing,
         nothing,
         nothing,
@@ -208,9 +204,7 @@ end
         Reseau.null_buffer(),
         "h2",
         nothing,
-        nothing,
         C_NULL,
-        nothing,
         nothing,
         nothing,
         nothing,
@@ -244,9 +238,7 @@ end
         Reseau.null_buffer(),
         nothing,
         nothing,
-        nothing,
         C_NULL,
-        nothing,
         nothing,
         nothing,
         nothing,
@@ -278,7 +270,7 @@ end
         Sockets.channel_slot_insert_front!(channel, slot)
     end
 
-    handler = Sockets.tls_alpn_handler_new((new_slot, protocol, ud) -> nothing, nothing)
+    handler = Sockets.tls_alpn_handler_new((new_slot, protocol) -> nothing)
     Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 

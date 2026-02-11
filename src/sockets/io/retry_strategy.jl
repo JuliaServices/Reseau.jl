@@ -60,12 +60,12 @@ end
 # =============================================================================
 
 mutable struct NoRetryStrategy <: AbstractRetryStrategy
-    shutdown_options::shutdown_callback_options
+    shutdown_options::Union{TaskFn, Nothing}
     @atomic shutdown::Bool
 end
 
 function NoRetryStrategy(;
-        shutdown_options::shutdown_callback_options = shutdown_callback_options(),
+        shutdown_options::Union{TaskFn, Nothing} = nothing,
     )
     return NoRetryStrategy(shutdown_options, false)
 end
@@ -97,8 +97,8 @@ end
 
 function retry_strategy_shutdown!(strategy::NoRetryStrategy)
     @atomic strategy.shutdown = true
-    if strategy.shutdown_options.shutdown_callback_fn !== nothing
-        strategy.shutdown_options.shutdown_callback_fn(strategy.shutdown_options.shutdown_callback_user_data)
+    if strategy.shutdown_options !== nothing
+        strategy.shutdown_options(UInt8(0))
     end
     return nothing
 end

@@ -171,10 +171,9 @@ function _tls_network_connect(
     tls_conn_opts = Sockets.TlsConnectionOptions(
         ctx;
         server_name = host,
-        on_negotiation_result = (handler, slot, err, ud) -> begin
+        on_negotiation_result = (handler, slot, err) -> begin
             _ = handler
             _ = slot
-            _ = ud
             return nothing
         end,
     )
@@ -280,10 +279,10 @@ end
     Sockets.tls_connection_options_set_timeout_ms(conn, 250)
     Sockets.tls_connection_options_set_advertise_alpn_message(conn, true)
 
-    cb1 = (handler, slot, err, ud) -> nothing
-    cb2 = (handler, slot, buf, ud) -> nothing
-    cb3 = (handler, slot, err, msg, ud) -> nothing
-    Sockets.tls_connection_options_set_callbacks(conn, cb1, cb2, cb3, 123)
+    cb1 = (handler, slot, err) -> nothing
+    cb2 = (handler, slot, buf) -> nothing
+    cb3 = (handler, slot, err, msg) -> nothing
+    Sockets.tls_connection_options_set_callbacks(conn, cb1, cb2, cb3)
 
     @test conn.server_name == "example.com"
     @test conn.alpn_list == "h2"
@@ -292,7 +291,6 @@ end
     @test conn.on_negotiation_result === cb1
     @test conn.on_data_read === cb2
     @test conn.on_error === cb3
-    @test conn.user_data == 123
 
     conn_copy = Sockets.tls_connection_options_copy(conn)
     @test conn_copy.server_name == conn.server_name
@@ -564,11 +562,9 @@ end
     called = Ref(false)
     handler = Sockets.CustomKeyOpHandler(
         (handler_obj, operation) -> begin
-            @test handler_obj.user_data == 7
             @test operation === op
             called[] = true
-        end;
-        user_data = 7,
+        end,
     )
 
     @test Sockets.custom_key_op_handler_acquire(handler) === handler
@@ -721,7 +717,7 @@ end
     Sockets.channel_slot_set_handler!(slot, handler)
 
     handler.stats.handshake_status = Sockets.TlsNegotiationStatus.ONGOING
-    Sockets._tls_timeout_task(handler.timeout_task, handler, Reseau.TaskStatus.RUN_READY)
+    Sockets._tls_timeout_task(handler, Reseau.TaskStatus.RUN_READY)
 
     @test channel.shutdown_pending
     @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
@@ -1121,7 +1117,7 @@ end
     channel = Sockets.Channel(event_loop, nothing)
     slot = Sockets.channel_slot_new!(channel)
     saw_data = Ref(false)
-    on_data_read = (handler, slot, buf, ud) -> begin
+    on_data_read = (handler, slot, buf) -> begin
         saw_data[] = true
         return nothing
     end
@@ -1458,16 +1454,15 @@ end
     server_ctx = _test_server_ctx()
     @test server_ctx isa Sockets.TlsContext
 
-    on_server_negotiation = (handler, slot, err, ud) -> begin
+    on_server_negotiation = (handler, slot, err) -> begin
         _ = handler
         _ = slot
         _ = err
-        _ = ud
         server_negotiated[] = true
         return nothing
     end
 
-    on_accept = (listener, err, new_sock, ud) -> begin
+    on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         if err != Reseau.AWS_OP_SUCCESS
             return nothing
         end
@@ -1489,16 +1484,14 @@ end
         Sockets.channel_setup_complete!(channel)
         server_ready[] = true
         return nothing
-    end
+    end)
 
-    on_accept_start = (socket, err, ud) -> begin
-        _ = socket
-        _ = ud
+    on_accept_start = Reseau.EventCallable(err -> begin
         if err == Reseau.AWS_OP_SUCCESS
             accept_started[] = true
         end
         return nothing
-    end
+    end)
 
     listener_opts = Sockets.SocketListenerOptions(; on_accept_start = on_accept_start, on_accept_result = on_accept)
     @test Sockets.socket_start_accept(server_sock, event_loop, listener_opts) === nothing
@@ -1517,13 +1510,13 @@ end
     read_done = Ref(false)
     read_payload = Ref("")
 
-    on_data_read = (handler, slot, buf, ud) -> begin
+    on_data_read = (handler, slot, buf) -> begin
         read_payload[] = String(Reseau.byte_cursor_from_buf(buf))
         read_done[] = true
         return nothing
     end
 
-    on_negotiation = (handler, slot, err, ud) -> begin
+    on_negotiation = (handler, slot, err) -> begin
         negotiated[] = true
         return nothing
     end
@@ -1537,13 +1530,13 @@ end
     connect_opts = Sockets.SocketConnectOptions(
         Sockets.SocketEndpoint("127.0.0.1", port);
         event_loop = event_loop,
-        on_connection_result = (sock_obj, err, ud) -> begin
+        on_connection_result = Reseau.EventCallable(err -> begin
             if err != Reseau.AWS_OP_SUCCESS
                 negotiated[] = true
                 return nothing
             end
             channel = Sockets.Channel(event_loop, nothing)
-            Sockets.socket_channel_handler_new!(channel, sock_obj)
+            Sockets.socket_channel_handler_new!(channel, client_sock)
             tls_opts = Sockets.TlsConnectionOptions(
                 client_ctx;
                 server_name = "localhost",
@@ -1558,7 +1551,7 @@ end
             end
             Sockets.channel_setup_complete!(channel)
             return nothing
-        end,
+        end),
     )
 
     @test Sockets.socket_connect(client_sock, connect_opts) === nothing
@@ -1577,20 +1570,18 @@ end
 
         ping_task = Sockets.ChannelTask()
         send_args = (handler = client_tls, slot = client_tls.slot, message = msg)
-        send_fn = (task, args, status) -> begin
-            _ = task
-            if status == Reseau.TaskStatus.RUN_READY
+        Sockets.channel_task_init!(ping_task, Reseau.EventCallable(status -> begin
+            if Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY
                 try
-                    Sockets.handler_process_write_message(args.handler, args.slot, args.message)
+                    Sockets.handler_process_write_message(send_args.handler, send_args.slot, send_args.message)
                 catch e
-                    if args.slot.channel !== nothing
-                        Sockets.channel_release_message_to_pool!(args.slot.channel, args.message)
+                    if send_args.slot.channel !== nothing
+                        Sockets.channel_release_message_to_pool!(send_args.slot.channel, send_args.message)
                     end
                 end
             end
-            return nothing
-        end
-        Sockets.channel_task_init!(ping_task, send_fn, send_args, "tls_test_send_ping")
+            nothing
+        end), "tls_test_send_ping")
         Sockets.channel_schedule_task_now!(client_channel, ping_task)
     end
 
@@ -1793,7 +1784,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
         port = 0,
         tls_connection_options = Sockets.TlsConnectionOptions(
             server_ctx;
-            on_negotiation_result = (handler, slot, err, ud) -> begin
+            on_negotiation_result = (handler, slot, err) -> begin
                 server_negotiated_called[] = true
                 server_negotiated_err[] = err
                 return nothing
@@ -1843,7 +1834,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
         tls_connection_options = Sockets.TlsConnectionOptions(
             client_ctx;
             server_name = "localhost",
-            on_negotiation_result = (handler, slot, err, ud) -> begin
+            on_negotiation_result = (handler, slot, err) -> begin
                 client_negotiated_called[] = true
                 client_negotiated_err[] = err
                 return nothing
@@ -1932,7 +1923,7 @@ end
         port = 0,
         tls_connection_options = Sockets.TlsConnectionOptions(
             server_ctx;
-            on_negotiation_result = (handler, slot, err, ud) -> begin
+            on_negotiation_result = (handler, slot, err) -> begin
                 server_negotiated_called[] = true
                 server_negotiated_err[] = err
                 return nothing
@@ -1990,7 +1981,7 @@ end
             tls_connection_options = Sockets.TlsConnectionOptions(
                 client_ctx;
                 server_name = "localhost",
-                on_negotiation_result = (handler, slot, err, ud) -> begin
+                on_negotiation_result = (handler, slot, err) -> begin
                     client_negotiated_called[] = true
                     client_negotiated_err[] = err
                     return nothing
@@ -2080,21 +2071,26 @@ end
     connect_opts = Sockets.SocketConnectOptions(
         Sockets.SocketEndpoint("127.0.0.1", port);
         event_loop = EventLoops.event_loop_group_get_next_loop(elg),
-        on_connection_result = (sock, err, ud) -> begin
+        on_connection_result = Reseau.EventCallable(err -> begin
             if err != Reseau.AWS_OP_SUCCESS
                 close_done[] = true
                 return nothing
             end
-            now = EventLoops.event_loop_current_clock_time(sock.event_loop)
+            loop = client_socket.event_loop
+            if loop === nothing
+                close_done[] = true
+                return nothing
+            end
+            now = EventLoops.event_loop_current_clock_time(loop)
             task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-                Sockets.socket_close(sock)
+                Sockets.socket_close(client_socket)
                 close_done[] = true
                 return nothing
             end); type_tag = "close_client_socket")
-            EventLoops.event_loop_schedule_task_future!(sock.event_loop, task, now + UInt64(1_000_000_000))
+            EventLoops.event_loop_schedule_task_future!(loop, task, now + UInt64(1_000_000_000))
             return nothing
-        end,
+        end),
     )
 
     @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -2149,7 +2145,7 @@ end
         port = 0,
         tls_connection_options = Sockets.TlsConnectionOptions(
             server_ctx;
-            on_negotiation_result = (handler, slot, err, ud) -> begin
+            on_negotiation_result = (handler, slot, err) -> begin
                 server_negotiated[] = err == Reseau.AWS_OP_SUCCESS
                 return nothing
             end,
@@ -2186,7 +2182,7 @@ end
         tls_connection_options = Sockets.TlsConnectionOptions(
             client_ctx;
             server_name = "localhost",
-            on_negotiation_result = (handler, slot, err, ud) -> begin
+            on_negotiation_result = (handler, slot, err) -> begin
                 client_negotiated[] = err == Reseau.AWS_OP_SUCCESS
                 return nothing
             end,

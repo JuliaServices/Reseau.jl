@@ -351,7 +351,7 @@
 
             # Run scheduled tasks.
             now_ns = try
-                event_loop.clock()
+                clock_now_ns(event_loop.clock)
             catch
                 UInt64(0)
             end
@@ -360,7 +360,7 @@
             # Compute next timeout.
             use_default_timeout = false
             now2 = try
-                event_loop.clock()
+                clock_now_ns(event_loop.clock)
             catch
                 use_default_timeout = true
                 UInt64(0)
@@ -614,14 +614,12 @@
             event_loop::EventLoop,
             handle::IoHandle,
             events::Int,
-            on_event::OnEventCallback,
-            user_data,
+            on_event::EventCallable,
         )::Nothing
         _ = event_loop
         _ = handle
         _ = events
         _ = on_event
-        _ = user_data
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
@@ -665,10 +663,7 @@
             impl.iocp_handle = C_NULL
         end
 
-        for (_, obj) in event_loop.local_data
-            _event_loop_local_object_destroy(obj)
-        end
-        empty!(event_loop.local_data)
+        _event_loop_clean_up_shared_resources!(event_loop)
 
         return nothing
     end

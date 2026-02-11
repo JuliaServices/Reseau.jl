@@ -91,11 +91,11 @@ end
 
 function _drain_channel_tasks(channel::Sockets.Channel; timeout_ns::Int = 2_000_000_000)
     done = Ref(false)
-    task = Sockets.ChannelTask((_, arg, status) -> begin
-        status == Reseau.TaskStatus.RUN_READY || return nothing
-        arg[] = true
+    task = Sockets.ChannelTask(Reseau.EventCallable(status -> begin
+        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+        done[] = true
         return nothing
-    end, done, "drain_channel_tasks")
+    end), "drain_channel_tasks")
     Sockets.channel_schedule_task_now!(channel, task)
     return _wait_until(() -> done[]; timeout_ns = timeout_ns)
 end
@@ -111,15 +111,14 @@ function _setup_channel(; enable_read_back_pressure::Bool = false)
 
     setup_ch = Channel{Int}(1)
 
-    on_setup = (ch, err, _ud) -> begin
+    on_setup = Reseau.EventCallable(err -> begin
         put!(setup_ch, err)
         return nothing
-    end
+    end)
 
     channel_opts = Sockets.ChannelOptions(
         event_loop = el,
         on_setup_completed = on_setup,
-        setup_user_data = nothing,
         enable_read_back_pressure = enable_read_back_pressure,
     )
 

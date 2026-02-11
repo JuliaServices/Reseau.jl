@@ -371,7 +371,7 @@ end
             write_err = Ref{Int}(0)
             write_done = Threads.Atomic{Bool}(false)
 
-            on_accept = (listener, err, new_sock, ud) -> begin
+            on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
                 accept_err[] = err
                 accepted[] = new_sock
                 if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -389,7 +389,7 @@ end
 
                 try
                     Sockets.socket_subscribe_to_readable_events(
-                        new_sock, (sock, err, ud) -> begin
+                        new_sock, Reseau.EventCallable(err -> begin
                             read_err[] = err
                             if err != Reseau.AWS_OP_SUCCESS
                                 read_done[] = true
@@ -398,21 +398,21 @@ end
 
                             buf = Reseau.ByteBuffer(64)
                             try
-                                Sockets.socket_read(sock, buf)
+                                Sockets.socket_read(new_sock, buf)
                                 payload[] = String(Reseau.byte_cursor_from_buf(buf))
                             catch e
                                 read_err[] = e isa Reseau.ReseauError ? e.code : -1
                             end
                             read_done[] = true
                             return nothing
-                        end, nothing
+                        end)
                     )
                 catch e
                     read_err[] = e isa Reseau.ReseauError ? e.code : -1
                     read_done[] = true
                 end
                 return nothing
-            end
+            end)
 
             accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
             @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
@@ -427,7 +427,7 @@ end
             connect_opts = Sockets.SocketConnectOptions(
                 Sockets.SocketEndpoint("127.0.0.1", port);
                 event_loop = el_val,
-                on_connection_result = (sock, err, ud) -> begin
+                on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
                     if err != Reseau.AWS_OP_SUCCESS
@@ -437,18 +437,18 @@ end
                     cursor = Reseau.ByteCursor("ping")
                     try
                         Sockets.socket_write(
-                            sock, cursor, (s, err, bytes, ud) -> begin
+                            client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                                 write_err[] = err
                                 write_done[] = true
                                 return nothing
-                            end, nothing
+                            end)
                         )
                     catch e
                         write_err[] = e isa Reseau.ReseauError ? e.code : -1
                         write_done[] = true
                     end
                     return nothing
-                end,
+                end),
             )
 
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -527,7 +527,7 @@ end
             connect_opts = Sockets.SocketConnectOptions(
                 Sockets.SocketEndpoint("127.0.0.1", port);
                 event_loop = el_val,
-                on_connection_result = (sock, err, ud) -> nothing,
+                on_connection_result = Reseau.EventCallable(err -> nothing),
             )
 
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -591,11 +591,11 @@ end
             connect_err = Ref{Int}(0)
             connect_done = Threads.Atomic{Bool}(false)
 
-            on_accept = (listener, err, new_sock, ud) -> begin
+            on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
                 accept_err[] = err
                 accepted[] = new_sock
                 return nothing
-            end
+            end)
 
             accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
             @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
@@ -610,11 +610,11 @@ end
             connect_opts = Sockets.SocketConnectOptions(
                 Sockets.SocketEndpoint("::1", port);
                 event_loop = el_val,
-                on_connection_result = (sock, err, ud) -> begin
+                on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
                     return nothing
-                end,
+                end),
             )
 
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -712,11 +712,11 @@ end
             connect_err = Ref{Int}(0)
             connect_done = Threads.Atomic{Bool}(false)
 
-            on_accept = (listener, err, new_sock, ud) -> begin
+            on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
                 accept_err[] = err
                 accepted[] = new_sock
                 return nothing
-            end
+            end)
 
             accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
             @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
@@ -731,11 +731,11 @@ end
             connect_opts = Sockets.SocketConnectOptions(
                 Sockets.SocketEndpoint("1", port);
                 event_loop = el_val,
-                on_connection_result = (sock, err, ud) -> begin
+                on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
                     return nothing
-                end,
+                end),
             )
 
             try
@@ -887,7 +887,7 @@ end
         write_err = Ref{Int}(0)
         write_done = Threads.Atomic{Bool}(false)
 
-        on_accept = (listener, err, new_sock, ud) -> begin
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             accepted[] = new_sock
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -905,7 +905,7 @@ end
 
             try
                 Sockets.socket_subscribe_to_readable_events(
-                    new_sock, (sock, err, ud) -> begin
+                    new_sock, Reseau.EventCallable(err -> begin
                         read_err[] = err
                         if err != Reseau.AWS_OP_SUCCESS
                             read_done[] = true
@@ -914,21 +914,21 @@ end
 
                         buf = Reseau.ByteBuffer(64)
                         try
-                            Sockets.socket_read(sock, buf)
+                            Sockets.socket_read(new_sock, buf)
                             payload[] = String(Reseau.byte_cursor_from_buf(buf))
                         catch e
                             read_err[] = e isa Reseau.ReseauError ? e.code : -1
                         end
                         read_done[] = true
                         return nothing
-                    end, nothing
+                    end)
                 )
             catch e
                 read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
             end
             return nothing
-        end
+        end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
         @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
@@ -942,7 +942,7 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             local_endpoint;
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -952,11 +952,11 @@ end
                 cursor = Reseau.ByteCursor("ping")
                 try
                     Sockets.socket_write(
-                        sock, cursor, (s, err, bytes, ud) -> begin
+                        client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                             write_err[] = err
                             write_done[] = true
                             return nothing
-                        end, nothing
+                        end)
                     )
                 catch e
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
@@ -964,7 +964,7 @@ end
                 end
 
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -1046,18 +1046,18 @@ end
         @test Sockets.socket_bind(server_socket, bind_opts) === nothing
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
-        on_accept_started = (listener, err, ud) -> begin
+        on_accept_started = Reseau.EventCallable(err -> begin
             accept_started[] = true
-            if err == Reseau.AWS_OP_SUCCESS && listener !== nothing
-                bound = Sockets.socket_get_bound_address(listener)
+            if err == Reseau.AWS_OP_SUCCESS && server_socket !== nothing
+                bound = Sockets.socket_get_bound_address(server_socket)
                 if bound isa Sockets.SocketEndpoint
                     port_ref[] = Int(bound.port)
                 end
             end
             return nothing
-        end
+        end)
 
-        on_accept = (listener, err, new_sock, ud) -> begin
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             accepted[] = new_sock
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -1075,7 +1075,7 @@ end
 
             try
                 Sockets.socket_subscribe_to_readable_events(
-                    new_sock, (sock, err, ud) -> begin
+                    new_sock, Reseau.EventCallable(err -> begin
                         read_err[] = err
                         if err != Reseau.AWS_OP_SUCCESS
                             read_done[] = true
@@ -1084,21 +1084,21 @@ end
 
                         buf = Reseau.ByteBuffer(64)
                         try
-                            Sockets.socket_read(sock, buf)
+                            Sockets.socket_read(new_sock, buf)
                             payload[] = String(Reseau.byte_cursor_from_buf(buf))
                         catch e
                             read_err[] = e isa Reseau.ReseauError ? e.code : -1
                         end
                         read_done[] = true
                         return nothing
-                    end, nothing
+                    end)
                 )
             catch e
                 read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
             end
             return nothing
-        end
+        end)
 
         accept_opts = Sockets.SocketListenerOptions(
             on_accept_result = on_accept,
@@ -1119,7 +1119,7 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             Sockets.SocketEndpoint("127.0.0.1", port_ref[]);
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1129,18 +1129,18 @@ end
                 cursor = Reseau.ByteCursor("ping")
                 try
                     Sockets.socket_write(
-                        sock, cursor, (s, err, bytes, ud) -> begin
+                        client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                             write_err[] = err
                             write_done[] = true
                             return nothing
-                        end, nothing
+                        end)
                     )
                 catch e
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -1200,7 +1200,7 @@ end
         end
 
         accept_done = Threads.Atomic{Bool}(false)
-        on_accept = (listener, err, new_sock, ud) -> begin
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accepted[] = new_sock
             accept_done[] = true
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -1212,17 +1212,17 @@ end
                 return nothing
             end
             _ = Sockets.socket_subscribe_to_readable_events(
-                new_sock, (sock, err, ud) -> begin
+                new_sock, Reseau.EventCallable(err -> begin
                     if err != Reseau.AWS_OP_SUCCESS
                         return nothing
                     end
                     buf = Reseau.ByteBuffer(64)
-                    _ = Sockets.socket_read(sock, buf)
+                    _ = Sockets.socket_read(new_sock, buf)
                     return nothing
-                end, nothing
+                end)
             )
             return nothing
-        end
+        end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
         @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
@@ -1243,7 +1243,7 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
                     write_started[] = true
@@ -1254,11 +1254,11 @@ end
                 write_cb_sync[] = false
                 try
                     Sockets.socket_write(
-                        sock, cursor, (s, err, bytes, ud) -> begin
+                        client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                             write_err[] = err
                             write_cb_invoked[] = true
                             return nothing
-                        end, nothing
+                        end)
                     )
                 catch e
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
@@ -1269,7 +1269,7 @@ end
                 end
                 write_started[] = true
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -1322,11 +1322,11 @@ end
     connect_opts = Sockets.SocketConnectOptions(
         endpoint;
         event_loop = el_val,
-        on_connection_result = (sock, err, ud) -> begin
+        on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
-        end,
+        end),
     )
 
     try
@@ -1373,11 +1373,11 @@ end
     connect_opts = Sockets.SocketConnectOptions(
         endpoint;
         event_loop = el_val,
-        on_connection_result = (sock, err, ud) -> begin
+        on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
-        end,
+        end),
     )
 
     try
@@ -1426,11 +1426,11 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             endpoint;
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 return nothing
-            end,
+            end),
         )
 
         cleanup_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
@@ -1497,15 +1497,15 @@ end
             return
         end
 
-        on_accept = (sock, err, new_sock, ud) -> begin
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             incoming[] = new_sock
             accept_done[] = true
-            if sock !== nothing
-                Sockets.socket_cleanup!(sock)
+            if new_sock !== nothing
+                Sockets.socket_cleanup!(new_sock)
             end
             return nothing
-        end
+        end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
         @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
@@ -1520,11 +1520,11 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -1579,11 +1579,11 @@ end
             return
         end
 
-        on_accept = (sock, err, new_sock, ud) -> begin
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accepted[] = new_sock
             accept_done[] = true
             return nothing
-        end
+        end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
         @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
@@ -1598,10 +1598,10 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_done[] = true
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -1627,13 +1627,12 @@ end
                 Sockets.socket_write(
                     client_socket,
                     cursor,
-                    (s, err, bytes, ud) -> begin
+                    Reseau.WriteCallable((err, bytes) -> begin
                         write_err_client[] = err
                         Sockets.socket_cleanup!(client_socket)
                         write_done_client[] = true
                         return nothing
-                    end,
-                    nothing,
+                    end),
                 )
             catch e
                 write_err_client[] = e isa Reseau.ReseauError ? e.code : -1
@@ -1649,13 +1648,12 @@ end
                 Sockets.socket_write(
                     server_sock,
                     cursor,
-                    (s, err, bytes, ud) -> begin
+                    Reseau.WriteCallable((err, bytes) -> begin
                         write_err_server[] = err
                         Sockets.socket_cleanup!(server_sock)
                         write_done_server[] = true
                         return nothing
-                    end,
-                    nothing,
+                    end),
                 )
             catch e
                 write_err_server[] = e isa Reseau.ReseauError ? e.code : -1
@@ -1722,7 +1720,7 @@ end
         write_err = Ref{Int}(0)
         write_done = Threads.Atomic{Bool}(false)
 
-        on_accept = (listener, err, new_sock, ud) -> begin
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             accepted[] = new_sock
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -1740,7 +1738,7 @@ end
 
             try
                 Sockets.socket_subscribe_to_readable_events(
-                    new_sock, (sock, err, ud) -> begin
+                    new_sock, Reseau.EventCallable(err -> begin
                         read_err[] = err
                         if err != Reseau.AWS_OP_SUCCESS
                             read_done[] = true
@@ -1749,21 +1747,21 @@ end
 
                         buf = Reseau.ByteBuffer(64)
                         try
-                            Sockets.socket_read(sock, buf)
+                            Sockets.socket_read(new_sock, buf)
                             payload[] = String(Reseau.byte_cursor_from_buf(buf))
                         catch e
                             read_err[] = e isa Reseau.ReseauError ? e.code : -1
                         end
                         read_done[] = true
                         return nothing
-                    end, nothing
+                    end)
                 )
             catch e
                 read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 read_done[] = true
             end
             return nothing
-        end
+        end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
         @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
@@ -1778,7 +1776,7 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             endpoint;
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1788,18 +1786,18 @@ end
                 cursor = Reseau.ByteCursor("ping")
                 try
                     Sockets.socket_write(
-                        sock, cursor, (s, err, bytes, ud) -> begin
+                        client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                             write_err[] = err
                             write_done[] = true
                             return nothing
-                        end, nothing
+                        end)
                     )
                 catch e
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -1872,21 +1870,21 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             endpoint;
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
 
-        on_accept = (listener, err, new_sock, ud) -> begin
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             accepted[] = new_sock
             accept_done[] = true
             return nothing
-        end
+        end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
         @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
@@ -1948,7 +1946,7 @@ end
         read_done = Threads.Atomic{Bool}(false)
         payload = Ref{String}("")
         Sockets.socket_subscribe_to_readable_events(
-            server_socket, (sock, err, ud) -> begin
+            server_socket, Reseau.EventCallable(err -> begin
                 read_err[] = err
                 if err != Reseau.AWS_OP_SUCCESS
                     read_done[] = true
@@ -1956,14 +1954,14 @@ end
                 end
                     buf = Reseau.ByteBuffer(64)
                     try
-                        Sockets.socket_read(sock, buf)
+                        Sockets.socket_read(server_socket, buf)
                         payload[] = String(Reseau.byte_cursor_from_buf(buf))
                     catch e
                         read_err[] = e isa Reseau.ReseauError ? e.code : -1
                     end
                     read_done[] = true
                     return nothing
-            end, nothing
+            end)
         )
 
         client = Sockets.socket_init(opts)
@@ -1981,7 +1979,7 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1990,18 +1988,18 @@ end
                 cursor = Reseau.ByteCursor("ping")
                 try
                     Sockets.socket_write(
-                        sock, cursor, (s, err, bytes, ud) -> begin
+                        client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                             write_err[] = err
                             write_done[] = true
                             return nothing
-                        end, nothing
+                        end)
                     )
                 catch e
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -2059,7 +2057,7 @@ end
         read_done = Threads.Atomic{Bool}(false)
         payload = Ref{String}("")
         Sockets.socket_subscribe_to_readable_events(
-            server_socket, (sock, err, ud) -> begin
+            server_socket, Reseau.EventCallable(err -> begin
                 read_err[] = err
                 if err != Reseau.AWS_OP_SUCCESS
                     read_done[] = true
@@ -2067,14 +2065,14 @@ end
                 end
                 buf = Reseau.ByteBuffer(64)
                 try
-                    Sockets.socket_read(sock, buf)
+                    Sockets.socket_read(server_socket, buf)
                     payload[] = String(Reseau.byte_cursor_from_buf(buf))
                 catch e
                     read_err[] = e isa Reseau.ReseauError ? e.code : -1
                 end
                 read_done[] = true
                 return nothing
-            end, nothing
+            end)
         )
 
         client = Sockets.socket_init(opts)
@@ -2095,7 +2093,7 @@ end
         connect_opts = Sockets.SocketConnectOptions(
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
-            on_connection_result = (sock, err, ud) -> begin
+            on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -2104,18 +2102,18 @@ end
                 cursor = Reseau.ByteCursor("ping")
                 try
                     Sockets.socket_write(
-                        sock, cursor, (s, err, bytes, ud) -> begin
+                        client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                             write_err[] = err
                             write_done[] = true
                             return nothing
-                        end, nothing
+                        end)
                     )
                 catch e
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
                 return nothing
-            end,
+            end),
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
@@ -2166,7 +2164,7 @@ end
             bind_opts = Sockets.SocketBindOptions(endpoint)
             @test Sockets.socket_bind(socket_val, bind_opts) === nothing
             @test Sockets.socket_assign_to_event_loop(socket_val, el_val) === nothing
-            Sockets.socket_subscribe_to_readable_events(socket_val, (sock, err, ud) -> nothing, nothing)
+            Sockets.socket_subscribe_to_readable_events(socket_val, Reseau.EventCallable(err -> nothing))
 
             buf = Reseau.ByteBuffer(4)
             try
@@ -2178,7 +2176,7 @@ end
             end
 
             try
-                Sockets.socket_write(socket_val, Reseau.ByteCursor("noop"), (s, err, bytes, ud) -> nothing, nothing)
+                Sockets.socket_write(socket_val, Reseau.ByteCursor("noop"), Reseau.WriteCallable((err, bytes) -> nothing))
                 @test false
             catch e
                 @test e isa Reseau.ReseauError
@@ -2456,11 +2454,11 @@ end
     connect_opts = Sockets.SocketConnectOptions(
         endpoint;
         event_loop = el_val,
-        on_connection_result = (sock, err, ud) -> begin
+        on_connection_result = Reseau.EventCallable(err -> begin
             err_code[] = err
             done[] = true
             return nothing
-        end,
+        end),
     )
 
     try
@@ -2541,11 +2539,11 @@ end
     connect_opts = Sockets.SocketConnectOptions(
         connect_endpoint;
         event_loop = el_val,
-        on_connection_result = (sock, err, ud) -> begin
+        on_connection_result = Reseau.EventCallable(err -> begin
             err_code[] = err
             done[] = true
             return nothing
-        end,
+        end),
     )
 
     try

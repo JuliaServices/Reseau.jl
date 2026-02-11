@@ -219,16 +219,6 @@ function _rw_handler_write_now(
     return nothing
 end
 
-function _rw_handler_write_task(task::Sockets.ChannelTask, args::RwWriteTaskArgs, status)
-    _ = task
-    st = _rw_task_status(status)
-    if st != Reseau.TaskStatus.RUN_READY
-        return nothing
-    end
-    _rw_handler_write_now(args.slot, args.buffer, args.on_completion, args.user_data)
-    return nothing
-end
-
 function rw_handler_write(handler::ReadWriteTestHandler, slot::Sockets.ChannelSlot, buffer::Reseau.ByteBuffer)
     return rw_handler_write_with_callback(handler, slot, buffer, nothing, nothing)
 end
@@ -246,7 +236,12 @@ function rw_handler_write_with_callback(
 
     args = RwWriteTaskArgs(handler, slot, buffer, on_completion, user_data)
     task = Sockets.ChannelTask()
-    Sockets.channel_task_init!(task, _rw_handler_write_task, args, "rw_handler_write")
+    Sockets.channel_task_init!(task, Reseau.EventCallable(status -> begin
+        if _rw_task_status(status) == Reseau.TaskStatus.RUN_READY
+            _rw_handler_write_now(args.slot, args.buffer, args.on_completion, args.user_data)
+        end
+        nothing
+    end), "rw_handler_write")
     Sockets.channel_schedule_task_now!(slot.channel, task)
     return nothing
 end
@@ -273,14 +268,6 @@ mutable struct RwWindowTaskArgs
     window_update::Csize_t
 end
 
-function _rw_handler_window_update_task(task::Sockets.ChannelTask, args::RwWindowTaskArgs, status)
-    _ = task
-    _rw_task_status(status) == Reseau.TaskStatus.RUN_READY || return nothing
-    args.handler.window = Reseau.add_size_saturating(args.handler.window, args.window_update)
-    Sockets.channel_slot_increment_read_window!(args.slot, args.window_update)
-    return nothing
-end
-
 function rw_handler_trigger_increment_read_window(
         handler::ReadWriteTestHandler,
         slot::Sockets.ChannelSlot,
@@ -294,7 +281,13 @@ function rw_handler_trigger_increment_read_window(
 
     args = RwWindowTaskArgs(handler, slot, update)
     task = Sockets.ChannelTask()
-    Sockets.channel_task_init!(task, _rw_handler_window_update_task, args, "increment_read_window_task")
+    Sockets.channel_task_init!(task, Reseau.EventCallable(status -> begin
+        if _rw_task_status(status) == Reseau.TaskStatus.RUN_READY
+            args.handler.window = Reseau.add_size_saturating(args.handler.window, args.window_update)
+            Sockets.channel_slot_increment_read_window!(args.slot, args.window_update)
+        end
+        nothing
+    end), "increment_read_window_task")
     Sockets.channel_schedule_task_now!(slot.channel, task)
     return nothing
 end
