@@ -384,7 +384,7 @@ function retry_token_schedule_retry(
     task = ScheduledTask(
         TaskFn(function(status)
             try
-                _exponential_backoff_retry_task(token, TaskStatus.T(status))
+                _exponential_backoff_retry_task(token, _coerce_task_status(status))
             catch e
                 Core.println("exponential_backoff_retry task errored: $e")
             end

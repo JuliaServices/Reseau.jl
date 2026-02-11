@@ -184,6 +184,10 @@ mutable struct RwWriteTaskArgs
     user_data::Any
 end
 
+@inline function _rw_task_status(status)
+    return status isa Reseau.TaskStatus.T ? status : Reseau.TaskStatus.T(status)
+end
+
 function _rw_handler_write_now(
         slot::Sockets.ChannelSlot,
         buffer::Reseau.ByteBuffer,
@@ -217,7 +221,7 @@ end
 
 function _rw_handler_write_task(task::Sockets.ChannelTask, args::RwWriteTaskArgs, status)
     _ = task
-    st = Reseau.TaskStatus.T(status)
+    st = _rw_task_status(status)
     if st != Reseau.TaskStatus.RUN_READY
         return nothing
     end
@@ -271,7 +275,7 @@ end
 
 function _rw_handler_window_update_task(task::Sockets.ChannelTask, args::RwWindowTaskArgs, status)
     _ = task
-    Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+    _rw_task_status(status) == Reseau.TaskStatus.RUN_READY || return nothing
     args.handler.window = Reseau.add_size_saturating(args.handler.window, args.window_update)
     Sockets.channel_slot_increment_read_window!(args.slot, args.window_update)
     return nothing

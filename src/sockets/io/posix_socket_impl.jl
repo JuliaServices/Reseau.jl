@@ -751,7 +751,7 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         connect_args.task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    _run_connect_success(connect_args, TaskStatus.T(status))
+                    _run_connect_success(connect_args, _coerce_task_status(status))
                 catch e
                     Core.println("posix_connect_success task errored: $e")
                 end
@@ -770,7 +770,7 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         timeout_task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    _handle_socket_timeout(connect_args, TaskStatus.T(status))
+                    _handle_socket_timeout(connect_args, _coerce_task_status(status))
                 catch e
                     Core.println("posix_connect_timeout task errored: $e")
                 end
@@ -1509,7 +1509,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
         socket_impl.written_task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    _written_task_fn(sock, TaskStatus.T(status))
+                    _written_task_fn(sock, _coerce_task_status(status))
                 catch e
                     Core.println("socket_written_task task errored: $e")
                 end

@@ -1136,7 +1136,7 @@
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    if TaskStatus.T(status) != TaskStatus.CANCELED && written_fn !== nothing
+                    if _coerce_task_status(status) != TaskStatus.CANCELED && written_fn !== nothing
                         _nw_lock_base(nw_socket)
                         socket = nw_socket.base_socket
                         written_fn(socket, error_code, bytes_written, user_data)
@@ -1260,7 +1260,7 @@
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    if TaskStatus.T(status) == TaskStatus.CANCELED
+                    if _coerce_task_status(status) == TaskStatus.CANCELED
                         return nothing
                     end
 
@@ -1334,7 +1334,7 @@
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    if TaskStatus.T(status) == TaskStatus.CANCELED
+                    if _coerce_task_status(status) == TaskStatus.CANCELED
                         return nothing
                     end
 
@@ -1420,7 +1420,7 @@
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                    _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
 
                     try_finish!() && return nothing
                     if time_ns() >= deadline_ns
@@ -1467,7 +1467,7 @@
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    if TaskStatus.T(status) == TaskStatus.CANCELED
+                    if _coerce_task_status(status) == TaskStatus.CANCELED
                         ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
                         return nothing
                     end

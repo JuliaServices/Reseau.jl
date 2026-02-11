@@ -108,7 +108,12 @@
             logf(LogLevel.DEBUG, LS_IO_EVENT_LOOP, "Eventfd not available, falling back to pipe")
             impl.use_eventfd = false
 
-            pipe_result = open_nonblocking_posix_pipe()
+            pipe_result = try
+                open_nonblocking_posix_pipe()
+            catch
+                @ccall close(epoll_fd::Cint)::Cint
+                rethrow()
+            end
 
             logf(
                 LogLevel.TRACE,
@@ -202,7 +207,7 @@
         impl.stop_task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    epoll_stop_task_callback(event_loop, TaskStatus.T(status))
+                    epoll_stop_task_callback(event_loop, _coerce_task_status(status))
                 catch e
                     Core.println("epoll_stop task errored: $e")
                 end
@@ -437,7 +442,7 @@
         event_data.cleanup_task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    epoll_unsubscribe_cleanup_task_callback(event_data, TaskStatus.T(status))
+                    epoll_unsubscribe_cleanup_task_callback(event_data, _coerce_task_status(status))
                 catch e
                     Core.println("epoll_cleanup task errored: $e")
                 end

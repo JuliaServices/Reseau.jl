@@ -5,6 +5,9 @@ using EnumX
     CANCELED = 1
 end
 
+@inline _coerce_task_status(status::TaskStatus.T)::TaskStatus.T = status
+@inline _coerce_task_status(status)::TaskStatus.T = TaskStatus.T(status)
+
 const _TASK_STATUS_STRINGS = (
     "<Running>",  # TaskStatus.RUN_READY == 0
     "<Canceled>", # TaskStatus.CANCELED == 1

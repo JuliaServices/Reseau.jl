@@ -268,33 +268,36 @@ function event_loop_group_new(options::EventLoopGroupOptions)
 
     clock = options.clock_override === nothing ? high_res_clock : options.clock_override
 
-    # Create first event loop
-    first_opts = EventLoopOptions(; clock = clock)
-    first_loop = event_loop_new(first_opts)
-
     elg = EventLoopGroup(
         Vector{EventLoop}(),
         options.shutdown_options,
         1,
     )
+    try
+        # Create first event loop
+        first_opts = EventLoopOptions(; clock = clock)
+        first_loop = event_loop_new(first_opts)
+        first_loop.base_elg = elg
+        push!(elg.event_loops, first_loop)
 
-    first_loop.base_elg = elg
-    push!(elg.event_loops, first_loop)
+        # Create remaining event loops
+        for _ in 2:loop_count
+            loop_opts = EventLoopOptions(; clock = clock, parent_elg = elg)
+            loop = event_loop_new(loop_opts)
+            push!(elg.event_loops, loop)
+        end
 
-    # Create remaining event loops
-    for _ in 2:loop_count
-        loop_opts = EventLoopOptions(; clock = clock, parent_elg = elg)
-        loop = event_loop_new(loop_opts)
-        push!(elg.event_loops, loop)
+        # Start event loops
+        for i in 1:length(elg.event_loops)
+            loop = elg.event_loops[i]
+            event_loop_run!(loop)
+        end
+
+        return elg
+    catch
+        event_loop_group_destroy!(elg)
+        rethrow()
     end
-
-    # Start event loops
-    for i in 1:length(elg.event_loops)
-        loop = elg.event_loops[i]
-        event_loop_run!(loop)
-    end
-
-    return elg
 end
 
 function EventLoopGroup(options::EventLoopGroupOptions)

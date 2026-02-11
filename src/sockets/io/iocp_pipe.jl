@@ -241,7 +241,7 @@
             impl.error_report_task = ScheduledTask(
                 TaskFn(function(status)
                     try
-                        _iocp_pipe_read_end_report_error_task(read_end, TaskStatus.T(status))
+                        _iocp_pipe_read_end_report_error_task(read_end, _coerce_task_status(status))
                     catch e
                         Core.println("pipe_read_end_report_error task errored: $e")
                     end

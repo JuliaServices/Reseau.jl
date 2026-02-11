@@ -57,7 +57,7 @@ function ChannelTask(task_fn, arg, type_tag::AbstractString)
     wrapper_task = ScheduledTask(
         TaskFn(function(status)
             try
-                _channel_task_wrapper(ctx, TaskStatus.T(status))
+                _channel_task_wrapper(ctx, _coerce_task_status(status))
             catch e
                 Core.println("channel task ($type_tag) errored: $e")
             end
@@ -318,7 +318,7 @@ function Channel(
     channel.cross_thread_task = ScheduledTask(
         TaskFn(function(status)
             try
-                _channel_schedule_cross_thread_tasks(channel, TaskStatus.T(status))
+                _channel_schedule_cross_thread_tasks(channel, _coerce_task_status(status))
             catch e
                 Core.println("channel_cross_thread_tasks errored: $e")
             end
@@ -523,7 +523,7 @@ function channel_new(options::ChannelOptions)::Channel
     task = ScheduledTask(
         TaskFn(function(status)
             try
-                _channel_setup_task(setup_args, TaskStatus.T(status))
+                _channel_setup_task(setup_args, _coerce_task_status(status))
             catch e
                 Core.println("channel_setup task errored: $e")
             end
@@ -673,7 +673,7 @@ function channel_set_statistics_handler!(channel::Channel, handler::Union{Statis
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    _channel_gather_statistics_task(channel, TaskStatus.T(status))
+                    _channel_gather_statistics_task(channel, _coerce_task_status(status))
                 catch e
                     Core.println("gather_statistics task errored: $e")
                 end
@@ -1133,7 +1133,7 @@ function _channel_schedule_shutdown_completion!(channel::Channel)
     task = ScheduledTask(
         TaskFn(function(status)
             try
-                _channel_shutdown_completion_task(channel, TaskStatus.T(status))
+                _channel_shutdown_completion_task(channel, _coerce_task_status(status))
             catch e
                 Core.println("channel_shutdown_complete task errored: $e")
             end
@@ -1247,7 +1247,7 @@ function channel_slot_on_handler_shutdown_complete!(
         write_task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    _channel_shutdown_write_task(write_args, TaskStatus.T(status))
+                    _channel_shutdown_write_task(write_args, _coerce_task_status(status))
                 catch e
                     Core.println("channel_shutdown_write task errored: $e")
                 end
@@ -1375,7 +1375,7 @@ function channel_destroy!(channel::Channel)
     task = ScheduledTask(
         TaskFn(function(status)
             try
-                _channel_destroy_task(channel, TaskStatus.T(status))
+                _channel_destroy_task(channel, _coerce_task_status(status))
             catch e
                 Core.println("channel_destroy task errored: $e")
             end

@@ -19,6 +19,22 @@ function _wait_for_channel(ch::Channel; timeout_ns::Int = _EVENT_LOOP_TEST_TIMEO
     return isready(ch)
 end
 
+function _wait_for_loop_stop(el::EventLoops.EventLoop; timeout_ns::Int = 5_000_000_000)
+    done_ch = Channel{Any}(1)
+    errormonitor(Threads.@spawn begin
+        try
+            EventLoops.event_loop_wait_for_stop_completion!(el)
+            put!(done_ch, nothing)
+        catch e
+            put!(done_ch, e)
+        end
+    end)
+    _wait_for_channel(done_ch; timeout_ns = timeout_ns) || return false
+    result = take!(done_ch)
+    result === nothing || throw(result)
+    return true
+end
+
 function _schedule_event_loop_task(el::EventLoops.EventLoop, fn; type_tag::AbstractString = "event_loop_task")
     done_ch = Channel{Any}(1)
     task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
@@ -285,8 +301,6 @@ end
                 @test isready(done_ch)
                 isready(done_ch) && take!(done_ch)
             finally
-                EventLoops.event_loop_stop!(el)
-                EventLoops.event_loop_wait_for_stop_completion!(el)
                 read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                 write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
                 EventLoops.event_loop_destroy!(el)
@@ -1427,7 +1441,7 @@ end
             @test take!(done1)
 
             @test EventLoops.event_loop_stop!(el) === nothing
-            @test EventLoops.event_loop_wait_for_stop_completion!(el) === nothing
+            @test _wait_for_loop_stop(el)
             @test EventLoops.event_loop_run!(el) === nothing
 
             done2 = Channel{Bool}(1)

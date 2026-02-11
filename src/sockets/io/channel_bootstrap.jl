@@ -265,7 +265,7 @@ function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, ad
     task = ScheduledTask(
         TaskFn(function(status)
             try
-                TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                 _start_connection_attempts(request, addresses, event_loop)
             catch e
                 Core.println("client_bootstrap_attempts task errored: $e")
@@ -677,7 +677,7 @@ function _connection_request_complete(request::SocketConnectionRequest, error_co
             task = ScheduledTask(
                 TaskFn(function(status)
                     try
-                        TaskStatus.T(status) == TaskStatus.RUN_READY || return nothing
+                        _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                         _connection_request_invoke_on_setup(request, error_code, channel)
                     catch e
                         Core.println("client_bootstrap_on_setup task errored: $e")
@@ -794,51 +794,71 @@ function ServerBootstrap(options::ServerBootstrapOptions)
 
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ServerBootstrap: created")
 
-    # Create listener socket
-    listener = socket_init(options.socket_options)
-    bootstrap.listener_socket = listener
+    listener = nothing
+    try
+        # Create listener socket
+        listener = socket_init(options.socket_options)
+        bootstrap.listener_socket = listener
 
-    # Bind to address
-    local_endpoint = SocketEndpoint()
-    set_address!(local_endpoint, options.host)
-    local_endpoint.port = options.port
+        # Bind to address
+        local_endpoint = SocketEndpoint()
+        set_address!(local_endpoint, options.host)
+        local_endpoint.port = options.port
 
-    bind_opts = if _socket_uses_network_framework_tls(listener, options.tls_connection_options)
-        SocketBindOptions(local_endpoint; tls_connection_options = options.tls_connection_options)
-    else
-        SocketBindOptions(local_endpoint)
-    end
-    socket_bind(listener, bind_opts)
+        bind_opts = if _socket_uses_network_framework_tls(listener, options.tls_connection_options)
+            SocketBindOptions(local_endpoint; tls_connection_options = options.tls_connection_options)
+        else
+            SocketBindOptions(local_endpoint)
+        end
+        socket_bind(listener, bind_opts)
 
-    # Start listening
-    socket_listen(listener, options.backlog)
+        # Start listening
+        socket_listen(listener, options.backlog)
 
-    # Get event loop and start accepting
-    event_loop = event_loop_group_get_next_loop(options.event_loop_group)
+        # Get event loop and start accepting
+        event_loop = event_loop_group_get_next_loop(options.event_loop_group)
 
-    if event_loop === nothing
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: no event loop available"
+        if event_loop === nothing
+            logf(
+                LogLevel.ERROR,
+                LS_IO_CHANNEL_BOOTSTRAP,
+                "ServerBootstrap: no event loop available",
+            )
+            throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
+        end
+
+        bootstrap.listener_event_loop = event_loop
+
+        listener_options = SocketListenerOptions(
+            on_accept_result = (sock, err, new_sock, ud) -> _on_incoming_connection(bootstrap, err, new_sock),
+            on_accept_result_user_data = bootstrap,
+            on_accept_start = (sock, err, ud) -> begin
+                if options.on_listener_setup !== nothing
+                    options.on_listener_setup(bootstrap, err, options.user_data)
+                end
+            end,
+            on_accept_start_user_data = bootstrap,
         )
-        socket_close(listener)
-        throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-    end
 
-    bootstrap.listener_event_loop = event_loop
-
-    listener_options = SocketListenerOptions(
-        on_accept_result = (sock, err, new_sock, ud) -> _on_incoming_connection(bootstrap, err, new_sock),
-        on_accept_result_user_data = bootstrap,
-        on_accept_start = (sock, err, ud) -> begin
-            if options.on_listener_setup !== nothing
-                options.on_listener_setup(bootstrap, err, options.user_data)
+        socket_start_accept(listener, event_loop, listener_options)
+    catch e
+        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+        logf(
+            LogLevel.ERROR,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: setup failed with error %d",
+            err,
+        )
+        if listener !== nothing
+            try
+                socket_close(listener)
+            catch
             end
-        end,
-        on_accept_start_user_data = bootstrap,
-    )
-
-    socket_start_accept(listener, event_loop, listener_options)
+        end
+        bootstrap.listener_socket = nothing
+        bootstrap.listener_event_loop = nothing
+        rethrow()
+    end
 
     logf(
         LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
@@ -1169,7 +1189,7 @@ function server_bootstrap_shutdown!(bootstrap::ServerBootstrap)
         task = ScheduledTask(
             TaskFn(function(status)
                 try
-                    _server_bootstrap_listener_destroy_task((bootstrap = bootstrap,), TaskStatus.T(status))
+                    _server_bootstrap_listener_destroy_task((bootstrap = bootstrap,), _coerce_task_status(status))
                 catch e
                     Core.println("server_listener_shutdown task errored: $e")
                 end

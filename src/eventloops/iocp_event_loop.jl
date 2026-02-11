@@ -350,12 +350,21 @@
             end
 
             # Run scheduled tasks.
-            now_ns = event_loop.clock()
+            now_ns = try
+                event_loop.clock()
+            catch
+                UInt64(0)
+            end
             task_scheduler_run_all!(impl.thread_data.scheduler, now_ns)
 
             # Compute next timeout.
             use_default_timeout = false
-            now2 = event_loop.clock()
+            now2 = try
+                event_loop.clock()
+            catch
+                use_default_timeout = true
+                UInt64(0)
+            end
 
             has_tasks, next_run_time = task_scheduler_has_tasks(impl.thread_data.scheduler)
             if !has_tasks

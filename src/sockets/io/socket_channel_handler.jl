@@ -391,7 +391,11 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
         try
             _, bytes_read = socket_read(socket, message.message_data)
         catch e
-            last_error = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            if e isa ReseauError
+                last_error = e.code
+            else
+                last_error = ERROR_UNKNOWN
+            end
             channel_release_message_to_pool!(channel, message)
             break
         end
@@ -405,7 +409,11 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
         try
             channel_slot_send_message(slot, message, ChannelDirection.READ)
         catch e
-            last_error = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            if e isa ReseauError
+                last_error = e.code
+            else
+                last_error = ERROR_UNKNOWN
+            end
             channel_release_message_to_pool!(channel, message)
             break
         end
