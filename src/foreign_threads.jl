@@ -88,7 +88,7 @@ function ForeignThread(name::String, thread_fn::Ref{Ptr{Cvoid}};
             ret = ccall(
                 (:CreateThread, "kernel32"), Ptr{Cvoid},
                 (Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}),
-                C_NULL, Csize_t(0), thread_fn[], Ptr{Cvoid}(id), UInt32(0), C_NULL,
+                C_NULL, Csize_t(0), thread_fn[], Ptr{Cvoid}(UInt(id)), UInt32(0), C_NULL,
             )
             ret == C_NULL && throw(ArgumentError("error creating OS thread for ForeignThread"))
             # Close handle — thread keeps running, OS auto-cleans on exit
