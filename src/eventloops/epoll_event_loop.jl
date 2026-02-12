@@ -103,7 +103,7 @@
             impl.use_eventfd = true
             impl.write_task_handle = IoHandle(eventfd_result)
             impl.read_task_handle = IoHandle(eventfd_result)  # Same fd for eventfd
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "eventfd descriptor %d", eventfd_result)
+            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("eventfd descriptor %d", " ", eventfd_result))
         else
             logf(LogLevel.DEBUG, LS_IO_EVENT_LOOP, "Eventfd not available, falling back to pipe")
             impl.use_eventfd = false
@@ -117,11 +117,7 @@
 
             logf(
                 LogLevel.TRACE,
-                LS_IO_EVENT_LOOP,
-                "pipe descriptors read %d, write %d",
-                pipe_result[READ_FD],
-                pipe_result[WRITE_FD],
-            )
+                LS_IO_EVENT_LOOP,string("pipe descriptors read %d, write %d", " ", pipe_result[READ_FD], " ", pipe_result[WRITE_FD], " ", ))
             impl.read_task_handle = IoHandle(pipe_result[READ_FD])
             impl.write_task_handle = IoHandle(pipe_result[WRITE_FD])
         end
@@ -239,11 +235,7 @@
 
         logf(
             LogLevel.TRACE,
-            LS_IO_EVENT_LOOP,
-            "Scheduling %s task cross-thread for timestamp %d",
-            task.type_tag,
-            run_at_nanos,
-        )
+            LS_IO_EVENT_LOOP,string("Scheduling %s task cross-thread for timestamp %d", " ", task.type_tag, " ", run_at_nanos, " ", ))
 
         task.timestamp = run_at_nanos
         task.scheduled = true
@@ -274,11 +266,7 @@
         if event_loop_thread_is_callers_thread(event_loop)
             logf(
                 LogLevel.TRACE,
-                LS_IO_EVENT_LOOP,
-                "scheduling %s task in-thread for timestamp %d",
-                task.type_tag,
-                run_at_nanos,
-            )
+                LS_IO_EVENT_LOOP,string("scheduling %s task in-thread for timestamp %d", " ", task.type_tag, " ", run_at_nanos, " ", ))
             if run_at_nanos == 0
                 task_scheduler_schedule_now!(impl.scheduler, task)
             else
@@ -311,7 +299,7 @@
     function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl_data
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "cancelling %s task", task.type_tag)
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling %s task", " ", task.type_tag))
         if !task.scheduled
             return nothing
         end
@@ -349,7 +337,7 @@
             events::Int,
             on_event::EventCallable,
         )::Nothing
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "subscribing to events on fd %d", handle.fd)
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("subscribing to events on fd %d", " ", handle.fd))
 
         epoll_event_data = EpollEventHandleData(handle, on_event)
 
@@ -382,7 +370,7 @@
         )::Cint
 
         if ret != 0
-            logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to subscribe to events on fd %d", handle.fd)
+            logf(LogLevel.ERROR, LS_IO_EVENT_LOOP,string("failed to subscribe to events on fd %d", " ", handle.fd))
             handle.additional_data = C_NULL
             handle.additional_ref = nothing
             throw_error(ERROR_SYS_CALL_FAILURE)
@@ -409,7 +397,7 @@
         if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "un-subscribing from events on fd %d", handle.fd)
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
 
         impl = event_loop.impl_data
 
@@ -431,7 +419,7 @@
         )::Cint
 
         if ret != 0
-            logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to un-subscribe from events on fd %d", handle.fd)
+            logf(LogLevel.ERROR, LS_IO_EVENT_LOOP,string("failed to un-subscribe from events on fd %d", " ", handle.fd))
             throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
@@ -506,10 +494,7 @@
             task === nothing && break
             logf(
                 LogLevel.TRACE,
-                LS_IO_EVENT_LOOP,
-                "task %s pulled to event-loop, scheduling now",
-                task.type_tag,
-            )
+                LS_IO_EVENT_LOOP,string("task %s pulled to event-loop, scheduling now", " ", task.type_tag, " ", ))
             if task.timestamp == 0
                 task_scheduler_schedule_now!(impl.scheduler, task)
             else
@@ -553,14 +538,10 @@
 
         logf(
             LogLevel.INFO,
-            LS_IO_EVENT_LOOP,
-            "default timeout %d ms, and max events to process per tick %d",
-            timeout,
-            MAX_EVENTS,
-        )
+            LS_IO_EVENT_LOOP,string("default timeout %d ms, and max events to process per tick %d", " ", timeout, " ", MAX_EVENTS, " ", ))
 
         while impl.should_continue
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "waiting for a maximum of %d ms", timeout)
+            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("waiting for a maximum of %d ms", " ", timeout))
 
             # Call epoll_wait
             event_count = @ccall gc_safe = true epoll_wait(
@@ -572,7 +553,7 @@
 
             event_loop_register_tick_start!(event_loop)
 
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "wake up with %d events to process", event_count)
+            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("wake up with %d events to process", " ", event_count))
 
             # Process events
             if event_count > 0
@@ -616,10 +597,7 @@
                     if event_data.is_subscribed
                         logf(
                             LogLevel.TRACE,
-                            LS_IO_EVENT_LOOP,
-                            "activity on fd %d, invoking handler",
-                            event_data.handle.fd,
-                        )
+                            LS_IO_EVENT_LOOP,string("activity on fd %d, invoking handler", " ", event_data.handle.fd, " ", ))
                         try
                             event_data.on_event(event_mask)
                         catch e
@@ -629,11 +607,7 @@
                                      e.code == ERROR_IO_READ_WOULD_BLOCK)
                                 logf(
                                     LogLevel.DEBUG,
-                                    LS_IO_EVENT_LOOP,
-                                    "ignoring non-fatal IO callback error on fd %d: %d",
-                                    event_data.handle.fd,
-                                    e.code,
-                                )
+                                    LS_IO_EVENT_LOOP,string("ignoring non-fatal IO callback error on fd %d: %d", " ", event_data.handle.fd, " ", e.code, " ", ))
                             else
                                 rethrow()
                             end
@@ -693,11 +667,7 @@
 
                 logf(
                     LogLevel.TRACE,
-                    LS_IO_EVENT_LOOP,
-                    "detected more scheduled tasks with the next occurring at %d ns, using timeout of %d ms",
-                    timeout_ns,
-                    timeout_ms,
-                )
+                    LS_IO_EVENT_LOOP,string("detected more scheduled tasks with the next occurring at %d ns, using timeout of %d ms", " ", timeout_ns, " ", timeout_ms, " ", ))
                 timeout = Cint(timeout_ms)
             end
 

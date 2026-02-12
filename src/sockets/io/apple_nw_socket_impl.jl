@@ -126,7 +126,7 @@
         nw_socket = socket.impl::NWSocket
         nw_socket.event_loop !== nothing && throw_error(ERROR_INVALID_STATE)
         if event_loop_group_acquire_from_event_loop(event_loop) === nothing
-            logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket=%p: failed to acquire event loop group.", _nw_socket_ptr(nw_socket))
+            logf(LogLevel.ERROR, LS_IO_SOCKET,string("nw_socket=%p: failed to acquire event loop group.", " ", _nw_socket_ptr(nw_socket)))
             throw_error(ERROR_INVALID_STATE)
         end
         nw_socket.event_loop = event_loop
@@ -185,12 +185,7 @@
         state_masked = UInt16(state & 0xFFFF)
         logf(
             LogLevel.DEBUG,
-            LS_IO_SOCKET,
-            "nw_socket=%p: set state from %s to %s",
-            _nw_socket_ptr(nw_socket),
-            _nw_state_string(nw_socket.state),
-            _nw_state_string(state_masked),
-        )
+            LS_IO_SOCKET,string("nw_socket=%p: set state from %s to %s", " ", _nw_socket_ptr(nw_socket), " ", _nw_state_string(nw_socket.state), " ", _nw_state_string(state_masked), " ", ))
 
         current = nw_socket.state
         read_write_bits = state_masked & (_nw_state_mask(NWSocketState.CONNECTED_WRITE) | _nw_state_mask(NWSocketState.CONNECTED_READ))
@@ -212,11 +207,7 @@
 
         logf(
             LogLevel.DEBUG,
-            LS_IO_SOCKET,
-            "nw_socket=%p: state now %s",
-            _nw_socket_ptr(nw_socket),
-            _nw_state_string(nw_socket.state),
-        )
+            LS_IO_SOCKET,string("nw_socket=%p: state now %s", " ", _nw_socket_ptr(nw_socket), " ", _nw_state_string(nw_socket.state), " ", ))
         return nothing
     end
 
@@ -381,10 +372,7 @@
         if !transport_ctx.verify_peer
             logf(
                 LogLevel.WARN,
-                LS_IO_TLS,
-                "nw_socket=%p: x.509 validation has been disabled. If this is not running in a test environment, this is likely a security vulnerability.",
-                _nw_socket_ptr(nw_socket),
-            )
+                LS_IO_TLS,string("nw_socket=%p: x.509 validation has been disabled. If this is not running in a test environment, this is likely a security vulnerability.", " ", _nw_socket_ptr(nw_socket), " ", ))
             return true
         end
 
@@ -402,11 +390,7 @@
             if status != 0
                 logf(
                     LogLevel.ERROR,
-                    LS_IO_TLS,
-                    "nw_socket=%p: SecTrustSetAnchorCertificates failed with OSStatus %d",
-                    _nw_socket_ptr(nw_socket),
-                    Int(status),
-                )
+                    LS_IO_TLS,string("nw_socket=%p: SecTrustSetAnchorCertificates failed with OSStatus %d", " ", _nw_socket_ptr(nw_socket), " ", Int(status), " ", ))
                 raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), trust_ref)
                 return false
@@ -438,7 +422,7 @@
                 policy,
             )
             if status != 0
-                logf(LogLevel.ERROR, LS_IO_TLS, "nw_socket=%p: SecTrustSetPolicies failed %d", _nw_socket_ptr(nw_socket), Int(status))
+                logf(LogLevel.ERROR, LS_IO_TLS,string("nw_socket=%p: SecTrustSetPolicies failed %d", " ", _nw_socket_ptr(nw_socket), " ", Int(status)))
                 raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), policy)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), trust_ref)
@@ -475,14 +459,7 @@
             crt_error = _nw_determine_socket_error(err_code)
             logf(
                 LogLevel.DEBUG,
-                LS_IO_TLS,
-                "nw_socket=%p: SecTrustEvaluateWithError failed with crt error %d: %s (CF error %d: %s)",
-                _nw_socket_ptr(nw_socket),
-                crt_error,
-                error_name(crt_error),
-                err_code,
-                err_desc,
-            )
+                LS_IO_TLS,string("nw_socket=%p: SecTrustEvaluateWithError failed with crt error %d: %s (CF error %d: %s)", " ", _nw_socket_ptr(nw_socket), " ", crt_error, " ", error_name(crt_error), " ", err_code, " ", err_desc, " ", ))
         end
 
         policy != C_NULL && ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), policy)
@@ -576,10 +553,7 @@
         if nw_socket.event_loop === nothing
             logf(
                 LogLevel.ERROR,
-                LS_IO_TLS,
-                "nw_socket=%p: TLS verify block requires event loop with dispatch queue",
-                _nw_socket_ptr(nw_socket),
-            )
+                LS_IO_TLS,string("nw_socket=%p: TLS verify block requires event loop with dispatch queue", " ", _nw_socket_ptr(nw_socket), " ", ))
         else
             _nw_ensure_callbacks!()
             dispatch_queue = nw_socket.event_loop.impl_data.dispatch_queue
@@ -1112,12 +1086,7 @@
         if nw_socket.base_socket !== nothing
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,
-                "NW receive complete: is_complete=%d is_final=%d err=%d",
-                is_complete ? 1 : 0,
-                complete ? 1 : 0,
-                err_code,
-            )
+                LS_IO_SOCKET,string("NW receive complete: is_complete=%d is_final=%d err=%d", " ", is_complete ? 1 : 0, " ", complete ? 1 : 0, " ", err_code, " ", ))
         end
 
         _nw_handle_incoming_data(nw_socket, err_code, data, complete)
@@ -1235,10 +1204,7 @@
         else
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,
-                "nw_socket=%p: connection ready but no connect callback set",
-                _nw_socket_ptr(nw_socket),
-            )
+                LS_IO_SOCKET,string("nw_socket=%p: connection ready but no connect callback set", " ", _nw_socket_ptr(nw_socket), " ", ))
         end
         return nothing
     end
@@ -1282,12 +1248,7 @@
                     if err_code != 0
                         logf(
                             LogLevel.ERROR,
-                            LS_IO_SOCKET,
-                            "nw_connection error (domain=%d raw=%d mapped=%d)",
-                            Int(raw_domain),
-                            Int(raw_code),
-                            err_code,
-                        )
+                            LS_IO_SOCKET,string("nw_connection error (domain=%d raw=%d mapped=%d)", " ", Int(raw_domain), " ", Int(raw_code), " ", err_code, " ", ))
                         nw_socket.last_error = err_code
                         _nw_lock_synced(nw_socket)
                         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
@@ -1341,12 +1302,7 @@
                     elseif state == 3 # nw_listener_state_failed
                         logf(
                             LogLevel.ERROR,
-                            LS_IO_SOCKET,
-                            "nw_listener failed (domain=%d raw=%d mapped=%d)",
-                            Int(raw_domain),
-                            Int(raw_code),
-                            err_code,
-                        )
+                            LS_IO_SOCKET,string("nw_listener failed (domain=%d raw=%d mapped=%d)", " ", Int(raw_domain), " ", Int(raw_code), " ", err_code, " ", ))
                         _nw_lock_synced(nw_socket)
                         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
                         _nw_unlock_synced(nw_socket)
@@ -1733,17 +1689,11 @@
             nw_socket.on_connection_result = options.on_connection_result
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,
-                "nw_socket=%p: connect callback set",
-                _nw_socket_ptr(nw_socket),
-            )
+                LS_IO_SOCKET,string("nw_socket=%p: connect callback set", " ", _nw_socket_ptr(nw_socket), " ", ))
         else
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,
-                "nw_socket=%p: connect callback missing",
-                _nw_socket_ptr(nw_socket),
-            )
+                LS_IO_SOCKET,string("nw_socket=%p: connect callback missing", " ", _nw_socket_ptr(nw_socket), " ", ))
         end
 
         event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)

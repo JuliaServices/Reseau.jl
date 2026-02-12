@@ -1,4 +1,3 @@
-using Printf
 import Dates
 
 abstract type AbstractLogFormatter end
@@ -31,11 +30,6 @@ const _LOG_LEVEL_LABELS = (
     return 1 <= idx <= length(_LOG_LEVEL_LABELS) ? _LOG_LEVEL_LABELS[idx] : "UNKNOWN"
 end
 
-@inline function _format_user_content(fmt::AbstractString, args::Tuple)
-    isempty(args) && return fmt
-    return Printf.format(Printf.Format(fmt), args...)
-end
-
 const _TS_FMT_ISO_8601_UTC = Dates.DateFormat("yyyy-mm-dd\\THH:MM:SS")
 const _TS_FMT_ISO_8601_BASIC_UTC = Dates.DateFormat("yyyymmdd\\THHMMSS")
 
@@ -51,12 +45,11 @@ function _timestamp_string(fmt::date_format)
     end
 end
 
-function format_line(formatter::StandardLogFormatter, level::LogLevel.T, subject::LogSubject, fmt::AbstractString, args...)
-    user_content = _format_user_content(fmt, args)
+function format_line(formatter::StandardLogFormatter, level::LogLevel.T, subject::LogSubject, msg::AbstractString)
     timestamp = _timestamp_string(formatter.date_format)
     level_str = _log_level_label(level)
     subject_name = log_subject_name(subject)
     subject_segment = subject_name == "" ? "" : string("[", subject_name, "] ")
     thread_id = string(Threads.threadid())
-    return string("[", level_str, "] [", timestamp, "] [", thread_id, "] ", subject_segment, "- ", user_content, "\n")
+    return string("[", level_str, "] [", timestamp, "] [", thread_id, "] ", subject_segment, "- ", msg, "\n")
 end

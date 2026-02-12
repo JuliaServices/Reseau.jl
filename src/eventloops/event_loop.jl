@@ -366,10 +366,7 @@ function event_loop_group_release!(elg::EventLoopGroup)
     elseif new_count < 0
         logf(
             LogLevel.ERROR,
-            LS_IO_EVENT_LOOP,
-            "Event loop group ref_count underflow (ref_count=%d)",
-            new_count,
-        )
+            LS_IO_EVENT_LOOP,string("Event loop group ref_count underflow (ref_count=%d)", " ", new_count, " ", ))
         return nothing
     end
 

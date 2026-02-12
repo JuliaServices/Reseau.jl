@@ -161,10 +161,7 @@
             _dispatch_after(dispatch_loop.dispatch_queue, when, entry_ptr, run_ptr)
             logf(
                 LogLevel.TRACE,
-                LS_IO_EVENT_LOOP,
-                "dispatch queue scheduling future iteration in %d ns",
-                delta,
-            )
+                LS_IO_EVENT_LOOP,string("dispatch queue scheduling future iteration in %d ns", " ", string(delta), " ", ))
         end
 
         return nothing
@@ -311,7 +308,7 @@
         dispatch_loop.dispatch_queue = queue
         _dispatch_suspend(queue)
 
-        logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "dispatch queue created with id: %s", queue_id)
+        logf(LogLevel.INFO, LS_IO_EVENT_LOOP,string("dispatch queue created with id: %s", " ", string(queue_id)))
 
         return event_loop
     end
@@ -439,7 +436,7 @@
 
     function event_loop_cancel_task!(event_loop::DispatchQueueEventLoop, task::ScheduledTask)
         dispatch_loop = event_loop.impl_data
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "dispatch queue cancelling %s task", task.type_tag)
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("dispatch queue cancelling %s task", " ", string(task.type_tag)))
 
         if !task.scheduled
             return nothing
@@ -492,9 +489,7 @@
         _ = user_data
         logf(
             LogLevel.ERROR,
-            LS_IO_EVENT_LOOP,
-            "subscribe_to_io_events not supported for dispatch queue event loops",
-        )
+            LS_IO_EVENT_LOOP,string("subscribe_to_io_events not supported for dispatch queue event loops", " ", ))
         return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
     end
 
@@ -505,9 +500,7 @@
         _ = handle
         logf(
             LogLevel.ERROR,
-            LS_IO_EVENT_LOOP,
-            "unsubscribe_from_io_events not supported for dispatch queue event loops",
-        )
+            LS_IO_EVENT_LOOP,string("unsubscribe_from_io_events not supported for dispatch queue event loops", " ", ))
         return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
     end
 

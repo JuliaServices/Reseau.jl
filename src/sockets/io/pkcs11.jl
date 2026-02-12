@@ -431,9 +431,7 @@ function pkcs11_lib_release(lib::Pkcs11Lib)
             if rv != CKR_OK
                 logf(
                     LogLevel.ERROR,
-                    LS_IO_PKCS11,
-                    "PKCS11 finalize failed: $(pkcs11_error_code_str(pkcs11_error_from_ckr(rv)))",
-                )
+                    LS_IO_PKCS11,string("PKCS11 finalize failed: $(pkcs11_error_code_str(pkcs11_error_from_ckr(rv)))", " ", ))
             end
         end
     end
@@ -779,9 +777,7 @@ function pkcs11_lib_find_private_key(
         if key_type != CKK_RSA && key_type != CKK_EC
             logf(
                 LogLevel.ERROR,
-                LS_IO_PKCS11,
-                "PKCS11: Unsupported private key type 0x$(string(UInt64(key_type), base = 16))",
-            )
+                LS_IO_PKCS11,string("PKCS11: Unsupported private key type 0x$(string(UInt64(key_type), base = 16))", " ", ))
             throw_error(ERROR_IO_PKCS11_KEY_TYPE_UNSUPPORTED)
         end
 
@@ -939,9 +935,7 @@ function _pkcs11_sign_rsa(
     if sig_val != TLS_SIGNATURE_RSA
         logf(
             LogLevel.ERROR,
-            LS_IO_PKCS11,
-            "PKCS11: Signature algorithm unsupported for RSA key",
-        )
+            LS_IO_PKCS11,string("PKCS11: Signature algorithm unsupported for RSA key", " ", ))
         throw_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
     end
 
@@ -1024,9 +1018,7 @@ function _pkcs11_sign_ecdsa(
     if sig_val != TLS_SIGNATURE_ECDSA
         logf(
             LogLevel.ERROR,
-            LS_IO_PKCS11,
-            "PKCS11: Signature algorithm unsupported for EC key",
-        )
+            LS_IO_PKCS11,string("PKCS11: Signature algorithm unsupported for EC key", " ", ))
         throw_error(ERROR_IO_TLS_SIGNATURE_ALGORITHM_UNSUPPORTED)
     end
 

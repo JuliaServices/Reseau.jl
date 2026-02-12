@@ -306,7 +306,7 @@
         if handle == UInt(typemax(UInt))
             wsa_err = _wsa_get_last_error()
             aws_err = _winsock_determine_socket_error(wsa_err)
-            logf(LogLevel.ERROR, LS_IO_SOCKET, "socket() failed with WSAError %d", wsa_err)
+            logf(LogLevel.ERROR, LS_IO_SOCKET,string("socket() failed with WSAError %d", " ", wsa_err))
             throw_error(aws_err)
         end
 
@@ -315,7 +315,7 @@
         if ccall((:ioctlsocket, _WS2_32), Cint, (UInt, UInt32, Ptr{UInt32}), handle, FIONBIO, non_blocking) != 0
             wsa_err = _wsa_get_last_error()
             aws_err = _winsock_determine_socket_error(wsa_err)
-            logf(LogLevel.ERROR, LS_IO_SOCKET, "ioctlsocket(FIONBIO) failed with WSAError %d", wsa_err)
+            logf(LogLevel.ERROR, LS_IO_SOCKET,string("ioctlsocket(FIONBIO) failed with WSAError %d", " ", wsa_err))
             _ = ccall((:closesocket, _WS2_32), Cint, (UInt,), handle)
             throw_error(aws_err)
         end

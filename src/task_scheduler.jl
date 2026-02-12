@@ -478,12 +478,7 @@ end
 function task_run!(task::ScheduledTask, status::TaskStatus.T)
     logf(
         LogLevel.TRACE,
-        LS_COMMON_TASK_SCHEDULER,
-        "id=%s: Running %s task with %s status",
-        string(objectid(task)),
-        task.type_tag,
-        task_status_to_string(status),
-    )
+        LS_COMMON_TASK_SCHEDULER,string("id=%s: Running %s task with %s status", " ", string(objectid(task)), " ", task.type_tag, " ", task_status_to_string(status), " ", ))
     task.scheduled = false
     task.fn(UInt8(status))
     return nothing
@@ -503,11 +498,7 @@ end
 function task_scheduler_schedule_now!(scheduler::TaskScheduler, task::ScheduledTask)
     logf(
         LogLevel.TRACE,
-        LS_COMMON_TASK_SCHEDULER,
-        "id=%s: Scheduling %s task for immediate execution",
-        string(objectid(task)),
-        task.type_tag,
-    )
+        LS_COMMON_TASK_SCHEDULER,string("id=%s: Scheduling %s task for immediate execution", " ", string(objectid(task)), " ", task.type_tag, " ", ))
     task.timestamp = UInt64(0)
     task.scheduled = true
     push!(scheduler.asap, task)
@@ -517,12 +508,7 @@ end
 function task_scheduler_schedule_future!(scheduler::TaskScheduler, task::ScheduledTask, time_to_run::UInt64)
     logf(
         LogLevel.TRACE,
-        LS_COMMON_TASK_SCHEDULER,
-        "id=%s: Scheduling %s task for future execution at time %d",
-        string(objectid(task)),
-        task.type_tag,
-        time_to_run,
-    )
+        LS_COMMON_TASK_SCHEDULER,string("id=%s: Scheduling %s task for future execution at time %d", " ", string(objectid(task)), " ", task.type_tag, " ", time_to_run, " ", ))
     task.timestamp = time_to_run
     task.scheduled = true
     push!(scheduler.timed, task)

@@ -1,13 +1,4 @@
-abstract type AbstractLogger end
-
-struct NullLogger <: AbstractLogger end
-
-log_level(::NullLogger, ::LogSubject) = LOG_LEVEL_NONE
-log!(::NullLogger, ::LogLevel.T, ::LogSubject, ::AbstractString, args...) = nothing
-close!(::NullLogger) = nothing
-set_log_level!(::NullLogger, ::LogLevel.T) = nothing
-
-mutable struct LoggerPipeline{F <: AbstractLogFormatter, C <: AbstractLogChannel, W <: AbstractLogWriter} <: AbstractLogger
+mutable struct LoggerPipeline{F <: AbstractLogFormatter, C <: AbstractLogChannel, W <: AbstractLogWriter}
     formatter::F
     channel::C
     writer::W
@@ -25,11 +16,11 @@ function set_log_level!(logger::LoggerPipeline, level::LogLevel.T)
     return nothing
 end
 
-function log!(logger::LoggerPipeline, level::LogLevel.T, subject::LogSubject, fmt::AbstractString, args...)
+@inline function log!(logger::LoggerPipeline, level::LogLevel.T, subject::LogSubject, fmt::AbstractString)
     if Int(level) > Int(log_level(logger, subject))
         return nothing
     end
-    line = format_line(logger.formatter, level, subject, fmt, args...)
+    line = format_line(logger.formatter, level, subject, fmt)
     send!(logger.channel, logger.writer, line)
     return nothing
 end
@@ -40,97 +31,107 @@ function close!(logger::LoggerPipeline)
     return nothing
 end
 
-const _default_logger = Ref{AbstractLogger}(NullLogger())
-const _logger_override = ScopedValue{Union{AbstractLogger, Nothing}}(nothing)
+const _DEFAULT_LOGGER = LoggerPipeline(
+    StandardLogFormatter(DateFormat.ISO_8601),
+    ForegroundChannel(),
+    log_writer_stdout(),
+    LOG_LEVEL_NONE,
+)
+const DefaultLoggerPipeline = typeof(_DEFAULT_LOGGER)
+const CURRENT_LOGGER = ScopedValue{DefaultLoggerPipeline}(_DEFAULT_LOGGER)
 
 @inline function current_logger()
-    override = _logger_override[]
-    return override === nothing ? _default_logger[] : override
+    return CURRENT_LOGGER[]
 end
 
 @inline function logger_get()
     return current_logger()
 end
 
-@inline function logger_set(logger::AbstractLogger)
-    _default_logger[] = logger
-    return nothing
+@inline function logger_set(logger::LoggerPipeline)
+    throw(ArgumentError("global logger mutation is not supported; use with_logger(logger) do ... end"))
 end
 
-@inline function with_logger(logger::AbstractLogger, f::Function)
-    return with(f, _logger_override => logger)
+@inline function with_logger(f, logger::DefaultLoggerPipeline)
+    return with(f, CURRENT_LOGGER => logger)
+end
+
+@inline function with_logger(logger::LoggerPipeline, f)
+    logger isa DefaultLoggerPipeline || throw(ArgumentError("with_logger only supports the default logger pipeline type"))
+    return with_logger(f, logger)
 end
 
 @inline function _level_from_int(level::Integer)
     return LogLevel.T(Int(level))
 end
 
-function logf(level::Integer, subject::Integer, fmt::AbstractString, args...)
-    return logf(_level_from_int(level), LogSubject(subject), fmt, args...)
-end
-
-function logf(level::LogLevel.T, subject::Integer, fmt::AbstractString, args...)
-    return logf(level, LogSubject(subject), fmt, args...)
-end
-
-function logf(level::Integer, subject::LogSubject, fmt::AbstractString, args...)
-    return logf(_level_from_int(level), subject, fmt, args...)
-end
-
-function logf(level::LogLevel.T, subject::LogSubject, fmt::AbstractString, args...)
-    return log!(current_logger(), level, subject, fmt, args...)
-end
-
-function logf(level::Cint, subject::LogSubject, fmt::AbstractString, args...)
-    return logf(_level_from_int(level), subject, fmt, args...)
-end
-
 const STATIC_LOG_LEVEL = LOG_LEVEL_INFO
 
-macro LOGF(level, subject, msg, args...)
-    return :(Int($level) > Int(STATIC_LOG_LEVEL) ? nothing : logf($level, $subject, $msg, $(args...)))
+@inline function logf(level::Integer, subject::Integer, msg::AbstractString)
+    return logf(_level_from_int(level), LogSubject(subject), msg)
 end
 
-macro LOGF_FATAL(subject, msg, args...)
+@inline function logf(level::LogLevel.T, subject::Integer, msg::AbstractString)
+    return logf(level, LogSubject(subject), msg)
+end
+
+@inline function logf(level::Integer, subject::LogSubject, msg::AbstractString)
+    return logf(_level_from_int(level), subject, msg)
+end
+
+@inline function logf(level::LogLevel.T, subject::LogSubject, msg::AbstractString)
+    Int(level) > Int(STATIC_LOG_LEVEL) && return nothing
+    return log!(current_logger(), level, subject, msg)
+end
+
+@inline function logf(level::Cint, subject::LogSubject, msg::AbstractString)
+    return logf(_level_from_int(level), subject, msg)
+end
+
+macro LOGF(level, subject, msg)
+    return :(Int($level) > Int(STATIC_LOG_LEVEL) ? nothing : logf($level, $subject, $msg))
+end
+
+macro LOGF_FATAL(subject, msg)
     if Int(LOG_LEVEL_FATAL) > Int(STATIC_LOG_LEVEL)
         return :(nothing)
     end
-    return :(logf(LOG_LEVEL_FATAL, $subject, $msg, $(args...)))
+    return :(logf(LOG_LEVEL_FATAL, $subject, $msg))
 end
 
-macro LOGF_ERROR(subject, msg, args...)
+macro LOGF_ERROR(subject, msg)
     if Int(LOG_LEVEL_ERROR) > Int(STATIC_LOG_LEVEL)
         return :(nothing)
     end
-    return :(logf(LOG_LEVEL_ERROR, $subject, $msg, $(args...)))
+    return :(logf(LOG_LEVEL_ERROR, $subject, $msg))
 end
 
-macro LOGF_WARN(subject, msg, args...)
+macro LOGF_WARN(subject, msg)
     if Int(LOG_LEVEL_WARN) > Int(STATIC_LOG_LEVEL)
         return :(nothing)
     end
-    return :(logf(LOG_LEVEL_WARN, $subject, $msg, $(args...)))
+    return :(logf(LOG_LEVEL_WARN, $subject, $msg))
 end
 
-macro LOGF_INFO(subject, msg, args...)
+macro LOGF_INFO(subject, msg)
     if Int(LOG_LEVEL_INFO) > Int(STATIC_LOG_LEVEL)
         return :(nothing)
     end
-    return :(logf(LOG_LEVEL_INFO, $subject, $msg, $(args...)))
+    return :(logf(LOG_LEVEL_INFO, $subject, $msg))
 end
 
-macro LOGF_DEBUG(subject, msg, args...)
+macro LOGF_DEBUG(subject, msg)
     if Int(LOG_LEVEL_DEBUG) > Int(STATIC_LOG_LEVEL)
         return :(nothing)
     end
-    return :(logf(LOG_LEVEL_DEBUG, $subject, $msg, $(args...)))
+    return :(logf(LOG_LEVEL_DEBUG, $subject, $msg))
 end
 
-macro LOGF_TRACE(subject, msg, args...)
+macro LOGF_TRACE(subject, msg)
     if Int(LOG_LEVEL_TRACE) > Int(STATIC_LOG_LEVEL)
         return :(nothing)
     end
-    return :(logf(LOG_LEVEL_TRACE, $subject, $msg, $(args...)))
+    return :(logf(LOG_LEVEL_TRACE, $subject, $msg))
 end
 
 const _log_subject_registry = Dict{LogSubject, LogSubjectInfo}()

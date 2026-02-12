@@ -46,11 +46,7 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
     chan_id = chan === nothing ? -1 : chan.channel_id
     logf(
         LogLevel.DEBUG,
-        LS_IO_ALPN,
-        "ALPN negotiated protocol: %s (channel %d)",
-        isempty(protocol_str) ? "<empty>" : protocol_str,
-        chan_id,
-    )
+        LS_IO_ALPN,string("ALPN negotiated protocol: %s (channel %d)", " ", string(isempty(protocol_str) ? "<empty>" : protocol_str), " ", string(chan_id), " ", ))
 
     channel = slot.channel
     if channel === nothing

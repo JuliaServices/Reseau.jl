@@ -308,11 +308,7 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
         is_server = handler.ctx_obj !== nothing && handler.ctx_obj.options.is_server
         logf(
             LogLevel.DEBUG,
-            LS_IO_TLS,
-            "SecureTransport SSLCopyALPNProtocols unavailable (server=%s status=%d)",
-            is_server ? "true" : "false",
-            status,
-        )
+            LS_IO_TLS,string("SecureTransport SSLCopyALPNProtocols unavailable (server=%s status=%d)", " ", string(is_server ? "true" : "false"), " ", string(status), " ", ))
         return null_buffer()
     end
 
@@ -376,10 +372,7 @@ function _secure_transport_handle_would_block(handler::SecureTransportTlsHandler
     _ = handler
     logf(
         LogLevel.DEBUG,
-        LS_IO_TLS,
-        "SecureTransport SSLHandshake would block (server=%s)",
-        is_server ? "true" : "false",
-    )
+        LS_IO_TLS,string("SecureTransport SSLHandshake would block (server=%s)", " ", string(is_server ? "true" : "false"), " ", ))
     return nothing
 end
 
@@ -395,10 +388,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
     if status == _errSecSuccess
         logf(
             LogLevel.DEBUG,
-            LS_IO_TLS,
-            "SecureTransport SSLHandshake success (server=%s)",
-            is_server ? "true" : "false",
-        )
+            LS_IO_TLS,string("SecureTransport SSLHandshake success (server=%s)", " ", string(is_server ? "true" : "false"), " ", ))
         handler.negotiation_finished = true
         handler.protocol = _secure_transport_get_protocol(handler)
         if handler.protocol.len > 0
@@ -410,9 +400,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
     elseif status == _errSSLPeerAuthCompleted
         logf(
             LogLevel.DEBUG,
-            LS_IO_TLS,
-            "SecureTransport SSLHandshake peer auth completed",
-        )
+            LS_IO_TLS,string("SecureTransport SSLHandshake peer auth completed", " ", ))
         if handler.verify_peer
             if handler.ca_certs == C_NULL
                 _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
@@ -482,9 +470,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
 
             logf(
                 LogLevel.WARN,
-                LS_IO_TLS,
-                "SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])",
-            )
+                LS_IO_TLS,string("SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])", " ", ))
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 
@@ -495,9 +481,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
     else
         logf(
             LogLevel.WARN,
-            LS_IO_TLS,
-            "SecureTransport SSLHandshake failed with OSStatus $status",
-        )
+            LS_IO_TLS,string("SecureTransport SSLHandshake failed with OSStatus $status", " ", ))
         handler.negotiation_finished = false
         _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
@@ -646,15 +630,11 @@ end
 function _secure_transport_initialize_read_delay_shutdown(handler::SecureTransportTlsHandler, slot::ChannelSlot, error_code::Int)
     logf(
         LogLevel.DEBUG,
-        LS_IO_TLS,
-        "TLS handler pending data during shutdown, waiting for downstream read window.",
-    )
+        LS_IO_TLS,string("TLS handler pending data during shutdown, waiting for downstream read window.", " ", ))
     if channel_slot_downstream_read_window(slot) == 0
         logf(
             LogLevel.WARN,
-            LS_IO_TLS,
-            "TLS shutdown delayed; pending data cannot be processed until read window opens.",
-        )
+            LS_IO_TLS,string("TLS shutdown delayed; pending data cannot be processed until read window opens.", " ", ))
     end
     handler.read_state = TlsHandlerReadState.SHUTTING_DOWN
     handler.delay_shutdown_error_code = error_code
@@ -801,9 +781,7 @@ function handler_process_read_message(
         else
             logf(
                 LogLevel.ERROR,
-                LS_IO_TLS,
-                "SecureTransport SSLRead failed with OSStatus $status",
-            )
+                LS_IO_TLS,string("SecureTransport SSLRead failed with OSStatus $status", " ", ))
             shutdown_error_code = ERROR_IO_TLS_ERROR_READ_FAILURE
             break
         end
@@ -1080,9 +1058,7 @@ function _secure_transport_handler_new(
     if !st_ctx.verify_peer && protocol_side == _kSSLClientSide
         logf(
             LogLevel.WARN,
-            LS_IO_TLS,
-            "x.509 validation has been disabled. This is unsafe outside of test environments.",
-        )
+            LS_IO_TLS,string("x.509 validation has been disabled. This is unsafe outside of test environments.", " ", ))
         _ = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
     end
 

@@ -34,10 +34,7 @@ end
         if byte_cursor_find_exact(Ref(instance_nonce), Ref(to_find), found) == OP_SUCCESS
             logf(
                 Cint(LL_ERROR),
-                LS_COMMON_GENERAL,
-                "static: Lock %s creation has illegal character \\",
-                _nonce_string(instance_nonce),
-            )
+                LS_COMMON_GENERAL,string("static: Lock %s creation has illegal character \\", " ", string(_nonce_string(instance_nonce)), " ", ))
             raise_error(ERROR_INVALID_ARGUMENT)
             return Ptr{cross_process_lock}(C_NULL)
         end
@@ -53,11 +50,7 @@ end
             last_error = ccall((:GetLastError, "kernel32"), UInt32, ())
             logf(
                 Cint(LL_WARN),
-                LS_COMMON_GENERAL,
-                "static: Lock %s creation failed with error %d",
-                unsafe_string(pointer(nonce_buf[].mem)),
-                last_error,
-            )
+                LS_COMMON_GENERAL,string("static: Lock %s creation failed with error %d", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", string(last_error), " ", ))
             translate_and_raise_io_error_or(last_error, ERROR_MUTEX_FAILED)
             byte_buf_clean_up(nonce_buf)
             return Ptr{cross_process_lock}(C_NULL)
@@ -66,10 +59,7 @@ end
         if ccall((:GetLastError, "kernel32"), UInt32, ()) == _ERROR_ALREADY_EXISTS
             logf(
                 Cint(LL_TRACE),
-                LS_COMMON_GENERAL,
-                "static: Lock %s is already acquired by another instance",
-                unsafe_string(pointer(nonce_buf[].mem)),
-            )
+                LS_COMMON_GENERAL,string("static: Lock %s is already acquired by another instance", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", ))
             ccall((:CloseHandle, "kernel32"), UInt8, (Ptr{Cvoid},), mutex)
             raise_error(ERROR_MUTEX_CALLER_NOT_OWNER)
             byte_buf_clean_up(nonce_buf)
@@ -86,11 +76,7 @@ end
         unsafe_store!(instance_lock, cross_process_lock(mutex))
         logf(
             Cint(LL_TRACE),
-            LS_COMMON_GENERAL,
-            "static: Lock %s acquired by this instance with HANDLE %p",
-            unsafe_string(pointer(nonce_buf[].mem)),
-            mutex,
-        )
+            LS_COMMON_GENERAL,string("static: Lock %s acquired by this instance with HANDLE %p", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", string(mutex), " ", ))
 
         byte_buf_clean_up(nonce_buf)
         return instance_lock
@@ -103,10 +89,7 @@ end
         ccall((:CloseHandle, "kernel32"), UInt8, (Ptr{Cvoid},), unsafe_load(instance_lock).mutex)
         logf(
             Cint(LL_TRACE),
-            LS_COMMON_GENERAL,
-            "static: Lock released for handle %p",
-            unsafe_load(instance_lock).mutex,
-        )
+            LS_COMMON_GENERAL,string("static: Lock released for handle %p", " ", string(unsafe_load(instance_lock).mutex), " ", ))
         _cpl_free(Ptr{UInt8}(instance_lock))
         return nothing
     end
@@ -137,10 +120,7 @@ else
         if byte_cursor_find_exact(Ref(instance_nonce), Ref(to_find), found) == OP_SUCCESS
             logf(
                 Cint(LL_ERROR),
-                LS_COMMON_GENERAL,
-                "static: Lock %s creation has illegal character /",
-                _nonce_string(instance_nonce),
-            )
+                LS_COMMON_GENERAL,string("static: Lock %s creation has illegal character /", " ", string(_nonce_string(instance_nonce)), " ", ))
             raise_error(ERROR_INVALID_ARGUMENT)
             return Ptr{cross_process_lock}(C_NULL)
         end
@@ -181,11 +161,7 @@ else
         if fd < 0
             logf(
                 Cint(LL_DEBUG),
-                LS_COMMON_GENERAL,
-                "static: Lock file %s failed to open with errno %d",
-                unsafe_string(pointer(nonce_buf[].mem)),
-                err,
-            )
+                LS_COMMON_GENERAL,string("static: Lock file %s failed to open with errno %d", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", string(err), " ", ))
             translate_and_raise_io_error_or(err, ERROR_MUTEX_FAILED)
             if last_error() == ERROR_NO_PERMISSION
                 if ccall(:chmod, Cint, (Ptr{UInt8}, Cint), pointer(nonce_buf[].mem), mode) == 0
@@ -194,21 +170,14 @@ else
                 if fd < 0
                     logf(
                         Cint(LL_DEBUG),
-                        LS_COMMON_GENERAL,
-                        "static: Lock file %s couldn't be opened due to file ownership permissions. Attempting to open as read only",
-                        unsafe_string(pointer(nonce_buf[].mem)),
-                    )
+                        LS_COMMON_GENERAL,string("static: Lock file %s couldn't be opened due to file ownership permissions. Attempting to open as read only", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", ))
                     fd = ccall(:open, Cint, (Ptr{UInt8}, Cint), pointer(nonce_buf[].mem), _O_RDONLY)
                 end
                 if fd < 0
                     err = Libc.errno()
                     logf(
                         Cint(LL_ERROR),
-                        LS_COMMON_GENERAL,
-                        "static: Lock file %s failed to open with read-only permissions with errno %d",
-                        unsafe_string(pointer(nonce_buf[].mem)),
-                        err,
-                    )
+                        LS_COMMON_GENERAL,string("static: Lock file %s failed to open with read-only permissions with errno %d", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", string(err), " ", ))
                     translate_and_raise_io_error_or(err, ERROR_MUTEX_FAILED)
                     byte_buf_clean_up(nonce_buf)
                     return Ptr{cross_process_lock}(C_NULL)
@@ -216,10 +185,7 @@ else
             else
                 logf(
                     Cint(LL_ERROR),
-                    LS_COMMON_GENERAL,
-                    "static: Lock file %s failed to open. The lock cannot be acquired.",
-                    unsafe_string(pointer(nonce_buf[].mem)),
-                )
+                    LS_COMMON_GENERAL,string("static: Lock file %s failed to open. The lock cannot be acquired.", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", ))
                 byte_buf_clean_up(nonce_buf)
                 return Ptr{cross_process_lock}(C_NULL)
             end
@@ -231,10 +197,7 @@ else
         if ccall(:flock, Cint, (Cint, Cint), fd, _LOCK_EX | _LOCK_NB) == -1
             logf(
                 Cint(LL_TRACE),
-                LS_COMMON_GENERAL,
-                "static: Lock file %s already acquired by another instance",
-                unsafe_string(pointer(nonce_buf[].mem)),
-            )
+                LS_COMMON_GENERAL,string("static: Lock file %s already acquired by another instance", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", ))
             ccall(:close, Cint, (Cint,), fd)
             raise_error(ERROR_MUTEX_CALLER_NOT_OWNER)
             byte_buf_clean_up(nonce_buf)
@@ -251,11 +214,7 @@ else
         unsafe_store!(instance_lock, cross_process_lock(fd))
         logf(
             Cint(LL_TRACE),
-            LS_COMMON_GENERAL,
-            "static: Lock file %s acquired by this instance with fd %d",
-            unsafe_string(pointer(nonce_buf[].mem)),
-            fd,
-        )
+            LS_COMMON_GENERAL,string("static: Lock file %s acquired by this instance with fd %d", " ", string(unsafe_string(pointer(nonce_buf[].mem))), " ", string(fd), " ", ))
 
         byte_buf_clean_up(nonce_buf)
         return instance_lock
@@ -268,10 +227,7 @@ else
         ccall(:close, Cint, (Cint,), unsafe_load(instance_lock).locked_fd)
         logf(
             Cint(LL_TRACE),
-            LS_COMMON_GENERAL,
-            "static: Lock file released for fd %d",
-            unsafe_load(instance_lock).locked_fd,
-        )
+            LS_COMMON_GENERAL,string("static: Lock file released for fd %d", " ", string(unsafe_load(instance_lock).locked_fd), " ", ))
         _cpl_free(Ptr{UInt8}(instance_lock))
         return nothing
     end

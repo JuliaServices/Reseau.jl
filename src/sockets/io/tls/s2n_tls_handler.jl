@@ -483,9 +483,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
             end
             logf(
                 LogLevel.WARN,
-                LS_IO_TLS,
-                "s2n negotiate failed: $(_s2n_strerror(s2n_error)) ($(_s2n_strerror_debug(s2n_error)))",
-            )
+                LS_IO_TLS,string("s2n negotiate failed: $(_s2n_strerror(s2n_error)) ($(_s2n_strerror_debug(s2n_error)))", " ", ))
             handler.state = TlsNegotiationState.FAILED
             _s2n_on_negotiation_result(handler, handler.slot, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
@@ -536,15 +534,11 @@ end
 function _s2n_initialize_read_delay_shutdown(handler::S2nTlsHandler, slot::ChannelSlot, error_code::Int)
     logf(
         LogLevel.DEBUG,
-        LS_IO_TLS,
-        "TLS handler pending data during shutdown, waiting for downstream read window.",
-    )
+        LS_IO_TLS,string("TLS handler pending data during shutdown, waiting for downstream read window.", " ", ))
     if channel_slot_downstream_read_window(slot) == 0
         logf(
             LogLevel.WARN,
-            LS_IO_TLS,
-            "TLS shutdown delayed; pending data cannot be processed until read window opens.",
-        )
+            LS_IO_TLS,string("TLS shutdown delayed; pending data cannot be processed until read window opens.", " ", ))
     end
     handler.read_state = TlsHandlerReadState.SHUTTING_DOWN
     handler.shutdown_error_code = error_code
@@ -767,9 +761,7 @@ function handler_process_read_message(
             end
             logf(
                 LogLevel.ERROR,
-                LS_IO_TLS,
-                "s2n recv failed: $(_s2n_strerror(_s2n_errno())) ($(_s2n_strerror_debug(_s2n_errno())))",
-            )
+                LS_IO_TLS,string("s2n recv failed: $(_s2n_strerror(_s2n_errno())) ($(_s2n_strerror_debug(_s2n_errno())))", " ", ))
             shutdown_error_code = ERROR_IO_TLS_ERROR_READ_FAILURE
             break
         end
@@ -1049,9 +1041,7 @@ function _s2n_async_pkey_callback(conn::Ptr{Cvoid}, s2n_op::Ptr{Cvoid})::Cint
 
     logf(
         LogLevel.DEBUG,
-        LS_IO_TLS,
-        "Begin TLS key operation. type=$(tls_key_operation_type_str(operation.operation_type)) input_len=$(operation.input.len) signature=$(tls_signature_algorithm_str(operation.signature_algorithm)) digest=$(tls_hash_algorithm_str(operation.digest_algorithm))",
-    )
+        LS_IO_TLS,string("Begin TLS key operation. type=$(tls_key_operation_type_str(operation.operation_type)) input_len=$(operation.input.len) signature=$(tls_signature_algorithm_str(operation.signature_algorithm)) digest=$(tls_hash_algorithm_str(operation.digest_algorithm))", " ", ))
 
     if handler.s2n_ctx !== nothing && handler.s2n_ctx.custom_key_handler !== nothing
         custom_key_op_handler_perform_operation(handler.s2n_ctx.custom_key_handler, operation)
@@ -1159,9 +1149,7 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
             S2N_SUCCESS
         logf(
             LogLevel.ERROR,
-            LS_IO_TLS,
-            "s2n: failed to set security policy '$policy': $(_s2n_strerror(_s2n_errno()))",
-        )
+            LS_IO_TLS,string("s2n: failed to set security policy '$policy': $(_s2n_strerror(_s2n_errno()))", " ", ))
         _s2n_ctx_destroy!(ctx_impl)
         throw_error(ERROR_IO_TLS_CTX_ERROR)
     end
