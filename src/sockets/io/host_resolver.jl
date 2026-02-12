@@ -253,14 +253,14 @@ function _normalize_resolution_config(
 
     if config === nothing
         return HostResolutionConfig(
-            HostResolveImpl(_default_dns_resolve),
+            nothing,
             base_max_ttl,
             base_resolve_freq,
             resolver.config.max_addresses_per_host,
         )
     end
 
-    impl = config.impl === nothing ? HostResolveImpl(_default_dns_resolve) : (config.impl::HostResolveImpl)
+    impl = config.impl === nothing ? nothing : (config.impl::HostResolveImpl)
     max_ttl = config.max_ttl_secs != 0 ? config.max_ttl_secs : base_max_ttl
     resolve_freq = config.resolve_frequency_ns != 0 ? config.resolve_frequency_ns : base_resolve_freq
     impl_data = config.impl_data === nothing && config.impl === nothing ?
@@ -291,7 +291,7 @@ function _dispatch_resolve_callback(
         host_name::String,
         error_code::Int,
         addresses::Vector{HostAddress},
-    )
+    )::Nothing
     event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
     if event_loop !== nothing
         task = ScheduledTask(
@@ -299,7 +299,8 @@ function _dispatch_resolve_callback(
                 try
                     callback(resolver, host_name, error_code, addresses)
                 catch err
-                    logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name': $err")
+                    _ = err
+                    logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name'")
                 end
                 return nothing
             end);
@@ -310,7 +311,8 @@ function _dispatch_resolve_callback(
         try
             callback(resolver, host_name, error_code, addresses)
         catch err
-            logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name': $err")
+            _ = err
+            logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name'")
         end
     end
     return nothing
@@ -423,12 +425,22 @@ function _host_entry_finished_or_pending_pred(entry::HostEntry)
     return ((@atomic entry.state) == DefaultResolverState.SHUTTING_DOWN) || !isempty(entry.pending_callbacks)
 end
 
-function _invoke_resolver_impl(impl::HostResolveImpl, host::String, impl_data)
+function _invoke_resolver_impl(impl::HostResolveImpl, host::String, impl_data)::Tuple{Vector{HostAddress}, Int}
     result = impl(host, impl_data)
     if result isa Tuple
-        return result
+        if length(result) == 2
+            addrs_any = result[1]
+            err_any = result[2]
+            if addrs_any isa Vector{HostAddress} && err_any isa Integer
+                return addrs_any, Int(err_any)
+            end
+        end
+        return HostAddress[], ERROR_IO_DNS_QUERY_FAILED
     end
-    return result, AWS_OP_SUCCESS
+    if result isa Vector{HostAddress}
+        return result, AWS_OP_SUCCESS
+    end
+    return HostAddress[], ERROR_IO_DNS_QUERY_FAILED
 end
 
 
@@ -477,44 +489,40 @@ function _default_dns_resolve(host::String, impl_data)
     return addresses, error_code
 end
 
-function _resolve_addresses(entry::HostEntry)
-    addresses = HostAddress[]
-    error_code = AWS_OP_SUCCESS
+function _resolve_addresses(entry::HostEntry)::Tuple{Vector{HostAddress}, Int}
+    host_name = entry.host_name
+    impl = entry.resolution_config.impl
+    addresses::Vector{HostAddress} = HostAddress[]
+    error_code::Int = ERROR_IO_DNS_QUERY_FAILED
 
-    is_default_impl = entry.resolution_config.impl === nothing
-    impl = is_default_impl ? HostResolveImpl(_default_dns_resolve) : (entry.resolution_config.impl::HostResolveImpl)
-    impl_data = entry.resolution_config.impl_data
     try
-        addresses, error_code = _invoke_resolver_impl(impl, entry.host_name, impl_data)
-    catch e
-        if e isa MethodError && !is_default_impl
-            try
-                addresses = impl(entry.host_name, HostAddressType.A, impl_data)
-                error_code = AWS_OP_SUCCESS
-            catch err
-                logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: custom resolve failed for '$(entry.host_name)': $err")
-                addresses = HostAddress[]
-                error_code = ERROR_IO_DNS_QUERY_FAILED
-            end
+        if impl !== nothing
+            resolved, err = _invoke_resolver_impl(impl::HostResolveImpl, host_name, entry.resolution_config.impl_data)
+            addresses = resolved
+            error_code = err
         else
-            logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve failed for '$(entry.host_name)': $e")
-            error_code = ERROR_IO_DNS_QUERY_FAILED
+            impl_data_any = entry.resolution_config.impl_data
+            max_addresses::UInt64 = impl_data_any isa Integer ? UInt64(impl_data_any::Integer) : UInt64(0)
+            resolved, err = _default_dns_resolve(host_name, max_addresses)
+            addresses = resolved
+            error_code = Int(err)
         end
+    catch
+        logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve failed for '$host_name'")
+        return HostAddress[], ERROR_IO_DNS_QUERY_FAILED
     end
 
-    if error_code == AWS_OP_SUCCESS
-        if addresses isa AbstractVector{HostAddress}
-            addresses = collect(addresses)
-            for addr in addresses
-                addr.host = entry.host_name
-            end
-        else
-            addresses = HostAddress[]
-            error_code = ERROR_IO_DNS_QUERY_FAILED
-        end
+    error_code == AWS_OP_SUCCESS || return HostAddress[], error_code
+
+    normalized = HostAddress[]
+    sizehint!(normalized, length(addresses))
+    for addr in addresses
+        addr_copy = copy(addr)
+        addr_copy.host = host_name
+        push!(normalized, addr_copy)
     end
 
-    return addresses, error_code
+    return normalized, AWS_OP_SUCCESS
 end
 
 # Channel-based rendezvous for passing HostEntry to the resolver thread.
@@ -525,16 +533,28 @@ const _RESOLVER_THREAD_STARTUP = Base.Channel{Any}(1)
     try
         _host_resolver_thread(entry)
     catch e
-        Core.println("host resolver thread errored: $e")
+        Core.println("host resolver thread errored")
     finally
         managed_thread_finished!()
     end
 end
 
 const _RESOLVER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+const _RESOLVER_THREAD_ENTRY_LOCK = ReentrantLock()
 
 function _host_resolver_init_cfunctions!()
     _RESOLVER_THREAD_ENTRY_C[] = @cfunction(_resolver_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+    return nothing
+end
+
+function _host_resolver_ensure_thread_entry!()::Nothing
+    _RESOLVER_THREAD_ENTRY_C[] != C_NULL && return nothing
+    lock(_RESOLVER_THREAD_ENTRY_LOCK)
+    try
+        _RESOLVER_THREAD_ENTRY_C[] == C_NULL && _host_resolver_init_cfunctions!()
+    finally
+        unlock(_RESOLVER_THREAD_ENTRY_LOCK)
+    end
     return nothing
 end
 
@@ -644,9 +664,8 @@ function _host_resolver_thread(entry::HostEntry)
             entry.on_host_purge_complete(UInt8(0))
         end
     catch err
-        logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: thread failed for '$(entry.host_name)': $err")
-        bt = catch_backtrace()
-        logf(LogLevel.ERROR, LS_IO_DNS,string("%s", " ", string(sprint(showerror, err, bt))))
+        _ = err
+        logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: thread failed for '$(entry.host_name)'")
     end
 
     return nothing
@@ -664,8 +683,8 @@ end
 function host_resolver_resolve!(
         resolver::HostResolver,
         host_name::AbstractString,
-        on_resolved;
-        resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
+        on_resolved,
+        resolution_config::Union{HostResolutionConfig, Nothing},
     )::Nothing
     if @atomic resolver.shutdown
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve called after shutdown")
@@ -676,11 +695,13 @@ function host_resolver_resolve!(
     timestamp = _resolver_clock(resolver)
 
     callback = _host_resolve_callback_callable(on_resolved)
+    normalized_config = _normalize_resolution_config(resolver, resolution_config)
 
     lock(resolver.resolver_lock)
-    entry = get(resolver.cache, host, nothing)
-    if entry === nothing
-        new_entry = HostEntry(resolver, host, resolution_config, timestamp)
+    entry_any = get(resolver.cache, host, nothing)
+    if entry_any === nothing
+        _host_resolver_ensure_thread_entry!()
+        new_entry = HostEntry(resolver, host, normalized_config, timestamp)
         push!(
             new_entry.pending_callbacks,
             PendingCallback(callback),
@@ -699,6 +720,7 @@ function host_resolver_resolve!(
         return nothing
     end
 
+    entry = entry_any::HostEntry
     lock(entry.entry_lock)
     unlock(resolver.resolver_lock)
 
@@ -720,6 +742,15 @@ function host_resolver_resolve!(
     unlock(entry.entry_lock)
 
     return nothing
+end
+
+function host_resolver_resolve!(
+        resolver::HostResolver,
+        host_name::AbstractString,
+        on_resolved;
+        resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
+    )::Nothing
+    return host_resolver_resolve!(resolver, host_name, on_resolved, resolution_config)
 end
 
 # Purge the entire cache
@@ -753,12 +784,13 @@ function host_resolver_purge_host_cache!(
     host = String(host_name)
 
     lock(resolver.resolver_lock)
-    entry = get(resolver.cache, host, nothing)
-    if entry === nothing
+    entry_any = get(resolver.cache, host, nothing)
+    if entry_any === nothing
         unlock(resolver.resolver_lock)
         _dispatch_simple_callback(resolver, on_host_purge_complete)
         return nothing
     end
+    entry = entry_any::HostEntry
 
     lock(entry.entry_lock)
     entry.on_host_purge_complete = on_host_purge_complete
@@ -781,8 +813,9 @@ function host_resolver_get_host_address_count(
     count = 0
 
     lock(resolver.resolver_lock)
-    entry = get(resolver.cache, host, nothing)
-    if entry !== nothing
+    entry_any = get(resolver.cache, host, nothing)
+    if entry_any !== nothing
+        entry = entry_any::HostEntry
         lock(entry.entry_lock)
         if (flags & GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A) != 0
             count += cache_count(entry.a_records)
@@ -806,11 +839,12 @@ function host_resolver_get_address!(
     host = String(host_name)
 
     lock(resolver.resolver_lock)
-    entry = get(resolver.cache, host, nothing)
-    if entry === nothing
+    entry_any = get(resolver.cache, host, nothing)
+    if entry_any === nothing
         unlock(resolver.resolver_lock)
         return nothing
     end
+    entry = entry_any::HostEntry
     lock(entry.entry_lock)
     unlock(resolver.resolver_lock)
 
@@ -828,11 +862,12 @@ function host_resolver_record_connection_failure!(
         address::HostAddress,
     )
     lock(resolver.resolver_lock)
-    entry = get(resolver.cache, address.host, nothing)
-    if entry === nothing
+    entry_any = get(resolver.cache, address.host, nothing)
+    if entry_any === nothing
         unlock(resolver.resolver_lock)
         return nothing
     end
+    entry = entry_any::HostEntry
 
     lock(entry.entry_lock)
     unlock(resolver.resolver_lock)

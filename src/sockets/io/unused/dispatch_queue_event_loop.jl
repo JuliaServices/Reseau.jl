@@ -294,7 +294,6 @@
         dispatch_loop = DispatchLoop()
         event_loop = EventLoop(options.clock, dispatch_loop)
         dispatch_loop.base_loop = event_loop
-        event_loop.base_elg = options.parent_elg
 
         thread_increment_unjoined_count()
 

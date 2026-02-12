@@ -241,7 +241,7 @@
                     try
                         _iocp_pipe_read_end_report_error_task(read_end, _coerce_task_status(status))
                     catch e
-                        Core.println("pipe_read_end_report_error task errored: $e")
+                        Core.println("pipe_read_end_report_error task errored")
                     end
                     return nothing
                 end);

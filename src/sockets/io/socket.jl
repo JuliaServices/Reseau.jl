@@ -66,7 +66,7 @@ mutable struct SocketEndpoint
 end
 
 function SocketEndpoint()
-    return SocketEndpoint(ntuple(_ -> UInt8(0), ADDRESS_MAX_LEN), UInt32(0))
+    return SocketEndpoint(ntuple(_ -> UInt8(0), Val(ADDRESS_MAX_LEN)), UInt32(0))
 end
 
 function SocketEndpoint(address::AbstractString, port::Integer)
@@ -80,7 +80,7 @@ function set_address!(endpoint::SocketEndpoint, address::AbstractString)
     bytes = codeunits(address)
     len = min(length(bytes), ADDRESS_MAX_LEN - 1)
     # Build new address tuple
-    addr = ntuple(ADDRESS_MAX_LEN) do i
+    addr = ntuple(Val(ADDRESS_MAX_LEN)) do i
         if i <= len
             bytes[i]
         else
@@ -136,7 +136,9 @@ function SocketOptions(;
         keepalive::Bool = false,
         network_interface_name::AbstractString = "",
     )
-    iface = ntuple(i -> i <= length(network_interface_name) ? UInt8(codeunit(network_interface_name, i)) : UInt8(0), NETWORK_INTERFACE_NAME_MAX)
+    iface = ntuple(Val(NETWORK_INTERFACE_NAME_MAX)) do i
+        i <= length(network_interface_name) ? UInt8(codeunit(network_interface_name, i)) : UInt8(0)
+    end
     return SocketOptions(
         type,
         domain,
@@ -165,19 +167,22 @@ end
 struct SocketConnectOptions
     remote_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
+    event_loop_group::Union{EventLoopGroup, Nothing}
     on_connection_result::Union{EventCallable, Nothing}
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
 end
 
 function SocketConnectOptions(
         remote_endpoint::SocketEndpoint;
         event_loop = nothing,
+        event_loop_group = nothing,
         on_connection_result = nothing,
-        tls_connection_options = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )
     return SocketConnectOptions(
         remote_endpoint,
         event_loop,
+        event_loop_group,
         on_connection_result,
         tls_connection_options,
     )
@@ -187,13 +192,13 @@ end
 struct SocketBindOptions
     local_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
 end
 
 function SocketBindOptions(
         local_endpoint::SocketEndpoint;
         event_loop = nothing,
-        tls_connection_options = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )
     return SocketBindOptions(
         local_endpoint,
@@ -206,15 +211,18 @@ end
 struct SocketListenerOptions
     on_accept_result::Union{ChannelCallable, Nothing}
     on_accept_start::Union{EventCallable, Nothing}
+    event_loop_group::Union{EventLoopGroup, Nothing}
 end
 
 function SocketListenerOptions(;
         on_accept_result = nothing,
         on_accept_start = nothing,
+        event_loop_group = nothing,
     )
     return SocketListenerOptions(
         on_accept_result,
         on_accept_start,
+        event_loop_group,
     )
 end
 
@@ -269,8 +277,44 @@ function socket_connect(socket::Socket, options::SocketConnectOptions)::Nothing
     return socket_connect_impl(socket.impl, socket, options)
 end
 
+function socket_connect(
+        socket::Socket,
+        remote_endpoint::SocketEndpoint;
+        event_loop::Union{EventLoop, Nothing} = nothing,
+        event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
+        on_connection_result::Union{EventCallable, Nothing} = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+    )::Nothing
+    return socket_connect(
+        socket,
+        SocketConnectOptions(
+            remote_endpoint;
+            event_loop = event_loop,
+            event_loop_group = event_loop_group,
+            on_connection_result = on_connection_result,
+            tls_connection_options = tls_connection_options,
+        ),
+    )
+end
+
 function socket_bind(socket::Socket, options::SocketBindOptions)::Nothing
     return socket_bind_impl(socket.impl, socket, options)
+end
+
+function socket_bind(
+        socket::Socket,
+        local_endpoint::SocketEndpoint;
+        event_loop::Union{EventLoop, Nothing} = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+    )::Nothing
+    return socket_bind(
+        socket,
+        SocketBindOptions(
+            local_endpoint;
+            event_loop = event_loop,
+            tls_connection_options = tls_connection_options,
+        ),
+    )
 end
 
 function socket_listen(socket::Socket, backlog_size::Integer)::Nothing
@@ -303,7 +347,7 @@ function socket_close(socket::Socket)::Nothing
                 socket_close_impl(socket.impl, socket)
                 notify(fut, nothing)
             catch e
-                notify(fut, e isa ReseauError ? e : CapturedException(e, catch_backtrace()))
+                notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
             end
             return nothing
         end);
@@ -322,8 +366,26 @@ function socket_set_options(socket::Socket, options::SocketOptions)::Nothing
     return socket_set_options_impl(socket.impl, socket, options)
 end
 
+function socket_assign_to_event_loop_impl(
+        impl,
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup, Nothing},
+    )::Nothing
+    _ = event_loop_group
+    return socket_assign_to_event_loop_impl(impl, socket, event_loop)
+end
+
 function socket_assign_to_event_loop(socket::Socket, event_loop::EventLoop)::Nothing
     return socket_assign_to_event_loop_impl(socket.impl, socket, event_loop)
+end
+
+function socket_assign_to_event_loop(
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup, Nothing},
+    )::Nothing
+    return socket_assign_to_event_loop_impl(socket.impl, socket, event_loop, event_loop_group)
 end
 
 function socket_subscribe_to_readable_events(socket::Socket, on_readable::EventCallable)::Nothing

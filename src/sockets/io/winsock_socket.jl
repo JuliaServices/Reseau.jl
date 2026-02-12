@@ -622,7 +622,7 @@
                 try
                     _winsock_handle_socket_timeout(args, _coerce_task_status(status))
                 catch e
-                    Core.println("winsock_connect_timeout task errored: $e")
+                    Core.println("winsock_connect_timeout task errored")
                 end
                 return nothing
             end);
@@ -732,7 +732,7 @@
                         _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                         _winsock_local_and_udp_connection_success(sock)
                     catch e
-                        Core.println("winsock_local_connect_success task errored: $e")
+                        Core.println("winsock_local_connect_success task errored")
                     end
                     return nothing
                 end);
@@ -798,7 +798,7 @@
                             _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                             _winsock_local_and_udp_connection_success(sock)
                         catch e
-                            Core.println("winsock_udp_connect_success task errored: $e")
+                            Core.println("winsock_udp_connect_success task errored")
                         end
                         return nothing
                     end);
@@ -1373,7 +1373,7 @@
                         try
                             _winsock_named_pipe_connected_immediately_task(impl.read_io_data, _coerce_task_status(status))
                         catch e
-                            Core.println("winsock_pipe_connected_immediately task errored: $e")
+                            Core.println("winsock_pipe_connected_immediately task errored")
                         end
                         return nothing
                     end);

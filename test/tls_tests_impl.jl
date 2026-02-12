@@ -288,9 +288,9 @@ end
     @test conn.alpn_list == "h2"
     @test conn.timeout_ms == 0x000000fa
     @test conn.advertise_alpn_message
-    @test conn.on_negotiation_result === cb1
-    @test conn.on_data_read === cb2
-    @test conn.on_error === cb3
+    @test conn.on_negotiation_result isa Reseau.TlsNegotiationResultCallback
+    @test conn.on_data_read isa Reseau.TlsDataReadCallback
+    @test conn.on_error isa Reseau.TlsErrorCallback
 
     conn_copy = Sockets.tls_connection_options_copy(conn)
     @test conn_copy.server_name == conn.server_name

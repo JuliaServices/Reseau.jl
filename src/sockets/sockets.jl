@@ -73,9 +73,7 @@ function io_library_init()
     _io_library_initialized[] && return nothing
     _io_library_initialized[] = true
     _cal_init()
-    tls_init_static_state()
     io_tracing_init()
-    _host_resolver_init_cfunctions!()
     return nothing
 end
 
@@ -88,6 +86,7 @@ function io_library_clean_up()
 end
 
 # --- IO implementation (moved from `src/io/*`) ---
+include("io/tls_types.jl")
 include("io/posix_socket_types.jl")
 include("io/apple_nw_socket_types.jl")
 include("io/winsock_socket_types.jl")
@@ -104,7 +103,6 @@ include("io/host_resolver.jl")
 include("io/retry_strategy.jl")
 include("io/stream.jl")
 include("io/pem.jl")
-include("io/shared_library.jl")
 include("io/pkcs11.jl")
 include("io/pki_utils.jl")
 include("io/pipe.jl")

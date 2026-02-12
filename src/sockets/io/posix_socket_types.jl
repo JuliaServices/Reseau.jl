@@ -12,9 +12,9 @@ mutable struct SocketWriteRequest
 end
 
 # POSIX socket connect args
-mutable struct PosixSocketConnectArgs
+mutable struct PosixSocketConnectArgs{S}
     task::Union{ScheduledTask, Nothing}
-    socket::Any  # Socket or nothing (Socket not defined yet)
+    socket::Union{S, Nothing}
 end
 
 # POSIX socket implementation data

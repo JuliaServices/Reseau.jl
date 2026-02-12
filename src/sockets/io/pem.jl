@@ -69,6 +69,70 @@ const PEM_LABELS = [
 const PEM_LABEL_TO_TYPE = Dict{String, PemObjectType.T}(
     label => obj_type for (label, obj_type) in PEM_LABELS
 )
+
+@inline function _pem_base64_value(c::UInt8)::Int
+    if c >= UInt8('A') && c <= UInt8('Z')
+        return Int(c - UInt8('A'))
+    elseif c >= UInt8('a') && c <= UInt8('z')
+        return Int(c - UInt8('a')) + 26
+    elseif c >= UInt8('0') && c <= UInt8('9')
+        return Int(c - UInt8('0')) + 52
+    elseif c == UInt8('+')
+        return 62
+    elseif c == UInt8('/')
+        return 63
+    else
+        return -1
+    end
+end
+
+function _pem_base64_decode(data::String)::Vector{UInt8}
+    bytes = codeunits(data)
+    n = length(bytes)
+    n == 0 && return UInt8[]
+    (n % 4) == 0 || throw_error(ERROR_IO_PEM_MALFORMED)
+
+    out = Vector{UInt8}(undef, (n >>> 2) * 3)
+    out_len = 0
+    i = 1
+    while i <= n
+        c1 = bytes[i]
+        c2 = bytes[i + 1]
+        c3 = bytes[i + 2]
+        c4 = bytes[i + 3]
+
+        v1 = _pem_base64_value(c1)
+        v2 = _pem_base64_value(c2)
+        (v1 < 0 || v2 < 0) && throw_error(ERROR_IO_PEM_MALFORMED)
+
+        pad3 = c3 == UInt8('=')
+        pad4 = c4 == UInt8('=')
+        (pad3 && !pad4) && throw_error(ERROR_IO_PEM_MALFORMED)
+
+        v3 = pad3 ? 0 : _pem_base64_value(c3)
+        v4 = pad4 ? 0 : _pem_base64_value(c4)
+        (v3 < 0 || v4 < 0) && throw_error(ERROR_IO_PEM_MALFORMED)
+
+        block = (UInt32(v1) << 18) | (UInt32(v2) << 12) | (UInt32(v3) << 6) | UInt32(v4)
+
+        out_len += 1
+        out[out_len] = UInt8((block >> 16) & 0xff)
+
+        if !pad3
+            out_len += 1
+            out[out_len] = UInt8((block >> 8) & 0xff)
+            if !pad4
+                out_len += 1
+                out[out_len] = UInt8(block & 0xff)
+            end
+        end
+
+        i += 4
+    end
+
+    resize!(out, out_len)
+    return out
+end
 const PEM_TYPE_TO_LABEL = Dict{PemObjectType.T, String}(
     obj_type => label for (label, obj_type) in PEM_LABELS
 )
@@ -126,12 +190,7 @@ function pem_parse(pem_data::AbstractVector{UInt8})::Vector{PemObject}
         else
             if startswith(trimmed, "-----END")
                 base64_clean = join(base64_lines)
-                decoded = try
-                    base64decode(base64_clean)
-                catch e
-                    logf(LogLevel.ERROR, LS_IO_PEM, "PEM: base64 decode failed: $e")
-                    throw_error(ERROR_IO_PEM_MALFORMED)
-                end
+                decoded = _pem_base64_decode(base64_clean)
 
                 buf = ByteBuffer(length(decoded))
                 if !isempty(decoded)

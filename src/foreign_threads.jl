@@ -10,7 +10,7 @@ module ForeignThreads
 # For managed threads, call `managed_thread_finished!()` in your thread
 # function's `finally` block and `join_all_managed()` at shutdown.
 
-using EnumX, ScopedValues
+using EnumX
 
 @enumx ThreadJoinStrategy::UInt8 begin
     MANUAL = 0
@@ -40,9 +40,6 @@ mutable struct ForeignThread
     name::String
     managed::Bool
 end
-
-# ScopedValue set by @wrap_thread_fn — thread functions read this to get their ID.
-const FOREIGN_THREAD_ID = ScopedValue{UInt64}()
 
 # ── Managed thread tracking ──────────────────────────────────────────
 
@@ -115,9 +112,8 @@ end
 # ── @wrap_thread_fn macro ────────────────────────────────────────────
 
 # Transform a zero-arg function definition into an OS thread entry point.
-# The output function takes `(::Ptr{Cvoid})::Ptr{Cvoid}` and sets up
-# FOREIGN_THREAD_ID before running the body. Thread adoption is handled
-# by @cfunction's trampoline.
+# The output function takes `(::Ptr{Cvoid})::Ptr{Cvoid}` and runs the
+# body on the adopted foreign thread (@cfunction trampoline).
 #
 # Usage:
 #   @wrap_thread_fn function my_worker()
@@ -142,11 +138,10 @@ macro wrap_thread_fn(fndef)
         function $(esc(name))(arg::Ptr{Cvoid})::Ptr{Cvoid}
             thread_id = UInt64(UInt(arg))
             try
-                @with FOREIGN_THREAD_ID => thread_id begin
-                    $(esc(body))
-                end
+                _ = thread_id
+                $(esc(body))
             catch e
-                Core.println("foreign thread ($thread_id) errored: $e")
+                Core.println("foreign thread ($thread_id) errored")
             end
             return C_NULL
         end
@@ -186,27 +181,14 @@ macro wrap_task_fn(fndef)
             try
                 $(esc(body))
             catch e
-                Core.println("task ($($(string(name)))) errored: $e")
+                Core.println("task ($($(string(name)))) errored")
             end
             return nothing
         end
     end
 end
 
-# ── Demo / test ──────────────────────────────────────────────────────
-
-@wrap_thread_fn function hello()
-    println("hello from a foreign thread: $(FOREIGN_THREAD_ID[])")
-end
-
-const FOREIGN_THREAD_HELLO_FN = Ref{Ptr{Cvoid}}(C_NULL)
-
 function __init__()
-    @static if Sys.iswindows()
-        FOREIGN_THREAD_HELLO_FN[] = @cfunction(hello, UInt32, (Ptr{Cvoid},))
-    else
-        FOREIGN_THREAD_HELLO_FN[] = @cfunction(hello, Ptr{Cvoid}, (Ptr{Cvoid},))
-    end
     return nothing
 end
 

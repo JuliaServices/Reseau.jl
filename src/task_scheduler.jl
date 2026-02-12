@@ -8,6 +8,23 @@ end
 @inline _coerce_task_status(status::TaskStatus.T)::TaskStatus.T = status
 @inline _coerce_task_status(status)::TaskStatus.T = TaskStatus.T(status)
 
+@inline function _callback_obj_to_ptr_and_root(obj)
+    obj === nothing && return C_NULL, nothing
+    if Base.ismutabletype(typeof(obj))
+        # Preserve mutable objects explicitly while passing raw object pointers
+        # through callback trampolines.
+        return pointer_from_objref(obj), obj
+    end
+    box = Ref{Any}(obj)
+    return pointer_from_objref(box), box
+end
+
+@inline function _callback_ptr_to_obj(ptr::Ptr{Cvoid})
+    ptr == C_NULL && return nothing
+    obj = unsafe_pointer_to_objref(ptr)
+    return obj isa Base.RefValue ? obj[] : obj
+end
+
 const _TASK_STATUS_STRINGS = (
     "<Running>",  # TaskStatus.RUN_READY == 0
     "<Canceled>", # TaskStatus.CANCELED == 1
@@ -20,7 +37,7 @@ const _TASK_STATUS_STRINGS = (
 
 struct _TaskCallWrapper <: Function end
 
-function (::_TaskCallWrapper)(f, status::UInt8)
+function (::_TaskCallWrapper)(f::F, status::UInt8) where {F}
     f(status)
     return nothing
 end
@@ -56,7 +73,7 @@ end
 
 struct _EventCallWrapper <: Function end
 
-function (::_EventCallWrapper)(f, x::Int)
+function (::_EventCallWrapper)(f::F, x::Int) where {F}
     f(x)
     return nothing
 end
@@ -91,7 +108,7 @@ end
 
 struct _WriteCallWrapper <: Function end
 
-function (::_WriteCallWrapper)(f, err::Int, n::Csize_t)
+function (::_WriteCallWrapper)(f::F, err::Int, n::Csize_t) where {F}
     f(err, n)
     return nothing
 end
@@ -127,14 +144,14 @@ end
 
 struct _ChannelCallWrapper <: Function end
 
-function (::_ChannelCallWrapper)(f, error_code::Int, obj)
-    f(error_code, obj)
+function (::_ChannelCallWrapper)(f::F, error_code::Int, objptr::Ptr{Cvoid}) where {F}
+    f(error_code, _callback_ptr_to_obj(objptr))
     return nothing
 end
 
 @generated function _channel_gen_fptr(::Type{F}) where F
     quote
-        @cfunction($(_ChannelCallWrapper()), Cvoid, (Ref{$F}, Int, Any))
+        @cfunction($(_ChannelCallWrapper()), Cvoid, (Ref{$F}, Int, Ptr{Cvoid}))
     end
 end
 
@@ -153,7 +170,10 @@ end
 
 
 @inline function (f::ChannelCallable)(error_code::Int, obj)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int, Any), f.objptr, error_code, obj)
+    objptr, objroot = _callback_obj_to_ptr_and_root(obj)
+    GC.@preserve objroot begin
+        ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Int, Ptr{Cvoid}), f.objptr, error_code, objptr)
+    end
     return nothing
 end
 
@@ -162,7 +182,7 @@ end
 
 struct _ProtocolNegotiatedCallWrapper <: Function end
 
-function (::_ProtocolNegotiatedCallWrapper)(f, slot, protocol)
+function (::_ProtocolNegotiatedCallWrapper)(f::F, slot, protocol) where {F}
     return f(slot, protocol)
 end
 
@@ -189,91 +209,33 @@ end
     return ccall(f.ptr, Any, (Ptr{Cvoid}, Any, Any), f.objptr, slot, protocol)
 end
 
-# ── HostResolveCallback: trim-safe (Any, Any, Int, Any) -> Nothing ──
-# Covers: host_resolver resolve callbacks
+# ── HostResolveCallback: typed resolver callback wrapper ──
 # (resolver, host_name, error_code, addresses) -> nothing.
 
-struct _HostResolveCallbackWrapper <: Function end
+struct HostResolveCallback{F}
+    callback::F
+end
 
-function (::_HostResolveCallbackWrapper)(f, resolver, host_name, error_code::Int, addresses)
-    f(resolver, host_name, error_code, addresses)
+@inline function (f::HostResolveCallback{F})(resolver, host_name, error_code::Int, addresses)::Nothing where {F}
+    f.callback(resolver, host_name, error_code, addresses)
     return nothing
 end
 
-@generated function _host_resolve_callback_gen_fptr(::Type{F}) where F
-    quote
-        @cfunction($(_HostResolveCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Int, Any))
-    end
-end
-
-struct HostResolveCallback
-    ptr::Ptr{Cvoid}
-    objptr::Ptr{Cvoid}
-    _root::Any
-end
-
-function HostResolveCallback(callable::F) where F
-    ptr = _host_resolve_callback_gen_fptr(F)
-    objref = Base.cconvert(Ref{F}, callable)
-    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
-    return HostResolveCallback(ptr, objptr, objref)
-end
-
-@inline function (f::HostResolveCallback)(resolver, host_name, error_code::Int, addresses)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int, Any), f.objptr, resolver, host_name, error_code, addresses)
-    return nothing
-end
-
-# ── HostResolveImpl: trim-safe resolver implementation wrappers ──
+# ── HostResolveImpl: typed resolver implementation wrapper ──
 # Supports both forms:
 #   (host, impl_data) -> result
 #   (host, address_type, impl_data) -> result
 
-struct _HostResolveImplWrapper2 <: Function end
-
-function (::_HostResolveImplWrapper2)(f, host, impl_data)
-    return f(host, impl_data)
+struct HostResolveImpl{F}
+    callable::F
 end
 
-@generated function _host_resolve_impl_gen_fptr2(::Type{F}) where F
-    quote
-        @cfunction($(_HostResolveImplWrapper2()), Any, (Ref{$F}, Any, Any))
-    end
+@inline function (f::HostResolveImpl{F})(host, impl_data) where {F}
+    return f.callable(host, impl_data)
 end
 
-struct _HostResolveImplWrapper3 <: Function end
-
-function (::_HostResolveImplWrapper3)(f, host, address_type, impl_data)
-    return f(host, address_type, impl_data)
-end
-
-@generated function _host_resolve_impl_gen_fptr3(::Type{F}) where F
-    quote
-        @cfunction($(_HostResolveImplWrapper3()), Any, (Ref{$F}, Any, Any, Any))
-    end
-end
-
-struct HostResolveImpl
-    ptr2::Ptr{Cvoid}
-    ptr3::Ptr{Cvoid}
-    objptr::Ptr{Cvoid}
-    _root::Any
-end
-
-function HostResolveImpl(callable::F) where F
-    ptr2 = _host_resolve_impl_gen_fptr2(F)
-    ptr3 = _host_resolve_impl_gen_fptr3(F)
-    objref = Base.cconvert(Ref{F}, callable)
-    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
-    return HostResolveImpl(ptr2, ptr3, objptr, objref)
-end
-
-@inline function (f::HostResolveImpl)(host, impl_data)
-    return ccall(f.ptr2, Any, (Ptr{Cvoid}, Any, Any), f.objptr, host, impl_data)
-end
-
-@inline function (f::HostResolveImpl)(host, address_type, impl_data)
-    return ccall(f.ptr3, Any, (Ptr{Cvoid}, Any, Any, Any), f.objptr, host, address_type, impl_data)
+@inline function (f::HostResolveImpl{F})(host, address_type, impl_data) where {F}
+    return f.callable(host, address_type, impl_data)
 end
 
 # ── TLS callback wrappers ──
@@ -281,7 +243,7 @@ end
 
 struct _TlsNegotiationResultCallbackWrapper <: Function end
 
-function (::_TlsNegotiationResultCallbackWrapper)(f, handler, slot, error_code::Int)
+function (::_TlsNegotiationResultCallbackWrapper)(f::F, handler, slot, error_code::Int) where {F}
     f(handler, slot, error_code)
     return nothing
 end
@@ -312,7 +274,7 @@ end
 
 struct _TlsDataReadCallbackWrapper <: Function end
 
-function (::_TlsDataReadCallbackWrapper)(f, handler, slot, buffer)
+function (::_TlsDataReadCallbackWrapper)(f::F, handler, slot, buffer) where {F}
     f(handler, slot, buffer)
     return nothing
 end
@@ -343,7 +305,7 @@ end
 
 struct _TlsErrorCallbackWrapper <: Function end
 
-function (::_TlsErrorCallbackWrapper)(f, handler, slot, error_code::Int, message)
+function (::_TlsErrorCallbackWrapper)(f::F, handler, slot, error_code::Int, message) where {F}
     f(handler, slot, error_code, message)
     return nothing
 end
@@ -378,14 +340,17 @@ end
 
 struct _BootstrapChannelCallbackWrapper <: Function end
 
-function (::_BootstrapChannelCallbackWrapper)(f, bootstrap, error_code::Int, channel, user_data)
+function (::_BootstrapChannelCallbackWrapper)(f::F, bootstrap_ptr::Ptr{Cvoid}, error_code::Int, channel_ptr::Ptr{Cvoid}, user_data_ptr::Ptr{Cvoid}) where {F}
+    bootstrap = _callback_ptr_to_obj(bootstrap_ptr)
+    channel = _callback_ptr_to_obj(channel_ptr)
+    user_data = _callback_ptr_to_obj(user_data_ptr)
     f(bootstrap, error_code, channel, user_data)
     return nothing
 end
 
 @generated function _bootstrap_channel_callback_gen_fptr(::Type{F}) where F
     quote
-        @cfunction($(_BootstrapChannelCallbackWrapper()), Cvoid, (Ref{$F}, Any, Int, Any, Any))
+        @cfunction($(_BootstrapChannelCallbackWrapper()), Cvoid, (Ref{$F}, Ptr{Cvoid}, Int, Ptr{Cvoid}, Ptr{Cvoid}))
     end
 end
 
@@ -403,7 +368,21 @@ function BootstrapChannelCallback(callable::F) where F
 end
 
 @inline function (f::BootstrapChannelCallback)(bootstrap, error_code::Int, channel, user_data)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Int, Any, Any), f.objptr, bootstrap, error_code, channel, user_data)
+    bootstrap_ptr, bootstrap_root = _callback_obj_to_ptr_and_root(bootstrap)
+    channel_ptr, channel_root = _callback_obj_to_ptr_and_root(channel)
+    user_data_ptr, user_data_root = _callback_obj_to_ptr_and_root(user_data)
+    GC.@preserve bootstrap_root channel_root user_data_root begin
+        ccall(
+            f.ptr,
+            Cvoid,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Int, Ptr{Cvoid}, Ptr{Cvoid}),
+            f.objptr,
+            bootstrap_ptr,
+            error_code,
+            channel_ptr,
+            user_data_ptr,
+        )
+    end
     return nothing
 end
 
@@ -413,14 +392,16 @@ end
 
 struct _BootstrapEventCallbackWrapper <: Function end
 
-function (::_BootstrapEventCallbackWrapper)(f, bootstrap, error_code::Int, user_data)
+function (::_BootstrapEventCallbackWrapper)(f::F, bootstrap_ptr::Ptr{Cvoid}, error_code::Int, user_data_ptr::Ptr{Cvoid}) where {F}
+    bootstrap = _callback_ptr_to_obj(bootstrap_ptr)
+    user_data = _callback_ptr_to_obj(user_data_ptr)
     f(bootstrap, error_code, user_data)
     return nothing
 end
 
 @generated function _bootstrap_event_callback_gen_fptr(::Type{F}) where F
     quote
-        @cfunction($(_BootstrapEventCallbackWrapper()), Cvoid, (Ref{$F}, Any, Int, Any))
+        @cfunction($(_BootstrapEventCallbackWrapper()), Cvoid, (Ref{$F}, Ptr{Cvoid}, Int, Ptr{Cvoid}))
     end
 end
 
@@ -438,7 +419,19 @@ function BootstrapEventCallback(callable::F) where F
 end
 
 @inline function (f::BootstrapEventCallback)(bootstrap, error_code::Int, user_data)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Int, Any), f.objptr, bootstrap, error_code, user_data)
+    bootstrap_ptr, bootstrap_root = _callback_obj_to_ptr_and_root(bootstrap)
+    user_data_ptr, user_data_root = _callback_obj_to_ptr_and_root(user_data)
+    GC.@preserve bootstrap_root user_data_root begin
+        ccall(
+            f.ptr,
+            Cvoid,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Int, Ptr{Cvoid}),
+            f.objptr,
+            bootstrap_ptr,
+            error_code,
+            user_data_ptr,
+        )
+    end
     return nothing
 end
 

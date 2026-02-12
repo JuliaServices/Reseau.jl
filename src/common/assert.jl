@@ -1,6 +1,5 @@
 function fatal_assert(cond_str::AbstractString, file::AbstractString, line::Integer)
-    write(Base.stderr, "FATAL_ASSERT: " * cond_str * " at " * file * ":" * string(line) * "\n")
-    throw(ErrorException("FATAL_ASSERT: " * cond_str))
+    throw(ErrorException("FATAL_ASSERT: " * cond_str * " at " * file * ":" * string(line) * "\n"))
 end
 
 function debug_assert(cond::Bool)

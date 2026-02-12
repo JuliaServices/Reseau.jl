@@ -28,57 +28,49 @@ JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no \
   trim/echo_trim_safe.jl
 ```
 
-## Result
+## Current Result (2026-02-12)
 
-- Runtime script check with `--experimental --trim=safe` succeeds.
-- `juliac` executable compilation fails in trim verifier:
-  - Max verifier index: `Verifier error #343` (343 total errors).
-  - Julia 1.12.5 no longer prints the old `Trim verify finished with ...` footer in this run.
-  - `Failed to compile trim/echo_trim_safe.jl`
+- Compile still fails under trim verifier.
+- Current verifier set: `19` errors + `2` warnings.
+- Latest log: `/tmp/reseau_trim_verify_latest.log`.
+- Net from this pass: reduced from `21` to `19` hard errors.
 
-## Main Blockers (Reseau)
+## Item-by-Item Status
 
-1. ~~Logging dispatch is still dynamic in trim paths.~~ **EXPERIMENTAL FIXED**
-- Logging now avoids vararg splatting in `logf/log!/format_line` and no longer shows trim verifier blockers.
-- Current experiment also simplifies log argument rendering (`"... [N args]"`) to avoid dynamic formatting/show paths.
+1. External JLL init (`aws_c_common_jll` / `JLLWrappers` sort/unique calls)
+- Status: `PASS (for now)`
+- Reason: external package init path, not in Reseau-owned code.
 
-2. Channel pipeline uses dynamic fields in hot send paths.
-- `src/sockets/io/channel.jl:96`
-- `src/sockets/io/channel.jl:871`
-- `src/sockets/io/channel.jl:878`
-- `src/sockets/io/channel.jl:887`
-- `src/sockets/io/channel.jl:892`
-- `src/sockets/io/channel.jl:905`
-- `src/sockets/io/channel.jl:907`
-- Symptoms: unresolved `getproperty` and handler dispatch from `slot.channel::Any` and nullable handler fields.
+2. `_ClientChannelOnSetup` callback invocation still unresolved under trim
+- Status: `PASS (for now)`
+- Work attempted: moved setup logic into direct callable method body on `_ClientChannelOnSetup`.
+- Result: unresolved invoke remains.
 
-3. Socket/bootstrap implementation fields are not concrete enough for trim-safe reachability.
-- `src/sockets/io/socket.jl:242`
-- `src/sockets/io/channel_bootstrap.jl:752`
-- `src/sockets/io/channel_bootstrap.jl:753`
-- `src/sockets/io/channel_bootstrap.jl:757`
-- `src/sockets/io/apple_nw_socket_impl.jl:668`
-- `src/sockets/io/apple_nw_socket_impl.jl:685`
-- `src/sockets/io/apple_nw_socket_impl.jl:686`
-- Symptoms: unresolved calls around `Union` impl fields and `Any` callback/TLS state.
+3. Host resolver callback/impl path (`_dispatch_resolve_callback`, `_invoke_resolver_impl`, `impl_data::Any`)
+- Status: `PASS (for now)`
+- Work attempted: explored stronger callback typing; reverted because it introduced additional unresolved `@cfunction` verifier failures.
+- Result: unresolved dynamic path remains and appears structural (callback + `impl_data` representation).
 
-4. TLS backend init is reached for this plain TCP example and triggers dynamic `Libdl` resolution.
-- `src/Reseau.jl:38`
-- `src/sockets/sockets.jl:76`
-- `src/sockets/io/tls_channel_handler.jl:1496`
-- `src/sockets/io/tls/secure_transport_tls_handler.jl:226`
-- `src/sockets/io/tls/secure_transport_tls_handler.jl:227`
+4. Channel handler vtable dispatch wrappers (`handler_process_*`, `handler_shutdown`, `handler_increment_read_window`)
+- Status: `PASS (for now)`
+- Work attempted: multiple callable-wrapper rewrites; best stable state still yields unresolved `f::Any` handler field access under trim.
+- Result: unresolved dynamic handler dispatch remains.
 
-5. Assertions/debug paths still pull in dynamic formatting/writes.
-- `src/common/assert.jl:2`
-- Symptoms: unresolved formatting/write calls in `fatal_assert` path.
+5. Socket handler trigger-read path (`_socket_handler_trigger_read`)
+- Status: `PASS (for now)`
+- Work attempted: tightened return types and removed `slot.channel::Any` usage in trigger path.
+- Result: unresolved invoke remains at callback callsites.
 
-6. ~~Error callback handlers are invoked through untyped function storage.~~ **FIXED** — removed unused handler callback system and ~45 unused error constants/functions from `error.jl`.
+## Changes Kept From This Iteration
 
-## Fix Directions
+1. Removed trim-hostile `println` vararg path in kqueue event-loop startup error handling.
+2. Kept typed channel extraction and explicit `::Nothing` annotations in `src/sockets/io/socket_channel_handler.jl` trigger-read path.
+3. Kept direct `_ClientChannelOnSetup` callable body (instead of delegating to separate helper).
 
-1. Make TLS/host-resolver static init lazy so plain TCP trim builds do not traverse TLS setup.
-2. Replace `Any` fields in channel/bootstrap/socket hot structs with concrete types or tighter unions.
-3. Use typed callback wrappers (`TaskFn`/`EventCallable`/`ChannelCallable`) consistently instead of raw `Function`.
-4. Keep trim-friendly logging fast paths (tuple-based/no vararg splats); optionally restore richer formatting with typed fast paths for common arg arities/types.
-5. Reduce dynamic `Libdl` keyword-path usage in SecureTransport setup where trim-safe compilation requires concrete dispatch.
+## Validation Run
+
+Default Reseau tests were run and passed:
+
+```sh
+JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
+```

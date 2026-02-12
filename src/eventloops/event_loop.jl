@@ -54,24 +54,24 @@ function _init_default_clock()
     _DEFAULT_CLOCK[] = HighResClock()
 end
 
+abstract type AbstractEventLoopGroup end
+
 # Event loop options
 struct EventLoopOptions
     clock::ClockSource
-    parent_elg::Any  # EventLoopGroup or nothing
 end
 
 function EventLoopOptions(;
         clock::ClockSource = _DEFAULT_CLOCK[],
-        parent_elg = nothing,
     )
-    return EventLoopOptions(clock, parent_elg)
+    return EventLoopOptions(clock)
 end
 
 # Event loop group options
 struct EventLoopGroupOptions
     loop_count::UInt16
     shutdown_options::Union{TaskFn, Nothing}
-    cpu_group::Any
+    cpu_group::Union{Nothing, Integer, Base.RefValue}
     clock_override::Union{ClockSource, Nothing}
 end
 
@@ -128,7 +128,6 @@ mutable struct EventLoop
     latest_tick_start::UInt64
     current_tick_latency_sum::Csize_t
     @atomic next_flush_time::UInt64
-    base_elg::Any  # EventLoopGroup or nothing
     impl_data::PlatformEventLoop
     @atomic running::Bool
     @atomic should_stop::Bool
@@ -143,7 +142,6 @@ function EventLoop(clock::ClockSource, impl_data::PlatformEventLoop)
         UInt64(0),
         Csize_t(0),
         UInt64(0),
-        nothing,
         impl_data,
         false,
         false,
@@ -280,11 +278,27 @@ function event_loop_new(options::EventLoopOptions)::EventLoop
     end
 end
 
+function event_loop_new(;
+        clock::ClockSource = _DEFAULT_CLOCK[],
+    )::EventLoop
+    return event_loop_new(EventLoopOptions(; clock = clock))
+end
+
 # Event Loop Group for managing multiple event loops
-mutable struct EventLoopGroup
+mutable struct EventLoopGroup <: AbstractEventLoopGroup
     event_loops::Vector{EventLoop}
     shutdown_options::Union{TaskFn, Nothing}
-    @atomic ref_count::Int
+    lease_lock::ReentrantLock
+    active_lease_ids::Set{UInt64}
+    next_lease_id::UInt64
+    @atomic close_requested::Bool
+    @atomic destroying::Bool
+    @atomic destroyed::Bool
+end
+
+struct EventLoopGroupLease
+    group::EventLoopGroup
+    lease_id::UInt64
 end
 
 # Julia-idiomatic conveniences:
@@ -310,19 +324,21 @@ function event_loop_group_new(options::EventLoopGroupOptions)
     elg = EventLoopGroup(
         Vector{EventLoop}(),
         options.shutdown_options,
-        1,
+        ReentrantLock(),
+        Set{UInt64}(),
+        UInt64(1),
+        false,
+        false,
+        false,
     )
     try
         # Create first event loop
-        first_opts = EventLoopOptions(; clock = clock)
-        first_loop = event_loop_new(first_opts)
-        first_loop.base_elg = elg
+        first_loop = event_loop_new(; clock = clock)
         push!(elg.event_loops, first_loop)
 
         # Create remaining event loops
         for _ in 2:loop_count
-            loop_opts = EventLoopOptions(; clock = clock, parent_elg = elg)
-            loop = event_loop_new(loop_opts)
+            loop = event_loop_new(; clock = clock)
             push!(elg.event_loops, loop)
         end
 
@@ -339,13 +355,54 @@ function event_loop_group_new(options::EventLoopGroupOptions)
     end
 end
 
+function event_loop_group_new(;
+        loop_count::Integer = 0,
+        shutdown_options::Union{TaskFn, Nothing} = nothing,
+        cpu_group = nothing,
+        clock_override::Union{ClockSource, Nothing} = nothing,
+    )
+    return event_loop_group_new(
+        EventLoopGroupOptions(;
+            loop_count = loop_count,
+            shutdown_options = shutdown_options,
+            cpu_group = cpu_group,
+            clock_override = clock_override,
+        ),
+    )
+end
+
 function EventLoopGroup(options::EventLoopGroupOptions)
     return event_loop_group_new(options)
 end
 
-function event_loop_group_acquire!(elg::EventLoopGroup)
-    @atomic elg.ref_count += 1
-    return elg
+function EventLoopGroup(;
+        loop_count::Integer = 0,
+        shutdown_options::Union{TaskFn, Nothing} = nothing,
+        cpu_group = nothing,
+        clock_override::Union{ClockSource, Nothing} = nothing,
+    )
+    return event_loop_group_new(;
+        loop_count = loop_count,
+        shutdown_options = shutdown_options,
+        cpu_group = cpu_group,
+        clock_override = clock_override,
+    )
+end
+
+function event_loop_group_open_lease!(elg::EventLoopGroup)::Union{EventLoopGroupLease, Nothing}
+    lock(elg.lease_lock)
+    try
+        if @atomic elg.close_requested
+            return nothing
+        end
+
+        lease_id = elg.next_lease_id
+        elg.next_lease_id += UInt64(1)
+        push!(elg.active_lease_ids, lease_id)
+        return EventLoopGroupLease(elg, lease_id)
+    finally
+        unlock(elg.lease_lock)
+    end
 end
 
 function _event_loop_group_called_from_loop_thread(elg::EventLoopGroup)::Bool
@@ -359,16 +416,17 @@ function _event_loop_group_called_from_loop_thread(elg::EventLoopGroup)::Bool
     return false
 end
 
-function event_loop_group_release!(elg::EventLoopGroup)
-    new_count = @atomic elg.ref_count -= 1
-    if new_count > 0
-        return nothing
-    elseif new_count < 0
-        logf(
-            LogLevel.ERROR,
-            LS_IO_EVENT_LOOP,string("Event loop group ref_count underflow (ref_count=%d)", " ", new_count, " ", ))
-        return nothing
+function _event_loop_group_ready_to_destroy(elg::EventLoopGroup)::Bool
+    lock(elg.lease_lock)
+    try
+        return (@atomic elg.close_requested) && isempty(elg.active_lease_ids)
+    finally
+        unlock(elg.lease_lock)
     end
+end
+
+function _event_loop_group_try_destroy!(elg::EventLoopGroup)::Nothing
+    _event_loop_group_ready_to_destroy(elg) || return nothing
 
     if _event_loop_group_called_from_loop_thread(elg)
         errormonitor(Threads.@spawn event_loop_group_destroy!(elg))
@@ -378,14 +436,60 @@ function event_loop_group_release!(elg::EventLoopGroup)
     return nothing
 end
 
-function event_loop_group_destroy!(elg::EventLoopGroup)
-    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Event loop group destroy")
-    for i in 1:length(elg.event_loops)
-        el = elg.event_loops[i]
-        el === nothing && continue
-        event_loop_destroy!(el)
+function event_loop_group_close_lease!(::Nothing)::Nothing
+    return nothing
+end
+
+function event_loop_group_close_lease!(lease::EventLoopGroupLease)::Nothing
+    elg = lease.group
+    removed = false
+    lock(elg.lease_lock)
+    try
+        if lease.lease_id in elg.active_lease_ids
+            delete!(elg.active_lease_ids, lease.lease_id)
+            removed = true
+        end
+    finally
+        unlock(elg.lease_lock)
     end
-    empty!(elg.event_loops)
+
+    removed && _event_loop_group_try_destroy!(elg)
+    return nothing
+end
+
+function event_loop_group_release!(elg::EventLoopGroup)::Nothing
+    @atomic elg.close_requested = true
+    _event_loop_group_try_destroy!(elg)
+    return nothing
+end
+
+function event_loop_group_destroy!(elg::EventLoopGroup)::Nothing
+    expected = false
+    if !(@atomicreplace elg.destroying expected => true).success
+        return nothing
+    end
+
+    @atomic elg.close_requested = true
+    lock(elg.lease_lock)
+    try
+        empty!(elg.active_lease_ids)
+    finally
+        unlock(elg.lease_lock)
+    end
+
+    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Event loop group destroy")
+    try
+        for i in 1:length(elg.event_loops)
+            el = elg.event_loops[i]
+            el === nothing && continue
+            event_loop_destroy!(el)
+        end
+    finally
+        empty!(elg.event_loops)
+        @atomic elg.destroyed = true
+        _event_loop_group_clear_default_if_matches!(elg)
+    end
+
     if elg.shutdown_options !== nothing
         elg.shutdown_options(UInt8(0))
     end
@@ -407,10 +511,10 @@ function default_event_loop_group()::EventLoopGroup
     lock(_DEFAULT_EVENT_LOOP_GROUP_LOCK)
     try
         elg = _DEFAULT_EVENT_LOOP_GROUP[]
-        if elg === nothing
+        if elg === nothing || (@atomic elg.destroyed)
             # Keep this single-loop to avoid surprising concurrency in downstream
             # consumers that "just want a default".
-            elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
+            elg = EventLoopGroup(; loop_count = 1)
             _DEFAULT_EVENT_LOOP_GROUP[] = elg
         end
         return elg::EventLoopGroup
@@ -454,19 +558,14 @@ function event_loop_group_get_next_loop(elg::EventLoopGroup)
     return load1 <= load2 ? el1 : el2
 end
 
-# Get group from event loop
-function event_loop_group_acquire_from_event_loop(event_loop::EventLoop)::Union{EventLoopGroup, Nothing}
-    if event_loop.base_elg === nothing
-        return nothing
-    end
-    elg = event_loop.base_elg::EventLoopGroup
-    return event_loop_group_acquire!(elg)
-end
-
-function event_loop_group_release_from_event_loop!(event_loop::EventLoop)
-    if event_loop.base_elg !== nothing
-        elg = event_loop.base_elg::EventLoopGroup
-        event_loop_group_release!(elg)
+function _event_loop_group_clear_default_if_matches!(elg::EventLoopGroup)::Nothing
+    lock(_DEFAULT_EVENT_LOOP_GROUP_LOCK)
+    try
+        if _DEFAULT_EVENT_LOOP_GROUP[] === elg
+            _DEFAULT_EVENT_LOOP_GROUP[] = nothing
+        end
+    finally
+        unlock(_DEFAULT_EVENT_LOOP_GROUP_LOCK)
     end
     return nothing
 end

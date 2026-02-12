@@ -126,7 +126,6 @@
 
         # Create the event loop
         event_loop = EventLoop(options.clock, impl)
-        event_loop.base_elg = options.parent_elg
 
         return event_loop
     end

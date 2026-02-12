@@ -83,11 +83,12 @@
         on_cleanup_complete::Union{TaskFn, Nothing}
         cleanup_requested::Bool
         event_loop::Union{EventLoop, Nothing}
+        event_loop_group_lease::Union{EventLoopGroupLease, Nothing}
         connection_setup::Bool
         timeout_task::Union{ScheduledTask, Nothing}
         host_name::Union{String, Nothing}
         alpn_list::Union{String, Nothing}
-        tls_ctx::Union{Any, Nothing}
+        tls_ctx::Union{AbstractTlsContext, Nothing}
         protocol_buf::ByteBuffer
         synced_lock::ReentrantLock
         read_scheduled::Bool
@@ -113,6 +114,7 @@
             nothing,
             nothing,
             false,
+            nothing,
             nothing,
             false,
             nothing,

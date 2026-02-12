@@ -112,6 +112,18 @@
     @inline _nw_unlock_synced(sock::NWSocket) = unlock(sock.synced_lock)
     @inline _nw_lock_base(sock::NWSocket) = lock(sock.base_socket_lock)
     @inline _nw_unlock_base(sock::NWSocket) = unlock(sock.base_socket_lock)
+    @inline _nw_impl(socket::Socket)::NWSocket = socket.impl::NWSocket
+
+    @inline function _nw_base_socket(nw_socket::NWSocket)::Union{Socket, Nothing}
+        base = nw_socket.base_socket
+        return base === nothing ? nothing : (base::Socket)
+    end
+
+    @inline function _nw_tls_ctx(nw_socket::NWSocket)::Union{AbstractTlsContext, Nothing}
+        ctx = nw_socket.tls_ctx
+        return ctx === nothing ? nothing : (ctx::AbstractTlsContext)
+    end
+
     @inline function _nw_socket_ptr(sock::NWSocket)::Ptr{Cvoid}
         key = sock.registry_key
         return key == C_NULL ? pointer_from_objref(sock) : key
@@ -121,21 +133,35 @@
         return event_loop !== nothing
     end
 
-    function _nw_set_event_loop!(socket::Socket, event_loop::EventLoop)::Nothing
-        socket.event_loop = event_loop
-        nw_socket = socket.impl::NWSocket
+    function _nw_set_event_loop!(
+            socket::Socket,
+            event_loop::EventLoop,
+            event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
+        )::Nothing
+        nw_socket = _nw_impl(socket)
         nw_socket.event_loop !== nothing && throw_error(ERROR_INVALID_STATE)
-        if event_loop_group_acquire_from_event_loop(event_loop) === nothing
-            logf(LogLevel.ERROR, LS_IO_SOCKET,string("nw_socket=%p: failed to acquire event loop group.", " ", _nw_socket_ptr(nw_socket)))
-            throw_error(ERROR_INVALID_STATE)
+
+        lease = nothing
+        if event_loop_group !== nothing
+            lease = event_loop_group_open_lease!(event_loop_group)
+            if lease === nothing
+                logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket: failed to acquire event loop group lease.")
+                throw_error(ERROR_INVALID_STATE)
+            end
         end
+
+        socket.event_loop = event_loop
+        nw_socket.event_loop_group_lease = lease
         nw_socket.event_loop = event_loop
         return nothing
     end
 
     function _nw_release_event_loop!(nw_socket::NWSocket)
+        if nw_socket.event_loop_group_lease !== nothing
+            event_loop_group_close_lease!(nw_socket.event_loop_group_lease)
+            nw_socket.event_loop_group_lease = nothing
+        end
         if nw_socket.event_loop !== nothing
-            event_loop_group_release_from_event_loop!(nw_socket.event_loop)
             nw_socket.event_loop = nothing
         end
         return nothing
@@ -185,7 +211,9 @@
         state_masked = UInt16(state & 0xFFFF)
         logf(
             LogLevel.DEBUG,
-            LS_IO_SOCKET,string("nw_socket=%p: set state from %s to %s", " ", _nw_socket_ptr(nw_socket), " ", _nw_state_string(nw_socket.state), " ", _nw_state_string(state_masked), " ", ))
+            LS_IO_SOCKET,
+            "nw_socket: set state from $(_nw_state_string(nw_socket.state)) to $(_nw_state_string(state_masked))",
+        )
 
         current = nw_socket.state
         read_write_bits = state_masked & (_nw_state_mask(NWSocketState.CONNECTED_WRITE) | _nw_state_mask(NWSocketState.CONNECTED_READ))
@@ -207,7 +235,9 @@
 
         logf(
             LogLevel.DEBUG,
-            LS_IO_SOCKET,string("nw_socket=%p: state now %s", " ", _nw_socket_ptr(nw_socket), " ", _nw_state_string(nw_socket.state), " ", ))
+            LS_IO_SOCKET,
+            "nw_socket: state now $(_nw_state_string(nw_socket.state))",
+        )
         return nothing
     end
 
@@ -366,31 +396,36 @@
             trust::sec_trust_t,
         )::Bool
         _ = metadata
-        transport_ctx = nw_socket.tls_ctx === nothing ? nothing : nw_socket.tls_ctx.impl
-        transport_ctx === nothing && return false
+        tls_ctx = _nw_tls_ctx(nw_socket)
+        tls_ctx === nothing && return false
 
-        if !transport_ctx.verify_peer
+        if !tls_context_verify_peer(tls_ctx)
             logf(
                 LogLevel.WARN,
-                LS_IO_TLS,string("nw_socket=%p: x.509 validation has been disabled. If this is not running in a test environment, this is likely a security vulnerability.", " ", _nw_socket_ptr(nw_socket), " ", ))
+                LS_IO_TLS,
+                "nw_socket: x.509 validation has been disabled. If this is not running in a test environment, this is likely a security vulnerability.",
+            )
             return true
         end
 
         trust_ref = ccall((:sec_trust_copy_ref, _NW_SECURITY_LIB), SecTrustRef, (sec_trust_t,), trust)
         trust_ref == C_NULL && return false
 
-        if transport_ctx.ca_cert != C_NULL
+        ca_cert = tls_context_ca_cert(tls_ctx)
+        if ca_cert != C_NULL
             status = ccall(
                 (:SecTrustSetAnchorCertificates, _NW_SECURITY_LIB),
                 OSStatus,
                 (SecTrustRef, CFArrayRef),
                 trust_ref,
-                transport_ctx.ca_cert,
+                ca_cert,
             )
             if status != 0
                 logf(
                     LogLevel.ERROR,
-                    LS_IO_TLS,string("nw_socket=%p: SecTrustSetAnchorCertificates failed with OSStatus %d", " ", _nw_socket_ptr(nw_socket), " ", Int(status), " ", ))
+                    LS_IO_TLS,
+                    "nw_socket: SecTrustSetAnchorCertificates failed with OSStatus $(Int(status))",
+                )
                 raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), trust_ref)
                 return false
@@ -422,7 +457,7 @@
                 policy,
             )
             if status != 0
-                logf(LogLevel.ERROR, LS_IO_TLS,string("nw_socket=%p: SecTrustSetPolicies failed %d", " ", _nw_socket_ptr(nw_socket), " ", Int(status)))
+                logf(LogLevel.ERROR, LS_IO_TLS, "nw_socket: SecTrustSetPolicies failed $(Int(status))")
                 raise_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), policy)
                 ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), trust_ref)
@@ -459,7 +494,9 @@
             crt_error = _nw_determine_socket_error(err_code)
             logf(
                 LogLevel.DEBUG,
-                LS_IO_TLS,string("nw_socket=%p: SecTrustEvaluateWithError failed with crt error %d: %s (CF error %d: %s)", " ", _nw_socket_ptr(nw_socket), " ", crt_error, " ", error_name(crt_error), " ", err_code, " ", err_desc, " ", ))
+                LS_IO_TLS,
+                "nw_socket: SecTrustEvaluateWithError failed with crt error $crt_error: $(error_name(crt_error)) (CF error $err_code: $err_desc)",
+            )
         end
 
         policy != C_NULL && ccall((:CFRelease, _COREFOUNDATION_LIB), Cvoid, (CFTypeRef,), policy)
@@ -477,16 +514,17 @@
         )
         sec_options == C_NULL && return nothing
 
-        transport_ctx = nw_socket.tls_ctx === nothing ? nothing : nw_socket.tls_ctx.impl
-        transport_ctx === nothing && return nothing
+        tls_ctx = _nw_tls_ctx(nw_socket)
+        tls_ctx === nothing && return nothing
 
-        local_identity = transport_ctx.secitem_identity
-        if local_identity == C_NULL && transport_ctx.certs != C_NULL
+        local_identity = tls_context_secitem_identity(tls_ctx)
+        certs = tls_context_certs(tls_ctx)
+        if local_identity == C_NULL && certs != C_NULL
             local_identity = ccall(
                 (:CFArrayGetValueAtIndex, _COREFOUNDATION_LIB),
                 Ptr{Cvoid},
                 (Ptr{Cvoid}, Clong),
-                transport_ctx.certs,
+                certs,
                 0,
             )
         end
@@ -500,7 +538,8 @@
             )
         end
 
-        if transport_ctx.minimum_tls_version == TlsVersion.TLSv1_2
+        min_tls_version = tls_context_minimum_tls_version_code(tls_ctx)
+        if min_tls_version == UInt8(TlsVersion.TLSv1_2)
             ccall(
                 (:sec_protocol_options_set_min_tls_protocol_version, _NW_SECURITY_LIB),
                 Cvoid,
@@ -508,7 +547,7 @@
                 sec_options,
                 tls_protocol_version_TLSv12,
             )
-        elseif transport_ctx.minimum_tls_version == TlsVersion.TLSv1_3
+        elseif min_tls_version == UInt8(TlsVersion.TLSv1_3)
             ccall(
                 (:sec_protocol_options_set_min_tls_protocol_version, _NW_SECURITY_LIB),
                 Cvoid,
@@ -525,7 +564,7 @@
             Cvoid,
             (sec_protocol_options_t, UInt8),
             sec_options,
-            transport_ctx.verify_peer ? 1 : 0,
+            tls_context_verify_peer(tls_ctx) ? 1 : 0,
         )
 
         if nw_socket.host_name !== nothing
@@ -553,7 +592,9 @@
         if nw_socket.event_loop === nothing
             logf(
                 LogLevel.ERROR,
-                LS_IO_TLS,string("nw_socket=%p: TLS verify block requires event loop with dispatch queue", " ", _nw_socket_ptr(nw_socket), " ", ))
+                LS_IO_TLS,
+                "nw_socket: TLS verify block requires event loop with dispatch queue",
+            )
         else
             _nw_ensure_callbacks!()
             dispatch_queue = nw_socket.event_loop.impl_data.dispatch_queue
@@ -656,10 +697,12 @@
         if options.type == SocketType.STREAM
             if setup_tls
                 nw_socket.event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-                transport_ctx = nw_socket.tls_ctx.impl
-                if transport_ctx.minimum_tls_version == TlsVersion.SSLv3 ||
-                        transport_ctx.minimum_tls_version == TlsVersion.TLSv1 ||
-                        transport_ctx.minimum_tls_version == TlsVersion.TLSv1_1
+                tls_ctx = _nw_tls_ctx(nw_socket)
+                tls_ctx === nothing && throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
+                min_tls_version = tls_context_minimum_tls_version_code(tls_ctx)
+                if min_tls_version == UInt8(TlsVersion.SSLv3) ||
+                        min_tls_version == UInt8(TlsVersion.TLSv1) ||
+                        min_tls_version == UInt8(TlsVersion.TLSv1_1)
                     throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
 
@@ -821,7 +864,7 @@
             _nw_socket_state_changed(ctx, state, error)
         catch ex
             try
-                @error "Fatal error in nw_connection state handler" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in nw_connection state handler")
             catch
             end
         end
@@ -834,7 +877,7 @@
             _nw_listener_state_changed(ctx, state, error)
         catch ex
             try
-                @error "Fatal error in nw_listener state handler" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in nw_listener state handler")
             catch
             end
         end
@@ -847,7 +890,7 @@
             _nw_listener_new_connection(ctx, connection)
         catch ex
             try
-                @error "Fatal error in nw_listener new connection handler" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in nw_listener new connection handler")
             catch
             end
         end
@@ -866,7 +909,7 @@
             _nw_receive_completion(ctx, data, context, is_complete, error)
         catch ex
             try
-                @error "Fatal error in nw_connection receive completion" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in nw_connection receive completion")
             catch
             end
         end
@@ -882,7 +925,7 @@
             _nw_send_completion(send_ctx_ptr, error, data)
         catch ex
             try
-                @error "Fatal error in nw_connection send completion" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in nw_connection send completion")
             catch
             end
         finally
@@ -903,7 +946,7 @@
             verified = _nw_tls_verify_callback(ctx, metadata, trust) != 0
         catch ex
             try
-                @error "Fatal error in sec_protocol verify callback" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in sec_protocol verify callback")
             catch
             end
             verified = false
@@ -914,7 +957,7 @@
             complete != C_NULL && BlocksABI.call_block_void_bool(complete, verified)
         catch ex
             try
-                @error "Fatal error calling sec_protocol verify completion block" exception = (ex, catch_backtrace())
+                Core.println("Fatal error calling sec_protocol verify completion block")
             catch
             end
         end
@@ -927,7 +970,7 @@
             _nw_tls_options_callback(ctx, options)
         catch ex
             try
-                @error "Fatal error in nw_parameters TLS options block" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in nw_parameters TLS options block")
             catch
             end
         end
@@ -940,7 +983,7 @@
             _nw_tcp_options_callback(ctx, options)
         catch ex
             try
-                @error "Fatal error in nw_parameters TCP/UDP options block" exception = (ex, catch_backtrace())
+                Core.println("Fatal error in nw_parameters TCP/UDP options block")
             catch
             end
         end
@@ -1044,8 +1087,8 @@
                         push!(nw_socket.read_queue, node)
                     end
 
-                    if nw_socket.base_socket !== nothing
-                        socket = nw_socket.base_socket
+                    socket = _nw_base_socket(nw_socket)
+                    if socket !== nothing
                         if socket.options.type != SocketType.DGRAM && is_complete
                             _nw_lock_synced(nw_socket)
                             _nw_set_socket_state!(nw_socket, ~Int(_nw_state_mask(NWSocketState.CONNECTED_READ)))
@@ -1056,7 +1099,7 @@
                         end
                     end
                 catch e
-                    Core.println("nw_readable_task task errored: $e")
+                    Core.println("nw_readable_task task errored")
                 end
                 return nothing
             end);
@@ -1086,7 +1129,9 @@
         if nw_socket.base_socket !== nothing
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,string("NW receive complete: is_complete=%d is_final=%d err=%d", " ", is_complete ? 1 : 0, " ", complete ? 1 : 0, " ", err_code, " ", ))
+                LS_IO_SOCKET,
+                "NW receive complete: is_complete=$(is_complete ? 1 : 0) is_final=$(complete ? 1 : 0) err=$err_code",
+            )
         end
 
         _nw_handle_incoming_data(nw_socket, err_code, data, complete)
@@ -1108,7 +1153,7 @@
                         written_fn(error_code, bytes_written)
                     end
                 catch e
-                    Core.println("nw_written_task task errored: $e")
+                    Core.println("nw_written_task task errored")
                 end
                 return nothing
             end);
@@ -1149,7 +1194,7 @@
 
     function _nw_connection_ready!(nw_socket::NWSocket, connection::nw_connection_t)
         _nw_lock_base(nw_socket)
-        socket = nw_socket.base_socket
+        socket = _nw_base_socket(nw_socket)
         if socket !== nothing
             path = ccall((:nw_connection_copy_current_path, _NW_NETWORK_LIB), nw_path_t, (nw_connection_t,), connection)
             endpoint = ccall((:nw_path_copy_effective_local_endpoint, _NW_NETWORK_LIB), nw_endpoint_t, (nw_path_t,), path)
@@ -1198,13 +1243,15 @@
 
         if nw_socket.on_connection_result !== nothing
             _nw_lock_base(nw_socket)
-            socket = nw_socket.base_socket
+            socket = _nw_base_socket(nw_socket)
             nw_socket.on_connection_result(0)
             _nw_unlock_base(nw_socket)
         else
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,string("nw_socket=%p: connection ready but no connect callback set", " ", _nw_socket_ptr(nw_socket), " ", ))
+                LS_IO_SOCKET,
+                "nw_socket: connection ready but no connect callback set",
+            )
         end
         return nothing
     end
@@ -1248,7 +1295,9 @@
                     if err_code != 0
                         logf(
                             LogLevel.ERROR,
-                            LS_IO_SOCKET,string("nw_connection error (domain=%d raw=%d mapped=%d)", " ", Int(raw_domain), " ", Int(raw_code), " ", err_code, " ", ))
+                            LS_IO_SOCKET,
+                            "nw_connection error (domain=$(Int(raw_domain)) raw=$(Int(raw_code)) mapped=$err_code)",
+                        )
                         nw_socket.last_error = err_code
                         _nw_lock_synced(nw_socket)
                         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
@@ -1257,7 +1306,7 @@
                         if !nw_socket.connection_setup
                             if nw_socket.on_connection_result !== nothing
                                 _nw_lock_base(nw_socket)
-                                socket = nw_socket.base_socket
+                                socket = _nw_base_socket(nw_socket)
                                 nw_socket.on_connection_result(err_code)
                                 _nw_unlock_base(nw_socket)
                             end
@@ -1270,7 +1319,7 @@
                         end
                     end
                 catch e
-                    Core.println("nw_conn_state task errored: $e")
+                    Core.println("nw_conn_state task errored")
                 end
                 return nothing
             end);
@@ -1302,7 +1351,9 @@
                     elseif state == 3 # nw_listener_state_failed
                         logf(
                             LogLevel.ERROR,
-                            LS_IO_SOCKET,string("nw_listener failed (domain=%d raw=%d mapped=%d)", " ", Int(raw_domain), " ", Int(raw_code), " ", err_code, " ", ))
+                            LS_IO_SOCKET,
+                            "nw_listener failed (domain=$(Int(raw_domain)) raw=$(Int(raw_code)) mapped=$err_code)",
+                        )
                         _nw_lock_synced(nw_socket)
                         _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
                         _nw_unlock_synced(nw_socket)
@@ -1329,7 +1380,7 @@
                         end
                     end
                 catch e
-                    Core.println("nw_listener_state task errored: $e")
+                    Core.println("nw_listener_state task errored")
                 end
                 return nothing
             end);
@@ -1339,72 +1390,96 @@
         return nothing
     end
 
-    function _nw_listener_poll_port_until_ready!(nw_socket::NWSocket)::Nothing
-        # Called on the socket's event-loop thread.
-        nw_socket.event_loop === nothing && return nothing
-
-        deadline_ns = time_ns() + 2_000_000_000
-
-        function try_finish!()::Bool
-            _nw_lock_base(nw_socket)
-            try
-                sock = nw_socket.base_socket
-                cb = nw_socket.on_accept_started
-                sock === nothing && return true
-                cb === nothing && return true
-                port = ccall((:nw_listener_get_port, _NW_NETWORK_LIB), UInt16, (nw_listener_t,), nw_socket.listener)
-                if port != 0
-                    sock.local_endpoint.port = port
-                    nw_socket.on_accept_started = nothing
-                    cb(0)
-                    return true
-                end
-                return false
-            finally
-                _nw_unlock_base(nw_socket)
+    @inline function _nw_listener_try_finish_port_ready!(nw_socket::NWSocket)::Bool
+        _nw_lock_base(nw_socket)
+        try
+            sock = _nw_base_socket(nw_socket)
+            cb = nw_socket.on_accept_started
+            sock === nothing && return true
+            cb === nothing && return true
+            port = ccall((:nw_listener_get_port, _NW_NETWORK_LIB), UInt16, (nw_listener_t,), nw_socket.listener)
+            if port != 0
+                sock.local_endpoint.port = port
+                nw_socket.on_accept_started = nothing
+                cb(0)
+                return true
             end
+            return false
+        finally
+            _nw_unlock_base(nw_socket)
         end
+    end
 
-        # Fast path: finish immediately if the port is already known.
-        try_finish!() && return nothing
+    @inline function _nw_listener_force_accept_started!(nw_socket::NWSocket)::Nothing
+        _nw_lock_base(nw_socket)
+        try
+            sock = _nw_base_socket(nw_socket)
+            cb = nw_socket.on_accept_started
+            if sock !== nothing && cb !== nothing
+                nw_socket.on_accept_started = nothing
+                cb(0)
+            end
+        finally
+            _nw_unlock_base(nw_socket)
+        end
+        return nothing
+    end
 
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
+    struct _NwListenerPortPollState
+        nw_socket::NWSocket
+        deadline_ns::UInt64
+        task_ref::Base.RefValue{Union{ScheduledTask, Nothing}}
+    end
 
-                    try_finish!() && return nothing
-                    if time_ns() >= deadline_ns
-                        # Timed out waiting for a non-zero port; proceed anyway to avoid hanging
-                        # listener setup in callers.
-                        _nw_lock_base(nw_socket)
-                        try
-                            sock = nw_socket.base_socket
-                            cb = nw_socket.on_accept_started
-                            if sock !== nothing && cb !== nothing
-                                nw_socket.on_accept_started = nothing
-                                cb(0)
-                            end
-                        finally
-                            _nw_unlock_base(nw_socket)
-                        end
-                        return nothing
-                    end
+    struct _NwListenerPortPollTaskFn
+        state::_NwListenerPortPollState
+    end
 
-                    now = event_loop_current_clock_time(nw_socket.event_loop)
-                    run_at = now + 1_000_000
-                    event_loop_schedule_task_future!(nw_socket.event_loop, task, run_at)
-                catch e
-                    Core.println("nw_listener_port_poll task errored: $e")
-                end
+    @inline function (fn::_NwListenerPortPollTaskFn)(status::UInt8)::Nothing
+        try
+            _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
+            state = fn.state
+            nw_socket = state.nw_socket
+
+            _nw_listener_try_finish_port_ready!(nw_socket) && return nothing
+            if time_ns() >= state.deadline_ns
+                # Timed out waiting for a non-zero port; proceed anyway to avoid hanging
+                # listener setup in callers.
+                _nw_listener_force_accept_started!(nw_socket)
                 return nothing
-            end);
+            end
+
+            event_loop = nw_socket.event_loop
+            event_loop === nothing && return nothing
+            task = state.task_ref[]
+            task === nothing && return nothing
+            run_at = event_loop_current_clock_time(event_loop) + 1_000_000
+            event_loop_schedule_task_future!(event_loop, task, run_at)
+        catch
+            Core.println("nw_listener_port_poll task errored")
+        end
+        return nothing
+    end
+
+    function _nw_listener_poll_port_until_ready!(nw_socket::NWSocket)::Nothing
+        event_loop = nw_socket.event_loop
+        event_loop === nothing && return nothing
+
+        _nw_listener_try_finish_port_ready!(nw_socket) && return nothing
+
+        task_ref = Ref{Union{ScheduledTask, Nothing}}(nothing)
+        state = _NwListenerPortPollState(
+            nw_socket,
+            time_ns() + 2_000_000_000,
+            task_ref,
+        )
+        task = ScheduledTask(
+            TaskFn(_NwListenerPortPollTaskFn(state));
             type_tag = "nw_listener_port_poll",
         )
-
-        now = event_loop_current_clock_time(nw_socket.event_loop)
-        run_at = now + 1_000_000
-        event_loop_schedule_task_future!(nw_socket.event_loop, task, run_at)
+        task_ref[] = task
+        run_at = event_loop_current_clock_time(event_loop) + 1_000_000
+        event_loop_schedule_task_future!(event_loop, task, run_at)
         return nothing
     end
 
@@ -1423,7 +1498,7 @@
                         return nothing
                     end
                     _nw_lock_base(nw_socket)
-                    listener = nw_socket.base_socket
+                    listener = _nw_base_socket(nw_socket)
                     if listener === nothing || listener.accept_result_fn === nothing
                         _nw_unlock_base(nw_socket)
                         ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
@@ -1479,7 +1554,7 @@
                     listener.accept_result_fn(0, new_socket)
                     _nw_unlock_base(nw_socket)
                 catch e
-                    Core.println("nw_listener_accept task errored: $e")
+                    Core.println("nw_listener_accept task errored")
                 end
                 return nothing
             end);
@@ -1504,7 +1579,7 @@
                         ccall((:nw_connection_cancel, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), nw_socket.connection)
                     end
                 catch e
-                    Core.println("nw_cancel task errored: $e")
+                    Core.println("nw_cancel task errored")
                 end
                 return nothing
             end);
@@ -1540,21 +1615,26 @@
         return nothing
     end
 
-    function _nw_setup_tls_from_connection_options!(nw_socket::NWSocket, options::Union{Any, Nothing})::Nothing
+    function _nw_setup_tls_from_connection_options!(
+            nw_socket::NWSocket,
+            options::MaybeTlsConnectionOptions,
+        )::Nothing
         if nw_socket.tls_ctx !== nothing || nw_socket.host_name !== nothing || nw_socket.alpn_list !== nothing
             throw_error(ERROR_INVALID_STATE)
         end
         options === nothing && return nothing
 
-        if options.server_name !== nothing
-            nw_socket.host_name = String(options.server_name)
+        server_name = tls_connection_options_server_name(options)
+        if server_name !== nothing
+            nw_socket.host_name = String(server_name)
         end
 
-        alpn_list = options.alpn_list
-        if options.ctx !== nothing
-            nw_socket.tls_ctx = options.ctx
+        alpn_list = tls_connection_options_alpn_list(options)
+        ctx = tls_connection_options_context(options)
+        if ctx !== nothing
+            nw_socket.tls_ctx = ctx
             if alpn_list === nothing
-                alpn_list = options.ctx.options.alpn_list
+                alpn_list = tls_context_alpn_list(ctx)
             end
         end
 
@@ -1592,7 +1672,7 @@
     end
 
     function socket_cleanup_impl(::NWSocket, socket::Socket)
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         nw_socket === nothing && return nothing
 
         if socket_is_open(socket)
@@ -1622,7 +1702,7 @@
             socket::Socket,
             options::SocketConnectOptions,
         )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         if socket.event_loop !== nothing
             throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
@@ -1632,7 +1712,7 @@
         event_loop = options.event_loop
         event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
-        _nw_set_event_loop!(socket, event_loop)
+        _nw_set_event_loop!(socket, event_loop, options.event_loop_group)
 
         _nw_setup_socket_params!(nw_socket, socket.options)
 
@@ -1689,11 +1769,15 @@
             nw_socket.on_connection_result = options.on_connection_result
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,string("nw_socket=%p: connect callback set", " ", _nw_socket_ptr(nw_socket), " ", ))
+                LS_IO_SOCKET,
+                "nw_socket connect callback set",
+            )
         else
             logf(
                 LogLevel.TRACE,
-                LS_IO_SOCKET,string("nw_socket=%p: connect callback missing", " ", _nw_socket_ptr(nw_socket), " ", ))
+                LS_IO_SOCKET,
+                "nw_socket connect callback missing",
+            )
         end
 
         event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)
@@ -1710,14 +1794,14 @@
                         if !nw_socket.connection_setup && nw_socket.base_socket !== nothing
                             err = ERROR_IO_SOCKET_TIMEOUT
                             nw_socket.connection_setup = true
-                            socket_close(nw_socket.base_socket)
+                            socket_close(_nw_base_socket(nw_socket)::Socket)
                             if nw_socket.on_connection_result !== nothing
                                 nw_socket.on_connection_result(err)
                             end
                         end
                         _nw_unlock_base(nw_socket)
                     catch e
-                        Core.println("nw_timeout task errored: $e")
+                        Core.println("nw_timeout task errored")
                     end
                     return nothing
                 end);
@@ -1734,7 +1818,7 @@
             socket::Socket,
             options::SocketBindOptions,
         )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
 
         _nw_lock_synced(nw_socket)
         try
@@ -1782,7 +1866,7 @@
             backlog_size::Integer,
         )::Nothing
         _ = backlog_size
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         try
         if nw_socket.state != _nw_state_mask(NWSocketState.BOUND)
@@ -1822,7 +1906,7 @@
 	            accept_loop::EventLoop,
 	            options::SocketListenerOptions,
 	        )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         try
         if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
@@ -1832,7 +1916,7 @@
         nw_socket.on_accept_started = options.on_accept_start
         socket.accept_result_fn = options.on_accept_result
 
-        _nw_set_event_loop!(socket, accept_loop)
+        _nw_set_event_loop!(socket, accept_loop, options.event_loop_group)
 
         event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle)
 
@@ -1868,7 +1952,7 @@
 	    end
 
     function socket_stop_accept_impl(::NWSocket, socket::Socket)::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         try
         if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
@@ -1883,7 +1967,7 @@
     end
 
     function socket_close_impl(::NWSocket, socket::Socket)::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         if nw_socket.state < _nw_state_mask(NWSocketState.CLOSING)
             _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSING)) | Int(_nw_state_mask(NWSocketState.CONNECTED_READ)))
@@ -1911,22 +1995,22 @@
             throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
         socket.options = copy(options)
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         _nw_setup_socket_params!(nw_socket, options)
         return nothing
     end
 
-    function socket_assign_to_event_loop_impl(
-            ::NWSocket,
+    function _nw_socket_assign_to_event_loop_impl(
             socket::Socket,
             event_loop::EventLoop,
+            event_loop_group::Union{EventLoopGroup, Nothing},
         )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         if socket.event_loop !== nothing
             throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
 
-        _nw_set_event_loop!(socket, event_loop)
+        _nw_set_event_loop!(socket, event_loop, event_loop_group)
 
         event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)
 
@@ -1936,12 +2020,29 @@
         return nothing
     end
 
+    function socket_assign_to_event_loop_impl(
+            ::NWSocket,
+            socket::Socket,
+            event_loop::EventLoop,
+        )::Nothing
+        return _nw_socket_assign_to_event_loop_impl(socket, event_loop, nothing)
+    end
+
+    function socket_assign_to_event_loop_impl(
+            ::NWSocket,
+            socket::Socket,
+            event_loop::EventLoop,
+            event_loop_group::Union{EventLoopGroup, Nothing},
+        )::Nothing
+        return _nw_socket_assign_to_event_loop_impl(socket, event_loop, event_loop_group)
+    end
+
     function socket_subscribe_to_readable_events_impl(
             ::NWSocket,
             socket::Socket,
             on_readable::EventCallable,
         )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         if nw_socket.mode == NWSocketMode.LISTENER
             throw_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
         end
@@ -1955,7 +2056,7 @@
             socket::Socket,
             buffer::ByteBuffer,
         )::Tuple{Nothing, Csize_t}
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
@@ -2008,7 +2109,7 @@
             cursor::ByteCursor,
             written_fn::Union{WriteCallable, Nothing},
         )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
@@ -2065,11 +2166,11 @@
     end
 
     function socket_get_error_impl(::NWSocket, socket::Socket)::Int
-        return socket.impl.last_error
+        return _nw_impl(socket).last_error
     end
 
     function socket_is_open_impl(::NWSocket, socket::Socket)::Bool
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         is_open = nw_socket.state < _nw_state_mask(NWSocketState.CLOSING)
         _nw_unlock_synced(nw_socket)
@@ -2081,7 +2182,7 @@
             socket::Socket,
             fn::TaskFn,
         )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         nw_socket.on_close_complete = fn
         return nothing
     end
@@ -2091,17 +2192,17 @@
             socket::Socket,
             fn::TaskFn,
         )::Nothing
-        nw_socket = socket.impl
+        nw_socket = _nw_impl(socket)
         nw_socket.on_cleanup_complete = fn
         return nothing
     end
 
     function socket_get_protocol_impl(::NWSocket, socket::Socket)::ByteBuffer
-        return socket.impl.protocol_buf
+        return _nw_impl(socket).protocol_buf
     end
 
     function socket_get_server_name_impl(::NWSocket, socket::Socket)::ByteBuffer
-        name = socket.impl.host_name
+        name = _nw_impl(socket).host_name
         name === nothing && return null_buffer()
         return byte_buf_from_c_str(name)
     end
