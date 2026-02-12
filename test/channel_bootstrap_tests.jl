@@ -275,7 +275,7 @@ end
     @test requested_loop !== nothing
     setup_called = Ref(false)
     setup_on_loop = Ref(false)
-    request = Sockets.SocketConnectionRequest(
+    request = Sockets.SocketConnectionRequest{Nothing, Nothing, Sockets._SocketConnectionEventCallback, Nothing, Nothing}(
         client_bootstrap,
         "example.com",
         UInt32(443),
@@ -285,11 +285,14 @@ end
         nothing,
         nothing,
         nothing,
-        Reseau.EventCallable(err -> begin
+        Sockets._SocketConnectionEventCallback((bs, err, channel, ud) -> begin
+            _ = bs
+            _ = channel
+            _ = ud
             setup_called[] = true
             setup_on_loop[] = EventLoops.event_loop_thread_is_callers_thread(requested_loop)
             return nothing
-        end),
+        end, nothing),
         nothing,
         false,
         requested_loop,

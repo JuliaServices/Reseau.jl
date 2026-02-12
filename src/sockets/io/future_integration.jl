@@ -17,7 +17,7 @@ function future_on_event_loop!(
                 try
                     callback(future, user_data)
                 catch e
-                    Core.println("future_event_loop_callback task errored: $e")
+                    Core.println("future_event_loop_callback task errored")
                 end
                 return nothing
             end);
@@ -47,7 +47,7 @@ function future_on_channel!(
                 try
                     callback(future, user_data)
                 catch e
-                    Core.println("future_channel_callback task errored: $e")
+                    Core.println("future_channel_callback task errored")
                 end
                 return nothing
             end);

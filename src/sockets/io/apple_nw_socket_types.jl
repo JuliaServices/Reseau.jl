@@ -87,7 +87,7 @@
         timeout_task::Union{ScheduledTask, Nothing}
         host_name::Union{String, Nothing}
         alpn_list::Union{String, Nothing}
-        tls_ctx::Union{Any, Nothing}
+        tls_ctx::Union{AbstractTlsContext, Nothing}
         protocol_buf::ByteBuffer
         synced_lock::ReentrantLock
         read_scheduled::Bool

@@ -100,6 +100,8 @@ const SHUT_WR = Cint(1)
     const _VSOCK_ZERO = ntuple(_ -> UInt8(0), 8)
 end
 
+@inline _posix_impl(sock::Socket)::PosixSocket = sock.impl::PosixSocket
+
 # Convert domain enum to system constant
 function convert_domain(domain::SocketDomain.T)::Cint
     if domain == SocketDomain.IPV4
@@ -348,7 +350,9 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
     if iface_len >= NETWORK_INTERFACE_NAME_MAX
         logf(
             LogLevel.ERROR,
-            LS_IO_SOCKET,string("id=%p fd=%d: network_interface_name max length must be less or equal than %d bytes including NULL terminated", " ", string(sock), " ", string(fd), " ", string(NETWORK_INTERFACE_NAME_MAX), " ", ))
+            LS_IO_SOCKET,
+            "fd=$fd: network_interface_name max length must be <= $NETWORK_INTERFACE_NAME_MAX bytes including the null terminator",
+        )
         throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
     end
 
@@ -375,7 +379,9 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                 iface_name = String(Vector{UInt8}(iface_bytes))
                 logf(
                     LogLevel.ERROR,
-                    LS_IO_SOCKET,string("id=%p fd=%d: setsockopt() with SO_BINDTODEVICE for \"%s\" failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
+                    LS_IO_SOCKET,
+                    "fd=$fd: setsockopt(SO_BINDTODEVICE) for \"$iface_name\" failed with errno $errno_val",
+                )
                 throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
         elseif IP_BOUND_IF != 0
@@ -385,7 +391,9 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                 errno_val = get_errno()
                 logf(
                     LogLevel.ERROR,
-                    LS_IO_SOCKET,string("id=%p fd=%d: network_interface_name \"%s\" not found. if_nametoindex() failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
+                    LS_IO_SOCKET,
+                    "fd=$fd: network_interface_name \"$iface_name\" not found; if_nametoindex() failed with errno $errno_val",
+                )
                 throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
 
@@ -405,7 +413,9 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                     errno_val = get_errno()
                     logf(
                         LogLevel.ERROR,
-                        LS_IO_SOCKET,string("id=%p fd=%d: setsockopt() with IPV6_BOUND_IF for \"%s\" failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
+                        LS_IO_SOCKET,
+                        "fd=$fd: setsockopt(IPV6_BOUND_IF) for \"$iface_name\" failed with errno $errno_val",
+                    )
                     throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
             else
@@ -423,14 +433,18 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                     errno_val = get_errno()
                     logf(
                         LogLevel.ERROR,
-                        LS_IO_SOCKET,string("id=%p fd=%d: setsockopt() with IP_BOUND_IF for \"%s\" failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
+                        LS_IO_SOCKET,
+                        "fd=$fd: setsockopt(IP_BOUND_IF) for \"$iface_name\" failed with errno $errno_val",
+                    )
                     throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
             end
         else
             logf(
                 LogLevel.ERROR,
-                LS_IO_SOCKET,string("id=%p fd=%d: network_interface_name is not supported on this platform.", " ", string(sock), " ", string(fd), " ", ))
+                LS_IO_SOCKET,
+                "fd=$fd: network_interface_name is not supported on this platform",
+            )
             throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
         end
     end
@@ -525,7 +539,7 @@ function inet_pton_ipv6(address::AbstractString)::NTuple{16, UInt8}
     if result != 1
         throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
     end
-    return Tuple(addr)
+    return ntuple(i -> addr[i], Val(16))
 end
 
 # Convert IPv4 to string
@@ -569,7 +583,7 @@ function socket_cleanup_impl(::PosixSocket, sock::Socket)
         return nothing
     end
 
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     fd_for_logging = sock.io_handle.fd
 
     if socket_is_open(sock)
@@ -690,7 +704,7 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
     copy!(sock.remote_endpoint, remote_endpoint)
     sock.connection_result_fn = on_connection_result
 
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
 
     # Create connect args
     connect_args = PosixSocketConnectArgs(nothing, sock)
@@ -715,7 +729,7 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
                 try
                     _run_connect_success(connect_args, _coerce_task_status(status))
                 catch e
-                    Core.println("posix_connect_success task errored: $e")
+                    Core.println("posix_connect_success task errored")
                 end
                 return nothing
             end);
@@ -734,7 +748,7 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
                 try
                     _handle_socket_timeout(connect_args, _coerce_task_status(status))
                 catch e
-                    Core.println("posix_connect_timeout task errored: $e")
+                    Core.println("posix_connect_timeout task errored")
                 end
                 return nothing
             end);
@@ -780,7 +794,7 @@ end
 # Connection success callback
 function _on_connection_success(sock::Socket)
     event_loop = sock.event_loop
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     fd = sock.io_handle.fd
 
     if socket_impl.currently_subscribed
@@ -849,14 +863,14 @@ function _on_connection_error(sock::Socket, error_code::Integer)
 end
 
 # Socket connect event handler
-function _socket_connect_event(connect_args, events::Int)
-    fd = connect_args.socket !== nothing ? connect_args.socket.io_handle.fd : -1
+function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::Int) where {S}
+    fd = connect_args.socket === nothing ? -1 : (connect_args.socket::Socket).io_handle.fd
 
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: connection activity handler triggered")
 
     if connect_args.socket !== nothing
-        sock = connect_args.socket
-        socket_impl = sock.impl
+        sock = connect_args.socket::Socket
+        socket_impl = _posix_impl(sock)
 
         # Check for error/closed events
         if (events & Int(IoEventType.ERROR) != 0) || (events & Int(IoEventType.CLOSED) != 0)
@@ -883,12 +897,12 @@ function _socket_connect_event(connect_args, events::Int)
 end
 
 # Handle socket connection timeout
-function _handle_socket_timeout(connect_args::PosixSocketConnectArgs, status::TaskStatus.T)
+function _handle_socket_timeout(connect_args::PosixSocketConnectArgs{S}, status::TaskStatus.T) where {S}
 
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket timeout task triggered")
 
     if connect_args.socket !== nothing
-        sock = connect_args.socket
+        sock = connect_args.socket::Socket
         fd = sock.io_handle.fd
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: timed out, shutting down")
 
@@ -903,7 +917,7 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs, status::Ta
         end
 
         sock.event_loop = nothing
-        socket_impl = sock.impl
+        socket_impl = _posix_impl(sock)
         socket_impl.currently_subscribed = false
 
         raise_error(error_code)
@@ -919,11 +933,11 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs, status::Ta
 end
 
 # Run connect success callback in event loop thread
-function _run_connect_success(connect_args::PosixSocketConnectArgs, status::TaskStatus.T)
+function _run_connect_success(connect_args::PosixSocketConnectArgs{S}, status::TaskStatus.T) where {S}
 
     if connect_args.socket !== nothing
-        sock = connect_args.socket
-        socket_impl = sock.impl
+        sock = connect_args.socket::Socket
+        socket_impl = _posix_impl(sock)
 
         if status == TaskStatus.RUN_READY
             _on_connection_success(sock)
@@ -967,7 +981,7 @@ function _update_local_endpoint!(sock::Socket)
         return nothing
     elseif family == AF_INET6
         port = ntohs(reinterpret(Cushort, address[3:4])[1])
-        addr_tuple = Tuple(address[9:24])
+        addr_tuple = ntuple(i -> address[8 + i], Val(16))
         addr_str = inet_ntop_ipv6(addr_tuple)
         set_address!(sock.local_endpoint, addr_str)
         sock.local_endpoint.port = UInt32(port)
@@ -1136,8 +1150,7 @@ function socket_listen_impl(::PosixSocket, sock::Socket, backlog_size::Integer):
 end
 
 # POSIX impl - close
-function socket_close_impl(::PosixSocket, sock::Socket)::Nothing
-    socket_impl = sock.impl
+function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: closing")
 
@@ -1156,12 +1169,14 @@ function socket_close_impl(::PosixSocket, sock::Socket)::Nothing
         end
     end
 
-    if socket_impl.close_happened !== nothing
-        socket_impl.close_happened[] = true
+    close_happened = socket_impl.close_happened
+    if close_happened !== nothing
+        Base.setfield!(close_happened, :x, true)
     end
 
-    if socket_impl.connect_args !== nothing
-        socket_impl.connect_args.socket = nothing
+    connect_args = socket_impl.connect_args
+    if connect_args !== nothing
+        (connect_args::PosixSocketConnectArgs{Socket}).socket = nothing
         socket_impl.connect_args = nothing
     end
 
@@ -1241,7 +1256,7 @@ function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loo
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: assigning to event loop")
 
     sock.event_loop = event_loop
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     socket_impl.currently_subscribed = true
 
     try
@@ -1263,7 +1278,7 @@ end
 
 # Socket IO event handler
 function _on_socket_io_event(sock, events::Int)
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     fd = sock.io_handle.fd
 
     # Handle readable events first
@@ -1384,7 +1399,7 @@ end
 
 # Process socket write requests
 function _process_socket_write_requests(sock::Socket, parent_request::Union{SocketWriteRequest, Nothing})
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     fd = sock.io_handle.fd
 
     purge = false
@@ -1470,7 +1485,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
                 try
                     _written_task_fn(sock, _coerce_task_status(status))
                 catch e
-                    Core.println("socket_written_task task errored: $e")
+                    Core.println("socket_written_task task errored")
                 end
                 return nothing
             end);
@@ -1484,7 +1499,7 @@ end
 
 # Written task callback
 function _written_task_fn(sock::Socket, status::TaskStatus.T)
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
 
     socket_impl.written_task_scheduled = false
 
@@ -1520,7 +1535,7 @@ function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, writ
         throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
     end
 
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
 
     # Create write request
     write_request = SocketWriteRequest(
@@ -1583,7 +1598,7 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
     sock.accept_result_fn = options.on_accept_result
     sock.event_loop = accept_loop
 
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     socket_impl.continue_accept = true
     socket_impl.currently_subscribed = true
 
@@ -1612,7 +1627,7 @@ end
 
 # Socket accept event handler
 function _socket_accept_event(sock, events::Int)
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     fd = sock.io_handle.fd
 
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: listening event received")
@@ -1672,7 +1687,7 @@ function _socket_accept_event(sock, events::Int)
                 new_sock.options.domain = SocketDomain.IPV4
             elseif family == AF_INET6
                 port = UInt32(ntohs(reinterpret(Cushort, in_addr[3:4])[1]))
-                addr_tuple = Tuple(in_addr[9:24])
+                addr_tuple = ntuple(i -> in_addr[8 + i], Val(16))
                 addr_str = inet_ntop_ipv6(addr_tuple)
                 set_address!(new_sock.remote_endpoint, addr_str)
                 new_sock.options.domain = SocketDomain.IPV6
@@ -1735,7 +1750,7 @@ function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Nothing
 
     logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: stopping accepting new connections")
 
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     if socket_impl.currently_subscribed
         event_loop_unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
         socket_impl.currently_subscribed = false
@@ -1748,14 +1763,14 @@ end
 
 # POSIX impl - set close callback
 function socket_set_close_callback_impl(::PosixSocket, sock::Socket, fn::TaskFn)::Nothing
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     socket_impl.on_close_complete = fn
     return nothing
 end
 
 # POSIX impl - set cleanup callback
 function socket_set_cleanup_callback_impl(::PosixSocket, sock::Socket, fn::TaskFn)::Nothing
-    socket_impl = sock.impl
+    socket_impl = _posix_impl(sock)
     socket_impl.on_cleanup_complete = fn
     return nothing
 end

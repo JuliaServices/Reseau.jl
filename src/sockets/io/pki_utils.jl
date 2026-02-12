@@ -237,14 +237,24 @@ function _pki_import_ecc_key_into_keychain(private_key::ByteCursor, keychain::Pt
                 obj.object_type == PemObjectType.EVP_PKEY
             format = _kSecFormatWrappedPKCS8
         end
-        status = lock(_pki_sec_lock) do
-            _pki_secitem_import(data_ref, format, _kSecItemTypePrivateKey, keychain, out_items)
+        status = let
+            lock(_pki_sec_lock)
+            try
+                _pki_secitem_import(data_ref, format, _kSecItemTypePrivateKey, keychain, out_items)
+            finally
+                unlock(_pki_sec_lock)
+            end
         end
         if status != _errSecSuccess && status != _errSecDuplicateItem && format == _kSecFormatWrappedPKCS8
             out_items[] != C_NULL && _cf_release(out_items[])
             out_items[] = C_NULL
-            status = lock(_pki_sec_lock) do
-                _pki_secitem_import(data_ref, _kSecFormatOpenSSL, _kSecItemTypePrivateKey, keychain, out_items)
+            status = let
+                lock(_pki_sec_lock)
+                try
+                    _pki_secitem_import(data_ref, _kSecFormatOpenSSL, _kSecItemTypePrivateKey, keychain, out_items)
+                finally
+                    unlock(_pki_sec_lock)
+                end
             end
         end
         _cf_release(data_ref)
@@ -307,8 +317,13 @@ function import_public_and_private_keys_to_identity(
     cert_import_output = Ref{Ptr{Cvoid}}(C_NULL)
     key_import_output = Ref{Ptr{Cvoid}}(C_NULL)
     cert_objects = nothing
-    cert_status = lock(_pki_sec_lock) do
-        _pki_secitem_import(cert_data, _kSecFormatUnknown, _kSecItemTypeCertificate, import_keychain[], cert_import_output)
+    cert_status = let
+        lock(_pki_sec_lock)
+        try
+            _pki_secitem_import(cert_data, _kSecFormatUnknown, _kSecItemTypeCertificate, import_keychain[], cert_import_output)
+        finally
+            unlock(_pki_sec_lock)
+        end
     end
     if cert_status == _errSecUnknownFormat || cert_status == _errSecUnsupportedFormat
         cert_objects = pem_parse(_cursor_to_memory(public_cert_chain))
@@ -334,14 +349,24 @@ function import_public_and_private_keys_to_identity(
 
         cert_import_output[] != C_NULL && _cf_release(cert_import_output[])
         cert_import_output[] = C_NULL
-        cert_status = lock(_pki_sec_lock) do
-            _pki_secitem_import(root_data, _kSecFormatX509Cert, _kSecItemTypeCertificate, import_keychain[], cert_import_output)
+        cert_status = let
+            lock(_pki_sec_lock)
+            try
+                _pki_secitem_import(root_data, _kSecFormatX509Cert, _kSecItemTypeCertificate, import_keychain[], cert_import_output)
+            finally
+                unlock(_pki_sec_lock)
+            end
         end
         _cf_release(root_data)
     end
 
-    key_status = lock(_pki_sec_lock) do
-        _pki_secitem_import(key_data, _kSecFormatUnknown, _kSecItemTypePrivateKey, import_keychain[], key_import_output)
+    key_status = let
+        lock(_pki_sec_lock)
+        try
+            _pki_secitem_import(key_data, _kSecFormatUnknown, _kSecItemTypePrivateKey, import_keychain[], key_import_output)
+        finally
+            unlock(_pki_sec_lock)
+        end
     end
 
     if cert_status != _errSecSuccess && cert_status != _errSecDuplicateItem

@@ -66,7 +66,7 @@ mutable struct SocketEndpoint
 end
 
 function SocketEndpoint()
-    return SocketEndpoint(ntuple(_ -> UInt8(0), ADDRESS_MAX_LEN), UInt32(0))
+    return SocketEndpoint(ntuple(_ -> UInt8(0), Val(ADDRESS_MAX_LEN)), UInt32(0))
 end
 
 function SocketEndpoint(address::AbstractString, port::Integer)
@@ -80,7 +80,7 @@ function set_address!(endpoint::SocketEndpoint, address::AbstractString)
     bytes = codeunits(address)
     len = min(length(bytes), ADDRESS_MAX_LEN - 1)
     # Build new address tuple
-    addr = ntuple(ADDRESS_MAX_LEN) do i
+    addr = ntuple(Val(ADDRESS_MAX_LEN)) do i
         if i <= len
             bytes[i]
         else
@@ -136,7 +136,9 @@ function SocketOptions(;
         keepalive::Bool = false,
         network_interface_name::AbstractString = "",
     )
-    iface = ntuple(i -> i <= length(network_interface_name) ? UInt8(codeunit(network_interface_name, i)) : UInt8(0), NETWORK_INTERFACE_NAME_MAX)
+    iface = ntuple(Val(NETWORK_INTERFACE_NAME_MAX)) do i
+        i <= length(network_interface_name) ? UInt8(codeunit(network_interface_name, i)) : UInt8(0)
+    end
     return SocketOptions(
         type,
         domain,
@@ -337,7 +339,7 @@ function socket_close(socket::Socket)::Nothing
                 socket_close_impl(socket.impl, socket)
                 notify(fut, nothing)
             catch e
-                notify(fut, e isa ReseauError ? e : CapturedException(e, catch_backtrace()))
+                notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
             end
             return nothing
         end);

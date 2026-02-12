@@ -162,7 +162,7 @@ function handler_increment_read_window(handler::SocketChannelHandler, slot::Chan
         LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
         "Socket handler: increment read window message received, scheduling read"
     )
-    _socket_handler_trigger_read(handler)
+    _socket_handler_trigger_read(handler)::Nothing
     return nothing
 end
 
@@ -266,30 +266,30 @@ function handler_trigger_write(handler::SocketChannelHandler)::Nothing
 end
 
 function handler_trigger_read(handler::SocketChannelHandler)::Nothing
-    _socket_handler_trigger_read(handler)
+    _socket_handler_trigger_read(handler)::Nothing
     return nothing
 end
 
 # Internal - trigger a socket read
-function _socket_handler_trigger_read(handler::SocketChannelHandler)
+function _socket_handler_trigger_read(handler::SocketChannelHandler)::Nothing
     if handler.shutdown_in_progress
         return nothing
     end
 
-    if handler.slot === nothing
+    slot = handler.slot
+    if slot === nothing
         return nothing
     end
-
-    slot = handler.slot
     if slot.adj_right === nothing || slot.adj_right.handler === nothing
         handler.pending_read = true
         return nothing
     end
 
-    channel = slot.channel
-    if channel === nothing
+    channel_any = slot.channel
+    if !(channel_any isa Channel)
         return nothing
     end
+    channel = channel_any::Channel
 
     sock = handler.socket
     event_loop = sock.event_loop
@@ -298,12 +298,7 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)
     end
 
     if event_loop_thread_is_callers_thread(event_loop)
-        _socket_handler_do_read(handler)
-        return nothing
-    end
-
-    channel = slot.channel
-    if channel === nothing
+        _socket_handler_do_read(handler)::Nothing
         return nothing
     end
 
@@ -312,7 +307,7 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)
     end
 
     channel_task_init!(handler.read_task_storage, EventCallable(s -> _socket_handler_read_task(handler, _coerce_task_status(s))), "socket_handler_read_now")
-    channel_schedule_task_now!(channel, handler.read_task_storage)
+    channel_schedule_task_now!(channel, handler.read_task_storage)::Nothing
 
     return nothing
 end
@@ -327,7 +322,7 @@ function _socket_handler_subscribe_to_read(handler::SocketChannelHandler)
             LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
             "Socket handler: readable event with error $error_code"
         )
-        _socket_handler_trigger_read(handler)
+        _socket_handler_trigger_read(handler)::Nothing
         return nothing
     end))
 end
@@ -449,7 +444,7 @@ function _socket_handler_wrap_channel_setup!(handler::SocketChannelHandler, chan
                 handler.pending_read &&
                 !handler.shutdown_in_progress
             handler.pending_read = false
-            _socket_handler_trigger_read(handler)
+            _socket_handler_trigger_read(handler)::Nothing
         end
         return nothing
     end)

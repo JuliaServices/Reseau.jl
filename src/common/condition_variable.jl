@@ -44,16 +44,25 @@ function condition_variable_notify_all(cond_ref::Base.RefValue{ConditionVariable
     return condition_variable_notify_all(cond_ref[])
 end
 
-@inline function _cond_predicate(pred, ctx)
+@inline function _cond_predicate(pred::P, ctx::C)::Bool where {P, C}
     return pred(ctx)
+end
+
+struct _CondSeqChanged
+    cond::ConditionVariable
+    seq::UInt64
+end
+
+@inline function (cb::_CondSeqChanged)()::Bool
+    return (@atomic cb.cond.seq) != cb.seq
 end
 
 function condition_variable_wait_pred(
         cond::ConditionVariable,
         mutex::ReentrantLock,
-        pred,
-        pred_ctx,
-    )
+        pred::P,
+        pred_ctx::C,
+    ) where {P, C}
     local_seq = @atomic cond.seq
     while !_cond_predicate(pred, pred_ctx)
         unlock(mutex)
@@ -74,9 +83,9 @@ end
 function condition_variable_wait_pred(
         cond_ref::Base.RefValue{ConditionVariable},
         mutex_ref::Base.RefValue{ReentrantLock},
-        pred,
-        pred_ctx,
-    )
+        pred::P,
+        pred_ctx::C,
+    ) where {P, C}
     return condition_variable_wait_pred(cond_ref[], mutex_ref[], pred, pred_ctx)
 end
 
@@ -84,9 +93,9 @@ function condition_variable_wait_for_pred(
         cond::ConditionVariable,
         mutex::ReentrantLock,
         time_to_wait::Integer,
-        pred,
-        pred_ctx,
-    )
+        pred::P,
+        pred_ctx::C,
+    ) where {P, C}
     start_ref = Ref{UInt64}(0)
     if sys_clock_get_ticks(start_ref) != OP_SUCCESS
         return OP_ERR
@@ -104,7 +113,7 @@ function condition_variable_wait_for_pred(
         end
         remaining = deadline - now_ref[]
         unlock(mutex)
-        ok = timedwait_poll_ns(() -> (@atomic cond.seq) != local_seq, remaining)
+        ok = timedwait_poll_ns(_CondSeqChanged(cond, local_seq), remaining)
         lock(mutex)
         if ok == :timed_out
             return raise_error(ERROR_COND_VARIABLE_TIMED_OUT)
@@ -118,8 +127,8 @@ function condition_variable_wait_for_pred(
         cond_ref::Base.RefValue{ConditionVariable},
         mutex_ref::Base.RefValue{ReentrantLock},
         time_to_wait::Integer,
-        pred,
-        pred_ctx,
-    )
+        pred::P,
+        pred_ctx::C,
+    ) where {P, C}
     return condition_variable_wait_for_pred(cond_ref[], mutex_ref[], time_to_wait, pred, pred_ctx)
 end

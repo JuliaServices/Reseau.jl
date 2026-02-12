@@ -27,7 +27,7 @@ const _COREFOUNDATION_LIB = "/System/Library/Frameworks/CoreFoundation.framework
 
 const _ssl_set_alpn_protocols = Ref{Ptr{Cvoid}}(C_NULL)
 const _ssl_copy_alpn_protocols = Ref{Ptr{Cvoid}}(C_NULL)
-const _secure_transport_security_handle = Ref{Any}(nothing)
+const _secure_transport_security_handle = Ref{Union{Ptr{Nothing}, Nothing}}(nothing)
 const _secure_transport_handler_registry = IdDict{Any, Nothing}()
 
 const _kCFStringEncodingASCII = UInt32(0x0600)
@@ -131,6 +131,10 @@ function setchannelslot!(handler::SecureTransportTlsHandler, slot::ChannelSlot):
     return nothing
 end
 
+@inline tls_context_ca_cert(ctx::TlsContext{SecureTransportCtx})::Ptr{Cvoid} = ctx.impl.ca_cert
+@inline tls_context_certs(ctx::TlsContext{SecureTransportCtx})::Ptr{Cvoid} = ctx.impl.certs
+@inline tls_context_secitem_identity(ctx::TlsContext{SecureTransportCtx})::Ptr{Cvoid} = ctx.impl.secitem_identity
+
 @inline function _cf_release(obj::Ptr{Cvoid})
     @static if Sys.isapple()
         obj == C_NULL && return nothing
@@ -220,7 +224,7 @@ function _secure_transport_init()
 
     handle = _secure_transport_security_handle[]
     if handle === nothing
-        handle = Libdl.dlopen(_SECURITY_LIB)
+        handle = Libdl.dlopen(_SECURITY_LIB)::Ptr{Nothing}
         _secure_transport_security_handle[] = handle
     end
     _ssl_set_alpn_protocols[] = Libdl.dlsym(handle, :SSLSetALPNProtocols; throw_error = false)
@@ -545,12 +549,15 @@ end
 function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len_ptr::Ptr{Csize_t})::OSStatus
     handler = unsafe_pointer_to_objref(conn)::SecureTransportTlsHandler
     requested = unsafe_load(len_ptr)
-    channel = handler.slot === nothing ? nothing : handler.slot.channel
-    channel === nothing && return _errSSLClosedNoNotify
+    slot_any = handler.slot
+    slot_any === nothing && return _errSSLClosedNoNotify
+    slot = slot_any::ChannelSlot{Union{Channel, Nothing}}
+    channel = slot.channel
+    channel isa Channel || return _errSSLClosedNoNotify
 
     processed = Csize_t(0)
     while processed < requested
-        overhead = channel_slot_upstream_message_overhead(handler.slot)
+        overhead = channel_slot_upstream_message_overhead(slot)
         message_size_hint = Csize_t(requested - processed) + overhead
         message = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, message_size_hint)
         message === nothing && return _errSSLClosedNoNotify
@@ -579,7 +586,7 @@ function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, le
         end
 
         try
-            channel_slot_send_message(handler.slot, message, ChannelDirection.WRITE)
+            channel_slot_send_message(slot, message, ChannelDirection.WRITE)
         catch e
             e isa ReseauError || rethrow()
             channel_release_message_to_pool!(channel, message)

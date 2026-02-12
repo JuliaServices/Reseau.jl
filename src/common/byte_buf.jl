@@ -34,8 +34,9 @@ struct ByteCursor
     ptr::MemoryRef{UInt8}
 end
 
-# Registry to prevent GC of underlying data for wrapped cursors/buffers
-const _BUFFER_VIEW_REGISTRY = WeakKeyDict{Any, Any}()
+# Registry to prevent GC of underlying data for wrapped cursors/buffers.
+# Use IdDict to avoid WeakKeyDict finalizer paths that are trim-hostile.
+const _BUFFER_VIEW_REGISTRY = IdDict{Any, Any}()
 const _BUFFER_VIEW_REGISTRY_LOCK = ReentrantLock()
 
 @inline function _buffer_view_registry_set!(key, value)::Nothing

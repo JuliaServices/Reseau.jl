@@ -469,6 +469,14 @@ mutable struct TlsContext{Impl} <: AbstractTlsContext
     closed::Bool
 end
 
+@inline tls_context_alpn_list(ctx::TlsContext)::Union{String, Nothing} = ctx.options.alpn_list
+@inline tls_context_impl(ctx::TlsContext) = ctx.impl
+@inline tls_context_minimum_tls_version_code(ctx::TlsContext)::UInt8 = UInt8(ctx.options.minimum_tls_version)
+@inline tls_context_verify_peer(ctx::TlsContext)::Bool = ctx.options.verify_peer
+@inline tls_context_ca_cert(ctx::TlsContext)::Ptr{Cvoid} = C_NULL
+@inline tls_context_certs(ctx::TlsContext)::Ptr{Cvoid} = C_NULL
+@inline tls_context_secitem_identity(ctx::TlsContext)::Ptr{Cvoid} = C_NULL
+
 const _tls_cal_init_lock = ReentrantLock()
 const _tls_cal_initialized = Ref(false)
 const _tls_use_secitem = Ref(false)
@@ -594,7 +602,7 @@ function _tls_validate_pem(buf::ByteBuffer)::Nothing
 end
 
 function tls_context_new(options::TlsContextOptions)::TlsContext
-    _tls_cal_init_once()
+    tls_init_static_state()
     return _tls_context_new_impl(options)
 end
 
@@ -908,16 +916,31 @@ function tls_ctx_options_init_default_client(;
     end
     secitem_options = (Sys.isapple() && is_using_secitem()) ?
         SecItemOptions("aws-crt-default-certificate-label", "aws-crt-default-key-label") : nothing
-    return TlsContextOptions(;
-        is_server = false,
-        verify_peer = verify_peer,
-        ca_file = ca_file,
-        ca_path = ca_path,
-        alpn_list = alpn_list,
-        minimum_tls_version = minimum_tls_version,
-        cipher_pref = cipher_pref,
-        max_fragment_size = max_fragment_size,
-        secitem_options = secitem_options,
+    ca_file_buf = ca_file === nothing ? null_buffer() : ca_file
+    ca_file_set = ca_file !== nothing
+    return TlsContextOptions(
+        false, # is_server
+        minimum_tls_version,
+        cipher_pref,
+        ca_file_buf,
+        ca_file_set,
+        ca_path,
+        alpn_list,
+        null_buffer(), # certificate
+        false,         # certificate_set
+        null_buffer(), # private_key
+        false,         # private_key_set
+        nothing,       # system_certificate_path
+        null_buffer(), # pkcs12
+        false,         # pkcs12_set
+        null_buffer(), # pkcs12_password
+        false,         # pkcs12_password_set
+        secitem_options,
+        nothing, # keychain_path
+        Csize_t(max_fragment_size),
+        verify_peer,
+        nothing, # ctx_options_extension
+        nothing, # custom_key_op_handler
     )
 end
 
@@ -1347,6 +1370,10 @@ mutable struct TlsConnectionOptions <: AbstractTlsConnectionOptions
     on_error::Union{TlsErrorCallback, Nothing}
     timeout_ms::UInt32
 end
+
+@inline tls_connection_options_server_name(options::TlsConnectionOptions)::Union{String, Nothing} = options.server_name
+@inline tls_connection_options_alpn_list(options::TlsConnectionOptions)::Union{String, Nothing} = options.alpn_list
+@inline tls_connection_options_context(options::TlsConnectionOptions)::Union{AbstractTlsContext, Nothing} = options.ctx
 
 @inline _tls_negotiation_result_callback(::Nothing) = nothing
 @inline _tls_negotiation_result_callback(callback::TlsNegotiationResultCallback) = callback

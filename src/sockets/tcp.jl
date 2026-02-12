@@ -11,7 +11,7 @@ export
 
 mutable struct TCPSocket <: IO
     channel::Union{Channel, Nothing}
-    slot::Union{ChannelSlot, Nothing}
+    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
     socket::Union{Socket, Nothing}
     handler::Union{AbstractChannelHandler, Nothing}
     host::String
@@ -38,7 +38,7 @@ mutable struct TCPSocket <: IO
 end
 
 mutable struct _TCPSocketHandler <: AbstractChannelHandler
-    slot::Union{ChannelSlot, Nothing}
+    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
     io::TCPSocket
 end
 
@@ -142,7 +142,7 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
     return nothing
 end
 
-function _on_setup(bootstrap, error_code::Int, channel, io::TCPSocket)
+function _on_setup(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
     _ = bootstrap
     if error_code != AWS_OP_SUCCESS || channel === nothing
         io.connect_error = error_code
@@ -170,10 +170,51 @@ function _on_setup(bootstrap, error_code::Int, channel, io::TCPSocket)
     return nothing
 end
 
-function _on_shutdown(bootstrap, error_code::Int, channel, io::TCPSocket)
+function _on_shutdown(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
     _ = bootstrap
     _ = channel
     _mark_closed!(io, error_code)
+    return nothing
+end
+
+@inline function _on_setup_callback(bootstrap, error_code, channel, user_data)::Nothing
+    _ = bootstrap
+    io = user_data::TCPSocket
+    err = Int(error_code)
+    if err != AWS_OP_SUCCESS || !(channel isa Channel)
+        io.connect_error = err
+        _mark_closed!(io, err)
+        notify(io.connect_event)
+        return nothing
+    end
+
+    ch = channel::Channel
+    if channel_thread_is_callers_thread(ch)
+        _install_handler!(io, ch)
+        io.connect_error = AWS_OP_SUCCESS
+        notify(io.connect_event)
+        return nothing
+    end
+
+    task = ChannelTask(
+        EventCallable(s -> begin
+            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+            _install_handler!(io, ch)
+            io.connect_error = AWS_OP_SUCCESS
+            notify(io.connect_event)
+            return nothing
+        end),
+        "tcpsocket_install_handler",
+    )
+    channel_schedule_task_now!(ch, task)
+    return nothing
+end
+
+@inline function _on_shutdown_callback(bootstrap, error_code, channel, user_data)::Nothing
+    _ = bootstrap
+    _ = channel
+    io = user_data::TCPSocket
+    _mark_closed!(io, Int(error_code))
     return nothing
 end
 
@@ -294,14 +335,17 @@ function TCPSocket(
     result = client_bootstrap_connect!(
         bootstrap,
         host,
-        port;
-        socket_options = socket_options,
-        tls_connection_options = tls_conn,
-        on_setup = _on_setup,
-        on_shutdown = _on_shutdown,
-        user_data = io,
-        enable_read_back_pressure = enable_read_back_pressure,
-        host_resolution_config = host_resolution_config,
+        port,
+        socket_options,
+        tls_conn,
+        nothing,
+        nothing,
+        _on_setup_callback,
+        _on_shutdown_callback,
+        io,
+        enable_read_back_pressure,
+        nothing,
+        host_resolution_config,
     )
     wait(io.connect_event)
     io.connect_error == AWS_OP_SUCCESS || error("TCPSocket connect failed: $(io.connect_error)")
@@ -353,8 +397,8 @@ mutable struct _TCPServerState
     is_local::Bool
 end
 
-mutable struct TCPServer
-    bootstrap::ServerBootstrap
+mutable struct TCPServer{B <: ServerBootstrap}
+    bootstrap::B
     state::_TCPServerState
 end
 
@@ -430,6 +474,26 @@ function listen(addr::InetAddr; backlog::Integer = 511, kwargs...)
     return listen(addr.host, addr.port; backlog = backlog, kwargs...)
 end
 
+struct _TCPServerOnListenerSetup
+    state::_TCPServerState
+end
+
+@inline function (cb::_TCPServerOnListenerSetup)(_bootstrap, error_code::Int, _user_data)::Nothing
+    st = cb.state
+    st.listen_error = error_code
+    notify(st.listen_event)
+    return nothing
+end
+
+struct _TCPServerOnIncomingSetup
+    state::_TCPServerState
+end
+
+@inline function (cb::_TCPServerOnIncomingSetup)(_bootstrap, error_code::Int, channel, _user_data)::Nothing
+    _server_on_incoming_setup(cb.state, error_code, channel, nothing)
+    return nothing
+end
+
 function listen(host::AbstractString, port::Integer;
         backlog::Integer = 511,
         tls::Bool = false,
@@ -464,13 +528,6 @@ function listen(host::AbstractString, port::Integer;
         socket_options.domain == SocketDomain.LOCAL,
     )
 
-    on_listener_setup = (bootstrap, error_code, user_data) -> begin
-        st = user_data::_TCPServerState
-        st.listen_error = error_code
-        notify(st.listen_event)
-        return nothing
-    end
-
     bootstrap = ServerBootstrap(;
         event_loop_group = elg,
         socket_options = socket_options,
@@ -478,8 +535,8 @@ function listen(host::AbstractString, port::Integer;
         port = port,
         backlog = backlog,
         tls_connection_options = tls_conn,
-        on_listener_setup = on_listener_setup,
-        on_incoming_channel_setup = (bs, err, ch, ud) -> _server_on_incoming_setup(ud, err, ch, nothing),
+        on_listener_setup = _TCPServerOnListenerSetup(state),
+        on_incoming_channel_setup = _TCPServerOnIncomingSetup(state),
         user_data = state,
         enable_read_back_pressure = enable_read_back_pressure,
     )
