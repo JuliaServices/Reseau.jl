@@ -23,7 +23,7 @@ struct ClientBootstrapOptions
     host_resolver::HostResolver
     host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
     on_creation_callback::Union{BootstrapChannelCallback, Nothing}
     on_setup_callback::Union{BootstrapChannelCallback, Nothing}
@@ -36,7 +36,7 @@ function ClientBootstrapOptions(;
         host_resolver,
         host_resolution_config = nothing,
         socket_options::SocketOptions = SocketOptions(),
-        tls_connection_options = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
         on_protocol_negotiated = nothing,
         on_creation_callback = nothing,
         on_setup_callback = nothing,
@@ -63,7 +63,7 @@ mutable struct ClientBootstrap
     host_resolver::HostResolver
     host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
     on_creation_callback::Union{BootstrapChannelCallback, Nothing}
     on_setup_callback::Union{BootstrapChannelCallback, Nothing}
@@ -90,6 +90,34 @@ function ClientBootstrap(options::ClientBootstrapOptions)
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: created")
 
     return bootstrap
+end
+
+function ClientBootstrap(;
+        event_loop_group,
+        host_resolver,
+        host_resolution_config = nothing,
+        socket_options::SocketOptions = SocketOptions(),
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+        on_protocol_negotiated = nothing,
+        on_creation_callback = nothing,
+        on_setup_callback = nothing,
+        on_shutdown_callback = nothing,
+        user_data = nothing,
+    )
+    return ClientBootstrap(
+        ClientBootstrapOptions(;
+            event_loop_group = event_loop_group,
+            host_resolver = host_resolver,
+            host_resolution_config = host_resolution_config,
+            socket_options = socket_options,
+            tls_connection_options = tls_connection_options,
+            on_protocol_negotiated = on_protocol_negotiated,
+            on_creation_callback = on_creation_callback,
+            on_setup_callback = on_setup_callback,
+            on_shutdown_callback = on_shutdown_callback,
+            user_data = user_data,
+        ),
+    )
 end
 
 @inline function _socket_uses_network_framework_tls(socket::Socket, tls_options)::Bool
@@ -126,7 +154,7 @@ mutable struct SocketConnectionRequest
     socket_options::SocketOptions
     socket::Union{Socket, Nothing}  # nullable
     channel::Union{Channel, Nothing}  # nullable
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
     on_creation::Union{EventCallable, Nothing}
     on_setup::Union{EventCallable, Nothing}
@@ -151,7 +179,7 @@ function client_bootstrap_connect!(
         host::AbstractString,
         port::Integer;
         socket_options::SocketOptions = bootstrap.socket_options,
-        tls_connection_options = bootstrap.tls_connection_options,
+        tls_connection_options::MaybeTlsConnectionOptions = bootstrap.tls_connection_options,
         on_protocol_negotiated = bootstrap.on_protocol_negotiated,
         on_creation = bootstrap.on_creation_callback,
         on_setup = bootstrap.on_setup_callback,
@@ -715,7 +743,7 @@ struct ServerBootstrapOptions
     host::String
     port::UInt32
     backlog::Int
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
     on_listener_setup::Union{BootstrapEventCallback, Nothing}
     on_incoming_channel_setup::Union{BootstrapChannelCallback, Nothing}
@@ -731,7 +759,7 @@ function ServerBootstrapOptions(;
         host::AbstractString = "0.0.0.0",
         port::Integer,
         backlog::Integer = 128,
-        tls_connection_options = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
         on_protocol_negotiated = nothing,
         on_listener_setup = nothing,
         on_incoming_channel_setup = nothing,
@@ -763,7 +791,7 @@ mutable struct ServerBootstrap
     socket_options::SocketOptions
     listener_socket::Union{Socket, Nothing}
     listener_event_loop::Union{EventLoop, Nothing}
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
     on_incoming_channel_setup::Union{ChannelCallable, Nothing}
     on_incoming_channel_shutdown::Union{ChannelCallable, Nothing}
@@ -873,6 +901,40 @@ function ServerBootstrap(options::ServerBootstrapOptions)
     )
 
     return bootstrap
+end
+
+function ServerBootstrap(;
+        event_loop_group,
+        socket_options::SocketOptions = SocketOptions(),
+        host::AbstractString = "0.0.0.0",
+        port::Integer,
+        backlog::Integer = 128,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+        on_protocol_negotiated = nothing,
+        on_listener_setup = nothing,
+        on_incoming_channel_setup = nothing,
+        on_incoming_channel_shutdown = nothing,
+        on_listener_destroy = nothing,
+        user_data = nothing,
+        enable_read_back_pressure::Bool = false,
+    )
+    return ServerBootstrap(
+        ServerBootstrapOptions(;
+            event_loop_group = event_loop_group,
+            socket_options = socket_options,
+            host = host,
+            port = port,
+            backlog = backlog,
+            tls_connection_options = tls_connection_options,
+            on_protocol_negotiated = on_protocol_negotiated,
+            on_listener_setup = on_listener_setup,
+            on_incoming_channel_setup = on_incoming_channel_setup,
+            on_incoming_channel_shutdown = on_incoming_channel_shutdown,
+            on_listener_destroy = on_listener_destroy,
+            user_data = user_data,
+            enable_read_back_pressure = enable_read_back_pressure,
+        ),
+    )
 end
 
 function _server_bootstrap_incoming_started!(bootstrap::ServerBootstrap)

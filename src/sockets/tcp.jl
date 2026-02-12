@@ -269,13 +269,13 @@ function TCPSocket(
         )
     end
 
-    bootstrap = ClientBootstrap(ClientBootstrapOptions(
+    bootstrap = ClientBootstrap(;
         event_loop_group = elg,
         host_resolver = resolver,
         host_resolution_config = host_resolution_config,
         socket_options = socket_options,
         tls_connection_options = tls_conn,
-    ))
+    )
 
     io = _new_unconnected_socket(
         read_buffer_capacity = read_buffer_capacity,
@@ -471,7 +471,7 @@ function listen(host::AbstractString, port::Integer;
         return nothing
     end
 
-    bootstrap = ServerBootstrap(ServerBootstrapOptions(
+    bootstrap = ServerBootstrap(;
         event_loop_group = elg,
         socket_options = socket_options,
         host = host,
@@ -482,7 +482,7 @@ function listen(host::AbstractString, port::Integer;
         on_incoming_channel_setup = (bs, err, ch, ud) -> _server_on_incoming_setup(ud, err, ch, nothing),
         user_data = state,
         enable_read_back_pressure = enable_read_back_pressure,
-    ))
+    )
     wait(state.listen_event)
     state.listen_error == AWS_OP_SUCCESS || error("listen failed: $(state.listen_error)")
     return TCPServer(bootstrap, state)

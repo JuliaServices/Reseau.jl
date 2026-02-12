@@ -463,7 +463,7 @@ function TlsContextOptions(;
     )
 end
 
-mutable struct TlsContext{Impl}
+mutable struct TlsContext{Impl} <: AbstractTlsContext
     options::TlsContextOptions
     impl::Impl
     closed::Bool
@@ -1337,7 +1337,7 @@ function tls_context_new_server(;
     return tls_context_new(opts)
 end
 
-mutable struct TlsConnectionOptions
+mutable struct TlsConnectionOptions <: AbstractTlsConnectionOptions
     ctx::TlsContext
     server_name::Union{String, Nothing}
     alpn_list::Union{String, Nothing}
