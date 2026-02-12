@@ -166,14 +166,14 @@ struct SocketConnectOptions
     remote_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
     on_connection_result::Union{EventCallable, Nothing}
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
 end
 
 function SocketConnectOptions(
         remote_endpoint::SocketEndpoint;
         event_loop = nothing,
         on_connection_result = nothing,
-        tls_connection_options = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )
     return SocketConnectOptions(
         remote_endpoint,
@@ -187,13 +187,13 @@ end
 struct SocketBindOptions
     local_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
-    tls_connection_options::Any  # TlsConnectionOptions or nothing
+    tls_connection_options::MaybeTlsConnectionOptions
 end
 
 function SocketBindOptions(
         local_endpoint::SocketEndpoint;
         event_loop = nothing,
-        tls_connection_options = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )
     return SocketBindOptions(
         local_endpoint,
@@ -269,8 +269,42 @@ function socket_connect(socket::Socket, options::SocketConnectOptions)::Nothing
     return socket_connect_impl(socket.impl, socket, options)
 end
 
+function socket_connect(
+        socket::Socket,
+        remote_endpoint::SocketEndpoint;
+        event_loop::Union{EventLoop, Nothing} = nothing,
+        on_connection_result::Union{EventCallable, Nothing} = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+    )::Nothing
+    return socket_connect(
+        socket,
+        SocketConnectOptions(
+            remote_endpoint;
+            event_loop = event_loop,
+            on_connection_result = on_connection_result,
+            tls_connection_options = tls_connection_options,
+        ),
+    )
+end
+
 function socket_bind(socket::Socket, options::SocketBindOptions)::Nothing
     return socket_bind_impl(socket.impl, socket, options)
+end
+
+function socket_bind(
+        socket::Socket,
+        local_endpoint::SocketEndpoint;
+        event_loop::Union{EventLoop, Nothing} = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+    )::Nothing
+    return socket_bind(
+        socket,
+        SocketBindOptions(
+            local_endpoint;
+            event_loop = event_loop,
+            tls_connection_options = tls_connection_options,
+        ),
+    )
 end
 
 function socket_listen(socket::Socket, backlog_size::Integer)::Nothing

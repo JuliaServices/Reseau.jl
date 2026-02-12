@@ -1,5 +1,7 @@
 # AWS IO Library - PKCS#11 (stub)
 
+using Libdl
+
 @enumx Pkcs11LibBehavior::UInt8 begin
     DEFAULT_BEHAVIOR = 0
     OMIT_INITIALIZE = 1
@@ -299,12 +301,13 @@ end
 
 mutable struct Pkcs11Lib
     options::Pkcs11LibOptions
-    shared_lib::SharedLibrary
+    shared_lib_handle::Ptr{Cvoid}
+    shared_lib_owned::Bool
     function_list::Ptr{Cvoid}
     finalize_on_cleanup::Bool
 end
 
-Pkcs11Lib(options::Pkcs11LibOptions) = Pkcs11Lib(options, SharedLibrary(), C_NULL, false)
+Pkcs11Lib(options::Pkcs11LibOptions) = Pkcs11Lib(options, C_NULL, false, C_NULL, false)
 
 const _pkcs11_ckr_map = Ref{Dict{UInt64, Int}}(Dict{UInt64, Int}())
 const _pkcs11_ckr_loaded = Ref(false)
@@ -390,6 +393,42 @@ function get_prefix_to_rsa_sig(digest_alg)::ByteCursor
     throw_error(ERROR_IO_TLS_DIGEST_ALGORITHM_UNSUPPORTED)
 end
 
+function _pkcs11_shared_library_load(filename::ByteCursor)::Tuple{Ptr{Cvoid}, Bool}
+    if filename.len == 0
+        handle = @static if Sys.iswindows()
+            # Resolve against the current process image.
+            ccall(:GetModuleHandleW, Ptr{Cvoid}, (Ptr{Cvoid},), C_NULL)
+        else
+            # Resolve against globally visible symbols.
+            ccall(:dlopen, Ptr{Cvoid}, (Ptr{Cvoid}, Cint), C_NULL, Cint(Libdl.RTLD_LAZY))
+        end
+        handle == C_NULL && throw_error(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
+        return (handle, !Sys.iswindows())
+    end
+
+    handle = Libdl.dlopen(String(filename), Libdl.RTLD_LAZY; throw_error = false)
+    handle === nothing && throw_error(ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE)
+    return (Ptr{Cvoid}(handle), true)
+end
+
+function _pkcs11_shared_library_find_symbol(lib::Pkcs11Lib, symbol_name::Symbol)::Ptr{Cvoid}
+    handle = lib.shared_lib_handle
+    handle == C_NULL && throw_error(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
+    sym = Libdl.dlsym_e(handle, symbol_name)
+    sym == C_NULL && throw_error(ERROR_IO_SHARED_LIBRARY_FIND_SYMBOL_FAILURE)
+    return sym
+end
+
+function _pkcs11_shared_library_clean_up!(lib::Pkcs11Lib)::Nothing
+    handle = lib.shared_lib_handle
+    if handle != C_NULL && lib.shared_lib_owned
+        _ = Libdl.dlclose(handle)
+    end
+    lib.shared_lib_handle = C_NULL
+    lib.shared_lib_owned = false
+    return nothing
+end
+
 function pkcs11_lib_new(options::Pkcs11LibOptions)::Pkcs11Lib
     behavior = options.initialize_finalize_behavior
     if behavior != Pkcs11LibBehavior.DEFAULT_BEHAVIOR &&
@@ -399,14 +438,11 @@ function pkcs11_lib_new(options::Pkcs11LibOptions)::Pkcs11Lib
     end
 
     lib = Pkcs11Lib(options)
-    loaded = if options.filename.len == 0
-        shared_library_load_default()
-    else
-        shared_library_load(String(options.filename))
-    end
-    lib.shared_lib = loaded
+    handle, owned = _pkcs11_shared_library_load(options.filename)
+    lib.shared_lib_handle = handle
+    lib.shared_lib_owned = owned
 
-    sym = shared_library_find_symbol(lib.shared_lib, "C_GetFunctionList")
+    sym = _pkcs11_shared_library_find_symbol(lib, :C_GetFunctionList)
 
     fn_list = Ref{Ptr{Cvoid}}(C_NULL)
     rv = ccall(sym, Culong, (Ref{Ptr{Cvoid}},), fn_list)
@@ -435,7 +471,7 @@ function pkcs11_lib_release(lib::Pkcs11Lib)
             end
         end
     end
-    _ = shared_library_clean_up!(lib.shared_lib)
+    _pkcs11_shared_library_clean_up!(lib)
     return nothing
 end
 

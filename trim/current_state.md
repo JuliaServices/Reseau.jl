@@ -28,57 +28,84 @@ JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no \
   trim/echo_trim_safe.jl
 ```
 
-## Result
+## Current Result (2026-02-12)
 
-- Runtime script check with `--experimental --trim=safe` succeeds.
-- `juliac` executable compilation fails in trim verifier:
-  - Max verifier index: `Verifier error #343` (343 total errors).
-  - Julia 1.12.5 no longer prints the old `Trim verify finished with ...` footer in this run.
-  - `Failed to compile trim/echo_trim_safe.jl`
+- Compile still fails in trim verifier.
+- New max verifier index: `Verifier error #349`.
+- Previous recorded baseline: `#343`.
+- Delta: `+6` errors.
 
-## Main Blockers (Reseau)
+## Refactors Completed In This Iteration
 
-1. ~~Logging dispatch is still dynamic in trim paths.~~ **EXPERIMENTAL FIXED**
-- Logging now avoids vararg splatting in `logf/log!/format_line` and no longer shows trim verifier blockers.
-- Current experiment also simplifies log argument rendering (`"... [N args]"`) to avoid dynamic formatting/show paths.
+1. TLS field typing cleanup:
+- Added `src/sockets/io/tls_types.jl` and introduced `AbstractTlsContext`, `AbstractTlsConnectionOptions`, and `MaybeTlsConnectionOptions`.
+- Replaced `tls_connection_options::Any` fields in socket/bootstrap structs with `MaybeTlsConnectionOptions`.
 
-2. Channel pipeline uses dynamic fields in hot send paths.
-- `src/sockets/io/channel.jl:96`
-- `src/sockets/io/channel.jl:871`
+2. Flattened constructor paths (without breaking existing options constructors yet):
+- Added keyword constructors for:
+  - `EventLoops.event_loop_new(; ...)`
+  - `EventLoops.event_loop_group_new(; ...)`
+  - `EventLoops.EventLoopGroup(; ...)`
+  - `Sockets.ClientBootstrap(; ...)`
+  - `Sockets.ServerBootstrap(; ...)`
+  - `Sockets.socket_connect(socket, endpoint; ...)`
+  - `Sockets.socket_bind(socket, endpoint; ...)`
+- Updated internal callsites (`src/sockets/tcp.jl`) and downstream callsites (AwsHTTP/HTTP) to use direct constructor style.
+
+3. Shared library abstraction removal:
+- Removed `src/sockets/io/shared_library.jl`.
+- Switched PKCS11 dynamic-loading path to direct `Libdl`/platform-handle usage in `src/sockets/io/pkcs11.jl`.
+- Removed shared-library test include/file (`test/shared_library_tests.jl`).
+
+## Main Remaining Blockers (From Verifier Output)
+
+1. Channel path still relies on `slot.channel::Any` in hot read/write window logic.
 - `src/sockets/io/channel.jl:878`
 - `src/sockets/io/channel.jl:887`
-- `src/sockets/io/channel.jl:892`
-- `src/sockets/io/channel.jl:905`
-- `src/sockets/io/channel.jl:907`
-- Symptoms: unresolved `getproperty` and handler dispatch from `slot.channel::Any` and nullable handler fields.
+- `src/sockets/io/channel.jl:950`
+- `src/sockets/io/channel.jl:953`
+- `src/sockets/io/channel.jl:954`
+- `src/sockets/io/channel.jl:955`
 
-3. Socket/bootstrap implementation fields are not concrete enough for trim-safe reachability.
-- `src/sockets/io/socket.jl:242`
-- `src/sockets/io/channel_bootstrap.jl:752`
-- `src/sockets/io/channel_bootstrap.jl:753`
-- `src/sockets/io/channel_bootstrap.jl:757`
-- `src/sockets/io/apple_nw_socket_impl.jl:668`
-- `src/sockets/io/apple_nw_socket_impl.jl:685`
-- `src/sockets/io/apple_nw_socket_impl.jl:686`
-- Symptoms: unresolved calls around `Union` impl fields and `Any` callback/TLS state.
+2. Platform socket impl unions still trigger unresolved field conversions/setproperty.
+- `src/sockets/io/posix_socket_impl.jl:1160`
+- `src/sockets/io/posix_socket_impl.jl:1165`
+- `src/sockets/io/apple_nw_socket_impl.jl:660`
+- `src/sockets/io/apple_nw_socket_impl.jl:1752`
+- `src/sockets/io/apple_nw_socket_impl.jl:1755`
+- `src/sockets/io/apple_nw_socket_impl.jl:1878`
 
-4. TLS backend init is reached for this plain TCP example and triggers dynamic `Libdl` resolution.
-- `src/Reseau.jl:38`
-- `src/sockets/sockets.jl:76`
-- `src/sockets/io/tls_channel_handler.jl:1496`
+3. Host resolver still contains dynamic callback/predicate/cfunction paths.
+- `src/sockets/io/host_resolver.jl:485`
+- `src/sockets/io/host_resolver.jl:505`
+- `src/sockets/io/host_resolver.jl:507`
+- `src/sockets/io/host_resolver.jl:552`
+- `src/sockets/io/host_resolver.jl:597`
+- `src/sockets/io/host_resolver.jl:649`
+- `src/common/condition_variable.jl:48`
+- `src/common/condition_variable.jl:97`
+- `src/common/clock.jl:281`
+- `src/task_scheduler.jl:238`
+- `src/task_scheduler.jl:250`
+
+4. SecureTransport dynamic symbol loading still uses trim-hostile `Libdl` lazy paths.
 - `src/sockets/io/tls/secure_transport_tls_handler.jl:226`
 - `src/sockets/io/tls/secure_transport_tls_handler.jl:227`
+- `src/sockets/io/tls_channel_handler.jl:1508`
 
-5. Assertions/debug paths still pull in dynamic formatting/writes.
-- `src/common/assert.jl:2`
-- Symptoms: unresolved formatting/write calls in `fatal_assert` path.
+## Targeted Next Fix Ideas
 
-6. ~~Error callback handlers are invoked through untyped function storage.~~ **FIXED** — removed unused handler callback system and ~45 unused error constants/functions from `error.jl`.
+1. Channel typing:
+- Remove `Any` from `ChannelSlot.channel` and related handler fields so read-window and send paths are fully concrete.
 
-## Fix Directions
+2. Socket impl representation:
+- Split platform socket implementations into fully concrete wrappers (or concrete tagged unions with typed storage) so `setproperty!` does not cross unrelated impl types.
 
-1. Make TLS/host-resolver static init lazy so plain TCP trim builds do not traverse TLS setup.
-2. Replace `Any` fields in channel/bootstrap/socket hot structs with concrete types or tighter unions.
-3. Use typed callback wrappers (`TaskFn`/`EventCallable`/`ChannelCallable`) consistently instead of raw `Function`.
-4. Keep trim-friendly logging fast paths (tuple-based/no vararg splats); optionally restore richer formatting with typed fast paths for common arg arities/types.
-5. Reduce dynamic `Libdl` keyword-path usage in SecureTransport setup where trim-safe compilation requires concrete dispatch.
+3. Host resolver trim pass:
+- Replace `Function` predicates/callback storage with typed wrappers.
+- Remove `collect(::AbstractVector)`/`Tuple{Any,Any}` style flows in resolver internals.
+- Avoid runtime-generated `@cfunction` paths on trim-critical resolver code.
+
+4. TLS static init gating:
+- Ensure plain TCP echo path never reaches SecureTransport symbol resolution.
+- Gate TLS backend init so no `Libdl` lazy lookup runs unless TLS is explicitly configured/used.

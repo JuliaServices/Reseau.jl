@@ -54,15 +54,17 @@ function _init_default_clock()
     _DEFAULT_CLOCK[] = HighResClock()
 end
 
+abstract type AbstractEventLoopGroup end
+
 # Event loop options
 struct EventLoopOptions
     clock::ClockSource
-    parent_elg::Any  # EventLoopGroup or nothing
+    parent_elg::Union{AbstractEventLoopGroup, Nothing}
 end
 
 function EventLoopOptions(;
         clock::ClockSource = _DEFAULT_CLOCK[],
-        parent_elg = nothing,
+        parent_elg::Union{AbstractEventLoopGroup, Nothing} = nothing,
     )
     return EventLoopOptions(clock, parent_elg)
 end
@@ -71,7 +73,7 @@ end
 struct EventLoopGroupOptions
     loop_count::UInt16
     shutdown_options::Union{TaskFn, Nothing}
-    cpu_group::Any
+    cpu_group::Union{Nothing, Integer, Base.RefValue}
     clock_override::Union{ClockSource, Nothing}
 end
 
@@ -128,7 +130,7 @@ mutable struct EventLoop
     latest_tick_start::UInt64
     current_tick_latency_sum::Csize_t
     @atomic next_flush_time::UInt64
-    base_elg::Any  # EventLoopGroup or nothing
+    base_elg::Union{AbstractEventLoopGroup, Nothing}
     impl_data::PlatformEventLoop
     @atomic running::Bool
     @atomic should_stop::Bool
@@ -280,8 +282,15 @@ function event_loop_new(options::EventLoopOptions)::EventLoop
     end
 end
 
+function event_loop_new(;
+        clock::ClockSource = _DEFAULT_CLOCK[],
+        parent_elg::Union{AbstractEventLoopGroup, Nothing} = nothing,
+    )::EventLoop
+    return event_loop_new(EventLoopOptions(; clock = clock, parent_elg = parent_elg))
+end
+
 # Event Loop Group for managing multiple event loops
-mutable struct EventLoopGroup
+mutable struct EventLoopGroup <: AbstractEventLoopGroup
     event_loops::Vector{EventLoop}
     shutdown_options::Union{TaskFn, Nothing}
     @atomic ref_count::Int
@@ -314,15 +323,13 @@ function event_loop_group_new(options::EventLoopGroupOptions)
     )
     try
         # Create first event loop
-        first_opts = EventLoopOptions(; clock = clock)
-        first_loop = event_loop_new(first_opts)
+        first_loop = event_loop_new(; clock = clock)
         first_loop.base_elg = elg
         push!(elg.event_loops, first_loop)
 
         # Create remaining event loops
         for _ in 2:loop_count
-            loop_opts = EventLoopOptions(; clock = clock, parent_elg = elg)
-            loop = event_loop_new(loop_opts)
+            loop = event_loop_new(; clock = clock, parent_elg = elg)
             push!(elg.event_loops, loop)
         end
 
@@ -339,8 +346,38 @@ function event_loop_group_new(options::EventLoopGroupOptions)
     end
 end
 
+function event_loop_group_new(;
+        loop_count::Integer = 0,
+        shutdown_options::Union{TaskFn, Nothing} = nothing,
+        cpu_group = nothing,
+        clock_override::Union{ClockSource, Nothing} = nothing,
+    )
+    return event_loop_group_new(
+        EventLoopGroupOptions(;
+            loop_count = loop_count,
+            shutdown_options = shutdown_options,
+            cpu_group = cpu_group,
+            clock_override = clock_override,
+        ),
+    )
+end
+
 function EventLoopGroup(options::EventLoopGroupOptions)
     return event_loop_group_new(options)
+end
+
+function EventLoopGroup(;
+        loop_count::Integer = 0,
+        shutdown_options::Union{TaskFn, Nothing} = nothing,
+        cpu_group = nothing,
+        clock_override::Union{ClockSource, Nothing} = nothing,
+    )
+    return event_loop_group_new(;
+        loop_count = loop_count,
+        shutdown_options = shutdown_options,
+        cpu_group = cpu_group,
+        clock_override = clock_override,
+    )
 end
 
 function event_loop_group_acquire!(elg::EventLoopGroup)
@@ -410,7 +447,7 @@ function default_event_loop_group()::EventLoopGroup
         if elg === nothing
             # Keep this single-loop to avoid surprising concurrency in downstream
             # consumers that "just want a default".
-            elg = EventLoopGroup(EventLoopGroupOptions(; loop_count = 1))
+            elg = EventLoopGroup(; loop_count = 1)
             _DEFAULT_EVENT_LOOP_GROUP[] = elg
         end
         return elg::EventLoopGroup
