@@ -8,6 +8,7 @@ const g_aws_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX
 
 struct ChannelOptions
     event_loop::EventLoop
+    event_loop_group::Union{EventLoopGroup, Nothing}
     on_setup_completed::Union{EventCallable, Nothing}
     on_shutdown_completed::Union{EventCallable, Nothing}
     enable_read_back_pressure::Bool
@@ -15,12 +16,14 @@ end
 
 function ChannelOptions(;
         event_loop,
+        event_loop_group = nothing,
         on_setup_completed = nothing,
         on_shutdown_completed = nothing,
         enable_read_back_pressure::Bool = false,
     )
     return ChannelOptions(
         event_loop,
+        event_loop_group,
         on_setup_completed,
         on_shutdown_completed,
         enable_read_back_pressure,
@@ -580,6 +583,7 @@ end
 # Channel - a bidirectional pipeline of handlers
 mutable struct Channel
     event_loop::EventLoop
+    event_loop_group_lease::Union{EventLoopGroupLease, Nothing}
     first::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}  # nullable - Socket side (leftmost)
     last::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}   # nullable - Application side (rightmost)
     channel_state::ChannelState.T
@@ -638,12 +642,14 @@ function Channel(
         event_loop::EventLoop,
         message_pool::Union{MessagePool, Nothing} = nothing;
         enable_read_back_pressure::Bool = false,
+        event_loop_group_lease::Union{EventLoopGroupLease, Nothing} = nothing,
     )
     channel_id = _next_channel_id()
     window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
 
     channel = Channel(
         event_loop,
+        event_loop_group_lease,
         nothing,  # first
         nothing,  # last
         ChannelState.NOT_INITIALIZED,
@@ -852,18 +858,22 @@ function channel_new(options::ChannelOptions)::Channel
         throw_error(ERROR_INVALID_ARGUMENT)
     end
 
+    lease = options.event_loop_group === nothing ? nothing : event_loop_group_open_lease!(options.event_loop_group)
+    if options.event_loop_group !== nothing && lease === nothing
+        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+    end
+
     channel = Channel(
         options.event_loop,
         nothing;
         enable_read_back_pressure = options.enable_read_back_pressure,
+        event_loop_group_lease = lease,
     )
     channel.on_setup_completed = options.on_setup_completed
     channel.on_shutdown_completed = options.on_shutdown_completed
     channel.channel_state = ChannelState.SETTING_UP
     channel.setup_pending = true
     channel.destroy_pending = false
-
-    event_loop_group_acquire_from_event_loop(options.event_loop)
 
     setup_args = ChannelSetupArgs(channel)
     task = ScheduledTask(
@@ -1738,7 +1748,8 @@ function _channel_destroy_impl!(channel::Channel)
         channel.statistics_task = nothing
     end
 
-    event_loop_group_release_from_event_loop!(channel.event_loop)
+    event_loop_group_close_lease!(channel.event_loop_group_lease)
+    channel.event_loop_group_lease = nothing
     channel.first = nothing
     channel.last = nothing
     return nothing

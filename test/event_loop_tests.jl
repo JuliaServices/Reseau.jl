@@ -1353,13 +1353,9 @@ end
 
         try
             @test EventLoops.event_loop_group_get_loop_count(elg) == 1
-            el = EventLoops.event_loop_group_get_next_loop(elg)
-            @test el !== nothing
-            if el !== nothing
-                acquired = EventLoops.event_loop_group_acquire_from_event_loop(el)
-                @test acquired === elg
-                EventLoops.event_loop_group_release_from_event_loop!(el)
-            end
+            lease = EventLoops.event_loop_group_open_lease!(elg)
+            @test lease !== nothing
+            EventLoops.event_loop_group_close_lease!(lease)
         finally
             EventLoops.event_loop_group_destroy!(elg)
         end

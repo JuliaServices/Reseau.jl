@@ -501,6 +501,7 @@ function _initiate_socket_connect(request::R, address::HostAddress) where {R <: 
     connect_opts = SocketConnectOptions(
         remote_endpoint;
         event_loop = event_loop,
+        event_loop_group = request.bootstrap.event_loop_group,
         on_connection_result = EventCallable(err -> _on_socket_connect_complete(socket, err, attempt)),
         tls_connection_options = request.tls_connection_options,
     )
@@ -774,6 +775,7 @@ function _setup_client_channel(request::R)::Nothing where {R <: SocketConnection
     on_setup = EventCallable(_ClientChannelOnSetup(ctx))
     options = ChannelOptions(
         event_loop = event_loop,
+        event_loop_group = request.bootstrap.event_loop_group,
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
         enable_read_back_pressure = request.enable_read_back_pressure,
@@ -1006,6 +1008,7 @@ function ServerBootstrap(options::ServerBootstrapOptions)
             else
                 nothing
             end,
+            event_loop_group = bootstrap.event_loop_group,
         )
 
         socket_start_accept(listener, event_loop, listener_options)
@@ -1386,7 +1389,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
     end
 
     try
-        socket_assign_to_event_loop(socket, event_loop)
+        socket_assign_to_event_loop(socket, event_loop, bootstrap.event_loop_group)
     catch e
         logf(
             LogLevel.ERROR,
@@ -1404,6 +1407,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
     on_setup = EventCallable(_IncomingChannelOnSetup(ctx))
     options = ChannelOptions(
         event_loop = event_loop,
+        event_loop_group = bootstrap.event_loop_group,
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
         enable_read_back_pressure = bootstrap.enable_read_back_pressure,

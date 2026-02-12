@@ -167,6 +167,7 @@ end
 struct SocketConnectOptions
     remote_endpoint::SocketEndpoint
     event_loop::Union{EventLoop, Nothing}
+    event_loop_group::Union{EventLoopGroup, Nothing}
     on_connection_result::Union{EventCallable, Nothing}
     tls_connection_options::MaybeTlsConnectionOptions
 end
@@ -174,12 +175,14 @@ end
 function SocketConnectOptions(
         remote_endpoint::SocketEndpoint;
         event_loop = nothing,
+        event_loop_group = nothing,
         on_connection_result = nothing,
         tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )
     return SocketConnectOptions(
         remote_endpoint,
         event_loop,
+        event_loop_group,
         on_connection_result,
         tls_connection_options,
     )
@@ -208,15 +211,18 @@ end
 struct SocketListenerOptions
     on_accept_result::Union{ChannelCallable, Nothing}
     on_accept_start::Union{EventCallable, Nothing}
+    event_loop_group::Union{EventLoopGroup, Nothing}
 end
 
 function SocketListenerOptions(;
         on_accept_result = nothing,
         on_accept_start = nothing,
+        event_loop_group = nothing,
     )
     return SocketListenerOptions(
         on_accept_result,
         on_accept_start,
+        event_loop_group,
     )
 end
 
@@ -275,6 +281,7 @@ function socket_connect(
         socket::Socket,
         remote_endpoint::SocketEndpoint;
         event_loop::Union{EventLoop, Nothing} = nothing,
+        event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
         on_connection_result::Union{EventCallable, Nothing} = nothing,
         tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )::Nothing
@@ -283,6 +290,7 @@ function socket_connect(
         SocketConnectOptions(
             remote_endpoint;
             event_loop = event_loop,
+            event_loop_group = event_loop_group,
             on_connection_result = on_connection_result,
             tls_connection_options = tls_connection_options,
         ),
@@ -358,8 +366,26 @@ function socket_set_options(socket::Socket, options::SocketOptions)::Nothing
     return socket_set_options_impl(socket.impl, socket, options)
 end
 
+function socket_assign_to_event_loop_impl(
+        impl,
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup, Nothing},
+    )::Nothing
+    _ = event_loop_group
+    return socket_assign_to_event_loop_impl(impl, socket, event_loop)
+end
+
 function socket_assign_to_event_loop(socket::Socket, event_loop::EventLoop)::Nothing
     return socket_assign_to_event_loop_impl(socket.impl, socket, event_loop)
+end
+
+function socket_assign_to_event_loop(
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup, Nothing},
+    )::Nothing
+    return socket_assign_to_event_loop_impl(socket.impl, socket, event_loop, event_loop_group)
 end
 
 function socket_subscribe_to_readable_events(socket::Socket, on_readable::EventCallable)::Nothing

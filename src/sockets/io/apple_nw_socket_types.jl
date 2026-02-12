@@ -83,6 +83,7 @@
         on_cleanup_complete::Union{TaskFn, Nothing}
         cleanup_requested::Bool
         event_loop::Union{EventLoop, Nothing}
+        event_loop_group_lease::Union{EventLoopGroupLease, Nothing}
         connection_setup::Bool
         timeout_task::Union{ScheduledTask, Nothing}
         host_name::Union{String, Nothing}
@@ -113,6 +114,7 @@
             nothing,
             nothing,
             false,
+            nothing,
             nothing,
             false,
             nothing,

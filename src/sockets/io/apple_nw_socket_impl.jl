@@ -133,21 +133,35 @@
         return event_loop !== nothing
     end
 
-    function _nw_set_event_loop!(socket::Socket, event_loop::EventLoop)::Nothing
-        socket.event_loop = event_loop
+    function _nw_set_event_loop!(
+            socket::Socket,
+            event_loop::EventLoop,
+            event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
+        )::Nothing
         nw_socket = _nw_impl(socket)
         nw_socket.event_loop !== nothing && throw_error(ERROR_INVALID_STATE)
-        if event_loop_group_acquire_from_event_loop(event_loop) === nothing
-            logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket: failed to acquire event loop group.")
-            throw_error(ERROR_INVALID_STATE)
+
+        lease = nothing
+        if event_loop_group !== nothing
+            lease = event_loop_group_open_lease!(event_loop_group)
+            if lease === nothing
+                logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket: failed to acquire event loop group lease.")
+                throw_error(ERROR_INVALID_STATE)
+            end
         end
+
+        socket.event_loop = event_loop
+        nw_socket.event_loop_group_lease = lease
         nw_socket.event_loop = event_loop
         return nothing
     end
 
     function _nw_release_event_loop!(nw_socket::NWSocket)
+        if nw_socket.event_loop_group_lease !== nothing
+            event_loop_group_close_lease!(nw_socket.event_loop_group_lease)
+            nw_socket.event_loop_group_lease = nothing
+        end
         if nw_socket.event_loop !== nothing
-            event_loop_group_release_from_event_loop!(nw_socket.event_loop)
             nw_socket.event_loop = nothing
         end
         return nothing
@@ -1698,7 +1712,7 @@
         event_loop = options.event_loop
         event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
-        _nw_set_event_loop!(socket, event_loop)
+        _nw_set_event_loop!(socket, event_loop, options.event_loop_group)
 
         _nw_setup_socket_params!(nw_socket, socket.options)
 
@@ -1902,7 +1916,7 @@
         nw_socket.on_accept_started = options.on_accept_start
         socket.accept_result_fn = options.on_accept_result
 
-        _nw_set_event_loop!(socket, accept_loop)
+        _nw_set_event_loop!(socket, accept_loop, options.event_loop_group)
 
         event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle)
 
@@ -1986,17 +2000,17 @@
         return nothing
     end
 
-    function socket_assign_to_event_loop_impl(
-            ::NWSocket,
+    function _nw_socket_assign_to_event_loop_impl(
             socket::Socket,
             event_loop::EventLoop,
+            event_loop_group::Union{EventLoopGroup, Nothing},
         )::Nothing
         nw_socket = _nw_impl(socket)
         if socket.event_loop !== nothing
             throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
 
-        _nw_set_event_loop!(socket, event_loop)
+        _nw_set_event_loop!(socket, event_loop, event_loop_group)
 
         event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)
 
@@ -2004,6 +2018,23 @@
             ccall((:nw_connection_start, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), socket.io_handle.handle)
         end
         return nothing
+    end
+
+    function socket_assign_to_event_loop_impl(
+            ::NWSocket,
+            socket::Socket,
+            event_loop::EventLoop,
+        )::Nothing
+        return _nw_socket_assign_to_event_loop_impl(socket, event_loop, nothing)
+    end
+
+    function socket_assign_to_event_loop_impl(
+            ::NWSocket,
+            socket::Socket,
+            event_loop::EventLoop,
+            event_loop_group::Union{EventLoopGroup, Nothing},
+        )::Nothing
+        return _nw_socket_assign_to_event_loop_impl(socket, event_loop, event_loop_group)
     end
 
     function socket_subscribe_to_readable_events_impl(
