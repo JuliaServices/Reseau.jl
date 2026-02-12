@@ -665,10 +665,7 @@ function _connection_request_invoke_on_setup(
         request.on_setup(error_code)
     catch err
         logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: on_setup callback threw: %s",
-            sprint(showerror, err, catch_backtrace()),
-        )
+            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,string("ClientBootstrap: on_setup callback threw: %s", " ", string(sprint(showerror, err, catch_backtrace())), " ", ))
     end
     return nothing
 end
@@ -678,11 +675,7 @@ function _connection_request_complete(request::SocketConnectionRequest, error_co
         request.on_shutdown = nothing
     end
     logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: connection request complete error=%d on_setup=%s",
-        error_code,
-        request.on_setup === nothing ? "nothing" : "set",
-    )
+        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,string("ClientBootstrap: connection request complete error=%d on_setup=%s", " ", string(error_code), " ", string(request.on_setup === nothing ? "nothing" : "set"), " ", ))
     if request.on_setup !== nothing
         requested_loop = request.requested_event_loop
         if requested_loop !== nothing && !event_loop_thread_is_callers_thread(requested_loop)
@@ -842,9 +835,7 @@ function ServerBootstrap(options::ServerBootstrapOptions)
         if event_loop === nothing
             logf(
                 LogLevel.ERROR,
-                LS_IO_CHANNEL_BOOTSTRAP,
-                "ServerBootstrap: no event loop available",
-            )
+                LS_IO_CHANNEL_BOOTSTRAP,string("ServerBootstrap: no event loop available", " ", ))
             throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         end
 
@@ -864,10 +855,7 @@ function ServerBootstrap(options::ServerBootstrapOptions)
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(
             LogLevel.ERROR,
-            LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: setup failed with error %d",
-            err,
-        )
+            LS_IO_CHANNEL_BOOTSTRAP,string("ServerBootstrap: setup failed with error %d", " ", string(err), " ", ))
         if listener !== nothing
             try
                 socket_close(listener)

@@ -480,11 +480,7 @@ function is_network_interface_name_valid(interface_name::AbstractString)::Bool
             err = Libc.errno()
             logf(
                 LogLevel.ERROR,
-                LS_IO_SOCKET,
-                "network_interface_name(%s) is invalid with errno: %d",
-                interface_name,
-                err,
-            )
+                LS_IO_SOCKET,string("network_interface_name(%s) is invalid with errno: %d", " ", string(interface_name), " ", string(err), " ", ))
             return false
         end
         return true

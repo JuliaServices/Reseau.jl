@@ -348,12 +348,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
     if iface_len >= NETWORK_INTERFACE_NAME_MAX
         logf(
             LogLevel.ERROR,
-            LS_IO_SOCKET,
-            "id=%p fd=%d: network_interface_name max length must be less or equal than %d bytes including NULL terminated",
-            sock,
-            fd,
-            NETWORK_INTERFACE_NAME_MAX,
-        )
+            LS_IO_SOCKET,string("id=%p fd=%d: network_interface_name max length must be less or equal than %d bytes including NULL terminated", " ", string(sock), " ", string(fd), " ", string(NETWORK_INTERFACE_NAME_MAX), " ", ))
         throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
     end
 
@@ -380,13 +375,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                 iface_name = String(Vector{UInt8}(iface_bytes))
                 logf(
                     LogLevel.ERROR,
-                    LS_IO_SOCKET,
-                    "id=%p fd=%d: setsockopt() with SO_BINDTODEVICE for \"%s\" failed with errno %d.",
-                    sock,
-                    fd,
-                    iface_name,
-                    errno_val,
-                )
+                    LS_IO_SOCKET,string("id=%p fd=%d: setsockopt() with SO_BINDTODEVICE for \"%s\" failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
                 throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
         elseif IP_BOUND_IF != 0
@@ -396,13 +385,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                 errno_val = get_errno()
                 logf(
                     LogLevel.ERROR,
-                    LS_IO_SOCKET,
-                    "id=%p fd=%d: network_interface_name \"%s\" not found. if_nametoindex() failed with errno %d.",
-                    sock,
-                    fd,
-                    iface_name,
-                    errno_val,
-                )
+                    LS_IO_SOCKET,string("id=%p fd=%d: network_interface_name \"%s\" not found. if_nametoindex() failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
                 throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
 
@@ -422,13 +405,7 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                     errno_val = get_errno()
                     logf(
                         LogLevel.ERROR,
-                        LS_IO_SOCKET,
-                        "id=%p fd=%d: setsockopt() with IPV6_BOUND_IF for \"%s\" failed with errno %d.",
-                        sock,
-                        fd,
-                        iface_name,
-                        errno_val,
-                    )
+                        LS_IO_SOCKET,string("id=%p fd=%d: setsockopt() with IPV6_BOUND_IF for \"%s\" failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
                     throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
             else
@@ -446,24 +423,14 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                     errno_val = get_errno()
                     logf(
                         LogLevel.ERROR,
-                        LS_IO_SOCKET,
-                        "id=%p fd=%d: setsockopt() with IP_BOUND_IF for \"%s\" failed with errno %d.",
-                        sock,
-                        fd,
-                        iface_name,
-                        errno_val,
-                    )
+                        LS_IO_SOCKET,string("id=%p fd=%d: setsockopt() with IP_BOUND_IF for \"%s\" failed with errno %d.", " ", string(sock), " ", string(fd), " ", string(iface_name), " ", string(errno_val), " ", ))
                     throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
             end
         else
             logf(
                 LogLevel.ERROR,
-                LS_IO_SOCKET,
-                "id=%p fd=%d: network_interface_name is not supported on this platform.",
-                sock,
-                fd,
-            )
+                LS_IO_SOCKET,string("id=%p fd=%d: network_interface_name is not supported on this platform.", " ", string(sock), " ", string(fd), " ", ))
             throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
         end
     end

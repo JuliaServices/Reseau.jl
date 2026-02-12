@@ -646,7 +646,7 @@ function _host_resolver_thread(entry::HostEntry)
     catch err
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: thread failed for '$(entry.host_name)': $err")
         bt = catch_backtrace()
-        logf(LogLevel.ERROR, LS_IO_DNS, "%s", sprint(showerror, err, bt))
+        logf(LogLevel.ERROR, LS_IO_DNS,string("%s", " ", string(sprint(showerror, err, bt))))
     end
 
     return nothing

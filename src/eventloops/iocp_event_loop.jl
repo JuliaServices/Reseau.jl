@@ -206,10 +206,7 @@
         if !ok
             logf(
                 LogLevel.ERROR,
-                LS_IO_EVENT_LOOP,
-                "PostQueuedCompletionStatus() failed with error %d",
-                _win_get_last_error(),
-            )
+                LS_IO_EVENT_LOOP,string("PostQueuedCompletionStatus() failed with error %d", " ", _win_get_last_error(), " ", ))
         end
         return nothing
     end
@@ -229,10 +226,7 @@
         if iocp_handle == C_NULL
             logf(
                 LogLevel.FATAL,
-                LS_IO_EVENT_LOOP,
-                "CreateIoCompletionPort() failed with error %d",
-                _win_get_last_error(),
-            )
+                LS_IO_EVENT_LOOP,string("CreateIoCompletionPort() failed with error %d", " ", _win_get_last_error(), " ", ))
             throw_error(ERROR_SYS_CALL_FAILURE)
         end
         impl.iocp_handle = iocp_handle
@@ -595,10 +589,7 @@
         if !associated
             logf(
                 LogLevel.ERROR,
-                LS_IO_EVENT_LOOP,
-                "CreateIoCompletionPort() failed with error %d",
-                _win_get_last_error(),
-            )
+                LS_IO_EVENT_LOOP,string("CreateIoCompletionPort() failed with error %d", " ", _win_get_last_error(), " ", ))
             throw_error(ERROR_SYS_CALL_FAILURE)
         end
 

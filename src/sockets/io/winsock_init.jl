@@ -65,14 +65,14 @@
             wsa_data = Ref(WSADATA(0x0, 0x0, ntuple(_ -> UInt8(0), 257), ntuple(_ -> UInt8(0), 129), 0x0, 0x0, C_NULL))
             rc = ccall((:WSAStartup, _WS2_32), Cint, (UInt16, Ptr{WSADATA}), requested_version, wsa_data)
             if rc != 0
-                logf(LogLevel.ERROR, LS_IO_SOCKET, "static: WinSock initialization failed with error %d", rc)
+                logf(LogLevel.ERROR, LS_IO_SOCKET,string("static: WinSock initialization failed with error %d", " ", string(rc)))
                 throw_error(ERROR_SYS_CALL_FAILURE)
             end
 
             dummy = ccall((:socket, _WS2_32), UInt, (Cint, Cint, Cint), AF_INET, SOCK_STREAM, Cint(0))
             if dummy == INVALID_SOCKET
                 err = _wsa_get_last_error()
-                logf(LogLevel.ERROR, LS_IO_SOCKET, "static: dummy socket() failed with WSAError %d", err)
+                logf(LogLevel.ERROR, LS_IO_SOCKET,string("static: dummy socket() failed with WSAError %d", " ", string(err)))
                 throw_error(ERROR_SYS_CALL_FAILURE)
             end
 
@@ -97,7 +97,7 @@
                 )
                 if rc != 0 || connectex_ref[] == C_NULL
                     err = _wsa_get_last_error()
-                    logf(LogLevel.ERROR, LS_IO_SOCKET, "static: failed to load WSAID_CONNECTEX with WSAError %d", err)
+                    logf(LogLevel.ERROR, LS_IO_SOCKET,string("static: failed to load WSAID_CONNECTEX with WSAError %d", " ", string(err)))
                     throw_error(ERROR_SYS_CALL_FAILURE)
                 end
                 _connectex_fn[] = connectex_ref[]
@@ -122,7 +122,7 @@
                 )
                 if rc != 0 || acceptex_ref[] == C_NULL
                     err = _wsa_get_last_error()
-                    logf(LogLevel.ERROR, LS_IO_SOCKET, "static: failed to load WSAID_ACCEPTEX with WSAError %d", err)
+                    logf(LogLevel.ERROR, LS_IO_SOCKET,string("static: failed to load WSAID_ACCEPTEX with WSAError %d", " ", string(err)))
                     throw_error(ERROR_SYS_CALL_FAILURE)
                 end
                 _acceptex_fn[] = acceptex_ref[]
