@@ -67,9 +67,10 @@ function ci_debug_event_loop_state(label::AbstractString, event_loop::EventLoops
             end
         end
         if !isempty(scheduler.timed)
-            for i in 1:min(length(scheduler.timed), 4)
+            next_timed_task = peek(scheduler.timed)
+            if next_timed_task !== nothing
                 ci_debug_log(
-                    "$(label): timed[$i]=type=$(scheduler.timed[i].type_tag), scheduled=$(scheduler.timed[i].scheduled), timestamp=$(scheduler.timed[i].timestamp)"
+                    "$(label): timed_next=type=$(next_timed_task.type_tag), scheduled=$(next_timed_task.scheduled), timestamp=$(next_timed_task.timestamp)"
                 )
             end
         end
