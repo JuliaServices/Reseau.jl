@@ -7,7 +7,7 @@
 ## 1) Epoll implementation: correctness, robustness, performance, and safety
 
 ### Correctness / robustness
-- [ ] `P0` Audit all code paths that acquire `event_loop.lock` in `epoll_event_loop.jl` for guaranteed unlock on exceptions (`try`/`finally`) in:
+- [x] `P0` Audit all code paths that acquire `event_loop.lock` in `epoll_event_loop.jl` for guaranteed unlock on exceptions (`try`/`finally`) in:
   - `schedule_task_cross_thread`
   - `event_loop_cancel_task!`
   - `process_task_pre_queue`
