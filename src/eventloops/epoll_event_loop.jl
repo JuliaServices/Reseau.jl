@@ -240,19 +240,30 @@
         task.scheduled = true
 
         lock(impl.task_pre_queue_mutex)
+        try
+            is_first_task = isempty(impl.task_pre_queue)
+            push!(impl.task_pre_queue, task)
 
-        is_first_task = isempty(impl.task_pre_queue)
-        push!(impl.task_pre_queue, task)
-
-        # If the list was not empty, we already have a pending read on the pipe/eventfd
-        if is_first_task
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
-            # Write to signal the event thread
-            counter = Ref(UInt64(1))
-            @ccall write(impl.write_task_handle.fd::Cint, counter::Ptr{UInt64}, sizeof(UInt64)::Csize_t)::Cssize_t
+            # If the list was not empty, we already have a pending read on the pipe/eventfd
+            if is_first_task
+                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
+                # Write to signal the event thread
+                counter = Ref(UInt64(1))
+                while true
+                    written = @ccall gc_safe = true write(
+                        impl.write_task_handle.fd::Cint,
+                        counter::Ptr{UInt64},
+                        sizeof(UInt64)::Csize_t,
+                    )::Cssize_t
+                    if written == -1 && Base.Libc.errno() == Libc.EINTR
+                        continue
+                    end
+                    break
+                end
+            end
+        finally
+            unlock(impl.task_pre_queue_mutex)
         end
-
-        unlock(impl.task_pre_queue_mutex)
 
         return nothing
     end
@@ -305,14 +316,17 @@
 
         removed = false
         lock(impl.task_pre_queue_mutex)
-        if !isempty(impl.task_pre_queue)
-            idx = findfirst(x -> x === task, impl.task_pre_queue)
-            if idx !== nothing
-                deleteat!(impl.task_pre_queue, idx)
-                removed = true
+        try
+            if !isempty(impl.task_pre_queue)
+                idx = findfirst(x -> x === task, impl.task_pre_queue)
+                if idx !== nothing
+                    deleteat!(impl.task_pre_queue, idx)
+                    removed = true
+                end
             end
+        finally
+            unlock(impl.task_pre_queue_mutex)
         end
-        unlock(impl.task_pre_queue_mutex)
 
         if removed
             task_run!(task, TaskStatus.CANCELED)
@@ -465,27 +479,34 @@
         end
 
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
-        impl.should_process_task_pre_queue = false
+
+        tasks_to_schedule = impl.task_pre_queue_spare
+        empty!(tasks_to_schedule)
 
         count_ignore = Ref(UInt64(0))
 
         lock(impl.task_pre_queue_mutex)
+        try
+            if !impl.should_process_task_pre_queue
+                return nothing
+            end
 
-        # Drain the eventfd/pipe
-        while true
-            read_bytes = @ccall read(
-                impl.read_task_handle.fd::Cint,
-                count_ignore::Ptr{UInt64},
-                sizeof(UInt64)::Csize_t,
-            )::Cssize_t
-            read_bytes < 0 && break
+            impl.should_process_task_pre_queue = false
+
+            # Drain the eventfd/pipe
+            while true
+                read_bytes = @ccall read(
+                    impl.read_task_handle.fd::Cint,
+                    count_ignore::Ptr{UInt64},
+                    sizeof(UInt64)::Csize_t,
+                )::Cssize_t
+                read_bytes < 0 && break
+            end
+
+            tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
+        finally
+            unlock(impl.task_pre_queue_mutex)
         end
-
-        # Swap pre-queue contents to minimize lock hold time
-        tasks_to_schedule = impl.task_pre_queue
-        impl.task_pre_queue = ScheduledTask[]
-
-        unlock(impl.task_pre_queue_mutex)
 
         # Schedule the tasks
         while !isempty(tasks_to_schedule)

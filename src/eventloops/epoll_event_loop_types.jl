@@ -82,6 +82,7 @@
         write_task_handle::IoHandle
         task_pre_queue_mutex::ReentrantLock
         task_pre_queue::Vector{ScheduledTask}
+        task_pre_queue_spare::Vector{ScheduledTask}
         stop_task::Union{Nothing, ScheduledTask}
         @atomic stop_task_scheduled::Bool
         epoll_fd::Int32
@@ -102,6 +103,7 @@
             IoHandle(),
             IoHandle(),
             ReentrantLock(),
+            ScheduledTask[],
             ScheduledTask[],
             nothing,
             false,
