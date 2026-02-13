@@ -349,6 +349,7 @@
                     string(impl.write_task_handle.fd),
                 ),
             )
+            impl.should_process_task_pre_queue = true
 
             if needs_signal
                 logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
@@ -657,6 +658,20 @@
 
         lock(impl.task_pre_queue_mutex)
         try
+            if !impl.should_process_task_pre_queue && isempty(impl.task_pre_queue)
+                _event_loop_stop_trace_queue(
+                    event_loop,
+                    "process-pre-queue-skip-empty",
+                    string(
+                        "q_len=",
+                        string(length(impl.task_pre_queue)),
+                        " pending=",
+                        string(impl.should_process_task_pre_queue),
+                    ),
+                )
+                return nothing
+            end
+
             if !impl.should_process_task_pre_queue
                 _event_loop_stop_trace_queue(
                     event_loop,
@@ -782,7 +797,27 @@
                     end
 
                     event_data = get(impl.handle_registry, event_data_ptr, nothing)
-                    event_data === nothing && continue
+                    if event_data === nothing
+                        if event_data_ptr == impl.read_task_handle.additional_data
+                            lock(impl.task_pre_queue_mutex)
+                            try
+                                impl.should_process_task_pre_queue = true
+                            finally
+                                unlock(impl.task_pre_queue_mutex)
+                            end
+                            _event_loop_stop_trace_queue(
+                                event_loop,
+                                "event-data-miss-read-handle",
+                                string(
+                                    "ev_ptr=",
+                                    string(event_data_ptr),
+                                    " read_ptr=",
+                                    string(impl.read_task_handle.additional_data),
+                                ),
+                            )
+                        end
+                        continue
+                    end
 
                     # Convert epoll events to our event mask
                     event_mask = 0
