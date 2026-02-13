@@ -36,7 +36,8 @@
 - [x] `P1` Audit all `@ccall` sites for correct argument types and error translation; avoid unchecked assumptions about partial writes/reads.
   - Fixed Linux precompile/runtime failures by adding explicit `Csize_t` annotation on `write` length arguments, replacing deprecated `pointer(Ref(...))` usage with `Base.unsafe_convert(Ptr{UInt64}, Ref(...))`, and introducing a version-safe `_LIBC_EWOULDBLOCK` fallback.
 - [x] `P1` Ensure all native resources (`epoll` fd, eventfd/pipe fds, any user-level handles) are released on both normal and exceptional paths.
-- [ ] `P2` Check finalization behavior for loop/task objects: no reliance on finalizers for correctness during normal shutdown.
+- [x] `P2` Check finalization behavior for loop/task objects: no reliance on finalizers for correctness during normal shutdown.
+  - Confirmed: the epoll implementation has no task/loop finalizers in source; shutdown uses explicit `event_loop_destroy!` paths and destroy-state checks, with tests already exercising explicit teardown ordering.
 
 ### Performance
 - [x] `P2` Confirm epoll wait buffer sizing (`events` array length) is appropriate for expected concurrency and can absorb burst loads without immediate reallocation.
@@ -45,7 +46,8 @@
   - Added regression coverage confirming `impl.task_pre_queue_spare` is reused across drain cycles.
 - [x] `P2` Confirm wakeup batching avoids pathological wake storms when the same loop receives many cross-thread signals in quick succession.
   - Added burst scheduling regression to verify cross-thread scheduling remains reliable under many queued wakeups.
-- [ ] `P2` Validate fd registration/unregistration path does not perform avoidable work while lock is held.
+- [x] `P2` Validate fd registration/unregistration path does not perform avoidable work while lock is held.
+  - Epoll registration/unregistration does not hold the task pre-queue mutex for `epoll_ctl` work; lock usage is limited to lightweight queue-path bookkeeping.
 - [x] `P2` Confirm callback dispatch keeps fast path lightweight and does not allocate per-event where it can be avoided.
   - Simplified the event-dispatch hot path logging to avoid per-event `string(...)` formatting allocations.
 
