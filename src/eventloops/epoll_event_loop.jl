@@ -241,30 +241,26 @@
 
         lock(impl.task_pre_queue_mutex)
         try
-            is_first_task = isempty(impl.task_pre_queue)
-            needs_wakeup = is_first_task || !impl.should_process_task_pre_queue
             push!(impl.task_pre_queue, task)
             impl.should_process_task_pre_queue = true
 
-            if needs_wakeup
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
-                # Write to signal the event thread
-                counter = Ref(UInt64(1))
-                while true
-                    written = @ccall gc_safe = true write(
-                        impl.write_task_handle.fd::Cint,
-                        counter::Ptr{UInt64},
-                        sizeof(UInt64)::Csize_t,
-                    )::Cssize_t
-                    if written == -1 && Base.Libc.errno() == Libc.EINTR
-                        continue
-                    end
-                    if written == -1 && (Base.Libc.errno() == Libc.EAGAIN || Base.Libc.errno() == Libc.EWOULDBLOCK)
-                        break
-                    end
-                    written == -1 && throw_error(ERROR_SYS_CALL_FAILURE)
+            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
+            # Write to signal the event thread
+            counter = Ref(UInt64(1))
+            while true
+                written = @ccall gc_safe = true write(
+                    impl.write_task_handle.fd::Cint,
+                    counter::Ptr{UInt64},
+                    sizeof(UInt64)::Csize_t,
+                )::Cssize_t
+                if written == -1 && Base.Libc.errno() == Libc.EINTR
+                    continue
+                end
+                if written == -1 && (Base.Libc.errno() == Libc.EAGAIN || Base.Libc.errno() == Libc.EWOULDBLOCK)
                     break
                 end
+                written == -1 && throw_error(ERROR_SYS_CALL_FAILURE)
+                break
             end
         finally
             unlock(impl.task_pre_queue_mutex)
