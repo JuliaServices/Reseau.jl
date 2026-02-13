@@ -1086,7 +1086,11 @@ end
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
         ci_debug_log("socket connect read write: socket_start_accept")
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        @test ci_with_timeout(
+            "socket connect read write: socket_start_accept",
+            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1125,7 +1129,11 @@ end
         )
 
         ci_debug_log("socket connect read write: socket_connect")
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test ci_with_timeout(
+            "socket connect read write: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
+            timeout_s = 1.0,
+        )
         ci_debug_log("socket connect read write: socket_connect done")
         @test ci_wait_for_flag("socket connect read write: wait connect_done", connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
