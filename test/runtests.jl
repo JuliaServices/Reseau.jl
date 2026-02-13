@@ -3,6 +3,7 @@ using Reseau
 import Reseau: Threads, EventLoops, Sockets
 
 const _TEST_STAGE_LOG = get(ENV, "RESEAU_TEST_STAGE_LOG", "") == "1"
+const _EVENT_LOOP_DRILL = get(ENV, "RESEAU_EVENT_LOOP_DRILL", "") == "1"
 _log_stage(name::AbstractString) = _TEST_STAGE_LOG && println("[test-stage] ", name)
 
 include("test_utils.jl")
@@ -10,6 +11,11 @@ cleanup_test_sockets!()
 atexit(cleanup_test_sockets!)
 setup_test_keychain!()
 atexit(cleanup_test_keychain!)
+
+if _EVENT_LOOP_DRILL
+    include("event_loop_ci_drill.jl")
+    exit(0)
+end
 
 if Sys.islinux()
     using aws_lc_jll

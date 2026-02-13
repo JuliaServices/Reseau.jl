@@ -28,6 +28,7 @@ jobs:
         shell: bash
         env:
           JULIA_NUM_THREADS: 1
+          RESEAU_EVENT_LOOP_DRILL: "1"
           RESEAU_TEST_STAGE_LOG: "1"
           RESEAU_SOCKET_CLOSE_DEBUG: "1"
           RESEAU_EVENT_LOOP_TEST_TRACE: "1"
@@ -41,18 +42,17 @@ jobs:
           run_slice() {
             local start="$1"
             local max_seconds="$2"
-            local script_cmd=$3
 
             RESEAU_EVENT_LOOP_TEST_TRACE_START="$start" \
             RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT="$start" \
             timeout --foreground -s QUIT "${max_seconds}"s \
-              julia --project=. --startup-file=no --history-file=no -e "${script_cmd}"
+              julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
           }
 
           start_index="${RESEAU_EVENT_LOOP_TEST_INDEX}"
           timeout_seconds="${RESEAU_EVENT_LOOP_TEST_TIMEOUT_SEC}"
           echo "[ci-drill] running event-loop testset window=$start_index (trace-only)"
-          if ! run_slice "$start_index" "$timeout_seconds" "using Pkg; Pkg.instantiate(); include(\"test/event_loop_ci_drill.jl\")"; then
+          if ! run_slice "$start_index" "$timeout_seconds"; then
             echo "[ci-drill] event-loop drill timed out or failed at index=$start_index"
             exit 1
           fi
