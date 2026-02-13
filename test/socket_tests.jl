@@ -54,8 +54,39 @@ function ci_debug_event_loop_state(label::AbstractString, event_loop::EventLoops
         impl = event_loop.impl_data
         scheduler = impl.scheduler
         ci_debug_log(
+            "$(label): running_thread_id=$(@atomic impl.running_thread_id) caller_thread=$(Threads.threadid()) is_event_loop_thread=$(EventLoops.event_loop_thread_is_callers_thread(event_loop)) should_process_task_pre_queue=$(impl.should_process_task_pre_queue) should_continue=$(impl.should_continue) read_fd=$(impl.read_task_handle.fd) write_fd=$(impl.write_task_handle.fd) stop_task_scheduled=$(@atomic impl.stop_task_scheduled)"
+        )
+        ci_debug_log(
             "$(label): pre_queue=$(length(impl.task_pre_queue)), running_tasks=$(length(scheduler.running)), asap=$(length(scheduler.asap)), timed=$(length(scheduler.timed)), should_continue=$(impl.should_continue), stop_task_scheduled=$(@atomic impl.stop_task_scheduled)"
         )
+        if !isempty(scheduler.asap)
+            for i in 1:min(length(scheduler.asap), 4)
+                ci_debug_log(
+                    "$(label): asap[$i]=type=$(scheduler.asap[i].type_tag), scheduled=$(scheduler.asap[i].scheduled), timestamp=$(scheduler.asap[i].timestamp)"
+                )
+            end
+        end
+        if !isempty(scheduler.timed)
+            for i in 1:min(length(scheduler.timed), 4)
+                ci_debug_log(
+                    "$(label): timed[$i]=type=$(scheduler.timed[i].type_tag), scheduled=$(scheduler.timed[i].scheduled), timestamp=$(scheduler.timed[i].timestamp)"
+                )
+            end
+        end
+        if !isempty(scheduler.running)
+            for i in 1:min(length(scheduler.running), 4)
+                ci_debug_log(
+                    "$(label): running[$i]=type=$(scheduler.running[i].type_tag), scheduled=$(scheduler.running[i].scheduled), timestamp=$(scheduler.running[i].timestamp)"
+                )
+            end
+        end
+        if !isempty(impl.task_pre_queue)
+            for i in 1:min(length(impl.task_pre_queue), 4)
+                ci_debug_log(
+                    "$(label): pre_queue[$i]=type=$(impl.task_pre_queue[i].type_tag), scheduled=$(impl.task_pre_queue[i].scheduled), timestamp=$(impl.task_pre_queue[i].timestamp)"
+                )
+            end
+        end
     end
 end
 
@@ -75,6 +106,13 @@ function ci_debug_socket_state(label::AbstractString, socket::Union{Sockets.Sock
             ci_debug_log("$(label): failed to read platform socket impl internals")
         end
     end
+end
+
+function ci_debug_task_state(label::AbstractString, task::Union{Reseau.ScheduledTask, Nothing})
+    task === nothing && return
+    ci_debug_log(
+        "$(label): type=$(task.type_tag), scheduled=$(task.scheduled), timestamp=$(task.timestamp), objectid=$(objectid(task))"
+    )
 end
 
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
@@ -1959,6 +1997,7 @@ end
 
         write_task_client = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             ci_debug_log("cleanup in write cb doesn't explode: write_task_client running")
+            ci_debug_log("cleanup in write cb doesn't explode: write_task_client status=$(status)")
             cursor = Reseau.ByteCursor("teapot")
             try
                 Sockets.socket_write(
@@ -1990,12 +2029,13 @@ end
                 end
                 write_done_client[] = true
             end
-            ci_debug_log("cleanup in write cb doesn't explode: write_task_client complete")
+                ci_debug_log("cleanup in write cb doesn't explode: write_task_client complete")
             return nothing
         end); type_tag = "socket_write_cleanup_client")
 
         write_task_server = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             ci_debug_log("cleanup in write cb doesn't explode: write_task_server running")
+            ci_debug_log("cleanup in write cb doesn't explode: write_task_server status=$(status)")
             cursor = Reseau.ByteCursor("spout")
             try
                 Sockets.socket_write(
@@ -2031,7 +2071,18 @@ end
             return nothing
         end); type_tag = "socket_write_cleanup_server")
 
+        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_client initial", write_task_client)
+        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_server initial", write_task_server)
+        ci_debug_event_loop_state(
+            "cleanup in write cb doesn't explode: state before client schedule",
+            el_val,
+        )
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_client)
+        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_client after schedule", write_task_client)
+        ci_debug_event_loop_state(
+            "cleanup in write cb doesn't explode: state after client schedule",
+            el_val,
+        )
         if !ci_wait_for_flag(
             "cleanup in write cb doesn't explode: wait write_done_client",
             write_done_client;
@@ -2042,12 +2093,33 @@ end
                 "cleanup in write cb doesn't explode: state at client timeout",
                 el_val,
             )
+            ci_debug_task_state(
+                "cleanup in write cb doesn't explode: write_task_client at client timeout",
+                write_task_client,
+            )
+            ci_debug_task_state(
+                "cleanup in write cb doesn't explode: write_task_server at client timeout",
+                write_task_server,
+            )
             ci_debug_socket_state("cleanup in write cb doesn't explode: client socket at client timeout", client_socket)
             ci_debug_socket_state("cleanup in write cb doesn't explode: server socket at client timeout", server_sock)
             ci_debug_socket_state("cleanup in write cb doesn't explode: listener socket at client timeout", listener_socket)
         end
         @test write_done_client[] == true
+        ci_debug_task_state(
+            "cleanup in write cb doesn't explode: write_task_client at client completion",
+            write_task_client,
+        )
+        ci_debug_task_state(
+            "cleanup in write cb doesn't explode: write_task_server at client completion",
+            write_task_server,
+        )
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_server)
+        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_server after schedule", write_task_server)
+        ci_debug_event_loop_state(
+            "cleanup in write cb doesn't explode: state after server schedule",
+            el_val,
+        )
         if !ci_wait_for_flag(
             "cleanup in write cb doesn't explode: wait write_done_server",
             write_done_server;
@@ -2058,11 +2130,31 @@ end
                 "cleanup in write cb doesn't explode: state at server timeout",
                 el_val,
             )
+            ci_debug_task_state(
+                "cleanup in write cb doesn't explode: write_task_server at server timeout",
+                write_task_server,
+            )
+            ci_debug_task_state(
+                "cleanup in write cb doesn't explode: write_task_client at server timeout",
+                write_task_client,
+            )
             ci_debug_socket_state("cleanup in write cb doesn't explode: client socket at server timeout", client_socket)
             ci_debug_socket_state("cleanup in write cb doesn't explode: server socket at server timeout", server_sock)
             ci_debug_socket_state("cleanup in write cb doesn't explode: listener socket at server timeout", listener_socket)
         end
         @test write_done_server[] == true
+        ci_debug_event_loop_state(
+            "cleanup in write cb doesn't explode: state at completion",
+            el_val,
+        )
+        ci_debug_task_state(
+            "cleanup in write cb doesn't explode: write_task_client at server completion",
+            write_task_client,
+        )
+        ci_debug_task_state(
+            "cleanup in write cb doesn't explode: write_task_server at server completion",
+            write_task_server,
+        )
         @test write_err_client[] == Reseau.AWS_OP_SUCCESS
         @test write_err_server[] == Reseau.AWS_OP_SUCCESS
         @test write_done_client_cb_err[] === nothing
