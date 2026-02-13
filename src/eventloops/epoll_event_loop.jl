@@ -234,6 +234,7 @@
     function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
 
+        should_signal = false
         lock(impl.task_pre_queue_mutex)
         try
             if task.scheduled
@@ -282,44 +283,44 @@
 
             is_first_task = isempty(impl.task_pre_queue)
             push!(impl.task_pre_queue, task)
-
-            # If the list was not empty, we already have a pending read on the pipe/eventfd
-            if is_first_task
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
-                # Write to signal the event thread
-                counter = Ref(UInt64(1))
-                write_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt64}, counter))
-                remaining = Csize_t(sizeof(UInt64))
-                while remaining > 0
-                    written = @ccall gc_safe = true write(
-                        impl.write_task_handle.fd::Cint,
-                        write_ptr::Ptr{UInt8},
-                        remaining::Csize_t,
-                    )::Cssize_t
-                    if written == -1
-                        errno = Base.Libc.errno()
-                        if errno == Libc.EINTR
-                            continue
-                        end
-                        if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
-                            logf(
-                                LogLevel.TRACE,
-                                LS_IO_EVENT_LOOP,
-                                "Ignoring cross-thread wakeup write backpressure when scheduling task queue",
-                            )
-                            break
-                        end
-                        throw_error(ERROR_SYS_CALL_FAILURE)
-                    end
-                    if written <= 0
-                        break
-                    end
-                    remaining -= Csize_t(written)
-                    write_ptr += Int(written)
-                end
-            end
+            should_signal = is_first_task
         finally
             unlock(impl.task_pre_queue_mutex)
+        end
+
+        if should_signal
+            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
+            # Write to signal the event thread
+            counter = Ref(UInt64(1))
+            write_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt64}, counter))
+            remaining = Csize_t(sizeof(UInt64))
+            while remaining > 0
+                written = @ccall gc_safe = true write(
+                    impl.write_task_handle.fd::Cint,
+                    write_ptr::Ptr{UInt8},
+                    remaining::Csize_t,
+                )::Cssize_t
+                if written == -1
+                    errno = Base.Libc.errno()
+                    if errno == Libc.EINTR
+                        continue
+                    end
+                    if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
+                        logf(
+                            LogLevel.TRACE,
+                            LS_IO_EVENT_LOOP,
+                            "Ignoring cross-thread wakeup write backpressure when scheduling task queue",
+                        )
+                        break
+                    end
+                    throw_error(ERROR_SYS_CALL_FAILURE)
+                end
+                if written <= 0
+                    break
+                end
+                remaining -= Csize_t(written)
+                write_ptr += Int(written)
+            end
         end
 
         return nothing
