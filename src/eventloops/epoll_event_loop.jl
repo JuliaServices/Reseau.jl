@@ -56,6 +56,13 @@
         return nothing
     end
 
+    @inline function _event_loop_thread_id()::UInt64
+        @static if Sys.islinux()
+            return UInt64(@ccall pthread_self()::Culong)
+        end
+        return UInt64(Base.Threads.threadid())
+    end
+
     @wrap_thread_fn function _epoll_event_loop_thread_entry()
         event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
         try
@@ -445,13 +452,14 @@
 
     # Check if on event thread
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
+        caller_thread_id = _event_loop_thread_id()
         task_local_loop = Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing)
         impl = event_loop.impl_data
         if task_local_loop === event_loop
             _event_loop_trace_thread_decision(
                 event_loop,
                 "task-local-match",
-                Int(Base.Threads.threadid()),
+                Int(caller_thread_id),
                 Int(@atomic impl.running_thread_id),
                 true,
             )
@@ -462,19 +470,7 @@
             _event_loop_trace_thread_decision(
                 event_loop,
                 "threadid-reject-stopped",
-                Int(Base.Threads.threadid()),
-                Int(@atomic impl.running_thread_id),
-                false,
-            )
-            return false
-        end
-
-        thread_id = Base.Threads.threadid()
-        if thread_id <= 1
-            _event_loop_trace_thread_decision(
-                event_loop,
-                "threadid-disabled",
-                Int(thread_id),
+                Int(caller_thread_id),
                 Int(@atomic impl.running_thread_id),
                 false,
             )
@@ -482,12 +478,12 @@
         end
 
         running_id = @atomic impl.running_thread_id
-        match = running_id != 0 && running_id == UInt64(thread_id)
+        match = running_id != 0 && running_id == caller_thread_id
         if match
             _event_loop_trace_thread_decision(
                 event_loop,
                 "threadid-match",
-                Int(Base.Threads.threadid()),
+                Int(caller_thread_id),
                 Int(running_id),
                 false,
             )
@@ -496,7 +492,7 @@
             _event_loop_trace_thread_decision(
                 event_loop,
                 "threadid-miss",
-                Int(thread_id),
+                Int(caller_thread_id),
                 Int(running_id),
                 false,
             )
@@ -765,7 +761,7 @@
         impl = event_loop.impl_data
 
         # Set running thread ID
-        @atomic impl.running_thread_id = UInt64(Base.Threads.threadid())
+        @atomic impl.running_thread_id = _event_loop_thread_id()
 
         # Subscribe to events on the read task handle for cross-thread notifications.
         # Signal `startup_event` once subscription is complete.
@@ -953,7 +949,7 @@
         event_loop_wait_for_stop_completion!(event_loop)
 
         # Set thread ID for cancellation callbacks
-        impl.thread_joined_to = UInt64(Base.Threads.threadid())
+        impl.thread_joined_to = _event_loop_thread_id()
         @atomic impl.running_thread_id = impl.thread_joined_to
 
         # Clean up scheduler (cancels remaining tasks)

@@ -439,49 +439,71 @@ function socket_close(socket::Socket)::Nothing
 
     _socket_close_debug(socket, "cross-thread-enter"; task_scheduled = false)
 
-    task = ScheduledTask(
-        TaskFn(function(status)
-            error_code = nothing
-            should_close = false
-            try
-                lock(close_lock) do
-                    if !close_started[]
-                        close_started[] = true
-                        should_close = true
-                    end
+    function run_socket_close_task()::Union{Nothing, ReseauError}
+        error_code = nothing
+        should_close = false
+        try
+            lock(close_lock) do
+                if !close_started[]
+                    close_started[] = true
+                    should_close = true
                 end
-                _socket_close_debug(
-                    socket,
-                    "close-task-entered",
-                    task_scheduled = true,
-                    task_invoked = true,
-                )
-
-                if should_close
-                    socket_close_impl(socket.impl, socket)
-                end
-            catch e
-                error_code = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
             end
-
-            close_error = error_code
             _socket_close_debug(
                 socket,
-                "close-task-complete",
+                "close-task-entered",
+                task_scheduled = true,
                 task_invoked = true,
-                task_done = true,
-                err_code = close_error === nothing ? nothing : close_error.code,
             )
+            if should_close
+                socket_close_impl(socket.impl, socket)
+            end
+        catch e
+            error_code = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
+        end
+
+        _socket_close_debug(
+            socket,
+            "close-task-complete",
+            task_invoked = true,
+            task_done = true,
+            err_code = error_code === nothing ? nothing : error_code.code,
+        )
+        return error_code
+    end
+
+    task = ScheduledTask(
+        TaskFn(function(status)
+            _ = status
+            close_error = run_socket_close_task()
             put!(close_result, close_error)
             return nothing
         end);
         type_tag = "socket_close_on_event_loop",
     )
-    event_loop_schedule_task_now!(event_loop, task)
+    close_status = nothing
+    try
+        event_loop_schedule_task_now!(event_loop, task)
+        _socket_close_debug(
+            socket,
+            "cross-thread-scheduled",
+            task_scheduled = true,
+        )
+    catch e
+        close_schedule_error = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
+        _socket_close_debug(
+            socket,
+            "cross-thread-schedule-failed",
+            task_scheduled = true,
+            task_invoked = true,
+            err_code = close_schedule_error.code,
+        )
+        put!(close_result, run_socket_close_task())
+    end
 
     _socket_close_debug(
         socket,
-        "waiting-cross-thread-completion";
+        "waiting-cross-thread-completion",
         task_scheduled = true,
     )
     close_status = take!(close_result)
