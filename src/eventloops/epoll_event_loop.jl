@@ -468,13 +468,35 @@
             )
             return false
         end
+
+        thread_id = Base.Threads.threadid()
+        if thread_id <= 1
+            _event_loop_trace_thread_decision(
+                event_loop,
+                "threadid-disabled",
+                Int(thread_id),
+                Int(@atomic impl.running_thread_id),
+                false,
+            )
+            return false
+        end
+
         running_id = @atomic impl.running_thread_id
-        match = running_id != 0 && running_id == UInt64(Base.Threads.threadid())
+        match = running_id != 0 && running_id == UInt64(thread_id)
         if match
             _event_loop_trace_thread_decision(
                 event_loop,
                 "threadid-match",
                 Int(Base.Threads.threadid()),
+                Int(running_id),
+                false,
+            )
+        end
+        if !match
+            _event_loop_trace_thread_decision(
+                event_loop,
+                "threadid-miss",
+                Int(thread_id),
                 Int(running_id),
                 false,
             )

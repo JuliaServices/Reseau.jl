@@ -32,6 +32,7 @@ jobs:
           RESEAU_SOCKET_CLOSE_DEBUG: "1"
           RESEAU_EVENT_LOOP_TEST_TRACE: "1"
           RESEAU_EVENT_LOOP_TEST_TIMEOUT_SEC: "180"
+          RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT: "220"
         run: |
           set -euo pipefail
           set -x
@@ -44,4 +45,8 @@ jobs:
           fi
 
           echo "[ci-drill] running full suite"
-          julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
+          if ! timeout --foreground -s QUIT "600s" \
+            julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'; then
+            echo "[ci-full] full suite timed out or failed"
+            exit 1
+          fi
