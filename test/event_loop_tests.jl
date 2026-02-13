@@ -1,6 +1,8 @@
 using Test
 using Reseau
 
+get(ENV, "RESEAU_EVENT_LOOP_TEST_TRACE", "") == "1" && println("[event-loop-test] module loaded")
+
 const _dispatch_queue_store = Ref{Ptr{Cvoid}}(C_NULL)
 function _dispatch_queue_setter(handle::Ptr{EventLoops.IoHandle}, queue::Ptr{Cvoid})
     _dispatch_queue_store[] = queue
@@ -71,8 +73,46 @@ function _drain_pipe(read_end::Sockets.PipeReadEnd)
     end
 end
 
+const _EVENT_LOOP_TEST_TRACE = get(ENV, "RESEAU_EVENT_LOOP_TEST_TRACE", "") == "1"
+const _EVENT_LOOP_TEST_TRACE_LIMIT = begin
+    try
+        parse(Int, get(ENV, "RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT", "0"))
+    catch
+        0
+    end
+end
+const _EVENT_LOOP_TEST_TRACE_START = begin
+    try
+        parse(Int, get(ENV, "RESEAU_EVENT_LOOP_TEST_TRACE_START", "1"))
+    catch
+        1
+    end
+end
+const _EVENT_LOOP_TEST_TRACE_COUNT = Ref(0)
+macro trace_testset(test_name, body)
+    return esc(
+        quote
+            local _run = true
+            if _EVENT_LOOP_TEST_TRACE_LIMIT > 0
+                _EVENT_LOOP_TEST_TRACE_COUNT[] += 1
+                local _idx = _EVENT_LOOP_TEST_TRACE_COUNT[]
+                if _idx < _EVENT_LOOP_TEST_TRACE_START || _idx > _EVENT_LOOP_TEST_TRACE_LIMIT
+                    _run = false
+                end
+            end
+
+            if _run
+                _EVENT_LOOP_TEST_TRACE && println("[event-loop-test] ", $(test_name))
+                @testset $(test_name) $(body)
+            else
+                _EVENT_LOOP_TEST_TRACE && println("[event-loop-test-skip] ", $(test_name))
+            end
+        end,
+    )
+end
+
 @testset "Event Loops" begin
-    @testset "EventLoopGroup indexing convenience" begin
+     @trace_testset "EventLoopGroup indexing convenience" begin
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         try
@@ -86,7 +126,7 @@ end
         end
     end
 
-    @testset "Epoll pipe cloexec flags" begin
+     @trace_testset "Epoll pipe cloexec flags" begin
         if Sys.islinux()
             read_fd, write_fd = EventLoops.open_nonblocking_posix_pipe()
             try
@@ -107,7 +147,7 @@ end
         end
     end
 
-    @testset "Event loop scheduling" begin
+     @trace_testset "Event loop scheduling" begin
         el = EventLoops.event_loop_new()
 
         interactive_threads = Base.Threads.nthreads(:interactive)
@@ -142,7 +182,7 @@ end
         end
     end
 
-    @testset "Event loop future scheduling timing" begin
+     @trace_testset "Event loop future scheduling timing" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -182,7 +222,7 @@ end
         end
     end
 
-    @testset "Event loop stress scheduling" begin
+     @trace_testset "Event loop stress scheduling" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -226,7 +266,7 @@ end
         end
     end
 
-    @testset "Event loop pipe subscribe stress" begin
+     @trace_testset "Event loop pipe subscribe stress" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -304,7 +344,7 @@ end
         end
     end
 
-    @testset "Event loop subscribe/unsubscribe" begin
+     @trace_testset "Event loop subscribe/unsubscribe" begin
         if Sys.iswindows()
             @test true
         else
@@ -359,7 +399,7 @@ end
         end
     end
 
-    @testset "Event loop writable event on subscribe" begin
+     @trace_testset "Event loop writable event on subscribe" begin
         if Sys.iswindows()
             @test true
         else
@@ -437,7 +477,7 @@ end
         end
     end
 
-    @testset "Event loop no readable event before write" begin
+     @trace_testset "Event loop no readable event before write" begin
         if Sys.iswindows()
             @test true
         else
@@ -504,7 +544,7 @@ end
         end
     end
 
-    @testset "Event loop readable event on subscribe if data present" begin
+     @trace_testset "Event loop readable event on subscribe if data present" begin
         if Sys.iswindows()
             @test true
         else
@@ -584,7 +624,7 @@ end
         end
     end
 
-    @testset "Event loop readable event after write" begin
+     @trace_testset "Event loop readable event after write" begin
         if Sys.iswindows()
             @test true
         else
@@ -690,7 +730,7 @@ end
         end
     end
 
-    @testset "Event loop readable event on 2nd time readable" begin
+     @trace_testset "Event loop readable event on 2nd time readable" begin
         if Sys.iswindows()
             @test true
         else
@@ -802,7 +842,7 @@ end
         end
     end
 
-    @testset "Event loop no events after unsubscribe" begin
+     @trace_testset "Event loop no events after unsubscribe" begin
         if Sys.iswindows()
             @test true
         else
@@ -946,7 +986,7 @@ end
         end
     end
 
-    @testset "Event loop group thread affinity" begin
+     @trace_testset "Event loop group thread affinity" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 2
             @test true
@@ -1012,7 +1052,7 @@ end
         end
     end
 
-    @testset "IoHandle additional_data parity" begin
+     @trace_testset "IoHandle additional_data parity" begin
         if Sys.iswindows()
             @test true
         else
@@ -1075,7 +1115,7 @@ end
         end
     end
 
-    @testset "Event loop unsubscribe error" begin
+     @trace_testset "Event loop unsubscribe error" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1116,7 +1156,7 @@ end
         end
     end
 
-    @testset "Event loop syscall error mapping" begin
+     @trace_testset "Event loop syscall error mapping" begin
         if Sys.iswindows()
             @test true
         else
@@ -1192,7 +1232,7 @@ end
         end
     end
 
-    @testset "Event loop serialized ordering" begin
+     @trace_testset "Event loop serialized ordering" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1241,7 +1281,7 @@ end
         end
     end
 
-    @testset "Event loop cancel task" begin
+     @trace_testset "Event loop cancel task" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1284,7 +1324,7 @@ end
         end
     end
 
-    @testset "Event loop destroy cancels pending task" begin
+     @trace_testset "Event loop destroy cancels pending task" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1312,7 +1352,7 @@ end
         end
     end
 
-    @testset "Event loop destroy on loop thread throws" begin
+     @trace_testset "Event loop destroy on loop thread throws" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1343,7 +1383,7 @@ end
         end
     end
 
-    @testset "Event loop group" begin
+     @trace_testset "Event loop group" begin
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         try
@@ -1356,7 +1396,7 @@ end
         end
     end
 
-    @testset "Event loop group async shutdown" begin
+     @trace_testset "Event loop group async shutdown" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1390,7 +1430,7 @@ end
         end
     end
 
-    @testset "Event loop group NUMA setup" begin
+     @trace_testset "Event loop group NUMA setup" begin
         cpu_count = max(1, min(Sys.CPU_THREADS, Int(typemax(UInt16))))
         elg = EventLoops.EventLoopGroup(; loop_count = typemax(UInt16), cpu_group = 0)
 
@@ -1402,7 +1442,7 @@ end
         end
     end
 
-    @testset "Event loop stop then restart" begin
+     @trace_testset "Event loop stop then restart" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1442,7 +1482,7 @@ end
         end
     end
 
-    @testset "Event loop multiple stops" begin
+     @trace_testset "Event loop multiple stops" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1460,7 +1500,7 @@ end
         end
     end
 
-    @testset "Event loop group setup and shutdown" begin
+     @trace_testset "Event loop group setup and shutdown" begin
         expected = max(1, Sys.CPU_THREADS >> 1)
 
         elg = EventLoops.EventLoopGroup(; loop_count = 0)
@@ -1474,7 +1514,7 @@ end
         end
     end
 
-    @testset "Event loop group destroy idempotent" begin
+     @trace_testset "Event loop group destroy idempotent" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1487,7 +1527,7 @@ end
         end
     end
 
-    @testset "Event loop message pool sharing" begin
+     @trace_testset "Event loop message pool sharing" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
@@ -1528,7 +1568,7 @@ end
         end
     end
 
-    @testset "Event loop load factor" begin
+     @trace_testset "Event loop load factor" begin
         times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
         clock = EventLoops.SequenceClock(times)
 
@@ -1541,7 +1581,7 @@ end
         @test EventLoops.event_loop_get_load_factor(el) == 0
     end
 
-    @testset "Event loop clock override" begin
+     @trace_testset "Event loop clock override" begin
         clock = EventLoops.RefClock(UInt64(42))
 
         el = EventLoops.event_loop_new(clock)
@@ -1563,7 +1603,7 @@ end
         end
     end
 
-    @testset "Event loop group thread constraint" begin
+     @trace_testset "Event loop group thread constraint" begin
         # OS threads have no interactive thread pool constraint;
         # verify that creating an ELG with a reasonable count succeeds.
         elg = EventLoops.EventLoopGroup(; loop_count = UInt16(2))
@@ -1575,7 +1615,7 @@ end
         end
     end
 
-    @testset "Epoll task pre-queue drain" begin
+     @trace_testset "Epoll task pre-queue drain" begin
         if !Sys.islinux()
             @test true
         else
@@ -1620,7 +1660,7 @@ end
         end
     end
 
-    @testset "Kqueue cleanup task doesn't underflow connected handle count" begin
+     @trace_testset "Kqueue cleanup task doesn't underflow connected handle count" begin
         if !Sys.isapple()
             @test true
         else
@@ -1660,7 +1700,7 @@ end
         end
     end
 
-    @testset "Kqueue completion port for NW sockets" begin
+     @trace_testset "Kqueue completion port for NW sockets" begin
         if !Sys.isapple()
             @test true
         else
