@@ -38,4 +38,5 @@ Status legend: [ ] pending, [x] done, [~] blocked/needs-more-info
 
 ## Step 6 — Merge readiness
 - [ ] Update changelog/docs if needed.
-- [ ] Open PR and ensure CI green across the 3 platforms.
+- [x] Open PR (https://github.com/JuliaServices/Reseau.jl/pull/25)
+- [ ] Ensure CI green across the 3 platforms.
