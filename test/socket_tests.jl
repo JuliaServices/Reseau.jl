@@ -109,6 +109,13 @@ function ci_debug_socket_state(label::AbstractString, socket::Union{Sockets.Sock
     end
 end
 
+function ci_debug_cleanup_context(label::AbstractString, event_loop::EventLoops.EventLoop, sockets::Union{Sockets.Socket, Nothing}...)
+    ci_debug_event_loop_state("$(label): pre-cleanup", event_loop)
+    for i in eachindex(sockets)
+        ci_debug_socket_state("$(label): pre-cleanup socket[$i]", sockets[i])
+    end
+end
+
 function ci_debug_task_state(label::AbstractString, task::Union{Reseau.ScheduledTask, Nothing})
     task === nothing && return
     ci_debug_log(
@@ -582,6 +589,7 @@ end
             @test payload[] == "ping"
         finally
             ci_debug_log("ipv4 stream: cleanup start")
+            ci_debug_cleanup_context("ipv4 stream", el_val, client_socket, accepted[], server_socket)
             if client_socket !== nothing
                 ci_debug_log("ipv4 stream: cleanup client_socket")
                 if !ci_with_timeout("ipv4 stream: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket); timeout_s=1.0)
@@ -680,6 +688,7 @@ end
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
         finally
             ci_debug_log("ipv4 udp: cleanup start")
+            ci_debug_cleanup_context("ipv4 udp", el_val, client_socket, server_socket)
             if client_socket !== nothing
                 ci_debug_log("ipv4 udp: cleanup client_socket")
                 if !ci_with_timeout(
@@ -809,6 +818,7 @@ end
             @test accept_err[] == Reseau.AWS_OP_SUCCESS
         finally
             ci_debug_log("ipv6 stream: cleanup start")
+            ci_debug_cleanup_context("ipv6 stream", el_val, client_socket, accepted[], server_socket)
             if client_socket !== nothing
                 ci_debug_log("ipv6 stream: cleanup client_socket")
                 ci_with_timeout(
@@ -1213,6 +1223,7 @@ end
         @test payload[] == "ping"
     finally
         ci_debug_log("socket connect read write: cleanup start")
+        ci_debug_cleanup_context("socket connect read write", el_val, client_socket, accepted[], server_socket)
         if client_socket !== nothing
             ci_with_timeout("socket connect read write: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
             if !ci_with_timeout("socket connect read write: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
