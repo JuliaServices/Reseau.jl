@@ -51,7 +51,8 @@
 - [x] `P1` Validate FD lifecycle in `close`/`epoll_ctl` paths never operates on invalidated descriptors during teardown.
 - [x] `P1` Ensure failure modes from syscalls are surfaced and bounded (especially `epoll_wait`, `epoll_ctl`, `read`, and `write`), including when loop already stopped.
   - Added bounded EINTR retry guards and explicit error logging for cross-thread wakeup `read`/`write` paths.
-- [ ] `P2` Confirm no sensitive data is inferred from debug logs around descriptor values or callback pointers in production error paths.
+- [x] `P2` Confirm no sensitive data is inferred from debug logs around descriptor values or callback pointers in production error paths.
+  - Epoll now redacts sensitive descriptor and callback path data from callback exception logs, only emitting event-dispatch context.
 
 ## 2) Consistency check: epoll vs kqueue and iocp in Reseau
 

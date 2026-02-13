@@ -796,16 +796,16 @@ end
                                 e.code == ERROR_IO_READ_WOULD_BLOCK)
                                 logf(
                                     LogLevel.DEBUG,
-                                    LS_IO_EVENT_LOOP,string("ignoring non-fatal IO callback error on fd %d: %d", " ", event_data.handle.fd, " ", e.code, " ", ))
+                                    LS_IO_EVENT_LOOP,
+                                    "ignoring non-fatal IO callback error during event dispatch: ",
+                                    e.code,
+                                )
                             else
                                 logf(
                                     LogLevel.ERROR,
                                     LS_IO_EVENT_LOOP,
-                                    "unhandled IO callback exception on fd ",
-                                    event_data.handle.fd,
-                                    ": ",
+                                    "unhandled IO callback exception during event dispatch: ",
                                     e,
-                                    " ",
                                 )
                             end
                         end
