@@ -399,6 +399,9 @@
 
     # Cleanup task callback
     function epoll_unsubscribe_cleanup_task_callback(event_data::EpollEventHandleData, status::TaskStatus.T)
+        if event_data.handle.additional_ref === event_data
+            event_data.handle.additional_ref = nothing
+        end
         return nothing
     end
 
@@ -453,7 +456,8 @@
         event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)
 
         handle.additional_data = C_NULL
-        handle.additional_ref = nothing
+        # Keep `additional_ref` until cleanup task runs; it anchors
+        # `event_data` while stale epoll events may still reference its pointer.
 
         return nothing
     end
