@@ -1046,6 +1046,11 @@ end
                     )
                     @test sub_res === nothing
                     @test read_end.io_handle.additional_data != C_NULL
+                    if Sys.islinux()
+                        impl = el.impl_data
+                        @test haskey(impl.handle_registry, read_end.io_handle.additional_data)
+                        @test get(impl.handle_registry, read_end.io_handle.additional_data, nothing) === read_end.io_handle.additional_ref
+                    end
 
                     done_ch = Channel{Nothing}(1)
                     handle = read_end.io_handle
@@ -1064,6 +1069,9 @@ end
                     @test isready(done_ch)
                     isready(done_ch) && take!(done_ch)
                     @test read_end.io_handle.additional_data == C_NULL
+                    if Sys.islinux()
+                        @test !haskey(impl.handle_registry, read_end.io_handle.additional_data)
+                    end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
