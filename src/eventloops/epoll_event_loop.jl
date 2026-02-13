@@ -362,18 +362,23 @@
             on_event::EventCallable,
         )::Nothing
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("subscribing to events on fd %d", " ", handle.fd))
-
-        if handle.additional_data != C_NULL
-            throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
-        end
-
         epoll_event_data = EpollEventHandleData(handle, on_event)
-
-        # Store handle data reference
-        handle.additional_data = pointer_from_objref(epoll_event_data)
-        handle.additional_ref = epoll_event_data
-
+        epoll_event_data_ptr = pointer_from_objref(epoll_event_data)
         impl = event_loop.impl_data
+
+        lock(impl.handle_registry_mutex)
+        try
+            if handle.additional_data != C_NULL
+                throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
+            end
+
+            # Store handle data reference
+            handle.additional_data = epoll_event_data_ptr
+            handle.additional_ref = epoll_event_data
+            impl.handle_registry[epoll_event_data_ptr] = epoll_event_data
+        finally
+            unlock(impl.handle_registry_mutex)
+        end
 
         # Build event mask - everyone is always registered for edge-triggered, hang up, remote hang up, errors
         event_mask = EPOLLET | EPOLLHUP | EPOLLRDHUP | EPOLLERR
@@ -387,7 +392,7 @@
         end
 
         # Create epoll_event struct
-        epoll_ev = EpollEvent(event_mask, handle.additional_data)
+        epoll_ev = EpollEvent(event_mask, epoll_event_data_ptr)
         epoll_ev_ref = Ref(epoll_ev)
 
         ret = @ccall epoll_ctl(
@@ -399,12 +404,17 @@
 
         if ret != 0
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP,string("failed to subscribe to events on fd %d", " ", handle.fd))
-            handle.additional_data = C_NULL
-            handle.additional_ref = nothing
+            lock(impl.handle_registry_mutex)
+            try
+                handle.additional_data = C_NULL
+                handle.additional_ref = nothing
+                delete!(impl.handle_registry, epoll_event_data_ptr)
+            finally
+                unlock(impl.handle_registry_mutex)
+            end
             throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
-        impl.handle_registry[handle.additional_data] = epoll_event_data
         return nothing
     end
 
@@ -432,14 +442,26 @@
 
         impl = event_loop.impl_data
 
-        if handle.additional_data == C_NULL
-            throw_error(ERROR_IO_NOT_SUBSCRIBED)
-        end
+        event_data_ptr = C_NULL
+        event_data = nothing
 
-        event_data_ptr = handle.additional_data
-        event_data = get(impl.handle_registry, event_data_ptr, nothing)
-        if event_data === nothing
-            throw_error(ERROR_IO_NOT_SUBSCRIBED)
+        lock(impl.handle_registry_mutex)
+        try
+            if handle.additional_data == C_NULL
+                throw_error(ERROR_IO_NOT_SUBSCRIBED)
+            end
+
+            event_data_ptr = handle.additional_data
+            event_data = get(impl.handle_registry, event_data_ptr, nothing)
+            if event_data === nothing
+                throw_error(ERROR_IO_NOT_SUBSCRIBED)
+            end
+
+            # Mark as unsubscribed before removing from polling before DEL call.
+            event_data.is_subscribed = false
+            delete!(impl.handle_registry, event_data_ptr)
+        finally
+            unlock(impl.handle_registry_mutex)
         end
 
         # Remove from epoll - use a dummy event (required by older kernels)
@@ -455,12 +477,15 @@
 
         if ret != 0
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP,string("failed to un-subscribe from events on fd %d", " ", handle.fd))
+            lock(impl.handle_registry_mutex)
+            try
+                impl.handle_registry[event_data_ptr] = event_data
+                event_data.is_subscribed = true
+            finally
+                unlock(impl.handle_registry_mutex)
+            end
             throw_error(ERROR_SYS_CALL_FAILURE)
         end
-
-        # Mark as unsubscribed and schedule cleanup task
-        event_data.is_subscribed = false
-        delete!(impl.handle_registry, event_data_ptr)
 
         event_data.cleanup_task = ScheduledTask(
             TaskFn(function(status)
@@ -612,7 +637,12 @@
                         continue
                     end
 
-                    event_data = get(impl.handle_registry, event_data_ptr, nothing)
+                    lock(impl.handle_registry_mutex)
+                    try
+                        event_data = get(impl.handle_registry, event_data_ptr, nothing)
+                    finally
+                        unlock(impl.handle_registry_mutex)
+                    end
                     event_data === nothing && continue
 
                     # Convert epoll events to our event mask

@@ -90,6 +90,7 @@
         should_continue::Bool
         use_eventfd::Bool  # true if using eventfd, false if using pipe
         handle_registry::Dict{Ptr{Cvoid}, EpollEventHandleData}
+        handle_registry_mutex::ReentrantLock
     end
 
     function EpollEventLoop()
@@ -113,6 +114,7 @@
             false,
             false,
             Dict{Ptr{Cvoid}, EpollEventHandleData}(),
+            ReentrantLock(),
         )
     end
 
