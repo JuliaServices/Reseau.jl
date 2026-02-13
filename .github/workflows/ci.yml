@@ -31,10 +31,12 @@ jobs:
           RESEAU_TEST_STAGE_LOG: "1"
           RESEAU_SOCKET_CLOSE_DEBUG: "1"
           RESEAU_EVENT_LOOP_TEST_TRACE: "1"
-          RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT: "50"
-          RESEAU_EVENT_LOOP_TEST_TRACE_START: "1"
+          RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT: "1"
+          RESEAU_EVENT_LOOP_TEST_INDEX: "1"
+          RESEAU_EVENT_LOOP_TEST_TIMEOUT_SEC: "180"
         run: |
           set -euo pipefail
+          set -x
 
           run_slice() {
             local start="$1"
@@ -47,14 +49,13 @@ jobs:
               julia --project=. --startup-file=no --history-file=no -e "${script_cmd}"
           }
 
-          # First pass: one testset at a time so we can localize a hang.
-          for start in $(seq 1 50); do
-            echo "[ci-drill] running event-loop testset window=$start/$start (trace-only)"
-            if ! run_slice "$start" 180 "using Pkg; Pkg.instantiate(); include(\"test/event_loop_ci_drill.jl\")"; then
-              echo "[ci-drill] event-loop drill timed out or failed at index=$start"
-              exit 1
-            fi
-          done
+          start_index="${RESEAU_EVENT_LOOP_TEST_INDEX}"
+          timeout_seconds="${RESEAU_EVENT_LOOP_TEST_TIMEOUT_SEC}"
+          echo "[ci-drill] running event-loop testset window=$start_index (trace-only)"
+          if ! run_slice "$start_index" "$timeout_seconds" "using Pkg; Pkg.instantiate(); include(\"test/event_loop_ci_drill.jl\")"; then
+            echo "[ci-drill] event-loop drill timed out or failed at index=$start_index"
+            exit 1
+          fi
 
           # Full suite fallback (non-timeboxed here) to preserve confidence once slices pass.
           if [ "${CI_RUN_FULL_TESTS:-0}" = "1" ]; then
