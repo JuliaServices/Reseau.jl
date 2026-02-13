@@ -1743,6 +1743,22 @@ end
             )::Cssize_t
             @test read_res < 0
 
+            # Verify queue buffers are reused between drain cycles.
+            pre_spare = impl.task_pre_queue_spare
+
+            for i in 1:3
+                lock(impl.task_pre_queue_mutex)
+                push!(impl.task_pre_queue, Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> nothing),
+                    type_tag = "pre_queue_task_repeat_" * string(i),
+                ))
+                unlock(impl.task_pre_queue_mutex)
+
+                impl.should_process_task_pre_queue = true
+                EventLoops.process_task_pre_queue(el)
+                @test impl.task_pre_queue_spare === pre_spare
+            end
+
             EventLoops.event_loop_destroy!(el)
         end
     end
