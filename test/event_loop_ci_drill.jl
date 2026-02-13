@@ -9,11 +9,6 @@ atexit(cleanup_test_sockets!)
 setup_test_keychain!()
 atexit(cleanup_test_keychain!)
 
-if Sys.islinux()
-    using aws_lc_jll
-    using s2n_tls_jll
-end
-
 const _trace_enabled = get(ENV, "RESEAU_EVENT_LOOP_TEST_TRACE", "") == "1"
 if _trace_enabled
     println("[ci-drill] test mode: ", "event_loop_ci_drill")
