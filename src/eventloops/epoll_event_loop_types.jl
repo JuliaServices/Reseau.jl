@@ -40,6 +40,7 @@
     # Configuration constants
     const DEFAULT_TIMEOUT_MS = 100 * 1000  # 100 seconds in milliseconds
     const MAX_EVENTS = 100
+    const EWOULDBLOCK_RETRY_LIMIT = 32
 
     # Pipe fd indices
     const READ_FD = 1

@@ -294,6 +294,7 @@
             counter = Ref(UInt64(1))
             write_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt64}, counter))
             remaining = Csize_t(sizeof(UInt64))
+            retries = 0
             while remaining > 0
                 written = @ccall gc_safe = true write(
                     impl.write_task_handle.fd::Cint,
@@ -303,6 +304,15 @@
                 if written == -1
                     errno = Base.Libc.errno()
                     if errno == Libc.EINTR
+                        retries += 1
+                        if retries > EWOULDBLOCK_RETRY_LIMIT
+                            logf(
+                                LogLevel.ERROR,
+                                LS_IO_EVENT_LOOP,
+                                "aborting cross-thread wakeup write after repeated EINTR",
+                            )
+                            break
+                        end
                         continue
                     end
                     if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
@@ -597,6 +607,7 @@ end
             impl.should_process_task_pre_queue = false
 
             # Drain the eventfd/pipe
+            retries = 0
             while true
                 read_bytes = @ccall read(
                     impl.read_task_handle.fd::Cint,
@@ -606,11 +617,26 @@ end
                 if read_bytes == -1
                     errno = Base.Libc.errno()
                     if errno == Libc.EINTR
+                        retries += 1
+                        if retries > EWOULDBLOCK_RETRY_LIMIT
+                            logf(
+                                LogLevel.ERROR,
+                                LS_IO_EVENT_LOOP,
+                                "aborting cross-thread wakeup read after repeated EINTR",
+                            )
+                            break
+                        end
                         continue
                     end
                     if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
                         break
                     end
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_EVENT_LOOP,
+                        "cross-thread wakeup read failed with errno ",
+                        errno,
+                    )
                     break
                 end
                 if read_bytes == 0
