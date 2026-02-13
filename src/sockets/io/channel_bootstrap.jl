@@ -172,9 +172,11 @@ mutable struct SocketConnectionRequest{PN, OC, OS, OD, TO}
     enable_read_back_pressure::Bool
     requested_event_loop::Union{EventLoop, Nothing}
     event_loop::Union{EventLoop, Nothing}
+    host_resolution_config::HostResolutionConfig
     addresses::Vector{HostAddress}
     addresses_count::Int
     failed_count::Int
+    connection_attempt_tasks::Vector{ScheduledTask}
     connection_chosen::Bool
 end
 
@@ -265,6 +267,10 @@ function client_bootstrap_connect!(
     on_creation_type = _SocketConnectionEventCallback
     on_setup_type = _SocketConnectionEventCallback
     on_shutdown_type = _SocketConnectionEventCallback
+    request_resolution_config = _normalize_resolution_config(
+        bootstrap.host_resolver,
+        host_resolution_config,
+    )
 
     request = SocketConnectionRequest{
         typeof(protocol_negotiated_cb),
@@ -287,9 +293,11 @@ function client_bootstrap_connect!(
         enable_read_back_pressure,
         requested_event_loop,
         nothing,
+        request_resolution_config,
         HostAddress[],
         0,
         0,
+        ScheduledTask[],
         false,
     )
 
@@ -307,7 +315,7 @@ function client_bootstrap_connect!(
         bootstrap.host_resolver,
         host_str,
         _HostResolvedCallback(request),
-        host_resolution_config,
+        request_resolution_config,
     )
 
     return nothing
@@ -363,6 +371,74 @@ function _get_connection_event_loop(request::R)::Union{EventLoop, Nothing} where
         event_loop_group_get_next_loop(request.bootstrap.event_loop_group) :
         request.requested_event_loop
     return request.event_loop
+end
+
+@inline function _connection_request_has_both_families(addresses::Vector{HostAddress})::Bool
+    has_v4 = false
+    has_v6 = false
+    for addr in addresses
+        if addr.address_type == HostAddressType.A
+            has_v4 = true
+        elseif addr.address_type == HostAddressType.AAAA
+            has_v6 = true
+        end
+        has_v4 && has_v6 && return true
+    end
+    return false
+end
+
+@inline function _attempt_schedule_run_at(
+        request::R,
+        base_timestamp::UInt64,
+        attempt_idx::Int,
+    )::UInt64 where {R <: SocketConnectionRequest}
+    delay_ns = attempt_idx == 0 ? request.host_resolution_config.resolution_delay_ns : request.host_resolution_config.connection_attempt_delay_ns
+    if !_connection_request_has_both_families(request.addresses)
+        delay_ns = 0
+    end
+    delay = delay_ns + UInt64(attempt_idx) * request.host_resolution_config.connection_attempt_delay_ns
+    return delay == 0 ? UInt64(0) : base_timestamp + delay
+end
+
+function _cancel_connection_attempts(request::R) where {R <: SocketConnectionRequest}
+    event_loop = request.event_loop
+    event_loop === nothing && return nothing
+    for task in request.connection_attempt_tasks
+        if task.scheduled
+            event_loop_cancel_task!(event_loop, task)
+        end
+    end
+    empty!(request.connection_attempt_tasks)
+    return nothing
+end
+
+function _start_connection_attempt(
+        request::R,
+        address::HostAddress,
+        run_at_timestamp::UInt64,
+        event_loop::EventLoop,
+    ) where {R <: SocketConnectionRequest}
+    task = ScheduledTask(
+        TaskFn(function(status)
+            try
+                _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
+                request.connection_chosen && return nothing
+                _initiate_socket_connect(request, address)
+            catch e
+                Core.println("client_bootstrap_attempt task errored")
+            end
+            return nothing
+        end);
+        type_tag = "client_bootstrap_attempt",
+    )
+    push!(request.connection_attempt_tasks, task)
+
+    if run_at_timestamp == 0
+        event_loop_schedule_task_now!(event_loop, task)
+    else
+        event_loop_schedule_task_future!(event_loop, task, run_at_timestamp)
+    end
+    return nothing
 end
 
 # Callback when host resolution completes
@@ -428,8 +504,26 @@ function _start_connection_attempts(
     request.addresses_count = length(addresses)
     request.failed_count = 0
     request.connection_chosen = false
-    for address in addresses
-        _initiate_socket_connect(request, address)
+    if request.connection_attempt_tasks !== nothing
+        _cancel_connection_attempts(request)
+    end
+    if request.addresses_count == 0
+        _connection_request_complete(request, ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
+        return nothing
+    end
+
+    request.connection_attempt_tasks = ScheduledTask[]
+    now = event_loop_current_clock_time(event_loop)
+    for (idx, address) in enumerate(addresses)
+        run_at_timestamp = _attempt_schedule_run_at(request, now, idx - 1)
+        logf(
+            LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
+            string(
+                "ClientBootstrap: scheduling connection attempt at ",
+                run_at_timestamp,
+            ),
+        )
+        _start_connection_attempt(request, address, run_at_timestamp, event_loop)
     end
     return nothing
 end
@@ -540,6 +634,7 @@ function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::S
                 return nothing
             end
             request.connection_chosen = true
+            _cancel_connection_attempts(request)
             socket_close(socket)
             _connection_request_complete(request, error_code, nothing)
             return nothing
@@ -558,6 +653,7 @@ function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::S
         LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
         "ClientBootstrap: connection established to $(request.host):$(request.port)"
     )
+    _cancel_connection_attempts(request)
     request.connection_chosen = true
     request.socket = socket
 
@@ -820,6 +916,7 @@ function _connection_request_invoke_on_setup(
 end
 
 function _connection_request_complete(request::R, error_code::Int, channel::Union{Channel, Nothing}) where {R <: SocketConnectionRequest}
+    _cancel_connection_attempts(request)
     if error_code != AWS_OP_SUCCESS
         request.on_shutdown = nothing
     end

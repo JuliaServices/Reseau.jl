@@ -79,6 +79,10 @@ struct HostResolutionConfig
     impl::Union{HostResolveImpl, Nothing}
     max_ttl_secs::UInt64
     resolve_frequency_ns::UInt64
+    resolution_delay_ns::UInt64
+    first_address_family_count::UInt64
+    connection_attempt_delay_ns::UInt64
+    min_connection_attempt_delay_ns::UInt64
     impl_data::Any
 end
 
@@ -94,12 +98,20 @@ function HostResolutionConfig(;
         impl = nothing,
         max_ttl_secs::Integer = 0,
         resolve_frequency_ns::Integer = 0,
+        resolution_delay_ns::Integer = HOST_RESOLVER_HAPPY_EYEBALLS_RESOLUTION_DELAY_NS,
+        first_address_family_count::Integer = Int(HOST_RESOLVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT),
+        connection_attempt_delay_ns::Integer = HOST_RESOLVER_HAPPY_EYEBALLS_CONNECTION_ATTEMPT_DELAY_NS,
+        min_connection_attempt_delay_ns::Integer = HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_NS,
         impl_data = nothing,
     )
     return HostResolutionConfig(
         _host_resolve_impl_callable(impl),
         UInt64(max_ttl_secs),
         UInt64(resolve_frequency_ns),
+        UInt64(resolution_delay_ns),
+        UInt64(first_address_family_count),
+        UInt64(connection_attempt_delay_ns),
+        UInt64(min_connection_attempt_delay_ns),
         impl_data,
     )
 end
@@ -126,6 +138,26 @@ end
 
 const HOST_RESOLVER_DEFAULT_RESOLVE_FREQUENCY_NS = UInt64(1_000_000_000)
 const HOST_RESOLVER_MIN_WAIT_BETWEEN_RESOLVE_NS = UInt64(100_000_000) # 100ms
+const HOST_RESOLVER_HAPPY_EYEBALLS_RESOLUTION_DELAY_NS = UInt64(50_000_000) # 50ms
+const HOST_RESOLVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT = UInt64(1)
+const HOST_RESOLVER_HAPPY_EYEBALLS_CONNECTION_ATTEMPT_DELAY_NS = UInt64(250_000_000) # 250ms
+const HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_NS = UInt64(100_000_000) # 100ms
+const HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_FLOOR_NS = UInt64(10_000_000) # 10ms
+
+@inline function _normalize_first_address_family_count(count::UInt64)::UInt64
+    return count == 0 ? HOST_RESOLVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT : count
+end
+
+@inline function _normalize_connection_attempt_min_delay(min_delay::UInt64)::UInt64
+    return max(min_delay, HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_FLOOR_NS)
+end
+
+@inline function _normalize_connection_attempt_delay(
+    delay_ns::UInt64,
+    min_delay_ns::UInt64,
+)::UInt64
+    return max(delay_ns, min_delay_ns)
+end
 
 const HostResolverCache = Dict{String, Any}
 
@@ -256,6 +288,10 @@ function _normalize_resolution_config(
             nothing,
             base_max_ttl,
             base_resolve_freq,
+            HOST_RESOLVER_HAPPY_EYEBALLS_RESOLUTION_DELAY_NS,
+            HOST_RESOLVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT,
+            HOST_RESOLVER_HAPPY_EYEBALLS_CONNECTION_ATTEMPT_DELAY_NS,
+            HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_NS,
             resolver.config.max_addresses_per_host,
         )
     end
@@ -267,7 +303,31 @@ function _normalize_resolution_config(
         resolver.config.max_addresses_per_host :
         config.impl_data
 
-    return HostResolutionConfig(impl, max_ttl, resolve_freq, impl_data)
+    resolution_delay_ns = config.resolution_delay_ns == 0 ?
+        HOST_RESOLVER_HAPPY_EYEBALLS_RESOLUTION_DELAY_NS : config.resolution_delay_ns
+    first_address_family_count = _normalize_first_address_family_count(config.first_address_family_count)
+    min_connection_attempt_delay_ns = _normalize_connection_attempt_min_delay(
+        config.min_connection_attempt_delay_ns == 0 ?
+        HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_NS :
+        config.min_connection_attempt_delay_ns,
+    )
+    connection_attempt_delay_ns = _normalize_connection_attempt_delay(
+        config.connection_attempt_delay_ns == 0 ?
+        HOST_RESOLVER_HAPPY_EYEBALLS_CONNECTION_ATTEMPT_DELAY_NS :
+        config.connection_attempt_delay_ns,
+        min_connection_attempt_delay_ns,
+    )
+
+    return HostResolutionConfig(
+        impl,
+        max_ttl,
+        resolve_freq,
+        resolution_delay_ns,
+        first_address_family_count,
+        connection_attempt_delay_ns,
+        min_connection_attempt_delay_ns,
+        impl_data,
+    )
 end
 
 function _dispatch_simple_callback(
@@ -408,13 +468,70 @@ function _process_records!(
     return nothing
 end
 
-function _collect_callback_addresses(entry::HostEntry)
+function _collect_family_records(cache::LRUCache{String, HostAddress})
+    addrs = HostAddress[]
+    count = cache_count(cache)
+    for _ in 1:count
+        addr = use_lru!(cache)
+        addr === nothing && break
+        push!(addrs, copy(addr))
+    end
+    return addrs
+end
+
+function _interleave_family_addresses(
+        primary_family::HostAddressType.T,
+        primary_family_count::Int,
+        aaaa_records::Vector{HostAddress},
+        a_records::Vector{HostAddress},
+    )
+    primary_count = max(primary_family_count, 1)
+
+    primary = primary_family == HostAddressType.AAAA ? aaaa_records : a_records
+    secondary = primary_family == HostAddressType.AAAA ? a_records : aaaa_records
+    primary_len = length(primary)
+    secondary_len = length(secondary)
+
     addresses = HostAddress[]
-    aaaa = use_lru!(entry.aaaa_records)
-    a = use_lru!(entry.a_records)
-    aaaa !== nothing && push!(addresses, copy(aaaa))
-    a !== nothing && push!(addresses, copy(a))
+    sizehint!(addresses, primary_len + secondary_len)
+
+    if primary_len == 0
+        append!(addresses, secondary)
+        return addresses
+    end
+    if secondary_len == 0
+        append!(addresses, primary)
+        return addresses
+    end
+
+    primary_idx = 1
+    secondary_idx = 1
+    while primary_idx <= primary_len || secondary_idx <= secondary_len
+        for _ in 1:primary_count
+            primary_idx <= primary_len || continue
+            push!(addresses, primary[primary_idx])
+            primary_idx += 1
+        end
+        if secondary_idx <= secondary_len
+            push!(addresses, secondary[secondary_idx])
+            secondary_idx += 1
+        end
+    end
     return addresses
+end
+
+function _collect_callback_addresses(entry::HostEntry)
+    aaaa_records = _collect_family_records(entry.aaaa_records)
+    a_records = _collect_family_records(entry.a_records)
+    isempty(aaaa_records) && return a_records
+    isempty(a_records) && return aaaa_records
+
+    return _interleave_family_addresses(
+        HostAddressType.AAAA,
+        Int(entry.resolution_config.first_address_family_count),
+        aaaa_records,
+        a_records,
+    )
 end
 
 function _host_entry_finished_pred(entry::HostEntry)
