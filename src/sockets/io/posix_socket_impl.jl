@@ -102,6 +102,13 @@ end
 
 @inline _posix_impl(sock::Socket)::PosixSocket = sock.impl::PosixSocket
 
+@inline function _ci_debug_socket(msg::AbstractString)
+    @static if Sys.islinux()
+        Core.println("[CI DEBUG] socket-debug $(msg)")
+    end
+    return nothing
+end
+
 # Convert domain enum to system constant
 function convert_domain(domain::SocketDomain.T)::Cint
     if domain == SocketDomain.IPV4
@@ -585,6 +592,7 @@ function socket_cleanup_impl(::PosixSocket, sock::Socket)
 
     socket_impl = _posix_impl(sock)
     fd_for_logging = sock.io_handle.fd
+    _ci_debug_socket("socket_cleanup_impl start fd=$(fd_for_logging)")
 
     if socket_is_open(sock)
         logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd_for_logging is still open, closing...")
@@ -600,6 +608,8 @@ function socket_cleanup_impl(::PosixSocket, sock::Socket)
     if on_cleanup_complete !== nothing
         on_cleanup_complete(UInt8(0))
     end
+
+    _ci_debug_socket("socket_cleanup_impl done fd=$(fd_for_logging)")
 
     return nothing
 end
@@ -1153,15 +1163,19 @@ end
 function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: closing")
+    _ci_debug_socket("socket_close_impl start fd=$(fd) event_loop_set=$(sock.event_loop !== nothing) state=$(sock.state)")
 
     event_loop = sock.event_loop
+    _ci_debug_socket("socket_close_impl event_loop_running=$(event_loop !== nothing ? @atomic event_loop.running : false)")
 
     if event_loop !== nothing
         # Unsubscribe from events if subscribed
         if socket_impl.currently_subscribed
             if sock.state == SocketState.LISTENING
+                _ci_debug_socket("socket_close_impl calling socket_stop_accept fd=$(fd)")
                 socket_stop_accept(sock)
             else
+                _ci_debug_socket("socket_close_impl calling socket_unsubscribe fd=$(fd)")
                 event_loop_unsubscribe_from_io_events!(event_loop, sock.io_handle)
             end
             socket_impl.currently_subscribed = false
@@ -1181,12 +1195,15 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
     end
 
     if socket_is_open(sock)
+        _ci_debug_socket("socket_close_impl calling close(fd) fd=$(fd)")
         ccall(:close, Cint, (Cint,), fd)
         sock.io_handle.fd = -1
         sock.state = SocketState.CLOSED
+        _ci_debug_socket("socket_close_impl close complete fd=$(fd)")
 
         # Cancel written task if scheduled
         if socket_impl.written_task_scheduled && event_loop !== nothing
+            _ci_debug_socket("socket_close_impl cancelling written_task fd=$(fd)")
             event_loop_cancel_task!(event_loop, socket_impl.written_task)
         end
 
@@ -1211,6 +1228,8 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
     if socket_impl.on_close_complete !== nothing
         socket_impl.on_close_complete(UInt8(0))
     end
+
+    _ci_debug_socket("socket_close_impl done fd=$(fd)")
 
     return nothing
 end
