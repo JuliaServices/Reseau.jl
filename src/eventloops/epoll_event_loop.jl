@@ -504,6 +504,7 @@
             end
 
             tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
+            impl.task_pre_queue_spare = tasks_to_schedule
         finally
             unlock(impl.task_pre_queue_mutex)
         end
