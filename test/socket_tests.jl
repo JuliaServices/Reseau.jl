@@ -48,6 +48,35 @@ function ci_wait_for_flag(label::AbstractString, flag; timeout_s::Float64 = 5.0)
     return false
 end
 
+function ci_debug_event_loop_state(label::AbstractString, event_loop::EventLoops.EventLoop)
+    ci_debug_log("$(label): running=$(@atomic event_loop.running) should_stop=$(@atomic event_loop.should_stop)")
+    @static if Sys.islinux()
+        impl = event_loop.impl_data
+        scheduler = impl.scheduler
+        ci_debug_log(
+            "$(label): pre_queue=$(length(impl.task_pre_queue)), running_tasks=$(length(scheduler.running)), asap=$(length(scheduler.asap)), timed=$(length(scheduler.timed)), should_continue=$(impl.should_continue), stop_task_scheduled=$(@atomic impl.stop_task_scheduled)"
+        )
+    end
+end
+
+function ci_debug_socket_state(label::AbstractString, socket::Union{Sockets.Socket, Nothing})
+    socket === nothing && return
+    ci_debug_log(
+        "$(label): fd=$(socket.io_handle.fd), state=$(socket.state), event_loop=$(socket.event_loop === nothing ? "none" : "set")"
+    )
+    impl = socket.impl
+    impl === nothing && return
+    @static if Sys.islinux()
+        try
+            ci_debug_log(
+                "$(label): currently_subscribed=$(impl.currently_subscribed), close_happened=$((impl.close_happened === nothing) ? "none" : "set"), connect_args=$(impl.connect_args === nothing ? "none" : "set"), written_task_scheduled=$(impl.written_task_scheduled)"
+            )
+        catch
+            ci_debug_log("$(label): failed to read platform socket impl internals")
+        end
+    end
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -1925,8 +1954,11 @@ end
         write_err_client = Ref{Int}(0)
         write_done_server = Threads.Atomic{Bool}(false)
         write_err_server = Ref{Int}(0)
+        write_done_client_cb_err = Ref{Any}(nothing)
+        write_done_server_cb_err = Ref{Any}(nothing)
 
         write_task_client = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+            ci_debug_log("cleanup in write cb doesn't explode: write_task_client running")
             cursor = Reseau.ByteCursor("teapot")
             try
                 Sockets.socket_write(
@@ -1934,20 +1966,36 @@ end
                     cursor,
                     Reseau.WriteCallable((err, bytes) -> begin
                         write_err_client[] = err
-                        Sockets.socket_cleanup!(client_socket)
+                        try
+                            Sockets.socket_cleanup!(client_socket)
+                        catch e
+                            write_done_client_cb_err[] = e
+                            ci_debug_log(
+                                "cleanup in write cb doesn't explode: client write callback cleanup threw $(e)"
+                            )
+                        end
                         write_done_client[] = true
                         return nothing
                     end),
                 )
             catch e
                 write_err_client[] = e isa Reseau.ReseauError ? e.code : -1
-                Sockets.socket_cleanup!(client_socket)
+                try
+                    Sockets.socket_cleanup!(client_socket)
+                catch cleanup_err
+                    write_done_client_cb_err[] = cleanup_err
+                    ci_debug_log(
+                        "cleanup in write cb doesn't explode: client write task cleanup threw $(cleanup_err)"
+                    )
+                end
                 write_done_client[] = true
             end
+            ci_debug_log("cleanup in write cb doesn't explode: write_task_client complete")
             return nothing
         end); type_tag = "socket_write_cleanup_client")
 
         write_task_server = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+            ci_debug_log("cleanup in write cb doesn't explode: write_task_server running")
             cursor = Reseau.ByteCursor("spout")
             try
                 Sockets.socket_write(
@@ -1955,25 +2003,70 @@ end
                     cursor,
                     Reseau.WriteCallable((err, bytes) -> begin
                         write_err_server[] = err
-                        Sockets.socket_cleanup!(server_sock)
+                        try
+                            Sockets.socket_cleanup!(server_sock)
+                        catch e
+                            write_done_server_cb_err[] = e
+                            ci_debug_log(
+                                "cleanup in write cb doesn't explode: server write callback cleanup threw $(e)"
+                            )
+                        end
                         write_done_server[] = true
                         return nothing
                     end),
                 )
             catch e
                 write_err_server[] = e isa Reseau.ReseauError ? e.code : -1
-                Sockets.socket_cleanup!(server_sock)
+                try
+                    Sockets.socket_cleanup!(server_sock)
+                catch cleanup_err
+                    write_done_server_cb_err[] = cleanup_err
+                    ci_debug_log(
+                        "cleanup in write cb doesn't explode: server write task cleanup threw $(cleanup_err)"
+                    )
+                end
                 write_done_server[] = true
             end
+            ci_debug_log("cleanup in write cb doesn't explode: write_task_server complete")
             return nothing
         end); type_tag = "socket_write_cleanup_server")
 
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_client)
-        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait write_done_client", write_done_client)
+        if !ci_wait_for_flag(
+            "cleanup in write cb doesn't explode: wait write_done_client",
+            write_done_client;
+            timeout_s = 10.0,
+        )
+            ci_debug_log("cleanup in write cb doesn't explode: write_done_client timed out")
+            ci_debug_event_loop_state(
+                "cleanup in write cb doesn't explode: state at client timeout",
+                el_val,
+            )
+            ci_debug_socket_state("cleanup in write cb doesn't explode: client socket at client timeout", client_socket)
+            ci_debug_socket_state("cleanup in write cb doesn't explode: server socket at client timeout", server_sock)
+            ci_debug_socket_state("cleanup in write cb doesn't explode: listener socket at client timeout", listener_socket)
+        end
+        @test write_done_client[] == true
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_server)
-        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait write_done_server", write_done_server)
+        if !ci_wait_for_flag(
+            "cleanup in write cb doesn't explode: wait write_done_server",
+            write_done_server;
+            timeout_s = 10.0,
+        )
+            ci_debug_log("cleanup in write cb doesn't explode: write_done_server timed out")
+            ci_debug_event_loop_state(
+                "cleanup in write cb doesn't explode: state at server timeout",
+                el_val,
+            )
+            ci_debug_socket_state("cleanup in write cb doesn't explode: client socket at server timeout", client_socket)
+            ci_debug_socket_state("cleanup in write cb doesn't explode: server socket at server timeout", server_sock)
+            ci_debug_socket_state("cleanup in write cb doesn't explode: listener socket at server timeout", listener_socket)
+        end
+        @test write_done_server[] == true
         @test write_err_client[] == Reseau.AWS_OP_SUCCESS
         @test write_err_server[] == Reseau.AWS_OP_SUCCESS
+        @test write_done_client_cb_err[] === nothing
+        @test write_done_server_cb_err[] === nothing
     finally
         ci_debug_log("cleanup in write cb doesn't explode: cleanup start")
         if client_socket !== nothing
