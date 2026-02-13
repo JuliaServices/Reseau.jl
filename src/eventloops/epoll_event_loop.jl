@@ -7,6 +7,36 @@
 
     # Channel-based rendezvous for passing EventLoop to the thread function.
     const _EPOLL_THREAD_STARTUP = Channel{Any}(1)
+    const _EVENT_LOOP_TRACE_STOP = get(ENV, "RESEAU_EVENT_LOOP_TEST_TRACE", "") == "1"
+
+    @inline function _event_loop_stop_trace(message::AbstractString)
+        _EVENT_LOOP_TRACE_STOP || return nothing
+        Core.println("[event-loop-stop] ", message)
+        return nothing
+    end
+
+    @inline function _event_loop_trace_thread_decision(
+        event_loop::EventLoop,
+        path::AbstractString,
+        thread_id::Integer,
+        running_id::Integer,
+        task_local_hit::Bool,
+    )
+        _EVENT_LOOP_TRACE_STOP || return nothing
+        Core.println(
+            "[event-loop-stop] ",
+            path,
+            " loop=",
+            string(UInt64(objectid(event_loop))),
+            " threadid=",
+            string(thread_id),
+            " running_thread_id=",
+            string(running_id),
+            " task_local=",
+            string(task_local_hit),
+        )
+        return nothing
+    end
 
     @wrap_thread_fn function _epoll_event_loop_thread_entry()
         event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
@@ -194,12 +224,20 @@
     # Stop the event loop
     function event_loop_stop!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
+        if !@atomic event_loop.running
+            _event_loop_stop_trace("stop requested while event loop is not running")
+            @atomic impl.stop_task_scheduled = false
+            return nothing
+        end
+
+        _event_loop_stop_trace("stop requested")
         @atomic event_loop.should_stop = true
 
         # Use atomic CAS to ensure stop task is only scheduled once
         expected = false
         if !(@atomicreplace impl.stop_task_scheduled expected => true).success
             # Stop task already scheduled
+            _event_loop_stop_trace("stop already scheduled; returning")
             return nothing
         end
 
@@ -217,7 +255,8 @@
             end);
             type_tag = "epoll_event_loop_stop",
         )
-        event_loop_schedule_task_now!(event_loop, impl.stop_task)
+        _event_loop_stop_trace("enqueueing stop task via cross-thread queue")
+        schedule_task_cross_thread(event_loop, impl.stop_task, UInt64(0))
 
         return nothing
     end
@@ -226,9 +265,19 @@
     function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
 
+        _event_loop_stop_trace(
+            "waiting for stop completion on running=" * string(@atomic event_loop.running) *
+            " running_id=" * string(@atomic impl.running_thread_id),
+        )
+        if !@atomic event_loop.running
+            @atomic impl.running_thread_id = UInt64(0)
+            @atomic impl.stop_task_scheduled = false
+            return nothing
+        end
         if impl.thread_created_on !== nothing
             wait(impl.completion_event)
         end
+        _event_loop_stop_trace("stop completion observed; clearing running flag")
 
         @atomic event_loop.running = false
 
@@ -345,13 +394,41 @@
 
     # Check if on event thread
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
-        if Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing) === event_loop
+        task_local_loop = Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing)
+        if task_local_loop === event_loop
+            _event_loop_trace_thread_decision(
+                event_loop,
+                "task-local-match",
+                Int(Base.Threads.threadid()),
+                Int(@atomic event_loop.impl_data.running_thread_id),
+                true,
+            )
             return true
         end
 
         impl = event_loop.impl_data
+        if !@atomic event_loop.running
+            _event_loop_trace_thread_decision(
+                event_loop,
+                "threadid-reject-stopped",
+                Int(Base.Threads.threadid()),
+                Int(@atomic impl.running_thread_id),
+                false,
+            )
+            return false
+        end
         running_id = @atomic impl.running_thread_id
-        return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
+        match = running_id != 0 && running_id == UInt64(Base.Threads.threadid())
+        if match
+            _event_loop_trace_thread_decision(
+                event_loop,
+                "threadid-match",
+                Int(Base.Threads.threadid()),
+                Int(running_id),
+                false,
+            )
+        end
+        return match
     end
 
     # Subscribe to IO events

@@ -556,6 +556,9 @@
 
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         impl = event_loop.impl_data
+        if !@atomic event_loop.running
+            return false
+        end
         running_id = @atomic impl.running_thread_id
         return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
     end
