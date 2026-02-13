@@ -67,7 +67,7 @@ function ci_debug_event_loop_state(label::AbstractString, event_loop::EventLoops
             end
         end
         if !isempty(scheduler.timed)
-            next_timed_task = peek(scheduler.timed)
+            next_timed_task = Reseau.peek(scheduler.timed)
             if next_timed_task !== nothing
                 ci_debug_log(
                     "$(label): timed_next=type=$(next_timed_task.type_tag), scheduled=$(next_timed_task.scheduled), timestamp=$(next_timed_task.timestamp)"
