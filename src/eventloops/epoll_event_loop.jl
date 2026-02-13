@@ -229,11 +229,8 @@
     end
 
     # Schedule task cross-thread
-    @inline _epoll_debug_enabled() = get(ENV, "RESEAU_DEBUG_EPOLL", "0") == "1"
-
     function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
-        debug_epoll = _epoll_debug_enabled()
 
         logf(
             LogLevel.TRACE,
@@ -244,35 +241,26 @@
 
         lock(impl.task_pre_queue_mutex)
         try
-            debug_epoll && Core.println(
-                "[CI EPOLL] schedule_task_cross_thread start task=$(task.type_tag) pre_queue_len=$(length(impl.task_pre_queue)) should_process=$(impl.should_process_task_pre_queue) event_loop_thread=$(impl.running_thread_id) caller_tid=$(Base.Threads.threadid())",
-            )
+            is_first_task = isempty(impl.task_pre_queue)
             push!(impl.task_pre_queue, task)
-            impl.should_process_task_pre_queue = true
-            debug_epoll && Core.println("[CI EPOLL] schedule_task_cross_thread queued task=$(task.type_tag) post_len=$(length(impl.task_pre_queue)) should_process=$(impl.should_process_task_pre_queue)")
 
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
-            # Write to signal the event thread
-            counter = Ref(UInt64(1))
-            write_result = nothing
-            while true
-                written = @ccall gc_safe = true write(
-                    impl.write_task_handle.fd::Cint,
-                    counter::Ptr{UInt64},
-                    sizeof(UInt64)::Csize_t,
-                )::Cssize_t
-                if written == -1 && Base.Libc.errno() == Libc.EINTR
-                    continue
-                end
-                if written == -1 && (Base.Libc.errno() == Libc.EAGAIN || Base.Libc.errno() == Libc.EWOULDBLOCK)
-                    write_result = :ewouldblock
+            # If the list was not empty, we already have a pending read on the pipe/eventfd
+            if is_first_task
+                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
+                # Write to signal the event thread
+                counter = Ref(UInt64(1))
+                while true
+                    written = @ccall gc_safe = true write(
+                        impl.write_task_handle.fd::Cint,
+                        counter::Ptr{UInt64},
+                        sizeof(UInt64)::Csize_t,
+                    )::Cssize_t
+                    if written == -1 && Base.Libc.errno() == Libc.EINTR
+                        continue
+                    end
                     break
                 end
-                written == -1 && throw_error(ERROR_SYS_CALL_FAILURE)
-                write_result = written
-                break
             end
-            debug_epoll && Core.println("[CI EPOLL] schedule_task_cross_thread wrote to task fd result=$(write_result)")
         finally
             unlock(impl.task_pre_queue_mutex)
         end
@@ -318,13 +306,14 @@
     end
 
     # Cancel task
-    function epoll_cancel_task_callback(event_loop::EventLoop, task::ScheduledTask, status::TaskStatus.T)
-        status == TaskStatus.CANCELED && return nothing
+    function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
+        debug_assert(event_loop_thread_is_callers_thread(event_loop))
+        impl = event_loop.impl_data
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling %s task", " ", task.type_tag))
         if !task.scheduled
             return nothing
         end
 
-        impl = event_loop.impl_data
         removed = false
         lock(impl.task_pre_queue_mutex)
         try
@@ -345,35 +334,6 @@
         end
 
         task_scheduler_cancel!(impl.scheduler, task)
-        return nothing
-    end
-
-    function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
-        impl = event_loop.impl_data
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling %s task", " ", task.type_tag))
-        if !task.scheduled
-            return nothing
-        end
-
-        if !(@atomic event_loop.running) || event_loop_thread_is_callers_thread(event_loop)
-            return epoll_cancel_task_callback(event_loop, task, TaskStatus.RUN_READY)
-        end
-
-        event_loop_schedule_task_now!(
-            event_loop,
-            ScheduledTask(
-                TaskFn(function(status)
-                    try
-                        epoll_cancel_task_callback(event_loop, task, _coerce_task_status(status))
-                    catch
-                        Core.println("epoll_cancel task errored")
-                    end
-                    return nothing
-                end);
-                type_tag = "epoll_event_loop_cancel",
-            ),
-        )
-        return nothing
     end
 
     # Check if on event thread
@@ -437,45 +397,22 @@
         return nothing
     end
 
-    function epoll_direct_unsubscribe(event_loop::EventLoop, event_data::EpollEventHandleData)::Nothing
-        if event_data.handle.fd < 0 || !event_data.is_subscribed
-            event_data.is_subscribed = false
-            return nothing
-        end
-
-        impl = event_loop.impl_data
-        dummy_event = EpollEvent(UInt32(0), C_NULL)
-        dummy_ref = Ref(dummy_event)
-
-        ret = @ccall epoll_ctl(
-            impl.epoll_fd::Cint,
-            EPOLL_CTL_DEL::Cint,
-            event_data.handle.fd::Cint,
-            dummy_ref::Ptr{EpollEvent},
-        )::Cint
-
-        if ret != 0
-            logf(
-                LogLevel.ERROR,
-                LS_IO_EVENT_LOOP,
-                string(
-                    "failed to un-subscribe from events on fd ",
-                    event_data.handle.fd,
-                    " during direct epoll cleanup",
-                ),
-            )
-        end
-        event_data.is_subscribed = false
+    # Cleanup task callback
+    function epoll_unsubscribe_cleanup_task_callback(event_data::EpollEventHandleData, status::TaskStatus.T)
         return nothing
     end
 
     # Unsubscribe from IO events
-
     function event_loop_unsubscribe_from_io_events!(
             event_loop::EventLoop,
             handle::IoHandle,
         )::Nothing
+        if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
+            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+        end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
+
+        impl = event_loop.impl_data
 
         if handle.additional_data == C_NULL
             throw_error(ERROR_IO_NOT_SUBSCRIBED)
@@ -483,7 +420,38 @@
 
         event_data = unsafe_pointer_to_objref(handle.additional_data)::EpollEventHandleData
 
-        epoll_direct_unsubscribe(event_loop, event_data)
+        # Remove from epoll - use a dummy event (required by older kernels)
+        dummy_event = EpollEvent(UInt32(0), C_NULL)
+        dummy_ref = Ref(dummy_event)
+
+        ret = @ccall epoll_ctl(
+            impl.epoll_fd::Cint,
+            EPOLL_CTL_DEL::Cint,
+            handle.fd::Cint,
+            dummy_ref::Ptr{EpollEvent},
+        )::Cint
+
+        if ret != 0
+            logf(LogLevel.ERROR, LS_IO_EVENT_LOOP,string("failed to un-subscribe from events on fd %d", " ", handle.fd))
+            throw_error(ERROR_SYS_CALL_FAILURE)
+        end
+
+        # Mark as unsubscribed and schedule cleanup task
+        event_data.is_subscribed = false
+
+        event_data.cleanup_task = ScheduledTask(
+            TaskFn(function(status)
+                try
+                    epoll_unsubscribe_cleanup_task_callback(event_data, _coerce_task_status(status))
+                catch e
+                    Core.println("epoll_cleanup task errored")
+                end
+                return nothing
+            end);
+            type_tag = "epoll_event_loop_unsubscribe_cleanup",
+        )
+        event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)
+
         handle.additional_data = C_NULL
         handle.additional_ref = nothing
 
@@ -493,18 +461,10 @@
     # Callback for cross-thread task pipe/eventfd
     function on_tasks_to_schedule(event_loop::EventLoop, events::Int)
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread tasks to schedule")
-        debug_epoll = _epoll_debug_enabled()
         impl = event_loop.impl_data
 
         if (events & Int(IoEventType.READABLE)) != 0
-            debug_epoll && Core.println("[CI EPOLL] on_tasks_to_schedule readable events=0x$(string(events, base=16)) should_process_before=$(impl.should_process_task_pre_queue)")
-            lock(impl.task_pre_queue_mutex)
-            try
-                impl.should_process_task_pre_queue = true
-            finally
-                unlock(impl.task_pre_queue_mutex)
-            end
-            debug_epoll && Core.println("[CI EPOLL] on_tasks_to_schedule set should_process=true")
+            impl.should_process_task_pre_queue = true
         end
 
         return nothing
@@ -513,24 +473,25 @@
     # Process cross-thread task queue
     function process_task_pre_queue(event_loop::EventLoop)
         impl = event_loop.impl_data
-        debug_epoll = _epoll_debug_enabled()
+
+        if !impl.should_process_task_pre_queue
+            return nothing
+        end
+
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
 
         tasks_to_schedule = impl.task_pre_queue_spare
         empty!(tasks_to_schedule)
-        debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue enter pre_len=$(length(impl.task_pre_queue)) should_process=$(impl.should_process_task_pre_queue)")
 
         count_ignore = Ref(UInt64(0))
 
         lock(impl.task_pre_queue_mutex)
         try
-            if !impl.should_process_task_pre_queue && isempty(impl.task_pre_queue)
-                debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue skip should_process=false and pre_queue empty")
+            if !impl.should_process_task_pre_queue
                 return nothing
             end
 
             impl.should_process_task_pre_queue = false
-
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
 
             # Drain the eventfd/pipe
             while true
@@ -544,12 +505,10 @@
 
             tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
             impl.task_pre_queue_spare = tasks_to_schedule
-            debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue swapped task_queue with $(length(tasks_to_schedule)) candidates")
         finally
             unlock(impl.task_pre_queue_mutex)
         end
 
-        debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue scheduling candidates")
         # Schedule the tasks
         while !isempty(tasks_to_schedule)
             task = popfirst!(tasks_to_schedule)
@@ -563,7 +522,6 @@
                 task_scheduler_schedule_future!(impl.scheduler, task, task.timestamp)
             end
         end
-        debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue done")
 
         return nothing
     end

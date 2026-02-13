@@ -13,116 +13,6 @@ function wait_for_flag(flag; timeout_s::Float64 = 5.0)
     return false
 end
 
-function ci_debug_log(msg::AbstractString)
-    println("[CI DEBUG] $(msg)")
-    flush(stdout)
-end
-
-function ci_with_timeout(label::AbstractString, f::Function; timeout_s::Float64 = 1.0)
-    done = Threads.Atomic{Bool}(false)
-    @async begin
-        try
-            f()
-        catch e
-            ci_debug_log("$(label) threw: $(e)")
-        finally
-            done[] = true
-        end
-    end
-
-    if wait_for_flag(done; timeout_s)
-        ci_debug_log("$(label) done")
-        return true
-    end
-    ci_debug_log("$(label) timed out after $(timeout_s)s")
-    return false
-end
-
-function ci_wait_for_flag(label::AbstractString, flag; timeout_s::Float64 = 5.0)
-    ci_debug_log("$(label) waiting")
-    if wait_for_flag(flag; timeout_s)
-        ci_debug_log("$(label) complete")
-        return true
-    end
-    ci_debug_log("$(label) timed out after $(timeout_s)s")
-    return false
-end
-
-function ci_debug_event_loop_state(label::AbstractString, event_loop::EventLoops.EventLoop)
-    ci_debug_log("$(label): running=$(@atomic event_loop.running) should_stop=$(@atomic event_loop.should_stop)")
-    @static if Sys.islinux()
-        impl = event_loop.impl_data
-        scheduler = impl.scheduler
-        ci_debug_log(
-            "$(label): running_thread_id=$(@atomic impl.running_thread_id) caller_thread=$(Threads.threadid()) is_event_loop_thread=$(EventLoops.event_loop_thread_is_callers_thread(event_loop)) should_process_task_pre_queue=$(impl.should_process_task_pre_queue) should_continue=$(impl.should_continue) read_fd=$(impl.read_task_handle.fd) write_fd=$(impl.write_task_handle.fd) stop_task_scheduled=$(@atomic impl.stop_task_scheduled)"
-        )
-        ci_debug_log(
-            "$(label): pre_queue=$(length(impl.task_pre_queue)), running_tasks=$(length(scheduler.running)), asap=$(length(scheduler.asap)), timed=$(length(scheduler.timed)), should_continue=$(impl.should_continue), stop_task_scheduled=$(@atomic impl.stop_task_scheduled)"
-        )
-        if !isempty(scheduler.asap)
-            for i in 1:min(length(scheduler.asap), 4)
-                ci_debug_log(
-                    "$(label): asap[$i]=type=$(scheduler.asap[i].type_tag), scheduled=$(scheduler.asap[i].scheduled), timestamp=$(scheduler.asap[i].timestamp)"
-                )
-            end
-        end
-        if !isempty(scheduler.timed)
-            next_timed_task = Reseau.peek(scheduler.timed)
-            if next_timed_task !== nothing
-                ci_debug_log(
-                    "$(label): timed_next=type=$(next_timed_task.type_tag), scheduled=$(next_timed_task.scheduled), timestamp=$(next_timed_task.timestamp)"
-                )
-            end
-        end
-        if !isempty(scheduler.running)
-            for i in 1:min(length(scheduler.running), 4)
-                ci_debug_log(
-                    "$(label): running[$i]=type=$(scheduler.running[i].type_tag), scheduled=$(scheduler.running[i].scheduled), timestamp=$(scheduler.running[i].timestamp)"
-                )
-            end
-        end
-        if !isempty(impl.task_pre_queue)
-            for i in 1:min(length(impl.task_pre_queue), 4)
-                ci_debug_log(
-                    "$(label): pre_queue[$i]=type=$(impl.task_pre_queue[i].type_tag), scheduled=$(impl.task_pre_queue[i].scheduled), timestamp=$(impl.task_pre_queue[i].timestamp)"
-                )
-            end
-        end
-    end
-end
-
-function ci_debug_socket_state(label::AbstractString, socket::Union{Sockets.Socket, Nothing})
-    socket === nothing && return
-    ci_debug_log(
-        "$(label): fd=$(socket.io_handle.fd), state=$(socket.state), event_loop=$(socket.event_loop === nothing ? "none" : "set")"
-    )
-    impl = socket.impl
-    impl === nothing && return
-    @static if Sys.islinux()
-        try
-            ci_debug_log(
-                "$(label): currently_subscribed=$(impl.currently_subscribed), close_happened=$((impl.close_happened === nothing) ? "none" : "set"), connect_args=$(impl.connect_args === nothing ? "none" : "set"), written_task_scheduled=$(impl.written_task_scheduled)"
-            )
-        catch
-            ci_debug_log("$(label): failed to read platform socket impl internals")
-        end
-    end
-end
-
-function ci_debug_cleanup_context(label::AbstractString, event_loop::EventLoops.EventLoop, sockets::Union{Sockets.Socket, Nothing}...)
-    ci_debug_event_loop_state("$(label): pre-cleanup", event_loop)
-    for i in eachindex(sockets)
-        ci_debug_socket_state("$(label): pre-cleanup socket[$i]", sockets[i])
-    end
-end
-
-function ci_debug_task_state(label::AbstractString, task::Union{Reseau.ScheduledTask, Nothing})
-    task === nothing && return
-    ci_debug_log(
-        "$(label): type=$(task.type_tag), scheduled=$(task.scheduled), timestamp=$(task.timestamp), objectid=$(objectid(task))"
-    )
-end
-
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -420,7 +310,6 @@ end
             return
         end
         @test EventLoops.event_loop_run!(el_val) === nothing
-        ci_debug_log("ipv4 stream: event loop running")
 
         opts = Sockets.SocketOptions(;
             type = Sockets.SocketType.STREAM,
@@ -434,9 +323,7 @@ end
 
         local server_socket
         try
-            ci_debug_log("ipv4 stream: socket_init(server) start")
             server_socket = Sockets.socket_init(opts)
-            ci_debug_log("ipv4 stream: socket_init(server) done")
         catch e
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
@@ -451,9 +338,7 @@ end
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
             try
-                ci_debug_log("ipv4 stream: socket_bind(server) start")
                 Sockets.socket_bind(server_socket, bind_opts)
-                ci_debug_log("ipv4 stream: socket_bind(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
@@ -461,9 +346,7 @@ end
                 return
             end
             try
-                ci_debug_log("ipv4 stream: socket_listen(server) start")
                 Sockets.socket_listen(server_socket, 1024)
-                ci_debug_log("ipv4 stream: socket_listen(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
@@ -471,13 +354,10 @@ end
                 return
             end
 
-            ci_debug_log("ipv4 stream: get_bound_address(server) start")
             bound = Sockets.socket_get_bound_address(server_socket)
-            ci_debug_log("ipv4 stream: get_bound_address(server) done")
             @test bound isa Sockets.SocketEndpoint
             port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
-                ci_debug_log("ipv4 stream: bound port is 0, aborting subtest")
                 return
             end
 
@@ -571,49 +451,24 @@ end
                 end),
             )
 
-            ci_debug_log("ipv4 stream: socket_connect(start)")
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-            ci_debug_log("ipv4 stream: waiting connect_done")
             @test wait_for_flag(connect_done)
-            ci_debug_log("ipv4 stream: wait connect_done complete")
             @test connect_err[] == Reseau.AWS_OP_SUCCESS
-            ci_debug_log("ipv4 stream: waiting write_done")
             @test wait_for_flag(write_done)
-            ci_debug_log("ipv4 stream: wait write_done complete")
             @test write_err[] == Reseau.AWS_OP_SUCCESS
-            ci_debug_log("ipv4 stream: waiting read_done")
             @test wait_for_flag(read_done)
-            ci_debug_log("ipv4 stream: wait read_done complete")
             @test accept_err[] == Reseau.AWS_OP_SUCCESS
             @test read_err[] == Reseau.AWS_OP_SUCCESS
             @test payload[] == "ping"
         finally
-            ci_debug_log("ipv4 stream: cleanup start")
-            ci_debug_cleanup_context("ipv4 stream", el_val, client_socket, accepted[], server_socket)
             if client_socket !== nothing
-                ci_debug_log("ipv4 stream: cleanup client_socket")
-                if !ci_with_timeout("ipv4 stream: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket); timeout_s=1.0)
-                    ci_debug_log("ipv4 stream: cleanup client_socket fallback close")
-                    if !ci_with_timeout("ipv4 stream: socket_close(client_socket)", () -> Sockets.socket_close(client_socket); timeout_s=1.0)
-                        ci_debug_log("ipv4 stream: socket_close(client_socket) timed out")
-                    end
-                end
+                Sockets.socket_cleanup!(client_socket)
             end
             if accepted[] !== nothing
-                ci_debug_log("ipv4 stream: cleanup accepted")
-                ci_with_timeout("ipv4 stream: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]); timeout_s=1.0)
+                Sockets.socket_cleanup!(accepted[])
             end
-            ci_debug_log("ipv4 stream: cleanup server_socket")
-            ci_with_timeout("ipv4 stream: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket); timeout_s=1.0)
-            ci_debug_log("ipv4 stream: event_loop_destroy start")
-            if !ci_with_timeout(
-                "ipv4 stream: event_loop_destroy!",
-                () -> EventLoops.event_loop_destroy!(el_val);
-                timeout_s=1.0,
-            )
-                ci_debug_log("ipv4 stream: event_loop_destroy timed out")
-            end
-            ci_debug_log("ipv4 stream: event_loop_destroy done")
+            Sockets.socket_cleanup!(server_socket)
+            EventLoops.event_loop_destroy!(el_val)
         end
 
         # IPv4 UDP
@@ -634,9 +489,7 @@ end
 
         local server_socket
         try
-            ci_debug_log("ipv4 udp: socket_init(server) start")
             server_socket = Sockets.socket_init(opts_udp)
-            ci_debug_log("ipv4 udp: socket_init(server) done")
         catch e
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
@@ -649,9 +502,7 @@ end
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
             try
-                ci_debug_log("ipv4 udp: socket_bind(server) start")
                 Sockets.socket_bind(server_socket, bind_opts)
-                ci_debug_log("ipv4 udp: socket_bind(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
@@ -659,17 +510,13 @@ end
                 return
             end
 
-            ci_debug_log("ipv4 udp: get_bound_address(server) start")
             bound = Sockets.socket_get_bound_address(server_socket)
-            ci_debug_log("ipv4 udp: get_bound_address(server) done")
             @test bound isa Sockets.SocketEndpoint
             port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
-                ci_debug_log("ipv4 udp: bound port is 0, aborting subtest")
                 return
             end
 
-            ci_debug_log("ipv4 udp: socket_init(client) start")
             client = Sockets.socket_init(opts_udp)
             client_socket = client isa Sockets.Socket ? client : nothing
             @test client_socket !== nothing
@@ -677,45 +524,19 @@ end
                 return
             end
 
-            ci_debug_log("ipv4 udp: socket_connect(client) start")
             connect_opts = Sockets.SocketConnectOptions(
                 Sockets.SocketEndpoint("127.0.0.1", port);
                 event_loop = el_val,
                 on_connection_result = Reseau.EventCallable(err -> nothing),
             )
 
-            ci_debug_log("ipv4 udp: socket_connect call")
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
         finally
-            ci_debug_log("ipv4 udp: cleanup start")
-            ci_debug_cleanup_context("ipv4 udp", el_val, client_socket, server_socket)
             if client_socket !== nothing
-                ci_debug_log("ipv4 udp: cleanup client_socket")
-                if !ci_with_timeout(
-                    "ipv4 udp: socket_cleanup!(client_socket)",
-                    () -> Sockets.socket_cleanup!(client_socket);
-                    timeout_s=1.0,
-                )
-                    ci_debug_log("ipv4 udp: cleanup client_socket timed out")
-                end
-                ci_debug_log("ipv4 udp: cleanup client_socket done")
+                Sockets.socket_cleanup!(client_socket)
             end
-            ci_debug_log("ipv4 udp: cleanup server_socket")
-            ci_with_timeout(
-                "ipv4 udp: socket_cleanup!(server_socket)",
-                () -> Sockets.socket_cleanup!(server_socket);
-                timeout_s=1.0,
-            )
-            ci_debug_log("ipv4 udp: cleanup server_socket done")
-            ci_debug_log("ipv4 udp: event_loop_destroy start")
-            if !ci_with_timeout(
-                "ipv4 udp: event_loop_destroy!",
-                () -> EventLoops.event_loop_destroy!(el_val);
-                timeout_s=1.0,
-            )
-                ci_debug_log("ipv4 udp: event_loop_destroy timed out")
-            end
-            ci_debug_log("ipv4 udp: event_loop_destroy done")
+            Sockets.socket_cleanup!(server_socket)
+            EventLoops.event_loop_destroy!(el_val)
         end
 
         # IPv6 stream
@@ -736,18 +557,12 @@ end
 
         local server_socket
         try
-            ci_debug_log("ipv6 stream: socket_init(server) start")
             server_socket = Sockets.socket_init(opts6)
-            ci_debug_log("ipv6 stream: socket_init(server) done")
         catch e
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
                 e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
-            ci_with_timeout(
-                "ipv6 stream: event_loop_destroy!",
-                () -> EventLoops.event_loop_destroy!(el_val);
-                timeout_s=1.0,
-            )
+            EventLoops.event_loop_destroy!(el_val)
             return
         end
 
@@ -757,25 +572,18 @@ end
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("::1", 0))
             try
-                ci_debug_log("ipv6 stream: socket_bind(server) start")
                 Sockets.socket_bind(server_socket, bind_opts)
-                ci_debug_log("ipv6 stream: socket_bind(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
                 return
             end
-            ci_debug_log("ipv6 stream: socket_listen(server) start")
             @test Sockets.socket_listen(server_socket, 1024) === nothing
-            ci_debug_log("ipv6 stream: socket_listen(server) done")
 
-            ci_debug_log("ipv6 stream: get_bound_address(server) start")
             bound = Sockets.socket_get_bound_address(server_socket)
-            ci_debug_log("ipv6 stream: get_bound_address(server) done")
             @test bound isa Sockets.SocketEndpoint
             port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
-                ci_debug_log("ipv6 stream: bound port is 0, aborting subtest")
                 return
             end
 
@@ -809,50 +617,19 @@ end
                 end),
             )
 
-            ci_debug_log("ipv6 stream: socket_connect(start)")
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-            ci_debug_log("ipv6 stream: waiting connect_done")
             @test wait_for_flag(connect_done)
-            ci_debug_log("ipv6 stream: wait connect_done complete")
             @test connect_err[] == Reseau.AWS_OP_SUCCESS
             @test accept_err[] == Reseau.AWS_OP_SUCCESS
         finally
-            ci_debug_log("ipv6 stream: cleanup start")
-            ci_debug_cleanup_context("ipv6 stream", el_val, client_socket, accepted[], server_socket)
             if client_socket !== nothing
-                ci_debug_log("ipv6 stream: cleanup client_socket")
-                ci_with_timeout(
-                    "ipv6 stream: socket_cleanup!(client_socket)",
-                    () -> Sockets.socket_cleanup!(client_socket);
-                    timeout_s=1.0,
-                )
-                ci_debug_log("ipv6 stream: cleanup client_socket done")
+                Sockets.socket_cleanup!(client_socket)
             end
             if accepted[] !== nothing
-                ci_debug_log("ipv6 stream: cleanup accepted")
-                ci_with_timeout(
-                    "ipv6 stream: socket_cleanup!(accepted[])",
-                    () -> Sockets.socket_cleanup!(accepted[]);
-                    timeout_s=1.0,
-                )
-                ci_debug_log("ipv6 stream: cleanup accepted done")
+                Sockets.socket_cleanup!(accepted[])
             end
-            ci_debug_log("ipv6 stream: cleanup server_socket")
-            ci_with_timeout(
-                "ipv6 stream: socket_cleanup!(server_socket)",
-                () -> Sockets.socket_cleanup!(server_socket);
-                timeout_s=1.0,
-            )
-            ci_debug_log("ipv6 stream: cleanup server_socket done")
-            ci_debug_log("ipv6 stream: event_loop_destroy start")
-            if !ci_with_timeout(
-                "ipv6 stream: event_loop_destroy!",
-                () -> EventLoops.event_loop_destroy!(el_val);
-                timeout_s=1.0,
-            )
-                ci_debug_log("ipv6 stream: event_loop_destroy timed out")
-            end
-            ci_debug_log("ipv6 stream: event_loop_destroy done")
+            Sockets.socket_cleanup!(server_socket)
+            EventLoops.event_loop_destroy!(el_val)
         end
     end
 end
@@ -1021,7 +798,6 @@ end
 end
 
 @testset "winsock stubs" begin
-    ci_debug_log("socket_tests: winsock stubs start")
     if Sys.iswindows()
         @test Sockets.winsock_check_and_init!() === nothing
     else
@@ -1052,7 +828,6 @@ end
 end
 
 @testset "socket nonblocking cloexec" begin
-    ci_debug_log("socket_tests: socket nonblocking cloexec start")
     if Sys.iswindows()
         @test true
     else
@@ -1074,15 +849,12 @@ end
 end
 
 @testset "socket connect read write" begin
-    ci_debug_log("socket_tests: socket connect read write start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
-    ci_debug_log("socket connect read write: event_loop_new")
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    ci_debug_log("socket connect read write: event_loop_run!")
     @test EventLoops.event_loop_run!(el_val) === nothing
     # Use LOCAL domain to ensure POSIX path (standalone event loop, no ELG)
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
@@ -1102,9 +874,7 @@ end
         end
 
         bind_opts = Sockets.SocketBindOptions(local_endpoint)
-        ci_debug_log("socket connect read write: socket_bind")
         @test Sockets.socket_bind(server_socket, bind_opts) === nothing
-        ci_debug_log("socket connect read write: socket_listen")
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         accept_err = Ref{Int}(0)
@@ -1118,7 +888,6 @@ end
         write_done = Threads.Atomic{Bool}(false)
 
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
-            ci_debug_log("socket connect read write: on_accept")
             accept_err[] = err
             accepted[] = new_sock
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -1137,7 +906,6 @@ end
             try
                 Sockets.socket_subscribe_to_readable_events(
                     new_sock, Reseau.EventCallable(err -> begin
-                        ci_debug_log("socket connect read write: on_read")
                         read_err[] = err
                         if err != Reseau.AWS_OP_SUCCESS
                             read_done[] = true
@@ -1163,12 +931,7 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        ci_debug_log("socket connect read write: socket_start_accept")
-        @test ci_with_timeout(
-            "socket connect read write: socket_start_accept",
-            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1180,7 +943,6 @@ end
             local_endpoint;
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("socket connect read write: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1191,7 +953,6 @@ end
                 try
                     Sockets.socket_write(
                         client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
-                            ci_debug_log("socket connect read write: on_write")
                             write_err[] = err
                             write_done[] = true
                             return nothing
@@ -1206,43 +967,26 @@ end
             end),
         )
 
-        ci_debug_log("socket connect read write: socket_connect")
-        @test ci_with_timeout(
-            "socket connect read write: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
-            timeout_s = 1.0,
-        )
-        ci_debug_log("socket connect read write: socket_connect done")
-        @test ci_wait_for_flag("socket connect read write: wait connect_done", connect_done)
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("socket connect read write: wait write_done", write_done)
+        @test wait_for_flag(write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("socket connect read write: wait read_done", read_done)
+        @test wait_for_flag(read_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
-        ci_debug_log("socket connect read write: cleanup start")
-        ci_debug_cleanup_context("socket connect read write", el_val, client_socket, accepted[], server_socket)
         if client_socket !== nothing
-            ci_with_timeout("socket connect read write: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("socket connect read write: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("socket connect read write: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            ci_with_timeout("socket connect read write: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
-            if !ci_with_timeout("socket connect read write: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
-                ci_debug_log("socket connect read write: fallback socket_close(accepted[]) timed out")
-            end
+            Sockets.socket_close(accepted[])
         end
         if server_socket !== nothing
-            ci_with_timeout("socket connect read write: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
-            if !ci_with_timeout("socket connect read write: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
-                ci_debug_log("socket connect read write: fallback socket_close(server_socket) timed out")
-            end
+            Sockets.socket_close(server_socket)
         end
-        ci_with_timeout("socket connect read write: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+        EventLoops.event_loop_destroy!(el_val)
         # Clean up Unix domain socket file (Windows LOCAL uses named pipes, not a filesystem path).
         @static if !Sys.iswindows()
             sock_path = Sockets.get_address(local_endpoint)
@@ -1252,7 +996,6 @@ end
 end
 
 @testset "nw socket connect read write" begin
-    ci_debug_log("socket_tests: nw socket connect read write start")
     @static if !Sys.isapple()
         @test true
         return
@@ -1274,7 +1017,6 @@ end
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     server = Sockets.socket_init(opts)
     server_socket = server isa Sockets.Socket ? server : nothing
-    ci_debug_log("nw socket connect read write: server socket init")
     @test server_socket !== nothing
 
     client_socket = nothing
@@ -1299,9 +1041,7 @@ end
         end
 
         bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        ci_debug_log("nw socket connect read write: socket_bind")
         @test Sockets.socket_bind(server_socket, bind_opts) === nothing
-        ci_debug_log("nw socket connect read write: socket_listen")
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         on_accept_started = Reseau.EventCallable(err -> begin
@@ -1316,7 +1056,6 @@ end
         end)
 
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
-            ci_debug_log("nw socket connect read write: on_accept")
             accept_err[] = err
             accepted[] = new_sock
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -1363,14 +1102,9 @@ end
             on_accept_result = on_accept,
             on_accept_start = on_accept_started,
         )
-        ci_debug_log("nw socket connect read write: socket_start_accept")
-        @test ci_with_timeout(
-            "nw socket connect read write: socket_start_accept",
-            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-        @test ci_wait_for_flag("nw socket connect read write: wait accept_started", accept_started)
+        @test wait_for_flag(accept_started)
         @test port_ref[] != 0
 
         client = Sockets.socket_init(opts)
@@ -1384,7 +1118,6 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port_ref[]);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("nw socket connect read write: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1408,47 +1141,30 @@ end
             end),
         )
 
-        ci_debug_log("nw socket connect read write: socket_connect")
-        @test ci_with_timeout(
-            "nw socket connect read write: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
-            timeout_s = 1.0,
-        )
-        ci_debug_log("nw socket connect read write: socket_connect done")
-        @test ci_wait_for_flag("nw socket connect read write: wait connect_done", connect_done)
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("nw socket connect read write: wait write_done", write_done)
+        @test wait_for_flag(write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("nw socket connect read write: wait read_done", read_done)
+        @test wait_for_flag(read_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
-        ci_debug_log("nw socket connect read write: cleanup start")
         if client_socket !== nothing
-            ci_with_timeout("nw socket connect read write: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("nw socket connect read write: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("nw socket connect read write: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            ci_with_timeout("nw socket connect read write: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
-            if !ci_with_timeout("nw socket connect read write: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
-                ci_debug_log("nw socket connect read write: fallback socket_close(accepted[]) timed out")
-            end
+            Sockets.socket_close(accepted[])
         end
         if server_socket !== nothing
-            ci_with_timeout("nw socket connect read write: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
-            if !ci_with_timeout("nw socket connect read write: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
-                ci_debug_log("nw socket connect read write: fallback socket_close(server_socket) timed out")
-            end
+            Sockets.socket_close(server_socket)
         end
-        ci_with_timeout("nw socket connect read write: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+        EventLoops.event_loop_destroy!(el_val)
     end
 end
 
 @testset "sock write cb is async" begin
-    ci_debug_log("socket_tests: sock write cb is async start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1507,12 +1223,7 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        ci_debug_log("sock write cb is async: socket_start_accept")
-        @test ci_with_timeout(
-            "sock write cb is async: socket_start_accept",
-            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1531,7 +1242,6 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("sock write cb is async: on_connection_result")
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
                     write_started[] = true
@@ -1560,45 +1270,28 @@ end
             end),
         )
 
-        ci_debug_log("sock write cb is async: socket_connect")
-        @test ci_with_timeout(
-            "sock write cb is async: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
-            timeout_s = 1.0,
-        )
-        ci_debug_log("sock write cb is async: socket_connect done")
-        @test ci_wait_for_flag("sock write cb is async: wait connect_done", connect_done)
-        @test ci_wait_for_flag("sock write cb is async: wait accept_done", accept_done)
-        @test ci_wait_for_flag("sock write cb is async: wait write_started", write_started)
-        @test ci_wait_for_flag("sock write cb is async: wait write_cb_invoked", write_cb_invoked)
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test wait_for_flag(connect_done)
+        @test wait_for_flag(accept_done)
+        @test wait_for_flag(write_started)
+        @test wait_for_flag(write_cb_invoked)
         @test !write_cb_sync[]
         @test write_err[] == Reseau.AWS_OP_SUCCESS
     finally
-        ci_debug_log("sock write cb is async: cleanup start")
         if client_socket !== nothing
-            ci_with_timeout("sock write cb is async: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("sock write cb is async: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("sock write cb is async: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            ci_with_timeout("sock write cb is async: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
-            if !ci_with_timeout("sock write cb is async: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
-                ci_debug_log("sock write cb is async: fallback socket_close(accepted[]) timed out")
-            end
+            Sockets.socket_close(accepted[])
         end
         if server_socket !== nothing
-            ci_with_timeout("sock write cb is async: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
-            if !ci_with_timeout("sock write cb is async: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
-                ci_debug_log("sock write cb is async: fallback socket_close(server_socket) timed out")
-            end
+            Sockets.socket_close(server_socket)
         end
-        ci_with_timeout("sock write cb is async: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+        EventLoops.event_loop_destroy!(el_val)
     end
 end
 
 @testset "connect timeout" begin
-    ci_debug_log("socket_tests: connect timeout start")
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
@@ -1636,29 +1329,20 @@ end
 
     try
         try
-            ci_debug_log("connect timeout: socket_connect")
-            @test ci_with_timeout(
-                "connect timeout: socket_connect",
-                () -> Sockets.socket_connect(socket_val, connect_opts),
-                timeout_s = 1.0,
-            )
-            @test ci_wait_for_flag("connect timeout: wait connect_done", connect_done; timeout_s = 3.0)
+            Sockets.socket_connect(socket_val, connect_opts)
+            @test wait_for_flag(connect_done; timeout_s = 3.0)
             @test _is_allowed_connect_error(connect_err[])
         catch e
             @test e isa Reseau.ReseauError
             @test _is_allowed_connect_error(e.code)
         end
     finally
-        ci_with_timeout("connect timeout: socket_cleanup!(socket_val)", () -> Sockets.socket_cleanup!(socket_val))
-        if !ci_with_timeout("connect timeout: socket_close(socket_val)", () -> Sockets.socket_close(socket_val))
-            ci_debug_log("connect timeout: fallback socket_close(socket_val) timed out")
-        end
-        ci_with_timeout("connect timeout: event_loop_group_destroy!", () -> EventLoops.event_loop_group_destroy!(elg_val))
+        Sockets.socket_cleanup!(socket_val)
+        EventLoops.event_loop_group_destroy!(elg_val)
     end
 end
 
 @testset "connect timeout cancellation" begin
-    ci_debug_log("socket_tests: connect timeout cancellation start")
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
@@ -1696,41 +1380,21 @@ end
 
     try
         try
-            ci_debug_log("connect timeout cancellation: socket_connect")
-            @test ci_with_timeout(
-                "connect timeout cancellation: socket_connect",
-                () -> Sockets.socket_connect(socket_val, connect_opts),
-                timeout_s = 1.0,
-            )
-            if !ci_with_timeout(
-                "connect timeout cancellation: event_loop_group_destroy!",
-                () -> EventLoops.event_loop_group_destroy!(elg_val),
-                timeout_s = 5.0,
-            )
-                ci_debug_log(
-                    "connect timeout cancellation: event_loop_group_destroy! timed out before callback completed"
-                )
-            end
-            @test ci_wait_for_flag("connect timeout cancellation: wait connect_done", connect_done; timeout_s = 5.0)
+            Sockets.socket_connect(socket_val, connect_opts)
+            EventLoops.event_loop_group_destroy!(elg_val)
+            @test connect_done[]
             @test connect_err[] == EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
                 _is_allowed_connect_error(connect_err[])
         catch e
-            if e isa Reseau.ReseauError
-                @test _is_allowed_connect_error(e.code)
-            else
-                rethrow()
-            end
+            @test e isa Reseau.ReseauError
+            @test _is_allowed_connect_error(e.code)
         end
     finally
-        ci_with_timeout("connect timeout cancellation: socket_cleanup!(socket_val)", () -> Sockets.socket_cleanup!(socket_val))
-        if !ci_with_timeout("connect timeout cancellation: socket_close(socket_val)", () -> Sockets.socket_close(socket_val))
-            ci_debug_log("connect timeout cancellation: fallback socket_close(socket_val) timed out")
-        end
+        Sockets.socket_cleanup!(socket_val)
     end
 end
 
 @testset "cleanup before connect or timeout" begin
-    ci_debug_log("socket_tests: cleanup before connect or timeout start")
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
         elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
         @test elg_val !== nothing
@@ -1775,22 +1439,9 @@ end
 
         try
             try
-                ci_debug_log("cleanup before connect or timeout: socket_connect")
-                @test ci_with_timeout(
-                    "cleanup before connect or timeout: socket_connect",
-                    () -> Sockets.socket_connect(socket_val, connect_opts),
-                    timeout_s = 1.0,
-                )
+                Sockets.socket_connect(socket_val, connect_opts)
                 EventLoops.event_loop_schedule_task_now!(el_val, cleanup_task)
-                if !ci_wait_for_flag(
-                    "cleanup before connect or timeout: wait cleanup_done",
-                    cleanup_done;
-                    timeout_s = 10.0,
-                )
-                    ci_debug_log(
-                        "cleanup before connect or timeout: cleanup_done timed out; continuing"
-                    )
-                end
+                @test wait_for_flag(cleanup_done)
                 sleep(0.05)
                 if connect_done[]
                     @test _is_allowed_connect_error(connect_err[])
@@ -1802,16 +1453,12 @@ end
                 @test _is_allowed_connect_error(e.code)
             end
         finally
-            ci_with_timeout("cleanup before connect or timeout: socket_cleanup!(socket_val)", () -> Sockets.socket_cleanup!(socket_val))
-            if !ci_with_timeout("cleanup before connect or timeout: socket_close(socket_val)", () -> Sockets.socket_close(socket_val))
-                ci_debug_log("cleanup before connect or timeout: fallback socket_close(socket_val) timed out")
-            end
-            ci_with_timeout("cleanup before connect or timeout: event_loop_group_destroy!", () -> EventLoops.event_loop_group_destroy!(elg_val))
+            Sockets.socket_cleanup!(socket_val)
+            EventLoops.event_loop_group_destroy!(elg_val)
         end
 end
 
 @testset "cleanup in accept doesn't explode" begin
-    ci_debug_log("socket_tests: cleanup in accept doesn't explode start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1859,12 +1506,7 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        ci_debug_log("cleanup in accept doesn't explode: socket_start_accept")
-        @test ci_with_timeout(
-            "cleanup in accept doesn't explode: socket_start_accept",
-            () -> Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1877,49 +1519,30 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("cleanup in accept doesn't explode: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 return nothing
             end),
         )
 
-        ci_debug_log("cleanup in accept doesn't explode: socket_connect")
-        @test ci_with_timeout(
-            "cleanup in accept doesn't explode: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing,
-            timeout_s = 1.0,
-        )
-        @test ci_wait_for_flag("cleanup in accept doesn't explode: wait accept_done", accept_done)
-        @test ci_wait_for_flag("cleanup in accept doesn't explode: wait connect_done", connect_done)
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test wait_for_flag(accept_done)
+        @test wait_for_flag(connect_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
     finally
-        ci_debug_log("cleanup in accept doesn't explode: cleanup start")
         if client_socket !== nothing
-            ci_with_timeout("cleanup in accept doesn't explode: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("cleanup in accept doesn't explode: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("cleanup in accept doesn't explode: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_cleanup!(client_socket)
         end
         if incoming[] !== nothing
-            ci_with_timeout("cleanup in accept doesn't explode: socket_cleanup!(incoming[])", () -> Sockets.socket_cleanup!(incoming[]))
-            if !ci_with_timeout("cleanup in accept doesn't explode: socket_close(incoming[])", () -> Sockets.socket_close(incoming[]))
-                ci_debug_log("cleanup in accept doesn't explode: fallback socket_close(incoming[]) timed out")
-            end
+            Sockets.socket_cleanup!(incoming[])
         end
-        ci_with_timeout("cleanup in accept doesn't explode: socket_cleanup!(listener_socket)", () -> Sockets.socket_cleanup!(listener_socket))
-        if !ci_with_timeout("cleanup in accept doesn't explode: socket_close(listener_socket)", () -> Sockets.socket_close(listener_socket))
-            ci_debug_log("cleanup in accept doesn't explode: fallback socket_close(listener_socket) timed out")
-        end
-        ci_with_timeout("cleanup in accept doesn't explode: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+        Sockets.socket_cleanup!(listener_socket)
+        EventLoops.event_loop_destroy!(el_val)
     end
 end
 
 @testset "cleanup in write cb doesn't explode" begin
-    ci_debug_log("socket_tests: cleanup in write cb doesn't explode start")
-    old_resau_debug_epoll = get(ENV, "RESEAU_DEBUG_EPOLL", nothing)
-    ENV["RESEAU_DEBUG_EPOLL"] = "1"
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1961,12 +1584,7 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        ci_debug_log("cleanup in write cb doesn't explode: socket_start_accept")
-        @test ci_with_timeout(
-            "cleanup in write cb doesn't explode: socket_start_accept",
-            () -> Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1979,20 +1597,14 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("cleanup in write cb doesn't explode: on_connection_result")
                 connect_done[] = true
                 return nothing
             end),
         )
 
-        ci_debug_log("cleanup in write cb doesn't explode: socket_connect")
-        @test ci_with_timeout(
-            "cleanup in write cb doesn't explode: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing,
-            timeout_s = 1.0,
-        )
-        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait accept_done", accept_done)
-        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait connect_done", connect_done)
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test wait_for_flag(accept_done)
+        @test wait_for_flag(connect_done)
 
         server_sock = accepted[]
         @test server_sock !== nothing
@@ -2006,12 +1618,8 @@ end
         write_err_client = Ref{Int}(0)
         write_done_server = Threads.Atomic{Bool}(false)
         write_err_server = Ref{Int}(0)
-        write_done_client_cb_err = Ref{Any}(nothing)
-        write_done_server_cb_err = Ref{Any}(nothing)
 
         write_task_client = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-            ci_debug_log("cleanup in write cb doesn't explode: write_task_client running")
-            ci_debug_log("cleanup in write cb doesn't explode: write_task_client status=$(status)")
             cursor = Reseau.ByteCursor("teapot")
             try
                 Sockets.socket_write(
@@ -2019,37 +1627,20 @@ end
                     cursor,
                     Reseau.WriteCallable((err, bytes) -> begin
                         write_err_client[] = err
-                        try
-                            Sockets.socket_cleanup!(client_socket)
-                        catch e
-                            write_done_client_cb_err[] = e
-                            ci_debug_log(
-                                "cleanup in write cb doesn't explode: client write callback cleanup threw $(e)"
-                            )
-                        end
+                        Sockets.socket_cleanup!(client_socket)
                         write_done_client[] = true
                         return nothing
                     end),
                 )
             catch e
                 write_err_client[] = e isa Reseau.ReseauError ? e.code : -1
-                try
-                    Sockets.socket_cleanup!(client_socket)
-                catch cleanup_err
-                    write_done_client_cb_err[] = cleanup_err
-                    ci_debug_log(
-                        "cleanup in write cb doesn't explode: client write task cleanup threw $(cleanup_err)"
-                    )
-                end
+                Sockets.socket_cleanup!(client_socket)
                 write_done_client[] = true
             end
-                ci_debug_log("cleanup in write cb doesn't explode: write_task_client complete")
             return nothing
         end); type_tag = "socket_write_cleanup_client")
 
         write_task_server = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-            ci_debug_log("cleanup in write cb doesn't explode: write_task_server running")
-            ci_debug_log("cleanup in write cb doesn't explode: write_task_server status=$(status)")
             cursor = Reseau.ByteCursor("spout")
             try
                 Sockets.socket_write(
@@ -2057,152 +1648,38 @@ end
                     cursor,
                     Reseau.WriteCallable((err, bytes) -> begin
                         write_err_server[] = err
-                        try
-                            Sockets.socket_cleanup!(server_sock)
-                        catch e
-                            write_done_server_cb_err[] = e
-                            ci_debug_log(
-                                "cleanup in write cb doesn't explode: server write callback cleanup threw $(e)"
-                            )
-                        end
+                        Sockets.socket_cleanup!(server_sock)
                         write_done_server[] = true
                         return nothing
                     end),
                 )
             catch e
                 write_err_server[] = e isa Reseau.ReseauError ? e.code : -1
-                try
-                    Sockets.socket_cleanup!(server_sock)
-                catch cleanup_err
-                    write_done_server_cb_err[] = cleanup_err
-                    ci_debug_log(
-                        "cleanup in write cb doesn't explode: server write task cleanup threw $(cleanup_err)"
-                    )
-                end
+                Sockets.socket_cleanup!(server_sock)
                 write_done_server[] = true
             end
-            ci_debug_log("cleanup in write cb doesn't explode: write_task_server complete")
             return nothing
         end); type_tag = "socket_write_cleanup_server")
 
-        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_client initial", write_task_client)
-        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_server initial", write_task_server)
-        ci_debug_event_loop_state(
-            "cleanup in write cb doesn't explode: state before client schedule",
-            el_val,
-        )
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_client)
-        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_client after schedule", write_task_client)
-        ci_debug_event_loop_state(
-            "cleanup in write cb doesn't explode: state after client schedule",
-            el_val,
-        )
-        if !ci_wait_for_flag(
-            "cleanup in write cb doesn't explode: wait write_done_client",
-            write_done_client;
-            timeout_s = 10.0,
-        )
-            ci_debug_log("cleanup in write cb doesn't explode: write_done_client timed out")
-            ci_debug_event_loop_state(
-                "cleanup in write cb doesn't explode: state at client timeout",
-                el_val,
-            )
-            ci_debug_task_state(
-                "cleanup in write cb doesn't explode: write_task_client at client timeout",
-                write_task_client,
-            )
-            ci_debug_task_state(
-                "cleanup in write cb doesn't explode: write_task_server at client timeout",
-                write_task_server,
-            )
-            ci_debug_socket_state("cleanup in write cb doesn't explode: client socket at client timeout", client_socket)
-            ci_debug_socket_state("cleanup in write cb doesn't explode: server socket at client timeout", server_sock)
-            ci_debug_socket_state("cleanup in write cb doesn't explode: listener socket at client timeout", listener_socket)
-        end
-        @test write_done_client[] == true
-        ci_debug_task_state(
-            "cleanup in write cb doesn't explode: write_task_client at client completion",
-            write_task_client,
-        )
-        ci_debug_task_state(
-            "cleanup in write cb doesn't explode: write_task_server at client completion",
-            write_task_server,
-        )
+        @test wait_for_flag(write_done_client)
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_server)
-        ci_debug_task_state("cleanup in write cb doesn't explode: write_task_server after schedule", write_task_server)
-        ci_debug_event_loop_state(
-            "cleanup in write cb doesn't explode: state after server schedule",
-            el_val,
-        )
-        if !ci_wait_for_flag(
-            "cleanup in write cb doesn't explode: wait write_done_server",
-            write_done_server;
-            timeout_s = 10.0,
-        )
-            ci_debug_log("cleanup in write cb doesn't explode: write_done_server timed out")
-            ci_debug_event_loop_state(
-                "cleanup in write cb doesn't explode: state at server timeout",
-                el_val,
-            )
-            ci_debug_task_state(
-                "cleanup in write cb doesn't explode: write_task_server at server timeout",
-                write_task_server,
-            )
-            ci_debug_task_state(
-                "cleanup in write cb doesn't explode: write_task_client at server timeout",
-                write_task_client,
-            )
-            ci_debug_socket_state("cleanup in write cb doesn't explode: client socket at server timeout", client_socket)
-            ci_debug_socket_state("cleanup in write cb doesn't explode: server socket at server timeout", server_sock)
-            ci_debug_socket_state("cleanup in write cb doesn't explode: listener socket at server timeout", listener_socket)
-        end
-        @test write_done_server[] == true
-        ci_debug_event_loop_state(
-            "cleanup in write cb doesn't explode: state at completion",
-            el_val,
-        )
-        ci_debug_task_state(
-            "cleanup in write cb doesn't explode: write_task_client at server completion",
-            write_task_client,
-        )
-        ci_debug_task_state(
-            "cleanup in write cb doesn't explode: write_task_server at server completion",
-            write_task_server,
-        )
+        @test wait_for_flag(write_done_server)
         @test write_err_client[] == Reseau.AWS_OP_SUCCESS
         @test write_err_server[] == Reseau.AWS_OP_SUCCESS
-        @test write_done_client_cb_err[] === nothing
-        @test write_done_server_cb_err[] === nothing
     finally
-        ci_debug_log("cleanup in write cb doesn't explode: cleanup start")
         if client_socket !== nothing
-            ci_with_timeout("cleanup in write cb doesn't explode: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("cleanup in write cb doesn't explode: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("cleanup in write cb doesn't explode: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_cleanup!(client_socket)
         end
         if accepted[] !== nothing
-            ci_with_timeout("cleanup in write cb doesn't explode: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
-            if !ci_with_timeout("cleanup in write cb doesn't explode: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
-                ci_debug_log("cleanup in write cb doesn't explode: fallback socket_close(accepted[]) timed out")
-            end
+            Sockets.socket_cleanup!(accepted[])
         end
-        ci_with_timeout("cleanup in write cb doesn't explode: socket_cleanup!(listener_socket)", () -> Sockets.socket_cleanup!(listener_socket))
-        if !ci_with_timeout("cleanup in write cb doesn't explode: socket_close(listener_socket)", () -> Sockets.socket_close(listener_socket))
-            ci_debug_log("cleanup in write cb doesn't explode: fallback socket_close(listener_socket) timed out")
-        end
-        ci_with_timeout("cleanup in write cb doesn't explode: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
-
-        if old_resau_debug_epoll === nothing
-            delete!(ENV, "RESEAU_DEBUG_EPOLL")
-        else
-            ENV["RESEAU_DEBUG_EPOLL"] = old_resau_debug_epoll
-        end
+        Sockets.socket_cleanup!(listener_socket)
+        EventLoops.event_loop_destroy!(el_val)
     end
 end
 
 @testset "local socket communication" begin
-    ci_debug_log("socket_tests: local socket communication start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2285,12 +1762,7 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        ci_debug_log("local socket communication: socket_start_accept")
-        @test ci_with_timeout(
-            "local socket communication: socket_start_accept",
-            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -2303,7 +1775,6 @@ end
             endpoint;
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("local socket communication: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -2327,42 +1798,26 @@ end
             end),
         )
 
-        ci_debug_log("local socket communication: socket_connect")
-        @test ci_with_timeout(
-            "local socket communication: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
-            timeout_s = 1.0,
-        )
-        ci_debug_log("local socket communication: socket_connect done")
-        @test ci_wait_for_flag("local socket communication: wait connect_done", connect_done)
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("local socket communication: wait write_done", write_done)
+        @test wait_for_flag(write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("local socket communication: wait read_done", read_done)
+        @test wait_for_flag(read_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
-        ci_debug_log("local socket communication: cleanup start")
         if client_socket !== nothing
-            ci_with_timeout("local socket communication: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("local socket communication: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("local socket communication: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_close(client_socket)
         end
         if accepted[] !== nothing
-            ci_with_timeout("local socket communication: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
-            if !ci_with_timeout("local socket communication: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
-                ci_debug_log("local socket communication: fallback socket_close(accepted[]) timed out")
-            end
+            Sockets.socket_close(accepted[])
         end
         if server_socket !== nothing
-            ci_with_timeout("local socket communication: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
-            if !ci_with_timeout("local socket communication: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
-                ci_debug_log("local socket communication: fallback socket_close(server_socket) timed out")
-            end
+            Sockets.socket_close(server_socket)
         end
-        ci_with_timeout("local socket communication: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+        EventLoops.event_loop_destroy!(el_val)
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -2370,7 +1825,6 @@ end
 end
 
 @testset "local socket connect before accept" begin
-    ci_debug_log("socket_tests: local socket connect before accept start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2415,22 +1869,15 @@ end
             endpoint;
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("local socket connect before accept: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 return nothing
             end),
         )
 
-        ci_debug_log("local socket connect before accept: socket_connect")
-        @test ci_with_timeout(
-            "local socket connect before accept: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
 
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
-            ci_debug_log("local socket connect before accept: on_accept")
             accept_err[] = err
             accepted[] = new_sock
             accept_done[] = true
@@ -2438,38 +1885,23 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        ci_debug_log("local socket connect before accept: socket_start_accept")
-        @test ci_with_timeout(
-            "local socket connect before accept: socket_start_accept",
-            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
-            timeout_s = 1.0,
-        )
+        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
-        @test ci_wait_for_flag("local socket connect before accept: wait connect_done", connect_done)
-        @test ci_wait_for_flag("local socket connect before accept: wait accept_done", accept_done)
+        @test wait_for_flag(connect_done)
+        @test wait_for_flag(accept_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
     finally
-        ci_debug_log("local socket connect before accept: cleanup start")
         if client_socket !== nothing
-            ci_with_timeout("local socket connect before accept: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("local socket connect before accept: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("local socket connect before accept: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_cleanup!(client_socket)
         end
         if accepted[] !== nothing
-            ci_with_timeout("local socket connect before accept: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
-            if !ci_with_timeout("local socket connect before accept: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
-                ci_debug_log("local socket connect before accept: fallback socket_close(accepted[]) timed out")
-            end
+            Sockets.socket_cleanup!(accepted[])
         end
         if server_socket !== nothing
-            ci_with_timeout("local socket connect before accept: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
-            if !ci_with_timeout("local socket connect before accept: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
-                ci_debug_log("local socket connect before accept: fallback socket_close(server_socket) timed out")
-            end
+            Sockets.socket_cleanup!(server_socket)
         end
-        ci_with_timeout("local socket connect before accept: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+        EventLoops.event_loop_destroy!(el_val)
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -2477,7 +1909,6 @@ end
 end
 
 @testset "udp socket communication" begin
-    ci_debug_log("socket_tests: udp socket communication start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2547,7 +1978,6 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
-                ci_debug_log("udp socket communication: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -2566,43 +1996,30 @@ end
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
-                    return nothing
-                end),
+                return nothing
+            end),
         )
 
-        ci_debug_log("udp socket communication: socket_connect")
-        @test ci_with_timeout(
-            "udp socket communication: socket_connect",
-            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
-            timeout_s = 1.0,
-        )
-        @test ci_wait_for_flag("udp socket communication: wait connect_done", connect_done)
+        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("udp socket communication: wait write_done", write_done)
+        @test wait_for_flag(write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test ci_wait_for_flag("udp socket communication: wait read_done", read_done)
+        @test wait_for_flag(read_done)
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
-        ci_debug_log("udp socket communication: cleanup start")
         if client_socket !== nothing
-            ci_with_timeout("udp socket communication: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
-            if !ci_with_timeout("udp socket communication: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
-                ci_debug_log("udp socket communication: fallback socket_close(client_socket) timed out")
-            end
+            Sockets.socket_close(client_socket)
         end
         if server_socket !== nothing
-            ci_with_timeout("udp socket communication: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
-            if !ci_with_timeout("udp socket communication: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
-                ci_debug_log("udp socket communication: fallback socket_close(server_socket) timed out")
-            end
+            Sockets.socket_close(server_socket)
         end
-        ci_with_timeout("udp socket communication: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+        EventLoops.event_loop_destroy!(el_val)
     end
 end
 
 @testset "udp bind connect communication" begin
-    ci_debug_log("socket_tests: udp bind connect communication start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2717,7 +2134,6 @@ end
 end
 
 @testset "wrong thread read write fails" begin
-    ci_debug_log("socket_tests: wrong thread read write fails start")
     if Sys.iswindows()
         @test true
     else
@@ -2780,7 +2196,6 @@ end
 end
 
 @testset "bind on zero port tcp ipv4" begin
-    ci_debug_log("socket_tests: bind on zero port tcp ipv4 start")
     # Use LOCAL domain on macOS to get a POSIX socket (IPV4 → NW on macOS,
     # which doesn't expose resolved port from socket_get_bound_address)
     @static if Sys.isapple()
@@ -2828,7 +2243,6 @@ end
 end
 
 @testset "bind on zero port udp ipv4" begin
-    ci_debug_log("socket_tests: bind on zero port udp ipv4 start")
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.LOCAL)
     else
@@ -2872,7 +2286,6 @@ end
 end
 
 @testset "incoming duplicate tcp bind errors" begin
-    ci_debug_log("socket_tests: incoming duplicate tcp bind errors start")
     # Use LOCAL on macOS since IPV4 → NW sockets, which don't expose
     # resolved port or enforce POSIX duplicate-bind semantics
     @static if Sys.isapple()
@@ -2934,7 +2347,6 @@ end
 end
 
 @testset "incoming tcp socket errors" begin
-    ci_debug_log("socket_tests: incoming tcp socket errors start")
     # Use LOCAL on macOS to test POSIX bind error paths
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
@@ -2977,7 +2389,6 @@ end
 end
 
 @testset "incoming udp socket errors" begin
-    ci_debug_log("socket_tests: incoming udp socket errors start")
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.LOCAL)
     else
@@ -3013,7 +2424,6 @@ end
 end
 
 @testset "outgoing local socket errors" begin
-    ci_debug_log("socket_tests: outgoing local socket errors start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -3071,7 +2481,6 @@ end
 end
 
 @testset "outgoing tcp socket error" begin
-    ci_debug_log("socket_tests: outgoing tcp socket error start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
