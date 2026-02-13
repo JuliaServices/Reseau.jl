@@ -1166,7 +1166,11 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
     _ci_debug_socket("socket_close_impl start fd=$(fd) event_loop_set=$(sock.event_loop !== nothing) state=$(sock.state)")
 
     event_loop = sock.event_loop
-    _ci_debug_socket("socket_close_impl event_loop_running=$(event_loop !== nothing ? @atomic event_loop.running : false)")
+    event_loop_running = false
+    if event_loop !== nothing
+        event_loop_running = @atomic event_loop.running
+    end
+    _ci_debug_socket("socket_close_impl event_loop_running=$(event_loop_running)")
 
     if event_loop !== nothing
         # Unsubscribe from events if subscribed
