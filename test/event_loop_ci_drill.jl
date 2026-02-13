@@ -1,5 +1,6 @@
 using Test
 using Reseau
+using Reseau: EventLoops, Sockets
 
 include(joinpath(@__DIR__, "test_utils.jl"))
 
