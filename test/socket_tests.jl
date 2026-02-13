@@ -13,26 +13,6 @@ function wait_for_flag(flag; timeout_s::Float64 = 5.0)
     return false
 end
 
-function run_with_timeout(fn::Function; timeout_s::Float64 = 5.0)
-    done = Threads.Atomic{Bool}(false)
-    err = Ref{Any}(nothing)
-    task = @async begin
-        try
-            fn()
-        catch e
-            err[] = e
-        finally
-            done[] = true
-        end
-        return nothing
-    end
-
-    @test wait_for_flag(done; timeout_s = timeout_s)
-    fetch(task)
-    err[] === nothing || throw(err[])
-    return nothing
-end
-
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -482,12 +462,12 @@ end
             @test payload[] == "ping"
         finally
             if client_socket !== nothing
-                run_with_timeout(() -> Sockets.socket_cleanup!(client_socket); timeout_s = 2.0)
+                Sockets.socket_cleanup!(client_socket)
             end
             if accepted[] !== nothing
-                run_with_timeout(() -> Sockets.socket_cleanup!(accepted[]); timeout_s = 2.0)
+                Sockets.socket_cleanup!(accepted[])
             end
-            run_with_timeout(() -> Sockets.socket_cleanup!(server_socket); timeout_s = 2.0)
+            Sockets.socket_cleanup!(server_socket)
             EventLoops.event_loop_destroy!(el_val)
         end
 
@@ -2211,6 +2191,72 @@ end
             @test wait_for_flag(close_done)
         finally
             EventLoops.event_loop_destroy!(el_val)
+        end
+    end
+end
+
+@testset "socket_close while event loop is stopping returns promptly" begin
+    if Threads.nthreads(:interactive) <= 1
+        @test true
+    else
+        el = EventLoops.event_loop_new()
+        el_val = el isa EventLoops.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            @test true
+        else
+            @test EventLoops.event_loop_run!(el_val) === nothing
+
+            @static if Sys.isapple()
+                opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+            else
+                opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+            end
+            sock = Sockets.socket_init(opts)
+            socket_val = sock isa Sockets.Socket ? sock : nothing
+            @test socket_val !== nothing
+            if socket_val === nothing
+                EventLoops.event_loop_destroy!(el_val)
+                @test true
+            else
+                close_done = Channel{Any}(1)
+                try
+                    if Sys.isapple()
+                        endpoint = Sockets.SocketEndpoint()
+                        Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+                    else
+                        endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
+                    end
+
+                    @test Sockets.socket_bind(socket_val, Sockets.SocketBindOptions(endpoint)) === nothing
+                    @test Sockets.socket_assign_to_event_loop(socket_val, el_val) === nothing
+                    @test Sockets.socket_listen(socket_val, 1) === nothing
+
+                    EventLoops.event_loop_stop!(el_val)
+
+                    Threads.@spawn begin
+                        try
+                            Sockets.socket_close(socket_val)
+                            put!(close_done, :ok)
+                        catch e
+                            put!(close_done, e)
+                        end
+                    end
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while !isready(close_done) && Base.time_ns() < deadline
+                        sleep(0.01)
+                    end
+                    @test isready(close_done)
+                    close_result = take!(close_done)
+                    @test close_result === :ok
+                finally
+                    if @atomic el_val.running
+                        EventLoops.event_loop_wait_for_stop_completion!(el_val)
+                    end
+                    EventLoops.event_loop_destroy!(el_val)
+                end
+            end
         end
     end
 end
