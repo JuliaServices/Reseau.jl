@@ -89,6 +89,7 @@
         should_process_task_pre_queue::Bool
         should_continue::Bool
         use_eventfd::Bool  # true if using eventfd, false if using pipe
+        handle_registry::Dict{Ptr{Cvoid}, EpollEventHandleData}
     end
 
     function EpollEventLoop()
@@ -111,6 +112,7 @@
             false,
             false,
             false,
+            Dict{Ptr{Cvoid}, EpollEventHandleData}(),
         )
     end
 
