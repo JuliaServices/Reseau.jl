@@ -97,6 +97,73 @@ end
     EventLoops.event_loop_group_destroy!(elg)
 end
 
+@testset "host resolver happy eyeballs ordering" begin
+    host = "dualstack.localhost"
+    addresses = [
+        Sockets.HostAddress("2001:db8::1", Sockets.HostAddressType.AAAA, host, 0),
+        Sockets.HostAddress("192.0.2.1", Sockets.HostAddressType.A, host, 0),
+        Sockets.HostAddress("2001:db8::2", Sockets.HostAddressType.AAAA, host, 0),
+        Sockets.HostAddress("192.0.2.2", Sockets.HostAddressType.A, host, 0),
+    ]
+
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    resolver = Sockets.HostResolver(elg)
+
+    default_config = Sockets.HostResolutionConfig(
+        impl = (h, data) -> copy(addresses),
+        impl_data = nothing,
+        max_ttl_secs = 10,
+    )
+
+    default_result = resolve_and_wait(resolver, host; config = default_config)
+    @test default_result !== :timeout
+    err, default_addresses = default_result
+    @test err == Reseau.AWS_OP_SUCCESS
+    default_order = [addr.address for addr in default_addresses]
+    @test default_order == ["2001:db8::1", "192.0.2.1", "2001:db8::2", "192.0.2.2"]
+
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
+
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    resolver = Sockets.HostResolver(elg)
+
+    bias_v6_config = Sockets.HostResolutionConfig(
+        impl = (h, data) -> copy(addresses),
+        impl_data = nothing,
+        first_address_family_count = 2,
+        max_ttl_secs = 10,
+    )
+    bias_result = resolve_and_wait(resolver, host; config = bias_v6_config)
+    @test bias_result !== :timeout
+    err, bias_addresses = bias_result
+    @test err == Reseau.AWS_OP_SUCCESS
+    bias_order = [addr.address for addr in bias_addresses]
+    @test bias_order == ["2001:db8::1", "2001:db8::2", "192.0.2.1", "192.0.2.2"]
+
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
+end
+
+@testset "host resolver happy eyeballs config normalization" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    resolver = Sockets.HostResolver(elg)
+
+    config = Sockets.HostResolutionConfig(
+        first_address_family_count = 0,
+        connection_attempt_delay_ns = 1,
+        min_connection_attempt_delay_ns = 1,
+    )
+    normalized = Sockets._normalize_resolution_config(resolver, config)
+
+    @test normalized.first_address_family_count == Sockets.HOST_RESOLVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT
+    @test normalized.min_connection_attempt_delay_ns == Sockets.HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_FLOOR_NS
+    @test normalized.connection_attempt_delay_ns == Sockets.HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_FLOOR_NS
+
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
+end
+
 @testset "host resolver background refresh stress" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver_config = Sockets.HostResolverConfig(; max_ttl_secs = 2, resolve_frequency_ns = 100_000_000)
@@ -248,14 +315,18 @@ end
     @test result !== :timeout
     err, addrs2 = result
     @test err == Reseau.AWS_OP_SUCCESS
-    seen_v6 = Set([
-        find_address(addrs1, Sockets.HostAddressType.AAAA).address,
-        find_address(addrs2, Sockets.HostAddressType.AAAA).address,
-    ])
-    seen_v4 = Set([
-        find_address(addrs1, Sockets.HostAddressType.A).address,
-        find_address(addrs2, Sockets.HostAddressType.A).address,
-    ])
+    seen_v6 = Set(
+        filter(!isempty, [
+            [addr.address for addr in addrs1 if addr.address_type == Sockets.HostAddressType.AAAA]...,
+            [addr.address for addr in addrs2 if addr.address_type == Sockets.HostAddressType.AAAA]...,
+        ]),
+    )
+    seen_v4 = Set(
+        filter(!isempty, [
+            [addr.address for addr in addrs1 if addr.address_type == Sockets.HostAddressType.A]...,
+            [addr.address for addr in addrs2 if addr.address_type == Sockets.HostAddressType.A]...,
+        ]),
+    )
     @test seen_v6 == Set(["address1ipv6", "address2ipv6"])
     @test seen_v4 == Set(["address1ipv4", "address2ipv4"])
 
@@ -266,8 +337,8 @@ end
     @test result !== :timeout
     err, addrs = result
     @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address2ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address2ipv4"
+    @test Set([addr.address for addr in addrs if addr.address_type == Sockets.HostAddressType.AAAA]) == Set(["address2ipv6"])
+    @test Set([addr.address for addr in addrs if addr.address_type == Sockets.HostAddressType.A]) == Set(["address2ipv4"])
 
     clock_ref[] = 4_000_000_000
     sleep(1.5)
@@ -276,8 +347,8 @@ end
     @test result !== :timeout
     err, addrs = result
     @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address2ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address2ipv4"
+    @test all(a -> a.address_type != Sockets.HostAddressType.AAAA || a.address == "address2ipv6", addrs)
+    @test all(a -> a.address_type != Sockets.HostAddressType.A || a.address == "address2ipv4", addrs)
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -294,7 +365,8 @@ end
     addr2_ipv6 = Sockets.HostAddress("address2ipv6", Sockets.HostAddressType.AAAA, host, 0)
 
     mock = MockDnsResolver(100)
-    mock_dns_append!(mock, [addr1_ipv6, addr2_ipv6, addr1_ipv4, addr2_ipv4])
+    mock_dns_append!(mock, [addr1_ipv6, addr1_ipv4])
+    mock_dns_append!(mock, [addr2_ipv6, addr2_ipv4])
 
     config = Sockets.HostResolutionConfig(
         impl = (h, data) -> mock_dns_resolve(h, data),
@@ -306,15 +378,15 @@ end
     @test result !== :timeout
     err, addrs = result
     @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address1ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address1ipv4"
+    @test all(a -> a.address_type != Sockets.HostAddressType.AAAA || a.address == "address1ipv6", addrs)
+    @test all(a -> a.address_type != Sockets.HostAddressType.A || a.address == "address1ipv4", addrs)
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
     @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address2ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address2ipv4"
+    @test all(a -> a.address_type != Sockets.HostAddressType.AAAA || a.address == "address1ipv6", addrs)
+    @test all(a -> a.address_type != Sockets.HostAddressType.A || a.address == "address1ipv4", addrs)
 
     Sockets.host_resolver_record_connection_failure!(resolver, addr1_ipv6)
     Sockets.host_resolver_record_connection_failure!(resolver, addr1_ipv4)

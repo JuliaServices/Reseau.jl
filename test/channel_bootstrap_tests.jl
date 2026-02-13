@@ -297,14 +297,124 @@ end
         false,
         requested_loop,
         nothing,
+        Sockets.HostResolutionConfig(),
         Sockets.HostAddress[],
         0,
         0,
+        Sockets.ScheduledTask[],
         false,
     )
     Sockets._connection_request_complete(request, EventLoops.ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
     @test wait_for_pred(() -> setup_called[])
     @test setup_on_loop[]
+    Sockets.host_resolver_shutdown!(resolver)
+    EventLoops.event_loop_group_destroy!(elg)
+end
+
+@testset "client bootstrap staggered connection scheduling" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    resolver = Sockets.HostResolver(elg)
+    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+        event_loop_group = elg,
+        host_resolver = resolver,
+    ))
+    el = EventLoops.event_loop_group_get_loop_at(elg, 0)
+    @test el !== nothing
+    event_loop = el isa EventLoops.EventLoop ? el : nothing
+    @test event_loop !== nothing
+    if event_loop === nothing
+        EventLoops.event_loop_group_destroy!(elg)
+        return
+    end
+
+    request = Sockets.SocketConnectionRequest{Nothing, Nothing, Sockets._SocketConnectionEventCallback, Nothing, Nothing}(
+        client_bootstrap,
+        "example.com",
+        UInt32(443),
+        client_bootstrap.socket_options,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        false,
+        nothing,
+        nothing,
+        Sockets.HostResolutionConfig(;
+            connection_attempt_delay_ns = 75_000_000,
+            resolution_delay_ns = 25_000_000,
+            first_address_family_count = 1,
+        ),
+        Sockets.HostAddress[],
+        0,
+        0,
+        Sockets.ScheduledTask[],
+        false,
+    )
+
+    addresses = [
+        Sockets.HostAddress("::1", Sockets.HostAddressType.AAAA, "example.com", 0),
+        Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, "example.com", 0),
+    ]
+
+    Sockets._start_connection_attempts(request, addresses, event_loop)
+    @test length(request.connection_attempt_tasks) == 2
+
+    first_task = request.connection_attempt_tasks[1]
+    second_task = request.connection_attempt_tasks[2]
+    @test first_task.timestamp != UInt64(0)
+    @test second_task.timestamp > first_task.timestamp
+
+    scheduled_attempts = copy(request.connection_attempt_tasks)
+    Sockets._connection_request_complete(request, Sockets.AWS_OP_SUCCESS, nothing)
+    @test isempty(request.connection_attempt_tasks)
+    @test all(!task.scheduled for task in scheduled_attempts)
+
+    request = Sockets.SocketConnectionRequest{Nothing, Nothing, Sockets._SocketConnectionEventCallback, Nothing, Nothing}(
+        client_bootstrap,
+        "example.com",
+        UInt32(443),
+        client_bootstrap.socket_options,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        false,
+        nothing,
+        nothing,
+        Sockets.HostResolutionConfig(;
+            connection_attempt_delay_ns = 30_000_000,
+            resolution_delay_ns = 50_000_000,
+            first_address_family_count = 1,
+        ),
+        Sockets.HostAddress[],
+        0,
+        0,
+        Sockets.ScheduledTask[],
+        false,
+    )
+    single_family_addresses = [
+        Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, "example.com", 0),
+        Sockets.HostAddress("192.0.2.10", Sockets.HostAddressType.A, "example.com", 0),
+    ]
+    Sockets._start_connection_attempts(request, single_family_addresses, event_loop)
+    @test length(request.connection_attempt_tasks) == 2
+
+    first_task = request.connection_attempt_tasks[1]
+    second_task = request.connection_attempt_tasks[2]
+    @test first_task.timestamp == UInt64(0)
+    @test second_task.timestamp > first_task.timestamp
+    single_family_attempts = copy(request.connection_attempt_tasks)
+
+    Sockets._connection_request_complete(request, Sockets.AWS_OP_SUCCESS, nothing)
+    @test isempty(request.connection_attempt_tasks)
+    @test all(!task.scheduled for task in single_family_attempts)
+
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
 end
