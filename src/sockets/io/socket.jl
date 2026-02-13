@@ -341,6 +341,10 @@ end
     return @atomic(impl.running_thread_id) != 0
 end
 
+@inline function _socket_is_stopping(event_loop::EventLoop)::Bool
+    return @atomic event_loop.should_stop
+end
+
 @noinline function _socket_close_debug(
     socket::Socket,
     stage::AbstractString;
@@ -400,6 +404,21 @@ function socket_close(socket::Socket)::Nothing
             task_scheduled = false,
         )
         socket_close_impl(socket.impl, socket)
+        return nothing
+    end
+
+    if _socket_is_stopping(event_loop)
+        _socket_close_debug(
+            socket,
+            "cross-thread-stop-short-circuit";
+            task_scheduled = false,
+        )
+        try
+            socket_close_impl(socket.impl, socket)
+        catch
+            # Best-effort direct close during shutdown; preserve prior semantics
+            # where stop-path cleanup should not block indefinitely on cross-thread work.
+        end
         return nothing
     end
 
