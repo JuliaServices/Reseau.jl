@@ -528,7 +528,14 @@ function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)
     if !removed
         removed = remove!(scheduler.timed, task; eq = (===))
     end
-    task_run!(task, TaskStatus.CANCELED)
+
+    # Only report cancellation when the task is actually tracked and removed.
+    # This avoids duplicate/invalid status transitions when cancel is called
+    # repeatedly after the task already completed or was never queued.
+    if removed
+        task_run!(task, TaskStatus.CANCELED)
+    end
+
     return nothing
 end
 

@@ -1,8 +1,8 @@
 # Epoll event loop review checklist (Reseau)
 
 ## Scope and objective
-- [ ] Confirm this checklist is reviewed before any code changes.
-- [ ] Prioritize items by severity (`P0` crash/deadlock, `P1` correctness, `P2` performance/stability, `P3` parity/style).
+- [x] Confirm this checklist is reviewed before any code changes.
+- [x] Prioritize items by severity (`P0` crash/deadlock, `P1` correctness, `P2` performance/stability, `P3` parity/style).
 
 ## 1) Epoll implementation: correctness, robustness, performance, and safety
 

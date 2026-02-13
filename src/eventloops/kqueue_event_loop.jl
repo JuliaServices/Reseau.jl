@@ -870,7 +870,37 @@
                     logf(
                         LogLevel.TRACE,
                         LS_IO_EVENT_LOOP,string("activity on fd %d, invoking handler", " ", handle_data.owner.fd, " ", ))
-                    handle_data.on_event(handle_data.events_this_loop)
+                    try
+                        handle_data.on_event(handle_data.events_this_loop)
+                    catch e
+                        if e isa ReseauError &&
+                            (e.code == ERROR_IO_SOCKET_CLOSED ||
+                            e.code == ERROR_IO_SOCKET_NOT_CONNECTED ||
+                            e.code == ERROR_IO_READ_WOULD_BLOCK)
+                            logf(
+                                LogLevel.DEBUG,
+                                LS_IO_EVENT_LOOP,
+                                string(
+                                    "ignoring non-fatal IO callback error on fd %d: %d",
+                                    " ",
+                                    handle_data.owner.fd,
+                                    " ",
+                                    e.code,
+                                    " ",
+                                ),
+                            )
+                        else
+                            logf(
+                                LogLevel.ERROR,
+                                LS_IO_EVENT_LOOP,
+                                "unhandled IO callback exception on fd ",
+                                handle_data.owner.fd,
+                                ": ",
+                                e,
+                                " ",
+                            )
+                        end
+                    end
                 end
                 handle_data.events_this_loop = 0
             end

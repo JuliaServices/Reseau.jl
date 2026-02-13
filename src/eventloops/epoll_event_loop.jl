@@ -537,16 +537,27 @@
     end
 
     # Callback for cross-thread task pipe/eventfd
-    function on_tasks_to_schedule(event_loop::EventLoop, events::Int)
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread tasks to schedule")
-        impl = event_loop.impl_data
+function on_tasks_to_schedule(event_loop::EventLoop, events::Int)
+    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread tasks to schedule")
+    impl = event_loop.impl_data
 
-        if (events & Int(IoEventType.READABLE)) != 0
-            impl.should_process_task_pre_queue = true
+    if (events & Int(IoEventType.READABLE)) == 0
+        if events != 0
+            logf(
+                LogLevel.DEBUG,
+                LS_IO_EVENT_LOOP,
+                "ignoring non-readable task-notification event mask on epoll read fd",
+                events,
+                " ",
+            )
         end
-
         return nothing
     end
+
+    impl.should_process_task_pre_queue = true
+
+    return nothing
+end
 
     # Process cross-thread task queue
     function process_task_pre_queue(event_loop::EventLoop)
