@@ -18,6 +18,26 @@ function ci_debug_log(msg::AbstractString)
     flush(stdout)
 end
 
+function ci_with_timeout(label::AbstractString, f::Function; timeout_s::Float64 = 1.0)
+    done = Threads.Atomic{Bool}(false)
+    @async begin
+        try
+            f()
+        catch e
+            ci_debug_log("$(label) threw: $(e)")
+        finally
+            done[] = true
+        end
+    end
+
+    if wait_for_flag(done; timeout_s)
+        ci_debug_log("$(label) done")
+        return true
+    end
+    ci_debug_log("$(label) timed out after $(timeout_s)s")
+    return false
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -486,17 +506,19 @@ end
             ci_debug_log("ipv4 stream: cleanup start")
             if client_socket !== nothing
                 ci_debug_log("ipv4 stream: cleanup client_socket")
-                Sockets.socket_cleanup!(client_socket)
-                ci_debug_log("ipv4 stream: cleanup client_socket done")
+                if !ci_with_timeout("ipv4 stream: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket); timeout_s=1.0)
+                    ci_debug_log("ipv4 stream: cleanup client_socket fallback close")
+                    if !ci_with_timeout("ipv4 stream: socket_close(client_socket)", () -> Sockets.socket_close(client_socket); timeout_s=1.0)
+                        ci_debug_log("ipv4 stream: socket_close(client_socket) timed out")
+                    end
+                end
             end
             if accepted[] !== nothing
                 ci_debug_log("ipv4 stream: cleanup accepted")
-                Sockets.socket_cleanup!(accepted[])
-                ci_debug_log("ipv4 stream: cleanup accepted done")
+                ci_with_timeout("ipv4 stream: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]); timeout_s=1.0)
             end
             ci_debug_log("ipv4 stream: cleanup server_socket")
-            Sockets.socket_cleanup!(server_socket)
-            ci_debug_log("ipv4 stream: cleanup server_socket done")
+            ci_with_timeout("ipv4 stream: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket); timeout_s=1.0)
             ci_debug_log("ipv4 stream: event_loop_destroy start")
             EventLoops.event_loop_destroy!(el_val)
             ci_debug_log("ipv4 stream: event_loop_destroy done")
