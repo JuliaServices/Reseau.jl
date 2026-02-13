@@ -543,6 +543,7 @@
             end
 
             tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
+            impl.task_pre_queue_spare = tasks_to_schedule
             debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue swapped task_queue with $(length(tasks_to_schedule)) candidates")
         finally
             unlock(impl.task_pre_queue_mutex)
