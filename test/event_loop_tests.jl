@@ -1612,6 +1612,137 @@ end
         end
     end
 
+    @testset "Epoll duplicate scheduling preserves explicit future timestamp" begin
+        if !Sys.islinux()
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            try
+                now = EventLoops.event_loop_current_clock_time(el)
+                future_deadline = now + 250_000_000
+
+                fired = Channel{UInt64}(1)
+                scheduled = Channel{Nothing}(1)
+
+                target_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            return nothing
+                        end
+                        now = EventLoops.event_loop_current_clock_time(el)
+                        put!(fired, now)
+                        return nothing
+                    end),
+                    type_tag = "epoll_future_dedup_task",
+                )
+
+                schedule_future_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            return nothing
+                        end
+                        EventLoops.event_loop_schedule_task_future!(el, target_task, future_deadline)
+                        put!(scheduled, nothing)
+                        return nothing
+                    end),
+                    type_tag = "epoll_future_schedule_task",
+                )
+
+                EventLoops.event_loop_schedule_task_now!(el, schedule_future_task)
+                @test _wait_for_channel(scheduled)
+
+                # A concurrent cross-thread schedule for the same task must not rewrite the future timestamp.
+                EventLoops.event_loop_schedule_task_now!(el, target_task)
+
+                deadline = Base.time_ns() + 3_000_000_000
+                while !isready(fired) && Base.time_ns() < deadline
+                    yield()
+                end
+
+                @test isready(fired)
+                if isready(fired)
+                    @test take!(fired) >= future_deadline
+                end
+            finally
+                EventLoops.event_loop_destroy!(el)
+            end
+        end
+    end
+
+    @testset "Epoll cancel-schedule churn stays race-free on same task id" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            try
+                churn_count = 64
+                request_ch = Channel{Nothing}(1)
+                status_ch = Channel{Reseau.TaskStatus.T}(churn_count)
+                canceled_count = Base.Threads.Atomic{Int}(0)
+
+                churn_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        put!(status_ch, Reseau.TaskStatus.T(status))
+                        return nothing
+                    end),
+                    type_tag = "epoll_churn_task",
+                )
+
+                canceller_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            return nothing
+                        end
+
+                        if isready(request_ch)
+                            take!(request_ch)
+                            EventLoops.event_loop_cancel_task!(el, churn_task)
+                            Base.Threads.atomic_add!(canceled_count, 1)
+                        end
+
+                        if Base.Threads.atomic_load(canceled_count) < churn_count
+                            EventLoops.event_loop_schedule_task_now!(el, canceller_task)
+                        end
+                        return nothing
+                    end),
+                    type_tag = "epoll_churn_canceller",
+                )
+
+                EventLoops.event_loop_schedule_task_now!(el, canceller_task)
+
+                for i in 1:churn_count
+                    now = EventLoops.event_loop_current_clock_time(el)
+                    EventLoops.event_loop_schedule_task_future!(
+                        el,
+                        churn_task,
+                        now + UInt64(10_000_000_000),
+                    )
+                    put!(request_ch, nothing)
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while Base.Threads.atomic_load(canceled_count) < i && Base.time_ns() < deadline
+                        yield()
+                    end
+                    @test Base.Threads.atomic_load(canceled_count) >= i
+                end
+
+                for _ in 1:churn_count
+                    @test _wait_for_channel(status_ch)
+                    @test take!(status_ch) == Reseau.TaskStatus.CANCELED
+                end
+            finally
+                EventLoops.event_loop_destroy!(el)
+            end
+        end
+    end
+
     @testset "Kqueue cleanup task doesn't underflow connected handle count" begin
         if !Sys.isapple()
             @test true

@@ -232,15 +232,52 @@
     function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
 
-        logf(
-            LogLevel.TRACE,
-            LS_IO_EVENT_LOOP,string("Scheduling %s task cross-thread for timestamp %d", " ", task.type_tag, " ", run_at_nanos, " ", ))
-
-        task.timestamp = run_at_nanos
-        task.scheduled = true
-
         lock(impl.task_pre_queue_mutex)
         try
+            if task.scheduled
+                logf(
+                    LogLevel.TRACE,
+                    LS_IO_EVENT_LOOP,
+                    string(
+                        "skipping cross-thread schedule for %s because it is already scheduled",
+                        " ",
+                        task.type_tag,
+                        " ",
+                    ),
+                )
+                return nothing
+            end
+
+            if findfirst(x -> x === task, impl.task_pre_queue) !== nothing
+                logf(
+                    LogLevel.TRACE,
+                    LS_IO_EVENT_LOOP,
+                    string(
+                        "skipping duplicate cross-thread schedule for %s currently queued",
+                        " ",
+                        task.type_tag,
+                        " ",
+                    ),
+                )
+                return nothing
+            end
+
+            logf(
+                LogLevel.TRACE,
+                LS_IO_EVENT_LOOP,
+                string(
+                    "Scheduling %s task cross-thread for timestamp %d",
+                    " ",
+                    task.type_tag,
+                    " ",
+                    run_at_nanos,
+                    " ",
+                ),
+            )
+
+            task.timestamp = run_at_nanos
+            task.scheduled = true
+
             is_first_task = isempty(impl.task_pre_queue)
             push!(impl.task_pre_queue, task)
 
@@ -295,11 +332,32 @@
             logf(
                 LogLevel.TRACE,
                 LS_IO_EVENT_LOOP,string("scheduling %s task in-thread for timestamp %d", " ", task.type_tag, " ", run_at_nanos, " ", ))
-            if run_at_nanos == 0
-                task_scheduler_schedule_now!(impl.scheduler, task)
-            else
-                task_scheduler_schedule_future!(impl.scheduler, task, run_at_nanos)
+
+            lock(impl.task_pre_queue_mutex)
+            try
+                if task.scheduled
+                    logf(
+                        LogLevel.TRACE,
+                        LS_IO_EVENT_LOOP,
+                        string(
+                            "skipping task %s schedule because it is already scheduled",
+                            " ",
+                            task.type_tag,
+                            " ",
+                        ),
+                    )
+                    return nothing
+                end
+
+                if run_at_nanos == 0
+                    task_scheduler_schedule_now!(impl.scheduler, task)
+                else
+                    task_scheduler_schedule_future!(impl.scheduler, task, run_at_nanos)
+                end
+            finally
+                unlock(impl.task_pre_queue_mutex)
             end
+
             return nothing
         end
 
@@ -328,13 +386,13 @@
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling %s task", " ", task.type_tag))
-        if !task.scheduled
-            return nothing
-        end
-
         removed = false
         lock(impl.task_pre_queue_mutex)
         try
+            if !task.scheduled
+                return nothing
+            end
+
             if !isempty(impl.task_pre_queue)
                 idx = findfirst(x -> x === task, impl.task_pre_queue)
                 if idx !== nothing
@@ -543,6 +601,20 @@
         while !isempty(tasks_to_schedule)
             task = popfirst!(tasks_to_schedule)
             task === nothing && break
+            if task.scheduled
+                logf(
+                    LogLevel.TRACE,
+                    LS_IO_EVENT_LOOP,
+                    string(
+                        "skipping queued task %s because it was already scheduled",
+                        " ",
+                        task.type_tag,
+                        " ",
+                    ),
+                )
+                continue
+            end
+
             logf(
                 LogLevel.TRACE,
                 LS_IO_EVENT_LOOP,string("task %s pulled to event-loop, scheduling now", " ", task.type_tag, " ", ))

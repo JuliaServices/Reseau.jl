@@ -20,9 +20,16 @@
 - [x] `P1` Validate that `destroy_event_loop` and `terminate` paths close every file descriptor exactly once and do not race with callbacks still using them.
 - [x] `P1` Verify that stop/shutdown is idempotent and that repeated stop requests do not produce stale wakes or resurrect a closed loop.
 - [x] `P2` Ensure callbacks in `event_loop_run!` are exception-contained per-iteration (a single bad callback cannot stop/poison the entire loop).
-- [ ] `P2` Confirm the queueing path used for task scheduling does not allow double-processing of a task if called from both loop thread and foreign threads concurrently.
-- [ ] `P2` Confirm cancellation (`event_loop_cancel_task!`) and scheduling operations remain race-free under rapid churn of same task IDs.
+- [x] `P2` Confirm the queueing path used for task scheduling does not allow double-processing of a task if called from both loop thread and foreign threads concurrently.
+- [x] `P2` Confirm cancellation (`event_loop_cancel_task!`) and scheduling operations remain race-free under rapid churn of same task IDs.
+  - Added lock-protected `task.scheduled` checks in `schedule_task_common` (in-thread path) and `event_loop_cancel_task!` to close races against concurrent cross-thread queue transitions.
+  - Added a dedicated Linux-only stress test: `Epoll cancel-schedule churn stays race-free on same task id`.
 - [ ] `P2` Validate that `process_task` can handle user callbacks that mutate subscriptions during iteration without invalidating active event vectors/indices.
+
+#### Queueing dedupe/ordering checks (epoll)
+- [x] Cross-thread duplicate scheduling of an already-scheduled task is now ignored in `schedule_task_common` and `schedule_task_cross_thread` (including duplicates already present in `impl.task_pre_queue`).
+- [x] `process_task_pre_queue` now skips queued tasks that are already `task.scheduled` at replay time.
+- [x] Regression test added: `Epoll duplicate scheduling preserves explicit future timestamp` (Linux-only); verifies a foreign-thread duplicate `event_loop_schedule_task_now!` on a task already scheduled as future does not reschedule to immediate execution.
 
 ### Memory safety and resource lifecycle
 - [ ] `P1` Verify ownership and lifetime assumptions for subscription callback/user-data payloads are explicit (especially around `cconvert`, `Ref`, and pointer casts).
