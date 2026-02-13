@@ -83,7 +83,7 @@
             )
         finally
             @atomic impl.running_thread_id = UInt64(0)
-            @atomic impl.should_process_task_pre_queue = false
+            impl.should_process_task_pre_queue = false
             notify(impl.completion_event)
             managed_thread_finished!()
         end
