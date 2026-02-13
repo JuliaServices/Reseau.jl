@@ -33,6 +33,32 @@ jobs:
           RESEAU_EVENT_LOOP_TEST_TRACE: "1"
           RESEAU_EVENT_LOOP_TEST_TIMEOUT_SEC: "180"
           RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT: "220"
+          CI_STAGE_TEST_TIMEOUT_SEC: "120"
+          CI_STAGE_TESTS: >
+            common_tests
+            event_loop_tests
+            socket_tests
+            socket_handler_tests
+            channel_tests
+            io_testing_channel_tests
+            channel_bootstrap_tests
+            pipe_tests
+            tls_tests
+            pkcs11_tests
+            alpn_tests
+            host_resolver_tests
+            io_tests
+            future_tests
+            stream_tests
+            pem_tests
+            pki_utils_tests
+            crypto_primitives_tests
+            crypto_tests
+            statistics_tests
+            retry_strategy_tests
+            vsock_tests
+            tracing_tests
+            sockets_compat_tests
         run: |
           set -euo pipefail
           set -x
@@ -43,6 +69,17 @@ jobs:
             echo "[ci-drill] event-loop drill timed out or failed"
             exit 1
           fi
+
+          echo "[ci-drill] running staged suite"
+          for file in ${CI_STAGE_TESTS}; do
+            echo "[ci-drill] stage start: ${file}"
+            if ! timeout --foreground -s QUIT "${CI_STAGE_TEST_TIMEOUT_SEC}"s \
+              RESEAU_TEST_FILE="${file}" julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); include("test/runtests_stage.jl")'; then
+              echo "[ci-drill] stage ${file} timed out or failed"
+              exit 1
+            fi
+            echo "[ci-drill] stage done: ${file}"
+          done
 
           echo "[ci-drill] running full suite"
           if ! timeout --foreground -s QUIT "600s" \
