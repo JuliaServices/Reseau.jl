@@ -604,14 +604,30 @@ end
             ci_debug_log("ipv4 udp: cleanup start")
             if client_socket !== nothing
                 ci_debug_log("ipv4 udp: cleanup client_socket")
-                Sockets.socket_cleanup!(client_socket)
+                if !ci_with_timeout(
+                    "ipv4 udp: socket_cleanup!(client_socket)",
+                    () -> Sockets.socket_cleanup!(client_socket);
+                    timeout_s=1.0,
+                )
+                    ci_debug_log("ipv4 udp: cleanup client_socket timed out")
+                end
                 ci_debug_log("ipv4 udp: cleanup client_socket done")
             end
             ci_debug_log("ipv4 udp: cleanup server_socket")
-            Sockets.socket_cleanup!(server_socket)
+            ci_with_timeout(
+                "ipv4 udp: socket_cleanup!(server_socket)",
+                () -> Sockets.socket_cleanup!(server_socket);
+                timeout_s=1.0,
+            )
             ci_debug_log("ipv4 udp: cleanup server_socket done")
             ci_debug_log("ipv4 udp: event_loop_destroy start")
-            EventLoops.event_loop_destroy!(el_val)
+            if !ci_with_timeout(
+                "ipv4 udp: event_loop_destroy!",
+                () -> EventLoops.event_loop_destroy!(el_val);
+                timeout_s=1.0,
+            )
+                ci_debug_log("ipv4 udp: event_loop_destroy timed out")
+            end
             ci_debug_log("ipv4 udp: event_loop_destroy done")
         end
 
@@ -640,7 +656,11 @@ end
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
                 e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
-            EventLoops.event_loop_destroy!(el_val)
+            ci_with_timeout(
+                "ipv6 stream: event_loop_destroy!",
+                () -> EventLoops.event_loop_destroy!(el_val);
+                timeout_s=1.0,
+            )
             return
         end
 
@@ -713,19 +733,37 @@ end
             ci_debug_log("ipv6 stream: cleanup start")
             if client_socket !== nothing
                 ci_debug_log("ipv6 stream: cleanup client_socket")
-                Sockets.socket_cleanup!(client_socket)
+                ci_with_timeout(
+                    "ipv6 stream: socket_cleanup!(client_socket)",
+                    () -> Sockets.socket_cleanup!(client_socket);
+                    timeout_s=1.0,
+                )
                 ci_debug_log("ipv6 stream: cleanup client_socket done")
             end
             if accepted[] !== nothing
                 ci_debug_log("ipv6 stream: cleanup accepted")
-                Sockets.socket_cleanup!(accepted[])
+                ci_with_timeout(
+                    "ipv6 stream: socket_cleanup!(accepted[])",
+                    () -> Sockets.socket_cleanup!(accepted[]);
+                    timeout_s=1.0,
+                )
                 ci_debug_log("ipv6 stream: cleanup accepted done")
             end
             ci_debug_log("ipv6 stream: cleanup server_socket")
-            Sockets.socket_cleanup!(server_socket)
+            ci_with_timeout(
+                "ipv6 stream: socket_cleanup!(server_socket)",
+                () -> Sockets.socket_cleanup!(server_socket);
+                timeout_s=1.0,
+            )
             ci_debug_log("ipv6 stream: cleanup server_socket done")
             ci_debug_log("ipv6 stream: event_loop_destroy start")
-            EventLoops.event_loop_destroy!(el_val)
+            if !ci_with_timeout(
+                "ipv6 stream: event_loop_destroy!",
+                () -> EventLoops.event_loop_destroy!(el_val);
+                timeout_s=1.0,
+            )
+                ci_debug_log("ipv6 stream: event_loop_destroy timed out")
+            end
             ci_debug_log("ipv6 stream: event_loop_destroy done")
         end
     end
