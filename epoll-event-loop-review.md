@@ -35,7 +35,7 @@
 - [ ] `P1` Verify ownership and lifetime assumptions for subscription callback/user-data payloads are explicit (especially around `cconvert`, `Ref`, and pointer casts).
 - [x] `P1` Audit all `@ccall` sites for correct argument types and error translation; avoid unchecked assumptions about partial writes/reads.
   - Fixed Linux precompile/runtime failures by adding explicit `Csize_t` annotation on `write` length arguments, replacing deprecated `pointer(Ref(...))` usage with `Base.unsafe_convert(Ptr{UInt64}, Ref(...))`, and introducing a version-safe `_LIBC_EWOULDBLOCK` fallback.
-- [ ] `P1` Ensure all native resources (`epoll` fd, eventfd/pipe fds, any user-level handles) are released on both normal and exceptional paths.
+- [x] `P1` Ensure all native resources (`epoll` fd, eventfd/pipe fds, any user-level handles) are released on both normal and exceptional paths.
 - [ ] `P2` Check finalization behavior for loop/task objects: no reliance on finalizers for correctness during normal shutdown.
 
 ### Performance
