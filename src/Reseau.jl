@@ -37,4 +37,8 @@ function __init__()
     Sockets.io_library_init()
 end
 
+@static if Sys.islinux()
+    const _register_s2n_lib! = Sockets._register_s2n_lib!
+end
+
 end # module Reseau
