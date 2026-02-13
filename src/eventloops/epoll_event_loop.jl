@@ -229,8 +229,11 @@
     end
 
     # Schedule task cross-thread
+    @inline _epoll_debug_enabled() = get(ENV, "RESEAU_DEBUG_EPOLL", "0") == "1"
+
     function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl_data
+        debug_epoll = _epoll_debug_enabled()
 
         logf(
             LogLevel.TRACE,
@@ -241,12 +244,17 @@
 
         lock(impl.task_pre_queue_mutex)
         try
+            debug_epoll && Core.println(
+                "[CI EPOLL] schedule_task_cross_thread start task=$(task.type_tag) pre_queue_len=$(length(impl.task_pre_queue)) should_process=$(impl.should_process_task_pre_queue) event_loop_thread=$(impl.running_thread_id) caller_tid=$(Base.Threads.threadid())",
+            )
             push!(impl.task_pre_queue, task)
             impl.should_process_task_pre_queue = true
+            debug_epoll && Core.println("[CI EPOLL] schedule_task_cross_thread queued task=$(task.type_tag) post_len=$(length(impl.task_pre_queue)) should_process=$(impl.should_process_task_pre_queue)")
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
             # Write to signal the event thread
             counter = Ref(UInt64(1))
+            write_result = nothing
             while true
                 written = @ccall gc_safe = true write(
                     impl.write_task_handle.fd::Cint,
@@ -257,11 +265,14 @@
                     continue
                 end
                 if written == -1 && (Base.Libc.errno() == Libc.EAGAIN || Base.Libc.errno() == Libc.EWOULDBLOCK)
+                    write_result = :ewouldblock
                     break
                 end
                 written == -1 && throw_error(ERROR_SYS_CALL_FAILURE)
+                write_result = written
                 break
             end
+            debug_epoll && Core.println("[CI EPOLL] schedule_task_cross_thread wrote to task fd result=$(write_result)")
         finally
             unlock(impl.task_pre_queue_mutex)
         end
@@ -482,15 +493,18 @@
     # Callback for cross-thread task pipe/eventfd
     function on_tasks_to_schedule(event_loop::EventLoop, events::Int)
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread tasks to schedule")
+        debug_epoll = _epoll_debug_enabled()
         impl = event_loop.impl_data
 
         if (events & Int(IoEventType.READABLE)) != 0
+            debug_epoll && Core.println("[CI EPOLL] on_tasks_to_schedule readable events=0x$(string(events, base=16)) should_process_before=$(impl.should_process_task_pre_queue)")
             lock(impl.task_pre_queue_mutex)
             try
                 impl.should_process_task_pre_queue = true
             finally
                 unlock(impl.task_pre_queue_mutex)
             end
+            debug_epoll && Core.println("[CI EPOLL] on_tasks_to_schedule set should_process=true")
         end
 
         return nothing
@@ -499,15 +513,18 @@
     # Process cross-thread task queue
     function process_task_pre_queue(event_loop::EventLoop)
         impl = event_loop.impl_data
+        debug_epoll = _epoll_debug_enabled()
 
         tasks_to_schedule = impl.task_pre_queue_spare
         empty!(tasks_to_schedule)
+        debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue enter pre_len=$(length(impl.task_pre_queue)) should_process=$(impl.should_process_task_pre_queue)")
 
         count_ignore = Ref(UInt64(0))
 
         lock(impl.task_pre_queue_mutex)
         try
             if !impl.should_process_task_pre_queue && isempty(impl.task_pre_queue)
+                debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue skip should_process=false and pre_queue empty")
                 return nothing
             end
 
@@ -526,10 +543,12 @@
             end
 
             tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
+            debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue swapped task_queue with $(length(tasks_to_schedule)) candidates")
         finally
             unlock(impl.task_pre_queue_mutex)
         end
 
+        debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue scheduling candidates")
         # Schedule the tasks
         while !isempty(tasks_to_schedule)
             task = popfirst!(tasks_to_schedule)
@@ -543,6 +562,7 @@
                 task_scheduler_schedule_future!(impl.scheduler, task, task.timestamp)
             end
         end
+        debug_epoll && Core.println("[CI EPOLL] process_task_pre_queue done")
 
         return nothing
     end

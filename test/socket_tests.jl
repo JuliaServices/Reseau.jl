@@ -1918,6 +1918,8 @@ end
 
 @testset "cleanup in write cb doesn't explode" begin
     ci_debug_log("socket_tests: cleanup in write cb doesn't explode start")
+    old_resau_debug_epoll = get(ENV, "RESEAU_DEBUG_EPOLL", nothing)
+    ENV["RESEAU_DEBUG_EPOLL"] = "1"
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2190,6 +2192,12 @@ end
             ci_debug_log("cleanup in write cb doesn't explode: fallback socket_close(listener_socket) timed out")
         end
         ci_with_timeout("cleanup in write cb doesn't explode: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
+
+        if old_resau_debug_epoll === nothing
+            delete!(ENV, "RESEAU_DEBUG_EPOLL")
+        else
+            ENV["RESEAU_DEBUG_EPOLL"] = old_resau_debug_epoll
+        end
     end
 end
 
