@@ -520,7 +520,13 @@ end
             ci_debug_log("ipv4 stream: cleanup server_socket")
             ci_with_timeout("ipv4 stream: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket); timeout_s=1.0)
             ci_debug_log("ipv4 stream: event_loop_destroy start")
-            EventLoops.event_loop_destroy!(el_val)
+            if !ci_with_timeout(
+                "ipv4 stream: event_loop_destroy!",
+                () -> EventLoops.event_loop_destroy!(el_val);
+                timeout_s=1.0,
+            )
+                ci_debug_log("ipv4 stream: event_loop_destroy timed out")
+            end
             ci_debug_log("ipv4 stream: event_loop_destroy done")
         end
 
