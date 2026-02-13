@@ -249,16 +249,34 @@
                 logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
                 # Write to signal the event thread
                 counter = Ref(UInt64(1))
-                while true
+                write_ptr = Ptr{UInt8}(pointer(counter))
+                remaining = Csize_t(sizeof(UInt64))
+                while remaining > 0
                     written = @ccall gc_safe = true write(
                         impl.write_task_handle.fd::Cint,
-                        counter::Ptr{UInt64},
-                        sizeof(UInt64)::Csize_t,
+                        write_ptr::Ptr{UInt8},
+                        remaining,
                     )::Cssize_t
-                    if written == -1 && Base.Libc.errno() == Libc.EINTR
-                        continue
+                    if written == -1
+                        errno = Base.Libc.errno()
+                        if errno == Libc.EINTR
+                            continue
+                        end
+                        if errno in (Libc.EAGAIN, Libc.EWOULDBLOCK)
+                            logf(
+                                LogLevel.TRACE,
+                                LS_IO_EVENT_LOOP,
+                                "Ignoring cross-thread wakeup write backpressure when scheduling task queue",
+                            )
+                            break
+                        end
+                        throw_error(ERROR_SYS_CALL_FAILURE)
                     end
-                    break
+                    if written <= 0
+                        break
+                    end
+                    remaining -= Csize_t(written)
+                    write_ptr += Int(written)
                 end
             end
         finally
@@ -500,7 +518,19 @@
                     count_ignore::Ptr{UInt64},
                     sizeof(UInt64)::Csize_t,
                 )::Cssize_t
-                read_bytes < 0 && break
+                if read_bytes == -1
+                    errno = Base.Libc.errno()
+                    if errno == Libc.EINTR
+                        continue
+                    end
+                    if errno in (Libc.EAGAIN, Libc.EWOULDBLOCK)
+                        break
+                    end
+                    break
+                end
+                if read_bytes == 0
+                    break
+                end
             end
 
             tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
@@ -571,6 +601,19 @@
                 MAX_EVENTS::Cint,
                 timeout::Cint,
             )::Cint
+            if event_count == -1
+                err = Base.Libc.errno()
+                if err == Libc.EINTR
+                    event_count = 0
+                else
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_EVENT_LOOP,
+                        "epoll_wait failed while waiting for events: errno ", err, " ",
+                    )
+                    event_count = 0
+                end
+            end
 
             event_loop_register_tick_start!(event_loop)
 
