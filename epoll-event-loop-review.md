@@ -17,7 +17,7 @@
   - retry/handle `EAGAIN` according to descriptor flags and backoff semantics.
 - [x] `P1` Verify wakeup/read path drains notifications in a bounded, deterministic way and leaves descriptor in a consistent state when signals/interrupts occur.
 - [x] `P1` Verify `on_tasks_to_schedule` callback ignores or safely handles non-read events and does not silently assume event type.
-- [ ] `P1` Validate that `destroy_event_loop` and `terminate` paths close every file descriptor exactly once and do not race with callbacks still using them.
+- [x] `P1` Validate that `destroy_event_loop` and `terminate` paths close every file descriptor exactly once and do not race with callbacks still using them.
 - [ ] `P1` Verify that stop/shutdown is idempotent and that repeated stop requests do not produce stale wakes or resurrect a closed loop.
 - [ ] `P2` Ensure callbacks in `event_loop_run!` are exception-contained per-iteration (a single bad callback cannot stop/poison the entire loop).
 - [ ] `P2` Confirm the queueing path used for task scheduling does not allow double-processing of a task if called from both loop thread and foreign threads concurrently.

@@ -786,13 +786,34 @@
 
         # Close file descriptors
         if impl.use_eventfd
-            @ccall close(impl.write_task_handle.fd::Cint)::Cint
+            read_task_fd = impl.read_task_handle.fd
+            write_task_fd = impl.write_task_handle.fd
+            if read_task_fd != write_task_fd && read_task_fd >= 0
+                @ccall close(read_task_fd::Cint)::Cint
+            end
+            if write_task_fd >= 0
+                @ccall close(write_task_fd::Cint)::Cint
+            end
+            impl.read_task_handle = IoHandle()
+            impl.write_task_handle = IoHandle()
         else
-            @ccall close(impl.read_task_handle.fd::Cint)::Cint
-            @ccall close(impl.write_task_handle.fd::Cint)::Cint
+            read_task_fd = impl.read_task_handle.fd
+            write_task_fd = impl.write_task_handle.fd
+            if read_task_fd >= 0
+                @ccall close(read_task_fd::Cint)::Cint
+            end
+            if write_task_fd >= 0
+                @ccall close(write_task_fd::Cint)::Cint
+            end
+            impl.read_task_handle = IoHandle()
+            impl.write_task_handle = IoHandle()
         end
 
-        @ccall close(impl.epoll_fd::Cint)::Cint
+        epoll_fd = impl.epoll_fd
+        if epoll_fd >= 0
+            @ccall close(epoll_fd::Cint)::Cint
+        end
+        impl.epoll_fd = Int32(-1)
 
         _event_loop_clean_up_shared_resources!(event_loop)
 
