@@ -1195,6 +1195,7 @@ end
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     server = Sockets.socket_init(opts)
     server_socket = server isa Sockets.Socket ? server : nothing
+    ci_debug_log("nw socket connect read write: server socket init")
     @test server_socket !== nothing
 
     client_socket = nothing
@@ -1219,7 +1220,9 @@ end
         end
 
         bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
+        ci_debug_log("nw socket connect read write: socket_bind")
         @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        ci_debug_log("nw socket connect read write: socket_listen")
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         on_accept_started = Reseau.EventCallable(err -> begin
@@ -1234,6 +1237,7 @@ end
         end)
 
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+            ci_debug_log("nw socket connect read write: on_accept")
             accept_err[] = err
             accepted[] = new_sock
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -1280,9 +1284,14 @@ end
             on_accept_result = on_accept,
             on_accept_start = on_accept_started,
         )
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        ci_debug_log("nw socket connect read write: socket_start_accept")
+        @test ci_with_timeout(
+            "nw socket connect read write: socket_start_accept",
+            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
-        @test wait_for_flag(accept_started)
+        @test ci_wait_for_flag("nw socket connect read write: wait accept_started", accept_started)
         @test port_ref[] != 0
 
         client = Sockets.socket_init(opts)
@@ -1296,6 +1305,7 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port_ref[]);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("nw socket connect read write: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1319,26 +1329,42 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-        @test wait_for_flag(connect_done)
+        ci_debug_log("nw socket connect read write: socket_connect")
+        @test ci_with_timeout(
+            "nw socket connect read write: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
+            timeout_s = 1.0,
+        )
+        ci_debug_log("nw socket connect read write: socket_connect done")
+        @test ci_wait_for_flag("nw socket connect read write: wait connect_done", connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(write_done)
+        @test ci_wait_for_flag("nw socket connect read write: wait write_done", write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(read_done)
+        @test ci_wait_for_flag("nw socket connect read write: wait read_done", read_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
+        ci_debug_log("nw socket connect read write: cleanup start")
         if client_socket !== nothing
-            Sockets.socket_close(client_socket)
+            ci_with_timeout("nw socket connect read write: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("nw socket connect read write: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("nw socket connect read write: fallback socket_close(client_socket) timed out")
+            end
         end
         if accepted[] !== nothing
-            Sockets.socket_close(accepted[])
+            ci_with_timeout("nw socket connect read write: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
+            if !ci_with_timeout("nw socket connect read write: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
+                ci_debug_log("nw socket connect read write: fallback socket_close(accepted[]) timed out")
+            end
         end
         if server_socket !== nothing
-            Sockets.socket_close(server_socket)
+            ci_with_timeout("nw socket connect read write: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
+            if !ci_with_timeout("nw socket connect read write: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
+                ci_debug_log("nw socket connect read write: fallback socket_close(server_socket) timed out")
+            end
         end
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("nw socket connect read write: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
     end
 end
 
@@ -1402,7 +1428,12 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        ci_debug_log("sock write cb is async: socket_start_accept")
+        @test ci_with_timeout(
+            "sock write cb is async: socket_start_accept",
+            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1421,6 +1452,7 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("sock write cb is async: on_connection_result")
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
                     write_started[] = true
@@ -1449,24 +1481,40 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-        @test wait_for_flag(connect_done)
-        @test wait_for_flag(accept_done)
-        @test wait_for_flag(write_started)
-        @test wait_for_flag(write_cb_invoked)
+        ci_debug_log("sock write cb is async: socket_connect")
+        @test ci_with_timeout(
+            "sock write cb is async: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
+            timeout_s = 1.0,
+        )
+        ci_debug_log("sock write cb is async: socket_connect done")
+        @test ci_wait_for_flag("sock write cb is async: wait connect_done", connect_done)
+        @test ci_wait_for_flag("sock write cb is async: wait accept_done", accept_done)
+        @test ci_wait_for_flag("sock write cb is async: wait write_started", write_started)
+        @test ci_wait_for_flag("sock write cb is async: wait write_cb_invoked", write_cb_invoked)
         @test !write_cb_sync[]
         @test write_err[] == Reseau.AWS_OP_SUCCESS
     finally
+        ci_debug_log("sock write cb is async: cleanup start")
         if client_socket !== nothing
-            Sockets.socket_close(client_socket)
+            ci_with_timeout("sock write cb is async: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("sock write cb is async: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("sock write cb is async: fallback socket_close(client_socket) timed out")
+            end
         end
         if accepted[] !== nothing
-            Sockets.socket_close(accepted[])
+            ci_with_timeout("sock write cb is async: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
+            if !ci_with_timeout("sock write cb is async: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
+                ci_debug_log("sock write cb is async: fallback socket_close(accepted[]) timed out")
+            end
         end
         if server_socket !== nothing
-            Sockets.socket_close(server_socket)
+            ci_with_timeout("sock write cb is async: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
+            if !ci_with_timeout("sock write cb is async: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
+                ci_debug_log("sock write cb is async: fallback socket_close(server_socket) timed out")
+            end
         end
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("sock write cb is async: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
     end
 end
 
