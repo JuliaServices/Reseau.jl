@@ -13,6 +13,50 @@ function wait_for_flag(flag; timeout_s::Float64 = 5.0)
     return false
 end
 
+const _SOCKET_BIND_INTERFACE_DEBUG = get(ENV, "RESEAU_SOCKET_BIND_INTERFACE_DEBUG", "") == "1"
+
+function _wait_for_flag_debug(flag::Ref{Bool}, label::AbstractString; timeout_s::Float64 = 5.0)
+    ok = wait_for_flag(flag; timeout_s = timeout_s)
+    if !ok && _SOCKET_BIND_INTERFACE_DEBUG
+        println("[socket-bind-iface] timeout waiting for ", label)
+    end
+    return ok
+end
+
+function _socket_bind_interface_dump(
+    label::AbstractString,
+    server::Sockets.Socket,
+    client::Union{Sockets.Socket, Nothing} = nothing,
+    accepted::Union{Sockets.Socket, Nothing} = nothing,
+)
+    _SOCKET_BIND_INTERFACE_DEBUG || return nothing
+    server_state = Int(server.state)
+    server_fd = server.io_handle.fd
+    client_state = client === nothing ? "none" : string(Int(client.state))
+    client_fd = client === nothing ? "none" : string(client.io_handle.fd)
+    accepted_fd = accepted === nothing ? "none" : string(accepted.io_handle.fd)
+    accepted_state = accepted === nothing ? "none" : string(Int(accepted.state))
+    println(
+        "[socket-bind-iface] ",
+        label,
+        " server(fd=",
+        server_fd,
+        ", state=",
+        server_state,
+        ") client(fd=",
+        client_fd,
+        ", state=",
+        client_state,
+        ") accepted(fd=",
+        accepted_fd,
+        ", state=",
+        accepted_state,
+        ") thread=",
+        Base.Threads.threadid(),
+    )
+    return nothing
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -28,7 +72,46 @@ function _is_allowed_connect_error(code::Int)
         code == EventLoops.ERROR_IO_SOCKET_CONNECTION_REFUSED
 end
 
-@testset "socket validate port" begin
+const _SOCKET_TEST_TRACE = get(ENV, "RESEAU_SOCKET_TEST_TRACE", "") == "1"
+const _SOCKET_TEST_TRACE_LIMIT = begin
+    try
+        parse(Int, get(ENV, "RESEAU_SOCKET_TEST_TRACE_LIMIT", "0"))
+    catch
+        0
+    end
+end
+const _SOCKET_TEST_TRACE_START = begin
+    try
+        parse(Int, get(ENV, "RESEAU_SOCKET_TEST_TRACE_START", "1"))
+    catch
+        1
+    end
+end
+const _SOCKET_TEST_TRACE_COUNT = Ref(0)
+
+macro trace_socket_testset(test_name, body)
+    return esc(
+        quote
+            local _run = true
+            if _SOCKET_TEST_TRACE_LIMIT > 0
+                _SOCKET_TEST_TRACE_COUNT[] += 1
+                local _idx = _SOCKET_TEST_TRACE_COUNT[]
+                if _idx < _SOCKET_TEST_TRACE_START || _idx > _SOCKET_TEST_TRACE_LIMIT
+                    _run = false
+                end
+            end
+
+            if _run
+                _SOCKET_TEST_TRACE && println("[socket-test] ", $(test_name))
+                @testset $(test_name) $(body)
+            else
+                _SOCKET_TEST_TRACE && println("[socket-test-skip] ", $(test_name))
+            end
+        end,
+    )
+end
+
+@trace_socket_testset "socket validate port" begin
     @test Sockets.socket_validate_port_for_connect(80, Sockets.SocketDomain.IPV4) === nothing
     @test Sockets.socket_validate_port_for_bind(80, Sockets.SocketDomain.IPV4) === nothing
 
@@ -125,7 +208,7 @@ end
     end
 end
 
-@testset "parse ipv4 valid addresses" begin
+@trace_socket_testset "parse ipv4 valid addresses" begin
     cases = [
         ("127.0.0.1", UInt32(0x7f000001)),
         ("0.0.0.0", UInt32(0x00000000)),
@@ -143,7 +226,7 @@ end
     end
 end
 
-@testset "parse ipv4 invalid addresses" begin
+@trace_socket_testset "parse ipv4 invalid addresses" begin
     invalid = [
         "",
         "256.1.1.1",
@@ -167,7 +250,7 @@ end
     end
 end
 
-@testset "parse ipv6 valid addresses" begin
+@trace_socket_testset "parse ipv6 valid addresses" begin
     cases = [
         ("::", (0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)),
         ("2001:db8:85a3::8a2e:370:7334",
@@ -188,7 +271,7 @@ end
     end
 end
 
-@testset "parse ipv6 invalid addresses" begin
+@trace_socket_testset "parse ipv6 invalid addresses" begin
     invalid = [
         "",
         ":::",
@@ -220,7 +303,7 @@ function _mem_from_bytes(bytes::NTuple{16, UInt8})
     return mem
 end
 
-@testset "message pool" begin
+@trace_socket_testset "message pool" begin
     args = Sockets.MessagePoolCreationArgs(
         application_data_msg_data_size = 128,
         application_data_msg_count = 2,
@@ -241,7 +324,7 @@ end
     @test length(pool.small_block_pool) == 2
 end
 
-@testset "memory pool" begin
+@trace_socket_testset "memory pool" begin
     pool = Sockets.MemoryPool(2, 32)
     @test length(pool) == 2
 
@@ -263,7 +346,7 @@ end
     @test length(pool) == 2
 end
 
-@testset "socket interface options" begin
+@trace_socket_testset "socket interface options" begin
     if Sys.iswindows()
         @test !Sockets.is_network_interface_name_valid("lo")
     else
@@ -288,7 +371,7 @@ end
     end
 end
 
-@testset "socket bind to interface" begin
+@trace_socket_testset "socket bind to interface" begin
     if Sys.iswindows()
         @test true
     else
@@ -374,6 +457,15 @@ end
             on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
                 accept_err[] = err
                 accepted[] = new_sock
+                if _SOCKET_BIND_INTERFACE_DEBUG
+                    println(
+                        "[socket-bind-iface] accept callback err=",
+                        accept_err[],
+                        " thread=",
+                        Base.Threads.threadid(),
+                    )
+                    _socket_bind_interface_dump("accept callback", server_socket, client_socket, accepted[])
+                end
                 if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
                     read_done[] = true
                     return nothing
@@ -391,6 +483,14 @@ end
                     Sockets.socket_subscribe_to_readable_events(
                         new_sock, Reseau.EventCallable(err -> begin
                             read_err[] = err
+                            if _SOCKET_BIND_INTERFACE_DEBUG
+                                println(
+                                    "[socket-bind-iface] read callback err=",
+                                    read_err[],
+                                    " thread=",
+                                    Base.Threads.threadid(),
+                                )
+                            end
                             if err != Reseau.AWS_OP_SUCCESS
                                 read_done[] = true
                                 return nothing
@@ -404,12 +504,20 @@ end
                                 read_err[] = e isa Reseau.ReseauError ? e.code : -1
                             end
                             read_done[] = true
+                            if _SOCKET_BIND_INTERFACE_DEBUG
+                                println("[socket-bind-iface] read payload='", payload[], "'")
+                                _socket_bind_interface_dump("read callback", server_socket, client_socket, accepted[])
+                            end
                             return nothing
                         end)
                     )
                 catch e
                     read_err[] = e isa Reseau.ReseauError ? e.code : -1
                     read_done[] = true
+                    _SOCKET_BIND_INTERFACE_DEBUG && println(
+                        "[socket-bind-iface] readable subscribe error=",
+                        read_err[],
+                    )
                 end
                 return nothing
             end)
@@ -423,6 +531,7 @@ end
             if client_socket === nothing
                 return
             end
+            _socket_bind_interface_dump("prepared client", server_socket, client_socket, accepted[])
 
             connect_opts = Sockets.SocketConnectOptions(
                 Sockets.SocketEndpoint("127.0.0.1", port);
@@ -430,6 +539,15 @@ end
                 on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
+                    if _SOCKET_BIND_INTERFACE_DEBUG
+                        println(
+                            "[socket-bind-iface] connect callback err=",
+                            connect_err[],
+                            " thread=",
+                            Base.Threads.threadid(),
+                        )
+                        _socket_bind_interface_dump("connect callback", server_socket, client_socket, accepted[])
+                    end
                     if err != Reseau.AWS_OP_SUCCESS
                         return nothing
                     end
@@ -440,26 +558,53 @@ end
                             client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
                                 write_err[] = err
                                 write_done[] = true
+                                if _SOCKET_BIND_INTERFACE_DEBUG
+                                    println(
+                                        "[socket-bind-iface] write callback err=",
+                                        write_err[],
+                                        " bytes=",
+                                        bytes,
+                                        " thread=",
+                                        Base.Threads.threadid(),
+                                    )
+                                    _socket_bind_interface_dump("write callback", server_socket, client_socket, accepted[])
+                                end
                                 return nothing
                             end)
                         )
                     catch e
                         write_err[] = e isa Reseau.ReseauError ? e.code : -1
                         write_done[] = true
+                        _SOCKET_BIND_INTERFACE_DEBUG && println(
+                            "[socket-bind-iface] socket_write threw ",
+                            write_err[],
+                        )
                     end
                     return nothing
                 end),
             )
 
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-            @test wait_for_flag(connect_done)
+            if _SOCKET_BIND_INTERFACE_DEBUG
+                _socket_bind_interface_dump("before wait connect", server_socket, client_socket, accepted[])
+            end
+            @test _wait_for_flag_debug(connect_done, "connect_done")
             @test connect_err[] == Reseau.AWS_OP_SUCCESS
-            @test wait_for_flag(write_done)
+            if _SOCKET_BIND_INTERFACE_DEBUG
+                _socket_bind_interface_dump("before wait write", server_socket, client_socket, accepted[])
+            end
+            @test _wait_for_flag_debug(write_done, "write_done")
             @test write_err[] == Reseau.AWS_OP_SUCCESS
-            @test wait_for_flag(read_done)
+            if _SOCKET_BIND_INTERFACE_DEBUG
+                _socket_bind_interface_dump("before wait read", server_socket, client_socket, accepted[])
+            end
+            @test _wait_for_flag_debug(read_done, "read_done")
             @test accept_err[] == Reseau.AWS_OP_SUCCESS
             @test read_err[] == Reseau.AWS_OP_SUCCESS
             @test payload[] == "ping"
+            if _SOCKET_BIND_INTERFACE_DEBUG
+                _socket_bind_interface_dump("done", server_socket, client_socket, accepted[])
+            end
         finally
             if client_socket !== nothing
                 Sockets.socket_cleanup!(client_socket)
@@ -634,7 +779,7 @@ end
     end
 end
 
-@testset "socket bind to invalid interface" begin
+@trace_socket_testset "socket bind to invalid interface" begin
     if Sys.iswindows()
         @test true
     else
@@ -659,7 +804,7 @@ end
     end
 end
 
-@testset "vsock loopback socket communication" begin
+@trace_socket_testset "vsock loopback socket communication" begin
     if !Sys.islinux()
         @test true
     else
@@ -767,7 +912,7 @@ end
     end
 end
 
-@testset "socket init domain-based selection" begin
+@trace_socket_testset "socket init domain-based selection" begin
     # IPV4 socket
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     sock = Sockets.socket_init(opts)
@@ -797,7 +942,7 @@ end
     end
 end
 
-@testset "winsock stubs" begin
+@trace_socket_testset "winsock stubs" begin
     if Sys.iswindows()
         @test Sockets.winsock_check_and_init!() === nothing
     else
@@ -827,7 +972,7 @@ end
     end
 end
 
-@testset "socket nonblocking cloexec" begin
+@trace_socket_testset "socket nonblocking cloexec" begin
     if Sys.iswindows()
         @test true
     else
@@ -848,7 +993,7 @@ end
 	    end
 end
 
-@testset "socket connect read write" begin
+@trace_socket_testset "socket connect read write" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -995,7 +1140,7 @@ end
     end
 end
 
-@testset "nw socket connect read write" begin
+@trace_socket_testset "nw socket connect read write" begin
     @static if !Sys.isapple()
         @test true
         return
@@ -1164,7 +1309,7 @@ end
     end
 end
 
-@testset "sock write cb is async" begin
+@trace_socket_testset "sock write cb is async" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1291,7 +1436,7 @@ end
     end
 end
 
-@testset "connect timeout" begin
+@trace_socket_testset "connect timeout" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
@@ -1342,7 +1487,7 @@ end
     end
 end
 
-@testset "connect timeout cancellation" begin
+@trace_socket_testset "connect timeout cancellation" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
@@ -1394,7 +1539,7 @@ end
     end
 end
 
-@testset "cleanup before connect or timeout" begin
+@trace_socket_testset "cleanup before connect or timeout" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
         elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
         @test elg_val !== nothing
@@ -1458,7 +1603,7 @@ end
         end
 end
 
-@testset "cleanup in accept doesn't explode" begin
+@trace_socket_testset "cleanup in accept doesn't explode" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1542,7 +1687,7 @@ end
     end
 end
 
-@testset "cleanup in write cb doesn't explode" begin
+@trace_socket_testset "cleanup in write cb doesn't explode" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1679,7 +1824,7 @@ end
     end
 end
 
-@testset "local socket communication" begin
+@trace_socket_testset "local socket communication" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1824,7 +1969,7 @@ end
     end
 end
 
-@testset "local socket connect before accept" begin
+@trace_socket_testset "local socket connect before accept" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1908,7 +2053,7 @@ end
     end
 end
 
-@testset "udp socket communication" begin
+@trace_socket_testset "udp socket communication" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2019,7 +2164,7 @@ end
     end
 end
 
-@testset "udp bind connect communication" begin
+@trace_socket_testset "udp bind connect communication" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2133,7 +2278,7 @@ end
     end
 end
 
-@testset "wrong thread read write fails" begin
+@trace_socket_testset "wrong thread read write fails" begin
     if Sys.iswindows()
         @test true
     else
@@ -2195,7 +2340,7 @@ end
     end
 end
 
-@testset "socket_close while event loop is stopping returns promptly" begin
+@trace_socket_testset "socket_close while event loop is stopping returns promptly" begin
     if Threads.nthreads(:interactive) <= 1
         @test true
     else
@@ -2261,7 +2406,7 @@ end
     end
 end
 
-@testset "socket_close after event loop thread crash returns promptly" begin
+@trace_socket_testset "socket_close after event loop thread crash returns promptly" begin
     if !Sys.islinux() || Threads.nthreads(:interactive) <= 1
         @test true
     else
@@ -2354,7 +2499,7 @@ end
     end
 end
 
-@testset "bind on zero port tcp ipv4" begin
+@trace_socket_testset "bind on zero port tcp ipv4" begin
     # Use LOCAL domain on macOS to get a POSIX socket (IPV4 → NW on macOS,
     # which doesn't expose resolved port from socket_get_bound_address)
     @static if Sys.isapple()
@@ -2401,7 +2546,7 @@ end
     Sockets.socket_close(socket_val)
 end
 
-@testset "bind on zero port udp ipv4" begin
+@trace_socket_testset "bind on zero port udp ipv4" begin
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.LOCAL)
     else
@@ -2444,7 +2589,7 @@ end
     Sockets.socket_close(socket_val)
 end
 
-@testset "incoming duplicate tcp bind errors" begin
+@trace_socket_testset "incoming duplicate tcp bind errors" begin
     # Use LOCAL on macOS since IPV4 → NW sockets, which don't expose
     # resolved port or enforce POSIX duplicate-bind semantics
     @static if Sys.isapple()
@@ -2505,7 +2650,7 @@ end
     end
 end
 
-@testset "incoming tcp socket errors" begin
+@trace_socket_testset "incoming tcp socket errors" begin
     # Use LOCAL on macOS to test POSIX bind error paths
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
@@ -2547,7 +2692,7 @@ end
     Sockets.socket_close(sock_val)
 end
 
-@testset "incoming udp socket errors" begin
+@trace_socket_testset "incoming udp socket errors" begin
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.LOCAL)
     else
@@ -2582,7 +2727,7 @@ end
     Sockets.socket_close(sock_val)
 end
 
-@testset "outgoing local socket errors" begin
+@trace_socket_testset "outgoing local socket errors" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2639,7 +2784,7 @@ end
     EventLoops.event_loop_destroy!(el_val)
 end
 
-@testset "outgoing tcp socket error" begin
+@trace_socket_testset "outgoing tcp socket error" begin
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing

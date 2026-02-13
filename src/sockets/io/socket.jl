@@ -335,6 +335,48 @@ end
     return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 end
 
+@inline function _socket_close_debug_msg(
+    stage::AbstractString,
+    socket::Socket,
+    kwargs::NamedTuple;
+)
+    fd = socket.io_handle.fd
+    state = Int(socket.state)
+    event_loop = socket.event_loop
+    running = event_loop === nothing ? false : @atomic event_loop.running
+    should_stop = event_loop === nothing ? false : @atomic event_loop.should_stop
+    running_thread_id = event_loop === nothing ? 0 : @atomic event_loop.impl_data.running_thread_id
+    thread_joined_to = event_loop === nothing ? 0 : event_loop.impl_data.thread_joined_to
+    foreign_thread_id = event_loop === nothing ? 0 : event_loop.thread === nothing ? 0 : event_loop.thread.id
+    on_event_loop_thread = event_loop === nothing ? false : event_loop_thread_is_callers_thread(event_loop)
+    return string(
+        "socket-close[",
+        stage,
+        "]: fd=",
+        fd,
+        " state=",
+        state,
+        " running=",
+        running,
+        " should_stop=",
+        should_stop,
+        " running_thread_id=",
+        running_thread_id,
+        " thread_joined_to=",
+        thread_joined_to,
+        " foreign_thread_id=",
+        foreign_thread_id,
+        " caller_thread=",
+        Base.Threads.threadid(),
+        " on_event_loop_thread=",
+        on_event_loop_thread,
+        "; ",
+        join([string(k, "=", v) for (k, v) in pairs(kwargs)], " "),
+        " time_ns=",
+        Base.time_ns(),
+    )
+end
+
 @inline function _socket_close_loop_running(event_loop::EventLoop)::Bool
     impl = event_loop.impl_data
     @atomic(event_loop.running) || return false
@@ -355,41 +397,26 @@ end
 )
     _socket_close_debug_enabled() || return nothing
 
-    event_loop = socket.event_loop
-    running = event_loop === nothing ? false : @atomic event_loop.running
-    should_stop = event_loop === nothing ? false : @atomic event_loop.should_stop
-    running_thread_id = 0
-    thread_joined_to = 0
-    foreign_thread_id = 0
-    if event_loop !== nothing
-        impl = event_loop.impl_data
-        running_thread_id = @atomic impl.running_thread_id
-        thread_joined_to = impl.thread_joined_to
-        foreign_thread_id = event_loop.thread === nothing ? 0 : event_loop.thread.id
-    end
-    local_loop = event_loop === nothing ? false : Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing) === event_loop
-    on_event_loop_thread = event_loop === nothing ? false : event_loop_thread_is_callers_thread(event_loop)
+    msg = _socket_close_debug_msg(
+        stage,
+        socket,
+        (
+            task_scheduled = task_scheduled,
+            task_invoked = task_invoked,
+            task_done = task_done,
+            err_code = err_code === nothing ? "none" : string(err_code),
+        ),
+    )
     logf(
         LogLevel.INFO,
         LS_IO_SOCKET,
-        string(
-            "socket-close[", stage, "]: fd=", socket.io_handle.fd,
-            ", state=", string(Int(socket.state)),
-            ", running=", string(running),
-            ", should_stop=", string(should_stop),
-            ", running_thread_id=", string(running_thread_id),
-            ", local_loop=", string(local_loop),
-            ", thread_joined_to=", string(thread_joined_to),
-            ", foreign_thread_id=", string(foreign_thread_id),
-            ", caller_thread=", string(Base.Threads.threadid()),
-            ", on_event_loop_thread=", string(on_event_loop_thread),
-            ", task_scheduled=", string(task_scheduled),
-            ", task_invoked=", string(task_invoked),
-            ", task_done=", string(task_done),
-            ", error_code=", err_code === nothing ? "none" : string(err_code),
-            ", time_ns=", string(Base.time_ns()),
-        ),
+        "socket close debug: $msg",
     )
+    _socket_close_debug_enabled() && Core.println(_socket_close_debug_msg(
+        stage,
+        socket,
+        (task_scheduled = task_scheduled, task_invoked = task_invoked, task_done = task_done, err_code = err_code === nothing ? "none" : string(err_code)),
+    ))
     return nothing
 end
 

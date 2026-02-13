@@ -20,7 +20,6 @@
         path::AbstractString,
         thread_id::Integer,
         running_id::Integer,
-        task_local_hit::Bool,
     )
         _EVENT_LOOP_TRACE_STOP || return nothing
         Core.println(
@@ -32,8 +31,6 @@
             string(thread_id),
             " running_thread_id=",
             string(running_id),
-            " task_local=",
-            string(task_local_hit),
         )
         return nothing
     end
@@ -67,11 +64,7 @@
         event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
         impl = event_loop.impl_data
         try
-            Base.task_local_storage(
-                () -> epoll_event_loop_thread(event_loop),
-                :_RESEAU_EVENT_LOOP_THREAD,
-                event_loop,
-            )
+            epoll_event_loop_thread(event_loop)
         catch e
             @atomic event_loop.running = false
             @atomic impl.should_stop = true
@@ -336,7 +329,7 @@
         try
             is_first_task = isempty(impl.task_pre_queue)
             push!(impl.task_pre_queue, task)
-            needs_signal = is_first_task || !impl.should_process_task_pre_queue
+            needs_signal = is_first_task
 
             _event_loop_stop_trace_queue(
                 event_loop,
@@ -463,18 +456,6 @@
 
     # Check if on event thread
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
-        task_local_loop = Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing)
-        if task_local_loop === event_loop
-            _event_loop_trace_thread_decision(
-                event_loop,
-                "task-local-match",
-                Int(_event_loop_thread_id()),
-                Int(@atomic event_loop.impl_data.running_thread_id),
-                true,
-            )
-            return true
-        end
-
         caller_thread_id = _event_loop_thread_id()
         impl = event_loop.impl_data
 
@@ -484,7 +465,6 @@
                 "threadid-reject-stopped",
                 Int(caller_thread_id),
                 Int(@atomic impl.running_thread_id),
-                false,
             )
             return false
         end
@@ -497,7 +477,6 @@
                 "threadid-match",
                 Int(caller_thread_id),
                 Int(running_id),
-                false,
             )
         end
         if !match
@@ -506,7 +485,6 @@
                 "threadid-miss",
                 Int(caller_thread_id),
                 Int(running_id),
-                false,
             )
         end
         return match
@@ -680,23 +658,9 @@
         lock(impl.task_pre_queue_mutex)
         try
             if !impl.should_process_task_pre_queue
-                if isempty(impl.task_pre_queue)
-                    _event_loop_stop_trace_queue(
-                        event_loop,
-                        "process-pre-queue-skip",
-                        string(
-                            "q_len=",
-                            string(length(impl.task_pre_queue)),
-                            " pending=",
-                            string(impl.should_process_task_pre_queue),
-                        ),
-                    )
-                    return nothing
-                end
-
                 _event_loop_stop_trace_queue(
                     event_loop,
-                    "process-pre-queue-race",
+                    "process-pre-queue-skip",
                     string(
                         "q_len=",
                         string(length(impl.task_pre_queue)),
@@ -704,6 +668,7 @@
                         string(impl.should_process_task_pre_queue),
                     ),
                 )
+                return nothing
             end
 
             impl.should_process_task_pre_queue = false
