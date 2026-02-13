@@ -352,6 +352,10 @@
         )::Nothing
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("subscribing to events on fd %d", " ", handle.fd))
 
+        if handle.additional_data != C_NULL
+            throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
+        end
+
         epoll_event_data = EpollEventHandleData(handle, on_event)
 
         # Store handle data reference
@@ -389,6 +393,7 @@
             throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
+        impl.handle_registry[handle.additional_data] = epoll_event_data
         return nothing
     end
 
@@ -421,7 +426,11 @@
             throw_error(ERROR_IO_NOT_SUBSCRIBED)
         end
 
-        event_data = unsafe_pointer_to_objref(handle.additional_data)::EpollEventHandleData
+        event_data_ptr = handle.additional_data
+        event_data = get(impl.handle_registry, event_data_ptr, nothing)
+        if event_data === nothing
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
+        end
 
         # Remove from epoll - use a dummy event (required by older kernels)
         dummy_event = EpollEvent(UInt32(0), C_NULL)
@@ -441,6 +450,7 @@
 
         # Mark as unsubscribed and schedule cleanup task
         event_data.is_subscribed = false
+        delete!(impl.handle_registry, event_data_ptr)
 
         event_data.cleanup_task = ScheduledTask(
             TaskFn(function(status)
@@ -593,7 +603,8 @@
                         continue
                     end
 
-                    event_data = unsafe_pointer_to_objref(event_data_ptr)::EpollEventHandleData
+                    event_data = get(impl.handle_registry, event_data_ptr, nothing)
+                    event_data === nothing && continue
 
                     # Convert epoll events to our event mask
                     event_mask = 0
