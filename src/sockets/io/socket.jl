@@ -337,7 +337,8 @@ end
 
 @inline function _socket_close_loop_running(event_loop::EventLoop)::Bool
     @atomic(event_loop.running) || return false
-    return @atomic(event_loop.impl_data.running_thread_id) != 0
+    impl = event_loop.impl_data
+    return @atomic(impl.running_thread_id) != 0
 end
 
 @noinline function _socket_close_debug(
