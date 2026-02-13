@@ -34,6 +34,7 @@ jobs:
           RESEAU_EVENT_LOOP_TEST_TRACE: "1"
           RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT: "1"
           RESEAU_EVENT_LOOP_TEST_INDEX: "1"
+          RESEAU_EVENT_LOOP_TEST_MAX_INDEX: "40"
           RESEAU_EVENT_LOOP_TEST_TIMEOUT_SEC: "180"
         run: |
           set -euo pipefail
@@ -51,11 +52,15 @@ jobs:
 
           start_index="${RESEAU_EVENT_LOOP_TEST_INDEX}"
           timeout_seconds="${RESEAU_EVENT_LOOP_TEST_TIMEOUT_SEC}"
-          echo "[ci-drill] running event-loop testset window=$start_index (trace-only)"
-          if ! run_slice "$start_index" "$timeout_seconds"; then
-            echo "[ci-drill] event-loop drill timed out or failed at index=$start_index"
-            exit 1
-          fi
+          max_index="${RESEAU_EVENT_LOOP_TEST_MAX_INDEX}"
+          echo "[ci-drill] running event-loop trace slices from $start_index to $max_index (window=1 each)"
+          for ((i = start_index; i <= max_index; i++)); do
+            echo "[ci-drill] running event-loop testset window=$i (trace-only)"
+            if ! run_slice "$i" "$timeout_seconds"; then
+              echo "[ci-drill] event-loop drill timed out or failed at index=$i"
+              exit 1
+            fi
+          done
 
           # Full suite fallback (non-timeboxed here) to preserve confidence once slices pass.
           if [ "${CI_RUN_FULL_TESTS:-0}" = "1" ]; then
