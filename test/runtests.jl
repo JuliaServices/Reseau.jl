@@ -13,6 +13,17 @@ if Sys.islinux()
     using s2n_tls_jll
 end
 
+if Sys.islinux()
+    @testset "ReseauS2N extension hooks" begin
+        @testset "ReseauS2N extension loaded" begin
+            @test Base.get_extension(Reseau, :ReseauS2NExt) !== nothing
+        end
+        @testset "s2n registration symbol available" begin
+            @test isdefined(Reseau, :_register_s2n_lib!) || isdefined(Reseau.Sockets, :_register_s2n_lib!)
+        end
+    end
+end
+
 include("common_tests.jl")
 include("event_loop_tests.jl")
 include("socket_tests.jl")
