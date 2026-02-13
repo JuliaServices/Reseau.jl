@@ -46,7 +46,7 @@
 - [ ] `P2` Confirm callback dispatch keeps fast path lightweight and does not allocate per-event where it can be avoided.
 
 ### Security / operational hardening
-- [ ] `P1` Validate FD lifecycle in `close`/`epoll_ctl` paths never operates on invalidated descriptors during teardown.
+- [x] `P1` Validate FD lifecycle in `close`/`epoll_ctl` paths never operates on invalidated descriptors during teardown.
 - [ ] `P1` Ensure failure modes from syscalls are surfaced and bounded (especially `epoll_wait`, `epoll_ctl`, `read`, and `write`), including when loop already stopped.
 - [ ] `P2` Confirm no sensitive data is inferred from debug logs around descriptor values or callback pointers in production error paths.
 

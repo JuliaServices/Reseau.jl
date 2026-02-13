@@ -429,6 +429,9 @@
             events::Int,
             on_event::EventCallable,
         )::Nothing
+        if handle.fd < 0
+            throw_error(ERROR_INVALID_ARGUMENT)
+        end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("subscribing to events on fd %d", " ", handle.fd))
 
         epoll_event_data = EpollEventHandleData(handle, on_event)
@@ -438,6 +441,11 @@
         handle.additional_ref = epoll_event_data
 
         impl = event_loop.impl_data
+        if impl.epoll_fd < 0
+            handle.additional_data = C_NULL
+            handle.additional_ref = nothing
+            throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        end
 
         # Build event mask - everyone is always registered for edge-triggered, hang up, remote hang up, errors
         event_mask = EPOLLET | EPOLLHUP | EPOLLRDHUP | EPOLLERR
@@ -486,12 +494,18 @@
             event_loop::EventLoop,
             handle::IoHandle,
         )::Nothing
+        if handle.fd < 0
+            throw_error(ERROR_INVALID_ARGUMENT)
+        end
         if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
 
         impl = event_loop.impl_data
+        if impl.epoll_fd < 0
+            throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        end
 
         if handle.additional_data == C_NULL
             throw_error(ERROR_IO_NOT_SUBSCRIBED)
