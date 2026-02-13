@@ -13,7 +13,7 @@
         try
             epoll_event_loop_thread(event_loop)
         catch e
-            Core.println("epoll event loop thread errored: $e")
+            Core.println("epoll event loop thread errored")
         finally
             impl = event_loop.impl_data
             notify(impl.completion_event)
@@ -82,7 +82,7 @@
 
     # Create a new epoll event loop
     function event_loop_new_with_epoll(
-            options::EventLoopOptions,
+            clock::ClockSource = HighResClock(),
         )::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered epoll event loop")
 
@@ -125,7 +125,7 @@
         impl.should_continue = false
 
         # Create the event loop
-        event_loop = EventLoop(options.clock, impl)
+        event_loop = EventLoop(clock, impl)
 
         return event_loop
     end
@@ -204,7 +204,7 @@
                 try
                     epoll_stop_task_callback(event_loop, _coerce_task_status(status))
                 catch e
-                    Core.println("epoll_stop task errored: $e")
+                    Core.println("epoll_stop task errored")
                 end
                 return nothing
             end);
@@ -430,7 +430,7 @@
                 try
                     epoll_unsubscribe_cleanup_task_callback(event_data, _coerce_task_status(status))
                 catch e
-                    Core.println("epoll_cleanup task errored: $e")
+                    Core.println("epoll_cleanup task errored")
                 end
                 return nothing
             end);

@@ -150,12 +150,12 @@ _schedule_write_end_task(state::PipeState, fn; delay_secs::Int = 0) =
     _schedule_task(state, state.write_loop::EventLoops.EventLoop, fn; delay_secs = delay_secs)
 
 function _fixture_before!(state::PipeState)
-    read_loop = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    read_loop = EventLoops.event_loop_new()
     EventLoops.event_loop_run!(read_loop)
     state.read_loop = read_loop
 
     if state.loop_setup == DIFFERENT_EVENT_LOOPS
-        write_loop = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+        write_loop = EventLoops.event_loop_new()
         EventLoops.event_loop_run!(write_loop)
         state.write_loop = write_loop
     else

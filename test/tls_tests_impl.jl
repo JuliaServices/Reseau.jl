@@ -149,7 +149,7 @@ function _tls_network_connect(
         port::Integer;
         ctx_options_override::Union{Function, Nothing} = nothing,
     )
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     ctx_opts = Sockets.tls_ctx_options_init_default_client()
@@ -522,7 +522,7 @@ end
         return
     end
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -698,7 +698,7 @@ end
 end
 
 @testset "TLS timeout task" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -793,7 +793,7 @@ end
     ctx = Sockets.tls_context_new(opts)
     @test ctx isa Sockets.TlsContext
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -928,7 +928,7 @@ function Sockets.handler_destroy(handler::SinkHandler)
 end
 
 @testset "TLS BYO crypto integration" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1029,7 +1029,7 @@ end
 end
 
 @testset "TLS client/server handler API" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1103,7 +1103,7 @@ end
 end
 
 @testset "TLS read shutdown ignores data" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1144,7 +1144,7 @@ end
 end
 
 @testset "TLS shutdown clears pending writes" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1169,7 +1169,7 @@ end
 end
 
 @testset "TLS write after failure" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1208,7 +1208,7 @@ end
         return
     end
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1286,7 +1286,7 @@ end
         return
     end
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1348,7 +1348,7 @@ end
         return
     end
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1430,7 +1430,7 @@ end
 end
 
 @testset "tls handler" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1595,7 +1595,7 @@ end
 end
 
 @testset "channel_setup_client_tls" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -1734,7 +1734,7 @@ end
 end
 
 function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T)
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     server_opts = Sockets.tls_ctx_options_init_default_server(
@@ -1894,7 +1894,7 @@ end
 end
 
 @testset "TLS server multiple connections" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     server_opts = Sockets.tls_ctx_options_init_default_server(
@@ -2025,7 +2025,7 @@ end
 end
 
 @testset "TLS server hangup during negotiation" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     server_opts = Sockets.tls_ctx_options_init_default_server(
@@ -2112,7 +2112,7 @@ end
         return
     end
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     server_opts = if Sys.isapple()
@@ -2215,7 +2215,7 @@ end
 end
 
 @testset "TLS handler overhead + max fragment size" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -2277,7 +2277,7 @@ end
     prev_max = Sockets.g_aws_channel_max_fragment_size[]
     Sockets.g_aws_channel_max_fragment_size[] = 4096
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     server_ctx = _test_server_ctx()
@@ -2432,7 +2432,7 @@ end
         prev_max = Sockets.g_aws_channel_max_fragment_size[]
         Sockets.g_aws_channel_max_fragment_size[] = 4096
 
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
         resolver = Sockets.HostResolver(elg)
 
         server_ctx = _test_server_ctx()
@@ -2679,7 +2679,7 @@ end
 
     Sockets.handler_gather_statistics(handler::FakeSocketStatsHandler) = handler.stats
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     event_loop === nothing && return

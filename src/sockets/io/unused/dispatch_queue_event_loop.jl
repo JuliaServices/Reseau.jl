@@ -288,11 +288,11 @@
         return nothing
     end
 
-    function event_loop_new_with_dispatch_queue(options::EventLoopOptions)::Union{EventLoop, ErrorResult}
+    function event_loop_new_with_dispatch_queue(clock::ClockSource = HighResClock())::Union{EventLoop, ErrorResult}
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing Dispatch Queue Event Loop")
 
         dispatch_loop = DispatchLoop()
-        event_loop = EventLoop(options.clock, dispatch_loop)
+        event_loop = EventLoop(clock, dispatch_loop)
         dispatch_loop.base_loop = event_loop
 
         thread_increment_unjoined_count()

@@ -7,12 +7,6 @@
     const _NW_DISPATCH_LIB = "libSystem"
     const _COREFOUNDATION_LIB = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 
-    # Backwards-compat feature flag:
-    # Downstream packages historically checked `Reseau._NW_SHIM_LIB != ""` to
-    # decide whether Apple Network.framework sockets were available. The shim
-    # shared library has been removed; keep a non-empty sentinel on macOS.
-    const _NW_SHIM_LIB = "<builtin>"
-
     const nw_connection_t = Ptr{Cvoid}
     const nw_listener_t = Ptr{Cvoid}
     const nw_parameters_t = Ptr{Cvoid}

@@ -130,7 +130,7 @@ end
 end
 
 @testset "async input stream read_to_fill async" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     state = AsyncStreamTestState(data = collect(codeunits("abcd")), event_loop = event_loop, completion_strategy = :event_loop)
     stream = Sockets.AsyncInputStream(_async_test_read, s -> nothing, state)
@@ -146,7 +146,7 @@ end
 end
 
 @testset "async input stream fill completes on thread" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     state = AsyncStreamTestState(
         data = collect(codeunits("123456789")),
@@ -197,7 +197,7 @@ end
 end
 
 @testset "async input stream fill completes randomly" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     state = AsyncStreamTestState(
         data = collect(codeunits("123456789")),

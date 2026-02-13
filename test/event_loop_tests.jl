@@ -73,7 +73,7 @@ end
 
 @testset "Event Loops" begin
     @testset "EventLoopGroup indexing convenience" begin
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         try
             @test length(elg) == 1
@@ -108,8 +108,7 @@ end
     end
 
     @testset "Event loop scheduling" begin
-        opts = EventLoops.EventLoopOptions()
-        el = EventLoops.event_loop_new(opts)
+        el = EventLoops.event_loop_new()
 
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
@@ -148,8 +147,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -189,8 +187,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -234,8 +231,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -316,7 +312,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -371,7 +367,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -449,7 +445,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -516,7 +512,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -596,7 +592,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -702,7 +698,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -814,7 +810,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -955,8 +951,7 @@ end
         if interactive_threads <= 2
             @test true
         else
-            opts = EventLoops.EventLoopGroupOptions(loop_count = 2)
-            elg = EventLoops.event_loop_group_new(opts)
+            elg = EventLoops.EventLoopGroup(; loop_count = 2)
 
             try
                 loop1 = EventLoops.event_loop_group_get_next_loop(elg)
@@ -1025,8 +1020,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                opts = EventLoops.EventLoopOptions()
-                el = EventLoops.event_loop_new(opts)
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -1078,8 +1072,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -1123,8 +1116,7 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                opts = EventLoops.EventLoopOptions()
-                el = EventLoops.event_loop_new(opts)
+                el = EventLoops.event_loop_new()
 
                 run_res = EventLoops.event_loop_run!(el)
                 @test run_res === nothing
@@ -1197,8 +1189,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -1247,8 +1238,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -1291,8 +1281,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -1320,8 +1309,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
             destroy_called = Ref(false)
@@ -1348,8 +1336,7 @@ end
     end
 
     @testset "Event loop group" begin
-        opts = EventLoops.EventLoopGroupOptions(loop_count = 1)
-        elg = EventLoops.event_loop_group_new(opts)
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         try
             @test EventLoops.event_loop_group_get_loop_count(elg) == 1
@@ -1366,14 +1353,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            shutdown_ch = Channel{Bool}(1)
-            shutdown_opts = Reseau.TaskFn((_) -> begin
-                put!(shutdown_ch, true)
-                return nothing
-            end)
-
-            opts = EventLoops.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts)
-            elg = EventLoops.event_loop_group_new(opts)
+            elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
             done = false
             try
@@ -1388,7 +1368,11 @@ end
                     return nothing
                 end); type_tag = "elg_release_async")
                 EventLoops.event_loop_schedule_task_now!(el, release_task)
-                done = _wait_for_channel(shutdown_ch)
+                deadline = Base.time_ns() + 2_000_000_000
+                while !(@atomic elg.destroyed) && Base.time_ns() < deadline
+                    yield()
+                end
+                done = @atomic elg.destroyed
                 @test done
             finally
                 if !done
@@ -1399,10 +1383,8 @@ end
     end
 
     @testset "Event loop group NUMA setup" begin
-        cpu_group = Ref{UInt16}(0)
         cpu_count = max(1, min(Sys.CPU_THREADS, Int(typemax(UInt16))))
-        opts = EventLoops.EventLoopGroupOptions(loop_count = typemax(UInt16), cpu_group = cpu_group)
-        elg = EventLoops.event_loop_group_new(opts)
+        elg = EventLoops.EventLoopGroup(; loop_count = typemax(UInt16), cpu_group = 0)
 
         try
             el_count = EventLoops.event_loop_group_get_loop_count(elg)
@@ -1417,7 +1399,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -1457,7 +1439,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -1473,8 +1455,7 @@ end
     @testset "Event loop group setup and shutdown" begin
         expected = max(1, Sys.CPU_THREADS >> 1)
 
-        opts = EventLoops.EventLoopGroupOptions(loop_count = 0)
-        elg = EventLoops.event_loop_group_new(opts)
+        elg = EventLoops.EventLoopGroup(; loop_count = 0)
 
         try
             @test EventLoops.event_loop_group_get_loop_count(elg) == expected
@@ -1485,30 +1466,16 @@ end
         end
     end
 
-    @testset "Event loop group shutdown callback" begin
+    @testset "Event loop group destroy idempotent" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
         else
-            shutdown_called = Ref(false)
-            shutdown_thread = Ref(0)
-            done_ch = Channel{Nothing}(1)
-
-            shutdown_opts = Reseau.TaskFn((_) -> begin
-                shutdown_called[] = true
-                shutdown_thread[] = Base.Threads.threadid()
-                if !isready(done_ch)
-                    put!(done_ch, nothing)
-                end
-                return nothing
-            end)
-
-            elg = EventLoops.event_loop_group_new(EventLoops.EventLoopGroupOptions(loop_count = 1, shutdown_options = shutdown_opts))
+            elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
             EventLoops.event_loop_group_destroy!(elg)
-            @test _wait_for_channel(done_ch)
-            @test shutdown_called[]
-            @test shutdown_thread[] != 0
+            @test (@atomic elg.destroyed)
+            @test EventLoops.event_loop_group_destroy!(elg) === nothing
         end
     end
 
@@ -1517,8 +1484,7 @@ end
         if interactive_threads <= 1
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
@@ -1558,8 +1524,7 @@ end
         times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
         clock = EventLoops.SequenceClock(times)
 
-        opts = EventLoops.EventLoopOptions(clock = clock)
-        el = EventLoops.event_loop_new(opts)
+        el = EventLoops.event_loop_new(clock)
         EventLoops.event_loop_register_tick_start!(el)
         EventLoops.event_loop_register_tick_end!(el)
 
@@ -1571,14 +1536,12 @@ end
     @testset "Event loop clock override" begin
         clock = EventLoops.RefClock(UInt64(42))
 
-        opts = EventLoops.EventLoopOptions(clock = clock)
-        el = EventLoops.event_loop_new(opts)
+        el = EventLoops.event_loop_new(clock)
         @test EventLoops.event_loop_current_clock_time(el) == UInt64(42)
 
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads > 1
-            group_opts = EventLoops.EventLoopGroupOptions(loop_count = 1, clock_override = clock)
-            elg = EventLoops.event_loop_group_new(group_opts)
+            elg = EventLoops.EventLoopGroup(; loop_count = 1, clock = clock)
 
             try
                 loop = EventLoops.event_loop_group_get_next_loop(elg)
@@ -1595,8 +1558,7 @@ end
     @testset "Event loop group thread constraint" begin
         # OS threads have no interactive thread pool constraint;
         # verify that creating an ELG with a reasonable count succeeds.
-        opts = EventLoops.EventLoopGroupOptions(loop_count = UInt16(2))
-        elg = EventLoops.event_loop_group_new(opts)
+        elg = EventLoops.EventLoopGroup(; loop_count = UInt16(2))
 
         try
             @test EventLoops.event_loop_group_get_loop_count(elg) == 2
@@ -1609,8 +1571,7 @@ end
         if !Sys.islinux()
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             impl = el.impl_data
 
@@ -1651,12 +1612,51 @@ end
         end
     end
 
+    @testset "Kqueue cleanup task doesn't underflow connected handle count" begin
+        if !Sys.isapple()
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+
+                impl = el.impl_data
+                handle_data = EventLoops.KqueueHandleData(
+                    read_end.io_handle,
+                    impl,
+                    EventLoops.EventCallable(err -> nothing),
+                    Int(EventLoops.IoEventType.READABLE),
+                )
+
+                # cleanup should only decrement once for active handles.
+                @test impl.thread_data.connected_handle_count == 0
+                @test !handle_data.connected
+                EventLoops.kqueue_cleanup_task_callback(handle_data, Reseau.TaskStatus.RUN_READY)
+                @test impl.thread_data.connected_handle_count == 0
+
+                handle_data.connected = true
+                impl.thread_data.connected_handle_count = 1
+                EventLoops.kqueue_cleanup_task_callback(handle_data, Reseau.TaskStatus.RUN_READY)
+                @test impl.thread_data.connected_handle_count == 0
+
+                @test impl.subscribe_changelist isa Vector{EventLoops.Kevent}
+                @test impl.subscribe_eventlist isa Vector{EventLoops.Kevent}
+                @test impl.unsubscribe_changelist isa Vector{EventLoops.Kevent}
+            finally
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
     @testset "Kqueue completion port for NW sockets" begin
         if !Sys.isapple()
             @test true
         else
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             try
                 # Verify nw_queue was created

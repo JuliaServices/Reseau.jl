@@ -303,7 +303,7 @@ end
         end
 
         # IPv4 stream
-        el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+        el = EventLoops.event_loop_new()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
@@ -472,7 +472,7 @@ end
         end
 
         # IPv4 UDP
-        el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+        el = EventLoops.event_loop_new()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
@@ -540,7 +540,7 @@ end
         end
 
         # IPv6 stream
-        el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+        el = EventLoops.event_loop_new()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
@@ -663,7 +663,7 @@ end
     if !Sys.islinux()
         @test true
     else
-        el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+        el = EventLoops.event_loop_new()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
@@ -849,7 +849,7 @@ end
 end
 
 @testset "socket connect read write" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -1001,9 +1001,7 @@ end
         return
     end
 
-    elg = EventLoops.event_loop_group_new(EventLoops.EventLoopGroupOptions(;
-        loop_count = 1,
-    ))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
     if elg_val === nothing
@@ -1167,7 +1165,7 @@ end
 end
 
 @testset "sock write cb is async" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -1294,7 +1292,7 @@ end
 end
 
 @testset "connect timeout" begin
-    elg = EventLoops.event_loop_group_new(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
     if elg_val === nothing
@@ -1345,7 +1343,7 @@ end
 end
 
 @testset "connect timeout cancellation" begin
-    elg = EventLoops.event_loop_group_new(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
     if elg_val === nothing
@@ -1397,7 +1395,7 @@ end
 end
 
 @testset "cleanup before connect or timeout" begin
-    elg = EventLoops.event_loop_group_new(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
         elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
         @test elg_val !== nothing
         if elg_val === nothing
@@ -1461,7 +1459,7 @@ end
 end
 
 @testset "cleanup in accept doesn't explode" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -1545,7 +1543,7 @@ end
 end
 
 @testset "cleanup in write cb doesn't explode" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -1682,7 +1680,7 @@ end
 end
 
 @testset "local socket communication" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -1827,7 +1825,7 @@ end
 end
 
 @testset "local socket connect before accept" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -1911,7 +1909,7 @@ end
 end
 
 @testset "udp socket communication" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -2022,7 +2020,7 @@ end
 end
 
 @testset "udp bind connect communication" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -2139,7 +2137,7 @@ end
     if Sys.iswindows()
         @test true
     else
-        el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+        el = EventLoops.event_loop_new()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
@@ -2426,7 +2424,7 @@ end
 end
 
 @testset "outgoing local socket errors" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
@@ -2483,7 +2481,7 @@ end
 end
 
 @testset "outgoing tcp socket error" begin
-    el = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing

@@ -35,7 +35,7 @@ end
             @testset "jitter $(jitter_mode)" begin
                 Sockets.io_library_init()
 
-                elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+                elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
                 config = Sockets.ExponentialBackoffConfig(;
                     backoff_scale_factor_ms = 1,
@@ -105,7 +105,7 @@ end
     else
         Sockets.io_library_init()
 
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
@@ -181,7 +181,7 @@ end
     else
         Sockets.io_library_init()
 
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 5,
@@ -259,7 +259,7 @@ end
     else
         Sockets.io_library_init()
 
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 400,
@@ -338,7 +338,7 @@ end
 @testset "exponential backoff invalid options" begin
     Sockets.io_library_init()
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
     config = Sockets.ExponentialBackoffConfig(;
         max_retries = 64,
@@ -362,7 +362,7 @@ end
     else
         Sockets.io_library_init()
 
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         backoff_config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,
@@ -468,7 +468,7 @@ end
     else
         Sockets.io_library_init()
 
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         backoff_config = Sockets.ExponentialBackoffConfig(;
             backoff_scale_factor_ms = 1,

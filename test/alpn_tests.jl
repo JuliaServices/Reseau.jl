@@ -25,7 +25,7 @@ function AlpnNegotiationArgs()
 end
 
 @testset "alpn handler" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -93,7 +93,7 @@ end
 end
 
 @testset "alpn missing protocol message" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -132,7 +132,7 @@ end
         @test true
         return
     end
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -256,7 +256,7 @@ end
 end
 
 @testset "alpn error creating handler" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing

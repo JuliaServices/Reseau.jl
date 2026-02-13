@@ -105,8 +105,7 @@ function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
 end
 
 function _setup_channel(; enable_read_back_pressure::Bool = false)
-    opts = EventLoops.EventLoopOptions()
-    el = EventLoops.event_loop_new(opts)
+    el = EventLoops.event_loop_new()
     EventLoops.event_loop_run!(el)
 
     setup_ch = Channel{Int}(1)
