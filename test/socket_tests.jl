@@ -1557,16 +1557,24 @@ end
 
     try
         try
-            Sockets.socket_connect(socket_val, connect_opts)
-            @test wait_for_flag(connect_done; timeout_s = 3.0)
+            ci_debug_log("connect timeout: socket_connect")
+            @test ci_with_timeout(
+                "connect timeout: socket_connect",
+                () -> Sockets.socket_connect(socket_val, connect_opts),
+                timeout_s = 1.0,
+            )
+            @test ci_wait_for_flag("connect timeout: wait connect_done", connect_done; timeout_s = 3.0)
             @test _is_allowed_connect_error(connect_err[])
         catch e
             @test e isa Reseau.ReseauError
             @test _is_allowed_connect_error(e.code)
         end
     finally
-        Sockets.socket_cleanup!(socket_val)
-        EventLoops.event_loop_group_destroy!(elg_val)
+        ci_with_timeout("connect timeout: socket_cleanup!(socket_val)", () -> Sockets.socket_cleanup!(socket_val))
+        if !ci_with_timeout("connect timeout: socket_close(socket_val)", () -> Sockets.socket_close(socket_val))
+            ci_debug_log("connect timeout: fallback socket_close(socket_val) timed out")
+        end
+        ci_with_timeout("connect timeout: event_loop_group_destroy!", () -> EventLoops.event_loop_group_destroy!(elg_val))
     end
 end
 
@@ -1609,8 +1617,13 @@ end
 
     try
         try
-            Sockets.socket_connect(socket_val, connect_opts)
-            EventLoops.event_loop_group_destroy!(elg_val)
+            ci_debug_log("connect timeout cancellation: socket_connect")
+            @test ci_with_timeout(
+                "connect timeout cancellation: socket_connect",
+                () -> Sockets.socket_connect(socket_val, connect_opts),
+                timeout_s = 1.0,
+            )
+            ci_with_timeout("connect timeout cancellation: event_loop_group_destroy!", () -> EventLoops.event_loop_group_destroy!(elg_val))
             @test connect_done[]
             @test connect_err[] == EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
                 _is_allowed_connect_error(connect_err[])
@@ -1619,7 +1632,10 @@ end
             @test _is_allowed_connect_error(e.code)
         end
     finally
-        Sockets.socket_cleanup!(socket_val)
+        ci_with_timeout("connect timeout cancellation: socket_cleanup!(socket_val)", () -> Sockets.socket_cleanup!(socket_val))
+        if !ci_with_timeout("connect timeout cancellation: socket_close(socket_val)", () -> Sockets.socket_close(socket_val))
+            ci_debug_log("connect timeout cancellation: fallback socket_close(socket_val) timed out")
+        end
     end
 end
 
@@ -1669,9 +1685,14 @@ end
 
         try
             try
-                Sockets.socket_connect(socket_val, connect_opts)
+                ci_debug_log("cleanup before connect or timeout: socket_connect")
+                @test ci_with_timeout(
+                    "cleanup before connect or timeout: socket_connect",
+                    () -> Sockets.socket_connect(socket_val, connect_opts),
+                    timeout_s = 1.0,
+                )
                 EventLoops.event_loop_schedule_task_now!(el_val, cleanup_task)
-                @test wait_for_flag(cleanup_done)
+                @test ci_wait_for_flag("cleanup before connect or timeout: wait cleanup_done", cleanup_done)
                 sleep(0.05)
                 if connect_done[]
                     @test _is_allowed_connect_error(connect_err[])
@@ -1683,8 +1704,11 @@ end
                 @test _is_allowed_connect_error(e.code)
             end
         finally
-            Sockets.socket_cleanup!(socket_val)
-            EventLoops.event_loop_group_destroy!(elg_val)
+            ci_with_timeout("cleanup before connect or timeout: socket_cleanup!(socket_val)", () -> Sockets.socket_cleanup!(socket_val))
+            if !ci_with_timeout("cleanup before connect or timeout: socket_close(socket_val)", () -> Sockets.socket_close(socket_val))
+                ci_debug_log("cleanup before connect or timeout: fallback socket_close(socket_val) timed out")
+            end
+            ci_with_timeout("cleanup before connect or timeout: event_loop_group_destroy!", () -> EventLoops.event_loop_group_destroy!(elg_val))
         end
 end
 
@@ -1737,7 +1761,12 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+        ci_debug_log("cleanup in accept doesn't explode: socket_start_accept")
+        @test ci_with_timeout(
+            "cleanup in accept doesn't explode: socket_start_accept",
+            () -> Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1750,26 +1779,42 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("cleanup in accept doesn't explode: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 return nothing
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-        @test wait_for_flag(accept_done)
-        @test wait_for_flag(connect_done)
+        ci_debug_log("cleanup in accept doesn't explode: socket_connect")
+        @test ci_with_timeout(
+            "cleanup in accept doesn't explode: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing,
+            timeout_s = 1.0,
+        )
+        @test ci_wait_for_flag("cleanup in accept doesn't explode: wait accept_done", accept_done)
+        @test ci_wait_for_flag("cleanup in accept doesn't explode: wait connect_done", connect_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
     finally
+        ci_debug_log("cleanup in accept doesn't explode: cleanup start")
         if client_socket !== nothing
-            Sockets.socket_cleanup!(client_socket)
+            ci_with_timeout("cleanup in accept doesn't explode: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("cleanup in accept doesn't explode: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("cleanup in accept doesn't explode: fallback socket_close(client_socket) timed out")
+            end
         end
         if incoming[] !== nothing
-            Sockets.socket_cleanup!(incoming[])
+            ci_with_timeout("cleanup in accept doesn't explode: socket_cleanup!(incoming[])", () -> Sockets.socket_cleanup!(incoming[]))
+            if !ci_with_timeout("cleanup in accept doesn't explode: socket_close(incoming[])", () -> Sockets.socket_close(incoming[]))
+                ci_debug_log("cleanup in accept doesn't explode: fallback socket_close(incoming[]) timed out")
+            end
         end
-        Sockets.socket_cleanup!(listener_socket)
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("cleanup in accept doesn't explode: socket_cleanup!(listener_socket)", () -> Sockets.socket_cleanup!(listener_socket))
+        if !ci_with_timeout("cleanup in accept doesn't explode: socket_close(listener_socket)", () -> Sockets.socket_close(listener_socket))
+            ci_debug_log("cleanup in accept doesn't explode: fallback socket_close(listener_socket) timed out")
+        end
+        ci_with_timeout("cleanup in accept doesn't explode: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
     end
 end
 
@@ -1816,7 +1861,12 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+        ci_debug_log("cleanup in write cb doesn't explode: socket_start_accept")
+        @test ci_with_timeout(
+            "cleanup in write cb doesn't explode: socket_start_accept",
+            () -> Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1829,14 +1879,20 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("cleanup in write cb doesn't explode: on_connection_result")
                 connect_done[] = true
                 return nothing
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-        @test wait_for_flag(accept_done)
-        @test wait_for_flag(connect_done)
+        ci_debug_log("cleanup in write cb doesn't explode: socket_connect")
+        @test ci_with_timeout(
+            "cleanup in write cb doesn't explode: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing,
+            timeout_s = 1.0,
+        )
+        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait accept_done", accept_done)
+        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait connect_done", connect_done)
 
         server_sock = accepted[]
         @test server_sock !== nothing
@@ -1894,20 +1950,30 @@ end
         end); type_tag = "socket_write_cleanup_server")
 
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_client)
-        @test wait_for_flag(write_done_client)
+        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait write_done_client", write_done_client)
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_server)
-        @test wait_for_flag(write_done_server)
+        @test ci_wait_for_flag("cleanup in write cb doesn't explode: wait write_done_server", write_done_server)
         @test write_err_client[] == Reseau.AWS_OP_SUCCESS
         @test write_err_server[] == Reseau.AWS_OP_SUCCESS
     finally
+        ci_debug_log("cleanup in write cb doesn't explode: cleanup start")
         if client_socket !== nothing
-            Sockets.socket_cleanup!(client_socket)
+            ci_with_timeout("cleanup in write cb doesn't explode: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("cleanup in write cb doesn't explode: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("cleanup in write cb doesn't explode: fallback socket_close(client_socket) timed out")
+            end
         end
         if accepted[] !== nothing
-            Sockets.socket_cleanup!(accepted[])
+            ci_with_timeout("cleanup in write cb doesn't explode: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
+            if !ci_with_timeout("cleanup in write cb doesn't explode: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
+                ci_debug_log("cleanup in write cb doesn't explode: fallback socket_close(accepted[]) timed out")
+            end
         end
-        Sockets.socket_cleanup!(listener_socket)
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("cleanup in write cb doesn't explode: socket_cleanup!(listener_socket)", () -> Sockets.socket_cleanup!(listener_socket))
+        if !ci_with_timeout("cleanup in write cb doesn't explode: socket_close(listener_socket)", () -> Sockets.socket_close(listener_socket))
+            ci_debug_log("cleanup in write cb doesn't explode: fallback socket_close(listener_socket) timed out")
+        end
+        ci_with_timeout("cleanup in write cb doesn't explode: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
     end
 end
 
@@ -1995,7 +2061,12 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        ci_debug_log("local socket communication: socket_start_accept")
+        @test ci_with_timeout(
+            "local socket communication: socket_start_accept",
+            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -2008,6 +2079,7 @@ end
             endpoint;
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("local socket communication: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -2031,26 +2103,42 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-        @test wait_for_flag(connect_done)
+        ci_debug_log("local socket communication: socket_connect")
+        @test ci_with_timeout(
+            "local socket communication: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
+            timeout_s = 1.0,
+        )
+        ci_debug_log("local socket communication: socket_connect done")
+        @test ci_wait_for_flag("local socket communication: wait connect_done", connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(write_done)
+        @test ci_wait_for_flag("local socket communication: wait write_done", write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(read_done)
+        @test ci_wait_for_flag("local socket communication: wait read_done", read_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
+        ci_debug_log("local socket communication: cleanup start")
         if client_socket !== nothing
-            Sockets.socket_close(client_socket)
+            ci_with_timeout("local socket communication: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("local socket communication: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("local socket communication: fallback socket_close(client_socket) timed out")
+            end
         end
         if accepted[] !== nothing
-            Sockets.socket_close(accepted[])
+            ci_with_timeout("local socket communication: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
+            if !ci_with_timeout("local socket communication: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
+                ci_debug_log("local socket communication: fallback socket_close(accepted[]) timed out")
+            end
         end
         if server_socket !== nothing
-            Sockets.socket_close(server_socket)
+            ci_with_timeout("local socket communication: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
+            if !ci_with_timeout("local socket communication: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
+                ci_debug_log("local socket communication: fallback socket_close(server_socket) timed out")
+            end
         end
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("local socket communication: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -2103,15 +2191,22 @@ end
             endpoint;
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("local socket connect before accept: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 return nothing
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        ci_debug_log("local socket connect before accept: socket_connect")
+        @test ci_with_timeout(
+            "local socket connect before accept: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+            ci_debug_log("local socket connect before accept: on_accept")
             accept_err[] = err
             accepted[] = new_sock
             accept_done[] = true
@@ -2119,23 +2214,38 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        ci_debug_log("local socket connect before accept: socket_start_accept")
+        @test ci_with_timeout(
+            "local socket connect before accept: socket_start_accept",
+            () -> Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing;
+            timeout_s = 1.0,
+        )
 
-        @test wait_for_flag(connect_done)
-        @test wait_for_flag(accept_done)
+        @test ci_wait_for_flag("local socket connect before accept: wait connect_done", connect_done)
+        @test ci_wait_for_flag("local socket connect before accept: wait accept_done", accept_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
     finally
+        ci_debug_log("local socket connect before accept: cleanup start")
         if client_socket !== nothing
-            Sockets.socket_cleanup!(client_socket)
+            ci_with_timeout("local socket connect before accept: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("local socket connect before accept: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("local socket connect before accept: fallback socket_close(client_socket) timed out")
+            end
         end
         if accepted[] !== nothing
-            Sockets.socket_cleanup!(accepted[])
+            ci_with_timeout("local socket connect before accept: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
+            if !ci_with_timeout("local socket connect before accept: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
+                ci_debug_log("local socket connect before accept: fallback socket_close(accepted[]) timed out")
+            end
         end
         if server_socket !== nothing
-            Sockets.socket_cleanup!(server_socket)
+            ci_with_timeout("local socket connect before accept: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
+            if !ci_with_timeout("local socket connect before accept: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
+                ci_debug_log("local socket connect before accept: fallback socket_close(server_socket) timed out")
+            end
         end
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("local socket connect before accept: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -2213,6 +2323,7 @@ end
             Sockets.SocketEndpoint("127.0.0.1", port);
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("udp socket communication: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -2231,26 +2342,38 @@ end
                     write_err[] = e isa Reseau.ReseauError ? e.code : -1
                     write_done[] = true
                 end
-                return nothing
-            end),
+                    return nothing
+                end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-        @test wait_for_flag(connect_done)
+        ci_debug_log("udp socket communication: socket_connect")
+        @test ci_with_timeout(
+            "udp socket communication: socket_connect",
+            () -> Sockets.socket_connect(client_socket, connect_opts) === nothing;
+            timeout_s = 1.0,
+        )
+        @test ci_wait_for_flag("udp socket communication: wait connect_done", connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(write_done)
+        @test ci_wait_for_flag("udp socket communication: wait write_done", write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(read_done)
+        @test ci_wait_for_flag("udp socket communication: wait read_done", read_done)
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
+        ci_debug_log("udp socket communication: cleanup start")
         if client_socket !== nothing
-            Sockets.socket_close(client_socket)
+            ci_with_timeout("udp socket communication: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("udp socket communication: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("udp socket communication: fallback socket_close(client_socket) timed out")
+            end
         end
         if server_socket !== nothing
-            Sockets.socket_close(server_socket)
+            ci_with_timeout("udp socket communication: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
+            if !ci_with_timeout("udp socket communication: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
+                ci_debug_log("udp socket communication: fallback socket_close(server_socket) timed out")
+            end
         end
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("udp socket communication: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
     end
 end
 
