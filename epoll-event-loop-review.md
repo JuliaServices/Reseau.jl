@@ -24,7 +24,7 @@
 - [x] `P2` Confirm cancellation (`event_loop_cancel_task!`) and scheduling operations remain race-free under rapid churn of same task IDs.
   - Added lock-protected `task.scheduled` checks in `schedule_task_common` (in-thread path) and `event_loop_cancel_task!` to close races against concurrent cross-thread queue transitions.
   - Added a dedicated Linux-only stress test: `Epoll cancel-schedule churn stays race-free on same task id`.
-- [ ] `P2` Validate that `process_task` can handle user callbacks that mutate subscriptions during iteration without invalidating active event vectors/indices.
+- [x] `P2` Validate that `process_task` can handle user callbacks that mutate subscriptions during iteration without invalidating active event vectors/indices.
 
 #### Queueing dedupe/ordering checks (epoll)
 - [x] Cross-thread duplicate scheduling of an already-scheduled task is now ignored in `schedule_task_common` and `schedule_task_cross_thread` (including duplicates already present in `impl.task_pre_queue`).

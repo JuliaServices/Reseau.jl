@@ -1180,6 +1180,81 @@ end
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
                     EventLoops.event_loop_destroy!(el)
                 end
+                end
+        end
+    end
+
+    @testset "Event loop callback mutates another subscription safely" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Base.Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = EventLoops.event_loop_new()
+                run_res = EventLoops.event_loop_run!(el)
+                @test run_res === nothing
+
+                read_a = nothing
+                write_a = nothing
+                read_b = nothing
+                write_b = nothing
+                events_ch = Channel{Symbol}(2)
+
+                try
+                    read_a, write_a = Sockets.pipe_create()
+                    read_b, write_b = Sockets.pipe_create()
+
+                    on_a = (loop, handle, events, data) -> begin
+                        EventLoops.event_loop_unsubscribe_from_io_events!(loop, read_b.io_handle)
+                        put!(events_ch, :a)
+                        return nothing
+                    end
+                    on_b = (loop, handle, events, data) -> begin
+                        put!(events_ch, :b)
+                        return nothing
+                    end
+
+                    sub_done = _schedule_event_loop_task(el, () -> begin
+                        @test EventLoops.event_loop_subscribe_to_io_events!(
+                            el,
+                            read_a.io_handle,
+                            Int(EventLoops.IoEventType.READABLE),
+                            on_a,
+                            nothing,
+                        ) === nothing
+                        @test EventLoops.event_loop_subscribe_to_io_events!(
+                            el,
+                            read_b.io_handle,
+                            Int(EventLoops.IoEventType.READABLE),
+                            on_b,
+                            nothing,
+                        ) === nothing
+                        Sockets.pipe_write!(write_a, _payload_abc())
+                        Sockets.pipe_write!(write_b, _payload_abc())
+                        return nothing
+                    end; type_tag = "subscribe_mutating_cb")
+                    @test _wait_for_channel(sub_done)
+
+                    # callback on A should run and may unsubscribe B without breaking the loop.
+                    deadline = Base.time_ns() + _EVENT_LOOP_TEST_TIMEOUT_NS
+                    while !isready(events_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+                    @test isready(events_ch)
+                    @test take!(events_ch) === :a
+
+                    # Loop continues to accept another task after mutation.
+                    continue_ch = _schedule_event_loop_task(el, () -> true; type_tag = "post_mutation_task")
+                    @test _wait_for_channel(continue_ch)
+                finally
+                    read_a !== nothing && Sockets.pipe_read_end_close!(read_a)
+                    write_a !== nothing && Sockets.pipe_write_end_close!(write_a)
+                    read_b !== nothing && Sockets.pipe_read_end_close!(read_b)
+                    write_b !== nothing && Sockets.pipe_write_end_close!(write_b)
+                    EventLoops.event_loop_destroy!(el)
+                end
             end
         end
     end
