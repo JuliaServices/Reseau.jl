@@ -15,7 +15,7 @@ end
 
 const _SOCKET_BIND_INTERFACE_DEBUG = get(ENV, "RESEAU_SOCKET_BIND_INTERFACE_DEBUG", "") == "1"
 
-function _wait_for_flag_debug(flag::Ref{Bool}, label::AbstractString; timeout_s::Float64 = 5.0)
+function _wait_for_flag_debug(flag, label::AbstractString; timeout_s::Float64 = 5.0)
     ok = wait_for_flag(flag; timeout_s = timeout_s)
     if !ok && _SOCKET_BIND_INTERFACE_DEBUG
         println("[socket-bind-iface] timeout waiting for ", label)
