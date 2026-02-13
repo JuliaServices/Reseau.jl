@@ -25,6 +25,18 @@ end
 
 const pthread_t = UInt  # pointer-sized: opaque ptr on macOS, unsigned long on Linux
 
+@inline function _foreign_thread_report_error(thread_id::thread_id_t, exc::Any, bt)
+    Core.println("[foreign-thread-err] id=", thread_id)
+    io = stderr
+    try
+        Base.showerror(io, exc)
+        Base.show_backtrace(io, bt)
+    catch
+        Core.println("[foreign-thread-err] failed to print full backtrace")
+    end
+    return nothing
+end
+
 mutable struct ThreadIdState
     @atomic next_id::UInt64
 end
@@ -135,16 +147,17 @@ macro wrap_thread_fn(fndef)
     name = sig.args[1]
     length(sig.args) == 1 || error("@wrap_thread_fn: function must take zero arguments")
     return quote
-        function $(esc(name))(arg::Ptr{Cvoid})::Ptr{Cvoid}
-            thread_id = UInt64(UInt(arg))
-            try
-                _ = thread_id
-                $(esc(body))
-            catch e
-                Core.println("foreign thread ($thread_id) errored")
-            end
-            return C_NULL
+    function $(esc(name))(arg::Ptr{Cvoid})::Ptr{Cvoid}
+        thread_id = UInt64(UInt(arg))
+        try
+            _ = thread_id
+            $(esc(body))
+        catch e
+            bt = catch_backtrace()
+            _foreign_thread_report_error(UInt64(thread_id), e, bt)
         end
+        return C_NULL
+    end
     end
 end
 
