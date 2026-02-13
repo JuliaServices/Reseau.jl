@@ -11,7 +11,11 @@
     @wrap_thread_fn function _epoll_event_loop_thread_entry()
         event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
         try
-            epoll_event_loop_thread(event_loop)
+            Base.task_local_storage(
+                () -> epoll_event_loop_thread(event_loop),
+                :_RESEAU_EVENT_LOOP_THREAD,
+                event_loop,
+            )
         catch e
             Core.println("epoll event loop thread errored")
         finally
@@ -341,6 +345,10 @@
 
     # Check if on event thread
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
+        if Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing) === event_loop
+            return true
+        end
+
         impl = event_loop.impl_data
         running_id = @atomic impl.running_thread_id
         return running_id != 0 && running_id == UInt64(Base.Threads.threadid())

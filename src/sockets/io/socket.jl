@@ -356,6 +356,7 @@ end
     running_thread_id = event_loop === nothing ? 0 : @atomic event_loop.impl_data.running_thread_id
     thread_joined_to = event_loop === nothing ? 0 : @atomic event_loop.impl_data.thread_joined_to
     foreign_thread_id = event_loop === nothing ? 0 : event_loop.thread === nothing ? 0 : event_loop.thread.id
+    local_loop = event_loop === nothing ? false : Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing) === event_loop
     on_event_loop_thread = event_loop === nothing ? false : event_loop_thread_is_callers_thread(event_loop)
     logf(
         LogLevel.INFO,
@@ -366,6 +367,7 @@ end
             ", running=", string(running),
             ", should_stop=", string(should_stop),
             ", running_thread_id=", string(running_thread_id),
+            ", local_loop=", string(local_loop),
             ", thread_joined_to=", string(thread_joined_to),
             ", foreign_thread_id=", string(foreign_thread_id),
             ", caller_thread=", string(Base.Threads.threadid()),
