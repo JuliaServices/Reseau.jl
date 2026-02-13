@@ -114,4 +114,31 @@
         )
     end
 
+    # Keep the relationship between `IoHandle.additional_data` (raw pointer) and
+    # `IoHandle.additional_ref` (GC root) explicit for epoll subscriptions.
+    @inline function epoll_store_handle_data!(handle::IoHandle, handle_data::EpollEventHandleData)::Nothing
+        handle.additional_ref = handle_data
+        handle.additional_data = pointer_from_objref(handle_data)
+        return nothing
+    end
+
+    @inline function epoll_release_handle_data!(handle::IoHandle)::Nothing
+        handle.additional_data = C_NULL
+        handle.additional_ref = nothing
+        return nothing
+    end
+
+    @inline function epoll_get_handle_data(handle::IoHandle)::EpollEventHandleData
+        if handle.additional_data == C_NULL
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
+        end
+
+        event_data = unsafe_pointer_to_objref(handle.additional_data)::EpollEventHandleData
+        if handle.additional_ref === nothing || event_data !== handle.additional_ref
+            throw_error(ERROR_INVALID_STATE)
+        end
+
+        return event_data
+    end
+
 end # @static if Sys.islinux()

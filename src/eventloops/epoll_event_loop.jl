@@ -433,17 +433,18 @@
             throw_error(ERROR_INVALID_ARGUMENT)
         end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("subscribing to events on fd %d", " ", handle.fd))
+        if handle.additional_data != C_NULL
+            throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
+        end
 
         epoll_event_data = EpollEventHandleData(handle, on_event)
 
         # Store handle data reference
-        handle.additional_data = pointer_from_objref(epoll_event_data)
-        handle.additional_ref = epoll_event_data
+        epoll_store_handle_data!(handle, epoll_event_data)
 
         impl = event_loop.impl_data
         if impl.epoll_fd < 0
-            handle.additional_data = C_NULL
-            handle.additional_ref = nothing
+            epoll_release_handle_data!(handle)
             throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
         end
 
@@ -471,8 +472,7 @@
 
         if ret != 0
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP,string("failed to subscribe to events on fd %d", " ", handle.fd))
-            handle.additional_data = C_NULL
-            handle.additional_ref = nothing
+            epoll_release_handle_data!(handle)
             throw_error(ERROR_SYS_CALL_FAILURE)
         end
 
@@ -511,7 +511,7 @@
             throw_error(ERROR_IO_NOT_SUBSCRIBED)
         end
 
-        event_data = unsafe_pointer_to_objref(handle.additional_data)::EpollEventHandleData
+        event_data = epoll_get_handle_data(handle)
 
         # Remove from epoll - use a dummy event (required by older kernels)
         dummy_event = EpollEvent(UInt32(0), C_NULL)
@@ -545,8 +545,7 @@
         )
         event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)
 
-        handle.additional_data = C_NULL
-        handle.additional_ref = nothing
+        epoll_release_handle_data!(handle)
 
         return nothing
     end

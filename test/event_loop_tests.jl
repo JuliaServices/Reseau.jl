@@ -359,6 +359,66 @@ end
         end
     end
 
+    @testset "Event loop subscription payload is stable and owned by handle refs" begin
+        if !Sys.islinux()
+            @test true
+        else
+            interactive_threads = Base.Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = EventLoops.event_loop_new()
+
+                run_res = EventLoops.event_loop_run!(el)
+                @test run_res === nothing
+
+                read_end = nothing
+                write_end = nothing
+                try
+                    read_end, write_end = Sockets.pipe_create()
+
+                    subscription_task = _schedule_event_loop_task(
+                        el,
+                        () -> begin
+                            EventLoops.event_loop_subscribe_to_io_events!(
+                                el,
+                                read_end.io_handle,
+                                Int(EventLoops.IoEventType.READABLE),
+                                (loop, handle, events, data) -> nothing,
+                                nothing,
+                            )
+                            @test read_end.io_handle.additional_data != C_NULL
+                            @test read_end.io_handle.additional_ref isa EventLoops.EpollEventHandleData
+                            stored_ptr = read_end.io_handle.additional_data
+                            stored_ref = read_end.io_handle.additional_ref
+                            @test unsafe_pointer_to_objref(stored_ptr) === stored_ref
+                            return nothing
+                        end;
+                        type_tag = "epoll_subscription_payload_capture",
+                    )
+                    @test _wait_for_channel(subscription_task)
+
+                    unsubscribe_task = _schedule_event_loop_task(
+                        el,
+                        () -> begin
+                            EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                            return nothing
+                        end;
+                        type_tag = "epoll_subscription_payload_release",
+                    )
+                    @test _wait_for_channel(unsubscribe_task)
+
+                    @test read_end.io_handle.additional_data == C_NULL
+                    @test read_end.io_handle.additional_ref === nothing
+                finally
+                    read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                    write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+                    EventLoops.event_loop_destroy!(el)
+                end
+            end
+        end
+    end
+
     @testset "Event loop writable event on subscribe" begin
         if Sys.iswindows()
             @test true
