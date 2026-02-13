@@ -13,6 +13,11 @@ function wait_for_flag(flag; timeout_s::Float64 = 5.0)
     return false
 end
 
+function ci_debug_log(msg::AbstractString)
+    println("[CI DEBUG] $(msg)")
+    flush(stdout)
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -310,6 +315,7 @@ end
             return
         end
         @test EventLoops.event_loop_run!(el_val) === nothing
+        ci_debug_log("ipv4 stream: event loop running")
 
         opts = Sockets.SocketOptions(;
             type = Sockets.SocketType.STREAM,
@@ -323,7 +329,9 @@ end
 
         local server_socket
         try
+            ci_debug_log("ipv4 stream: socket_init(server) start")
             server_socket = Sockets.socket_init(opts)
+            ci_debug_log("ipv4 stream: socket_init(server) done")
         catch e
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
@@ -338,7 +346,9 @@ end
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
             try
+                ci_debug_log("ipv4 stream: socket_bind(server) start")
                 Sockets.socket_bind(server_socket, bind_opts)
+                ci_debug_log("ipv4 stream: socket_bind(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
@@ -346,7 +356,9 @@ end
                 return
             end
             try
+                ci_debug_log("ipv4 stream: socket_listen(server) start")
                 Sockets.socket_listen(server_socket, 1024)
+                ci_debug_log("ipv4 stream: socket_listen(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
@@ -354,10 +366,13 @@ end
                 return
             end
 
+            ci_debug_log("ipv4 stream: get_bound_address(server) start")
             bound = Sockets.socket_get_bound_address(server_socket)
+            ci_debug_log("ipv4 stream: get_bound_address(server) done")
             @test bound isa Sockets.SocketEndpoint
             port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
+                ci_debug_log("ipv4 stream: bound port is 0, aborting subtest")
                 return
             end
 
@@ -451,16 +466,24 @@ end
                 end),
             )
 
+            ci_debug_log("ipv4 stream: socket_connect(start)")
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+            ci_debug_log("ipv4 stream: waiting connect_done")
             @test wait_for_flag(connect_done)
+            ci_debug_log("ipv4 stream: wait connect_done complete")
             @test connect_err[] == Reseau.AWS_OP_SUCCESS
+            ci_debug_log("ipv4 stream: waiting write_done")
             @test wait_for_flag(write_done)
+            ci_debug_log("ipv4 stream: wait write_done complete")
             @test write_err[] == Reseau.AWS_OP_SUCCESS
+            ci_debug_log("ipv4 stream: waiting read_done")
             @test wait_for_flag(read_done)
+            ci_debug_log("ipv4 stream: wait read_done complete")
             @test accept_err[] == Reseau.AWS_OP_SUCCESS
             @test read_err[] == Reseau.AWS_OP_SUCCESS
             @test payload[] == "ping"
         finally
+            ci_debug_log("ipv4 stream: cleanup start")
             if client_socket !== nothing
                 Sockets.socket_cleanup!(client_socket)
             end
@@ -489,7 +512,9 @@ end
 
         local server_socket
         try
+            ci_debug_log("ipv4 udp: socket_init(server) start")
             server_socket = Sockets.socket_init(opts_udp)
+            ci_debug_log("ipv4 udp: socket_init(server) done")
         catch e
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
@@ -502,7 +527,9 @@ end
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
             try
+                ci_debug_log("ipv4 udp: socket_bind(server) start")
                 Sockets.socket_bind(server_socket, bind_opts)
+                ci_debug_log("ipv4 udp: socket_bind(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
@@ -510,13 +537,17 @@ end
                 return
             end
 
+            ci_debug_log("ipv4 udp: get_bound_address(server) start")
             bound = Sockets.socket_get_bound_address(server_socket)
+            ci_debug_log("ipv4 udp: get_bound_address(server) done")
             @test bound isa Sockets.SocketEndpoint
             port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
+                ci_debug_log("ipv4 udp: bound port is 0, aborting subtest")
                 return
             end
 
+            ci_debug_log("ipv4 udp: socket_init(client) start")
             client = Sockets.socket_init(opts_udp)
             client_socket = client isa Sockets.Socket ? client : nothing
             @test client_socket !== nothing
@@ -524,14 +555,17 @@ end
                 return
             end
 
+            ci_debug_log("ipv4 udp: socket_connect(client) start")
             connect_opts = Sockets.SocketConnectOptions(
                 Sockets.SocketEndpoint("127.0.0.1", port);
                 event_loop = el_val,
                 on_connection_result = Reseau.EventCallable(err -> nothing),
             )
 
+            ci_debug_log("ipv4 udp: socket_connect call")
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
         finally
+            ci_debug_log("ipv4 udp: cleanup start")
             if client_socket !== nothing
                 Sockets.socket_cleanup!(client_socket)
             end
@@ -557,7 +591,9 @@ end
 
         local server_socket
         try
+            ci_debug_log("ipv6 stream: socket_init(server) start")
             server_socket = Sockets.socket_init(opts6)
+            ci_debug_log("ipv6 stream: socket_init(server) done")
         catch e
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
@@ -572,18 +608,25 @@ end
         try
             bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("::1", 0))
             try
+                ci_debug_log("ipv6 stream: socket_bind(server) start")
                 Sockets.socket_bind(server_socket, bind_opts)
+                ci_debug_log("ipv6 stream: socket_bind(server) done")
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
                 return
             end
+            ci_debug_log("ipv6 stream: socket_listen(server) start")
             @test Sockets.socket_listen(server_socket, 1024) === nothing
+            ci_debug_log("ipv6 stream: socket_listen(server) done")
 
+            ci_debug_log("ipv6 stream: get_bound_address(server) start")
             bound = Sockets.socket_get_bound_address(server_socket)
+            ci_debug_log("ipv6 stream: get_bound_address(server) done")
             @test bound isa Sockets.SocketEndpoint
             port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
             if port == 0
+                ci_debug_log("ipv6 stream: bound port is 0, aborting subtest")
                 return
             end
 
@@ -617,11 +660,15 @@ end
                 end),
             )
 
+            ci_debug_log("ipv6 stream: socket_connect(start)")
             @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+            ci_debug_log("ipv6 stream: waiting connect_done")
             @test wait_for_flag(connect_done)
+            ci_debug_log("ipv6 stream: wait connect_done complete")
             @test connect_err[] == Reseau.AWS_OP_SUCCESS
             @test accept_err[] == Reseau.AWS_OP_SUCCESS
         finally
+            ci_debug_log("ipv6 stream: cleanup start")
             if client_socket !== nothing
                 Sockets.socket_cleanup!(client_socket)
             end
