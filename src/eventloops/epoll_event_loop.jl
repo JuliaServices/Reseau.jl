@@ -640,12 +640,35 @@
         impl = event_loop.impl_data
 
         if !impl.should_process_task_pre_queue
-            _event_loop_stop_trace_queue(
-                event_loop,
-                "process-pre-queue-skip",
-                string("q_len=", string(length(impl.task_pre_queue)), " pending=", string(impl.should_process_task_pre_queue)),
-            )
-            return nothing
+            lock(impl.task_pre_queue_mutex)
+            try
+                if isempty(impl.task_pre_queue)
+                    _event_loop_stop_trace_queue(
+                        event_loop,
+                        "process-pre-queue-skip",
+                        string(
+                            "q_len=",
+                            string(length(impl.task_pre_queue)),
+                            " pending=",
+                            string(impl.should_process_task_pre_queue),
+                        ),
+                    )
+                    return nothing
+                end
+
+                _event_loop_stop_trace_queue(
+                    event_loop,
+                    "process-pre-queue-fallback",
+                    string(
+                        "q_len=",
+                        string(length(impl.task_pre_queue)),
+                        " pending=",
+                        string(impl.should_process_task_pre_queue),
+                    ),
+                )
+            finally
+                unlock(impl.task_pre_queue_mutex)
+            end
         end
 
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
