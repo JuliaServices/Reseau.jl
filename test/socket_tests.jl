@@ -1124,7 +1124,9 @@ end
             end),
         )
 
+        ci_debug_log("socket connect read write: socket_connect")
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        ci_debug_log("socket connect read write: socket_connect done")
         @test ci_wait_for_flag("socket connect read write: wait connect_done", connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test ci_wait_for_flag("socket connect read write: wait write_done", write_done)
@@ -1134,6 +1136,7 @@ end
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
+        ci_debug_log("socket connect read write: cleanup start")
         if client_socket !== nothing
             ci_with_timeout("socket connect read write: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
             if !ci_with_timeout("socket connect read write: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
