@@ -65,6 +65,7 @@
 
     @wrap_thread_fn function _epoll_event_loop_thread_entry()
         event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
+        impl = event_loop.impl_data
         try
             Base.task_local_storage(
                 () -> epoll_event_loop_thread(event_loop),
@@ -72,9 +73,17 @@
                 event_loop,
             )
         catch e
-            Core.println("epoll event loop thread errored")
+            @atomic event_loop.running = false
+            @atomic impl.should_stop = true
+            @atomic impl.running_thread_id = UInt64(0)
+            logf(
+                LogLevel.ERROR,
+                LS_IO_EVENT_LOOP,
+                "epoll event loop thread errored: $e",
+            )
         finally
-            impl = event_loop.impl_data
+            @atomic impl.running_thread_id = UInt64(0)
+            @atomic impl.should_process_task_pre_queue = false
             notify(impl.completion_event)
             managed_thread_finished!()
         end
@@ -291,8 +300,10 @@
         impl = event_loop.impl_data
 
         _event_loop_stop_trace(
-            "waiting for stop completion on running=" * string(@atomic event_loop.running) *
-            " running_id=" * string(@atomic impl.running_thread_id),
+            "waiting for stop completion on running=" *
+            string(@atomic event_loop.running) *
+            " running_id=" *
+            string(@atomic impl.running_thread_id),
         )
         if !@atomic event_loop.running
             @atomic impl.running_thread_id = UInt64(0)
@@ -455,6 +466,7 @@
         caller_thread_id = _event_loop_thread_id()
         task_local_loop = Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing)
         impl = event_loop.impl_data
+
         if task_local_loop === event_loop
             _event_loop_trace_thread_decision(
                 event_loop,
@@ -882,13 +894,13 @@
                 UInt64(0)
             end
 
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
-            tracing_task_begin(tracing_event_loop_run_tasks)
-            try
-                task_scheduler_run_all!(impl.scheduler, now_ns)
-            finally
-                tracing_task_end(tracing_event_loop_run_tasks)
-            end
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
+        tracing_task_begin(tracing_event_loop_run_tasks)
+        try
+            task_scheduler_run_all!(impl.scheduler, now_ns)
+        finally
+            tracing_task_end(tracing_event_loop_run_tasks)
+        end
 
             # Calculate next timeout
             use_default_timeout = false

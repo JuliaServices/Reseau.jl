@@ -1452,6 +1452,13 @@ end
             run_res = EventLoops.event_loop_run!(el)
             @test run_res === nothing
 
+            start_ns = Base.time_ns()
+            @test EventLoops.event_loop_stop!(el) === nothing
+            @test _wait_for_loop_stop(el; timeout_ns = 3_000_000_000)
+            @test Base.time_ns() - start_ns < 2_000_000_000
+
+            @test EventLoops.event_loop_run!(el) === nothing
+
             done1 = Channel{Bool}(1)
             task1 = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 if Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY

@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.3"
+julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "5161651ccad8168f11dafa414897e86ec255adbd"
+project_hash = "d86b3c0d2270d1da912a5f9ef6668f7f12213e3a"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -79,13 +79,10 @@ deps = ["Base64", "Dates", "EnumX", "LibAwsCal", "LibAwsCommon", "Libdl", "Print
 path = "."
 uuid = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 version = "1.1.1"
+weakdeps = ["aws_lc_jll", "s2n_tls_jll"]
 
     [deps.Reseau.extensions]
     ReseauS2NExt = ["aws_lc_jll", "s2n_tls_jll"]
-
-    [deps.Reseau.weakdeps]
-    aws_lc_jll = "97bc56f7-b146-5eb0-9ba6-f74d48471a93"
-    s2n_tls_jll = "cddc5d3d-934d-5d3a-9747-62fc12ea3f48"
 
 [[deps.SHA]]
 uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
@@ -122,3 +119,15 @@ deps = ["Artifacts", "JLLWrappers", "Libdl"]
 git-tree-sha1 = "a759cb9bf456ad792cc7898a81ae333cce9ef02a"
 uuid = "73048d1d-b8c4-5092-a58d-866c5e8d1e50"
 version = "0.12.6+0"
+
+[[deps.aws_lc_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "47d6e40cceab2ad91022abe43562bc784eb02262"
+uuid = "97bc56f7-b146-5eb0-9ba6-f74d48471a93"
+version = "1.67.0+0"
+
+[[deps.s2n_tls_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "ad2a7a9e19221b2e4b6a84118b19b34fd30df904"
+uuid = "cddc5d3d-934d-5d3a-9747-62fc12ea3f48"
+version = "1.7.0+0"

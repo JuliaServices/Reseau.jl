@@ -473,7 +473,9 @@ function task_run!(task::ScheduledTask, status::TaskStatus.T)
         LogLevel.TRACE,
         LS_COMMON_TASK_SCHEDULER,string("id=%s: Running %s task with %s status", " ", string(objectid(task)), " ", task.type_tag, " ", task_status_to_string(status), " ", ))
     task.scheduled = false
+
     task.fn(UInt8(status))
+
     return nothing
 end
 

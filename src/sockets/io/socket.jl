@@ -336,8 +336,8 @@ end
 end
 
 @inline function _socket_close_loop_running(event_loop::EventLoop)::Bool
-    @atomic(event_loop.running) || return false
     impl = event_loop.impl_data
+    @atomic(event_loop.running) || return false
     return @atomic(impl.running_thread_id) != 0
 end
 
@@ -389,10 +389,6 @@ end
     return nothing
 end
 
-@inline function _socket_is_stopping(event_loop::EventLoop)::Bool
-    return @atomic event_loop.should_stop
-end
-
 function socket_close(socket::Socket)::Nothing
     socket.impl === nothing && return nothing
 
@@ -404,30 +400,6 @@ function socket_close(socket::Socket)::Nothing
             task_scheduled = false,
         )
         socket_close_impl(socket.impl, socket)
-        return nothing
-    end
-
-    if _socket_is_stopping(event_loop)
-        _socket_close_debug(
-            socket,
-            "cross-thread-stop-short-circuit";
-            task_scheduled = false,
-        )
-        close_error = nothing
-        try
-            socket_close_impl(socket.impl, socket)
-        catch e
-            close_error = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
-        end
-
-        if close_error !== nothing
-            logf(
-                LogLevel.WARN,
-                LS_IO_SOCKET,
-                "socket close short-circuited due shutdown with error code=" * string(close_error.code),
-            )
-        end
-
         return nothing
     end
 
