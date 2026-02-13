@@ -67,11 +67,7 @@
         event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
         impl = event_loop.impl_data
         try
-            Base.task_local_storage(
-                () -> epoll_event_loop_thread(event_loop),
-                :_RESEAU_EVENT_LOOP_THREAD,
-                event_loop,
-            )
+            epoll_event_loop_thread(event_loop)
         catch e
             @atomic event_loop.running = false
             @atomic impl.should_stop = true
@@ -464,19 +460,7 @@
     # Check if on event thread
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         caller_thread_id = _event_loop_thread_id()
-        task_local_loop = Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing)
         impl = event_loop.impl_data
-
-        if task_local_loop === event_loop
-            _event_loop_trace_thread_decision(
-                event_loop,
-                "task-local-match",
-                Int(caller_thread_id),
-                Int(@atomic impl.running_thread_id),
-                true,
-            )
-            return true
-        end
 
         if !@atomic event_loop.running
             _event_loop_trace_thread_decision(
