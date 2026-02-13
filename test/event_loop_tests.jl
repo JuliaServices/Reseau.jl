@@ -1763,6 +1763,52 @@ end
         end
     end
 
+    @testset "Epoll cross-thread burst scheduling remains reliable" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            try
+                task_count = 256
+                executed = Base.Threads.Atomic{Int}(0)
+                tasks = Vector{Reseau.ScheduledTask}()
+
+                for _ in 1:task_count
+                    push!(
+                        tasks,
+                        Reseau.ScheduledTask(
+                            Reseau.TaskFn(status -> begin
+                                if Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY
+                                    Base.Threads.atomic_add!(executed, 1)
+                                end
+                                return nothing
+                            end),
+                            type_tag = "epoll_burst_task",
+                        ),
+                    )
+                end
+
+                Threads.@spawn begin
+                    for task in tasks
+                        EventLoops.event_loop_schedule_task_now!(el, task)
+                    end
+                end
+
+                deadline = Base.time_ns() + 5_000_000_000
+                while Base.Threads.atomic_load(executed) < task_count && Base.time_ns() < deadline
+                    yield()
+                end
+                @test Base.Threads.atomic_load(executed) == task_count
+            finally
+                EventLoops.event_loop_destroy!(el)
+            end
+        end
+    end
+
     @testset "Epoll duplicate scheduling preserves explicit future timestamp" begin
         if !Sys.islinux()
             @test true

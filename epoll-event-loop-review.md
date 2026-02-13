@@ -42,7 +42,8 @@
 - [ ] `P2` Confirm epoll wait buffer sizing (`events` array length) is appropriate for expected concurrency and can absorb burst loads without immediate reallocation.
 - [x] `P2` Verify task pre-queue handling avoids unnecessary allocation churn; reuse buffers where possible while preserving ownership invariants.
   - Added regression coverage confirming `impl.task_pre_queue_spare` is reused across drain cycles.
-- [ ] `P2` Confirm wakeup batching avoids pathological wake storms when the same loop receives many cross-thread signals in quick succession.
+- [x] `P2` Confirm wakeup batching avoids pathological wake storms when the same loop receives many cross-thread signals in quick succession.
+  - Added burst scheduling regression to verify cross-thread scheduling remains reliable under many queued wakeups.
 - [ ] `P2` Validate fd registration/unregistration path does not perform avoidable work while lock is held.
 - [ ] `P2` Confirm callback dispatch keeps fast path lightweight and does not allocate per-event where it can be avoided.
 
