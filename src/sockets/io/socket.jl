@@ -329,6 +329,26 @@ function socket_stop_accept(socket::Socket)::Nothing
     return socket_stop_accept_impl(socket.impl, socket)
 end
 
+# Polling-based wait for a future with a hard timeout.
+@inline function _wait_for_future_completion(fut::Future, timeout_ns::Int64)
+    timeout_ns <= 0 && (wait(fut); return true)
+    start = Base.time_ns()
+    iscomplete = () -> (@atomic(fut.set) != Int8(0))
+    while (Base.time_ns() - start) < timeout_ns
+        iscomplete() && return true
+        sleep(0.001)
+    end
+    return iscomplete()
+end
+
+@inline function _socket_close_timeout_ns()
+    return try
+        parse(UInt64, get(ENV, "RESEAU_SOCKET_CLOSE_TIMEOUT_NS", "1_000_000_000"))
+    catch
+        UInt64(1_000_000_000)
+    end
+end
+
 function socket_close(socket::Socket)::Nothing
     socket.impl === nothing && return nothing
 
@@ -341,20 +361,83 @@ function socket_close(socket::Socket)::Nothing
     # `socket_close_impl` may need to unsubscribe from IO events and tear down
     # event-loop-owned resources. Always do that work on the socket's event loop thread.
     fut = Future{Nothing}()
+    close_lock = ReentrantLock()
+    close_started = Ref(false)
+    fut_notified = Ref(false)
+
+    notify_future = function(error::Union{Nothing, Exception})
+        notify_allowed = false
+        lock(close_lock) do
+            if !fut_notified[]
+                fut_notified[] = true
+                notify_allowed = true
+            end
+        end
+        notify_allowed || return
+        if error === nothing
+            notify(fut, nothing)
+        else
+            notify(fut, error isa ReseauError ? error : ReseauError(ERROR_UNKNOWN))
+        end
+    end
+
     task = ScheduledTask(
         TaskFn(function(status)
             try
-                socket_close_impl(socket.impl, socket)
-                notify(fut, nothing)
+                should_close = false
+                lock(close_lock) do
+                    if !close_started[]
+                        close_started[] = true
+                        should_close = true
+                    end
+                end
+
+                if should_close
+                    socket_close_impl(socket.impl, socket)
+                end
+                notify_future(nothing)
             catch e
-                notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
+                notify_future(e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
             end
             return nothing
         end);
         type_tag = "socket_close_on_event_loop",
     )
     event_loop_schedule_task_now!(event_loop, task)
-    wait(fut)
+
+    if !_wait_for_future_completion(fut, Int64(_socket_close_timeout_ns()))
+        should_close = false
+        lock(close_lock) do
+            if !close_started[]
+                close_started[] = true
+                should_close = true
+            end
+        end
+
+        if should_close
+            fallback_error = nothing
+            try
+                socket_close_impl(socket.impl, socket)
+            catch e
+                fallback_error = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
+            end
+            notify_future(fallback_error)
+            if !_wait_for_future_completion(fut, 100_000_000)
+                logf(
+                    LogLevel.WARN,
+                    LS_IO_SOCKET,
+                    "socket close timed out in event-loop path and fallback failed to complete"
+                )
+            end
+        else
+            logf(
+                LogLevel.WARN,
+                LS_IO_SOCKET,
+                "socket close timed out while waiting for event-loop callback"
+            )
+            _wait_for_future_completion(fut, 100_000_000)
+        end
+    end
     return nothing
 end
 
