@@ -39,7 +39,8 @@
 - [ ] `P2` Check finalization behavior for loop/task objects: no reliance on finalizers for correctness during normal shutdown.
 
 ### Performance
-- [ ] `P2` Confirm epoll wait buffer sizing (`events` array length) is appropriate for expected concurrency and can absorb burst loads without immediate reallocation.
+- [x] `P2` Confirm epoll wait buffer sizing (`events` array length) is appropriate for expected concurrency and can absorb burst loads without immediate reallocation.
+  - Added adaptive epoll wait-capacity growth (`event_wait_capacity`) with a Linux test that pushes a 256-event readable burst and verifies all callbacks are observed and capacity grows to handle load.
 - [x] `P2` Verify task pre-queue handling avoids unnecessary allocation churn; reuse buffers where possible while preserving ownership invariants.
   - Added regression coverage confirming `impl.task_pre_queue_spare` is reused across drain cycles.
 - [x] `P2` Confirm wakeup batching avoids pathological wake storms when the same loop receives many cross-thread signals in quick succession.

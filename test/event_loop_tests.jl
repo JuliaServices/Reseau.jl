@@ -1809,6 +1809,82 @@ end
         end
     end
 
+    @testset "Epoll wait buffer grows for large burst readiness" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            read_ends = Vector{Sockets.PipeReadEnd}()
+            write_ends = Vector{Sockets.PipeWriteEnd}()
+            events_seen = Base.Threads.Atomic{Int}(0)
+
+            try
+                impl = el.impl_data
+                burst_count = 256
+                payload_byte = Ref{UInt8}(0x31)
+
+                for _ in 1:burst_count
+                    read_end, write_end = Sockets.pipe_create()
+                    push!(read_ends, read_end)
+                    push!(write_ends, write_end)
+
+                    callback = let fd = read_end.io_handle.fd
+                        EventLoops.EventCallable(function(events::Int)
+                            if (events & Int(EventLoops.IoEventType.READABLE)) == 0
+                                return nothing
+                            end
+                            read_buf = Ref{UInt8}(0)
+                            @ccall read(
+                                fd::Cint,
+                                read_buf::Ptr{UInt8},
+                                sizeof(UInt8)::Csize_t,
+                            )::Cssize_t
+                            Base.Threads.atomic_add!(events_seen, 1)
+                            return nothing
+                        end)
+                    end
+
+                    EventLoops.event_loop_subscribe_to_io_events!(
+                        el,
+                        read_end.io_handle,
+                        Int(EventLoops.IoEventType.READABLE),
+                        callback,
+                    )
+                end
+
+                for write_end in write_ends
+                    write_res = @ccall write(
+                        write_end.io_handle.fd::Cint,
+                        payload_byte::Ptr{UInt8},
+                        sizeof(UInt8)::Csize_t,
+                    )::Cssize_t
+                    @test write_res == 1
+                end
+
+                deadline = Base.time_ns() + 5_000_000_000
+                while Base.Threads.atomic_load(events_seen) < burst_count && Base.time_ns() < deadline
+                    yield()
+                end
+
+                @test Base.Threads.atomic_load(events_seen) == burst_count
+                @test impl.event_wait_capacity >= burst_count
+            finally
+                EventLoops.event_loop_destroy!(el)
+
+                for read_end in read_ends
+                    Sockets.pipe_read_end_close!(read_end)
+                end
+                for write_end in write_ends
+                    Sockets.pipe_write_end_close!(write_end)
+                end
+            end
+        end
+    end
+
     @testset "Epoll duplicate scheduling preserves explicit future timestamp" begin
         if !Sys.islinux()
             @test true

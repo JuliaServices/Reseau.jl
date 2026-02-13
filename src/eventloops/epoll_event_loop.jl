@@ -710,11 +710,18 @@ end
         # Cal cleanup is handled in the thread entry finally block
 
         timeout = DEFAULT_TIMEOUT_MS
-        events = Memory{EpollEvent}(undef, MAX_EVENTS)
+        event_wait_capacity = impl.event_wait_capacity
+        events = Memory{EpollEvent}(undef, event_wait_capacity)
 
         logf(
             LogLevel.INFO,
-            LS_IO_EVENT_LOOP,string("default timeout %d ms, and max events to process per tick %d", " ", timeout, " ", MAX_EVENTS, " ", ))
+            LS_IO_EVENT_LOOP,
+            "default timeout ",
+            timeout,
+            " ms, and max events to process per tick ",
+            event_wait_capacity,
+            " ",
+        )
 
         while impl.should_continue
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("waiting for a maximum of %d ms", " ", timeout))
@@ -723,7 +730,7 @@ end
             event_count = @ccall gc_safe = true epoll_wait(
                 impl.epoll_fd::Cint,
                 events::Ptr{EpollEvent},
-                MAX_EVENTS::Cint,
+                event_wait_capacity::Cint,
                 timeout::Cint,
             )::Cint
             if event_count == -1
@@ -736,8 +743,21 @@ end
                         LS_IO_EVENT_LOOP,
                         "epoll_wait failed while waiting for events: errno ", err, " ",
                     )
-                    event_count = 0
-                end
+                event_count = 0
+            end
+
+            if event_count == event_wait_capacity && event_wait_capacity < MAX_EVENTS
+                event_wait_capacity = min(event_wait_capacity << 1, MAX_EVENTS)
+                impl.event_wait_capacity = event_wait_capacity
+                events = Memory{EpollEvent}(undef, event_wait_capacity)
+                logf(
+                    LogLevel.TRACE,
+                    LS_IO_EVENT_LOOP,
+                    "expanded epoll event wait capacity to ",
+                    event_wait_capacity,
+                    " ",
+                )
+            end
             end
 
             event_loop_register_tick_start!(event_loop)

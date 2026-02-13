@@ -38,8 +38,9 @@
     const EFD_NONBLOCK = Cint(0o4000)
 
     # Configuration constants
+    const MAX_EVENTS_INITIAL = 128
     const DEFAULT_TIMEOUT_MS = 100 * 1000  # 100 seconds in milliseconds
-    const MAX_EVENTS = 100
+    const MAX_EVENTS = 1024
     const EWOULDBLOCK_RETRY_LIMIT = 32
 
     # Pipe fd indices
@@ -87,6 +88,7 @@
         stop_task::Union{Nothing, ScheduledTask}
         @atomic stop_task_scheduled::Bool
         epoll_fd::Int32
+        event_wait_capacity::Int
         should_process_task_pre_queue::Bool
         should_continue::Bool
         use_eventfd::Bool  # true if using eventfd, false if using pipe
@@ -109,6 +111,7 @@
             nothing,
             false,
             Int32(-1),
+            MAX_EVENTS_INITIAL,
             false,
             false,
             false,
