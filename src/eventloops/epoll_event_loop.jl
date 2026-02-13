@@ -446,18 +446,18 @@
     # Check if on event thread
     function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
         task_local_loop = Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing)
+        impl = event_loop.impl_data
         if task_local_loop === event_loop
             _event_loop_trace_thread_decision(
                 event_loop,
                 "task-local-match",
                 Int(Base.Threads.threadid()),
-                Int(@atomic event_loop.impl_data.running_thread_id),
+                Int(@atomic impl.running_thread_id),
                 true,
             )
             return true
         end
 
-        impl = event_loop.impl_data
         if !@atomic event_loop.running
             _event_loop_trace_thread_decision(
                 event_loop,
