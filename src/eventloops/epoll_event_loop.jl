@@ -38,6 +38,24 @@
         return nothing
     end
 
+    @inline function _event_loop_stop_trace_queue(
+        event_loop::EventLoop,
+        action::AbstractString,
+        payload::AbstractString,
+    )
+        _EVENT_LOOP_TRACE_STOP || return nothing
+        Core.println(
+            "[event-loop-stop-queue] ",
+            "loop=",
+            string(UInt64(objectid(event_loop))),
+            " action=",
+            action,
+            " ",
+            payload,
+        )
+        return nothing
+    end
+
     @wrap_thread_fn function _epoll_event_loop_thread_entry()
         event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
         try
@@ -294,14 +312,34 @@
 
         task.timestamp = run_at_nanos
         task.scheduled = true
+        written::Cssize_t = 0
 
         lock(impl.task_pre_queue_mutex)
         try
             is_first_task = isempty(impl.task_pre_queue)
             push!(impl.task_pre_queue, task)
+            needs_signal = is_first_task || !impl.should_process_task_pre_queue
 
-            # If the list was not empty, we already have a pending read on the pipe/eventfd
-            if is_first_task
+            _event_loop_stop_trace_queue(
+                event_loop,
+                "queue-push",
+                string(
+                    "task=",
+                    task.type_tag,
+                    " first=",
+                    string(is_first_task),
+                    " pending=",
+                    string(impl.should_process_task_pre_queue),
+                    " needs_signal=",
+                    string(needs_signal),
+                    " q_len=",
+                    string(length(impl.task_pre_queue)),
+                    " write_fd=",
+                    string(impl.write_task_handle.fd),
+                ),
+            )
+
+            if needs_signal
                 logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
                 # Write to signal the event thread
                 counter = Ref(UInt64(1))
@@ -315,6 +353,19 @@
                         continue
                     end
                     break
+                end
+                if written == -1
+                    _event_loop_stop_trace_queue(
+                        event_loop,
+                        "wake-write-failed",
+                        string("errno=", string(Base.Libc.errno()), " fd=", string(impl.write_task_handle.fd)),
+                    )
+                else
+                    _event_loop_stop_trace_queue(
+                        event_loop,
+                        "wake-write-ok",
+                        string("count=", string(written), " fd=", string(impl.write_task_handle.fd)),
+                    )
                 end
             end
         finally
@@ -569,6 +620,16 @@
 
         if (events & Int(IoEventType.READABLE)) != 0
             impl.should_process_task_pre_queue = true
+            _event_loop_stop_trace_queue(
+                event_loop,
+                "on-tasks-to-schedule",
+                string(
+                    "events=",
+                    string(events),
+                    " pending=",
+                    string(impl.should_process_task_pre_queue),
+                ),
+            )
         end
 
         return nothing
@@ -579,6 +640,11 @@
         impl = event_loop.impl_data
 
         if !impl.should_process_task_pre_queue
+            _event_loop_stop_trace_queue(
+                event_loop,
+                "process-pre-queue-skip",
+                string("q_len=", string(length(impl.task_pre_queue)), " pending=", string(impl.should_process_task_pre_queue)),
+            )
             return nothing
         end
 
@@ -592,10 +658,20 @@
         lock(impl.task_pre_queue_mutex)
         try
             if !impl.should_process_task_pre_queue
+                _event_loop_stop_trace_queue(
+                    event_loop,
+                    "process-pre-queue-race",
+                    string("q_len=", string(length(impl.task_pre_queue)), " pending=", string(impl.should_process_task_pre_queue)),
+                )
                 return nothing
             end
 
             impl.should_process_task_pre_queue = false
+            _event_loop_stop_trace_queue(
+                event_loop,
+                "process-pre-queue-drain-start",
+                string("q_len=", string(length(impl.task_pre_queue))),
+            )
 
             # Drain the eventfd/pipe
             while true
@@ -613,6 +689,11 @@
         end
 
         # Schedule the tasks
+        _event_loop_stop_trace_queue(
+            event_loop,
+            "process-pre-queue-drain-done",
+            string("schedule_len=", string(length(tasks_to_schedule))),
+        )
         while !isempty(tasks_to_schedule)
             task = popfirst!(tasks_to_schedule)
             task === nothing && break
