@@ -335,6 +335,11 @@ end
     return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 end
 
+@inline function _socket_close_loop_running(event_loop::EventLoop)::Bool
+    @atomic(event_loop.running) || return false
+    return @atomic(event_loop.impl_data.running_thread_id) != 0
+end
+
 @noinline function _socket_close_debug(
     socket::Socket,
     stage::AbstractString;
@@ -348,6 +353,9 @@ end
     event_loop = socket.event_loop
     running = event_loop === nothing ? false : @atomic event_loop.running
     should_stop = event_loop === nothing ? false : @atomic event_loop.should_stop
+    running_thread_id = event_loop === nothing ? 0 : @atomic event_loop.impl_data.running_thread_id
+    thread_joined_to = event_loop === nothing ? 0 : @atomic event_loop.impl_data.thread_joined_to
+    foreign_thread_id = event_loop === nothing ? 0 : event_loop.thread === nothing ? 0 : event_loop.thread.id
     on_event_loop_thread = event_loop === nothing ? false : event_loop_thread_is_callers_thread(event_loop)
     logf(
         LogLevel.INFO,
@@ -357,6 +365,9 @@ end
             ", state=", string(Int(socket.state)),
             ", running=", string(running),
             ", should_stop=", string(should_stop),
+            ", running_thread_id=", string(running_thread_id),
+            ", thread_joined_to=", string(thread_joined_to),
+            ", foreign_thread_id=", string(foreign_thread_id),
             ", caller_thread=", string(Base.Threads.threadid()),
             ", on_event_loop_thread=", string(on_event_loop_thread),
             ", task_scheduled=", string(task_scheduled),
@@ -377,13 +388,22 @@ function socket_close(socket::Socket)::Nothing
     socket.impl === nothing && return nothing
 
     event_loop = socket.event_loop
-    if event_loop === nothing || !(@atomic event_loop.running) || event_loop_thread_is_callers_thread(event_loop)
+    if event_loop === nothing || !(_socket_close_loop_running(event_loop)) || event_loop_thread_is_callers_thread(event_loop)
+        _socket_close_debug(
+            socket,
+            "close-path-decision";
+            task_scheduled = false,
+        )
         socket_close_impl(socket.impl, socket)
         return nothing
     end
 
     if _socket_is_stopping(event_loop)
-        _socket_close_debug(socket, "cross-thread-stop-short-circuit"; task_scheduled = false)
+        _socket_close_debug(
+            socket,
+            "cross-thread-stop-short-circuit";
+            task_scheduled = false,
+        )
         close_error = nothing
         try
             socket_close_impl(socket.impl, socket)
@@ -450,11 +470,18 @@ function socket_close(socket::Socket)::Nothing
     )
     event_loop_schedule_task_now!(event_loop, task)
 
-    _socket_close_debug(socket, "waiting-cross-thread-completion"; task_scheduled = true)
+    _socket_close_debug(
+        socket,
+        "waiting-cross-thread-completion";
+        task_scheduled = true,
+    )
     close_status = take!(close_result)
     _socket_close_debug(
         socket,
-        "cross-thread-complete"; task_scheduled = true, task_invoked = true, task_done = true,
+        "cross-thread-complete";
+        task_scheduled = true,
+        task_invoked = true,
+        task_done = true,
     )
 
     if (result = close_status) !== nothing

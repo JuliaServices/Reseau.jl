@@ -2261,6 +2261,99 @@ end
     end
 end
 
+@testset "socket_close after event loop thread crash returns promptly" begin
+    if !Sys.islinux() || Threads.nthreads(:interactive) <= 1
+        @test true
+    else
+        el = EventLoops.event_loop_new()
+        el_val = el isa EventLoops.EventLoop ? el : nothing
+        @test el_val !== nothing
+        if el_val === nothing
+            @test true
+        else
+            @test EventLoops.event_loop_run!(el_val) === nothing
+
+            if Sys.isapple()
+                endpoint = Sockets.SocketEndpoint()
+                Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+                domain = Sockets.SocketDomain.LOCAL
+            else
+                endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
+                domain = Sockets.SocketDomain.IPV4
+            end
+            opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = domain)
+            sock = Sockets.socket_init(opts)
+            socket_val = sock isa Sockets.Socket ? sock : nothing
+            @test socket_val !== nothing
+
+            if socket_val === nothing
+                EventLoops.event_loop_destroy!(el_val)
+                @test true
+            else
+                impl = el_val.impl_data
+                crash_done = Channel{Any}(1)
+                close_done = Channel{Any}(1)
+                close_call_completed = false
+                try
+                    @test Sockets.socket_bind(socket_val, Sockets.SocketBindOptions(endpoint)) === nothing
+                    @test Sockets.socket_assign_to_event_loop(socket_val, el_val) === nothing
+                    @test Sockets.socket_listen(socket_val, 1) === nothing
+
+                    EventLoops.event_loop_schedule_task_now!(
+                        el_val,
+                        Reseau.ScheduledTask(
+                            Reseau.TaskFn(status -> begin
+                                put!(crash_done, :triggered)
+                                throw(ErrorException("forced event-loop crash for socket close regression test"))
+                            end);
+                            type_tag = "socket_close_regression_crash_task",
+                        ),
+                    )
+
+                    crash_wait_deadline = Base.time_ns() + 2_000_000_000
+                    while !isready(crash_done) && Base.time_ns() < crash_wait_deadline
+                        sleep(0.01)
+                    end
+                    @test isready(crash_done)
+
+                    wait(impl.completion_event)
+                    @test isready(crash_done)
+
+                    Threads.@spawn begin
+                        try
+                            Sockets.socket_close(socket_val)
+                            put!(close_done, :ok)
+                        catch e
+                            put!(close_done, e)
+                        end
+                    end
+
+                    deadline = Base.time_ns() + 5_000_000_000
+                    while !isready(close_done) && Base.time_ns() < deadline
+                        sleep(0.01)
+                    end
+                    @test isready(close_done)
+                    close_result = take!(close_done)
+                    close_call_completed = true
+                    @test close_result === :ok
+                finally
+                    if !close_call_completed
+                        try
+                            Sockets.socket_close(socket_val)
+                        catch
+                            # ignore close failure from crash-path test cleanup
+                        end
+                    end
+                    if @atomic el_val.running
+                        EventLoops.event_loop_wait_for_stop_completion!(el_val)
+                    end
+                    EventLoops.event_loop_destroy!(el_val)
+                end
+            end
+        end
+    end
+end
+
 @testset "bind on zero port tcp ipv4" begin
     # Use LOCAL domain on macOS to get a POSIX socket (IPV4 → NW on macOS,
     # which doesn't expose resolved port from socket_get_bound_address)

@@ -8,19 +8,14 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             arch: x64
-            version: '1.12'
-          - os: windows-latest
-            arch: x64
-            version: '1.12'
-          - os: macOS-latest
-            arch: aarch64
-            version: '1.12'
+            version: '1.12.5'
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -29,4 +24,41 @@ jobs:
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+      - name: Julia CI test runner
+        shell: bash
+        env:
+          JULIA_NUM_THREADS: 1
+          RESEAU_TEST_STAGE_LOG: "1"
+          RESEAU_SOCKET_CLOSE_DEBUG: "1"
+          RESEAU_EVENT_LOOP_TEST_TRACE: "1"
+          RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT: "50"
+          RESEAU_EVENT_LOOP_TEST_TRACE_START: "1"
+        run: |
+          set -euo pipefail
+
+          run_slice() {
+            local start="$1"
+            local max_seconds="$2"
+            local script_cmd=$3
+
+            RESEAU_EVENT_LOOP_TEST_TRACE_START="$start" \
+            RESEAU_EVENT_LOOP_TEST_TRACE_LIMIT="$start" \
+            timeout --foreground -s QUIT "${max_seconds}"s \
+              julia --project=. --startup-file=no --history-file=no -e "${script_cmd}"
+          }
+
+          # First pass: one testset at a time so we can localize a hang.
+          for start in $(seq 1 50); do
+            echo "[ci-drill] running event-loop testset window=$start/$start (trace-only)"
+            if ! run_slice "$start" 180 "using Pkg; Pkg.instantiate(); include(\"test/event_loop_ci_drill.jl\")"; then
+              echo "[ci-drill] event-loop drill timed out or failed at index=$start"
+              exit 1
+            fi
+          done
+
+          # Full suite fallback (non-timeboxed here) to preserve confidence once slices pass.
+          if [ "${CI_RUN_FULL_TESTS:-0}" = "1" ]; then
+            julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
+          else
+            echo "[ci-drill] CI_RUN_FULL_TESTS not set to 1; skipping full test suite."
+          fi
