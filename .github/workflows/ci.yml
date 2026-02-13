@@ -73,8 +73,8 @@ jobs:
           echo "[ci-drill] running staged suite"
           for file in ${CI_STAGE_TESTS}; do
             echo "[ci-drill] stage start: ${file}"
-            if ! timeout --foreground -s QUIT "${CI_STAGE_TEST_TIMEOUT_SEC}"s \
-              RESEAU_TEST_FILE="${file}" julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); include("test/runtests_stage.jl")'; then
+            if ! RESEAU_TEST_FILE="${file}" timeout --foreground -s QUIT "${CI_STAGE_TEST_TIMEOUT_SEC}"s \
+              julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); include("test/runtests_stage.jl")'; then
               echo "[ci-drill] stage ${file} timed out or failed"
               exit 1
             fi
