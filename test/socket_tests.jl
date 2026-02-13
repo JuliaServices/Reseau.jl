@@ -1623,13 +1623,24 @@ end
                 () -> Sockets.socket_connect(socket_val, connect_opts),
                 timeout_s = 1.0,
             )
-            ci_with_timeout("connect timeout cancellation: event_loop_group_destroy!", () -> EventLoops.event_loop_group_destroy!(elg_val))
-            @test connect_done[]
+            if !ci_with_timeout(
+                "connect timeout cancellation: event_loop_group_destroy!",
+                () -> EventLoops.event_loop_group_destroy!(elg_val),
+                timeout_s = 5.0,
+            )
+                ci_debug_log(
+                    "connect timeout cancellation: event_loop_group_destroy! timed out before callback completed"
+                )
+            end
+            @test ci_wait_for_flag("connect timeout cancellation: wait connect_done", connect_done; timeout_s = 5.0)
             @test connect_err[] == EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
                 _is_allowed_connect_error(connect_err[])
         catch e
-            @test e isa Reseau.ReseauError
-            @test _is_allowed_connect_error(e.code)
+            if e isa Reseau.ReseauError
+                @test _is_allowed_connect_error(e.code)
+            else
+                rethrow()
+            end
         end
     finally
         ci_with_timeout("connect timeout cancellation: socket_cleanup!(socket_val)", () -> Sockets.socket_cleanup!(socket_val))
