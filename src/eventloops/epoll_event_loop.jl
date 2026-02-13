@@ -152,6 +152,8 @@
             throw_error(ERROR_INVALID_STATE)
         end
 
+        @atomic event_loop.should_stop = false
+
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Starting event-loop thread")
 
         impl.should_continue = true
@@ -188,6 +190,7 @@
     # Stop the event loop
     function event_loop_stop!(event_loop::EventLoop)::Nothing
         impl = event_loop.impl_data
+        @atomic event_loop.should_stop = true
 
         # Use atomic CAS to ensure stop task is only scheduled once
         expected = false
@@ -413,7 +416,9 @@
             handle::IoHandle,
         )::Nothing
         if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
-            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            if !(@atomic event_loop.should_stop)
+                throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
+            end
         end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
 
