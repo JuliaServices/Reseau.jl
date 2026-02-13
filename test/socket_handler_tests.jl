@@ -80,7 +80,7 @@ Sockets.handler_message_overhead(::TestReadHandler) = Csize_t(0)
 Sockets.handler_destroy(::TestReadHandler) = nothing
 
 @testset "socket handler read backpressure" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -264,7 +264,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 end
 
 @testset "socket handler write completion" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing
@@ -455,7 +455,7 @@ end
 end
 
 @testset "socket handler pending read before downstream setup" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
     if event_loop === nothing

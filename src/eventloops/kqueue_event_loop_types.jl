@@ -73,43 +73,12 @@
         UNSUBSCRIBED = 2
     end
 
-    # Handle data attached to IoHandle while subscribed
-    mutable struct KqueueHandleData
-        owner::IoHandle
-        event_loop::Any  # EventLoop (not yet defined at include time)
-        on_event::EventCallable
-        events_subscribed::Int  # IoEventType bitmask
-        events_this_loop::Int   # Events received during current loop iteration
-        state::HandleState.T
-        subscribe_task::Union{Nothing, ScheduledTask}  # nullable
-        cleanup_task::Union{Nothing, ScheduledTask}  # nullable
-        registry_key::Ptr{Cvoid}
-    end
-
-    function KqueueHandleData(
-            owner::IoHandle,
-            event_loop,
-            on_event::EventCallable,
-            events::Int,
-        )
-        return KqueueHandleData(
-            owner,
-            event_loop,
-            on_event,
-            events,
-            0,
-            HandleState.SUBSCRIBING,
-            nothing,
-            nothing,
-            C_NULL,
-        )
-    end
-
     # Cross-thread data protected by mutex
     mutable struct KqueueCrossThreadData
         mutex::ReentrantLock
         thread_signaled::Bool
         tasks_to_schedule::Vector{ScheduledTask}
+        tasks_to_schedule_spare::Vector{ScheduledTask}
         state::EventThreadState.T
     end
 
@@ -117,6 +86,7 @@
         return KqueueCrossThreadData(
             ReentrantLock(),
             false,
+            ScheduledTask[],
             ScheduledTask[],
             EventThreadState.READY_TO_RUN,
         )
@@ -137,6 +107,40 @@
         )
     end
 
+    # Handle data attached to IoHandle while subscribed
+    mutable struct KqueueHandleData{T}
+        owner::IoHandle
+        event_loop::T
+        on_event::EventCallable
+        events_subscribed::Int  # IoEventType bitmask
+        events_this_loop::Int   # Events received during current loop iteration
+        state::HandleState.T
+        connected::Bool
+        subscribe_task::Union{Nothing, ScheduledTask}  # nullable
+        cleanup_task::Union{Nothing, ScheduledTask}  # nullable
+        registry_key::Ptr{Cvoid}
+    end
+
+    function KqueueHandleData(
+            owner::IoHandle,
+            event_loop::T,
+            on_event::EventCallable,
+            events::Int,
+        ) where {T}
+        return KqueueHandleData{T}(
+            owner,
+            event_loop,
+            on_event,
+            events,
+            0,
+            HandleState.SUBSCRIBING,
+            false,
+            nothing,
+            nothing,
+            C_NULL,
+        )
+    end
+
     # KQueue event loop implementation data
     mutable struct KqueueEventLoop
         thread_created_on::Union{Nothing, ForeignThread}
@@ -149,8 +153,11 @@
         cross_thread_signal_pipe::NTuple{2, Int32}
         cross_thread_data::KqueueCrossThreadData
         thread_data::KqueueThreadData
-        handle_registry::Dict{Ptr{Cvoid}, Any}
+        handle_registry::Dict{Ptr{Cvoid}, KqueueHandleData{KqueueEventLoop}}
         nw_queue::Ptr{Cvoid}  # dispatch_queue_t for Apple NW sockets
+        subscribe_changelist::Vector{Kevent}
+        subscribe_eventlist::Vector{Kevent}
+        unsubscribe_changelist::Vector{Kevent}
     end
 
     function KqueueEventLoop()
@@ -165,8 +172,11 @@
             (Int32(-1), Int32(-1)),
             KqueueCrossThreadData(),
             KqueueThreadData(),
-            Dict{Ptr{Cvoid}, Any}(),
+            Dict{Ptr{Cvoid}, KqueueHandleData{KqueueEventLoop}}(),
             C_NULL,
+            Kevent[],
+            Kevent[],
+            Kevent[],
         )
     end
 

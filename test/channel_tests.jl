@@ -10,8 +10,7 @@ function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
 end
 
 function _setup_channel(; with_shutdown_cb::Bool = false)
-    opts = EventLoops.EventLoopOptions()
-    el = EventLoops.event_loop_new(opts)
+    el = EventLoops.event_loop_new()
     EventLoops.event_loop_run!(el)
 
     setup_ch = Channel{Int}(1)
@@ -84,8 +83,7 @@ end
         end
 
         @testset "destroy before setup completes waits for setup" begin
-            opts = EventLoops.EventLoopOptions()
-            el = EventLoops.event_loop_new(opts)
+            el = EventLoops.event_loop_new()
 
             setup_ch = Channel{Int}(1)
             on_setup = Reseau.EventCallable(err -> begin

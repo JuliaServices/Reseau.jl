@@ -70,3 +70,38 @@ end
     end
     @test wait(f) == 99
 end
+
+@testset "Future wait tolerates spurious wakeups" begin
+    f = EventLoops.Future{Int}()
+    done = Channel{Symbol}(1)
+
+    waiter = Threads.@spawn begin
+        try
+            wait(f)
+            put!(done, :ready)
+        catch e
+            put!(done, :error)
+        end
+    end
+
+    for _ in 1:20
+        lock(f.cond)
+        notify(f.cond)
+        unlock(f.cond)
+        sleep(0.001)
+    end
+
+    notify(f, 7)
+
+    deadline = Base.time_ns() + 2_000_000_000
+    while !isready(done) && Base.time_ns() < deadline
+        yield()
+    end
+
+    @test isready(done)
+    @test wait(f) == 7
+    if isready(done)
+        @test take!(done) == :ready
+    end
+    wait(waiter)
+end
