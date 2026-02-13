@@ -649,7 +649,12 @@
         impl = event_loop.impl_data
 
         if (events & Int(IoEventType.READABLE)) != 0
-            impl.should_process_task_pre_queue = true
+            lock(impl.task_pre_queue_mutex)
+            try
+                impl.should_process_task_pre_queue = true
+            finally
+                unlock(impl.task_pre_queue_mutex)
+            end
             _event_loop_stop_trace_queue(
                 event_loop,
                 "on-tasks-to-schedule",
@@ -668,10 +673,13 @@
     # Process cross-thread task queue
     function process_task_pre_queue(event_loop::EventLoop)
         impl = event_loop.impl_data
+        tasks_to_schedule = impl.task_pre_queue_spare
+        empty!(tasks_to_schedule)
+        count_ignore = Ref(UInt64(0))
 
-        if !impl.should_process_task_pre_queue
-            lock(impl.task_pre_queue_mutex)
-            try
+        lock(impl.task_pre_queue_mutex)
+        try
+            if !impl.should_process_task_pre_queue
                 if isempty(impl.task_pre_queue)
                     _event_loop_stop_trace_queue(
                         event_loop,
@@ -688,31 +696,6 @@
 
                 _event_loop_stop_trace_queue(
                     event_loop,
-                    "process-pre-queue-fallback",
-                    string(
-                        "q_len=",
-                        string(length(impl.task_pre_queue)),
-                        " pending=",
-                        string(impl.should_process_task_pre_queue),
-                    ),
-                )
-            finally
-                unlock(impl.task_pre_queue_mutex)
-            end
-        end
-
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
-
-        tasks_to_schedule = impl.task_pre_queue_spare
-        empty!(tasks_to_schedule)
-
-        count_ignore = Ref(UInt64(0))
-
-        lock(impl.task_pre_queue_mutex)
-        try
-            if !impl.should_process_task_pre_queue
-                _event_loop_stop_trace_queue(
-                    event_loop,
                     "process-pre-queue-race",
                     string(
                         "q_len=",
@@ -724,6 +707,7 @@
             end
 
             impl.should_process_task_pre_queue = false
+            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
             _event_loop_stop_trace_queue(
                 event_loop,
                 "process-pre-queue-drain-start",
@@ -731,16 +715,17 @@
             )
 
             # Drain the eventfd/pipe
-            while true
-                read_bytes = @ccall read(
-                    impl.read_task_handle.fd::Cint,
-                    count_ignore::Ptr{UInt64},
-                    sizeof(UInt64)::Csize_t,
+                while true
+                    read_bytes = @ccall read(
+                        impl.read_task_handle.fd::Cint,
+                        count_ignore::Ptr{UInt64},
+                        sizeof(UInt64)::Csize_t,
                 )::Cssize_t
-                read_bytes < 0 && break
-            end
+                    read_bytes < 0 && break
+                end
 
-            tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
+                tasks_to_schedule, impl.task_pre_queue = impl.task_pre_queue, tasks_to_schedule
+                impl.task_pre_queue_spare = tasks_to_schedule
         finally
             unlock(impl.task_pre_queue_mutex)
         end
