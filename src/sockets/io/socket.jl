@@ -353,9 +353,15 @@ end
     event_loop = socket.event_loop
     running = event_loop === nothing ? false : @atomic event_loop.running
     should_stop = event_loop === nothing ? false : @atomic event_loop.should_stop
-    running_thread_id = event_loop === nothing ? 0 : @atomic event_loop.impl_data.running_thread_id
-    thread_joined_to = event_loop === nothing ? 0 : event_loop.impl_data.thread_joined_to
-    foreign_thread_id = event_loop === nothing ? 0 : event_loop.thread === nothing ? 0 : event_loop.thread.id
+    running_thread_id = 0
+    thread_joined_to = 0
+    foreign_thread_id = 0
+    if event_loop !== nothing
+        impl = event_loop.impl_data
+        running_thread_id = @atomic impl.running_thread_id
+        thread_joined_to = impl.thread_joined_to
+        foreign_thread_id = event_loop.thread === nothing ? 0 : event_loop.thread.id
+    end
     local_loop = event_loop === nothing ? false : Base.task_local_storage(:_RESEAU_EVENT_LOOP_THREAD, nothing) === event_loop
     on_event_loop_thread = event_loop === nothing ? false : event_loop_thread_is_callers_thread(event_loop)
     logf(
