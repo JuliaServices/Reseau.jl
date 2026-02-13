@@ -18,8 +18,8 @@
 - [x] `P1` Verify wakeup/read path drains notifications in a bounded, deterministic way and leaves descriptor in a consistent state when signals/interrupts occur.
 - [x] `P1` Verify `on_tasks_to_schedule` callback ignores or safely handles non-read events and does not silently assume event type.
 - [x] `P1` Validate that `destroy_event_loop` and `terminate` paths close every file descriptor exactly once and do not race with callbacks still using them.
-- [ ] `P1` Verify that stop/shutdown is idempotent and that repeated stop requests do not produce stale wakes or resurrect a closed loop.
-- [ ] `P2` Ensure callbacks in `event_loop_run!` are exception-contained per-iteration (a single bad callback cannot stop/poison the entire loop).
+- [x] `P1` Verify that stop/shutdown is idempotent and that repeated stop requests do not produce stale wakes or resurrect a closed loop.
+- [x] `P2` Ensure callbacks in `event_loop_run!` are exception-contained per-iteration (a single bad callback cannot stop/poison the entire loop).
 - [ ] `P2` Confirm the queueing path used for task scheduling does not allow double-processing of a task if called from both loop thread and foreign threads concurrently.
 - [ ] `P2` Confirm cancellation (`event_loop_cancel_task!`) and scheduling operations remain race-free under rapid churn of same task IDs.
 - [ ] `P2` Validate that `process_task` can handle user callbacks that mutate subscriptions during iteration without invalidating active event vectors/indices.
@@ -44,8 +44,10 @@
 
 ## 2) Consistency check: epoll vs kqueue and iocp in Reseau
 
-- [ ] `P1` Compare callback exception handling behavior:
+- [x] `P1` Compare callback exception handling behavior:
   - should all three backends isolate callback failures from event pump stability?
+  - `aws-c-io` invokes callbacks in C without wrapper exceptions, while Julia kqueue/IOCP currently propagate callback throws and terminate their loop threads.
+  - `epoll` now logs and contains callback exceptions in-loop and keeps processing for the tick; this is a deliberate divergence that should be documented or applied uniformly.
 - [ ] `P1` Compare thread-start coordination pattern:
   - ensure epoll has equivalent guarantees to kqueue/iocp for single-startup completion and failure cleanup.
 - [ ] `P1` Compare stop/shutdown state transitions:
@@ -80,7 +82,7 @@
 
 ## 4) Suggested review order before implementation
 
-1. [ ] Lock correctness (`unlock` guarantees) and callback exception containment (highest risk).
+1. [x] Lock correctness (`unlock` guarantees) and callback exception containment (highest risk).
 2. [ ] Wakeup/read-write robustness (`EINTR`/`EAGAIN` paths).
 3. [ ] Shutdown/destruction race matrix (`stop`, `destroy`, double-stop, in-flight callbacks/subscriptions).
 4. [ ] Cross-backend behavior matrix versus kqueue/iocp.
@@ -88,7 +90,7 @@
 
 ## 5) Quick acceptance rubric
 
-- [ ] No deadlock path remains when user callbacks throw in any lock-held region.
+- [x] No deadlock path remains when user callbacks throw in any lock-held region.
 - [ ] Epoll demonstrates the same or better wakeup reliability than kqueue/iocp under stress.
 - [ ] Cleanup is idempotent and handles partially-initialized states safely.
 - [ ] Differences from kqueue/iocp and aws-c-io are documented and intentional.

@@ -666,14 +666,22 @@
                             event_data.on_event(event_mask)
                         catch e
                             if e isa ReseauError &&
-                                    (e.code == ERROR_IO_SOCKET_CLOSED ||
-                                     e.code == ERROR_IO_SOCKET_NOT_CONNECTED ||
-                                     e.code == ERROR_IO_READ_WOULD_BLOCK)
+                                (e.code == ERROR_IO_SOCKET_CLOSED ||
+                                e.code == ERROR_IO_SOCKET_NOT_CONNECTED ||
+                                e.code == ERROR_IO_READ_WOULD_BLOCK)
                                 logf(
                                     LogLevel.DEBUG,
                                     LS_IO_EVENT_LOOP,string("ignoring non-fatal IO callback error on fd %d: %d", " ", event_data.handle.fd, " ", e.code, " ", ))
                             else
-                                rethrow()
+                                logf(
+                                    LogLevel.ERROR,
+                                    LS_IO_EVENT_LOOP,
+                                    "unhandled IO callback exception on fd ",
+                                    event_data.handle.fd,
+                                    ": ",
+                                    e,
+                                    " ",
+                                )
                             end
                         end
                     end
@@ -699,6 +707,14 @@
             tracing_task_begin(tracing_event_loop_run_tasks)
             try
                 task_scheduler_run_all!(impl.scheduler, now_ns)
+            catch e
+                logf(
+                    LogLevel.ERROR,
+                    LS_IO_EVENT_LOOP,
+                    "unhandled scheduled-task exception in main loop: ",
+                    e,
+                    " ",
+                )
             finally
                 tracing_task_end(tracing_event_loop_run_tasks)
             end
