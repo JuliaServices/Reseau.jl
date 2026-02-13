@@ -243,6 +243,7 @@
         try
             is_first_task = isempty(impl.task_pre_queue)
             push!(impl.task_pre_queue, task)
+            impl.should_process_task_pre_queue = true
 
             # If the list was not empty, we already have a pending read on the pipe/eventfd
             if is_first_task
@@ -464,7 +465,12 @@
         impl = event_loop.impl_data
 
         if (events & Int(IoEventType.READABLE)) != 0
-            impl.should_process_task_pre_queue = true
+            lock(impl.task_pre_queue_mutex)
+            try
+                impl.should_process_task_pre_queue = true
+            finally
+                unlock(impl.task_pre_queue_mutex)
+            end
         end
 
         return nothing
@@ -474,12 +480,6 @@
     function process_task_pre_queue(event_loop::EventLoop)
         impl = event_loop.impl_data
 
-        if !impl.should_process_task_pre_queue
-            return nothing
-        end
-
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
-
         tasks_to_schedule = impl.task_pre_queue_spare
         empty!(tasks_to_schedule)
 
@@ -487,11 +487,13 @@
 
         lock(impl.task_pre_queue_mutex)
         try
-            if !impl.should_process_task_pre_queue
+            if !impl.should_process_task_pre_queue && isempty(impl.task_pre_queue)
                 return nothing
             end
 
             impl.should_process_task_pre_queue = false
+
+            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
 
             # Drain the eventfd/pipe
             while true
