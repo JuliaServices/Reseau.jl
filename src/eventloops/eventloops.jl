@@ -7,47 +7,50 @@ module EventLoops
 
 using EnumX
 
-# Bring parent-module bindings (common utilities, error codes, logging, etc.)
-# into this module so moved implementation files can remain largely unchanged.
-const _PARENT = parentmodule(@__MODULE__)
-for name in names(_PARENT; all = true, imported = false)
-    str = String(name)
-    startswith(str, "@") && continue
-    # Do not shadow stdlib `Threads` inside this module (implementation uses `Base.Threads.*`).
-    name === :Threads && continue
-    # Do not shadow Base.put!/Base.take! (lru_cache.jl defines Reseau.put! which would mask them).
-    name === :put! && continue
-    # Avoid self-aliasing.
-    name === :EventLoops && continue
-    if isdefined(@__MODULE__, name)
-        # Allow overwriting Base/Core imports (we want the parent-module bindings),
-        # but never clobber bindings defined by this module.
-        owner = Base.binding_module(@__MODULE__, name)
-        owner === (@__MODULE__) && continue
-        (owner === Base || owner === Core) || continue
-    end
-    val = getfield(_PARENT, name)
-    @eval const $(name) = $(_PARENT).$(name)
-end
+using ..Reseau:
+    ByteBuffer,
+    ERROR_ENUM_BEGIN_RANGE,
+    ERROR_ENUM_END_RANGE,
+    ERROR_INVALID_ARGUMENT,
+    ERROR_INVALID_FILE_HANDLE,
+    ERROR_INVALID_STATE,
+    ERROR_PLATFORM_NOT_SUPPORTED,
+    ERROR_SYS_CALL_FAILURE,
+    ERROR_THREAD_NO_SUCH_THREAD_ID,
+    EventCallable,
+    LOG_SUBJECT_BEGIN_RANGE,
+    LOG_SUBJECT_END_RANGE,
+    LogLevel,
+    LogSubject,
+    LogSubjectInfo,
+    ReseauError,
+    ScheduledTask,
+    TIMESTAMP_NANOS,
+    TaskFn,
+    TaskScheduler,
+    TaskStatus,
+    _coerce_task_status,
+    _fcntl,
+    _log_subject_registry,
+    _register_errors!,
+    add_u64_saturating,
+    capacity,
+    debug_assert,
+    fatal_assert_bool,
+    high_res_clock_get_ticks,
+    logf,
+    raise_error,
+    task_run!,
+    task_scheduler_cancel!,
+    task_scheduler_clean_up!,
+    task_scheduler_has_tasks,
+    task_scheduler_run_all!,
+    task_scheduler_schedule_future!,
+    task_scheduler_schedule_now!,
+    thread_sleep_ns,
+    throw_error
 
-# Pull in thread/runtime primitives from the sibling `Reseau.ForeignThreads` module so
-# the implementation can refer to them unqualified.
-const _THREADS = getfield(_PARENT, :ForeignThreads)
-for name in names(_THREADS; all = true, imported = false)
-    str = String(name)
-    startswith(str, "@") && continue
-    name === :ForeignThreads && continue
-    name === :__init__ && continue
-    if isdefined(@__MODULE__, name)
-        owner = Base.binding_module(@__MODULE__, name)
-        owner === (@__MODULE__) && continue
-        (owner === Base || owner === Core) || continue
-    end
-    val = getfield(_THREADS, name)
-    @eval const $(name) = $(_THREADS).$(name)
-end
-# Macros are skipped by the name-loop above; import them explicitly.
-using ..ForeignThreads: @wrap_thread_fn
+using ..ForeignThreads: ForeignThread, managed_thread_finished!, @wrap_thread_fn
 
 include("tracing.jl")
 include("io.jl")
@@ -65,7 +68,6 @@ include("iocp_event_loop.jl")
 include("future.jl")
 
 function __init__()
-    _init_default_clock()
     @static if Sys.isapple() || Sys.isbsd()
         _kqueue_init_cfunctions!()
     elseif Sys.islinux()
@@ -79,7 +81,6 @@ end
 export
     EventLoop,
     EventLoopGroup,
-    EventLoopGroupOptions,
     IoEventType,
     default_event_loop_group,
     event_loop_group_get_loop_count,

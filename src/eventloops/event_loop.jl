@@ -47,48 +47,6 @@ const ClockSource = Union{HighResClock, RefClock, SequenceClock}
     return values[next_index]
 end
 
-# Default clock source (constructed once at module init)
-const _DEFAULT_CLOCK = Ref{ClockSource}()
-
-function _init_default_clock()
-    _DEFAULT_CLOCK[] = HighResClock()
-end
-
-abstract type AbstractEventLoopGroup end
-
-# Event loop options
-struct EventLoopOptions
-    clock::ClockSource
-end
-
-function EventLoopOptions(;
-        clock::ClockSource = _DEFAULT_CLOCK[],
-    )
-    return EventLoopOptions(clock)
-end
-
-# Event loop group options
-struct EventLoopGroupOptions
-    loop_count::UInt16
-    shutdown_options::Union{TaskFn, Nothing}
-    cpu_group::Union{Nothing, Integer, Base.RefValue}
-    clock_override::Union{ClockSource, Nothing}
-end
-
-function EventLoopGroupOptions(;
-        loop_count::Integer = 0,
-        shutdown_options::Union{TaskFn, Nothing} = nothing,
-        cpu_group = nothing,
-        clock_override::Union{ClockSource, Nothing} = nothing,
-    )
-    return EventLoopGroupOptions(
-        UInt16(loop_count),
-        shutdown_options,
-        cpu_group,
-        clock_override,
-    )
-end
-
 # Event types for IO event subscriptions (bitmask)
 @enumx IoEventType::UInt32 begin
     READABLE = 1
@@ -96,16 +54,6 @@ end
     REMOTE_HANG_UP = 4
     CLOSED = 8
     ERROR = 16
-end
-
-function _cpu_group_value(cpu_group)
-    if cpu_group === nothing
-        return nothing
-    end
-    if cpu_group isa Base.RefValue
-        return cpu_group[]
-    end
-    return cpu_group
 end
 
 # Platform-specific event loop implementation type
@@ -155,6 +103,21 @@ end
 #   event_loop_schedule_task_now_serialized!, event_loop_schedule_task_future!,
 #   event_loop_cancel_task!, event_loop_subscribe_to_io_events!,
 #   event_loop_unsubscribe_from_io_events!, event_loop_thread_is_callers_thread
+
+function event_loop_subscribe_to_io_events!(
+        event_loop::EventLoop,
+        handle::IoHandle,
+        events::Int,
+        on_event::F,
+        user_data::Any,
+    ) where {F}
+    return event_loop_subscribe_to_io_events!(
+        event_loop,
+        handle,
+        events,
+        EventCallable((event_bits::Int) -> on_event(event_loop, handle, event_bits, user_data)),
+    )
+end
 
 # Start the destruction process (quick, non-blocking)
 function event_loop_start_destroy!(event_loop::EventLoop)
@@ -266,28 +229,21 @@ function event_loop_get_load_factor(event_loop::EventLoop)::Csize_t
 end
 
 # Create a new event loop based on platform
-function event_loop_new(options::EventLoopOptions)::EventLoop
+function event_loop_new(clock::ClockSource = HighResClock())::EventLoop
     @static if Sys.islinux()
-        return event_loop_new_with_epoll(options)
+        return event_loop_new_with_epoll(clock)
     elseif Sys.isapple() || Sys.isbsd()
-        return event_loop_new_with_kqueue(options)
+        return event_loop_new_with_kqueue(clock)
     elseif Sys.iswindows()
-        return event_loop_new_with_iocp(options)
+        return event_loop_new_with_iocp(clock)
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
-function event_loop_new(;
-        clock::ClockSource = _DEFAULT_CLOCK[],
-    )::EventLoop
-    return event_loop_new(EventLoopOptions(; clock = clock))
-end
-
 # Event Loop Group for managing multiple event loops
-mutable struct EventLoopGroup <: AbstractEventLoopGroup
+mutable struct EventLoopGroup
     event_loops::Vector{EventLoop}
-    shutdown_options::Union{TaskFn, Nothing}
     lease_lock::ReentrantLock
     active_lease_ids::Set{UInt64}
     next_lease_id::UInt64
@@ -308,22 +264,18 @@ Base.length(elg::EventLoopGroup) = length(elg.event_loops)
 Base.getindex(elg::EventLoopGroup, i::Integer) = elg.event_loops[i]
 
 # Create a new event loop group (creates and runs event loops)
-function event_loop_group_new(options::EventLoopGroupOptions)
-    loop_count = options.loop_count
-    cpu_group_val = _cpu_group_value(options.cpu_group)
-    if cpu_group_val !== nothing && loop_count == typemax(UInt16)
-        cpu_count = (Int(cpu_group_val) == 0) ? Sys.CPU_THREADS : 0
+function EventLoopGroup(;loop_count::Integer = 0, cpu_group::Union{Nothing, Integer} = nothing, clock::ClockSource = HighResClock())
+    loop_count = loop_count
+    if cpu_group !== nothing && loop_count == typemax(UInt16)
+        cpu_count = (Int(cpu_group) == 0) ? Sys.CPU_THREADS : 0
         loop_count = UInt16(cpu_count > 0 ? min(cpu_count, typemax(UInt16)) : 1)
     end
     if loop_count == 0
         loop_count = UInt16(max(1, Sys.CPU_THREADS >> 1))
     end
 
-    clock = options.clock_override === nothing ? _DEFAULT_CLOCK[] : options.clock_override
-
     elg = EventLoopGroup(
         Vector{EventLoop}(),
-        options.shutdown_options,
         ReentrantLock(),
         Set{UInt64}(),
         UInt64(1),
@@ -332,13 +284,9 @@ function event_loop_group_new(options::EventLoopGroupOptions)
         false,
     )
     try
-        # Create first event loop
-        first_loop = event_loop_new(; clock = clock)
-        push!(elg.event_loops, first_loop)
-
-        # Create remaining event loops
-        for _ in 2:loop_count
-            loop = event_loop_new(; clock = clock)
+        # Create event loops
+        for _ in 1:loop_count
+            loop = event_loop_new(clock)
             push!(elg.event_loops, loop)
         end
 
@@ -353,40 +301,6 @@ function event_loop_group_new(options::EventLoopGroupOptions)
         event_loop_group_destroy!(elg)
         rethrow()
     end
-end
-
-function event_loop_group_new(;
-        loop_count::Integer = 0,
-        shutdown_options::Union{TaskFn, Nothing} = nothing,
-        cpu_group = nothing,
-        clock_override::Union{ClockSource, Nothing} = nothing,
-    )
-    return event_loop_group_new(
-        EventLoopGroupOptions(;
-            loop_count = loop_count,
-            shutdown_options = shutdown_options,
-            cpu_group = cpu_group,
-            clock_override = clock_override,
-        ),
-    )
-end
-
-function EventLoopGroup(options::EventLoopGroupOptions)
-    return event_loop_group_new(options)
-end
-
-function EventLoopGroup(;
-        loop_count::Integer = 0,
-        shutdown_options::Union{TaskFn, Nothing} = nothing,
-        cpu_group = nothing,
-        clock_override::Union{ClockSource, Nothing} = nothing,
-    )
-    return event_loop_group_new(;
-        loop_count = loop_count,
-        shutdown_options = shutdown_options,
-        cpu_group = cpu_group,
-        clock_override = clock_override,
-    )
 end
 
 function event_loop_group_open_lease!(elg::EventLoopGroup)::Union{EventLoopGroupLease, Nothing}
@@ -489,10 +403,6 @@ function event_loop_group_destroy!(elg::EventLoopGroup)::Nothing
         @atomic elg.destroyed = true
         _event_loop_group_clear_default_if_matches!(elg)
     end
-
-    if elg.shutdown_options !== nothing
-        elg.shutdown_options(UInt8(0))
-    end
     return nothing
 end
 
@@ -512,8 +422,6 @@ function default_event_loop_group()::EventLoopGroup
     try
         elg = _DEFAULT_EVENT_LOOP_GROUP[]
         if elg === nothing || (@atomic elg.destroyed)
-            # Keep this single-loop to avoid surprising concurrency in downstream
-            # consumers that "just want a default".
             elg = EventLoopGroup(; loop_count = 1)
             _DEFAULT_EVENT_LOOP_GROUP[] = elg
         end

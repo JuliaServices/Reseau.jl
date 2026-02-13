@@ -14,7 +14,7 @@
         try
             kqueue_event_loop_thread(event_loop)
         catch e
-            Core.println("kqueue event loop thread errored: $e")
+            Core.println("kqueue event loop thread errored")
         finally
             impl = event_loop.impl_data
             notify(impl.completion_event)
@@ -91,7 +91,7 @@
 
     # Create a new kqueue event loop
     function event_loop_new_with_kqueue(
-            options::EventLoopOptions,
+            clock::ClockSource = HighResClock(),
         )::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered kqueue event loop")
 
@@ -156,7 +156,7 @@
         end
 
         # Create the event loop
-        event_loop = EventLoop(options.clock, impl)
+        event_loop = EventLoop(clock, impl)
 
         return event_loop
     end
@@ -270,12 +270,15 @@
 
         signal_thread = false
         lock(impl.cross_thread_data.mutex)
-        if impl.cross_thread_data.state == EventThreadState.RUNNING
-            impl.cross_thread_data.state = EventThreadState.STOPPING
-            impl.cross_thread_data.thread_signaled = true
-            signal_thread = true
+        try
+            if impl.cross_thread_data.state == EventThreadState.RUNNING
+                impl.cross_thread_data.state = EventThreadState.STOPPING
+                impl.cross_thread_data.thread_signaled = true
+                signal_thread = true
+            end
+        finally
+            unlock(impl.cross_thread_data.mutex)
         end
-        unlock(impl.cross_thread_data.mutex)
         if signal_thread
             signal_cross_thread_data_changed(event_loop)
         end
@@ -311,13 +314,16 @@
         should_signal_thread = false
 
         lock(impl.cross_thread_data.mutex)
-        push!(impl.cross_thread_data.tasks_to_schedule, task)
+        try
+            push!(impl.cross_thread_data.tasks_to_schedule, task)
 
-        if !impl.cross_thread_data.thread_signaled
-            should_signal_thread = true
-            impl.cross_thread_data.thread_signaled = true
+            if !impl.cross_thread_data.thread_signaled
+                should_signal_thread = true
+                impl.cross_thread_data.thread_signaled = true
+            end
+        finally
+            unlock(impl.cross_thread_data.mutex)
         end
-        unlock(impl.cross_thread_data.mutex)
 
         if should_signal_thread
             signal_cross_thread_data_changed(event_loop)
@@ -374,14 +380,17 @@
 
         removed = false
         lock(impl.cross_thread_data.mutex)
-        if !isempty(impl.cross_thread_data.tasks_to_schedule)
-            idx = findfirst(x -> x === task, impl.cross_thread_data.tasks_to_schedule)
-            if idx !== nothing
-                deleteat!(impl.cross_thread_data.tasks_to_schedule, idx)
-                removed = true
+        try
+            if !isempty(impl.cross_thread_data.tasks_to_schedule)
+                idx = findfirst(x -> x === task, impl.cross_thread_data.tasks_to_schedule)
+                if idx !== nothing
+                    deleteat!(impl.cross_thread_data.tasks_to_schedule, idx)
+                    removed = true
+                end
             end
+        finally
+            unlock(impl.cross_thread_data.mutex)
         end
-        unlock(impl.cross_thread_data.mutex)
 
         if removed
             task_run!(task, TaskStatus.CANCELED)
@@ -399,11 +408,8 @@
     end
 
     # Subscribe task callback
-    function kqueue_subscribe_task_callback(task_data::KqueueHandleData, status::TaskStatus.T)
-        event_loop = task_data.event_loop
-        impl = event_loop.impl_data
-
-        impl.thread_data.connected_handle_count += 1
+    function kqueue_subscribe_task_callback(task_data::KqueueHandleData{KqueueEventLoop}, status::TaskStatus.T)
+        impl = task_data.event_loop
 
         # If cancelled, nothing to do
         if status == TaskStatus.CANCELED
@@ -415,10 +421,17 @@
             return nothing
         end
 
+        if task_data.state == HandleState.SUBSCRIBED
+            return nothing
+        end
+
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("subscribing to events on fd %d", " ", task_data.owner.fd))
 
         # Build changelist for kevent
-        changelist = Vector{Kevent}()
+        changelist = impl.subscribe_changelist
+        eventlist = impl.subscribe_eventlist
+        empty!(changelist)
+        empty!(eventlist)
         handle_data_ptr = pointer_from_objref(task_data)
 
         if (task_data.events_subscribed & Int(IoEventType.READABLE)) != 0
@@ -444,11 +457,13 @@
 
         if isempty(changelist)
             task_data.state = HandleState.SUBSCRIBED
+            task_data.connected = true
+            impl.thread_data.connected_handle_count += 1
             return nothing
         end
 
         # Call kevent with EV_RECEIPT to get results
-        eventlist = similar(changelist)
+        resize!(eventlist, length(changelist))
         timeout_ref = Ref(Timespec(0, 0))
         num_events = @ccall gc_safe = true kevent(
             impl.kq_fd::Cint,
@@ -482,14 +497,23 @@
                 if eventlist[i].data == 0
                     del_ev = Kevent(eventlist[i].ident, eventlist[i].filter, EV_DELETE)
                     del_ref = Ref(del_ev)
-                    @ccall kevent(impl.kq_fd::Cint, del_ref::Ptr{Kevent}, 1::Cint, C_NULL::Ptr{Kevent}, 0::Cint, C_NULL::Ptr{Cvoid})::Cint
+                    @ccall kevent(
+                        impl.kq_fd::Cint,
+                        del_ref::Ptr{Kevent},
+                        1::Cint,
+                        C_NULL::Ptr{Kevent},
+                        0::Cint,
+                        C_NULL::Ptr{Cvoid},
+                    )::Cint
                 end
             end
             task_data.on_event(Int(IoEventType.ERROR))
             return nothing
         end
 
+        impl.thread_data.connected_handle_count += 1
         task_data.state = HandleState.SUBSCRIBED
+        task_data.connected = true
         return nothing
     end
 
@@ -507,14 +531,15 @@
             throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
         end
 
-        handle_data = KqueueHandleData(handle, event_loop, on_event, events)
+        impl = event_loop.impl_data::KqueueEventLoop
+        handle_data = KqueueHandleData(handle, impl, on_event, events)
 
         # Store handle data reference
         handle_data_ptr = pointer_from_objref(handle_data)
         handle.additional_data = handle_data_ptr
         handle.additional_ref = handle_data
         handle_data.registry_key = handle_data_ptr
-        event_loop.impl_data.handle_registry[handle_data_ptr] = handle_data
+        impl.handle_registry[handle_data_ptr] = handle_data
 
         # Create subscribe task
         handle_data.subscribe_task = ScheduledTask(
@@ -522,7 +547,7 @@
                 try
                     kqueue_subscribe_task_callback(handle_data, TaskStatus.T(status))
                 catch e
-                    Core.println("kqueue_subscribe task errored: $e")
+                    Core.println("kqueue_subscribe task errored")
                 end
                 return nothing
             end);
@@ -535,9 +560,12 @@
     end
 
     # Cleanup task callback
-    function kqueue_cleanup_task_callback(handle_data::KqueueHandleData, status::TaskStatus.T)
-        impl = handle_data.event_loop.impl_data
-        impl.thread_data.connected_handle_count -= 1
+    function kqueue_cleanup_task_callback(handle_data::KqueueHandleData{KqueueEventLoop}, status::TaskStatus.T)
+        impl = handle_data.event_loop
+        if handle_data.connected
+            handle_data.connected = false
+            impl.thread_data.connected_handle_count -= 1
+        end
         if handle_data.registry_key != C_NULL
             delete!(impl.handle_registry, handle_data.registry_key)
             handle_data.registry_key = C_NULL
@@ -545,32 +573,25 @@
         return nothing
     end
 
-    # Unsubscribe from IO events
-    function event_loop_unsubscribe_from_io_events!(
-            event_loop::EventLoop,
-            handle::IoHandle,
-        )::Nothing
-        if (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
-            throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
-        end
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
-
-        if handle.additional_data == C_NULL
-            throw_error(ERROR_IO_NOT_SUBSCRIBED)
+    function kqueue_unsubscribe_task_callback(handle_data::KqueueHandleData{KqueueEventLoop}, status::TaskStatus.T)
+        if status == TaskStatus.CANCELED
+            return nothing
         end
 
-        handle_data = unsafe_pointer_to_objref(handle.additional_data)::KqueueHandleData
-        impl = event_loop.impl_data
+        if handle_data.state == HandleState.UNSUBSCRIBED
+            return nothing
+        end
 
-        # If successfully subscribed, remove from kqueue
+        impl = handle_data.event_loop
         if handle_data.state == HandleState.SUBSCRIBED
-            changelist = Vector{Kevent}()
+            changelist = impl.unsubscribe_changelist
+            empty!(changelist)
 
             if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
-                push!(changelist, Kevent(handle.fd, EVFILT_READ, EV_DELETE))
+                push!(changelist, Kevent(handle_data.owner.fd, EVFILT_READ, EV_DELETE))
             end
             if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
-                push!(changelist, Kevent(handle.fd, EVFILT_WRITE, EV_DELETE))
+                push!(changelist, Kevent(handle_data.owner.fd, EVFILT_WRITE, EV_DELETE))
             end
 
             if !isempty(changelist)
@@ -585,25 +606,83 @@
             end
         end
 
+        kqueue_cleanup_task_callback(handle_data, status)
+        return nothing
+    end
+
+    # Unsubscribe from IO events
+    function event_loop_unsubscribe_from_io_events!(
+            event_loop::EventLoop,
+            handle::IoHandle,
+        )::Nothing
+        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
+
+        if handle.additional_data == C_NULL
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
+        end
+
+        handle_data = unsafe_pointer_to_objref(handle.additional_data)::KqueueHandleData{KqueueEventLoop}
+        impl = event_loop.impl_data::KqueueEventLoop
+
         if @atomic event_loop.running
-            # Schedule cleanup task
-            handle_data.cleanup_task = ScheduledTask(
-                TaskFn(function(status)
-                    try
-                        kqueue_cleanup_task_callback(handle_data, TaskStatus.T(status))
-                    catch e
-                        Core.println("kqueue_cleanup task errored: $e")
+            if event_loop_thread_is_callers_thread(event_loop)
+                # If called on event-loop thread, delete kqueue registration directly.
+                if handle_data.state == HandleState.SUBSCRIBED
+                    changelist = impl.unsubscribe_changelist
+                    empty!(changelist)
+
+                    if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
+                        push!(changelist, Kevent(handle.fd, EVFILT_READ, EV_DELETE))
                     end
-                    return nothing
-                end);
-                type_tag = "kqueue_cleanup",
-            )
+                    if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
+                        push!(changelist, Kevent(handle.fd, EVFILT_WRITE, EV_DELETE))
+                    end
+
+                    if !isempty(changelist)
+                        @ccall kevent(
+                            impl.kq_fd::Cint,
+                            changelist::Ptr{Kevent},
+                            length(changelist)::Cint,
+                            C_NULL::Ptr{Kevent},
+                            0::Cint,
+                            C_NULL::Ptr{Cvoid},
+                        )::Cint
+                    end
+                end
+
+                # Schedule cleanup task
+                handle_data.cleanup_task = ScheduledTask(
+                    TaskFn(function(status)
+                        try
+                            kqueue_cleanup_task_callback(handle_data, TaskStatus.T(status))
+                        catch e
+                            Core.println("kqueue_cleanup task errored")
+                        end
+                        return nothing
+                    end);
+                    type_tag = "kqueue_cleanup",
+                )
+            else
+                # Off-thread unsubscribe must run registration deletion from the event-loop thread.
+                handle_data.cleanup_task = ScheduledTask(
+                    TaskFn(function(status)
+                        try
+                            kqueue_unsubscribe_task_callback(handle_data, TaskStatus.T(status))
+                        catch e
+                            Core.println("kqueue_unsubscribe task errored")
+                        end
+                        return nothing
+                    end);
+                    type_tag = "kqueue_unsubscribe",
+                )
+            end
             event_loop_schedule_task_now!(event_loop, handle_data.cleanup_task)
         else
             # Event loop is no longer running, so task scheduling won't make forward progress.
             # Perform the minimal cleanup synchronously to avoid leaking handle registry entries.
             if handle_data.state == HandleState.SUBSCRIBED
                 impl.thread_data.connected_handle_count -= 1
+                handle_data.connected = false
             end
             if handle_data.registry_key != C_NULL
                 delete!(impl.handle_registry, handle_data.registry_key)
@@ -664,26 +743,25 @@
         impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread data to process")
 
-        tasks_to_schedule = Vector{ScheduledTask}()
+        tasks_to_schedule = impl.cross_thread_data.tasks_to_schedule_spare
 
         lock(impl.cross_thread_data.mutex)
-        impl.cross_thread_data.thread_signaled = false
+        try
+            impl.cross_thread_data.thread_signaled = false
 
-        initiate_stop = impl.cross_thread_data.state == EventThreadState.STOPPING &&
-            impl.thread_data.state == EventThreadState.RUNNING
-        if initiate_stop
-            impl.thread_data.state = EventThreadState.STOPPING
-        end
-
-        # Move tasks from cross-thread queue
-        while !isempty(impl.cross_thread_data.tasks_to_schedule)
-            task = popfirst!(impl.cross_thread_data.tasks_to_schedule)
-            if task !== nothing
-                push!(tasks_to_schedule, task)
+            initiate_stop = impl.cross_thread_data.state == EventThreadState.STOPPING &&
+                impl.thread_data.state == EventThreadState.RUNNING
+            if initiate_stop
+                impl.thread_data.state = EventThreadState.STOPPING
             end
-        end
 
-        unlock(impl.cross_thread_data.mutex)
+            empty!(tasks_to_schedule)
+            while !isempty(impl.cross_thread_data.tasks_to_schedule)
+                push!(tasks_to_schedule, popfirst!(impl.cross_thread_data.tasks_to_schedule))
+            end
+        finally
+            unlock(impl.cross_thread_data.mutex)
+        end
 
         process_tasks_to_schedule(event_loop, tasks_to_schedule)
     end
@@ -691,7 +769,7 @@
     # Main event loop thread function
     function kqueue_event_loop_thread(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "main loop started")
-        impl = event_loop.impl_data
+        impl = event_loop.impl_data::KqueueEventLoop
 
         # Set running thread ID
         @atomic impl.running_thread_id = UInt64(Base.Threads.threadid())
@@ -699,7 +777,7 @@
         notify(impl.startup_event)
 
         kevents = Memory{Kevent}(undef, MAX_EVENTS)
-        io_handle_events = Vector{KqueueHandleData}()
+        io_handle_events = Vector{KqueueHandleData{KqueueEventLoop}}()
 
         timeout = Timespec(DEFAULT_TIMEOUT_SEC, 0)
 
@@ -744,22 +822,25 @@
                 try
                     kevent = kevents[i]
                     # Check if this is the cross-thread signal
-                    if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
-                        should_process_cross_thread_data = true
-                        read_val = Ref{UInt32}(0)
-                        read_size = Csize_t(sizeof(UInt32))
-                        while true
-                            read_result = @ccall read(
-                                impl.cross_thread_signal_pipe[READ_FD]::Cint,
-                                read_val::Ptr{UInt32},
-                                read_size::Csize_t,
-                            )::Cssize_t
-                            if read_result <= 0
-                                break
+                        if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
+                            should_process_cross_thread_data = true
+                            read_val = Ref{UInt32}(0)
+                            read_size = Csize_t(sizeof(UInt32))
+                            while true
+                                read_result = @ccall gc_safe = true read(
+                                    impl.cross_thread_signal_pipe[READ_FD]::Cint,
+                                    read_val::Ptr{UInt32},
+                                    read_size::Csize_t,
+                                )::Cssize_t
+                                if read_result <= 0
+                                    if read_result == -1 && Base.Libc.errno() == Libc.EINTR
+                                        continue
+                                    end
+                                    break
+                                end
                             end
+                            continue
                         end
-                        continue
-                    end
 
                     # Process normal event
                     event_flags = event_flags_from_kevent(kevent)
@@ -798,10 +879,13 @@
             if !should_process_cross_thread_data
                 pending = false
                 lock(impl.cross_thread_data.mutex)
-                pending = impl.cross_thread_data.thread_signaled ||
-                    (impl.cross_thread_data.state != EventThreadState.RUNNING)
-                unlock(impl.cross_thread_data.mutex)
-                should_process_cross_thread_data = pending
+                try
+                    pending = impl.cross_thread_data.thread_signaled ||
+                        (impl.cross_thread_data.state != EventThreadState.RUNNING)
+                    should_process_cross_thread_data = pending
+                finally
+                    unlock(impl.cross_thread_data.mutex)
+                end
             end
             if should_process_cross_thread_data
                 process_cross_thread_data(event_loop)
@@ -851,6 +935,7 @@
         end
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "exiting main loop")
+        event_loop_thread_exit_s2n_cleanup!(event_loop)
         @atomic impl.running_thread_id = UInt64(0)
         LibAwsCal.aws_cal_thread_clean_up()
         return nothing

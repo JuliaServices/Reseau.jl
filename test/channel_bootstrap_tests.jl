@@ -34,7 +34,7 @@ function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
 end
 
 @testset "client/server bootstrap callbacks" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     server_setup_called = Ref(false)
@@ -146,7 +146,7 @@ end
 end
 
 @testset "client bootstrap attempts multiple resolved addresses" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
@@ -244,14 +244,14 @@ end
 end
 
 @testset "client bootstrap requested event loop mismatch" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
     client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
         host_resolver = resolver,
     ))
 
-    bad_loop = EventLoops.event_loop_new(EventLoops.EventLoopOptions())
+    bad_loop = EventLoops.event_loop_new()
     @test_throws Reseau.ReseauError Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "localhost",
@@ -265,7 +265,7 @@ end
 end
 
 @testset "client bootstrap on_setup runs on requested event loop" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
     client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
         event_loop_group = elg,
@@ -311,7 +311,7 @@ end
 
 if tls_tests_enabled()
 @testset "bootstrap tls negotiation" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     cert_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.crt")
@@ -414,7 +414,7 @@ else
 end
 
 @testset "server bootstrap destroy callback waits for channels" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
     cfg = _bootstrap_test_config()
 
@@ -500,7 +500,7 @@ end
 end
 
 @testset "server bootstrap destroy callback without channels" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
     cfg = _bootstrap_test_config()
 

@@ -92,8 +92,7 @@ end
     else
         Sockets.io_library_init()
 
-        elg_opts = EventLoops.EventLoopGroupOptions(; loop_count = 1)
-        elg = EventLoops.EventLoopGroup(elg_opts)
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         event_loop = EventLoops.event_loop_group_get_next_loop(elg)
         @test event_loop !== nothing

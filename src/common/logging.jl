@@ -84,7 +84,16 @@ end
     return log!(current_logger(), level, subject, msg)
 end
 
+@inline function logf(level::LogLevel.T, subject::LogSubject, msg::Function)
+    Int(level) > Int(STATIC_LOG_LEVEL) && return nothing
+    return logf(level, subject, msg())
+end
+
 @inline function logf(level::Cint, subject::LogSubject, msg::AbstractString)
+    return logf(_level_from_int(level), subject, msg)
+end
+
+@inline function logf(level::Cint, subject::LogSubject, msg::Function)
     return logf(_level_from_int(level), subject, msg)
 end
 

@@ -103,7 +103,7 @@ end
     old_client_setup = Sockets._tls_byo_client_setup[]
     old_server_setup = Sockets._tls_byo_server_setup[]
     try
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     incoming_rw_args = ByoCryptoRwArgs(ReentrantLock(), Reseau.ByteBuffer(128), false, nothing)

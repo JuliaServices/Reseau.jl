@@ -71,7 +71,7 @@ function resolve_and_wait(resolver, host; config=nothing, timeout_s::Float64 = 5
 end
 
 @testset "host resolver ipv6 address variations" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     config = Sockets.HostResolutionConfig(max_ttl_secs = 10)
@@ -98,7 +98,7 @@ end
 end
 
 @testset "host resolver background refresh stress" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver_config = Sockets.HostResolverConfig(; max_ttl_secs = 2, resolve_frequency_ns = 100_000_000)
     resolver = Sockets.HostResolver(elg, resolver_config)
 
@@ -137,7 +137,7 @@ end
 end
 
 @testset "host resolver literal address lookups" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
     config = Sockets.HostResolutionConfig(max_ttl_secs = 10)
 
@@ -169,7 +169,7 @@ end
 
 if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
     @testset "host resolver default dns lookups (network)" begin
-        elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+        elg = EventLoops.EventLoopGroup(; loop_count = 1)
         resolver = Sockets.HostResolver(elg)
         config = Sockets.HostResolutionConfig(max_ttl_secs = 10)
 
@@ -204,7 +204,7 @@ end
     clock_ref = Ref{UInt64}(0)
     clock_fn = EventLoops.RefClock(clock_ref)
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(
         elg,
         Sockets.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
@@ -281,7 +281,7 @@ end
 end
 
 @testset "host resolver connection failure handling" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     host = "host_address"
@@ -350,7 +350,7 @@ end
     clock_ref = Ref{UInt64}(0)
     clock_fn = EventLoops.RefClock(clock_ref)
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(
         elg,
         Sockets.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
@@ -410,7 +410,7 @@ end
     clock_ref = Ref{UInt64}(0)
     clock_fn = EventLoops.RefClock(clock_ref)
 
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(
         elg,
         Sockets.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
@@ -471,7 +471,7 @@ end
 end
 
 @testset "host resolver low frequency starvation" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     host = "host_address"
@@ -511,7 +511,7 @@ end
 end
 
 @testset "host resolver cached results" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     resolve_calls = Ref(0)
@@ -549,7 +549,7 @@ end
 end
 
 @testset "host resolver purge and count" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     resolved = Ref(false)
@@ -619,7 +619,7 @@ end
 end
 
 @testset "host resolver record failure moves address" begin
-    elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
     resolved = Ref(false)

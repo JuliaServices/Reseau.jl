@@ -13,7 +13,7 @@
         try
             _iocp_event_loop_thread(event_loop)
         catch e
-            Core.println("iocp event loop thread errored: $e")
+            Core.println("iocp event loop thread errored")
         finally
             impl = event_loop.impl_data
             notify(impl.completion_event)
@@ -211,7 +211,7 @@
         return nothing
     end
 
-    function event_loop_new_with_iocp(options::EventLoopOptions)::EventLoop
+    function event_loop_new_with_iocp(clock::ClockSource = HighResClock())::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing IO Completion Port event loop")
 
         impl = IocpEventLoop()
@@ -231,7 +231,7 @@
         end
         impl.iocp_handle = iocp_handle
 
-        event_loop = EventLoop(options.clock, impl)
+        event_loop = EventLoop(clock, impl)
 
         return event_loop
     end
@@ -376,6 +376,7 @@
         end
 
         logf(LogLevel.DEBUG, LS_IO_EVENT_LOOP, "exiting main loop")
+        event_loop_thread_exit_s2n_cleanup!(event_loop)
         @atomic impl.running_thread_id = UInt64(0)
         LibAwsCal.aws_cal_thread_clean_up()
         return nothing
@@ -661,8 +662,8 @@
 end # @static if Sys.iswindows()
 
 @static if !Sys.iswindows()
-function event_loop_new_with_iocp(options::EventLoopOptions)::EventLoop
-    _ = options
+function event_loop_new_with_iocp(clock::ClockSource = HighResClock())::EventLoop
+    _ = clock
     throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 end

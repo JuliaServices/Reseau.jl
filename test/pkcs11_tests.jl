@@ -1057,7 +1057,7 @@ end
 
             @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
-            elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+            elg = EventLoops.EventLoopGroup(; loop_count = 1)
             resolver = Sockets.HostResolver(elg)
 
             server_tls_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
@@ -1173,7 +1173,7 @@ end
 
             @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
-            elg = EventLoops.EventLoopGroup(EventLoops.EventLoopGroupOptions(; loop_count = 1))
+            elg = EventLoops.EventLoopGroup(; loop_count = 1)
             resolver = Sockets.HostResolver(elg)
 
             server_tls_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
