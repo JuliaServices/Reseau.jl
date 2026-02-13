@@ -684,9 +684,13 @@
                 _event_loop_stop_trace_queue(
                     event_loop,
                     "process-pre-queue-race",
-                    string("q_len=", string(length(impl.task_pre_queue)), " pending=", string(impl.should_process_task_pre_queue)),
+                    string(
+                        "q_len=",
+                        string(length(impl.task_pre_queue)),
+                        " pending=",
+                        string(impl.should_process_task_pre_queue),
+                    ),
                 )
-                return nothing
             end
 
             impl.should_process_task_pre_queue = false
