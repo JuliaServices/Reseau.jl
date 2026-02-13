@@ -933,6 +933,7 @@ end
 end
 
 @testset "winsock stubs" begin
+    ci_debug_log("socket_tests: winsock stubs start")
     if Sys.iswindows()
         @test Sockets.winsock_check_and_init!() === nothing
     else
@@ -963,6 +964,7 @@ end
 end
 
 @testset "socket nonblocking cloexec" begin
+    ci_debug_log("socket_tests: socket nonblocking cloexec start")
     if Sys.iswindows()
         @test true
     else
@@ -984,6 +986,7 @@ end
 end
 
 @testset "socket connect read write" begin
+    ci_debug_log("socket_tests: socket connect read write start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1131,6 +1134,7 @@ end
 end
 
 @testset "nw socket connect read write" begin
+    ci_debug_log("socket_tests: nw socket connect read write start")
     @static if !Sys.isapple()
         @test true
         return
@@ -1300,6 +1304,7 @@ end
 end
 
 @testset "sock write cb is async" begin
+    ci_debug_log("socket_tests: sock write cb is async start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1427,6 +1432,7 @@ end
 end
 
 @testset "connect timeout" begin
+    ci_debug_log("socket_tests: connect timeout start")
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
@@ -1478,6 +1484,7 @@ end
 end
 
 @testset "connect timeout cancellation" begin
+    ci_debug_log("socket_tests: connect timeout cancellation start")
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
     @test elg_val !== nothing
@@ -1530,6 +1537,7 @@ end
 end
 
 @testset "cleanup before connect or timeout" begin
+    ci_debug_log("socket_tests: cleanup before connect or timeout start")
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
         elg_val = elg isa EventLoops.EventLoopGroup ? elg : nothing
         @test elg_val !== nothing
@@ -1594,6 +1602,7 @@ end
 end
 
 @testset "cleanup in accept doesn't explode" begin
+    ci_debug_log("socket_tests: cleanup in accept doesn't explode start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1678,6 +1687,7 @@ end
 end
 
 @testset "cleanup in write cb doesn't explode" begin
+    ci_debug_log("socket_tests: cleanup in write cb doesn't explode start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1815,6 +1825,7 @@ end
 end
 
 @testset "local socket communication" begin
+    ci_debug_log("socket_tests: local socket communication start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -1960,6 +1971,7 @@ end
 end
 
 @testset "local socket connect before accept" begin
+    ci_debug_log("socket_tests: local socket connect before accept start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2044,6 +2056,7 @@ end
 end
 
 @testset "udp socket communication" begin
+    ci_debug_log("socket_tests: udp socket communication start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2155,6 +2168,7 @@ end
 end
 
 @testset "udp bind connect communication" begin
+    ci_debug_log("socket_tests: udp bind connect communication start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2269,6 +2283,7 @@ end
 end
 
 @testset "wrong thread read write fails" begin
+    ci_debug_log("socket_tests: wrong thread read write fails start")
     if Sys.iswindows()
         @test true
     else
@@ -2331,6 +2346,7 @@ end
 end
 
 @testset "bind on zero port tcp ipv4" begin
+    ci_debug_log("socket_tests: bind on zero port tcp ipv4 start")
     # Use LOCAL domain on macOS to get a POSIX socket (IPV4 → NW on macOS,
     # which doesn't expose resolved port from socket_get_bound_address)
     @static if Sys.isapple()
@@ -2378,6 +2394,7 @@ end
 end
 
 @testset "bind on zero port udp ipv4" begin
+    ci_debug_log("socket_tests: bind on zero port udp ipv4 start")
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.LOCAL)
     else
@@ -2421,6 +2438,7 @@ end
 end
 
 @testset "incoming duplicate tcp bind errors" begin
+    ci_debug_log("socket_tests: incoming duplicate tcp bind errors start")
     # Use LOCAL on macOS since IPV4 → NW sockets, which don't expose
     # resolved port or enforce POSIX duplicate-bind semantics
     @static if Sys.isapple()
@@ -2482,6 +2500,7 @@ end
 end
 
 @testset "incoming tcp socket errors" begin
+    ci_debug_log("socket_tests: incoming tcp socket errors start")
     # Use LOCAL on macOS to test POSIX bind error paths
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
@@ -2524,6 +2543,7 @@ end
 end
 
 @testset "incoming udp socket errors" begin
+    ci_debug_log("socket_tests: incoming udp socket errors start")
     @static if Sys.isapple()
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.LOCAL)
     else
@@ -2559,6 +2579,7 @@ end
 end
 
 @testset "outgoing local socket errors" begin
+    ci_debug_log("socket_tests: outgoing local socket errors start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
@@ -2616,6 +2637,7 @@ end
 end
 
 @testset "outgoing tcp socket error" begin
+    ci_debug_log("socket_tests: outgoing tcp socket error start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
