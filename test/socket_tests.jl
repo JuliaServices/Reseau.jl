@@ -38,6 +38,16 @@ function ci_with_timeout(label::AbstractString, f::Function; timeout_s::Float64 
     return false
 end
 
+function ci_wait_for_flag(label::AbstractString, flag; timeout_s::Float64 = 5.0)
+    ci_debug_log("$(label) waiting")
+    if wait_for_flag(flag; timeout_s)
+        ci_debug_log("$(label) complete")
+        return true
+    end
+    ci_debug_log("$(label) timed out after $(timeout_s)s")
+    return false
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -989,10 +999,12 @@ end
     ci_debug_log("socket_tests: socket connect read write start")
     el = EventLoops.event_loop_new()
     el_val = el isa EventLoops.EventLoop ? el : nothing
+    ci_debug_log("socket connect read write: event_loop_new")
     @test el_val !== nothing
     if el_val === nothing
         return
     end
+    ci_debug_log("socket connect read write: event_loop_run!")
     @test EventLoops.event_loop_run!(el_val) === nothing
     # Use LOCAL domain to ensure POSIX path (standalone event loop, no ELG)
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
@@ -1012,7 +1024,9 @@ end
         end
 
         bind_opts = Sockets.SocketBindOptions(local_endpoint)
+        ci_debug_log("socket connect read write: socket_bind")
         @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        ci_debug_log("socket connect read write: socket_listen")
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         accept_err = Ref{Int}(0)
@@ -1026,6 +1040,7 @@ end
         write_done = Threads.Atomic{Bool}(false)
 
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+            ci_debug_log("socket connect read write: on_accept")
             accept_err[] = err
             accepted[] = new_sock
             if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
@@ -1044,6 +1059,7 @@ end
             try
                 Sockets.socket_subscribe_to_readable_events(
                     new_sock, Reseau.EventCallable(err -> begin
+                        ci_debug_log("socket connect read write: on_read")
                         read_err[] = err
                         if err != Reseau.AWS_OP_SUCCESS
                             read_done[] = true
@@ -1069,6 +1085,7 @@ end
         end)
 
         accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
+        ci_debug_log("socket connect read write: socket_start_accept")
         @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
 
         client = Sockets.socket_init(opts)
@@ -1081,6 +1098,7 @@ end
             local_endpoint;
             event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
+                ci_debug_log("socket connect read write: on_connection_result")
                 connect_err[] = err
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1091,6 +1109,7 @@ end
                 try
                     Sockets.socket_write(
                         client_socket, cursor, Reseau.WriteCallable((err, bytes) -> begin
+                            ci_debug_log("socket connect read write: on_write")
                             write_err[] = err
                             write_done[] = true
                             return nothing
@@ -1106,25 +1125,34 @@ end
         )
 
         @test Sockets.socket_connect(client_socket, connect_opts) === nothing
-        @test wait_for_flag(connect_done)
+        @test ci_wait_for_flag("socket connect read write: wait connect_done", connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(write_done)
+        @test ci_wait_for_flag("socket connect read write: wait write_done", write_done)
         @test write_err[] == Reseau.AWS_OP_SUCCESS
-        @test wait_for_flag(read_done)
+        @test ci_wait_for_flag("socket connect read write: wait read_done", read_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
         @test read_err[] == Reseau.AWS_OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
-            Sockets.socket_close(client_socket)
+            ci_with_timeout("socket connect read write: socket_cleanup!(client_socket)", () -> Sockets.socket_cleanup!(client_socket))
+            if !ci_with_timeout("socket connect read write: socket_close(client_socket)", () -> Sockets.socket_close(client_socket))
+                ci_debug_log("socket connect read write: fallback socket_close(client_socket) timed out")
+            end
         end
         if accepted[] !== nothing
-            Sockets.socket_close(accepted[])
+            ci_with_timeout("socket connect read write: socket_cleanup!(accepted[])", () -> Sockets.socket_cleanup!(accepted[]))
+            if !ci_with_timeout("socket connect read write: socket_close(accepted[])", () -> Sockets.socket_close(accepted[]))
+                ci_debug_log("socket connect read write: fallback socket_close(accepted[]) timed out")
+            end
         end
         if server_socket !== nothing
-            Sockets.socket_close(server_socket)
+            ci_with_timeout("socket connect read write: socket_cleanup!(server_socket)", () -> Sockets.socket_cleanup!(server_socket))
+            if !ci_with_timeout("socket connect read write: socket_close(server_socket)", () -> Sockets.socket_close(server_socket))
+                ci_debug_log("socket connect read write: fallback socket_close(server_socket) timed out")
+            end
         end
-        EventLoops.event_loop_destroy!(el_val)
+        ci_with_timeout("socket connect read write: event_loop_destroy!", () -> EventLoops.event_loop_destroy!(el_val))
         # Clean up Unix domain socket file (Windows LOCAL uses named pipes, not a filesystem path).
         @static if !Sys.iswindows()
             sock_path = Sockets.get_address(local_endpoint)
