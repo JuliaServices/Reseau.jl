@@ -806,7 +806,11 @@ end
                     if event_data.is_subscribed
                         logf(
                             LogLevel.TRACE,
-                            LS_IO_EVENT_LOOP,string("activity on fd %d, invoking handler", " ", event_data.handle.fd, " ", ))
+                            LS_IO_EVENT_LOOP,
+                            "activity on fd ",
+                            event_data.handle.fd,
+                            " invoking handler",
+                        )
                         try
                             event_data.on_event(event_mask)
                         catch e

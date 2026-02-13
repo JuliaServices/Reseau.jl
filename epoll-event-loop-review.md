@@ -46,7 +46,8 @@
 - [x] `P2` Confirm wakeup batching avoids pathological wake storms when the same loop receives many cross-thread signals in quick succession.
   - Added burst scheduling regression to verify cross-thread scheduling remains reliable under many queued wakeups.
 - [ ] `P2` Validate fd registration/unregistration path does not perform avoidable work while lock is held.
-- [ ] `P2` Confirm callback dispatch keeps fast path lightweight and does not allocate per-event where it can be avoided.
+- [x] `P2` Confirm callback dispatch keeps fast path lightweight and does not allocate per-event where it can be avoided.
+  - Simplified the event-dispatch hot path logging to avoid per-event `string(...)` formatting allocations.
 
 ### Security / operational hardening
 - [x] `P1` Validate FD lifecycle in `close`/`epoll_ctl` paths never operates on invalidated descriptors during teardown.
