@@ -5,6 +5,8 @@
 @static if Sys.islinux()
     using LibAwsCal
 
+    const _LIBC_EWOULDBLOCK = isdefined(Base.Libc, :EWOULDBLOCK) ? Base.Libc.EWOULDBLOCK : Base.Libc.EAGAIN
+
     # Channel-based rendezvous for passing EventLoop to the thread function.
     const _EPOLL_THREAD_STARTUP = Channel{Any}(1)
 
@@ -286,7 +288,7 @@
                 logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
                 # Write to signal the event thread
                 counter = Ref(UInt64(1))
-                write_ptr = Ptr{UInt8}(pointer(counter))
+                write_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt64}, counter))
                 remaining = Csize_t(sizeof(UInt64))
                 while remaining > 0
                     written = @ccall gc_safe = true write(
@@ -299,7 +301,7 @@
                         if errno == Libc.EINTR
                             continue
                         end
-                        if errno in (Libc.EAGAIN, Libc.EWOULDBLOCK)
+                        if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
                             logf(
                                 LogLevel.TRACE,
                                 LS_IO_EVENT_LOOP,
@@ -581,7 +583,7 @@
                     if errno == Libc.EINTR
                         continue
                     end
-                    if errno in (Libc.EAGAIN, Libc.EWOULDBLOCK)
+                    if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
                         break
                     end
                     break
