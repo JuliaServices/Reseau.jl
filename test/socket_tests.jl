@@ -485,13 +485,21 @@ end
         finally
             ci_debug_log("ipv4 stream: cleanup start")
             if client_socket !== nothing
+                ci_debug_log("ipv4 stream: cleanup client_socket")
                 Sockets.socket_cleanup!(client_socket)
+                ci_debug_log("ipv4 stream: cleanup client_socket done")
             end
             if accepted[] !== nothing
+                ci_debug_log("ipv4 stream: cleanup accepted")
                 Sockets.socket_cleanup!(accepted[])
+                ci_debug_log("ipv4 stream: cleanup accepted done")
             end
+            ci_debug_log("ipv4 stream: cleanup server_socket")
             Sockets.socket_cleanup!(server_socket)
+            ci_debug_log("ipv4 stream: cleanup server_socket done")
+            ci_debug_log("ipv4 stream: event_loop_destroy start")
             EventLoops.event_loop_destroy!(el_val)
+            ci_debug_log("ipv4 stream: event_loop_destroy done")
         end
 
         # IPv4 UDP
@@ -567,10 +575,16 @@ end
         finally
             ci_debug_log("ipv4 udp: cleanup start")
             if client_socket !== nothing
+                ci_debug_log("ipv4 udp: cleanup client_socket")
                 Sockets.socket_cleanup!(client_socket)
+                ci_debug_log("ipv4 udp: cleanup client_socket done")
             end
+            ci_debug_log("ipv4 udp: cleanup server_socket")
             Sockets.socket_cleanup!(server_socket)
+            ci_debug_log("ipv4 udp: cleanup server_socket done")
+            ci_debug_log("ipv4 udp: event_loop_destroy start")
             EventLoops.event_loop_destroy!(el_val)
+            ci_debug_log("ipv4 udp: event_loop_destroy done")
         end
 
         # IPv6 stream
@@ -670,13 +684,21 @@ end
         finally
             ci_debug_log("ipv6 stream: cleanup start")
             if client_socket !== nothing
+                ci_debug_log("ipv6 stream: cleanup client_socket")
                 Sockets.socket_cleanup!(client_socket)
+                ci_debug_log("ipv6 stream: cleanup client_socket done")
             end
             if accepted[] !== nothing
+                ci_debug_log("ipv6 stream: cleanup accepted")
                 Sockets.socket_cleanup!(accepted[])
+                ci_debug_log("ipv6 stream: cleanup accepted done")
             end
+            ci_debug_log("ipv6 stream: cleanup server_socket")
             Sockets.socket_cleanup!(server_socket)
+            ci_debug_log("ipv6 stream: cleanup server_socket done")
+            ci_debug_log("ipv6 stream: event_loop_destroy start")
             EventLoops.event_loop_destroy!(el_val)
+            ci_debug_log("ipv6 stream: event_loop_destroy done")
         end
     end
 end
