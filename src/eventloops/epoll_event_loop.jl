@@ -292,7 +292,7 @@
                     written = @ccall gc_safe = true write(
                         impl.write_task_handle.fd::Cint,
                         write_ptr::Ptr{UInt8},
-                        remaining,
+                        remaining::Csize_t,
                     )::Cssize_t
                     if written == -1
                         errno = Base.Libc.errno()
