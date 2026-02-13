@@ -13,6 +13,26 @@ function wait_for_flag(flag; timeout_s::Float64 = 5.0)
     return false
 end
 
+function run_with_timeout(fn::Function; timeout_s::Float64 = 5.0)
+    done = Threads.Atomic{Bool}(false)
+    err = Ref{Any}(nothing)
+    task = @async begin
+        try
+            fn()
+        catch e
+            err[] = e
+        finally
+            done[] = true
+        end
+        return nothing
+    end
+
+    @test wait_for_flag(done; timeout_s = timeout_s)
+    fetch(task)
+    err[] === nothing || throw(err[])
+    return nothing
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -462,12 +482,12 @@ end
             @test payload[] == "ping"
         finally
             if client_socket !== nothing
-                Sockets.socket_cleanup!(client_socket)
+                run_with_timeout(() -> Sockets.socket_cleanup!(client_socket); timeout_s = 2.0)
             end
             if accepted[] !== nothing
-                Sockets.socket_cleanup!(accepted[])
+                run_with_timeout(() -> Sockets.socket_cleanup!(accepted[]); timeout_s = 2.0)
             end
-            Sockets.socket_cleanup!(server_socket)
+            run_with_timeout(() -> Sockets.socket_cleanup!(server_socket); timeout_s = 2.0)
             EventLoops.event_loop_destroy!(el_val)
         end
 
