@@ -132,12 +132,12 @@ end
     @test server_setup_has_pool[]
 
     if setup_channel[] !== nothing
-        Sockets.channel_shutdown!(setup_channel[], 0)
+        Sockets.pipeline_shutdown!(setup_channel[], 0)
         @test wait_for_pred(() -> shutdown_called[])
     end
 
     if server_channel[] !== nothing
-        Sockets.channel_shutdown!(server_channel[], 0)
+        Sockets.pipeline_shutdown!(server_channel[], 0)
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
@@ -230,12 +230,12 @@ end
     @test wait_for_pred(() -> server_setup_called[])
 
     if setup_channel[] !== nothing
-        Sockets.channel_shutdown!(setup_channel[], 0)
+        Sockets.pipeline_shutdown!(setup_channel[], 0)
         @test wait_for_pred(() -> shutdown_called[])
     end
 
     if server_channel[] !== nothing
-        Sockets.channel_shutdown!(server_channel[], 0)
+        Sockets.pipeline_shutdown!(server_channel[], 0)
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
@@ -509,10 +509,10 @@ if tls_tests_enabled()
     @test wait_for_pred(() -> client_negotiated[])
 
     if client_channel[] !== nothing
-        Sockets.channel_shutdown!(client_channel[], 0)
+        Sockets.pipeline_shutdown!(client_channel[], 0)
     end
     if server_channel[] !== nothing
-        Sockets.channel_shutdown!(server_channel[], 0)
+        Sockets.pipeline_shutdown!(server_channel[], 0)
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
@@ -544,7 +544,7 @@ end
             if channel !== nothing
                 push!(server_channels, channel)
                 if @atomic bs.shutdown
-                    Sockets.channel_shutdown!(channel, 0)
+                    Sockets.pipeline_shutdown!(channel, 0)
                 end
             end
             return nothing
@@ -596,10 +596,10 @@ end
     @test !destroy_called[]
 
     for channel in server_channels
-        Sockets.channel_shutdown!(channel, 0)
+        Sockets.pipeline_shutdown!(channel, 0)
     end
     if client_channel[] !== nothing
-        Sockets.channel_shutdown!(client_channel[], 0)
+        Sockets.pipeline_shutdown!(client_channel[], 0)
     end
 
     @test wait_for_pred(() -> server_shutdown[])

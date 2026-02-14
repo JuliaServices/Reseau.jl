@@ -37,11 +37,11 @@ function wait_for_pred_tls(pred::Function; timeout_s::Float64 = 10.0)
     return pred()
 end
 
-function wait_for_handshake_status(handler::Sockets.TlsChannelHandler, status; timeout_s::Float64 = 5.0)
+function wait_for_handshake_status(handler, status; timeout_s::Float64 = 5.0)
     start = Base.time_ns()
     timeout_ns = Int(timeout_s * 1_000_000_000)
     while (Base.time_ns() - start) < timeout_ns
-        if Sockets.handler_gather_statistics(handler).handshake_status == status
+        if handler.stats.handshake_status == status
             return true
         end
         sleep(0.01)
@@ -49,7 +49,7 @@ function wait_for_handshake_status(handler::Sockets.TlsChannelHandler, status; t
     return false
 end
 
-function mark_tls_handler_negotiated!(handler::Sockets.TlsChannelHandler)
+function mark_tls_handler_negotiated!(handler)
     if hasproperty(handler, :state)
         setfield!(handler, :state, Sockets.TlsNegotiationState.SUCCEEDED)
     elseif hasproperty(handler, :negotiation_finished)
@@ -58,7 +58,7 @@ function mark_tls_handler_negotiated!(handler::Sockets.TlsChannelHandler)
     return nothing
 end
 
-function mark_tls_handler_failed!(handler::Sockets.TlsChannelHandler)
+function mark_tls_handler_failed!(handler)
     if hasproperty(handler, :state)
         setfield!(handler, :state, Sockets.TlsNegotiationState.FAILED)
     elseif hasproperty(handler, :negotiation_finished)
@@ -200,7 +200,7 @@ function _tls_network_connect(
     wait_for_pred_tls(() -> setup_err[] !== nothing; timeout_s = 20.0)
 
     if channel_ref[] !== nothing
-        Sockets.channel_shutdown!(channel_ref[], 0)
+        Sockets.pipeline_shutdown!(channel_ref[], 0)
     end
 
     Sockets.host_resolver_shutdown!(resolver)
@@ -530,11 +530,12 @@ end
         return
     end
 
-    channel = Sockets.Channel(event_loop, nothing)
-    slot = Sockets.channel_slot_new!(channel)
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
     conn = Sockets.tls_connection_options_init_from_ctx(ctx)
     try
-        res = Sockets.tls_client_handler_new(conn, slot)
+        res = Sockets.tls_client_handler_new(conn, socket, ps)
         @test false
     catch e
         @test e isa Reseau.ReseauError
@@ -666,7 +667,7 @@ end
 end
 
 @testset "TLS BYO crypto setup" begin
-    new_handler = (options, slot, ud) -> nothing
+    new_handler = (options, socket, pipeline, ud) -> nothing
     start_negotiation = (handler, ud) -> 0
     client_opts = Sockets.TlsByoCryptoSetupOptions(
         new_handler_fn = new_handler,
@@ -710,17 +711,16 @@ end
     @test ctx isa Sockets.TlsContext
 
     opts = Sockets.TlsConnectionOptions(ctx; timeout_ms = 1)
-    channel = Sockets.Channel(event_loop, nothing)
-    slot = Sockets.channel_slot_new!(channel)
-    handler = Sockets.tls_client_handler_new(opts, slot)
-    @test handler isa Sockets.TlsChannelHandler
-    Sockets.channel_slot_set_handler!(slot, handler)
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
+    handler = Sockets.tls_client_handler_new(opts, socket, ps)
 
     handler.stats.handshake_status = Sockets.TlsNegotiationStatus.ONGOING
     Sockets._tls_timeout_task(handler, Reseau.TaskStatus.RUN_READY)
 
-    @test channel.shutdown_pending
-    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
+    @test ps.shutdown_pending
+    @test ps.shutdown_error_code == EventLoops.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
 
     EventLoops.event_loop_group_destroy!(elg)
 end
@@ -801,13 +801,12 @@ end
         return
     end
 
-    channel = Sockets.Channel(event_loop, nothing)
-    slot = Sockets.channel_slot_new!(channel)
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
     conn = Sockets.tls_connection_options_init_from_ctx(ctx)
     Sockets.tls_connection_options_set_server_name(conn, "example.com")
-    handler = Sockets.tls_client_handler_new(conn, slot)
-    @test handler isa Sockets.TlsChannelHandler
-    Sockets.channel_slot_set_handler!(slot, handler)
+    handler = Sockets.tls_client_handler_new(conn, socket, ps)
 
     @test _buf_to_string(Sockets.tls_handler_server_name(handler)) == "example.com"
     @test Sockets.tls_handler_protocol(handler).len == 0
@@ -816,115 +815,6 @@ end
     @test _buf_to_string(Sockets.tls_handler_protocol(handler)) == "h2"
 
     EventLoops.event_loop_group_destroy!(elg)
-end
-
-mutable struct EchoHandler <: Sockets.AbstractChannelHandler
-    slot::Union{Sockets.ChannelSlot, Nothing}
-    saw_ping::Base.RefValue{Bool}
-end
-
-function EchoHandler(flag::Base.RefValue{Bool})
-    return EchoHandler(nothing, flag)
-end
-
-function Sockets.handler_process_read_message(handler::EchoHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
-    channel = slot.channel
-    buf = message.message_data
-    payload = String(Reseau.byte_cursor_from_buf(buf))
-    if payload == "ping"
-        handler.saw_ping[] = true
-        resp = Sockets.IoMessage(4)
-        resp_ref = Ref(resp.message_data)
-        Reseau.byte_buf_write_from_whole_cursor(resp_ref, Reseau.ByteCursor("pong"))
-        resp.message_data = resp_ref[]
-        Sockets.channel_slot_send_message(slot, resp, Sockets.ChannelDirection.WRITE)
-    end
-    if channel !== nothing
-        Sockets.channel_release_message_to_pool!(channel, message)
-    end
-    return nothing
-end
-
-function Sockets.handler_process_write_message(handler::EchoHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
-    return Sockets.channel_slot_send_message(slot, message, Sockets.ChannelDirection.WRITE)
-end
-
-function Sockets.handler_increment_read_window(handler::EchoHandler, slot::Sockets.ChannelSlot, size::Csize_t)
-    return Sockets.channel_slot_increment_read_window!(slot, size)
-end
-
-function Sockets.handler_shutdown(
-        handler::EchoHandler,
-        slot::Sockets.ChannelSlot,
-        direction::Sockets.ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )
-    Sockets.channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
-    return nothing
-end
-
-function Sockets.handler_initial_window_size(handler::EchoHandler)
-    return Reseau.SIZE_MAX
-end
-
-function Sockets.handler_message_overhead(handler::EchoHandler)
-    return Csize_t(0)
-end
-
-function Sockets.handler_destroy(handler::EchoHandler)
-    return nothing
-end
-
-mutable struct SinkHandler <: Sockets.TlsChannelHandler
-    slot::Union{Sockets.ChannelSlot, Nothing}
-    writes::Base.RefValue{Int}
-end
-
-function SinkHandler()
-    return SinkHandler(nothing, Ref(0))
-end
-
-function Sockets.handler_process_read_message(handler::SinkHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
-    if slot.channel !== nothing
-        Sockets.channel_release_message_to_pool!(slot.channel, message)
-    end
-    return nothing
-end
-
-function Sockets.handler_process_write_message(handler::SinkHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
-    handler.writes[] += 1
-    if slot.channel !== nothing
-        Sockets.channel_release_message_to_pool!(slot.channel, message)
-    end
-    return nothing
-end
-
-function Sockets.handler_increment_read_window(handler::SinkHandler, slot::Sockets.ChannelSlot, size::Csize_t)
-    return Sockets.channel_slot_increment_read_window!(slot, size)
-end
-
-function Sockets.handler_shutdown(
-        handler::SinkHandler,
-        slot::Sockets.ChannelSlot,
-        direction::Sockets.ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )
-    Sockets.channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
-    return nothing
-end
-
-function Sockets.handler_initial_window_size(handler::SinkHandler)
-    return Reseau.SIZE_MAX
-end
-
-function Sockets.handler_message_overhead(handler::SinkHandler)
-    return Csize_t(0)
-end
-
-function Sockets.handler_destroy(handler::SinkHandler)
-    return nothing
 end
 
 @testset "TLS BYO crypto integration" begin
@@ -941,20 +831,26 @@ end
 
     new_called = Ref(false)
     start_called = Ref(false)
-    seen_slot = Ref{Any}(nothing)
+    seen_socket = Ref{Any}(nothing)
+    seen_pipeline = Ref{Any}(nothing)
     seen_new_ud = Ref{Any}(nothing)
     seen_start_ud = Ref{Any}(nothing)
     seen_handler = Ref{Any}(nothing)
     server_new_called = Ref(false)
-    server_seen_slot = Ref{Any}(nothing)
+    server_seen_socket = Ref{Any}(nothing)
+    server_seen_pipeline = Ref{Any}(nothing)
     server_seen_ud = Ref{Any}(nothing)
     server_seen_handler = Ref{Any}(nothing)
 
-    new_handler = (options, slot, ud) -> begin
+    # BYO crypto handler: just a mutable struct to serve as a handler
+    byo_handler = (;)
+
+    new_handler = (options, socket, pipeline, ud) -> begin
         new_called[] = true
-        seen_slot[] = slot
+        seen_socket[] = socket
+        seen_pipeline[] = pipeline
         seen_new_ud[] = ud
-        return SinkHandler()
+        return byo_handler
     end
     start_negotiation = (handler, ud) -> begin
         start_called[] = true
@@ -962,13 +858,14 @@ end
         seen_start_ud[] = ud
         return Reseau.AWS_OP_SUCCESS
     end
-    server_new_handler = (options, slot, ud) -> begin
+    server_new_handler = (options, socket, pipeline, ud) -> begin
         server_new_called[] = true
-        server_seen_slot[] = slot
+        server_seen_socket[] = socket
+        server_seen_pipeline[] = pipeline
         server_seen_ud[] = ud
-        handler = SinkHandler()
-        server_seen_handler[] = handler
-        return handler
+        h = (;)
+        server_seen_handler[] = h
+        return h
     end
 
     client_opts = Sockets.TlsByoCryptoSetupOptions(
@@ -984,17 +881,16 @@ end
     )
     @test Sockets.tls_byo_crypto_set_server_setup_options(server_setup) === nothing
 
-    channel = Sockets.Channel(event_loop, nothing)
-    left_slot = Sockets.channel_slot_new!(channel)
-    sink = SinkHandler()
-    Sockets.channel_slot_set_handler!(left_slot, sink)
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
 
     tls_opts = Sockets.TlsConnectionOptions(ctx; server_name = "example.com")
-    handler = Sockets.channel_setup_client_tls(left_slot, tls_opts)
-    @test handler isa Sockets.AbstractChannelHandler
+    handler = Sockets.tls_client_handler_new(tls_opts, socket, ps)
     @test new_called[]
     @test start_called[]
-    @test seen_slot[] === left_slot.adj_right
+    @test seen_socket[] === socket
+    @test seen_pipeline[] === ps
     @test seen_new_ud[] == 42
     @test seen_start_ud[] == 42
     @test seen_handler[] === handler
@@ -1009,15 +905,16 @@ end
         server_ctx = Sockets.tls_context_new(server_opts)
         @test server_ctx isa Sockets.TlsContext
         if server_ctx isa Sockets.TlsContext
-            server_channel = Sockets.Channel(event_loop, nothing)
-            server_slot = Sockets.channel_slot_new!(server_channel)
+            server_ps = Sockets.PipelineState(event_loop)
+            server_socket = Sockets.socket_init(socket_opts)
             server_handler = Sockets.tls_server_handler_new(
                 Sockets.TlsConnectionOptions(server_ctx),
-                server_slot,
+                server_socket,
+                server_ps,
             )
-            @test server_handler isa Sockets.AbstractChannelHandler
             @test server_new_called[]
-            @test server_seen_slot[] === server_slot
+            @test server_seen_socket[] === server_socket
+            @test server_seen_pipeline[] === server_ps
             @test server_seen_ud[] == 99
             @test server_seen_handler[] === server_handler
         end
@@ -1040,24 +937,15 @@ end
     client_ctx = _test_client_ctx()
     @test client_ctx isa Sockets.TlsContext
 
-    channel = Sockets.Channel(event_loop, nothing)
-    left_slot = Sockets.channel_slot_new!(channel)
-    sink = SinkHandler()
-    Sockets.channel_slot_set_handler!(left_slot, sink)
-    sink.slot = left_slot
-    tls_slot = Sockets.channel_slot_new!(channel)
-    Sockets.channel_slot_insert_right!(left_slot, tls_slot)
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
 
     client_opts = Sockets.TlsConnectionOptions(client_ctx; server_name = "example.com")
-    client_handler = Sockets.tls_client_handler_new(client_opts, tls_slot)
-    @test client_handler isa Sockets.TlsChannelHandler
-    if client_handler isa Sockets.TlsChannelHandler
-        client_opts.server_name = "changed"
-        @test _buf_to_string(Sockets.tls_handler_server_name(client_handler)) == "example.com"
-        @test Sockets.handler_gather_statistics(client_handler).handshake_status == Sockets.TlsNegotiationStatus.NONE
-        @test Sockets.tls_client_handler_start_negotiation(client_handler) === nothing
-        @test wait_for_handshake_status(client_handler, Sockets.TlsNegotiationStatus.ONGOING)
-    end
+    client_handler = Sockets.tls_client_handler_new(client_opts, socket, ps)
+    client_opts.server_name = "changed"
+    @test _buf_to_string(Sockets.tls_handler_server_name(client_handler)) == "example.com"
+    @test client_handler.stats.handshake_status == Sockets.TlsNegotiationStatus.NONE
 
     server_opts = Sockets.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
@@ -1069,27 +957,20 @@ end
         server_ctx = Sockets.tls_context_new(server_opts)
         @test server_ctx isa Sockets.TlsContext
         if server_ctx isa Sockets.TlsContext
-            server_channel = Sockets.Channel(event_loop, nothing)
-            server_left = Sockets.channel_slot_new!(server_channel)
-            server_sink = SinkHandler()
-            Sockets.channel_slot_set_handler!(server_left, server_sink)
-            server_sink.slot = server_left
-            server_slot = Sockets.channel_slot_new!(server_channel)
-            Sockets.channel_slot_insert_right!(server_left, server_slot)
+            server_ps = Sockets.PipelineState(event_loop)
+            server_socket = Sockets.socket_init(socket_opts)
 
             server_handler = Sockets.tls_server_handler_new(
                 Sockets.TlsConnectionOptions(server_ctx),
-                server_slot,
+                server_socket,
+                server_ps,
             )
-            @test server_handler isa Sockets.TlsChannelHandler
-            if server_handler isa Sockets.TlsChannelHandler
-                @test Sockets.handler_gather_statistics(server_handler).handshake_status == Sockets.TlsNegotiationStatus.NONE
-            end
+            @test server_handler.stats.handshake_status == Sockets.TlsNegotiationStatus.NONE
 
-            bad_channel = Sockets.Channel(event_loop, nothing)
-            bad_slot = Sockets.channel_slot_new!(bad_channel)
+            bad_ps = Sockets.PipelineState(event_loop)
+            bad_socket = Sockets.socket_init(socket_opts)
             try
-                bad_handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(server_ctx), bad_slot)
+                bad_handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(server_ctx), bad_socket, bad_ps)
                 @test false
             catch e
                 @test e isa Reseau.ReseauError
@@ -1102,7 +983,7 @@ end
     EventLoops.event_loop_group_destroy!(elg)
 end
 
-@testset "TLS read shutdown ignores data" begin
+@testset "pipeline_setup_client_tls!" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.event_loop_group_get_next_loop(elg)
     @test event_loop !== nothing
@@ -1114,511 +995,13 @@ end
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
 
-    channel = Sockets.Channel(event_loop, nothing)
-    slot = Sockets.channel_slot_new!(channel)
-    saw_data = Ref(false)
-    on_data_read = (handler, slot, buf) -> begin
-        saw_data[] = true
-        return nothing
-    end
-    opts = Sockets.TlsConnectionOptions(ctx; on_data_read = on_data_read)
-    handler = Sockets.tls_client_handler_new(opts, slot)
-    @test handler isa Sockets.TlsChannelHandler
-    Sockets.channel_slot_set_handler!(slot, handler)
-    if hasproperty(handler, :state)
-        setfield!(handler, :state, Sockets.TlsNegotiationState.SUCCEEDED)
-    elseif hasproperty(handler, :negotiation_finished)
-        setfield!(handler, :negotiation_finished, true)
-    end
-
-    Sockets.handler_shutdown(handler, slot, Sockets.ChannelDirection.READ, 0, false)
-
-    msg = Sockets.IoMessage(1)
-    msg_ref = Ref(msg.message_data)
-    Reseau.byte_buf_write_from_whole_cursor(msg_ref, Reseau.ByteCursor(UInt8[0x00]))
-    msg.message_data = msg_ref[]
-    Sockets.handler_process_read_message(handler, slot, msg)
-
-    @test !saw_data[]
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "TLS shutdown clears pending writes" begin
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    ctx = _test_client_ctx()
-    @test ctx isa Sockets.TlsContext
-
-    channel = Sockets.Channel(event_loop, nothing)
-    slot = Sockets.channel_slot_new!(channel)
-    handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), slot)
-    @test handler isa Sockets.TlsChannelHandler
-    Sockets.channel_slot_set_handler!(slot, handler)
-    mark_tls_handler_negotiated!(handler)
-
-    Sockets.handler_shutdown(handler, slot, Sockets.ChannelDirection.WRITE, 0, false)
-    @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
-
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "TLS write after failure" begin
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    ctx = _test_client_ctx()
-    @test ctx isa Sockets.TlsContext
-
-    channel = Sockets.Channel(event_loop, nothing)
-    slot = Sockets.channel_slot_new!(channel)
-    handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), slot)
-    @test handler isa Sockets.TlsChannelHandler
-    Sockets.channel_slot_set_handler!(slot, handler)
-    mark_tls_handler_failed!(handler)
-
-    msg = Sockets.IoMessage(1)
-    msg_ref = Ref(msg.message_data)
-    Reseau.byte_buf_write_from_whole_cursor(msg_ref, Reseau.ByteCursor(UInt8[0x02]))
-    msg.message_data = msg_ref[]
-    try
-        Sockets.handler_process_write_message(handler, slot, msg)
-        @test false
-    catch e
-        @test e isa Reseau.ReseauError
-        @test e.code == EventLoops.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED
-    end
-
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "TLS alert handling" begin
-    if Sys.isapple() || Sys.islinux()
-        @test true
-        return
-    end
-
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    ctx = _test_client_ctx()
-    @test ctx isa Sockets.TlsContext
-
-    function new_alert_handler()
-        channel = Sockets.Channel(event_loop, nothing)
-        slot = Sockets.channel_slot_new!(channel)
-        handler = Sockets.TlsChannelHandler(Sockets.TlsConnectionOptions(ctx))
-        handler.negotiation_completed = true
-        handler.state = Sockets.TlsHandshakeState.NEGOTIATED
-        handler.slot = slot
-        Sockets.channel_slot_set_handler!(slot, handler)
-        return channel, slot, handler
-    end
-
-    function send_alert!(handler::Sockets.TlsChannelHandler, slot::Sockets.ChannelSlot, level::UInt8, desc::UInt8)
-        msg = Sockets.IoMessage(2 + Sockets.TLS_RECORD_HEADER_LEN)
-        msg_ref = Ref(msg.message_data)
-        Reseau.byte_buf_reserve(msg_ref, 2 + Sockets.TLS_RECORD_HEADER_LEN)
-        msg.message_data = msg_ref[]
-        buf = msg.message_data
-        GC.@preserve buf begin
-            ptr = pointer(getfield(buf, :mem))
-            unsafe_store!(ptr, Sockets.TLS_RECORD_ALERT)
-            unsafe_store!(ptr + 1, UInt8(0))
-            unsafe_store!(ptr + 2, UInt8(0))
-            unsafe_store!(ptr + 3, UInt8(0))
-            unsafe_store!(ptr + 4, UInt8(2))
-            unsafe_store!(ptr + 5, level)
-            unsafe_store!(ptr + 6, desc)
-        end
-        setfield!(buf, :len, Csize_t(2 + Sockets.TLS_RECORD_HEADER_LEN))
-        Sockets.handler_process_read_message(handler, slot, msg)
-    end
-
-    channel, slot, handler = new_alert_handler()
-    send_alert!(handler, slot, Sockets.TLS_ALERT_LEVEL_WARNING, Sockets.TLS_ALERT_CLOSE_NOTIFY)
-    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_CLOSED_GRACEFUL
-
-    channel, slot, handler = new_alert_handler()
-    send_alert!(handler, slot, Sockets.TLS_ALERT_LEVEL_FATAL, UInt8(40))
-    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_ALERT_NOT_GRACEFUL
-
-    channel, slot, handler = new_alert_handler()
-    msg = Sockets.IoMessage(1 + Sockets.TLS_RECORD_HEADER_LEN)
-    msg_ref = Ref(msg.message_data)
-    Reseau.byte_buf_reserve(msg_ref, 1 + Sockets.TLS_RECORD_HEADER_LEN)
-    msg.message_data = msg_ref[]
-    buf = msg.message_data
-    GC.@preserve buf begin
-        ptr = pointer(getfield(buf, :mem))
-        unsafe_store!(ptr, Sockets.TLS_RECORD_ALERT)
-        unsafe_store!(ptr + 1, UInt8(0))
-        unsafe_store!(ptr + 2, UInt8(0))
-        unsafe_store!(ptr + 3, UInt8(0))
-        unsafe_store!(ptr + 4, UInt8(1))
-        unsafe_store!(ptr + 5, UInt8(0))
-    end
-    setfield!(buf, :len, Csize_t(1 + Sockets.TLS_RECORD_HEADER_LEN))
-    Sockets.handler_process_read_message(handler, slot, msg)
-    @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_ERROR_ALERT_RECEIVED
-
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "TLS handshake stats" begin
-    if Sys.isapple() || Sys.islinux()
-        @test true
-        return
-    end
-
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    ctx = _test_client_ctx()
-    @test ctx isa Sockets.TlsContext
-
-    channel = Sockets.Channel(event_loop, nothing)
-    left_slot = Sockets.channel_slot_new!(channel)
-    left_sink = SinkHandler()
-    Sockets.channel_slot_set_handler!(left_slot, left_sink)
-
-    tls_slot = Sockets.channel_slot_new!(channel)
-    Sockets.channel_slot_insert_right!(left_slot, tls_slot)
-    right_slot = Sockets.channel_slot_new!(channel)
-    Sockets.channel_slot_insert_right!(tls_slot, right_slot)
-    right_sink = SinkHandler()
-    Sockets.channel_slot_set_handler!(right_slot, right_sink)
-
-    handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), tls_slot)
-    @test handler isa Sockets.TlsChannelHandler
-    if handler isa Sockets.TlsChannelHandler
-        @test Sockets.tls_client_handler_start_negotiation(handler) === nothing
-        @test wait_for_handshake_status(handler, Sockets.TlsNegotiationStatus.ONGOING)
-        @test handler.stats.handshake_start_ns > 0
-
-        payload = Memory{UInt8}(undef, Sockets.TLS_NONCE_LEN)
-        rand!(payload)
-        msg = Sockets.IoMessage(Sockets.TLS_RECORD_HEADER_LEN + Sockets.TLS_NONCE_LEN)
-        msg_ref = Ref(msg.message_data)
-        Reseau.byte_buf_reserve(msg_ref, Sockets.TLS_RECORD_HEADER_LEN + Sockets.TLS_NONCE_LEN)
-        msg.message_data = msg_ref[]
-        buf = msg.message_data
-        GC.@preserve buf payload begin
-            ptr = pointer(getfield(buf, :mem))
-            unsafe_store!(ptr, Sockets.TLS_HANDSHAKE_SERVER_HELLO)
-            len = UInt32(Sockets.TLS_NONCE_LEN)
-            unsafe_store!(ptr + 1, UInt8((len >> 24) & 0xFF))
-            unsafe_store!(ptr + 2, UInt8((len >> 16) & 0xFF))
-            unsafe_store!(ptr + 3, UInt8((len >> 8) & 0xFF))
-            unsafe_store!(ptr + 4, UInt8(len & 0xFF))
-            unsafe_copyto!(ptr + Sockets.TLS_RECORD_HEADER_LEN, pointer(payload), Sockets.TLS_NONCE_LEN)
-        end
-        setfield!(buf, :len, Csize_t(Sockets.TLS_RECORD_HEADER_LEN + Sockets.TLS_NONCE_LEN))
-        Sockets.handler_process_read_message(handler, tls_slot, msg)
-        @test wait_for_handshake_status(handler, Sockets.TlsNegotiationStatus.SUCCESS)
-        @test handler.stats.handshake_end_ns >= handler.stats.handshake_start_ns
-    end
-
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "TLS mTLS custom key op handshake" begin
-    if Sys.isapple() || Sys.islinux()
-        @test true
-        return
-    end
-
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    called = Ref(false)
-    op_ref = Ref{Any}(nothing)
-    key_handler = Sockets.CustomKeyOpHandler(
-        (handler_obj, operation) -> begin
-            @test handler_obj isa Sockets.CustomKeyOpHandler
-            @test Sockets.tls_key_operation_get_type(operation) == Sockets.TlsKeyOperationType.SIGN
-            @test Sockets.tls_key_operation_get_digest_algorithm(operation) == Sockets.TlsHashAlgorithm.SHA256
-            @test Sockets.tls_key_operation_get_signature_algorithm(operation) == Sockets.TlsSignatureAlgorithm.RSA
-            called[] = true
-            op_ref[] = operation
-        end,
-    )
-
-    opts = Sockets.tls_ctx_options_init_client_mtls_with_custom_key_operations(
-        key_handler,
-        Reseau.ByteCursor(TEST_PEM_CERT),
-    )
-    @test opts isa Sockets.TlsContextOptions
-
-    ctx = Sockets.tls_context_new(opts)
-    @test ctx isa Sockets.TlsContext
-
-    channel = Sockets.Channel(event_loop, nothing)
-    left_slot = Sockets.channel_slot_new!(channel)
-    left_sink = SinkHandler()
-    Sockets.channel_slot_set_handler!(left_slot, left_sink)
-
-    tls_slot = Sockets.channel_slot_new!(channel)
-    Sockets.channel_slot_insert_right!(left_slot, tls_slot)
-    right_slot = Sockets.channel_slot_new!(channel)
-    Sockets.channel_slot_insert_right!(tls_slot, right_slot)
-    right_sink = SinkHandler()
-    Sockets.channel_slot_set_handler!(right_slot, right_sink)
-
-    tls_handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), tls_slot)
-    @test tls_handler isa Sockets.TlsChannelHandler
-    if tls_handler isa Sockets.TlsChannelHandler
-        @test Sockets.tls_client_handler_start_negotiation(tls_handler) === nothing
-        @test wait_for_handshake_status(tls_handler, Sockets.TlsNegotiationStatus.ONGOING)
-
-        payload = rand(UInt8, Sockets.TLS_NONCE_LEN)
-        msg = Sockets.IoMessage(Sockets.TLS_RECORD_HEADER_LEN + Sockets.TLS_NONCE_LEN)
-        msg_ref = Ref(msg.message_data)
-        Reseau.byte_buf_reserve(msg_ref, Sockets.TLS_RECORD_HEADER_LEN + Sockets.TLS_NONCE_LEN)
-        msg.message_data = msg_ref[]
-        buf = msg.message_data
-        GC.@preserve buf payload begin
-            ptr = pointer(getfield(buf, :mem))
-            unsafe_store!(ptr, Sockets.TLS_HANDSHAKE_SERVER_HELLO)
-            len = UInt32(Sockets.TLS_NONCE_LEN)
-            unsafe_store!(ptr + 1, UInt8((len >> 24) & 0xFF))
-            unsafe_store!(ptr + 2, UInt8((len >> 16) & 0xFF))
-            unsafe_store!(ptr + 3, UInt8((len >> 8) & 0xFF))
-            unsafe_store!(ptr + 4, UInt8(len & 0xFF))
-            unsafe_copyto!(ptr + Sockets.TLS_RECORD_HEADER_LEN, pointer(payload), Sockets.TLS_NONCE_LEN)
-        end
-        setfield!(buf, :len, Csize_t(Sockets.TLS_RECORD_HEADER_LEN + Sockets.TLS_NONCE_LEN))
-        Sockets.handler_process_read_message(tls_handler, tls_slot, msg)
-
-        @test wait_for_flag_tls(called)
-        @test tls_handler.stats.handshake_status == Sockets.TlsNegotiationStatus.ONGOING
-
-        op = op_ref[]
-        @test op isa Sockets.TlsKeyOperation
-        if op isa Sockets.TlsKeyOperation
-            Sockets.tls_key_operation_complete!(op, Reseau.ByteCursor(UInt8[0x01]))
-            @test wait_for_handshake_status(tls_handler, Sockets.TlsNegotiationStatus.SUCCESS)
-        end
-    end
-
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "tls handler" begin
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    server_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
-    server_sock = Sockets.socket_init(server_opts)
-    @test server_sock isa Sockets.Socket
-
-    bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
-    @test Sockets.socket_bind(server_sock, Sockets.SocketBindOptions(bind_endpoint)) === nothing
-    @test Sockets.socket_listen(server_sock, 16) === nothing
-
-    server_ready = Ref(false)
-    accept_started = Ref(false)
-    server_negotiated = Ref(false)
-    server_received = Ref(false)
-
-    server_ctx = _test_server_ctx()
-    @test server_ctx isa Sockets.TlsContext
-
-    on_server_negotiation = (handler, slot, err) -> begin
-        _ = handler
-        _ = slot
-        _ = err
-        server_negotiated[] = true
-        return nothing
-    end
-
-    on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
-        if err != Reseau.AWS_OP_SUCCESS
-            return nothing
-        end
-        Sockets.socket_assign_to_event_loop(new_sock, event_loop)
-        channel = Sockets.Channel(event_loop, nothing)
-        Sockets.socket_channel_handler_new!(channel, new_sock)
-
-        tls_opts = Sockets.TlsConnectionOptions(server_ctx; on_negotiation_result = on_server_negotiation)
-        Sockets.tls_channel_handler_new!(channel, tls_opts)
-
-        echo = EchoHandler(server_received)
-        echo_slot = Sockets.channel_slot_new!(channel)
-        if Sockets.channel_first_slot(channel) !== echo_slot
-            Sockets.channel_slot_insert_end!(channel, echo_slot)
-        end
-        Sockets.channel_slot_set_handler!(echo_slot, echo)
-        echo.slot = echo_slot
-
-        Sockets.channel_setup_complete!(channel)
-        server_ready[] = true
-        return nothing
-    end)
-
-    on_accept_start = Reseau.EventCallable(err -> begin
-        if err == Reseau.AWS_OP_SUCCESS
-            accept_started[] = true
-        end
-        return nothing
-    end)
-
-    listener_opts = Sockets.SocketListenerOptions(; on_accept_start = on_accept_start, on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server_sock, event_loop, listener_opts) === nothing
-    @test wait_for_flag_tls(accept_started)
-
-    bound = Sockets.socket_get_bound_address(server_sock)
-    @test bound isa Sockets.SocketEndpoint
-    port = bound isa Sockets.SocketEndpoint ? bound.port : 0
-    @test port > 0
-
-    client_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
-    client_sock = Sockets.socket_init(client_opts)
-    @test client_sock isa Sockets.Socket
-
-    negotiated = Ref(false)
-    read_done = Ref(false)
-    read_payload = Ref("")
-
-    on_data_read = (handler, slot, buf) -> begin
-        read_payload[] = String(Reseau.byte_cursor_from_buf(buf))
-        read_done[] = true
-        return nothing
-    end
-
-    on_negotiation = (handler, slot, err) -> begin
-        negotiated[] = true
-        return nothing
-    end
-
-    client_ctx = Sockets.tls_context_new_client(; verify_peer = false)
-    @test client_ctx isa Sockets.TlsContext
-
-    client_channel_ref = Ref{Any}(nothing)
-    client_tls_ref = Ref{Any}(nothing)
-
-    connect_opts = Sockets.SocketConnectOptions(
-        Sockets.SocketEndpoint("127.0.0.1", port);
-        event_loop = event_loop,
-        on_connection_result = Reseau.EventCallable(err -> begin
-            if err != Reseau.AWS_OP_SUCCESS
-                negotiated[] = true
-                return nothing
-            end
-            channel = Sockets.Channel(event_loop, nothing)
-            Sockets.socket_channel_handler_new!(channel, client_sock)
-            tls_opts = Sockets.TlsConnectionOptions(
-                client_ctx;
-                server_name = "localhost",
-                on_negotiation_result = on_negotiation,
-                on_data_read = on_data_read,
-            )
-            tls_handler = Sockets.tls_channel_handler_new!(channel, tls_opts)
-            if tls_handler isa Sockets.TlsChannelHandler
-                client_channel_ref[] = channel
-                client_tls_ref[] = tls_handler
-                Sockets.tls_client_handler_start_negotiation(tls_handler)
-            end
-            Sockets.channel_setup_complete!(channel)
-            return nothing
-        end),
-    )
-
-    @test Sockets.socket_connect(client_sock, connect_opts) === nothing
-
-    @test wait_for_flag_tls(server_ready)
-    @test wait_for_flag_tls(negotiated)
-    @test wait_for_flag_tls(server_negotiated)
-
-    client_channel = client_channel_ref[]
-    client_tls = client_tls_ref[]
-    if client_channel isa Sockets.Channel && client_tls isa Sockets.TlsChannelHandler
-        msg = Sockets.IoMessage(4)
-        msg_ref = Ref(msg.message_data)
-        Reseau.byte_buf_write_from_whole_cursor(msg_ref, Reseau.ByteCursor("ping"))
-        msg.message_data = msg_ref[]
-
-        ping_task = Sockets.ChannelTask()
-        send_args = (handler = client_tls, slot = client_tls.slot, message = msg)
-        Sockets.channel_task_init!(ping_task, Reseau.EventCallable(status -> begin
-            if Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY
-                try
-                    Sockets.handler_process_write_message(send_args.handler, send_args.slot, send_args.message)
-                catch e
-                    if send_args.slot.channel !== nothing
-                        Sockets.channel_release_message_to_pool!(send_args.slot.channel, send_args.message)
-                    end
-                end
-            end
-            nothing
-        end), "tls_test_send_ping")
-        Sockets.channel_schedule_task_now!(client_channel, ping_task)
-    end
-
-    @test wait_for_flag_tls(read_done)
-    @test read_payload[] == "pong"
-    @test server_received[] == true
-
-    Sockets.socket_close(server_sock)
-    Sockets.socket_close(client_sock)
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "channel_setup_client_tls" begin
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    ctx = _test_client_ctx()
-    @test ctx isa Sockets.TlsContext
-
-    channel = Sockets.Channel(event_loop, nothing)
-    left_slot = Sockets.channel_slot_new!(channel)
-    sink = SinkHandler()
-    Sockets.channel_slot_set_handler!(left_slot, sink)
-    sink.slot = left_slot
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
 
     opts = Sockets.TlsConnectionOptions(ctx; timeout_ms = 1)
-    handler = Sockets.channel_setup_client_tls(left_slot, opts)
-    @test handler isa Sockets.TlsChannelHandler
-    if handler isa Sockets.TlsChannelHandler
-        @test left_slot.adj_right === handler.slot
-        @test wait_for_handshake_status(handler, Sockets.TlsNegotiationStatus.ONGOING)
-    end
+    handler = Sockets.pipeline_setup_client_tls!(ps, socket, opts)
+    @test handler !== nothing
 
     EventLoops.event_loop_group_destroy!(elg)
 end
@@ -1862,10 +1245,10 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     @test client_negotiated_err[] == Reseau.AWS_OP_SUCCESS
 
     if server_channel[] !== nothing
-        Sockets.channel_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.pipeline_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
     end
     if client_channel[] !== nothing
-        Sockets.channel_shutdown!(client_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.pipeline_shutdown!(client_channel[], Reseau.AWS_OP_SUCCESS)
     end
 
     @test wait_for_flag_tls(server_shutdown)
@@ -2009,7 +1392,7 @@ end
         @test client_negotiated_err[] == Reseau.AWS_OP_SUCCESS
 
         if server_channel[] !== nothing
-            Sockets.channel_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
+            Sockets.pipeline_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
         end
 
         @test wait_for_flag_tls(server_shutdown)
@@ -2200,10 +1583,10 @@ end
     @test wait_for_flag_tls(client_negotiated)
 
     if server_channel[] !== nothing
-        Sockets.channel_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.pipeline_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
     end
     if client_channel[] !== nothing
-        Sockets.channel_shutdown!(client_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.pipeline_shutdown!(client_channel[], Reseau.AWS_OP_SUCCESS)
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
@@ -2212,60 +1595,6 @@ end
 
     Reseau.byte_buf_clean_up(Ref(cert_buf))
     Reseau.byte_buf_clean_up(Ref(key_buf))
-end
-
-@testset "TLS handler overhead + max fragment size" begin
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
-        return
-    end
-
-    ctx = _test_client_ctx()
-    @test ctx isa Sockets.TlsContext
-
-    prev_max = Sockets.g_aws_channel_max_fragment_size[]
-    Sockets.g_aws_channel_max_fragment_size[] = Csize_t(4096)
-
-    channel = Sockets.Channel(event_loop, nothing)
-    tls_slot = Sockets.channel_slot_new!(channel)
-    handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), tls_slot)
-    @test handler isa Sockets.TlsChannelHandler
-    handler isa Sockets.TlsChannelHandler && Sockets.channel_slot_set_handler!(tls_slot, handler)
-
-    app_slot = Sockets.channel_slot_new!(channel)
-    Sockets.channel_slot_insert_right!(tls_slot, app_slot)
-    app_handler = SinkHandler()
-    Sockets.channel_slot_set_handler!(app_slot, app_handler)
-
-    results = Channel{Int}(1)
-    task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-        msg = Sockets.channel_slot_acquire_max_message_for_write(app_slot)
-        if msg isa Sockets.IoMessage
-            cap = length(msg.message_data.mem)
-            Sockets.channel_release_message_to_pool!(channel, msg)
-            put!(results, cap)
-        else
-            put!(results, -1)
-        end
-        return nothing
-    end); type_tag = "tls_overhead_test")
-    EventLoops.event_loop_schedule_task_now!(event_loop, task)
-
-    cap = take!(results)
-    expected = Int(Sockets.g_aws_channel_max_fragment_size[] - Csize_t(Sockets.TLS_EST_RECORD_OVERHEAD))
-    @test cap == expected
-
-    if handler isa Sockets.TlsChannelHandler
-        @test Sockets.handler_message_overhead(handler) == Csize_t(Sockets.TLS_EST_RECORD_OVERHEAD)
-        @test Sockets.handler_initial_window_size(handler) == Csize_t(Sockets.TLS_EST_HANDSHAKE_SIZE)
-    end
-
-    Sockets.g_aws_channel_max_fragment_size[] = prev_max
-    EventLoops.event_loop_group_destroy!(elg)
 end
 
 @testset "TLS echo + backpressure" begin
@@ -2298,8 +1627,6 @@ end
 
     client_handler_ref = Ref{Any}(nothing)
     server_handler_ref = Ref{Any}(nothing)
-    client_slot_ref = Ref{Any}(nothing)
-    server_slot_ref = Ref{Any}(nothing)
 
     client_ready = Ref(false)
     server_ready = Ref(false)
@@ -2322,12 +1649,7 @@ end
                     server_rw_args,
                 )
                 server_handler_ref[] = handler
-                slot = Sockets.channel_slot_new!(channel)
-                if Sockets.channel_first_slot(channel) !== slot
-                    Sockets.channel_slot_insert_end!(channel, slot)
-                end
-                Sockets.channel_slot_set_handler!(slot, handler)
-                server_slot_ref[] = slot
+                rw_handler_install!(handler, channel)
             end
             server_ready[] = true
             return nothing
@@ -2374,12 +1696,7 @@ end
                     client_rw_args,
                 )
                 client_handler_ref[] = handler
-                slot = Sockets.channel_slot_new!(channel)
-                if Sockets.channel_first_slot(channel) !== slot
-                    Sockets.channel_slot_insert_end!(channel, slot)
-                end
-                Sockets.channel_slot_set_handler!(slot, handler)
-                client_slot_ref[] = slot
+                rw_handler_install!(handler, channel)
             end
             client_ready[] = true
             return nothing
@@ -2393,8 +1710,8 @@ end
     @test client_handler_ref[] isa ReadWriteTestHandler
     @test server_handler_ref[] isa ReadWriteTestHandler
 
-    rw_handler_write(client_handler_ref[], client_slot_ref[], write_tag)
-    rw_handler_write(server_handler_ref[], server_slot_ref[], read_tag)
+    rw_handler_write(client_handler_ref[], write_tag)
+    rw_handler_write(server_handler_ref[], read_tag)
 
     @test tls_wait_for_read(client_rw_args)
     @test tls_wait_for_read(server_rw_args)
@@ -2405,8 +1722,8 @@ end
     @test client_rw_args.read_invocations == 1
     @test server_rw_args.read_invocations == 1
 
-    rw_handler_trigger_increment_read_window(server_handler_ref[], server_slot_ref[], 100)
-    rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
+    rw_handler_trigger_increment_read_window(server_handler_ref[], 100)
+    rw_handler_trigger_increment_read_window(client_handler_ref[], 100)
 
     @test tls_wait_for_read(client_rw_args)
     @test tls_wait_for_read(server_rw_args)
@@ -2453,8 +1770,6 @@ end
 
         client_handler_ref = Ref{Any}(nothing)
         server_handler_ref = Ref{Any}(nothing)
-        client_slot_ref = Ref{Any}(nothing)
-        server_slot_ref = Ref{Any}(nothing)
         client_channel_ref = Ref{Any}(nothing)
         server_channel_ref = Ref{Any}(nothing)
 
@@ -2471,10 +1786,10 @@ end
             if !shutdown_invoked[]
                 shutdown_invoked[] = true
                 if !window_update_after_shutdown
-                    rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
+                    rw_handler_trigger_increment_read_window(client_handler_ref[], 100)
                 end
                 if server_channel_ref[] !== nothing
-                    Sockets.channel_shutdown!(server_channel_ref[], Reseau.AWS_OP_SUCCESS)
+                    Sockets.pipeline_shutdown!(server_channel_ref[], Reseau.AWS_OP_SUCCESS)
                 end
             end
             lock(args.lock) do
@@ -2506,12 +1821,7 @@ end
                         server_rw_args,
                     )
                     server_handler_ref[] = handler
-                    slot = Sockets.channel_slot_new!(channel)
-                    if Sockets.channel_first_slot(channel) !== slot
-                        Sockets.channel_slot_insert_end!(channel, slot)
-                    end
-                    Sockets.channel_slot_set_handler!(slot, handler)
-                    server_slot_ref[] = slot
+                    rw_handler_install!(handler, channel)
                 end
                 server_ready[] = true
                 return nothing
@@ -2562,12 +1872,7 @@ end
                         client_rw_args,
                     )
                     client_handler_ref[] = handler
-                    slot = Sockets.channel_slot_new!(channel)
-                    if Sockets.channel_first_slot(channel) !== slot
-                        Sockets.channel_slot_insert_end!(channel, slot)
-                    end
-                    Sockets.channel_slot_set_handler!(slot, handler)
-                    client_slot_ref[] = slot
+                    rw_handler_install!(handler, channel)
                 end
                 client_ready[] = true
                 return nothing
@@ -2582,11 +1887,11 @@ end
         @test wait_for_flag_tls(server_ready)
         @test wait_for_flag_tls(client_ready)
 
-        rw_handler_write(server_handler_ref[], server_slot_ref[], read_tag)
+        rw_handler_write(server_handler_ref[], read_tag)
         @test tls_wait_for_read(client_rw_args)
 
         if window_update_after_shutdown
-            rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
+            rw_handler_trigger_increment_read_window(client_handler_ref[], 100)
         end
 
         @test wait_for_flag_tls(client_shutdown)
@@ -2598,152 +1903,6 @@ end
         EventLoops.event_loop_group_destroy!(elg)
         Sockets.g_aws_channel_max_fragment_size[] = prev_max
     end
-end
-
-@testset "TLS statistics handler integration" begin
-    if Sys.iswindows() || Threads.nthreads(:interactive) <= 1
-        @test true
-        return
-    end
-
-    mutable struct TestTlsStatisticsHandler <: Sockets.StatisticsHandler
-        report_ms::UInt64
-        results::Channel{Tuple{Sockets.StatisticsSampleInterval, Vector{Any}}}
-    end
-
-    Sockets.report_interval_ms(handler::TestTlsStatisticsHandler) = handler.report_ms
-    Sockets.close!(::TestTlsStatisticsHandler) = nothing
-
-    function Sockets.process_statistics(
-            handler::TestTlsStatisticsHandler,
-            interval::Sockets.StatisticsSampleInterval,
-            stats_list::AbstractVector,
-        )
-        stats = Vector{Any}(undef, length(stats_list))
-        for i in 1:length(stats_list)
-            entry = stats_list[i]
-            if entry isa Sockets.SocketHandlerStatistics
-                stats[i] = Sockets.SocketHandlerStatistics(entry.category, entry.bytes_read, entry.bytes_written)
-            elseif entry isa Sockets.TlsHandlerStatistics
-                stats[i] = Sockets.TlsHandlerStatistics(
-                    entry.category,
-                    entry.handshake_start_ns,
-                    entry.handshake_end_ns,
-                    entry.handshake_status,
-                )
-            else
-                stats[i] = entry
-            end
-        end
-        put!(handler.results, (interval, stats))
-        return nothing
-    end
-
-    function wait_for_stats(ch::Channel; timeout_ns::Int = 5_000_000_000)
-        deadline = Base.time_ns() + timeout_ns
-        while Base.time_ns() < deadline
-            isready(ch) && return true
-            sleep(0.01)
-        end
-        return isready(ch)
-    end
-
-    mutable struct FakeSocketStatsHandler <: Sockets.AbstractChannelHandler
-        stats::Sockets.SocketHandlerStatistics
-    end
-
-    FakeSocketStatsHandler() = FakeSocketStatsHandler(Sockets.SocketHandlerStatistics())
-
-    Sockets.handler_process_read_message(::FakeSocketStatsHandler, ::Sockets.ChannelSlot, ::Sockets.IoMessage) = nothing
-    Sockets.handler_process_write_message(::FakeSocketStatsHandler, ::Sockets.ChannelSlot, ::Sockets.IoMessage) = nothing
-    Sockets.handler_increment_read_window(::FakeSocketStatsHandler, ::Sockets.ChannelSlot, ::Csize_t) = nothing
-    Sockets.handler_initial_window_size(::FakeSocketStatsHandler) = Csize_t(0)
-    Sockets.handler_message_overhead(::FakeSocketStatsHandler) = Csize_t(0)
-    Sockets.handler_destroy(::FakeSocketStatsHandler) = nothing
-
-    function Sockets.handler_shutdown(
-            ::FakeSocketStatsHandler,
-            slot::Sockets.ChannelSlot,
-            direction::Sockets.ChannelDirection.T,
-            error_code::Int,
-            free_scarce_resources_immediately::Bool,
-        )
-        Sockets.channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
-        return nothing
-    end
-
-    function Sockets.handler_reset_statistics(handler::FakeSocketStatsHandler)::Nothing
-        Sockets.crt_statistics_socket_reset!(handler.stats)
-        return nothing
-    end
-
-    Sockets.handler_gather_statistics(handler::FakeSocketStatsHandler) = handler.stats
-
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-    @test event_loop !== nothing
-    event_loop === nothing && return
-
-    channel = Sockets.Channel(event_loop, nothing)
-
-    socket_handler = FakeSocketStatsHandler()
-    socket_slot = Sockets.channel_slot_new!(channel)
-    Sockets.channel_slot_set_handler!(socket_slot, socket_handler)
-
-    client_ctx = Sockets.tls_context_new_client(; verify_peer = false)
-    @test client_ctx isa Sockets.TlsContext
-    client_ctx isa Sockets.TlsContext || return
-    tls_slot = Sockets.channel_slot_new!(channel)
-    tls_handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(client_ctx), tls_slot)
-    @test tls_handler isa Sockets.TlsChannelHandler
-    tls_handler isa Sockets.TlsChannelHandler || return
-    Sockets.channel_slot_insert_right!(socket_slot, tls_slot)
-    Sockets.channel_slot_set_handler!(tls_slot, tls_handler)
-
-    Sockets.channel_setup_complete!(channel)
-
-    stats_results = Channel{Tuple{Sockets.StatisticsSampleInterval, Vector{Any}}}(1)
-    stats_handler = TestTlsStatisticsHandler(UInt64(50), stats_results)
-
-    set_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-        Sockets.channel_set_statistics_handler!(channel, stats_handler)
-    end); type_tag = "set_tls_stats")
-    EventLoops.event_loop_schedule_task_now!(event_loop, set_task)
-
-    update_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-        socket_handler.stats.bytes_read = 111
-        socket_handler.stats.bytes_written = 222
-        Sockets.handler_gather_statistics(tls_handler).handshake_status = Sockets.TlsNegotiationStatus.SUCCESS
-        return nothing
-    end); type_tag = "update_tls_stats")
-    EventLoops.event_loop_schedule_task_now!(event_loop, update_task)
-
-    @test wait_for_stats(stats_results)
-    interval, stats_vec = take!(stats_results)
-    @test interval.end_time_ms >= interval.begin_time_ms
-
-    socket_stats = nothing
-    tls_stats = nothing
-    for entry in stats_vec
-        if entry isa Sockets.SocketHandlerStatistics
-            socket_stats = entry
-        elseif entry isa Sockets.TlsHandlerStatistics
-            tls_stats = entry
-        end
-    end
-
-    @test socket_stats isa Sockets.SocketHandlerStatistics
-    @test tls_stats isa Sockets.TlsHandlerStatistics
-    if socket_stats isa Sockets.SocketHandlerStatistics
-        @test socket_stats.bytes_read > 0
-        @test socket_stats.bytes_written > 0
-    end
-    if tls_stats isa Sockets.TlsHandlerStatistics
-        @test tls_stats.handshake_status == Sockets.TlsNegotiationStatus.SUCCESS
-    end
-
-    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
-    EventLoops.event_loop_group_destroy!(elg)
 end
 
 if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"

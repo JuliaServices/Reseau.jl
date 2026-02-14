@@ -10,10 +10,8 @@ export
     tlsupgrade!
 
 mutable struct TCPSocket <: IO
-    channel::Union{Channel, Nothing}
-    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
+    pipeline::Union{PipelineState, Nothing}
     socket::Union{Socket, Nothing}
-    handler::Union{AbstractChannelHandler, Nothing}
     host::String
     port::Int
     is_local::Bool
@@ -36,13 +34,6 @@ mutable struct TCPSocket <: IO
     connect_event::Base.Threads.Event
     connect_error::Int
 end
-
-mutable struct _TCPSocketHandler <: AbstractChannelHandler
-    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
-    io::TCPSocket
-end
-
-_TCPSocketHandler(io::TCPSocket) = _TCPSocketHandler(nothing, io)
 
 mutable struct _WriteCtx
     io::TCPSocket
@@ -88,8 +79,6 @@ function _new_unconnected_socket(;
     return TCPSocket(
         nothing,
         nothing,
-        nothing,
-        nothing,
         "",
         0,
         false,
@@ -126,32 +115,63 @@ function _mark_closed!(io::TCPSocket, error_code::Int)::Nothing
     return nothing
 end
 
-function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
-    handler = _TCPSocketHandler(io)
-    slot = channel_slot_new!(channel)
-    channel.last !== slot && channel_slot_insert_end!(channel, slot)
-    channel_slot_set_handler!(slot, handler)
-    io.channel = channel
-    io.slot = slot
-    io.handler = handler
-    first_slot = channel_first_slot(channel)
-    if first_slot !== nothing && first_slot.handler isa SocketChannelHandler
-        io.socket = socket_channel_handler_get_socket(first_slot.handler)
+function _install_handler!(io::TCPSocket, ps::PipelineState)::Nothing
+    io.pipeline = ps
+    io.socket = ps.socket isa Socket ? ps.socket::Socket : nothing
+
+    # App-level read handler: buffer incoming data into TCPSocket's buffer
+    app_read = msg -> begin
+        data_len = Int(msg.message_data.len)
+        if data_len > 0
+            lock(io.cond)
+            try
+                _ensure_capacity!(io, data_len)
+                copyto!(io.buffer, io.write_pos, msg.message_data.mem, 1, data_len)
+                io.write_pos += data_len
+                notify(io.cond)
+            finally
+                unlock(io.cond)
+            end
+        end
+        pipeline_release_message_to_pool!(ps, msg)
+        return nothing
     end
-    channel.channel_state == ChannelState.ACTIVE && channel_trigger_read(channel)
+
+    # Install app read handler via the pipeline's downstream_read_setter
+    if ps.downstream_read_setter !== nothing
+        (ps.downstream_read_setter::Function)(app_read)
+    end
+
+    # Register app shutdown closures
+    push!(ps.shutdown_chain.read_shutdown_fns,
+        (err, scarce, on_complete) -> begin
+            _mark_closed!(io, err)
+            on_complete(err, scarce)
+        end)
+    pushfirst!(ps.shutdown_chain.write_shutdown_fns,
+        (err, scarce, on_complete) -> begin
+            on_complete(err, scarce)
+        end)
+
+    # Trigger initial read
+    socket = io.socket
+    if socket !== nothing && ps.state == PipelineLifecycle.ACTIVE
+        _client_trigger_read(socket, ps)
+    end
     return nothing
 end
 
-function _on_setup(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
+function _on_setup(bootstrap, error_code::Int, pipeline::Union{PipelineState, Nothing}, io::TCPSocket)::Nothing
     _ = bootstrap
-    if error_code != AWS_OP_SUCCESS || channel === nothing
+    if error_code != AWS_OP_SUCCESS || pipeline === nothing
         io.connect_error = error_code
         _mark_closed!(io, error_code)
         notify(io.connect_event)
         return nothing
     end
-    if channel_thread_is_callers_thread(channel)
-        _install_handler!(io, channel)
+    ps = pipeline::PipelineState
+    if pipeline_thread_is_callers_thread(ps)
+        _install_handler!(io, ps)
         io.connect_error = AWS_OP_SUCCESS
         notify(io.connect_event)
         return nothing
@@ -159,38 +179,38 @@ function _on_setup(bootstrap, error_code::Int, channel::Union{Channel, Nothing},
     task = ChannelTask(
         EventCallable(s -> begin
             _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-            _install_handler!(io, channel)
+            _install_handler!(io, ps)
             io.connect_error = AWS_OP_SUCCESS
             notify(io.connect_event)
             return nothing
         end),
         "tcpsocket_install_handler",
     )
-    channel_schedule_task_now!(channel, task)
+    pipeline_schedule_task_now!(ps, task)
     return nothing
 end
 
-function _on_shutdown(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
+function _on_shutdown(bootstrap, error_code::Int, pipeline::Union{PipelineState, Nothing}, io::TCPSocket)::Nothing
     _ = bootstrap
-    _ = channel
+    _ = pipeline
     _mark_closed!(io, error_code)
     return nothing
 end
 
-@inline function _on_setup_callback(bootstrap, error_code, channel, user_data)::Nothing
+@inline function _on_setup_callback(bootstrap, error_code, pipeline, user_data)::Nothing
     _ = bootstrap
     io = user_data::TCPSocket
     err = Int(error_code)
-    if err != AWS_OP_SUCCESS || !(channel isa Channel)
+    if err != AWS_OP_SUCCESS || !(pipeline isa PipelineState)
         io.connect_error = err
         _mark_closed!(io, err)
         notify(io.connect_event)
         return nothing
     end
 
-    ch = channel::Channel
-    if channel_thread_is_callers_thread(ch)
-        _install_handler!(io, ch)
+    ps = pipeline::PipelineState
+    if pipeline_thread_is_callers_thread(ps)
+        _install_handler!(io, ps)
         io.connect_error = AWS_OP_SUCCESS
         notify(io.connect_event)
         return nothing
@@ -199,20 +219,20 @@ end
     task = ChannelTask(
         EventCallable(s -> begin
             _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-            _install_handler!(io, ch)
+            _install_handler!(io, ps)
             io.connect_error = AWS_OP_SUCCESS
             notify(io.connect_event)
             return nothing
         end),
         "tcpsocket_install_handler",
     )
-    channel_schedule_task_now!(ch, task)
+    pipeline_schedule_task_now!(ps, task)
     return nothing
 end
 
-@inline function _on_shutdown_callback(bootstrap, error_code, channel, user_data)::Nothing
+@inline function _on_shutdown_callback(bootstrap, error_code, pipeline, user_data)::Nothing
     _ = bootstrap
-    _ = channel
+    _ = pipeline
     io = user_data::TCPSocket
     _mark_closed!(io, Int(error_code))
     return nothing
@@ -420,8 +440,8 @@ function Base.close(server::TCPServer)::Nothing
     return nothing
 end
 
-function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, channel, _user_data)
-    if error_code != AWS_OP_SUCCESS || channel === nothing
+function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, pipeline, _user_data)
+    if error_code != AWS_OP_SUCCESS || !(pipeline isa PipelineState)
         return nothing
     end
     io = _new_unconnected_socket(
@@ -430,9 +450,10 @@ function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, chan
         initial_window_size = state.initial_window_size,
     )
     io.is_local = state.is_local
+    ps = pipeline::PipelineState
     # Install the read-buffering handler and only then publish to accept queue.
-    if channel_thread_is_callers_thread(channel)
-        _install_handler!(io, channel)
+    if pipeline_thread_is_callers_thread(ps)
+        _install_handler!(io, ps)
         lock(state.cond)
         try
             push!(state.accept_queue, io)
@@ -444,7 +465,7 @@ function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, chan
         task = ChannelTask(
             EventCallable(s -> begin
                 _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                _install_handler!(io, channel)
+                _install_handler!(io, ps)
                 lock(state.cond)
                 try
                     push!(state.accept_queue, io)
@@ -456,7 +477,7 @@ function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, chan
             end),
             "tcpserver_install_handler",
         )
-        channel_schedule_task_now!(channel, task)
+        pipeline_schedule_task_now!(ps, task)
     end
     return nothing
 end
@@ -636,10 +657,10 @@ function tlsupgrade!(
         timeout_ms::Integer = TLS_DEFAULT_TIMEOUT_MS,
     )::Nothing
     io.tls_enabled && return nothing
-    channel = io.channel
-    channel === nothing && error("TCPSocket is not connected")
-    socket_slot = channel_first_slot(channel)
-    socket_slot === nothing && error("TCPSocket has no socket slot")
+    ps = io.pipeline
+    ps === nothing && error("TCPSocket is not connected")
+    socket = io.socket
+    socket === nothing && error("TCPSocket has no socket")
 
     ctx = _tls_client_context(
         ssl_cert = ssl_cert,
@@ -651,12 +672,11 @@ function tlsupgrade!(
 
     negotiation_error = Ref(AWS_OP_SUCCESS)
     negotiation_event = Base.Threads.Event()
-    on_negotiation = (handler, slot, err, ud) -> begin
+    on_negotiation = (handler, pipeline, err) -> begin
         _ = handler
-        _ = ud
         negotiation_error[] = err
-        if err == AWS_OP_SUCCESS && slot !== nothing && slot.channel !== nothing
-            channel_trigger_read(slot.channel)
+        if err == AWS_OP_SUCCESS
+            _client_trigger_read(socket, ps)
         end
         notify(negotiation_event)
         return nothing
@@ -669,19 +689,30 @@ function tlsupgrade!(
         timeout_ms = timeout_ms,
     )
 
-    setup_result = Ref{Any}(nothing)
-    if channel_thread_is_callers_thread(channel)
-        setup_result[] = channel_setup_client_tls(socket_slot, tls_options)
+    _do_tls_setup = () -> begin
+        tls_handler = tls_handler_new(tls_options, socket, ps)
+        # Save existing app read function before TLS wiring replaces downstream_read_setter
+        existing_read_fn = socket.read_fn
+        _wire_tls_pipeline!(socket, ps, tls_handler)
+        # Re-install the app read handler through the new TLS downstream path
+        if existing_read_fn !== nothing
+            (ps.downstream_read_setter::Function)(existing_read_fn)
+        end
+        tls_client_handler_start_negotiation(tls_handler)
+    end
+
+    if pipeline_thread_is_callers_thread(ps)
+        _do_tls_setup()
     else
         task = ChannelTask(
             EventCallable(s -> begin
                 _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                setup_result[] = channel_setup_client_tls(socket_slot, tls_options)
+                _do_tls_setup()
                 return nothing
             end),
             "tcpsocket_tls_setup",
         )
-        channel_schedule_task_now!(channel, task)
+        pipeline_schedule_task_now!(ps, task)
     end
 
     wait(negotiation_event)
@@ -699,8 +730,8 @@ end
 function Base.close(io::TCPSocket)::Nothing
     io.closed && return nothing
     _mark_closed!(io, ERROR_IO_SOCKET_CLOSED)
-    channel = io.channel
-    channel !== nothing && channel_shutdown!(channel, ERROR_IO_SOCKET_CLOSED)
+    ps = io.pipeline
+    ps !== nothing && pipeline_shutdown!(ps, ERROR_IO_SOCKET_CLOSED)
     io.socket !== nothing && socket_close(io.socket)
     io.owns_host_resolver && io.host_resolver !== nothing && host_resolver_shutdown!(io.host_resolver)
     io.owns_event_loop_group && io.event_loop_group !== nothing && event_loop_group_release!(io.event_loop_group)
@@ -734,8 +765,8 @@ function _consume!(io::TCPSocket, nbytes::Int)::Nothing
         io.read_pos = 1
         io.write_pos = 1
     end
-    if io.enable_read_back_pressure && io.slot !== nothing
-        channel_slot_increment_read_window!(io.slot, Csize_t(nbytes))
+    if io.enable_read_back_pressure && io.pipeline !== nothing
+        pipeline_increment_read_window!(io.pipeline, Csize_t(nbytes))
     end
     return nothing
 end
@@ -881,15 +912,15 @@ function _make_write_completion(ctx::_WriteCtx)::EventCallable
 end
 
 function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)::Int
-    channel = io.channel
-    slot = io.slot
-    channel === nothing && return _write_fail!(ctx, ERROR_IO_SOCKET_NOT_CONNECTED)
-    slot === nothing && return _write_fail!(ctx, ERROR_IO_SOCKET_NOT_CONNECTED)
+    ps = io.pipeline
+    socket = io.socket
+    ps === nothing && return _write_fail!(ctx, ERROR_IO_SOCKET_NOT_CONNECTED)
+    socket === nothing && return _write_fail!(ctx, ERROR_IO_SOCKET_NOT_CONNECTED)
     remaining = length(data)
     cursor_ref = Ref(ByteCursor(data))
     completion = _make_write_completion(ctx)
     while remaining > 0
-        msg = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, remaining)
+        msg = pipeline_acquire_message_from_pool(ps, IoMessageType.APPLICATION_DATA, remaining)
         msg === nothing && return _write_fail!(ctx, ERROR_OOM)
         chunk_size = min(remaining, Int(capacity(msg.message_data) - msg.message_data.len))
         chunk_cursor = byte_cursor_advance(cursor_ref, chunk_size)
@@ -899,11 +930,11 @@ function _write_now(io::TCPSocket, data::Vector{UInt8}, ctx::_WriteCtx)::Int
         ctx.remaining += 1
         msg.on_completion = completion
         try
-            channel_slot_send_message(slot, msg, ChannelDirection.WRITE)
+            pipeline_write!(socket, msg)
         catch e
             e isa ReseauError || rethrow()
             ctx.remaining -= 1
-            channel_release_message_to_pool!(channel, msg)
+            pipeline_release_message_to_pool!(ps, msg)
             return _write_fail!(ctx, e.code)
         end
         remaining -= chunk_size
@@ -913,11 +944,11 @@ end
 
 function _write(io::TCPSocket, data::Vector{UInt8})::Nothing
     io.closed && throw(EOFError())
-    channel = io.channel
-    channel === nothing && throw(EOFError())
+    ps = io.pipeline
+    ps === nothing && throw(EOFError())
     isempty(data) && return nothing
     ctx = _begin_write!(io)
-    if channel_thread_is_callers_thread(channel)
+    if pipeline_thread_is_callers_thread(ps)
         res = _write_now(io, data, ctx)
         if res != OP_SUCCESS
             error("TCPSocket write failed: $res")
@@ -932,7 +963,7 @@ function _write(io::TCPSocket, data::Vector{UInt8})::Nothing
         end),
         "tcpsocket_write",
     )
-    channel_schedule_task_now!(channel, task)
+    pipeline_schedule_task_now!(ps, task)
     return nothing
 end
 
@@ -967,9 +998,9 @@ end
 
 function Base.flush(io::TCPSocket)
     io.closed && return nothing
-    channel = io.channel
-    channel === nothing && return nothing
-    channel_thread_is_callers_thread(channel) && return nothing
+    ps = io.pipeline
+    ps === nothing && return nothing
+    pipeline_thread_is_callers_thread(ps) && return nothing
     lock(io.cond)
     try
         while io.pending_writes > 0 && !io.closed
@@ -993,58 +1024,3 @@ function Base.unsafe_write(io::TCPSocket, p::Ptr{UInt8}, n::UInt)
     return nbytes
 end
 
-function setchannelslot!(handler::_TCPSocketHandler, slot::ChannelSlot)::Nothing
-    handler.slot = slot
-    return nothing
-end
-
-function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    io = handler.io
-    data_len = Int(message.message_data.len)
-    if data_len > 0
-        lock(io.cond)
-        try
-            _ensure_capacity!(io, data_len)
-            copyto!(io.buffer, io.write_pos, message.message_data.mem, 1, data_len)
-            io.write_pos += data_len
-            notify(io.cond)
-        finally
-            unlock(io.cond)
-        end
-    end
-    slot.channel !== nothing && channel_release_message_to_pool!(slot.channel, message)
-    return nothing
-end
-
-function handler_process_write_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    _ = handler
-    _ = slot
-    _ = message
-    throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
-end
-
-function handler_increment_read_window(handler::_TCPSocketHandler, slot::ChannelSlot, size::Csize_t)::Nothing
-    _ = handler
-    channel_slot_increment_read_window!(slot, size)
-    return nothing
-end
-
-function handler_shutdown(handler::_TCPSocketHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Nothing
-    _mark_closed!(handler.io, error_code)
-    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
-    return nothing
-end
-
-function handler_initial_window_size(handler::_TCPSocketHandler)::Csize_t
-    return Csize_t(handler.io.initial_window_size)
-end
-
-function handler_message_overhead(handler::_TCPSocketHandler)::Csize_t
-    _ = handler
-    return Csize_t(0)
-end
-
-function handler_destroy(handler::_TCPSocketHandler)::Nothing
-    _ = handler
-    return nothing
-end

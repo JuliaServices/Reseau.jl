@@ -1122,7 +1122,7 @@ end
                 on_setup = (bs, err, channel, ud) -> begin
                     client_ready[] = err == Reseau.AWS_OP_SUCCESS
                     if err == Reseau.AWS_OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                        Sockets.pipeline_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                     end
                     return nothing
                 end,
@@ -1238,7 +1238,7 @@ end
                 on_setup = (bs, err, channel, ud) -> begin
                     client_ready[] = err == Reseau.AWS_OP_SUCCESS
                     if err == Reseau.AWS_OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                        Sockets.pipeline_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
                     end
                     return nothing
                 end,

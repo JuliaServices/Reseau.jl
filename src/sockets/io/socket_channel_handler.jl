@@ -1,359 +1,133 @@
-# AWS IO Library - Socket Channel Handler
-# Port of aws-c-io/source/socket_channel_handler.c
+# Socket Pipeline Handler
+#
+# Bridges socket IO to the closure-based middleware pipeline.
+# All handler state has been merged into Socket fields (pipeline, read_fn,
+# write_fn, stats, etc.) so there is no separate handler struct.
+#
+# Read path:  OS → socket_read → _socket_dispatch_read → read_fn → (TLS → app)
+# Write path: app → pipeline_write! → write_fn → (TLS → _socket_write_message) → socket_write → OS
 
-# Socket channel handler - bridges socket IO to channel pipeline
-# This handler is typically the leftmost handler in a channel (socket side)
-# It reads from the socket and pushes messages into the channel (read direction)
-# It receives write messages and sends them out the socket (write direction)
+const SOCKET_DEFAULT_MAX_READ_SIZE = Csize_t(16384)
 
-# Socket channel handler structure
-mutable struct SocketChannelHandler <: AbstractChannelHandler
-    socket::Socket
-    slot::Union{ChannelSlot, Nothing}
-    max_rw_size::Csize_t
-    read_task_storage::ChannelTask
-    shutdown_task_storage::ChannelTask
-    stats::SocketHandlerStatistics
-    shutdown_error_code::Int
-    shutdown_in_progress::Bool
-    pending_read::Bool
-end
-
-function SocketChannelHandler(
-        socket::Socket;
+# Initialize a socket for pipeline use. Sets up pipeline-integration fields,
+# subscribes to readable events, and registers shutdown closures.
+function socket_pipeline_init!(
+        socket::Socket,
+        ps::PipelineState;
         max_read_size::Integer = 16384,
     )
+    socket.pipeline = ps
+    socket.max_rw_size = Csize_t(max_read_size)
+    # Socket reads up to downstream_window. Set to SIZE_MAX when no backpressure,
+    # or to a handshake-sized value initially when backpressure is enabled
+    # (the bootstrap/TLS init will adjust as needed).
+    socket.downstream_window = ps.read_back_pressure_enabled ? Csize_t(0) : SIZE_MAX
     stats = SocketHandlerStatistics()
     crt_statistics_socket_init!(stats)
-    return SocketChannelHandler(
-        socket,
-        nothing,
-        Csize_t(max_read_size),
-        ChannelTask(),
-        ChannelTask(),
-        stats,
-        0,
-        false,
-        false,
-    )
-end
+    socket.stats = stats
+    socket.read_task = ChannelTask()
+    socket.shutdown_task = ChannelTask()
+    socket.pending_read = false
+    socket.shutdown_in_progress = false
 
-function setchannelslot!(handler::SocketChannelHandler, slot::ChannelSlot)::Nothing
-    handler.slot = slot
-    return nothing
-end
-
-# Handler interface implementations
-
-function handler_initial_window_size(handler::SocketChannelHandler)::Csize_t
-    return SIZE_MAX
-end
-
-function handler_message_overhead(handler::SocketChannelHandler)::Csize_t
-    return Csize_t(0)  # Socket handler adds no overhead
-end
-
-function handler_destroy(handler::SocketChannelHandler)::Nothing
-    logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER, "Socket handler: destroying")
-    crt_statistics_socket_cleanup!(handler.stats)
-    return nothing
-end
-
-function handler_reset_statistics(handler::SocketChannelHandler)::Nothing
-    crt_statistics_socket_reset!(handler.stats)
-    return nothing
-end
-
-function handler_gather_statistics(handler::SocketChannelHandler)::SocketHandlerStatistics
-    return handler.stats
-end
-
-# Process read message - socket handler is at the socket end, shouldn't receive read messages
-function handler_process_read_message(handler::SocketChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    _ = handler
-    _ = slot
-    _ = message
-    logf(LogLevel.FATAL, LS_IO_SOCKET_HANDLER, "Socket handler: unexpected read message received")
-    fatal_assert("socket handler process_read_message called", "<unknown>", 0)
-    throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
-end
-
-# Process write message - send data out the socket
-function handler_process_write_message(handler::SocketChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    socket = handler.socket
-    _ = slot
-
-    write_complete = WriteCallable((error_code, bytes_written) -> _on_socket_write_complete(socket, message, error_code, bytes_written))
-
-    if !socket_is_open(socket)
-        # Preserve async completion semantics: report error via completion path
-        # and let channel shutdown cascade there, rather than throwing on loop thread.
-        write_complete(ERROR_IO_SOCKET_CLOSED, Csize_t(0))
-        return nothing
+    # Store socket reference on pipeline and set default downstream_read_setter.
+    # Set the default write_fn to write directly to the OS socket.
+    # TLS middleware overrides this in _wire_tls_pipeline!.
+    ps.socket = socket
+    socket.write_fn = msg -> _socket_write_message(socket, msg)
+    ps.downstream_read_setter = read_fn -> begin
+        socket.read_fn = read_fn
     end
 
-    logf(
-        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-        "Socket handler: writing $(message.message_data.len) bytes to socket"
-    )
-
-    # Create byte cursor from message data
-    cursor = byte_cursor_from_buf(message.message_data)
-
-    # Write to socket
-    try
-        socket_write(socket, cursor, write_complete)
-    catch e
-        e isa ReseauError || rethrow()
-        write_complete(e.code, Csize_t(0))
-    end
-
-    return nothing
-end
-
-# Socket write completion callback
-function _on_socket_write_complete(socket, message, error_code::Int, bytes_written::Csize_t)
-    channel = message isa IoMessage ? message.owning_channel : nothing
-
-    if error_code != AWS_OP_SUCCESS
-        logf(
-            LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-            "Socket handler: socket write completed with error $error_code, wrote $bytes_written bytes"
-        )
-    else
+    # Subscribe to OS readable events → triggers read loop
+    socket_subscribe_to_readable_events(socket, EventCallable(error_code -> begin
         logf(
             LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-            "Socket handler: socket write completed, wrote $bytes_written bytes"
+            "Socket handler: readable event with error $error_code"
         )
-    end
-
-    if socket !== nothing && socket.handler isa SocketChannelHandler
-        socket.handler.stats.bytes_written += UInt64(bytes_written)
-    elseif channel isa Channel && channel.first !== nothing && channel.first.handler isa SocketChannelHandler
-        channel.first.handler.stats.bytes_written += UInt64(bytes_written)
-    end
-
-    if message isa IoMessage && message.on_completion !== nothing
-        message.on_completion(error_code)
-    end
-
-    # Release the message back to pool
-    if channel isa Channel && message isa IoMessage
-        channel_release_message_to_pool!(channel, message)
-    end
-
-    # If error, trigger shutdown
-    if error_code != AWS_OP_SUCCESS && channel isa Channel
-        channel_shutdown!(channel, error_code)
-    end
-
-    return nothing
-end
-
-# Increment read window - handler can now read more data
-function handler_increment_read_window(handler::SocketChannelHandler, slot::ChannelSlot, size::Csize_t)::Nothing
-    _ = size
-
-    if handler.shutdown_in_progress
+        _socket_handler_trigger_read(socket)::Nothing
         return nothing
-    end
-    handler.pending_read && (handler.pending_read = false)
-    logf(
-        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-        "Socket handler: increment read window message received, scheduling read"
-    )
-    _socket_handler_trigger_read(handler)::Nothing
-    return nothing
-end
+    end))
 
-# Shutdown handler
-struct SocketHandlerShutdownArgs
-    handler::SocketChannelHandler
-    channel::Channel
-    slot::ChannelSlot
-    error_code::Int
-    direction::ChannelDirection.T
-    free_scarce_resources_immediately::Bool
-end
-
-function _socket_handler_close_task(handler::SocketChannelHandler)
-    slot = handler.slot
-    if slot === nothing
-        return nothing
-    end
-    channel_slot_on_handler_shutdown_complete!(slot, ChannelDirection.WRITE, handler.shutdown_error_code, false)
-    return nothing
-end
-
-function _socket_handler_shutdown_complete_fn(user_data)
-    args = user_data
-    handler = args.handler
-    channel_task_init!(handler.shutdown_task_storage, EventCallable(_ -> _socket_handler_close_task(handler)), "socket_handler_close")
-    handler.shutdown_error_code = args.error_code
-    channel_schedule_task_now!(args.channel, handler.shutdown_task_storage)
-    return nothing
-end
-
-function _socket_handler_shutdown_read_complete_fn(user_data)
-    args = user_data
-    channel_slot_on_handler_shutdown_complete!(
-        args.slot,
-        args.direction,
-        args.error_code,
-        args.free_scarce_resources_immediately,
-    )
-    return nothing
-end
-
-function handler_shutdown(
-        handler::SocketChannelHandler,
-        slot::ChannelSlot,
-        direction::ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )::Nothing
-    socket = handler.socket
-    channel = slot.channel
+    # Register socket shutdown closures in the pipeline's shutdown chain.
+    # Read shutdown is leftmost (socket side, first in read shutdown order).
+    # Write shutdown is leftmost (socket side, last in write shutdown order).
+    pushfirst!(ps.shutdown_chain.read_shutdown_fns,
+        (err, scarce, on_complete) -> _socket_read_shutdown(socket, err, scarce, on_complete))
+    push!(ps.shutdown_chain.write_shutdown_fns,
+        (err, scarce, on_complete) -> _socket_write_shutdown(socket, err, scarce, on_complete))
 
     logf(
         LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-        "Socket handler: shutdown requested, direction=$direction, error=$error_code"
+        "Socket handler: initialized for pipeline $(ps.channel_id)"
     )
-
-    handler.shutdown_error_code = error_code
-    handler.shutdown_in_progress = true
-
-    if direction == ChannelDirection.READ
-        logf(
-            LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-            "Socket handler: shutting down read direction with error_code $error_code"
-        )
-        if free_scarce_resources_immediately && socket_is_open(socket)
-            channel === nothing && return nothing
-            args = SocketHandlerShutdownArgs(handler, channel, slot, error_code, direction, free_scarce_resources_immediately)
-            socket_set_close_complete_callback(socket, TaskFn(_ -> _socket_handler_shutdown_read_complete_fn(args)))
-            socket_close(socket)
-            return nothing
-        end
-
-        channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
-        return nothing
-    end
-
-    logf(
-        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-        "Socket handler: shutting down write direction with error_code $error_code"
-    )
-    if socket_is_open(socket)
-        channel === nothing && return nothing
-        args = SocketHandlerShutdownArgs(handler, channel, slot, error_code, direction, free_scarce_resources_immediately)
-        socket_set_close_complete_callback(socket, TaskFn(_ -> _socket_handler_shutdown_complete_fn(args)))
-        socket_close(socket)
-    else
-        channel === nothing && return nothing
-        channel_task_init!(handler.shutdown_task_storage, EventCallable(_ -> _socket_handler_close_task(handler)), "socket_handler_close")
-        handler.shutdown_error_code = error_code
-        channel_schedule_task_now!(channel, handler.shutdown_task_storage)
-    end
-
     return nothing
 end
 
-# Trigger handler to process pending writes
-function handler_trigger_write(handler::SocketChannelHandler)::Nothing
-    # Socket handler doesn't batch writes, so nothing to do
-    return nothing
-end
+# --- Read path ---
 
-function handler_trigger_read(handler::SocketChannelHandler)::Nothing
-    _socket_handler_trigger_read(handler)::Nothing
-    return nothing
-end
-
-# Internal - trigger a socket read
-function _socket_handler_trigger_read(handler::SocketChannelHandler)::Nothing
-    if handler.shutdown_in_progress
+# Trigger a socket read. Called from _socket_trigger_read (channel.jl) and
+# from readable event subscriptions.
+function _socket_handler_trigger_read(socket::Socket)::Nothing
+    if socket.shutdown_in_progress
         return nothing
     end
 
-    slot = handler.slot
-    if slot === nothing
-        return nothing
-    end
-    if slot.adj_right === nothing || slot.adj_right.handler === nothing
-        handler.pending_read = true
+    ps = socket.pipeline
+    if !(ps isa PipelineState)
+        socket.pending_read = true
         return nothing
     end
 
-    channel_any = slot.channel
-    if !(channel_any isa Channel)
+    if socket.read_fn === nothing
+        socket.pending_read = true
         return nothing
     end
-    channel = channel_any::Channel
 
-    sock = handler.socket
-    event_loop = sock.event_loop
+    event_loop = socket.event_loop
     if event_loop === nothing
         return nothing
     end
 
     if event_loop_thread_is_callers_thread(event_loop)
-        _socket_handler_do_read(handler)::Nothing
+        _socket_do_read(socket)::Nothing
         return nothing
     end
 
-    if handler.read_task_storage.wrapper_task.scheduled
+    rt = socket.read_task
+    if rt === nothing
+        return nothing
+    end
+    read_task = rt::ChannelTask
+    if read_task.wrapper_task.scheduled
         return nothing
     end
 
-    channel_task_init!(handler.read_task_storage, EventCallable(s -> _socket_handler_read_task(handler, _coerce_task_status(s))), "socket_handler_read_now")
-    channel_schedule_task_now!(channel, handler.read_task_storage)::Nothing
-
+    channel_task_init!(read_task, EventCallable(s -> _socket_read_task(socket, _coerce_task_status(s))), "socket_read_now")
+    pipeline_schedule_task_now!(ps::PipelineState, read_task)::Nothing
     return nothing
 end
 
-# Subscribe to socket readable events
-function _socket_handler_subscribe_to_read(handler::SocketChannelHandler)
-    socket = handler.socket
-
-    # Set readable callback
-    return socket_subscribe_to_readable_events(socket, EventCallable(error_code -> begin
-        logf(
-            LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
-            "Socket handler: readable event with error $error_code"
-        )
-        _socket_handler_trigger_read(handler)::Nothing
-        return nothing
-    end))
-end
-
-function _socket_handler_read_task(handler::SocketChannelHandler, status::TaskStatus.T)
+function _socket_read_task(socket::Socket, status::TaskStatus.T)
     if status == TaskStatus.RUN_READY
-        _socket_handler_do_read(handler)
+        _socket_do_read(socket)
     end
     return nothing
 end
 
-# Internal - perform a socket read
-function _socket_handler_do_read(handler::SocketChannelHandler)
-    if handler.slot === nothing
+# Perform the socket read loop: read from OS socket, dispatch via read_fn.
+function _socket_do_read(socket::Socket)
+    ps = socket.pipeline
+    if !(ps isa PipelineState)
         return nothing
     end
 
-    channel = handler.slot.channel
-    if channel === nothing
+    if socket.shutdown_in_progress
         return nothing
     end
 
-    socket = handler.socket
-    slot = handler.slot
-
-    if handler.shutdown_in_progress
-        return nothing
-    end
-
-    downstream_window = channel_slot_downstream_read_window(slot)
-    max_to_read = downstream_window > handler.max_rw_size ? handler.max_rw_size : downstream_window
+    downstream_window = socket.downstream_window
+    max_to_read = downstream_window > socket.max_rw_size ? socket.max_rw_size : downstream_window
 
     logf(
         LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
@@ -369,7 +143,7 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
 
     while total_read < max_to_read
         iter_max_read = max_to_read - total_read
-        message = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, iter_max_read)
+        message = pipeline_acquire_message_from_pool(ps, IoMessageType.APPLICATION_DATA, iter_max_read)
         if message === nothing
             logf(
                 LogLevel.ERROR, LS_IO_SOCKET_HANDLER,
@@ -388,7 +162,7 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
             else
                 last_error = ERROR_UNKNOWN
             end
-            channel_release_message_to_pool!(channel, message)
+            pipeline_release_message_to_pool!(ps, message)
             break
         end
         total_read += bytes_read
@@ -399,14 +173,14 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
         )
 
         try
-            channel_slot_send_message(slot, message, ChannelDirection.READ)
+            _socket_dispatch_read(socket, message)
         catch e
             if e isa ReseauError
                 last_error = e.code
             else
                 last_error = ERROR_UNKNOWN
             end
-            channel_release_message_to_pool!(channel, message)
+            pipeline_release_message_to_pool!(ps, message)
             break
         end
     end
@@ -416,78 +190,173 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
         "Socket handler: total read on this tick $total_read"
     )
 
-    handler.stats.bytes_read += UInt64(total_read)
+    # Update stats
+    stats = socket.stats
+    if stats !== nothing
+        (stats::SocketHandlerStatistics).bytes_read += UInt64(total_read)
+    end
+
+    # Decrement socket downstream window
+    if total_read > 0
+        socket.downstream_window = socket.downstream_window > total_read ?
+            socket.downstream_window - total_read : Csize_t(0)
+    end
 
     if total_read < max_to_read
         if last_error != 0 && last_error != ERROR_IO_READ_WOULD_BLOCK
-            channel_shutdown!(channel, last_error)
+            pipeline_shutdown!(ps, last_error)
         end
         return nothing
     end
 
-    if total_read == handler.max_rw_size && !handler.read_task_storage.wrapper_task.scheduled
-        channel_task_init!(handler.read_task_storage, EventCallable(s -> _socket_handler_read_task(handler, _coerce_task_status(s))), "socket_handler_re_read")
-        channel_schedule_task_now!(channel, handler.read_task_storage)
+    # If we read a full chunk, schedule another read to drain the socket
+    rt = socket.read_task
+    if rt !== nothing
+        read_task = rt::ChannelTask
+        if total_read == socket.max_rw_size && !read_task.wrapper_task.scheduled
+            channel_task_init!(read_task, EventCallable(s -> _socket_read_task(socket, _coerce_task_status(s))), "socket_re_read")
+            pipeline_schedule_task_now!(ps, read_task)
+        end
     end
 
     return nothing
 end
 
-function _socket_handler_wrap_channel_setup!(handler::SocketChannelHandler, channel::Channel)
-    original_cb = channel.on_setup_completed
-    channel.on_setup_completed = EventCallable(err -> begin
-        if original_cb !== nothing
-            original_cb(err)
-        end
-        if err == AWS_OP_SUCCESS &&
-                channel.channel_state == ChannelState.ACTIVE &&
-                handler.pending_read &&
-                !handler.shutdown_in_progress
-            handler.pending_read = false
-            _socket_handler_trigger_read(handler)::Nothing
-        end
+# --- Write path ---
+
+# Write an IoMessage to the OS socket. This is the terminal step of the
+# write closure chain (called by write_fn or directly for non-TLS).
+function _socket_write_message(socket::Socket, message::IoMessage)
+    write_complete = WriteCallable((error_code, bytes_written) ->
+        _on_socket_write_complete(socket, message, error_code, bytes_written))
+
+    if !socket_is_open(socket)
+        write_complete(ERROR_IO_SOCKET_CLOSED, Csize_t(0))
         return nothing
-    end)
-    return nothing
-end
-
-# Create and set up a socket channel handler in a channel
-function socket_channel_handler_new!(
-        channel::Channel,
-        socket;
-        max_read_size::Integer = 16384,
-    )::SocketChannelHandler
-    if socket.event_loop === nothing
-        throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
-
-    handler = SocketChannelHandler(
-        socket;
-        max_read_size = max_read_size,
-    )
-
-    # Create slot and add to channel (socket is left-most)
-    slot = channel_slot_new!(channel)
-    if channel.first !== slot
-        channel_slot_insert_front!(channel, slot)
-    end
-    channel_slot_set_handler!(slot, handler)
-
-    # Link handler to the socket
-    socket.handler = handler
-
-    _socket_handler_wrap_channel_setup!(handler, channel)
-
-    _socket_handler_subscribe_to_read(handler)
 
     logf(
-        LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
-        "Socket handler: created and added to channel $(channel.channel_id)"
+        LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+        "Socket handler: writing $(message.message_data.len) bytes to socket"
     )
 
-    return handler
+    cursor = byte_cursor_from_buf(message.message_data)
+    try
+        socket_write(socket, cursor, write_complete)
+    catch e
+        e isa ReseauError || rethrow()
+        write_complete(e.code, Csize_t(0))
+    end
+
+    return nothing
 end
 
-function socket_channel_handler_get_socket(handler::SocketChannelHandler)
-    return handler.socket
+# Socket write completion callback
+function _on_socket_write_complete(socket::Socket, message::IoMessage, error_code::Int, bytes_written::Csize_t)
+    ps = socket.pipeline
+
+    if error_code != AWS_OP_SUCCESS
+        logf(
+            LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+            "Socket handler: write completed with error $error_code, wrote $bytes_written bytes"
+        )
+    else
+        logf(
+            LogLevel.TRACE, LS_IO_SOCKET_HANDLER,
+            "Socket handler: write completed, wrote $bytes_written bytes"
+        )
+    end
+
+    # Update stats
+    stats = socket.stats
+    if stats !== nothing
+        (stats::SocketHandlerStatistics).bytes_written += UInt64(bytes_written)
+    end
+
+    # Invoke message completion callback
+    if message.on_completion !== nothing
+        message.on_completion(error_code)
+    end
+
+    # Release message to pool
+    if ps isa PipelineState
+        pipeline_release_message_to_pool!(ps, message)
+    end
+
+    # If error, trigger shutdown
+    if error_code != AWS_OP_SUCCESS && ps isa PipelineState
+        pipeline_shutdown!(ps, error_code)
+    end
+
+    return nothing
+end
+
+# --- Shutdown ---
+
+# Read direction shutdown closure (registered as first in read_shutdown_fns).
+function _socket_read_shutdown(socket::Socket, error_code::Int, free_scarce::Bool, on_complete::Function)
+    logf(
+        LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+        "Socket handler: read shutdown, error=$error_code, free_scarce=$free_scarce"
+    )
+    socket.shutdown_in_progress = true
+
+    if free_scarce && socket_is_open(socket)
+        socket_set_close_complete_callback(socket, TaskFn(_ -> begin
+            on_complete(error_code, free_scarce)
+            return nothing
+        end))
+        socket_close(socket)
+    else
+        on_complete(error_code, free_scarce)
+    end
+    return nothing
+end
+
+# Write direction shutdown closure (registered as last in write_shutdown_fns).
+function _socket_write_shutdown(socket::Socket, error_code::Int, free_scarce::Bool, on_complete::Function)
+    logf(
+        LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
+        "Socket handler: write shutdown, error=$error_code"
+    )
+
+    if socket_is_open(socket)
+        socket_set_close_complete_callback(socket, TaskFn(_ -> begin
+            on_complete(error_code, free_scarce)
+            return nothing
+        end))
+        socket_close(socket)
+    else
+        on_complete(error_code, free_scarce)
+    end
+    return nothing
+end
+
+# --- Statistics ---
+
+function socket_reset_statistics(socket::Socket)::Nothing
+    stats = socket.stats
+    if stats !== nothing
+        crt_statistics_socket_reset!(stats::SocketHandlerStatistics)
+    end
+    return nothing
+end
+
+function socket_gather_statistics(socket::Socket)::Union{SocketHandlerStatistics, Nothing}
+    stats = socket.stats
+    return stats isa SocketHandlerStatistics ? stats : nothing
+end
+
+function socket_cleanup_handler!(socket::Socket)::Nothing
+    stats = socket.stats
+    if stats !== nothing
+        crt_statistics_socket_cleanup!(stats::SocketHandlerStatistics)
+    end
+    socket.pipeline = nothing
+    socket.read_fn = nothing
+    socket.write_fn = nothing
+    socket.stats = nothing
+    socket.read_task = nothing
+    socket.shutdown_task = nothing
+    return nothing
 end

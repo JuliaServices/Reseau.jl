@@ -27,20 +27,14 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
             end)
         ) : nothing
 
-    channel_opts = Sockets.ChannelOptions(
-        event_loop = el,
-        on_setup_completed = on_setup,
-        on_shutdown_completed = on_shutdown,
-    )
-
-    channel = Sockets.channel_new(channel_opts)
+    ps = Sockets.pipeline_new(el; on_setup_completed = on_setup, on_shutdown_completed = on_shutdown)
 
     @test _wait_ready_channel(setup_ch)
     if isready(setup_ch)
         @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
     end
 
-    return (el = el, channel = channel, shutdown_ch = shutdown_ch)
+    return (el = el, ps = ps, shutdown_ch = shutdown_ch)
 end
 
 @testset "channel" begin
@@ -48,39 +42,6 @@ end
         @test true
     else
         Sockets.io_library_init()
-
-        @testset "slots cleanup" begin
-            setup = _setup_channel()
-            el = setup.el
-            channel = setup.channel
-
-            slot_1 = Sockets.channel_slot_new!(channel)
-            slot_2 = Sockets.channel_slot_new!(channel)
-            slot_3 = Sockets.channel_slot_new!(channel)
-            slot_4 = Sockets.channel_slot_new!(channel)
-            slot_5 = Sockets.channel_slot_new!(channel)
-
-            Sockets.channel_slot_insert_right!(slot_1, slot_2)
-            Sockets.channel_slot_insert_right!(slot_2, slot_3)
-            Sockets.channel_slot_insert_left!(slot_3, slot_4)
-            Sockets.channel_slot_remove!(slot_2)
-
-            @test slot_1.adj_left === nothing
-            @test slot_1.adj_right === slot_4
-            @test slot_4.adj_left === slot_1
-            @test slot_4.adj_right === slot_3
-            @test slot_3.adj_left === slot_4
-            @test slot_3.adj_right === nothing
-
-            Sockets.channel_slot_replace!(slot_4, slot_5)
-            @test slot_1.adj_right === slot_5
-            @test slot_5.adj_left === slot_1
-            @test slot_5.adj_right === slot_3
-            @test slot_3.adj_left === slot_5
-
-            Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
-        end
 
         @testset "destroy before setup completes waits for setup" begin
             el = EventLoops.event_loop_new()
@@ -91,15 +52,9 @@ end
                 return nothing
             end)
 
-            channel_opts = Sockets.ChannelOptions(
-                event_loop = el,
-                on_setup_completed = on_setup,
-                on_shutdown_completed = nothing,
-            )
+            ps = Sockets.pipeline_new(el; on_setup_completed = on_setup, on_shutdown_completed = nothing)
 
-            channel = Sockets.channel_new(channel_opts)
-
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             @test EventLoops.event_loop_run!(el) === nothing
 
             @test _wait_ready_channel(setup_ch)
@@ -108,10 +63,10 @@ end
             end
 
             deadline = Base.time_ns() + 1_000_000_000
-            while channel.channel_state != Sockets.ChannelState.SHUT_DOWN && Base.time_ns() < deadline
+            while ps.state != Sockets.PipelineLifecycle.SHUT_DOWN && Base.time_ns() < deadline
                 yield()
             end
-            @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
+            @test ps.state == Sockets.PipelineLifecycle.SHUT_DOWN
 
             EventLoops.event_loop_destroy!(el)
         end
@@ -119,7 +74,7 @@ end
         @testset "channel tasks run" begin
             setup = _setup_channel()
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
 
             task_count = 4
             status_ch = Channel{Tuple{Int, Reseau.TaskStatus.T}}(task_count)
@@ -132,13 +87,13 @@ end
                 end), "test_channel_task")
             end
 
-            Sockets.channel_schedule_task_now!(channel, tasks[1])
-            Sockets.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
+            Sockets.pipeline_schedule_task_now!(ps, tasks[1])
+            Sockets.pipeline_schedule_task_future!(ps, tasks[2], UInt64(1))
 
             scheduler_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-                Sockets.channel_schedule_task_now!(channel, tasks[3])
-                Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
+                Sockets.pipeline_schedule_task_now!(ps, tasks[3])
+                Sockets.pipeline_schedule_task_future!(ps, tasks[4], UInt64(1))
                 return nothing
             end); type_tag = "schedule_on_thread")
             EventLoops.event_loop_schedule_task_now!(el, scheduler_task)
@@ -159,14 +114,14 @@ end
                 @test status == Reseau.TaskStatus.RUN_READY
             end
 
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             EventLoops.event_loop_destroy!(el)
         end
 
         @testset "channel tasks run cross-thread" begin
             setup = _setup_channel()
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
 
             task_count = 4
             status_ch = Channel{Tuple{Int, Reseau.TaskStatus.T}}(task_count)
@@ -180,12 +135,12 @@ end
             end
 
             t1 = errormonitor(Threads.@spawn begin
-                Sockets.channel_schedule_task_now!(channel, tasks[1])
-                Sockets.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
+                Sockets.pipeline_schedule_task_now!(ps, tasks[1])
+                Sockets.pipeline_schedule_task_future!(ps, tasks[2], UInt64(1))
             end)
             t2 = errormonitor(Threads.@spawn begin
-                Sockets.channel_schedule_task_now!(channel, tasks[3])
-                Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
+                Sockets.pipeline_schedule_task_now!(ps, tasks[3])
+                Sockets.pipeline_schedule_task_future!(ps, tasks[4], UInt64(1))
             end)
             wait(t1)
             wait(t2)
@@ -206,14 +161,14 @@ end
                 @test status == Reseau.TaskStatus.RUN_READY
             end
 
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             EventLoops.event_loop_destroy!(el)
         end
 
         @testset "channel tasks serialized run" begin
             setup = _setup_channel()
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
 
             task_count = 4
             status_ch = Channel{Tuple{Int, Reseau.TaskStatus.T}}(task_count)
@@ -226,13 +181,13 @@ end
                 end), "test_channel_task_serialized")
             end
 
-            Sockets.channel_schedule_task_now_serialized!(channel, tasks[1])
-            Sockets.channel_schedule_task_future!(channel, tasks[2], UInt64(1))
+            Sockets.pipeline_schedule_task_now_serialized!(ps, tasks[1])
+            Sockets.pipeline_schedule_task_future!(ps, tasks[2], UInt64(1))
 
             scheduler_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-                Sockets.channel_schedule_task_now_serialized!(channel, tasks[3])
-                Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
+                Sockets.pipeline_schedule_task_now_serialized!(ps, tasks[3])
+                Sockets.pipeline_schedule_task_future!(ps, tasks[4], UInt64(1))
                 return nothing
             end); type_tag = "schedule_on_thread_serialized")
             EventLoops.event_loop_schedule_task_now!(el, scheduler_task)
@@ -253,14 +208,14 @@ end
                 @test status == Reseau.TaskStatus.RUN_READY
             end
 
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             EventLoops.event_loop_destroy!(el)
         end
 
         @testset "channel serialized tasks queued via cross-thread list" begin
             setup = _setup_channel()
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
 
             status_ch = Channel{Reseau.TaskStatus.T}(1)
             task = Sockets.ChannelTask()
@@ -279,7 +234,7 @@ end
 
             blocker = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
-                Sockets.channel_schedule_task_now_serialized!(channel, task)
+                Sockets.pipeline_schedule_task_now_serialized!(ps, task)
                 put!(ready_ch, true)
                 take!(block_ch)
                 return nothing
@@ -290,8 +245,8 @@ end
                 @test take!(ready_ch)
 
                 queued = false
-                lock(channel.cross_thread_tasks_lock) do
-                    queued = !isempty(channel.cross_thread_tasks)
+                lock(ps.cross_thread_tasks_lock) do
+                    queued = !isempty(ps.cross_thread_tasks)
                 end
                 @test queued
 
@@ -317,7 +272,7 @@ end
                     catch
                     end
                 end
-                Sockets.channel_destroy!(channel)
+                Sockets.pipeline_destroy!(ps)
                 EventLoops.event_loop_destroy!(el)
             end
         end
@@ -325,10 +280,10 @@ end
         @testset "post shutdown tasks canceled" begin
             setup = _setup_channel(with_shutdown_cb = true)
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
             shutdown_ch = setup.shutdown_ch
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.pipeline_shutdown!(ps, Reseau.AWS_OP_SUCCESS)
             @test _wait_ready_channel(shutdown_ch)
 
             task_status = Ref{Reseau.TaskStatus.T}(Reseau.TaskStatus.RUN_READY)
@@ -337,17 +292,17 @@ end
                 task_status[] = Reseau.TaskStatus.T(status)
                 nothing
             end), "post_shutdown")
-            Sockets.channel_schedule_task_now!(channel, task)
+            Sockets.pipeline_schedule_task_now!(ps, task)
             @test task_status[] == Reseau.TaskStatus.CANCELED
 
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             EventLoops.event_loop_destroy!(el)
         end
 
         @testset "pending tasks canceled on shutdown" begin
             setup = _setup_channel(with_shutdown_cb = true)
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
             shutdown_ch = setup.shutdown_ch
 
             task_status = Ref{Int}(100)
@@ -356,10 +311,10 @@ end
                 task_status[] = status
                 nothing
             end), "future_task")
-            Sockets.channel_schedule_task_future!(channel, task, typemax(UInt64) - 1)
+            Sockets.pipeline_schedule_task_future!(ps, task, typemax(UInt64) - 1)
             @test task_status[] == 100
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.pipeline_shutdown!(ps, Reseau.AWS_OP_SUCCESS)
             @test _wait_ready_channel(shutdown_ch)
 
             deadline = Base.time_ns() + 2_000_000_000
@@ -368,29 +323,29 @@ end
             end
             @test task_status[] == Int(Reseau.TaskStatus.CANCELED)
 
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             EventLoops.event_loop_destroy!(el)
         end
 
         @testset "duplicate shutdown" begin
             setup = _setup_channel(with_shutdown_cb = true)
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
             shutdown_ch = setup.shutdown_ch
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.pipeline_shutdown!(ps, Reseau.AWS_OP_SUCCESS)
             @test _wait_ready_channel(shutdown_ch)
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.pipeline_shutdown!(ps, Reseau.AWS_OP_SUCCESS)
 
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             EventLoops.event_loop_destroy!(el)
         end
 
         @testset "concurrent shutdown schedules once" begin
             setup = _setup_channel(with_shutdown_cb = true)
             el = setup.el
-            channel = setup.channel
+            ps = setup.ps
             shutdown_ch = setup.shutdown_ch
 
             ready = Threads.Atomic{Int}(0)
@@ -401,7 +356,7 @@ end
                 while !go[]
                     yield()
                 end
-                Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                Sockets.pipeline_shutdown!(ps, Reseau.AWS_OP_SUCCESS)
                 return nothing
             end)
             t2 = errormonitor(Threads.@spawn begin
@@ -409,7 +364,7 @@ end
                 while !go[]
                     yield()
                 end
-                Sockets.channel_shutdown!(channel, Reseau.ERROR_INVALID_STATE)
+                Sockets.pipeline_shutdown!(ps, Reseau.ERROR_INVALID_STATE)
                 return nothing
             end)
 
@@ -432,7 +387,7 @@ end
             end
             @test !isready(shutdown_ch)
 
-            Sockets.channel_destroy!(channel)
+            Sockets.pipeline_destroy!(ps)
             EventLoops.event_loop_destroy!(el)
         end
     end

@@ -141,19 +141,16 @@ const _tls_byo_server_setup = Ref{Union{TlsByoCryptoSetupOptions, Nothing}}(noth
 function _tls_byo_new_handler(
         setup::TlsByoCryptoSetupOptions,
         options,
-        slot::ChannelSlot,
-    )::AbstractChannelHandler
-    handler = setup.new_handler_fn(options, slot, setup.user_data)
-    if !(handler isa AbstractChannelHandler)
-        throw_error(ERROR_INVALID_STATE)
-    end
-    channel_slot_set_handler!(slot, handler)
+        socket::Socket,
+        pipeline::PipelineState,
+    )
+    handler = setup.new_handler_fn(options, socket, pipeline, setup.user_data)
     return handler
 end
 
 function _tls_byo_start_negotiation(
         setup::TlsByoCryptoSetupOptions,
-        handler::AbstractChannelHandler,
+        handler,
     )::Nothing
     if setup.start_negotiation_fn === nothing
         throw_error(ERROR_INVALID_STATE)
@@ -806,9 +803,9 @@ function _tls_key_operation_completion_task(operation::TlsKeyOperation, status::
     if operation.completion_error_code == 0
         _ = _s2n_drive_negotiation(handler)
     else
-        slot = handler.slot
-        if slot !== nothing && slot.channel !== nothing
-            channel_shutdown!(slot.channel, operation.completion_error_code)
+        ps = handler.pipeline
+        if ps isa PipelineState
+            pipeline_shutdown!(ps, operation.completion_error_code)
         end
     end
 
@@ -868,13 +865,16 @@ function _tls_key_operation_complete_common(
 
     if operation.s2n_op != C_NULL && operation.s2n_handler !== nothing
         handler = operation.s2n_handler
-        if handler isa S2nTlsHandler && handler.slot !== nothing && handler.slot.channel !== nothing
-            channel_task_init!(
-                operation.completion_task,
-                EventCallable(s -> _tls_key_operation_completion_task(operation, _coerce_task_status(s))),
-                "tls_key_operation_completion_task",
-            )
-            channel_schedule_task_now!(handler.slot.channel, operation.completion_task)
+        if handler isa S2nTlsHandler
+            ps = handler.pipeline
+            if ps isa PipelineState
+                channel_task_init!(
+                    operation.completion_task,
+                    EventCallable(s -> _tls_key_operation_completion_task(operation, _coerce_task_status(s))),
+                    "tls_key_operation_completion_task",
+                )
+                pipeline_schedule_task_now!(ps, operation.completion_task)
+            end
         end
     end
 
@@ -1485,47 +1485,37 @@ struct TlsNegotiatedProtocolMessage
     protocol::ByteBuffer
 end
 
-# TLS handler base type
-abstract type TlsChannelHandler <: AbstractChannelHandler end
-
 function _tls_timeout_task(handler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
-    handler isa TlsChannelHandler || return nothing
     handler.stats.handshake_status == TlsNegotiationStatus.ONGOING || return nothing
-    slot = handler.slot
-    slot === nothing && return nothing
-    channel = slot.channel
-    channel === nothing && return nothing
-    channel_shutdown!(channel, ERROR_IO_TLS_NEGOTIATION_TIMEOUT)
+    ps = handler.pipeline
+    ps isa PipelineState || return nothing
+    pipeline_shutdown!(ps, ERROR_IO_TLS_NEGOTIATION_TIMEOUT)
     return nothing
 end
 
-function tls_on_drive_negotiation(handler::TlsChannelHandler)
+function tls_on_drive_negotiation(handler)
     if handler.stats.handshake_status == TlsNegotiationStatus.NONE
         handler.stats.handshake_status = TlsNegotiationStatus.ONGOING
-        slot = handler.slot
-        slot === nothing && return nothing
-        channel = slot.channel
-        channel === nothing && return nothing
-        now = channel_current_clock_time(channel)
+        ps = handler.pipeline
+        ps isa PipelineState || return nothing
+        now = pipeline_current_clock_time(ps)
         handler.stats.handshake_start_ns = now
 
         if handler.tls_timeout_ms > 0
             timeout_ns = now + timestamp_convert(handler.tls_timeout_ms, TIMESTAMP_MILLIS, TIMESTAMP_NANOS, nothing)
-            channel_schedule_task_future!(channel, handler.timeout_task, timeout_ns)
+            pipeline_schedule_task_future!(ps, handler.timeout_task, timeout_ns)
         end
     end
     return nothing
 end
 
-function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::Int)
+function tls_on_negotiation_completed(handler, error_code::Int)
     handler.stats.handshake_status =
         error_code == AWS_OP_SUCCESS ? TlsNegotiationStatus.SUCCESS : TlsNegotiationStatus.FAILURE
-    slot = handler.slot
-    slot === nothing && return nothing
-    channel = slot.channel
-    channel === nothing && return nothing
-    now = channel_current_clock_time(channel)
+    ps = handler.pipeline
+    ps isa PipelineState || return nothing
+    now = pipeline_current_clock_time(ps)
     handler.stats.handshake_end_ns = now
     return nothing
 end
@@ -1603,20 +1593,21 @@ end
 
 function tls_client_handler_new(
         options::TlsConnectionOptions,
-        slot::ChannelSlot,
-    )::AbstractChannelHandler
+        socket::Socket,
+        pipeline::PipelineState,
+    )
     if options.ctx.options.is_server
         throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     if _tls_byo_client_setup[] !== nothing
-        return _tls_byo_new_handler(_tls_byo_client_setup[], options, slot)
+        return _tls_byo_new_handler(_tls_byo_client_setup[], options, socket, pipeline)
     end
 
     @static if Sys.islinux()
-        return _s2n_handler_new(options, slot, S2N_CLIENT)
+        return _s2n_handler_new(options, socket, pipeline, S2N_CLIENT)
     elseif Sys.isapple()
-        return _secure_transport_handler_new(options, slot, _kSSLClientSide)
+        return _secure_transport_handler_new(options, socket, pipeline, _kSSLClientSide)
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
@@ -1624,113 +1615,162 @@ end
 
 function tls_server_handler_new(
         options::TlsConnectionOptions,
-        slot::ChannelSlot,
-    )::AbstractChannelHandler
+        socket::Socket,
+        pipeline::PipelineState,
+    )
     if !options.ctx.options.is_server
         throw_error(ERROR_INVALID_ARGUMENT)
     end
 
     if _tls_byo_server_setup[] !== nothing
-        return _tls_byo_new_handler(_tls_byo_server_setup[], options, slot)
+        return _tls_byo_new_handler(_tls_byo_server_setup[], options, socket, pipeline)
     end
 
     @static if Sys.islinux()
-        return _s2n_handler_new(options, slot, S2N_SERVER)
+        return _s2n_handler_new(options, socket, pipeline, S2N_SERVER)
     elseif Sys.isapple()
-        return _secure_transport_handler_new(options, slot, _kSSLServerSide)
+        return _secure_transport_handler_new(options, socket, pipeline, _kSSLServerSide)
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
-function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)::Nothing
+function tls_client_handler_start_negotiation(handler)::Nothing
     if _tls_byo_client_setup[] !== nothing
         _tls_byo_start_negotiation(_tls_byo_client_setup[], handler)
         return nothing
     end
 
+    ps = handler.pipeline
+    ps isa PipelineState || throw_error(ERROR_INVALID_STATE)
+
     @static if Sys.islinux()
         if !(handler isa S2nTlsHandler)
             throw_error(ERROR_INVALID_STATE)
         end
-        if handler.slot !== nothing && handler.slot.channel !== nothing && channel_thread_is_callers_thread(handler.slot.channel)
+        if pipeline_thread_is_callers_thread(ps)
             _ = _s2n_drive_negotiation(handler)
             return nothing
         end
         channel_task_init!(handler.negotiation_task, EventCallable(s -> _s2n_negotiation_task(handler, _coerce_task_status(s))), "s2n_channel_handler_negotiation")
-        channel_schedule_task_now!(handler.slot.channel, handler.negotiation_task)
+        pipeline_schedule_task_now!(ps, handler.negotiation_task)
         return nothing
     elseif Sys.isapple()
-        if !(handler isa SecureTransportTlsHandler)
+        if !(handler isa SecureTransportTlsState)
             throw_error(ERROR_INVALID_STATE)
         end
-        if handler.slot !== nothing && handler.slot.channel !== nothing && channel_thread_is_callers_thread(handler.slot.channel)
+        if pipeline_thread_is_callers_thread(ps)
             _secure_transport_drive_negotiation(handler)
             return nothing
         end
         channel_task_init!(handler.negotiation_task, EventCallable(s -> _secure_transport_negotiation_task(handler, _coerce_task_status(s))), "secure_transport_channel_handler_start_negotiation")
-        channel_schedule_task_now!(handler.slot.channel, handler.negotiation_task)
+        pipeline_schedule_task_now!(ps, handler.negotiation_task)
         return nothing
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
 
-function tls_handler_protocol(handler::TlsChannelHandler)::ByteBuffer
+function tls_handler_protocol(handler)::ByteBuffer
     if handler isa S2nTlsHandler
         return handler.protocol
-    elseif handler isa SecureTransportTlsHandler
+    elseif handler isa SecureTransportTlsState
         return handler.protocol
     else
         return null_buffer()
     end
 end
 
-function tls_handler_server_name(handler::TlsChannelHandler)::ByteBuffer
+function tls_handler_server_name(handler)::ByteBuffer
     if handler isa S2nTlsHandler
         return handler.server_name
-    elseif handler isa SecureTransportTlsHandler
+    elseif handler isa SecureTransportTlsState
         return handler.server_name
     else
         return null_buffer()
     end
 end
 
-function tls_channel_handler_new!(
-        channel::Channel,
+# Create a TLS handler and wire it into the pipeline as middleware.
+# Returns (tls_handler, tls_read_fn, tls_write_fn) for pipeline composition.
+function tls_handler_new(
         options::TlsConnectionOptions,
-    )::AbstractChannelHandler
-    channel.last === nothing && throw_error(ERROR_INVALID_STATE)
-
-    tls_slot = ChannelSlot()
-    tls_slot.channel = channel
-
+        socket::Socket,
+        pipeline::PipelineState,
+    )
     handler = options.ctx.options.is_server ?
-        tls_server_handler_new(options, tls_slot) :
-        tls_client_handler_new(options, tls_slot)
-
-    channel_slot_insert_right!(channel.last, tls_slot)
-    channel_slot_set_handler!(tls_slot, handler)
-
+        tls_server_handler_new(options, socket, pipeline) :
+        tls_client_handler_new(options, socket, pipeline)
     return handler
 end
 
-function channel_setup_client_tls(
-        right_of_slot::ChannelSlot,
+# Set up client TLS on an existing pipeline, start negotiation.
+function pipeline_setup_client_tls!(
+        pipeline::PipelineState,
+        socket::Socket,
         options::TlsConnectionOptions,
-    )::AbstractChannelHandler
-    channel = right_of_slot.channel
-    channel === nothing && throw_error(ERROR_INVALID_STATE)
-
-    tls_slot = ChannelSlot()
-    tls_slot.channel = channel
-
-    handler = tls_client_handler_new(options, tls_slot)
-
-    channel_slot_insert_right!(right_of_slot, tls_slot)
-    channel_slot_set_handler!(tls_slot, handler)
-
+    )
+    handler = tls_client_handler_new(options, socket, pipeline)
     tls_client_handler_start_negotiation(handler)
-
     return handler
+end
+
+# Wire a TLS handler into the pipeline's closure chain.
+# Sets socket.read_fn/write_fn, registers shutdown closures, sets up backpressure.
+function _wire_tls_pipeline!(socket::Socket, ps::PipelineState, handler)
+    # BYO crypto handlers manage their own pipeline integration;
+    # skip platform-specific wiring so the handler can use the
+    # default downstream_read_setter installed by socket_pipeline_init!.
+    if _tls_byo_client_setup[] !== nothing || _tls_byo_server_setup[] !== nothing
+        return nothing
+    end
+    @static if Sys.islinux()
+        socket.read_fn = msg -> begin
+            _s2n_process_read(handler, msg)
+            return nothing
+        end
+        socket.write_fn = msg -> begin
+            _s2n_process_write(handler, msg)
+            return nothing
+        end
+        push!(ps.shutdown_chain.read_shutdown_fns,
+            (err, scarce, on_complete) -> _s2n_read_shutdown(handler, err, scarce, on_complete))
+        pushfirst!(ps.shutdown_chain.write_shutdown_fns,
+            (err, scarce, on_complete) -> _s2n_write_shutdown(handler, err, scarce, on_complete))
+        socket_window_fn = function(size::Csize_t)
+            socket.downstream_window = add_size_saturating(socket.downstream_window, size)
+            _socket_trigger_read(socket)
+        end
+        ps.window_update_fn = make_s2n_window_update_fn(handler, socket_window_fn)
+    elseif Sys.isapple()
+        socket.read_fn = msg -> begin
+            _secure_transport_process_read(handler, msg)
+            return nothing
+        end
+        socket.write_fn = msg -> begin
+            _secure_transport_process_write(handler, msg)
+            return nothing
+        end
+        push!(ps.shutdown_chain.read_shutdown_fns,
+            (err, scarce, on_complete) -> _secure_transport_read_shutdown(handler, err, scarce, on_complete))
+        pushfirst!(ps.shutdown_chain.write_shutdown_fns,
+            (err, scarce, on_complete) -> _secure_transport_write_shutdown(handler, err, scarce, on_complete))
+        socket_window_fn = function(size::Csize_t)
+            socket.downstream_window = add_size_saturating(socket.downstream_window, size)
+            _socket_trigger_read(socket)
+        end
+        ps.window_update_fn = make_secure_transport_window_update_fn(handler, socket_window_fn)
+    else
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+    # Override downstream_read_setter: app reads route through TLS handler's downstream_read
+    ps.downstream_read_setter = read_fn -> begin
+        handler.downstream_read = read_fn
+    end
+    # Set initial socket window for TLS handshake when backpressure is enabled
+    if ps.read_back_pressure_enabled
+        socket.downstream_window = Csize_t(TLS_EST_HANDSHAKE_SIZE + TLS_EST_RECORD_OVERHEAD)
+    end
+    ps.tls_handler = handler
+    return nothing
 end

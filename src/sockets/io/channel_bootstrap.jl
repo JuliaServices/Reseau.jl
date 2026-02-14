@@ -141,18 +141,12 @@ end
 end
 
 function _install_protocol_handler_from_socket(
-        channel::Channel,
+        pipeline::PipelineState,
         socket::Socket,
         on_protocol_negotiated::ProtocolNegotiatedCallable,
     )::Nothing
     protocol = socket_get_protocol(socket)
-    new_slot = channel_slot_new!(channel)
-    channel_slot_insert_end!(channel, new_slot)
-    handler = on_protocol_negotiated(new_slot, protocol)
-    if handler === nothing
-        throw_error(ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE)
-    end
-    channel_slot_set_handler!(new_slot, handler)
+    on_protocol_negotiated(pipeline, protocol)
     return nothing
 end
 
@@ -163,7 +157,7 @@ mutable struct SocketConnectionRequest{PN, OC, OS, OD, TO}
     port::UInt32
     socket_options::SocketOptions
     socket::Union{Socket, Nothing}  # nullable
-    channel::Union{Channel, Nothing}  # nullable
+    channel::Union{PipelineState, Nothing}  # nullable
     tls_connection_options::TO
     on_protocol_negotiated::Union{PN, Nothing}
     on_creation::Union{OC, Nothing}
@@ -667,7 +661,7 @@ end
 mutable struct _ClientChannelSetupCtx{R <: SocketConnectionRequest}
     request::R
     socket::Socket
-    channel::Union{Channel, Nothing}
+    channel::Union{PipelineState, Nothing}
 end
 
 struct _ClientChannelOnShutdown{C <: _ClientChannelSetupCtx}
@@ -692,7 +686,7 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
     ctx = cb.ctx
     request = ctx.request
     socket = ctx.socket
-    channel = ctx.channel::Channel
+    ps = ctx.channel::PipelineState
 
     if error_code != AWS_OP_SUCCESS
         logf(
@@ -700,20 +694,19 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
             "ClientBootstrap: channel setup failed"
         )
         request.on_shutdown = nothing
-        channel_shutdown!(channel, error_code)
+        pipeline_shutdown!(ps, error_code)
         socket_close(socket)
         _connection_request_complete(request, error_code, nothing)
         return nothing
     end
 
-    local handler_result
     try
-        handler_result = socket_channel_handler_new!(channel, socket)
+        socket_pipeline_init!(socket, ps)
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create socket channel handler"
+            "ClientBootstrap: failed to init socket pipeline"
         )
         request.on_shutdown = nothing
         socket_close(socket)
@@ -721,61 +714,50 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
         return nothing
     end
 
+    # For non-TLS with backpressure, propagate window updates to socket
+    if ps.read_back_pressure_enabled
+        let sock = socket
+            ps.window_update_fn = function(size::Csize_t)
+                sock.downstream_window = add_size_saturating(sock.downstream_window, size)
+                _socket_trigger_read(sock)
+            end
+        end
+    end
+
     if request.tls_connection_options !== nothing && _socket_uses_network_framework_tls(socket, request.tls_connection_options)
+        # Network.framework TLS path — TLS is handled by the socket layer
         tls_options = request.tls_connection_options::TlsConnectionOptions
         if request.on_protocol_negotiated !== nothing
             try
-                _install_protocol_handler_from_socket(channel, socket, request.on_protocol_negotiated)
+                _install_protocol_handler_from_socket(ps, socket, request.on_protocol_negotiated)
             catch e
                 err = e isa ReseauError ? e.code : ERROR_UNKNOWN
                 request.on_shutdown = nothing
-                channel_shutdown!(channel, err)
+                pipeline_shutdown!(ps, err)
                 socket_close(socket)
                 _connection_request_complete(request, err, nothing)
                 return nothing
             end
         end
         if tls_options.on_negotiation_result !== nothing
-            tls_options.on_negotiation_result(handler_result, channel.first, AWS_OP_SUCCESS)
+            tls_options.on_negotiation_result(nothing, ps, AWS_OP_SUCCESS)
         end
-        _connection_request_complete(request, AWS_OP_SUCCESS, channel)
-        if channel_thread_is_callers_thread(channel)
-            try
-                channel_trigger_read(channel)
-            catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                request.on_shutdown = nothing
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                _connection_request_complete(request, err, nothing)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask(EventCallable(s -> begin
-                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                try
-                    channel_trigger_read(channel)
-                catch e
-                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                    channel_shutdown!(channel, err)
-                end
-                return nothing
-            end), "client_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
+        _connection_request_complete(request, AWS_OP_SUCCESS, ps)
+        _client_trigger_read(socket, ps)
         return nothing
     elseif request.tls_connection_options !== nothing
+        # Standard TLS path — stack TLS middleware on socket
         tls_options = request.tls_connection_options::TlsConnectionOptions
         advertise_alpn = request.on_protocol_negotiated !== nothing && tls_is_alpn_available()
-        on_negotiation = (handler, slot, err) -> begin
+        on_negotiation = (handler, pipeline, err) -> begin
             if tls_options.on_negotiation_result !== nothing
-                tls_options.on_negotiation_result(handler, slot, err)
+                tls_options.on_negotiation_result(handler, pipeline, err)
             end
             if err == AWS_OP_SUCCESS
-                _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+                _connection_request_complete(request, AWS_OP_SUCCESS, ps)
             else
                 request.on_shutdown = nothing
-                channel_shutdown!(channel, err)
+                pipeline_shutdown!(ps, err)
                 socket_close(socket)
                 _connection_request_complete(request, err, nothing)
             end
@@ -793,63 +775,63 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
         )
         local tls_handler
         try
-            tls_handler = tls_channel_handler_new!(channel, wrapped)
+            tls_handler = tls_handler_new(wrapped, socket, ps)
         catch e
             err = e isa ReseauError ? e.code : ERROR_UNKNOWN
             request.on_shutdown = nothing
-            channel_shutdown!(channel, err)
+            pipeline_shutdown!(ps, err)
             socket_close(socket)
             _connection_request_complete(request, err, nothing)
             return nothing
         end
-        if advertise_alpn
-            alpn_slot = channel_slot_new!(channel)
-            channel_slot_insert_right!(tls_handler.slot, alpn_slot)
-            alpn_handler = tls_alpn_handler_new(request.on_protocol_negotiated)
-            channel_slot_set_handler!(alpn_slot, alpn_handler)
-        end
+
+        # Wire TLS into the pipeline
+        _wire_tls_pipeline!(socket, ps, tls_handler)
+
         try
             tls_client_handler_start_negotiation(tls_handler)
         catch e
             err = e isa ReseauError ? e.code : ERROR_UNKNOWN
             request.on_shutdown = nothing
-            channel_shutdown!(channel, err)
+            pipeline_shutdown!(ps, err)
             socket_close(socket)
             _connection_request_complete(request, err, nothing)
             return nothing
         end
-        if channel_thread_is_callers_thread(channel)
-            try
-                channel_trigger_read(channel)
-            catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                request.on_shutdown = nothing
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                _connection_request_complete(request, err, nothing)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask(EventCallable(s -> begin
-                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                try
-                    channel_trigger_read(channel)
-                catch e
-                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                    channel_shutdown!(channel, err)
-                end
-                return nothing
-            end), "client_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
+        _client_trigger_read(socket, ps)
         return nothing
     end
 
     logf(
         LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)"
+        "ClientBootstrap: channel $(ps.channel_id) setup complete for $(request.host):$(request.port)"
     )
-    _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+    _connection_request_complete(request, AWS_OP_SUCCESS, ps)
+    return nothing
+end
+
+# Trigger the initial read on a pipeline socket, scheduling a task if not on the event loop thread.
+function _client_trigger_read(socket::Socket, ps::PipelineState)
+    if pipeline_thread_is_callers_thread(ps)
+        try
+            pipeline_trigger_read(socket)
+        catch e
+            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            pipeline_shutdown!(ps, err)
+        end
+    else
+        trigger_task = ChannelTask(EventCallable(s -> begin
+            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+            try
+                pipeline_trigger_read(socket)
+            catch e
+                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                pipeline_shutdown!(ps, err)
+            end
+            return nothing
+        end), "client_trigger_read")
+        pipeline_schedule_task_now!(ps, trigger_task)
+    end
     return nothing
 end
 
@@ -869,21 +851,14 @@ function _setup_client_channel(request::R)::Nothing where {R <: SocketConnection
     ctx = _ClientChannelSetupCtx(request, socket, nothing)
     on_shutdown = EventCallable(_ClientChannelOnShutdown(ctx))
     on_setup = EventCallable(_ClientChannelOnSetup(ctx))
-    options = ChannelOptions(
-        event_loop = event_loop,
-        event_loop_group = request.bootstrap.event_loop_group,
-        on_setup_completed = on_setup,
-        on_shutdown_completed = on_shutdown,
-        enable_read_back_pressure = request.enable_read_back_pressure,
-    )
 
-    local channel
+    local ps
     try
-        channel = channel_new(options)
+        ps = pipeline_new(event_loop; event_loop_group = request.bootstrap.event_loop_group, enable_read_back_pressure = request.enable_read_back_pressure, on_setup_completed = on_setup, on_shutdown_completed = on_shutdown)
     catch e
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create channel"
+            "ClientBootstrap: failed to create pipeline"
         )
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         socket_close(socket)
@@ -891,8 +866,8 @@ function _setup_client_channel(request::R)::Nothing where {R <: SocketConnection
         return nothing
     end
 
-    ctx.channel = channel
-    request.channel = channel
+    ctx.channel = ps
+    request.channel = ps
     if request.on_creation !== nothing
         request.on_creation(request, AWS_OP_SUCCESS)
     end
@@ -903,7 +878,7 @@ end
 function _connection_request_invoke_on_setup(
         request::R,
         error_code::Int,
-        channel::Union{Channel, Nothing},
+        channel::Union{PipelineState, Nothing},
     ) where {R <: SocketConnectionRequest}
     request.on_setup === nothing && return nothing
     request.channel = channel  # ensure closure can see the channel
@@ -915,7 +890,7 @@ function _connection_request_invoke_on_setup(
     return nothing
 end
 
-function _connection_request_complete(request::R, error_code::Int, channel::Union{Channel, Nothing}) where {R <: SocketConnectionRequest}
+function _connection_request_complete(request::R, error_code::Int, channel::Union{PipelineState, Nothing}) where {R <: SocketConnectionRequest}
     _cancel_connection_attempts(request)
     if error_code != AWS_OP_SUCCESS
         request.on_shutdown = nothing
@@ -1276,7 +1251,7 @@ end
 mutable struct _IncomingChannelSetupCtx{B <: ServerBootstrap}
     bootstrap::B
     socket::Socket
-    channel::Union{Channel, Nothing}
+    channel::Union{PipelineState, Nothing}
     incoming_called::Bool
     setup_succeeded::Bool
 end
@@ -1284,7 +1259,7 @@ end
 @inline function _incoming_channel_invoke_callback!(
         ctx::_IncomingChannelSetupCtx,
         err::Int,
-        channel::Union{Channel, Nothing},
+        channel::Union{PipelineState, Nothing},
     )::Nothing
     if ctx.incoming_called
         return nothing
@@ -1326,83 +1301,73 @@ end
 function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::Int)::Nothing
     bootstrap = ctx.bootstrap
     socket = ctx.socket
-    channel = ctx.channel::Channel
+    ps = ctx.channel::PipelineState
 
     if error_code != AWS_OP_SUCCESS
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: incoming channel setup failed"
         )
-        channel_shutdown!(channel, error_code)
+        pipeline_shutdown!(ps, error_code)
         socket_close(socket)
         return nothing
     end
 
-    local handler_result
     try
-        handler_result = socket_channel_handler_new!(channel, socket)
+        socket_pipeline_init!(socket, ps)
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to create socket handler for incoming connection"
+            "ServerBootstrap: failed to init socket pipeline for incoming connection"
         )
-        channel_shutdown!(channel, err)
         socket_close(socket)
         return nothing
     end
 
+    # For non-TLS with backpressure, propagate window updates to socket
+    if ps.read_back_pressure_enabled
+        let sock = socket
+            ps.window_update_fn = function(size::Csize_t)
+                sock.downstream_window = add_size_saturating(sock.downstream_window, size)
+                _socket_trigger_read(sock)
+            end
+        end
+    end
+
     if bootstrap.tls_connection_options !== nothing && _socket_uses_network_framework_tls(socket, bootstrap.tls_connection_options)
+        # Network.framework TLS path — TLS is handled by the socket layer
         tls_options = bootstrap.tls_connection_options::TlsConnectionOptions
         if bootstrap.on_protocol_negotiated !== nothing
             try
-                _install_protocol_handler_from_socket(channel, socket, bootstrap.on_protocol_negotiated)
+                _install_protocol_handler_from_socket(ps, socket, bootstrap.on_protocol_negotiated)
             catch e
                 err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                channel_shutdown!(channel, err)
+                pipeline_shutdown!(ps, err)
                 socket_close(socket)
                 return nothing
             end
         end
         if tls_options.on_negotiation_result !== nothing
-            tls_options.on_negotiation_result(handler_result, channel.first, AWS_OP_SUCCESS)
+            tls_options.on_negotiation_result(nothing, ps, AWS_OP_SUCCESS)
         end
         ctx.setup_succeeded = true
-        _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, channel)
-        if channel_thread_is_callers_thread(channel)
-            try
-                channel_trigger_read(channel)
-            catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                channel_shutdown!(channel, err)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask(EventCallable(s -> begin
-                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                try
-                    channel_trigger_read(channel)
-                catch e
-                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                    channel_shutdown!(channel, err)
-                end
-                return nothing
-            end), "server_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
+        _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, ps)
+        _client_trigger_read(socket, ps)
         return nothing
     elseif bootstrap.tls_connection_options !== nothing
+        # Standard TLS path — stack TLS middleware on socket
         tls_options = bootstrap.tls_connection_options::TlsConnectionOptions
         advertise_alpn = bootstrap.on_protocol_negotiated !== nothing && tls_is_alpn_available()
-        on_negotiation = (handler, slot, err) -> begin
+        on_negotiation = (handler, pipeline, err) -> begin
             if tls_options.on_negotiation_result !== nothing
-                tls_options.on_negotiation_result(handler, slot, err)
+                tls_options.on_negotiation_result(handler, pipeline, err)
             end
             if err == AWS_OP_SUCCESS
                 ctx.setup_succeeded = true
-                _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, channel)
+                _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, ps)
             else
-                channel_shutdown!(channel, err)
+                pipeline_shutdown!(ps, err)
             end
             return nothing
         end
@@ -1418,49 +1383,25 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
         )
         local tls_handler
         try
-            tls_handler = tls_channel_handler_new!(channel, wrapped)
+            tls_handler = tls_handler_new(wrapped, socket, ps)
         catch e
             err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-            channel_shutdown!(channel, err)
+            pipeline_shutdown!(ps, err)
             socket_close(socket)
             return nothing
         end
-        if advertise_alpn
-            alpn_slot = channel_slot_new!(channel)
-            channel_slot_insert_right!(tls_handler.slot, alpn_slot)
-            alpn_handler = tls_alpn_handler_new(bootstrap.on_protocol_negotiated)
-            channel_slot_set_handler!(alpn_slot, alpn_handler)
-        end
-        if channel_thread_is_callers_thread(channel)
-            try
-                channel_trigger_read(channel)
-            catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                channel_shutdown!(channel, err)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask(EventCallable(s -> begin
-                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                try
-                    channel_trigger_read(channel)
-                catch e
-                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                    channel_shutdown!(channel, err)
-                end
-                return nothing
-            end), "server_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
+        # Wire TLS into the pipeline
+        _wire_tls_pipeline!(socket, ps, tls_handler)
+        _client_trigger_read(socket, ps)
         return nothing
     end
 
     ctx.setup_succeeded = true
     logf(
         LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ServerBootstrap: incoming channel $(channel.channel_id) setup complete"
+        "ServerBootstrap: incoming channel $(ps.channel_id) setup complete"
     )
-    _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, channel)
+    _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, ps)
     return nothing
 end
 
@@ -1502,21 +1443,14 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
 
     on_shutdown = EventCallable(_IncomingChannelOnShutdown(ctx))
     on_setup = EventCallable(_IncomingChannelOnSetup(ctx))
-    options = ChannelOptions(
-        event_loop = event_loop,
-        event_loop_group = bootstrap.event_loop_group,
-        on_setup_completed = on_setup,
-        on_shutdown_completed = on_shutdown,
-        enable_read_back_pressure = bootstrap.enable_read_back_pressure,
-    )
 
-    local channel
+    local ps
     try
-        channel = channel_new(options)
+        ps = pipeline_new(event_loop; event_loop_group = bootstrap.event_loop_group, enable_read_back_pressure = bootstrap.enable_read_back_pressure, on_setup_completed = on_setup, on_shutdown_completed = on_shutdown)
     catch e
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ServerBootstrap: failed to create channel for incoming connection"
+            "ServerBootstrap: failed to create pipeline for incoming connection"
         )
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         _incoming_channel_invoke_callback!(ctx, err, nothing)
@@ -1525,7 +1459,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
         return nothing
     end
 
-    ctx.channel = channel
+    ctx.channel = ps
     return nothing
 end
 

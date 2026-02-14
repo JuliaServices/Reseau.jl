@@ -235,19 +235,31 @@ else
     PosixSocket
 end
 
-# Socket struct - non-parametric, dispatches on impl type
+# Socket struct - non-parametric, dispatches on impl type.
+# Fields from SocketChannelHandler are merged directly into Socket
+# (pipeline, read_fn, write_fn, etc.) to eliminate the handler indirection.
 mutable struct Socket
     local_endpoint::SocketEndpoint
     remote_endpoint::SocketEndpoint
     options::SocketOptions
     io_handle::IoHandle
     event_loop::Union{EventLoop, Nothing}
-    handler::Union{AbstractChannelHandler, Nothing}
     state::SocketState.T
     readable_fn::Union{EventCallable, Nothing}
     connection_result_fn::Union{EventCallable, Nothing}
     accept_result_fn::Union{ChannelCallable, Nothing}
     impl::Union{PlatformSocketImpl, Nothing}
+    # --- Pipeline integration (merged from SocketChannelHandler) ---
+    pipeline::Any           # Union{PipelineState, Nothing}
+    read_fn::Any            # Union{Function, Nothing} - read dispatch closure
+    write_fn::Any           # Union{Function, Nothing} - write dispatch closure
+    max_rw_size::Csize_t
+    downstream_window::Csize_t  # how many bytes the socket may read
+    stats::Any              # Union{SocketHandlerStatistics, Nothing}
+    shutdown_in_progress::Bool
+    pending_read::Bool
+    read_task::Any          # Union{ChannelTask, Nothing}
+    shutdown_task::Any      # Union{ChannelTask, Nothing}
 end
 
 # Initialize socket based on platform and domain

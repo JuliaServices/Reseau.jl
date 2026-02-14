@@ -401,12 +401,21 @@ function socket_init_posix(
         copy(options),
         io_handle,
         nothing,  # event_loop
-        nothing,  # handler
         SocketState.INIT,
         nothing,  # readable_fn
         nothing,  # connection_result_fn
         nothing,  # accept_result_fn
         socket_impl,
+        nothing,  # pipeline
+        nothing,  # read_fn
+        nothing,  # write_fn
+        Csize_t(0),  # max_rw_size
+        Csize_t(0),  # downstream_window
+        nothing,  # stats
+        false,    # shutdown_in_progress
+        false,    # pending_read
+        nothing,  # read_task
+        nothing,  # shutdown_task
     )
 
     # Copy options for new socket

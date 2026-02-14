@@ -78,11 +78,11 @@ const _BYO_READ_TAG = "I'm a little teapot."
 
 function _byo_start_negotiation(handler::ReadWriteTestHandler, test_args::ByoCryptoTestArgs)
     write_buf = _buf_from_string(_BYO_WRITE_TAG)
-    rw_handler_write(handler, handler.slot, write_buf)
+    rw_handler_write(handler, write_buf)
     if test_args.negotiation_result_fn !== nothing
         test_args.negotiation_result_fn(
             handler,
-            handler.slot,
+            nothing,
             Reseau.AWS_OP_SUCCESS,
         )
         test_args.negotiation_result_fn = nothing
@@ -90,10 +90,11 @@ function _byo_start_negotiation(handler::ReadWriteTestHandler, test_args::ByoCry
     return Reseau.AWS_OP_SUCCESS
 end
 
-function _byo_tls_handler_new(options, slot, test_args::ByoCryptoTestArgs)
-    _ = slot
+function _byo_tls_handler_new(options, socket, pipeline, test_args::ByoCryptoTestArgs)
     test_args.negotiation_result_fn = options.on_negotiation_result
-    return test_args.rw_handler
+    handler = test_args.rw_handler
+    rw_handler_install!(handler, pipeline)
+    return handler
 end
 
 @testset "BYO crypto handler integration" begin
@@ -284,7 +285,7 @@ end
     @test wait_for_pred(() -> incoming_rw_args.invocation_happened)
 
     read_buf = _buf_from_string(_BYO_READ_TAG)
-    @test rw_handler_write(incoming_args.rw_handler, incoming_args.rw_handler.slot, read_buf) === nothing
+    @test rw_handler_write(incoming_args.rw_handler, read_buf) === nothing
     @test wait_for_pred(() -> outgoing_rw_args.invocation_happened)
 
     @test String(Reseau.byte_cursor_from_buf(incoming_rw_args.received_message)) == _BYO_WRITE_TAG
@@ -293,10 +294,10 @@ end
     @test outgoing_args.negotiated
 
     if incoming_args.channel !== nothing
-        Sockets.channel_shutdown!(incoming_args.channel, Reseau.AWS_OP_SUCCESS)
+        Sockets.pipeline_shutdown!(incoming_args.channel, Reseau.AWS_OP_SUCCESS)
     end
     if outgoing_args.channel !== nothing
-        Sockets.channel_shutdown!(outgoing_args.channel, Reseau.AWS_OP_SUCCESS)
+        Sockets.pipeline_shutdown!(outgoing_args.channel, Reseau.AWS_OP_SUCCESS)
     end
 
     @test wait_for_pred(() -> incoming_args.shutdown_invoked)

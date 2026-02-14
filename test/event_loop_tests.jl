@@ -1631,8 +1631,8 @@ end
                 return nothing
             end)
 
-            ch1 = Sockets.channel_new(Sockets.ChannelOptions(; event_loop = el, on_setup_completed = on_setup))
-            ch2 = Sockets.channel_new(Sockets.ChannelOptions(; event_loop = el, on_setup_completed = on_setup))
+            ps1 = Sockets.pipeline_new(el; on_setup_completed = on_setup)
+            ps2 = Sockets.pipeline_new(el; on_setup_completed = on_setup)
 
             @test _wait_for_channel(setup_ch)
             @test _wait_for_channel(setup_ch)
@@ -1643,13 +1643,13 @@ end
                 @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
             end
 
-            @test ch1.message_pool isa Sockets.MessagePool
-            @test ch2.message_pool isa Sockets.MessagePool
-            @test ch1.message_pool === ch2.message_pool
-            @test el.message_pool === ch1.message_pool
+            @test ps1.message_pool isa Sockets.MessagePool
+            @test ps2.message_pool isa Sockets.MessagePool
+            @test ps1.message_pool === ps2.message_pool
+            @test el.message_pool === ps1.message_pool
 
-            Sockets.channel_destroy!(ch1)
-            Sockets.channel_destroy!(ch2)
+            Sockets.pipeline_destroy!(ps1)
+            Sockets.pipeline_destroy!(ps2)
 
             EventLoops.event_loop_destroy!(el)
             @test el.message_pool === nothing

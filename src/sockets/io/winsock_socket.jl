@@ -340,13 +340,22 @@
             SocketEndpoint(),
             copy(options),
             IoHandle(),
-            nothing,
-            nothing,
+            nothing,  # event_loop
             SocketState.INIT,
-            nothing,
-            nothing,
-            nothing,
+            nothing,  # readable_fn
+            nothing,  # connection_result_fn
+            nothing,  # accept_result_fn
             impl,
+            nothing,  # pipeline
+            nothing,  # read_fn
+            nothing,  # write_fn
+            Csize_t(0),  # max_rw_size
+            Csize_t(0),  # downstream_window
+            nothing,  # stats
+            false,    # shutdown_in_progress
+            false,    # pending_read
+            nothing,  # read_task
+            nothing,  # shutdown_task
         )
 
         impl.read_io_data.socket = sock

@@ -1,61 +1,8 @@
 using Test
 using Reseau
-import Reseau: EventLoops, Sockets, Threads
+import Reseau: Sockets
 
-function _wait_ready_stats(ch::Channel; timeout_ns::Integer = 5_000_000_000)
-    deadline = Base.time_ns() + timeout_ns
-    while !isready(ch) && Base.time_ns() < deadline
-        yield()
-    end
-    return isready(ch)
-end
-
-mutable struct TestStatsChannelHandler <: Sockets.AbstractChannelHandler
-    stats::Sockets.SocketHandlerStatistics
-end
-
-TestStatsChannelHandler() = TestStatsChannelHandler(Sockets.SocketHandlerStatistics())
-
-Sockets.handler_process_read_message(
-    ::TestStatsChannelHandler,
-    ::Sockets.ChannelSlot,
-    ::EventLoops.IoMessage,
-) = nothing
-
-Sockets.handler_process_write_message(
-    ::TestStatsChannelHandler,
-    ::Sockets.ChannelSlot,
-    ::EventLoops.IoMessage,
-) = nothing
-
-Sockets.handler_increment_read_window(
-    ::TestStatsChannelHandler,
-    ::Sockets.ChannelSlot,
-    ::Csize_t,
-) = nothing
-
-function Sockets.handler_shutdown(
-        ::TestStatsChannelHandler,
-        slot::Sockets.ChannelSlot,
-        direction::Sockets.ChannelDirection.T,
-        _error_code::Int,
-    )
-    Sockets.channel_slot_on_handler_shutdown_complete!(slot, direction, false, true)
-    return nothing
-end
-
-Sockets.handler_initial_window_size(::TestStatsChannelHandler) = Csize_t(0)
-Sockets.handler_message_overhead(::TestStatsChannelHandler) = Csize_t(0)
-Sockets.handler_destroy(::TestStatsChannelHandler) = nothing
-Sockets.handler_trigger_write(::TestStatsChannelHandler) = nothing
-
-function Sockets.handler_reset_statistics(handler::TestStatsChannelHandler)::Nothing
-    Sockets.crt_statistics_socket_reset!(handler.stats)
-    return nothing
-end
-
-Sockets.handler_gather_statistics(handler::TestStatsChannelHandler) = handler.stats
-
+# Test the abstract StatisticsHandler interface
 mutable struct TestStatisticsHandler <: Reseau.StatisticsHandler
     report_ms::UInt64
     results::Channel{Tuple{Reseau.StatisticsSampleInterval, Vector{Any}}}
@@ -86,59 +33,66 @@ function Reseau.process_statistics(
     return nothing
 end
 
-@testset "channel statistics handler integration" begin
-    if Base.Threads.nthreads(:interactive) <= 1
-        @test true
-    else
-        Sockets.io_library_init()
+@testset "StatisticsHandler abstract interface" begin
+    results = Channel{Tuple{Reseau.StatisticsSampleInterval, Vector{Any}}}(1)
+    handler = TestStatisticsHandler(UInt64(100), results)
 
-        elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    @test Reseau.report_interval_ms(handler) == UInt64(100)
+    @test Reseau.close!(handler) === nothing
 
-        event_loop = EventLoops.event_loop_group_get_next_loop(elg)
-        @test event_loop !== nothing
-        event_loop === nothing && return
+    interval = Reseau.StatisticsSampleInterval(UInt64(0), UInt64(100))
+    stat = Sockets.SocketHandlerStatistics()
+    stat.bytes_read = 42
+    stat.bytes_written = 84
+    Reseau.process_statistics(handler, interval, [stat])
 
-        channel = Sockets.Channel(event_loop, nothing)
-        handler = TestStatsChannelHandler()
-        slot = Sockets.channel_slot_new!(channel)
-        Sockets.channel_slot_set_handler!(slot, handler)
-        if Sockets.channel_first_slot(channel) !== slot
-            Sockets.channel_slot_insert_end!(channel, slot)
-        end
+    @test isready(results)
+    recv_interval, recv_stats = take!(results)
+    @test recv_interval.begin_time_ms == UInt64(0)
+    @test recv_interval.end_time_ms == UInt64(100)
+    @test length(recv_stats) == 1
+    @test recv_stats[1] isa Sockets.SocketHandlerStatistics
+    @test recv_stats[1].bytes_read == 42
+    @test recv_stats[1].bytes_written == 84
+end
 
-        results = Channel{Tuple{Reseau.StatisticsSampleInterval, Vector{Any}}}(1)
-        stats_handler = TestStatisticsHandler(UInt64(50), results)
+@testset "SocketHandlerStatistics struct operations" begin
+    @testset "default construction" begin
+        stats = Sockets.SocketHandlerStatistics()
+        @test stats.bytes_read == 0
+        @test stats.bytes_written == 0
+        @test stats.category == Sockets.STAT_CAT_SOCKET
+    end
 
-        set_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-            Sockets.channel_set_statistics_handler!(channel, stats_handler)
-        end); type_tag = "set_stats_handler")
-        EventLoops.event_loop_schedule_task_now!(event_loop, set_task)
+    @testset "init!" begin
+        stats = Sockets.SocketHandlerStatistics()
+        stats.bytes_read = 100
+        stats.bytes_written = 200
+        Sockets.crt_statistics_socket_init!(stats)
+        @test stats.bytes_read == 0
+        @test stats.bytes_written == 0
+        @test stats.category == Sockets.STAT_CAT_SOCKET
+    end
 
-        update_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-            handler.stats.bytes_read = 111
-            handler.stats.bytes_written = 222
-            return nothing
-        end); type_tag = "update_stats")
-        EventLoops.event_loop_schedule_task_now!(event_loop, update_task)
-
-        @test _wait_ready_stats(results; timeout_ns = 5_000_000_000)
-        interval, stats_vec = take!(results)
-        @test interval.end_time_ms >= interval.begin_time_ms
-        @test length(stats_vec) == 1
-        stats = stats_vec[1]
-        @test stats isa Sockets.SocketHandlerStatistics
+    @testset "set values and reset!" begin
+        stats = Sockets.SocketHandlerStatistics()
+        stats.bytes_read = 111
+        stats.bytes_written = 222
         @test stats.bytes_read == 111
         @test stats.bytes_written == 222
 
-        @test handler.stats.bytes_read == 0
-        @test handler.stats.bytes_written == 0
+        Sockets.crt_statistics_socket_reset!(stats)
+        @test stats.bytes_read == 0
+        @test stats.bytes_written == 0
+        # category should be unchanged after reset
+        @test stats.category == Sockets.STAT_CAT_SOCKET
+    end
 
-        clear_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-            Sockets.channel_set_statistics_handler!(channel, nothing)
-        end); type_tag = "clear_stats_handler")
-        EventLoops.event_loop_schedule_task_now!(event_loop, clear_task)
-
-        EventLoops.event_loop_group_release!(elg)
-        Sockets.io_library_clean_up()
+    @testset "cleanup!" begin
+        stats = Sockets.SocketHandlerStatistics()
+        stats.bytes_read = 50
+        # cleanup is a no-op but should not error
+        Sockets.crt_statistics_socket_cleanup!(stats)
+        @test true
     end
 end

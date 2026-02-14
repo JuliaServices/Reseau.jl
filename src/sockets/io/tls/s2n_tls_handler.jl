@@ -260,8 +260,7 @@ end
 
 S2nTlsCtx() = S2nTlsCtx(C_NULL, C_NULL, nothing)
 
-mutable struct S2nTlsHandler <: TlsChannelHandler
-    slot::Union{ChannelSlot, Nothing}
+mutable struct S2nTlsHandler
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
     timeout_task::ChannelTask
@@ -283,11 +282,12 @@ mutable struct S2nTlsHandler <: TlsChannelHandler
     shutdown_error_code::Int
     delayed_shutdown_task::ChannelTask
     negotiation_task::ChannelTask
-end
-
-function setchannelslot!(handler::S2nTlsHandler, slot::ChannelSlot)::Nothing
-    handler.slot = slot
-    return nothing
+    # Pipeline integration
+    socket::Any      # Socket
+    pipeline::Any    # PipelineState
+    downstream_read::Any  # Function - dispatches decrypted read data downstream
+    read_shutdown_on_complete::Any  # deferred read shutdown completion callback
+    write_shutdown_on_complete::Any  # deferred write shutdown completion callback
 end
 
 function _byte_buf_from_c_str(ptr::Ptr{Cchar})::ByteBuffer
@@ -332,8 +332,8 @@ function _s2n_generic_read(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
         end
 
         if msg.copy_mark == msg.message_data.len
-            if msg.owning_channel isa Channel
-                channel_release_message_to_pool!(msg.owning_channel, msg)
+            if msg.owning_channel isa PipelineState
+                pipeline_release_message_to_pool!(msg.owning_channel::PipelineState, msg)
             end
         else
             pushfirst!(queue, msg)
@@ -349,30 +349,25 @@ function _s2n_generic_read(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
 end
 
 function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UInt32)::Cint
-    channel = handler.slot === nothing ? nothing : handler.slot.channel
-    channel === nothing && return Cint(-1)
+    ps = handler.pipeline
+    ps isa PipelineState || return Cint(-1)
+    socket = handler.socket
+    socket isa Socket || return Cint(-1)
     processed = 0
 
     while processed < len
-        overhead = channel_slot_upstream_message_overhead(handler.slot)
-        message_size_hint = Csize_t(len - processed) + overhead
-        message = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, message_size_hint)
+        message_size_hint = Csize_t(len - processed)
+        message = pipeline_acquire_message_from_pool(ps, IoMessageType.APPLICATION_DATA, message_size_hint)
         message === nothing && return Cint(-1)
 
-        if message.message_data.capacity <= overhead
-            channel_release_message_to_pool!(channel, message)
-            Base.Libc.errno(Base.Libc.ENOMEM)
-            return Cint(-1)
-        end
-
-        available = Int(message.message_data.capacity - overhead)
+        available = Int(message.message_data.capacity)
         to_write = min(available, Int(len) - processed)
 
         mem = unsafe_wrap(Memory{UInt8}, buf_ptr + processed, to_write; own = false)
         chunk = ByteCursor(mem, to_write)
         buf_ref = Ref(message.message_data)
         if byte_buf_append(buf_ref, chunk) != AWS_OP_SUCCESS
-            channel_release_message_to_pool!(channel, message)
+            pipeline_release_message_to_pool!(ps, message)
             return Cint(-1)
         end
         message.message_data = buf_ref[]
@@ -384,10 +379,10 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
         end
 
         try
-            channel_slot_send_message(handler.slot, message, ChannelDirection.WRITE)
+            _socket_write_message(socket::Socket, message)
         catch e
             e isa ReseauError || rethrow()
-            channel_release_message_to_pool!(channel, message)
+            pipeline_release_message_to_pool!(ps, message)
             Base.Libc.errno(Base.Libc.EPIPE)
             return Cint(-1)
         end
@@ -414,25 +409,23 @@ end
 const _s2n_handler_recv_c = @cfunction(_s2n_handler_recv, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
 const _s2n_handler_send_c = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
 
-function _s2n_on_negotiation_result(handler::S2nTlsHandler, slot::ChannelSlot, error_code::Int)
+function _s2n_on_negotiation_result(handler::S2nTlsHandler, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
     if handler.on_negotiation_result !== nothing
-        handler.on_negotiation_result(handler, slot, error_code)
+        handler.on_negotiation_result(handler, handler.pipeline, error_code)
     end
     return nothing
 end
 
 function _s2n_send_alpn_message(handler::S2nTlsHandler)
-    slot = handler.slot
-    slot === nothing && return nothing
-    slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
     handler.protocol.len == 0 && return nothing
-    channel = slot.channel
-    channel === nothing && return nothing
+    handler.downstream_read === nothing && return nothing
+    ps = handler.pipeline
+    ps isa PipelineState || return nothing
 
-    message = channel_acquire_message_from_pool(
-        channel,
+    message = pipeline_acquire_message_from_pool(
+        ps,
         IoMessageType.APPLICATION_DATA,
         sizeof(TlsNegotiatedProtocolMessage),
     )
@@ -441,11 +434,11 @@ function _s2n_send_alpn_message(handler::S2nTlsHandler)
     message.user_data = TlsNegotiatedProtocolMessage(handler.protocol)
     setfield!(message.message_data, :len, Csize_t(sizeof(TlsNegotiatedProtocolMessage)))
     try
-        channel_slot_send_message(slot, message, ChannelDirection.READ)
+        (handler.downstream_read::Function)(message)
     catch e
         e isa ReseauError || rethrow()
-        channel_release_message_to_pool!(channel, message)
-        channel_shutdown!(channel, e.code)
+        pipeline_release_message_to_pool!(ps, message)
+        pipeline_shutdown!(ps, e.code)
     end
     return nothing
 end
@@ -472,7 +465,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
                 handler.server_name = _byte_buf_from_c_str(server_name_ptr)
             end
             _s2n_send_alpn_message(handler)
-            _s2n_on_negotiation_result(handler, handler.slot, AWS_OP_SUCCESS)
+            _s2n_on_negotiation_result(handler, AWS_OP_SUCCESS)
             return nothing
         end
 
@@ -485,7 +478,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
                 LogLevel.WARN,
                 LS_IO_TLS,string("s2n negotiate failed: $(_s2n_strerror(s2n_error)) ($(_s2n_strerror_debug(s2n_error)))", " ", ))
             handler.state = TlsNegotiationState.FAILED
-            _s2n_on_negotiation_result(handler, handler.slot, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+            _s2n_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 
@@ -511,51 +504,52 @@ function _s2n_delayed_shutdown_task(handler::S2nTlsHandler, status::TaskStatus.T
         catch
         end
     end
-    slot = handler.slot
-    slot === nothing && return nothing
-    channel_slot_on_handler_shutdown_complete!(
-        slot,
-        ChannelDirection.WRITE,
-        handler.shutdown_error_code,
-        false,
-    )
+    on_complete = handler.write_shutdown_on_complete
+    if on_complete isa Function
+        on_complete(handler.shutdown_error_code, false)
+    end
     return nothing
 end
 
 function _s2n_read_task(handler::S2nTlsHandler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     handler.read_task_pending = false
-    if handler.slot !== nothing
-        handler_process_read_message(handler, handler.slot, nothing)
+    if handler.pipeline isa PipelineState
+        _s2n_process_read(handler, nothing)
     end
     return nothing
 end
 
-function _s2n_initialize_read_delay_shutdown(handler::S2nTlsHandler, slot::ChannelSlot, error_code::Int)
+function _s2n_initialize_read_delay_shutdown(handler::S2nTlsHandler, error_code::Int, on_complete::Function)
     logf(
         LogLevel.DEBUG,
         LS_IO_TLS,string("TLS handler pending data during shutdown, waiting for downstream read window.", " ", ))
-    if channel_slot_downstream_read_window(slot) == 0
+    ps = handler.pipeline
+    if ps isa PipelineState && ps.downstream_window == Csize_t(0)
         logf(
             LogLevel.WARN,
             LS_IO_TLS,string("TLS shutdown delayed; pending data cannot be processed until read window opens.", " ", ))
     end
     handler.read_state = TlsHandlerReadState.SHUTTING_DOWN
     handler.shutdown_error_code = error_code
-    if !handler.read_task_pending
+    handler.read_shutdown_on_complete = on_complete
+    if !handler.read_task_pending && ps isa PipelineState
         handler.read_task_pending = true
         channel_task_init!(handler.read_task, EventCallable(s -> _s2n_read_task(handler, _coerce_task_status(s))), "s2n_read_on_delay_shutdown")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
+        pipeline_schedule_task_now!(ps::PipelineState, handler.read_task)
     end
     return nothing
 end
 
-function _s2n_do_delayed_shutdown(handler::S2nTlsHandler, slot::ChannelSlot, error_code::Int)::Nothing
+function _s2n_do_delayed_shutdown(handler::S2nTlsHandler, error_code::Int, on_complete::Function)::Nothing
     handler.shutdown_error_code = error_code
+    handler.write_shutdown_on_complete = on_complete
+    ps = handler.pipeline
+    ps isa PipelineState || return nothing
     _s2n_lib_handle()
     delay = ccall(_s2n_symbol(:s2n_connection_get_delay), UInt64, (Ptr{Cvoid},), handler.connection)
-    now = channel_current_clock_time(slot.channel)
-    channel_schedule_task_future!(slot.channel, handler.delayed_shutdown_task, now + delay)
+    now = pipeline_current_clock_time(ps)
+    pipeline_schedule_task_future!(ps, handler.delayed_shutdown_task, now + delay)
     return nothing
 end
 
@@ -638,22 +632,11 @@ function _s2n_set_protocol_preferences_connection(conn::Ptr{Cvoid}, alpn_list::S
     return nothing
 end
 
-# S2N handler interface implementations
-function handler_initial_window_size(handler::S2nTlsHandler)::Csize_t
-    _ = handler
-    return Csize_t(TLS_EST_HANDSHAKE_SIZE)
-end
-
-function handler_message_overhead(handler::S2nTlsHandler)::Csize_t
-    _ = handler
-    return Csize_t(TLS_EST_RECORD_OVERHEAD)
-end
-
-function handler_destroy(handler::S2nTlsHandler)::Nothing
+function _s2n_destroy!(handler::S2nTlsHandler)::Nothing
     while !isempty(handler.input_queue)
         msg = popfirst!(handler.input_queue)
-        if msg isa IoMessage && msg.owning_channel isa Channel
-            channel_release_message_to_pool!(msg.owning_channel, msg)
+        if msg isa IoMessage && msg.owning_channel isa PipelineState
+            pipeline_release_message_to_pool!(msg.owning_channel::PipelineState, msg)
         end
     end
     if handler.connection != C_NULL
@@ -666,28 +649,34 @@ function handler_destroy(handler::S2nTlsHandler)::Nothing
     end
     handler.protocol = null_buffer()
     handler.server_name = null_buffer()
-    handler.slot = nothing
+    handler.socket = nothing
+    handler.pipeline = nothing
+    handler.downstream_read = nothing
     handler.ctx = nothing
     handler.s2n_ctx = nothing
     return nothing
 end
 
-function handler_reset_statistics(handler::S2nTlsHandler)::Nothing
+function s2n_reset_statistics!(handler::S2nTlsHandler)::Nothing
     crt_statistics_tls_reset!(handler.stats)
     return nothing
 end
 
-function handler_gather_statistics(handler::S2nTlsHandler)
+function s2n_gather_statistics(handler::S2nTlsHandler)
     return handler.stats
 end
 
-function handler_process_read_message(
+function _s2n_process_read(
         handler::S2nTlsHandler,
-        slot::ChannelSlot,
         message::Union{IoMessage, Nothing},
     )::Nothing
     if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
-        message !== nothing && message.owning_channel isa Channel && channel_release_message_to_pool!(message.owning_channel, message)
+        message !== nothing && message.owning_channel isa PipelineState && pipeline_release_message_to_pool!(message.owning_channel::PipelineState, message)
+        return nothing
+    end
+
+    ps = handler.pipeline
+    if !(ps isa PipelineState)
         return nothing
     end
 
@@ -704,10 +693,15 @@ function handler_process_read_message(
                 _s2n_drive_negotiation(handler)
             catch e
                 e isa ReseauError || rethrow()
-                channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                pipeline_shutdown!(ps, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 return nothing
             end
-            channel_slot_increment_read_window!(slot, message_len)
+            # During negotiation, increment socket window to allow more handshake data
+            sock = handler.socket
+            if sock isa Socket
+                sock.downstream_window = add_size_saturating(sock.downstream_window, message_len)
+                _socket_trigger_read(sock)
+            end
             if handler.state == TlsNegotiationState.ONGOING
                 return nothing
             end
@@ -716,18 +710,14 @@ function handler_process_read_message(
 
     _s2n_lib_handle()
 
-    if slot.adj_right === nothing
-        downstream_window = SIZE_MAX
-    else
-        downstream_window = channel_slot_downstream_read_window(slot)
-    end
+    downstream_window = handler.downstream_read === nothing ? SIZE_MAX : ps.downstream_window
     processed = Csize_t(0)
     shutdown_error_code = 0
     force_shutdown = false
 
     while processed < downstream_window
-        outgoing = channel_acquire_message_from_pool(
-            slot.channel,
+        outgoing = pipeline_acquire_message_from_pool(
+            ps,
             IoMessageType.APPLICATION_DATA,
             downstream_window - processed,
         )
@@ -745,18 +735,15 @@ function handler_process_read_message(
         )
 
         if read_val == 0
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            pipeline_release_message_to_pool!(ps, outgoing)
             force_shutdown = true
             break
         end
 
         if read_val < 0
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            pipeline_release_message_to_pool!(ps, outgoing)
             err_type = _s2n_error_get_type(_s2n_errno())
             if err_type == S2N_ERR_T_BLOCKED
-                if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
-                    break
-                end
                 break
             end
             logf(
@@ -770,20 +757,20 @@ function handler_process_read_message(
         setfield!(outgoing.message_data, :len, Csize_t(read_val))
 
         if handler.on_data_read !== nothing
-            handler.on_data_read(handler, slot, outgoing.message_data)
+            handler.on_data_read(handler, ps, outgoing.message_data)
         end
 
-        if slot.adj_right !== nothing
+        if handler.downstream_read !== nothing
             try
-                channel_slot_send_message(slot, outgoing, ChannelDirection.READ)
+                (handler.downstream_read::Function)(outgoing)
             catch e
                 e isa ReseauError || rethrow()
-                channel_release_message_to_pool!(slot.channel, outgoing)
+                pipeline_release_message_to_pool!(ps, outgoing)
                 shutdown_error_code = e.code
                 break
             end
         else
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            pipeline_release_message_to_pool!(ps, outgoing)
         end
     end
 
@@ -794,40 +781,28 @@ function handler_process_read_message(
                 shutdown_error_code = handler.shutdown_error_code
             end
             handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
-            channel_slot_on_handler_shutdown_complete!(
-                slot,
-                ChannelDirection.READ,
-                shutdown_error_code,
-                false,
-            )
+            on_complete = handler.read_shutdown_on_complete
+            if on_complete isa Function
+                on_complete(shutdown_error_code, false)
+            end
         else
-            channel_shutdown!(slot.channel, shutdown_error_code)
+            pipeline_shutdown!(ps, shutdown_error_code)
         end
     end
 
     return nothing
 end
 
-function handler_process_read_message(handler::S2nTlsHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    invoke(
-        handler_process_read_message,
-        Tuple{S2nTlsHandler, ChannelSlot, Union{IoMessage, Nothing}},
-        handler,
-        slot,
-        message,
-    )
-    return nothing
-end
-
-function handler_process_write_message(
+function _s2n_process_write(
         handler::S2nTlsHandler,
-        slot::ChannelSlot,
         message::IoMessage,
     )::Nothing
-    _ = slot
     if handler.state != TlsNegotiationState.SUCCEEDED
         throw_error(ERROR_IO_TLS_ERROR_NOT_NEGOTIATED)
     end
+
+    ps = handler.pipeline
+    ps isa PipelineState || throw_error(ERROR_INVALID_STATE)
 
     handler.latest_message_on_completion = message.on_completion
 
@@ -847,77 +822,71 @@ function handler_process_write_message(
         throw_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
     end
 
-    channel_release_message_to_pool!(slot.channel, message)
+    pipeline_release_message_to_pool!(ps, message)
     return nothing
 end
 
-function handler_shutdown(
-        handler::S2nTlsHandler,
-        slot::ChannelSlot,
-        direction::ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )::Nothing
-    abort_immediately = free_scarce_resources_immediately
-
-    if direction == ChannelDirection.READ
-        if handler.state == TlsNegotiationState.ONGOING
-            handler.state = TlsNegotiationState.FAILED
-        end
-        if !abort_immediately &&
-                handler.state == TlsNegotiationState.SUCCEEDED &&
-                !isempty(handler.input_queue) &&
-                slot.adj_right !== nothing
-            _s2n_initialize_read_delay_shutdown(handler, slot, error_code)
-            return nothing
-        end
-        handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
-    else
-        if !abort_immediately && error_code != ERROR_IO_SOCKET_CLOSED
-            _s2n_do_delayed_shutdown(handler, slot, error_code)
-            return nothing
-        end
+# Read direction shutdown (registered in ShutdownChain.read_shutdown_fns)
+function _s2n_read_shutdown(handler::S2nTlsHandler, error_code::Int, free_scarce::Bool, on_complete::Function)
+    if handler.state == TlsNegotiationState.ONGOING
+        handler.state = TlsNegotiationState.FAILED
     end
+    if !free_scarce &&
+            handler.state == TlsNegotiationState.SUCCEEDED &&
+            !isempty(handler.input_queue) &&
+            handler.downstream_read !== nothing
+        _s2n_initialize_read_delay_shutdown(handler, error_code, on_complete)
+        return nothing
+    end
+    handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
 
     while !isempty(handler.input_queue)
         msg = popfirst!(handler.input_queue)
-        if msg isa IoMessage && msg.owning_channel isa Channel
-            channel_release_message_to_pool!(msg.owning_channel, msg)
+        if msg isa IoMessage && msg.owning_channel isa PipelineState
+            pipeline_release_message_to_pool!(msg.owning_channel::PipelineState, msg)
         end
     end
-    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, abort_immediately)
+    on_complete(error_code, free_scarce)
     return nothing
 end
 
-function handler_increment_read_window(
-        handler::S2nTlsHandler,
-        slot::ChannelSlot,
-        size::Csize_t,
-    )::Nothing
-    _ = size
-    if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+# Write direction shutdown (registered in ShutdownChain.write_shutdown_fns)
+function _s2n_write_shutdown(handler::S2nTlsHandler, error_code::Int, free_scarce::Bool, on_complete::Function)
+    if !free_scarce && error_code != ERROR_IO_SOCKET_CLOSED
+        _s2n_do_delayed_shutdown(handler, error_code, on_complete)
         return nothing
     end
-
-    downstream_size = channel_slot_downstream_read_window(slot)
-    current_window = slot.window_size
-    record_size = Csize_t(TLS_MAX_RECORD_SIZE)
-    likely_records = downstream_size == 0 ? Csize_t(0) : Csize_t(ceil(downstream_size / record_size))
-    offset_size = mul_size_saturating(likely_records, Csize_t(TLS_EST_RECORD_OVERHEAD))
-    total_desired = add_size_saturating(offset_size, downstream_size)
-
-    if total_desired > current_window
-        update_size = total_desired - current_window
-        channel_slot_increment_read_window!(slot, update_size)
-    end
-
-    if handler.state == TlsNegotiationState.SUCCEEDED && !handler.read_task_pending
-        handler.read_task_pending = true
-        channel_task_init!(handler.read_task, EventCallable(s -> _s2n_read_task(handler, _coerce_task_status(s))), "s2n_read_on_window_increment")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
-    end
-
+    on_complete(error_code, free_scarce)
     return nothing
+end
+
+# Create a window update closure for TLS backpressure translation.
+function make_s2n_window_update_fn(handler::S2nTlsHandler, upstream_window_fn::Function)
+    return function(size::Csize_t)
+        if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+            return nothing
+        end
+
+        ps = handler.pipeline
+        if !(ps isa PipelineState)
+            return nothing
+        end
+
+        downstream_size = size
+        records = downstream_size == Csize_t(0) ? Csize_t(0) : cld(downstream_size, Csize_t(TLS_MAX_RECORD_SIZE))
+        overhead = mul_size_saturating(records, Csize_t(TLS_EST_RECORD_OVERHEAD))
+        total_desired = add_size_saturating(overhead, downstream_size)
+
+        upstream_window_fn(total_desired)
+
+        if handler.state == TlsNegotiationState.SUCCEEDED && !handler.read_task_pending
+            handler.read_task_pending = true
+            channel_task_init!(handler.read_task, EventCallable(s -> _s2n_read_task(handler, _coerce_task_status(s))), "s2n_read_on_window_increment")
+            pipeline_schedule_task_now!(ps::PipelineState, handler.read_task)
+        end
+
+        return nothing
+    end
 end
 
 function _s2n_to_tls_signature_algorithm(s2n_alg::Cint)::TlsSignatureAlgorithm.T
@@ -1293,7 +1262,8 @@ end
 
 function _s2n_handler_new(
         options::TlsConnectionOptions,
-        slot::ChannelSlot,
+        socket::Socket,
+        pipeline::PipelineState,
         mode::Cint,
     )::S2nTlsHandler
     _s2n_lib_handle()
@@ -1303,7 +1273,6 @@ function _s2n_handler_new(
     s2n_ctx === nothing && throw_error(ERROR_IO_TLS_CTX_ERROR)
 
     handler = S2nTlsHandler(
-        slot,
         options.timeout_ms,
         TlsHandlerStatistics(),
         ChannelTask(),
@@ -1325,6 +1294,11 @@ function _s2n_handler_new(
         0,
         ChannelTask(),
         ChannelTask(),
+        socket,
+        pipeline,
+        nothing,  # downstream_read - set during pipeline wiring
+        nothing,  # read_shutdown_on_complete
+        nothing,  # write_shutdown_on_complete
     )
 
     crt_statistics_tls_init!(handler.stats)

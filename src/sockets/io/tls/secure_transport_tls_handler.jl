@@ -100,8 +100,7 @@ mutable struct SecureTransportCtx
     secitem_identity::Ptr{Cvoid}
 end
 
-mutable struct SecureTransportTlsHandler <: TlsChannelHandler
-    slot::Union{ChannelSlot, Nothing}
+mutable struct SecureTransportTlsState
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
     timeout_task::ChannelTask
@@ -113,9 +112,9 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     alpn_list::Union{String, Nothing}
     latest_message_on_completion::Union{EventCallable, Nothing}
     ca_certs::CFArrayRef
-    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
-    on_data_read::Union{TlsDataReadCallback, Nothing}
-    on_error::Union{TlsErrorCallback, Nothing}
+    on_negotiation_result::Union{Function, Nothing}
+    on_data_read::Union{Function, Nothing}
+    on_error::Union{Function, Nothing}
     advertise_alpn_message::Bool
     negotiation_finished::Bool
     verify_peer::Bool
@@ -124,11 +123,11 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     read_state::TlsHandlerReadState.T
     delay_shutdown_error_code::Int
     negotiation_task::ChannelTask
-end
-
-function setchannelslot!(handler::SecureTransportTlsHandler, slot::ChannelSlot)::Nothing
-    handler.slot = slot
-    return nothing
+    # Pipeline integration
+    socket::Any      # Socket
+    pipeline::Any    # PipelineState
+    downstream_read::Any  # Function - dispatches decrypted read data downstream
+    read_shutdown_on_complete::Any  # deferred shutdown completion callback
 end
 
 @inline tls_context_ca_cert(ctx::TlsContext{SecureTransportCtx})::Ptr{Cvoid} = ctx.impl.ca_cert
@@ -249,7 +248,7 @@ function _secure_transport_cleanup()
     return nothing
 end
 
-function _secure_transport_set_protocols(handler::SecureTransportTlsHandler, alpn_list::String)
+function _secure_transport_set_protocols(handler::SecureTransportTlsState, alpn_list::String)
     @static if !Sys.isapple()
         return nothing
     end
@@ -294,7 +293,7 @@ function _secure_transport_set_protocols(handler::SecureTransportTlsHandler, alp
     return nothing
 end
 
-function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::ByteBuffer
+function _secure_transport_get_protocol(handler::SecureTransportTlsState)::ByteBuffer
     @static if !Sys.isapple()
         return null_buffer()
     end
@@ -336,25 +335,23 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
     return buf
 end
 
-function _secure_transport_on_negotiation_result(handler::SecureTransportTlsHandler, error_code::Int)
+function _secure_transport_on_negotiation_result(handler::SecureTransportTlsState, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
-    if handler.on_negotiation_result !== nothing && handler.slot !== nothing
-        handler.on_negotiation_result(handler, handler.slot, error_code)
+    if handler.on_negotiation_result !== nothing
+        handler.on_negotiation_result(handler, handler.pipeline, error_code)
     end
     return nothing
 end
 
-function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
-    slot = handler.slot
-    slot === nothing && return nothing
-    slot.adj_right === nothing && return nothing
+function _secure_transport_send_alpn_message(handler::SecureTransportTlsState)
+    handler.downstream_read === nothing && return nothing
     handler.advertise_alpn_message || return nothing
     handler.protocol.len == 0 && return nothing
-    channel = slot.channel
-    channel === nothing && return nothing
+    ps = handler.pipeline
+    ps === nothing && return nothing
 
-    message = channel_acquire_message_from_pool(
-        channel,
+    message = pipeline_acquire_message_from_pool(
+        ps::PipelineState,
         IoMessageType.APPLICATION_DATA,
         sizeof(TlsNegotiatedProtocolMessage),
     )
@@ -363,16 +360,16 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     message.user_data = TlsNegotiatedProtocolMessage(handler.protocol)
     setfield!(message.message_data, :len, Csize_t(sizeof(TlsNegotiatedProtocolMessage)))
     try
-        channel_slot_send_message(slot, message, ChannelDirection.READ)
+        (handler.downstream_read::Function)(message)
     catch e
         e isa ReseauError || rethrow()
-        channel_release_message_to_pool!(channel, message)
-        channel_shutdown!(channel, e.code)
+        pipeline_release_message_to_pool!(ps::PipelineState, message)
+        pipeline_shutdown!(ps::PipelineState, e.code)
     end
     return nothing
 end
 
-function _secure_transport_handle_would_block(handler::SecureTransportTlsHandler, is_server::Bool)
+function _secure_transport_handle_would_block(handler::SecureTransportTlsState, is_server::Bool)
     _ = handler
     logf(
         LogLevel.DEBUG,
@@ -380,7 +377,7 @@ function _secure_transport_handle_would_block(handler::SecureTransportTlsHandler
     return nothing
 end
 
-function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)::Nothing
+function _secure_transport_drive_negotiation(handler::SecureTransportTlsState)::Nothing
     @static if !Sys.isapple()
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
@@ -492,7 +489,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
     end
 end
 
-function _secure_transport_negotiation_task(handler::SecureTransportTlsHandler, status::TaskStatus.T)
+function _secure_transport_negotiation_task(handler::SecureTransportTlsState, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     try
         _secure_transport_drive_negotiation(handler)
@@ -511,7 +508,7 @@ function _tls_pending_input_bytes(queue::Vector{IoMessage})::Int
 end
 
 function _secure_transport_read_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len_ptr::Ptr{Csize_t})::OSStatus
-    handler = unsafe_pointer_to_objref(conn)::SecureTransportTlsHandler
+    handler = unsafe_pointer_to_objref(conn)::SecureTransportTlsState
     requested = unsafe_load(len_ptr)
     written = Csize_t(0)
     queue = handler.input_queue
@@ -531,8 +528,8 @@ function _secure_transport_read_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len
         end
 
         if msg.copy_mark == msg.message_data.len
-            if msg.owning_channel isa Channel
-                channel_release_message_to_pool!(msg.owning_channel, msg)
+            if msg.owning_channel isa PipelineState
+                pipeline_release_message_to_pool!(msg.owning_channel, msg)
             end
         else
             pushfirst!(queue, msg)
@@ -547,34 +544,28 @@ function _secure_transport_read_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len
 end
 
 function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, len_ptr::Ptr{Csize_t})::OSStatus
-    handler = unsafe_pointer_to_objref(conn)::SecureTransportTlsHandler
+    handler = unsafe_pointer_to_objref(conn)::SecureTransportTlsState
     requested = unsafe_load(len_ptr)
-    slot_any = handler.slot
-    slot_any === nothing && return _errSSLClosedNoNotify
-    slot = slot_any::ChannelSlot{Union{Channel, Nothing}}
-    channel = slot.channel
-    channel isa Channel || return _errSSLClosedNoNotify
+    ps = handler.pipeline
+    ps === nothing && return _errSSLClosedNoNotify
+    pipeline = ps::PipelineState
+    socket = handler.socket
+    socket === nothing && return _errSSLClosedNoNotify
 
     processed = Csize_t(0)
     while processed < requested
-        overhead = channel_slot_upstream_message_overhead(slot)
-        message_size_hint = Csize_t(requested - processed) + overhead
-        message = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, message_size_hint)
+        message_size_hint = Csize_t(requested - processed)
+        message = pipeline_acquire_message_from_pool(pipeline, IoMessageType.APPLICATION_DATA, message_size_hint)
         message === nothing && return _errSSLClosedNoNotify
 
-        if message.message_data.capacity <= overhead
-            channel_release_message_to_pool!(channel, message)
-            return _errSecMemoryError
-        end
-
-        available = Int(message.message_data.capacity - overhead)
+        available = Int(message.message_data.capacity)
         to_write = min(available, Int(requested - processed))
 
         mem = unsafe_wrap(Memory{UInt8}, data + Int(processed), to_write; own = false)
         chunk = ByteCursor(mem, to_write)
         buf_ref = Ref(message.message_data)
         if byte_buf_append(buf_ref, chunk) != AWS_OP_SUCCESS
-            channel_release_message_to_pool!(channel, message)
+            pipeline_release_message_to_pool!(pipeline, message)
             return _errSecBufferTooSmall
         end
         message.message_data = buf_ref[]
@@ -586,10 +577,10 @@ function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, le
         end
 
         try
-            channel_slot_send_message(slot, message, ChannelDirection.WRITE)
+            _socket_write_message(socket::Socket, message)
         catch e
             e isa ReseauError || rethrow()
-            channel_release_message_to_pool!(channel, message)
+            pipeline_release_message_to_pool!(pipeline, message)
             return _errSSLClosedNoNotify
         end
     end
@@ -625,50 +616,36 @@ end
 const _secure_transport_read_cb_c = Ref{Ptr{Cvoid}}(C_NULL)
 const _secure_transport_write_cb_c = Ref{Ptr{Cvoid}}(C_NULL)
 
-function _secure_transport_read_task(handler::SecureTransportTlsHandler, status::TaskStatus.T)
+function _secure_transport_read_task(handler::SecureTransportTlsState, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     handler.read_task_pending = false
-    if handler.slot !== nothing
-        handler_process_read_message(handler, handler.slot, nothing)
+    if handler.pipeline !== nothing
+        _secure_transport_process_read(handler, nothing)
     end
     return nothing
 end
 
-function _secure_transport_initialize_read_delay_shutdown(handler::SecureTransportTlsHandler, slot::ChannelSlot, error_code::Int)
+function _secure_transport_initialize_read_delay_shutdown(handler::SecureTransportTlsState, error_code::Int, on_complete::Function)
     logf(
         LogLevel.DEBUG,
         LS_IO_TLS,string("TLS handler pending data during shutdown, waiting for downstream read window.", " ", ))
-    if channel_slot_downstream_read_window(slot) == 0
-        logf(
-            LogLevel.WARN,
-            LS_IO_TLS,string("TLS shutdown delayed; pending data cannot be processed until read window opens.", " ", ))
-    end
     handler.read_state = TlsHandlerReadState.SHUTTING_DOWN
     handler.delay_shutdown_error_code = error_code
+    handler.read_shutdown_on_complete = on_complete
     if !handler.read_task_pending
         handler.read_task_pending = true
         channel_task_init!(handler.read_task, EventCallable(s -> _secure_transport_read_task(handler, _coerce_task_status(s))), "secure_transport_read_on_delay_shutdown")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
+        pipeline_schedule_task_now!(handler.pipeline::PipelineState, handler.read_task)
     end
     return nothing
 end
 
-function handler_initial_window_size(handler::SecureTransportTlsHandler)::Csize_t
-    _ = handler
-    return Csize_t(TLS_EST_HANDSHAKE_SIZE)
-end
-
-function handler_message_overhead(handler::SecureTransportTlsHandler)::Csize_t
-    _ = handler
-    return Csize_t(TLS_EST_RECORD_OVERHEAD)
-end
-
-function handler_destroy(handler::SecureTransportTlsHandler)::Nothing
+function _secure_transport_destroy!(handler::SecureTransportTlsState)::Nothing
     delete!(_secure_transport_handler_registry, handler)
     while !isempty(handler.input_queue)
         msg = popfirst!(handler.input_queue)
-        if msg isa IoMessage && msg.owning_channel isa Channel
-            channel_release_message_to_pool!(msg.owning_channel, msg)
+        if msg isa IoMessage && msg.owning_channel isa PipelineState
+            pipeline_release_message_to_pool!(msg.owning_channel, msg)
         end
     end
     if handler.ctx != C_NULL
@@ -677,27 +654,34 @@ function handler_destroy(handler::SecureTransportTlsHandler)::Nothing
     end
     handler.protocol = null_buffer()
     handler.server_name = null_buffer()
-    handler.slot = nothing
+    handler.socket = nothing
+    handler.pipeline = nothing
+    handler.downstream_read = nothing
     handler.ctx_obj = nothing
     return nothing
 end
 
-function handler_reset_statistics(handler::SecureTransportTlsHandler)::Nothing
+function secure_transport_reset_statistics!(handler::SecureTransportTlsState)::Nothing
     crt_statistics_tls_reset!(handler.stats)
     return nothing
 end
 
-function handler_gather_statistics(handler::SecureTransportTlsHandler)
+function secure_transport_gather_statistics(handler::SecureTransportTlsState)
     return handler.stats
 end
 
-function handler_process_read_message(
-        handler::SecureTransportTlsHandler,
-        slot::ChannelSlot,
+function _secure_transport_process_read(
+        handler::SecureTransportTlsState,
         message::Union{IoMessage, Nothing},
     )::Nothing
+    ps = handler.pipeline
+    ps === nothing && return nothing
+    pipeline = ps::PipelineState
+
     if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
-        message !== nothing && message.owning_channel isa Channel && channel_release_message_to_pool!(message.owning_channel, message)
+        if message !== nothing && message.owning_channel isa PipelineState
+            pipeline_release_message_to_pool!(message.owning_channel::PipelineState, message)
+        end
         return nothing
     end
 
@@ -713,28 +697,30 @@ function handler_process_read_message(
                 negotiation_failed = true
             end
             if negotiation_failed
-                channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                pipeline_shutdown!(pipeline, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 return nothing
             end
-            channel_slot_increment_read_window!(slot, message_len)
+            # During negotiation, allow socket to read more handshake data
+            socket = handler.socket
+            if socket !== nothing
+                sock = socket::Socket
+                sock.downstream_window = add_size_saturating(sock.downstream_window, message_len)
+                _socket_trigger_read(sock)
+            end
             if !handler.negotiation_finished
                 return nothing
             end
         end
     end
 
-    if slot.adj_right === nothing
-        downstream_window = SIZE_MAX
-    else
-        downstream_window = channel_slot_downstream_read_window(slot)
-    end
+    downstream_window = handler.downstream_read === nothing ? SIZE_MAX : pipeline.downstream_window
     processed = Csize_t(0)
     shutdown_error_code = 0
     force_shutdown = false
 
     while processed < downstream_window
-        outgoing = channel_acquire_message_from_pool(
-            slot.channel,
+        outgoing = pipeline_acquire_message_from_pool(
+            pipeline,
             IoMessageType.APPLICATION_DATA,
             downstream_window - processed,
         )
@@ -756,29 +742,26 @@ function handler_process_read_message(
             setfield!(outgoing.message_data, :len, Csize_t(read_size[]))
 
             if handler.on_data_read !== nothing
-                handler.on_data_read(handler, slot, outgoing.message_data)
+                handler.on_data_read(handler, handler.pipeline, outgoing.message_data)
             end
 
-            if slot.adj_right !== nothing
+            if handler.downstream_read !== nothing
                 try
-                    channel_slot_send_message(slot, outgoing, ChannelDirection.READ)
+                    (handler.downstream_read::Function)(outgoing)
                 catch e
                     e isa ReseauError || rethrow()
-                    channel_release_message_to_pool!(slot.channel, outgoing)
+                    pipeline_release_message_to_pool!(pipeline, outgoing)
                     shutdown_error_code = e.code
                     break
                 end
             else
-                channel_release_message_to_pool!(slot.channel, outgoing)
+                pipeline_release_message_to_pool!(pipeline, outgoing)
             end
         else
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            pipeline_release_message_to_pool!(pipeline, outgoing)
         end
 
         if status == _errSSLWouldBlock
-            if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
-                break
-            end
             break
         elseif status == _errSSLClosedGraceful
             force_shutdown = true
@@ -801,37 +784,23 @@ function handler_process_read_message(
                 shutdown_error_code = handler.delay_shutdown_error_code
             end
             handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
-            channel_slot_on_handler_shutdown_complete!(
-                slot,
-                ChannelDirection.READ,
-                shutdown_error_code,
-                false,
-            )
+            on_complete = handler.read_shutdown_on_complete
+            handler.read_shutdown_on_complete = nothing
+            if on_complete !== nothing
+                (on_complete::Function)(shutdown_error_code, false)
+            end
         else
-            channel_shutdown!(slot.channel, shutdown_error_code)
+            pipeline_shutdown!(pipeline, shutdown_error_code)
         end
     end
 
     return nothing
 end
 
-function handler_process_read_message(handler::SecureTransportTlsHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    invoke(
-        handler_process_read_message,
-        Tuple{SecureTransportTlsHandler, ChannelSlot, Union{IoMessage, Nothing}},
-        handler,
-        slot,
-        message,
-    )
-    return nothing
-end
-
-function handler_process_write_message(
-        handler::SecureTransportTlsHandler,
-        slot::ChannelSlot,
+function _secure_transport_process_write(
+        handler::SecureTransportTlsState,
         message::IoMessage,
     )::Nothing
-    _ = slot
     if !handler.negotiation_finished
         throw_error(ERROR_IO_TLS_ERROR_NOT_NEGOTIATED)
     end
@@ -853,73 +822,69 @@ function handler_process_write_message(
         throw_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
     end
 
-    channel_release_message_to_pool!(slot.channel, message)
+    pipeline_release_message_to_pool!(handler.pipeline::PipelineState, message)
     return nothing
 end
 
-function handler_shutdown(
-        handler::SecureTransportTlsHandler,
-        slot::ChannelSlot,
-        direction::ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )::Nothing
-    abort_immediately = free_scarce_resources_immediately
-
-    if direction == ChannelDirection.READ
-        if !abort_immediately &&
-                handler.negotiation_finished &&
-                !isempty(handler.input_queue) &&
-                slot.adj_right !== nothing
-            _secure_transport_initialize_read_delay_shutdown(handler, slot, error_code)
-            return nothing
-        end
-        handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
-    else
-        if !abort_immediately && error_code != ERROR_IO_SOCKET_CLOSED
-            _ = ccall((:SSLClose, _SECURITY_LIB), OSStatus, (SSLContextRef,), handler.ctx)
-        end
+# Read direction shutdown (registered in ShutdownChain.read_shutdown_fns)
+function _secure_transport_read_shutdown(handler::SecureTransportTlsState, error_code::Int, free_scarce::Bool, on_complete::Function)
+    if !free_scarce &&
+            handler.negotiation_finished &&
+            !isempty(handler.input_queue) &&
+            handler.downstream_read !== nothing
+        _secure_transport_initialize_read_delay_shutdown(handler, error_code, on_complete)
+        return nothing
     end
+    handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
 
     while !isempty(handler.input_queue)
         msg = popfirst!(handler.input_queue)
-        if msg isa IoMessage && msg.owning_channel isa Channel
-            channel_release_message_to_pool!(msg.owning_channel, msg)
+        if msg isa IoMessage && msg.owning_channel isa PipelineState
+            pipeline_release_message_to_pool!(msg.owning_channel::PipelineState, msg)
         end
     end
-    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, abort_immediately)
+    on_complete(error_code, free_scarce)
     return nothing
 end
 
-function handler_increment_read_window(
-        handler::SecureTransportTlsHandler,
-        slot::ChannelSlot,
-        size::Csize_t,
-    )::Nothing
-    _ = size
-    if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+# Write direction shutdown (registered in ShutdownChain.write_shutdown_fns)
+function _secure_transport_write_shutdown(handler::SecureTransportTlsState, error_code::Int, free_scarce::Bool, on_complete::Function)
+    if !free_scarce && error_code != ERROR_IO_SOCKET_CLOSED
+        _ = ccall((:SSLClose, _SECURITY_LIB), OSStatus, (SSLContextRef,), handler.ctx)
+    end
+    on_complete(error_code, free_scarce)
+    return nothing
+end
+
+# Create a window update closure for TLS backpressure translation.
+# Translates plaintext window requests to ciphertext window (adding record overhead)
+# and propagates upstream to the socket.
+function make_secure_transport_window_update_fn(handler::SecureTransportTlsState, upstream_window_fn::Function)
+    return function(size::Csize_t)
+        if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
+            return nothing
+        end
+
+        ps = handler.pipeline
+        if !(ps isa PipelineState)
+            return nothing
+        end
+
+        downstream_size = size
+        records = downstream_size == Csize_t(0) ? Csize_t(0) : cld(downstream_size, Csize_t(TLS_MAX_RECORD_SIZE))
+        overhead = mul_size_saturating(records, Csize_t(TLS_EST_RECORD_OVERHEAD))
+        total_desired = add_size_saturating(overhead, downstream_size)
+
+        upstream_window_fn(total_desired)
+
+        if handler.negotiation_finished && !handler.read_task_pending
+            handler.read_task_pending = true
+            channel_task_init!(handler.read_task, EventCallable(s -> _secure_transport_read_task(handler, _coerce_task_status(s))), "secure_transport_read_on_window_increment")
+            pipeline_schedule_task_now!(ps::PipelineState, handler.read_task)
+        end
+
         return nothing
     end
-
-    downstream_size = channel_slot_downstream_read_window(slot)
-    current_window = slot.window_size
-    record_size = Csize_t(TLS_MAX_RECORD_SIZE)
-    likely_records = downstream_size == 0 ? Csize_t(0) : Csize_t(ceil(downstream_size / record_size))
-    offset_size = mul_size_saturating(likely_records, Csize_t(TLS_EST_RECORD_OVERHEAD))
-    total_desired = add_size_saturating(offset_size, downstream_size)
-
-    if total_desired > current_window
-        update_size = total_desired - current_window
-        channel_slot_increment_read_window!(slot, update_size)
-    end
-
-    if handler.negotiation_finished && !handler.read_task_pending
-        handler.read_task_pending = true
-        channel_task_init!(handler.read_task, EventCallable(s -> _secure_transport_read_task(handler, _coerce_task_status(s))), "secure_transport_read_on_window_increment")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
-    end
-
-    return nothing
 end
 
 function _secure_transport_ctx_destroy!(ctx::SecureTransportCtx)
@@ -997,9 +962,10 @@ end
 
 function _secure_transport_handler_new(
         options::TlsConnectionOptions,
-        slot::ChannelSlot,
+        socket::Socket,
+        pipeline::PipelineState,
         protocol_side::SSLProtocolSide,
-    )::SecureTransportTlsHandler
+    )::SecureTransportTlsState
     @static if !Sys.isapple()
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
@@ -1008,8 +974,7 @@ function _secure_transport_handler_new(
     st_ctx = ctx.impl isa SecureTransportCtx ? ctx.impl : nothing
     st_ctx === nothing && throw_error(ERROR_IO_TLS_CTX_ERROR)
 
-    handler = SecureTransportTlsHandler(
-        slot,
+    handler = SecureTransportTlsState(
         options.timeout_ms,
         TlsHandlerStatistics(),
         ChannelTask(),
@@ -1032,6 +997,10 @@ function _secure_transport_handler_new(
         TlsHandlerReadState.OPEN,
         0,
         ChannelTask(),
+        socket,
+        pipeline,
+        nothing,  # downstream_read - set during pipeline wiring
+        nothing,  # read_shutdown_on_complete
     )
 
     crt_statistics_tls_init!(handler.stats)
