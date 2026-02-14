@@ -13,8 +13,8 @@ const SOCKET_DEFAULT_MAX_READ_SIZE = Csize_t(16384)
 # subscribes to readable events, and registers shutdown closures.
 function socket_pipeline_init!(
         socket::Socket,
-        ps::PipelineState,
-        max_read_size::Integer,
+        ps::PipelineState;
+        max_read_size::Integer = 16384,
     )::Nothing
     socket.pipeline = ps
     socket.max_rw_size = Csize_t(max_read_size)
@@ -62,14 +62,6 @@ function socket_pipeline_init!(
         "Socket handler: initialized for pipeline $(ps.channel_id)"
     )
     return nothing
-end
-
-function socket_pipeline_init!(
-        socket::Socket,
-        ps::PipelineState;
-        max_read_size::Integer = 16384,
-    )::Nothing
-    return socket_pipeline_init!(socket, ps, max_read_size)
 end
 
 # --- Read path ---

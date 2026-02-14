@@ -37,36 +37,6 @@ function wait_for_pred_tls(pred::Function; timeout_s::Float64 = 10.0)
     return pred()
 end
 
-function wait_for_handshake_status(handler, status; timeout_s::Float64 = 5.0)
-    start = Base.time_ns()
-    timeout_ns = Int(timeout_s * 1_000_000_000)
-    while (Base.time_ns() - start) < timeout_ns
-        if handler.stats.handshake_status == status
-            return true
-        end
-        sleep(0.01)
-    end
-    return false
-end
-
-function mark_tls_handler_negotiated!(handler)
-    if hasproperty(handler, :state)
-        setfield!(handler, :state, Sockets.TlsNegotiationState.SUCCEEDED)
-    elseif hasproperty(handler, :negotiation_finished)
-        setfield!(handler, :negotiation_finished, true)
-    end
-    return nothing
-end
-
-function mark_tls_handler_failed!(handler)
-    if hasproperty(handler, :state)
-        setfield!(handler, :state, Sockets.TlsNegotiationState.FAILED)
-    elseif hasproperty(handler, :negotiation_finished)
-        setfield!(handler, :negotiation_finished, false)
-    end
-    return nothing
-end
-
 mutable struct TlsTestRwArgs
     lock::ReentrantLock
     invocation_happened::Bool
@@ -721,6 +691,86 @@ end
 
     @test ps.shutdown_pending
     @test ps.shutdown_error_code == EventLoops.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
+
+    EventLoops.event_loop_group_destroy!(elg)
+end
+
+@testset "TLS write before negotiation fails" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        EventLoops.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = _test_client_ctx()
+    @test ctx isa Sockets.TlsContext
+
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
+    handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), socket, ps)
+
+    msg = Sockets.IoMessage(1)
+    msg_ref = Ref(msg.message_data)
+    Reseau.byte_buf_write_from_whole_cursor(msg_ref, Reseau.ByteCursor(UInt8[0x02]))
+    msg.message_data = msg_ref[]
+
+    err = nothing
+    try
+        @static if Sys.islinux()
+            Sockets._s2n_process_write(handler, msg)
+        elseif Sys.isapple()
+            Sockets._secure_transport_process_write(handler, msg)
+        else
+            @test true
+            EventLoops.event_loop_group_destroy!(elg)
+            return
+        end
+    catch e
+        err = e
+    end
+
+    @test err isa Reseau.ReseauError
+    if err isa Reseau.ReseauError
+        @test err.code == EventLoops.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED
+    end
+
+    EventLoops.event_loop_group_destroy!(elg)
+end
+
+@testset "TLS handshake stats transitions" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    @test event_loop !== nothing
+    if event_loop === nothing
+        EventLoops.event_loop_group_destroy!(elg)
+        return
+    end
+
+    ctx = _test_client_ctx()
+    @test ctx isa Sockets.TlsContext
+
+    ps = Sockets.PipelineState(event_loop)
+    socket_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    socket = Sockets.socket_init(socket_opts)
+    handler = Sockets.tls_client_handler_new(Sockets.TlsConnectionOptions(ctx), socket, ps)
+
+    @test handler.stats.handshake_status == Sockets.TlsNegotiationStatus.NONE
+    @test handler.stats.handshake_start_ns == 0
+    @test handler.stats.handshake_end_ns == 0
+
+    Sockets.tls_on_drive_negotiation(handler)
+    @test handler.stats.handshake_status == Sockets.TlsNegotiationStatus.ONGOING
+    @test handler.stats.handshake_start_ns > 0
+
+    Sockets.tls_on_negotiation_completed(handler, Reseau.AWS_OP_SUCCESS)
+    @test handler.stats.handshake_status == Sockets.TlsNegotiationStatus.SUCCESS
+    @test handler.stats.handshake_end_ns >= handler.stats.handshake_start_ns
+
+    Sockets.tls_on_negotiation_completed(handler, EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+    @test handler.stats.handshake_status == Sockets.TlsNegotiationStatus.FAILURE
 
     EventLoops.event_loop_group_destroy!(elg)
 end

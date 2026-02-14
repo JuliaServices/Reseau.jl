@@ -720,7 +720,7 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
     end
 
     try
-        socket_pipeline_init!(socket, ps, 16384)
+        socket_pipeline_init!(socket, ps)
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(
@@ -1346,7 +1346,7 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
     end
 
     try
-        socket_pipeline_init!(socket, ps, 16384)
+        socket_pipeline_init!(socket, ps)
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(

@@ -138,49 +138,6 @@ end
     return nothing
 end
 
-# ── ObjectCallable: trim-safe type-erased callable for (T) -> Nothing ──
-# Typed by argument type `T` to avoid dynamic callback invocation.
-
-struct _ObjectCallWrapper{T} <: Function end
-
-function (::_ObjectCallWrapper{T})(f::F, objptr::Ptr{Cvoid}) where {T, F}
-    f(_callback_ptr_to_obj(objptr)::T)
-    return nothing
-end
-
-@generated function _object_gen_fptr(::Type{F}, ::Type{T}) where {F, T}
-    quote
-        @cfunction($(_ObjectCallWrapper{T}()), Cvoid, (Ref{$F}, Ptr{Cvoid}))
-    end
-end
-
-struct ObjectCallable{T}
-    ptr::Ptr{Cvoid}
-    objptr::Ptr{Cvoid}
-    _root::Any
-end
-
-function ObjectCallable{T}(callable::F) where {T, F}
-    ptr = _object_gen_fptr(F, T)
-    objref = Base.cconvert(Ref{F}, callable)
-    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
-    return ObjectCallable{T}(ptr, objptr, objref)
-end
-
-@inline function (f::ObjectCallable{T})(obj::T)::Nothing where T
-    objptr, objroot = _callback_obj_to_ptr_and_root(obj)
-    GC.@preserve objroot begin
-        ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}), f.objptr, objptr)
-    end
-    return nothing
-end
-
-Base.convert(::Type{ObjectCallable{T}}, callable::F) where {T, F <: Function} = ObjectCallable{T}(callable)
-
-@inline function (f::ObjectCallable{T})(obj)::Nothing where T
-    return f(convert(T, obj))
-end
-
 # ── ChannelCallable: trim-safe type-erased callable for (Int, Any) -> Nothing ──
 # Covers: accept_result_fn (error_code, new_socket), on_incoming_channel_setup/shutdown
 # (error_code, channel), and similar callbacks needing a runtime object argument.

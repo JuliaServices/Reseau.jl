@@ -417,23 +417,14 @@ function socket_close(socket::Socket)::Nothing
 
     # `socket_close_impl` may need to unsubscribe from IO events and tear down
     # event-loop-owned resources. Always do that work on the socket's event loop thread.
-    close_lock = ReentrantLock()
     close_result = Base.Channel{Union{Nothing, ReseauError}}(1)
-    close_started = Ref(false)
 
     _socket_close_debug(socket, "cross-thread-enter", false)
 
     task = ScheduledTask(
         TaskFn(function(status)
             task_error::Union{Nothing, ReseauError} = nothing
-            should_close = false
             try
-                lock(close_lock) do
-                    if !close_started[]
-                        close_started[] = true
-                        should_close = true
-                    end
-                end
                 _socket_close_debug(
                     socket,
                     "close-task-entered",
@@ -441,9 +432,7 @@ function socket_close(socket::Socket)::Nothing
                     true,
                 )
 
-                if should_close
-                    socket_close_impl(socket.impl, socket)
-                end
+                socket_close_impl(socket.impl, socket)
             catch e
                 task_error = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
             end
