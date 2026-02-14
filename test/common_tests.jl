@@ -59,9 +59,14 @@ end
         end);
         type_tag = "task_cancel",
     )
+    Reseau.task_scheduler_schedule_now!(scheduler, task)
     Reseau.task_scheduler_cancel!(scheduler, task)
     @test Base.timedwait(() -> isready(status_ch), 5.0) == :ok
     @test take!(status_ch) == Reseau.TaskStatus.CANCELED
+
+    # Cancelling again after removal should be idempotent.
+    Reseau.task_scheduler_cancel!(scheduler, task)
+    @test Base.timedwait(() -> isready(status_ch), 0.05) == :timed_out
 end
 
 @testset "TaskScheduler fairness" begin

@@ -141,7 +141,13 @@ macro wrap_thread_fn(fndef)
                 _ = thread_id
                 $(esc(body))
             catch e
-                Core.println("foreign thread ($thread_id) errored")
+                bt = catch_backtrace()
+                Core.print("foreign thread ($thread_id) errored: ")
+                Base.showerror(Core.stdout, e, bt)
+                Core.println()
+                if bt !== nothing
+                    Base.show_backtrace(Core.stdout, bt)
+                end
             end
             return C_NULL
         end

@@ -2,6 +2,7 @@ using Test
 using Reseau
 
 const _dispatch_queue_store = Ref{Ptr{Cvoid}}(C_NULL)
+
 function _dispatch_queue_setter(handle::Ptr{EventLoops.IoHandle}, queue::Ptr{Cvoid})
     _dispatch_queue_store[] = queue
     return nothing
@@ -350,6 +351,66 @@ end
                     @test res2 === nothing
                     @test res3 === nothing
                     @test res4 === nothing
+                finally
+                    read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                    write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+                    EventLoops.event_loop_destroy!(el)
+                end
+            end
+        end
+    end
+
+    @testset "Event loop subscription payload is stable and owned by handle refs" begin
+        if !Sys.islinux()
+            @test true
+        else
+            interactive_threads = Base.Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = EventLoops.event_loop_new()
+
+                run_res = EventLoops.event_loop_run!(el)
+                @test run_res === nothing
+
+                read_end = nothing
+                write_end = nothing
+                try
+                    read_end, write_end = Sockets.pipe_create()
+
+                    subscription_task = _schedule_event_loop_task(
+                        el,
+                        () -> begin
+                            EventLoops.event_loop_subscribe_to_io_events!(
+                                el,
+                                read_end.io_handle,
+                                Int(EventLoops.IoEventType.READABLE),
+                                (loop, handle, events, data) -> nothing,
+                                nothing,
+                            )
+                            @test read_end.io_handle.additional_data != C_NULL
+                            @test read_end.io_handle.additional_ref isa EventLoops.EpollEventHandleData
+                            stored_ptr = read_end.io_handle.additional_data
+                            stored_ref = read_end.io_handle.additional_ref
+                            @test unsafe_pointer_to_objref(stored_ptr) === stored_ref
+                            return nothing
+                        end;
+                        type_tag = "epoll_subscription_payload_capture",
+                    )
+                    @test _wait_for_channel(subscription_task)
+
+                    unsubscribe_task = _schedule_event_loop_task(
+                        el,
+                        () -> begin
+                            EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                            return nothing
+                        end;
+                        type_tag = "epoll_subscription_payload_release",
+                    )
+                    @test _wait_for_channel(unsubscribe_task)
+
+                    @test read_end.io_handle.additional_data == C_NULL
+                    @test read_end.io_handle.additional_ref === nothing
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
@@ -1180,6 +1241,81 @@ end
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
                     EventLoops.event_loop_destroy!(el)
                 end
+                end
+        end
+    end
+
+    @testset "Event loop callback mutates another subscription safely" begin
+        if Sys.iswindows()
+            @test true
+        else
+            interactive_threads = Base.Threads.nthreads(:interactive)
+            if interactive_threads <= 1
+                @test true
+            else
+                el = EventLoops.event_loop_new()
+                run_res = EventLoops.event_loop_run!(el)
+                @test run_res === nothing
+
+                read_a = nothing
+                write_a = nothing
+                read_b = nothing
+                write_b = nothing
+                events_ch = Channel{Symbol}(2)
+
+                try
+                    read_a, write_a = Sockets.pipe_create()
+                    read_b, write_b = Sockets.pipe_create()
+
+                    on_a = (loop, handle, events, data) -> begin
+                        EventLoops.event_loop_unsubscribe_from_io_events!(loop, read_b.io_handle)
+                        put!(events_ch, :a)
+                        return nothing
+                    end
+                    on_b = (loop, handle, events, data) -> begin
+                        put!(events_ch, :b)
+                        return nothing
+                    end
+
+                    sub_done = _schedule_event_loop_task(el, () -> begin
+                        @test EventLoops.event_loop_subscribe_to_io_events!(
+                            el,
+                            read_a.io_handle,
+                            Int(EventLoops.IoEventType.READABLE),
+                            on_a,
+                            nothing,
+                        ) === nothing
+                        @test EventLoops.event_loop_subscribe_to_io_events!(
+                            el,
+                            read_b.io_handle,
+                            Int(EventLoops.IoEventType.READABLE),
+                            on_b,
+                            nothing,
+                        ) === nothing
+                        Sockets.pipe_write!(write_a, _payload_abc())
+                        Sockets.pipe_write!(write_b, _payload_abc())
+                        return nothing
+                    end; type_tag = "subscribe_mutating_cb")
+                    @test _wait_for_channel(sub_done)
+
+                    # callback on A should run and may unsubscribe B without breaking the loop.
+                    deadline = Base.time_ns() + _EVENT_LOOP_TEST_TIMEOUT_NS
+                    while !isready(events_ch) && Base.time_ns() < deadline
+                        yield()
+                    end
+                    @test isready(events_ch)
+                    @test take!(events_ch) === :a
+
+                    # Loop continues to accept another task after mutation.
+                    continue_ch = _schedule_event_loop_task(el, () -> true; type_tag = "post_mutation_task")
+                    @test _wait_for_channel(continue_ch)
+                finally
+                    read_a !== nothing && Sockets.pipe_read_end_close!(read_a)
+                    write_a !== nothing && Sockets.pipe_write_end_close!(write_a)
+                    read_b !== nothing && Sockets.pipe_read_end_close!(read_b)
+                    write_b !== nothing && Sockets.pipe_write_end_close!(write_b)
+                    EventLoops.event_loop_destroy!(el)
+                end
             end
         end
     end
@@ -1597,7 +1733,6 @@ end
 
             impl.should_process_task_pre_queue = true
             EventLoops.process_task_pre_queue(el)
-
             @test isempty(impl.task_pre_queue)
 
             read_buf = Ref(UInt64(0))
@@ -1608,7 +1743,271 @@ end
             )::Cssize_t
             @test read_res < 0
 
+            # Verify queue buffers are reused between drain cycles.
+            pre_spare = impl.task_pre_queue_spare
+
+            for i in 1:3
+                lock(impl.task_pre_queue_mutex)
+                push!(impl.task_pre_queue, Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> nothing),
+                    type_tag = "pre_queue_task_repeat_" * string(i),
+                ))
+                unlock(impl.task_pre_queue_mutex)
+
+                impl.should_process_task_pre_queue = true
+                EventLoops.process_task_pre_queue(el)
+                @test impl.task_pre_queue_spare === pre_spare
+            end
+
             EventLoops.event_loop_destroy!(el)
+        end
+    end
+
+    @testset "Epoll cross-thread burst scheduling remains reliable" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            try
+                task_count = 256
+                executed = Base.Threads.Atomic{Int}(0)
+                tasks = Vector{Reseau.ScheduledTask}()
+
+                for _ in 1:task_count
+                    push!(
+                        tasks,
+                        Reseau.ScheduledTask(
+                            Reseau.TaskFn(status -> begin
+                                if Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY
+                                    Base.Threads.atomic_add!(executed, 1)
+                                end
+                                return nothing
+                            end),
+                            type_tag = "epoll_burst_task",
+                        ),
+                    )
+                end
+
+                Threads.@spawn begin
+                    for task in tasks
+                        EventLoops.event_loop_schedule_task_now!(el, task)
+                    end
+                end
+
+                deadline = Base.time_ns() + 5_000_000_000
+                while Base.Threads.atomic_load(executed) < task_count && Base.time_ns() < deadline
+                    yield()
+                end
+                @test Base.Threads.atomic_load(executed) == task_count
+            finally
+                EventLoops.event_loop_destroy!(el)
+            end
+        end
+    end
+
+    @testset "Epoll wait buffer grows for large burst readiness" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            read_ends = Vector{Sockets.PipeReadEnd}()
+            write_ends = Vector{Sockets.PipeWriteEnd}()
+            events_seen = Base.Threads.Atomic{Int}(0)
+
+            try
+                impl = el.impl_data
+                burst_count = 256
+                payload_byte = Ref{UInt8}(0x31)
+
+                for _ in 1:burst_count
+                    read_end, write_end = Sockets.pipe_create()
+                    push!(read_ends, read_end)
+                    push!(write_ends, write_end)
+
+                    callback = let fd = read_end.io_handle.fd
+                        EventLoops.EventCallable(function(events::Int)
+                            if (events & Int(EventLoops.IoEventType.READABLE)) == 0
+                                return nothing
+                            end
+                            read_buf = Ref{UInt8}(0)
+                            @ccall read(
+                                fd::Cint,
+                                read_buf::Ptr{UInt8},
+                                sizeof(UInt8)::Csize_t,
+                            )::Cssize_t
+                            Base.Threads.atomic_add!(events_seen, 1)
+                            return nothing
+                        end)
+                    end
+
+                    EventLoops.event_loop_subscribe_to_io_events!(
+                        el,
+                        read_end.io_handle,
+                        Int(EventLoops.IoEventType.READABLE),
+                        callback,
+                    )
+                end
+
+                for write_end in write_ends
+                    write_res = @ccall write(
+                        write_end.io_handle.fd::Cint,
+                        payload_byte::Ptr{UInt8},
+                        sizeof(UInt8)::Csize_t,
+                    )::Cssize_t
+                    @test write_res == 1
+                end
+
+                deadline = Base.time_ns() + 5_000_000_000
+                while Base.Threads.atomic_load(events_seen) < burst_count && Base.time_ns() < deadline
+                    yield()
+                end
+
+                @test Base.Threads.atomic_load(events_seen) == burst_count
+                @test impl.event_wait_capacity >= burst_count
+            finally
+                EventLoops.event_loop_destroy!(el)
+
+                for read_end in read_ends
+                    Sockets.pipe_read_end_close!(read_end)
+                end
+                for write_end in write_ends
+                    Sockets.pipe_write_end_close!(write_end)
+                end
+            end
+        end
+    end
+
+    @testset "Epoll duplicate scheduling preserves explicit future timestamp" begin
+        if !Sys.islinux()
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            try
+                now = EventLoops.event_loop_current_clock_time(el)
+                future_deadline = now + 250_000_000
+
+                fired = Channel{UInt64}(1)
+                scheduled = Channel{Nothing}(1)
+
+                target_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            return nothing
+                        end
+                        now = EventLoops.event_loop_current_clock_time(el)
+                        put!(fired, now)
+                        return nothing
+                    end),
+                    type_tag = "epoll_future_dedup_task",
+                )
+
+                schedule_future_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            return nothing
+                        end
+                        EventLoops.event_loop_schedule_task_future!(el, target_task, future_deadline)
+                        put!(scheduled, nothing)
+                        return nothing
+                    end),
+                    type_tag = "epoll_future_schedule_task",
+                )
+
+                EventLoops.event_loop_schedule_task_now!(el, schedule_future_task)
+                @test _wait_for_channel(scheduled)
+
+                # A concurrent cross-thread schedule for the same task must not rewrite the future timestamp.
+                EventLoops.event_loop_schedule_task_now!(el, target_task)
+
+                if _wait_for_channel(fired)
+                    @test take!(fired) >= future_deadline
+                else
+                    @test false
+                end
+            finally
+                EventLoops.event_loop_destroy!(el)
+            end
+        end
+    end
+
+    @testset "Epoll cancel-schedule churn stays race-free on same task id" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.event_loop_new()
+            run_res = EventLoops.event_loop_run!(el)
+            @test run_res === nothing
+
+            try
+                churn_count = 64
+                request_ch = Channel{Nothing}(1)
+                status_ch = Channel{Reseau.TaskStatus.T}(churn_count)
+                canceled_count = Base.Threads.Atomic{Int}(0)
+                churn_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        put!(status_ch, Reseau.TaskStatus.T(status))
+                        return nothing
+                    end),
+                    type_tag = "epoll_churn_task",
+                )
+
+                canceller_task = Reseau.ScheduledTask(
+                    Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            return nothing
+                        end
+
+                        if isready(request_ch)
+                            take!(request_ch)
+                            EventLoops.event_loop_cancel_task!(el, churn_task)
+                            Base.Threads.atomic_add!(canceled_count, 1)
+                        end
+
+                        if Base.Threads.atomic_load(canceled_count) < churn_count
+                            EventLoops.event_loop_schedule_task_now!(el, canceller_task)
+                        end
+                        return nothing
+                    end),
+                    type_tag = "epoll_churn_canceller",
+                )
+
+                EventLoops.event_loop_schedule_task_now!(el, canceller_task)
+
+                for i in 1:churn_count
+                    now = EventLoops.event_loop_current_clock_time(el)
+                    EventLoops.event_loop_schedule_task_future!(
+                        el,
+                        churn_task,
+                        now + UInt64(10_000_000_000),
+                    )
+                    put!(request_ch, nothing)
+
+                    deadline = Base.time_ns() + 2_000_000_000
+                    while Base.Threads.atomic_load(canceled_count) < i && Base.time_ns() < deadline
+                        yield()
+                    end
+                    @test Base.Threads.atomic_load(canceled_count) >= i
+                end
+
+                for _ in 1:churn_count
+                    @test _wait_for_channel(status_ch)
+                    @test take!(status_ch) == Reseau.TaskStatus.CANCELED
+                end
+            finally
+                EventLoops.event_loop_destroy!(el)
+            end
         end
     end
 
