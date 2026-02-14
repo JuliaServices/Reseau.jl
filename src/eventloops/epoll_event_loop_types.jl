@@ -15,21 +15,29 @@
     const EPOLL_CTL_DEL = Cint(2)
     const EPOLL_CTL_MOD = Cint(3)
 
-    # epoll_event ABI is packed in the Linux UAPI headers: u32 events; u64 data; (12 bytes).
-    # Use three UInt32 fields to match the packed layout across platforms.
+    # Linux struct epoll_event is __attribute__((packed)) on x86_64:
+    #   uint32_t events;  (offset 0, 4 bytes)
+    #   uint64_t data;    (offset 4, 8 bytes)
+    #   total: 12 bytes (NO padding between events and data)
+    #
+    # Julia's default alignment would insert 4 bytes of padding between
+    # UInt32 and UInt64, producing a 16-byte struct.  Using NTuple{2,UInt32}
+    # for the data field keeps alignment at 4, giving the correct 12-byte
+    # packed layout that the kernel expects.
     struct EpollEvent
         events::UInt32
-        data_lo::UInt32
-        data_hi::UInt32
+        data::NTuple{2, UInt32}
     end
 
     @inline function EpollEvent(events::UInt32, ptr::Ptr{Cvoid})
         u = UInt64(UInt(ptr))
-        return EpollEvent(events, UInt32(u & 0xffffffff), UInt32(u >> 32))
+        lo = UInt32(u & 0xFFFFFFFF)
+        hi = UInt32(u >> 32)
+        return EpollEvent(events, (lo, hi))
     end
 
     @inline function _epoll_event_data_ptr(ev::EpollEvent)::Ptr{Cvoid}
-        u = (UInt64(ev.data_hi) << 32) | UInt64(ev.data_lo)
+        u = UInt64(ev.data[1]) | (UInt64(ev.data[2]) << 32)
         return Ptr{Cvoid}(u)
     end
 
@@ -38,12 +46,20 @@
     const EFD_NONBLOCK = Cint(0o4000)
 
     # Configuration constants
+    const MAX_EVENTS_INITIAL = 128
     const DEFAULT_TIMEOUT_MS = 100 * 1000  # 100 seconds in milliseconds
-    const MAX_EVENTS = 100
+    const MAX_EVENTS = 1024
+    const EWOULDBLOCK_RETRY_LIMIT = 32
 
     # Pipe fd indices
     const READ_FD = 1
     const WRITE_FD = 2
+
+    @enumx EpollEventThreadState::UInt8 begin
+        READY_TO_RUN = 0
+        RUNNING = 1
+        STOPPING = 2
+    end
 
     # fcntl flags (Linux)
     const O_NONBLOCK = Cint(0x0800)
@@ -74,6 +90,7 @@
         scheduler::TaskScheduler
         thread_created_on::Union{Nothing, ForeignThread}
         thread_joined_to::UInt64
+        thread_state::EpollEventThreadState.T
         @atomic running_thread_id::UInt64
         startup_event::Base.Threads.Event
         completion_event::Base.Threads.Event
@@ -81,14 +98,19 @@
         read_task_handle::IoHandle
         write_task_handle::IoHandle
         task_pre_queue_mutex::ReentrantLock
+        subscribed_handle_data_mutex::ReentrantLock
         task_pre_queue::Vector{ScheduledTask}
         task_pre_queue_spare::Vector{ScheduledTask}
         stop_task::Union{Nothing, ScheduledTask}
         @atomic stop_task_scheduled::Bool
         epoll_fd::Int32
+        event_wait_capacity::Int
         should_process_task_pre_queue::Bool
         should_continue::Bool
         use_eventfd::Bool  # true if using eventfd, false if using pipe
+        # Keep handle data alive across unsubscribe while kernel events drain.
+        # Key is the `objectid` of the subscribed `EpollEventHandleData` object.
+        subscribed_handle_data::Dict{UInt64, EpollEventHandleData}
     end
 
     function EpollEventLoop()
@@ -96,6 +118,7 @@
             TaskScheduler(),
             nothing,
             UInt64(0),
+            EpollEventThreadState.READY_TO_RUN,
             UInt64(0),
             Base.Threads.Event(),
             Base.Threads.Event(),
@@ -103,15 +126,45 @@
             IoHandle(),
             IoHandle(),
             ReentrantLock(),
+            ReentrantLock(),
             ScheduledTask[],
             ScheduledTask[],
             nothing,
             false,
             Int32(-1),
+            MAX_EVENTS_INITIAL,
             false,
             false,
             false,
+            Dict{UInt64, EpollEventHandleData}(),
         )
+    end
+
+    # Keep the relationship between `IoHandle.additional_data` (raw pointer) and
+    # `IoHandle.additional_ref` (GC root) explicit for epoll subscriptions.
+    @inline function epoll_store_handle_data!(handle::IoHandle, handle_data::EpollEventHandleData)::Nothing
+        handle.additional_ref = handle_data
+        handle.additional_data = pointer_from_objref(handle_data)
+        return nothing
+    end
+
+    @inline function epoll_release_handle_data!(handle::IoHandle)::Nothing
+        handle.additional_data = C_NULL
+        handle.additional_ref = nothing
+        return nothing
+    end
+
+    @inline function epoll_get_handle_data(handle::IoHandle)::EpollEventHandleData
+        if handle.additional_data == C_NULL || handle.additional_ref === nothing
+            throw_error(ERROR_IO_NOT_SUBSCRIBED)
+        end
+
+        event_data = handle.additional_ref
+        if !(event_data isa EpollEventHandleData)
+            throw_error(ERROR_INVALID_STATE)
+        end
+
+        return event_data
     end
 
 end # @static if Sys.islinux()

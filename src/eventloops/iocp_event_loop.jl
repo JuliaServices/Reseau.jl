@@ -324,7 +324,19 @@
                     # Note: Internal is an NTSTATUS-style status code (0 on success).
                     status_code = Int(entry.Internal)
                     bytes = Csize_t(entry.dwNumberOfBytesTransferred)
-                    cb(event_loop, op, status_code, bytes)
+                    try
+                        cb(event_loop, op, status_code, bytes)
+                    catch e
+                        logf(
+                            LogLevel.ERROR,
+                            LS_IO_EVENT_LOOP,
+                            "unhandled IOCP completion callback exception on fd ",
+                            Int(impl.iocp_handle),
+                            ": ",
+                            e,
+                            " ",
+                        )
+                    end
                 end
             else
                 # Timeout is a normal condition.

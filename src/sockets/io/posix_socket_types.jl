@@ -24,8 +24,10 @@ mutable struct PosixSocket
     written_task::Union{ScheduledTask, Nothing}  # nullable
     connect_args::Union{PosixSocketConnectArgs, Nothing}  # nullable
     written_task_scheduled::Bool
+    has_pending_readable_event::Bool
     currently_subscribed::Bool
     continue_accept::Bool
+    accept_retry_task::Union{ScheduledTask, Nothing}  # nullable
     close_happened::Union{Ref{Bool}, Nothing}  # nullable
     on_close_complete::Union{TaskFn, Nothing}
     on_cleanup_complete::Union{TaskFn, Nothing}
@@ -40,6 +42,8 @@ function PosixSocket()
         false,
         false,
         false,
+        false,
+        nothing,
         nothing,
         nothing,
         nothing,
