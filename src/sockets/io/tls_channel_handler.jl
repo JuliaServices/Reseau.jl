@@ -5,9 +5,9 @@ using LibAwsCommon
 using Libdl
 
 # TLS callback types — closures capture context for trim-safe dispatch
-# on_negotiation_result: (handler, slot, error_code) -> nothing
-# on_data_read: (handler, slot, buffer) -> nothing
-# on_error: (handler, slot, error_code, message) -> nothing
+# on_negotiation_result: (handler, pipeline, error_code) -> nothing
+# on_data_read: (handler, pipeline, buffer) -> nothing
+# on_error: (handler, pipeline, error_code, message) -> nothing
 
 const TLS_DEFAULT_TIMEOUT_MS = 10_000
 const TLS_MAX_RECORD_SIZE = 16 * 1024
@@ -1717,11 +1717,28 @@ end
 
 # Wire a TLS handler into the pipeline's closure chain.
 # Sets socket.read_fn/write_fn, registers shutdown closures, sets up backpressure.
+@inline function _insert_tls_shutdown_hooks!(ps::PipelineState, read_shutdown_fn, write_shutdown_fn)::Nothing
+    chain = ps.shutdown_chain
+    # Read shutdown flows left-to-right: socket -> TLS -> downstream handlers.
+    read_insert_idx = isempty(chain.read_shutdown_fns) ? 1 : 2
+    insert!(chain.read_shutdown_fns, read_insert_idx, read_shutdown_fn)
+    # Write shutdown flows right-to-left: downstream handlers -> TLS -> socket.
+    write_insert_idx = isempty(chain.write_shutdown_fns) ? 1 : length(chain.write_shutdown_fns)
+    insert!(chain.write_shutdown_fns, write_insert_idx, write_shutdown_fn)
+    return nothing
+end
+
 function _wire_tls_pipeline!(socket::Socket, ps::PipelineState, handler)
     # BYO crypto handlers manage their own pipeline integration;
     # skip platform-specific wiring so the handler can use the
     # default downstream_read_setter installed by socket_pipeline_init!.
     if _tls_byo_client_setup[] !== nothing || _tls_byo_server_setup[] !== nothing
+        # Keep generic TLS bootstrap semantics for backpressure-enabled channels:
+        # allow enough initial socket window for handshake traffic.
+        if ps.read_back_pressure_enabled
+            socket.downstream_window = Csize_t(TLS_EST_HANDSHAKE_SIZE + TLS_EST_RECORD_OVERHEAD)
+        end
+        ps.tls_handler = handler
         return nothing
     end
     @static if Sys.islinux()
@@ -1733,10 +1750,11 @@ function _wire_tls_pipeline!(socket::Socket, ps::PipelineState, handler)
             _s2n_process_write(handler, msg)
             return nothing
         end
-        push!(ps.shutdown_chain.read_shutdown_fns,
-            (err, scarce, on_complete) -> _s2n_read_shutdown(handler, err, scarce, on_complete))
-        pushfirst!(ps.shutdown_chain.write_shutdown_fns,
-            (err, scarce, on_complete) -> _s2n_write_shutdown(handler, err, scarce, on_complete))
+        _insert_tls_shutdown_hooks!(
+            ps,
+            (err, scarce, on_complete) -> _s2n_read_shutdown(handler, err, scarce, on_complete),
+            (err, scarce, on_complete) -> _s2n_write_shutdown(handler, err, scarce, on_complete),
+        )
         socket_window_fn = function(size::Csize_t)
             socket.downstream_window = add_size_saturating(socket.downstream_window, size)
             _socket_trigger_read(socket)
@@ -1751,10 +1769,11 @@ function _wire_tls_pipeline!(socket::Socket, ps::PipelineState, handler)
             _secure_transport_process_write(handler, msg)
             return nothing
         end
-        push!(ps.shutdown_chain.read_shutdown_fns,
-            (err, scarce, on_complete) -> _secure_transport_read_shutdown(handler, err, scarce, on_complete))
-        pushfirst!(ps.shutdown_chain.write_shutdown_fns,
-            (err, scarce, on_complete) -> _secure_transport_write_shutdown(handler, err, scarce, on_complete))
+        _insert_tls_shutdown_hooks!(
+            ps,
+            (err, scarce, on_complete) -> _secure_transport_read_shutdown(handler, err, scarce, on_complete),
+            (err, scarce, on_complete) -> _secure_transport_write_shutdown(handler, err, scarce, on_complete),
+        )
         socket_window_fn = function(size::Csize_t)
             socket.downstream_window = add_size_saturating(socket.downstream_window, size)
             _socket_trigger_read(socket)

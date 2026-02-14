@@ -178,12 +178,12 @@ end
 end
 
 # ── ProtocolNegotiatedCallable: trim-safe (Any, Any) -> Any ──
-# Covers: ALPN protocol callback (slot, protocol) -> new_handler_or_nothing.
+# Covers: ALPN protocol callback (pipeline, protocol) -> nothing.
 
 struct _ProtocolNegotiatedCallWrapper <: Function end
 
-function (::_ProtocolNegotiatedCallWrapper)(f::F, slot, protocol) where {F}
-    return f(slot, protocol)
+function (::_ProtocolNegotiatedCallWrapper)(f::F, pipeline, protocol) where {F}
+    return f(pipeline, protocol)
 end
 
 @generated function _protocol_negotiated_gen_fptr(::Type{F}) where F
@@ -205,8 +205,8 @@ function ProtocolNegotiatedCallable(callable::F) where F
     return ProtocolNegotiatedCallable(ptr, objptr, objref)
 end
 
-@inline function (f::ProtocolNegotiatedCallable)(slot, protocol)
-    return ccall(f.ptr, Any, (Ptr{Cvoid}, Any, Any), f.objptr, slot, protocol)
+@inline function (f::ProtocolNegotiatedCallable)(pipeline, protocol)
+    return ccall(f.ptr, Any, (Ptr{Cvoid}, Any, Any), f.objptr, pipeline, protocol)
 end
 
 # ── HostResolveCallback: typed resolver callback wrapper ──
@@ -243,8 +243,8 @@ end
 
 struct _TlsNegotiationResultCallbackWrapper <: Function end
 
-function (::_TlsNegotiationResultCallbackWrapper)(f::F, handler, slot, error_code::Int) where {F}
-    f(handler, slot, error_code)
+function (::_TlsNegotiationResultCallbackWrapper)(f::F, handler, pipeline, error_code::Int) where {F}
+    f(handler, pipeline, error_code)
     return nothing
 end
 
@@ -267,15 +267,15 @@ function TlsNegotiationResultCallback(callable::F) where F
     return TlsNegotiationResultCallback(ptr, objptr, objref)
 end
 
-@inline function (f::TlsNegotiationResultCallback)(handler, slot, error_code::Int)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int), f.objptr, handler, slot, error_code)
+@inline function (f::TlsNegotiationResultCallback)(handler, pipeline, error_code::Int)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int), f.objptr, handler, pipeline, error_code)
     return nothing
 end
 
 struct _TlsDataReadCallbackWrapper <: Function end
 
-function (::_TlsDataReadCallbackWrapper)(f::F, handler, slot, buffer) where {F}
-    f(handler, slot, buffer)
+function (::_TlsDataReadCallbackWrapper)(f::F, handler, pipeline, buffer) where {F}
+    f(handler, pipeline, buffer)
     return nothing
 end
 
@@ -298,15 +298,15 @@ function TlsDataReadCallback(callable::F) where F
     return TlsDataReadCallback(ptr, objptr, objref)
 end
 
-@inline function (f::TlsDataReadCallback)(handler, slot, buffer)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Any), f.objptr, handler, slot, buffer)
+@inline function (f::TlsDataReadCallback)(handler, pipeline, buffer)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Any), f.objptr, handler, pipeline, buffer)
     return nothing
 end
 
 struct _TlsErrorCallbackWrapper <: Function end
 
-function (::_TlsErrorCallbackWrapper)(f::F, handler, slot, error_code::Int, message) where {F}
-    f(handler, slot, error_code, message)
+function (::_TlsErrorCallbackWrapper)(f::F, handler, pipeline, error_code::Int, message) where {F}
+    f(handler, pipeline, error_code, message)
     return nothing
 end
 
@@ -329,8 +329,8 @@ function TlsErrorCallback(callable::F) where F
     return TlsErrorCallback(ptr, objptr, objref)
 end
 
-@inline function (f::TlsErrorCallback)(handler, slot, error_code::Int, message)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int, Any), f.objptr, handler, slot, error_code, message)
+@inline function (f::TlsErrorCallback)(handler, pipeline, error_code::Int, message)::Nothing
+    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int, Any), f.objptr, handler, pipeline, error_code, message)
     return nothing
 end
 

@@ -150,6 +150,25 @@ function _install_protocol_handler_from_socket(
     return nothing
 end
 
+@inline function _tls_handler_negotiated_protocol(handler)::ByteBuffer
+    if handler !== nothing && hasproperty(handler, :protocol)
+        protocol = getproperty(handler, :protocol)
+        protocol isa ByteBuffer && return protocol
+    end
+    return null_buffer()
+end
+
+function _install_protocol_handler_from_tls(
+        pipeline,
+        tls_handler,
+        on_protocol_negotiated::ProtocolNegotiatedCallable,
+    )::Nothing
+    protocol = _tls_handler_negotiated_protocol(tls_handler)
+    protocol.len == 0 && return nothing
+    on_protocol_negotiated(pipeline, protocol)
+    return nothing
+end
+
 # Connection request tracking
 mutable struct SocketConnectionRequest{PN, OC, OS, OD, TO}
     bootstrap::ClientBootstrap
@@ -754,6 +773,18 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
                 tls_options.on_negotiation_result(handler, pipeline, err)
             end
             if err == AWS_OP_SUCCESS
+                if request.on_protocol_negotiated !== nothing
+                    try
+                        _install_protocol_handler_from_tls(ps, handler, request.on_protocol_negotiated)
+                    catch e
+                        protocol_err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                        request.on_shutdown = nothing
+                        pipeline_shutdown!(ps, protocol_err)
+                        socket_close(socket)
+                        _connection_request_complete(request, protocol_err, nothing)
+                        return nothing
+                    end
+                end
                 _connection_request_complete(request, AWS_OP_SUCCESS, ps)
             else
                 request.on_shutdown = nothing
@@ -1364,6 +1395,16 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
                 tls_options.on_negotiation_result(handler, pipeline, err)
             end
             if err == AWS_OP_SUCCESS
+                if bootstrap.on_protocol_negotiated !== nothing
+                    try
+                        _install_protocol_handler_from_tls(ps, handler, bootstrap.on_protocol_negotiated)
+                    catch e
+                        protocol_err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                        pipeline_shutdown!(ps, protocol_err)
+                        socket_close(socket)
+                        return nothing
+                    end
+                end
                 ctx.setup_succeeded = true
                 _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, ps)
             else

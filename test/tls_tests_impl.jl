@@ -887,6 +887,7 @@ end
 
     tls_opts = Sockets.TlsConnectionOptions(ctx; server_name = "example.com")
     handler = Sockets.tls_client_handler_new(tls_opts, socket, ps)
+    Sockets.tls_client_handler_start_negotiation(handler)
     @test new_called[]
     @test start_called[]
     @test seen_socket[] === socket

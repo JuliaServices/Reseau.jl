@@ -112,9 +112,9 @@ mutable struct SecureTransportTlsState
     alpn_list::Union{String, Nothing}
     latest_message_on_completion::Union{EventCallable, Nothing}
     ca_certs::CFArrayRef
-    on_negotiation_result::Union{Function, Nothing}
-    on_data_read::Union{Function, Nothing}
-    on_error::Union{Function, Nothing}
+    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
+    on_data_read::Union{TlsDataReadCallback, Nothing}
+    on_error::Union{TlsErrorCallback, Nothing}
     advertise_alpn_message::Bool
     negotiation_finished::Bool
     verify_peer::Bool
