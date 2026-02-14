@@ -349,7 +349,7 @@ end
 
 @noinline function _socket_close_debug(
     socket::Socket,
-    stage::AbstractString;
+    stage::AbstractString,
     task_scheduled::Bool = false,
     task_invoked::Bool = false,
     task_done::Bool = false,
@@ -395,19 +395,20 @@ function socket_close(socket::Socket)::Nothing
     end
 
     if _socket_is_stopping(event_loop)
-        _socket_close_debug(socket, "cross-thread-stop-short-circuit"; task_scheduled = false)
-        close_error = nothing
+        _socket_close_debug(socket, "cross-thread-stop-short-circuit", false)
+        short_circuit_error::Union{Nothing, ReseauError} = nothing
         try
             socket_close_impl(socket.impl, socket)
         catch e
-            close_error = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
+            short_circuit_error = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
         end
 
-        if close_error !== nothing
+        if short_circuit_error !== nothing
+            short_circuit_err_code = (short_circuit_error::ReseauError).code
             logf(
                 LogLevel.WARN,
                 LS_IO_SOCKET,
-                "socket close short-circuited due shutdown with error code=" * string(close_error.code),
+                string("socket close short-circuited due shutdown with error code=", short_circuit_err_code),
             )
         end
 
@@ -420,11 +421,11 @@ function socket_close(socket::Socket)::Nothing
     close_result = Base.Channel{Union{Nothing, ReseauError}}(1)
     close_started = Ref(false)
 
-    _socket_close_debug(socket, "cross-thread-enter"; task_scheduled = false)
+    _socket_close_debug(socket, "cross-thread-enter", false)
 
     task = ScheduledTask(
         TaskFn(function(status)
-            error_code = nothing
+            task_error::Union{Nothing, ReseauError} = nothing
             should_close = false
             try
                 lock(close_lock) do
@@ -436,44 +437,50 @@ function socket_close(socket::Socket)::Nothing
                 _socket_close_debug(
                     socket,
                     "close-task-entered",
-                    task_scheduled = true,
-                    task_invoked = true,
+                    true,
+                    true,
                 )
 
                 if should_close
                     socket_close_impl(socket.impl, socket)
                 end
             catch e
-                error_code = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
+                task_error = e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN)
             end
 
-            close_error = error_code
+            debug_err_code::Union{Nothing, Int} =
+                task_error === nothing ? nothing : (task_error::ReseauError).code
             _socket_close_debug(
                 socket,
                 "close-task-complete",
-                task_invoked = true,
-                task_done = true,
-                err_code = close_error === nothing ? nothing : close_error.code,
+                false,
+                true,
+                true,
+                debug_err_code,
             )
-            put!(close_result, close_error)
+            put!(close_result, task_error)
             return nothing
         end);
         type_tag = "socket_close_on_event_loop",
     )
     event_loop_schedule_task_now!(event_loop, task)
 
-    _socket_close_debug(socket, "waiting-cross-thread-completion"; task_scheduled = true)
+    _socket_close_debug(socket, "waiting-cross-thread-completion", true)
     close_status = take!(close_result)
     _socket_close_debug(
         socket,
-        "cross-thread-complete"; task_scheduled = true, task_invoked = true, task_done = true,
+        "cross-thread-complete",
+        true,
+        true,
+        true,
     )
 
-    if (result = close_status) !== nothing
+    if close_status !== nothing
+        close_status_err_code = (close_status::ReseauError).code
         logf(
             LogLevel.WARN,
             LS_IO_SOCKET,
-            "socket close completed with error code=$((result::ReseauError).code)",
+            string("socket close completed with error code=", close_status_err_code),
         )
     end
 

@@ -1023,4 +1023,3 @@ function Base.unsafe_write(io::TCPSocket, p::Ptr{UInt8}, n::UInt)
     _write(io, data)
     return nbytes
 end
-

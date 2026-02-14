@@ -140,14 +140,10 @@ macro wrap_thread_fn(fndef)
             try
                 _ = thread_id
                 $(esc(body))
-            catch e
-                bt = catch_backtrace()
-                Core.print("foreign thread ($thread_id) errored: ")
-                Base.showerror(Core.stdout, e, bt)
-                Core.println()
-                if bt !== nothing
-                    Base.show_backtrace(Core.stdout, bt)
-                end
+            catch
+                # Keep thread entry error handling trim-safe. Detailed exception
+                # rendering routes through dynamic Base backtrace formatting paths.
+                Core.println("foreign thread errored")
             end
             return C_NULL
         end

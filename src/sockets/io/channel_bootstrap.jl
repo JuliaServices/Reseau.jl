@@ -720,7 +720,7 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
     end
 
     try
-        socket_pipeline_init!(socket, ps)
+        socket_pipeline_init!(socket, ps, 16384)
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(
@@ -739,6 +739,7 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
             ps.window_update_fn = function(size::Csize_t)
                 sock.downstream_window = add_size_saturating(sock.downstream_window, size)
                 _socket_trigger_read(sock)
+                return nothing
             end
         end
     end
@@ -1345,7 +1346,7 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
     end
 
     try
-        socket_pipeline_init!(socket, ps)
+        socket_pipeline_init!(socket, ps, 16384)
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(
@@ -1362,6 +1363,7 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
             ps.window_update_fn = function(size::Csize_t)
                 sock.downstream_window = add_size_saturating(sock.downstream_window, size)
                 _socket_trigger_read(sock)
+                return nothing
             end
         end
     end
