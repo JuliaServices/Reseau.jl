@@ -370,7 +370,7 @@ end
     scheduled_attempts = copy(request.connection_attempt_tasks)
     Sockets._connection_request_complete(request, Sockets.AWS_OP_SUCCESS, nothing)
     @test isempty(request.connection_attempt_tasks)
-    @test all(!task.scheduled for task in scheduled_attempts)
+    @test wait_for_pred(() -> all(!task.scheduled for task in scheduled_attempts))
 
     request = Sockets.SocketConnectionRequest{Nothing, Nothing, Sockets._SocketConnectionEventCallback, Nothing, Nothing}(
         client_bootstrap,
@@ -413,7 +413,7 @@ end
 
     Sockets._connection_request_complete(request, Sockets.AWS_OP_SUCCESS, nothing)
     @test isempty(request.connection_attempt_tasks)
-    @test all(!task.scheduled for task in single_family_attempts)
+    @test wait_for_pred(() -> all(!task.scheduled for task in single_family_attempts))
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
