@@ -13,7 +13,7 @@ function wait_for(predicate; timeout_s::Float64 = 5.0)
     return false
 end
 
-mutable struct TestReadHandler <: Sockets.AbstractChannelHandler
+mutable struct TestReadHandler
     slot::Union{Sockets.ChannelSlot, Nothing}
     received::Vector{UInt8}
     lock::ReentrantLock
@@ -36,9 +36,8 @@ function Sockets.handler_process_read_message(handler::TestReadHandler, slot::So
         Sockets.channel_slot_increment_read_window!(slot, message.message_data.len)
     end
 
-    if slot.channel !== nothing
-        Sockets.channel_release_message_to_pool!(slot.channel, message)
-    end
+    channel = Sockets.slot_channel_or_nothing(slot)
+    channel !== nothing && Sockets.channel_release_message_to_pool!(channel, message)
     return nothing
 end
 

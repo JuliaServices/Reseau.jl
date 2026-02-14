@@ -242,7 +242,7 @@ mutable struct Socket
     options::SocketOptions
     io_handle::IoHandle
     event_loop::Union{EventLoop, Nothing}
-    handler::Union{AbstractChannelHandler, Nothing}
+    handler::Any
     state::SocketState.T
     readable_fn::Union{EventCallable, Nothing}
     connection_result_fn::Union{EventCallable, Nothing}

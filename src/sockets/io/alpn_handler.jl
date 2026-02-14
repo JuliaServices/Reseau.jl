@@ -1,7 +1,7 @@
 # AWS IO Library - ALPN Handler
 # Port of aws-c-io/source/alpn_handler.c
 
-mutable struct AlpnHandler <: AbstractChannelHandler
+mutable struct AlpnHandler
     slot::Union{ChannelSlot, Nothing}
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
 end
@@ -42,13 +42,13 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
         throw_error(ERROR_IO_MISSING_ALPN_MESSAGE)
     end
     protocol_str = byte_buffer_as_string(protocol)
-    chan = slot.channel
+    chan = slot_channel_or_nothing(slot)
     chan_id = chan === nothing ? -1 : chan.channel_id
     logf(
         LogLevel.DEBUG,
         LS_IO_ALPN,string("ALPN negotiated protocol: %s (channel %d)", " ", string(isempty(protocol_str) ? "<empty>" : protocol_str), " ", string(chan_id), " ", ))
 
-    channel = slot.channel
+    channel = slot_channel_or_nothing(slot)
     if channel === nothing
         throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
     end

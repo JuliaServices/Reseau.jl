@@ -108,10 +108,10 @@ end
             end
 
             deadline = Base.time_ns() + 1_000_000_000
-            while channel.channel_state != Sockets.ChannelState.SHUT_DOWN && Base.time_ns() < deadline
+            while channel.channel_state != Sockets.ChannelLifecycleState.SHUT_DOWN && Base.time_ns() < deadline
                 yield()
             end
-            @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
+            @test channel.channel_state == Sockets.ChannelLifecycleState.SHUT_DOWN
 
             EventLoops.event_loop_destroy!(el)
         end

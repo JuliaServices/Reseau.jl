@@ -11,9 +11,9 @@ export
 
 mutable struct TCPSocket <: IO
     channel::Union{Channel, Nothing}
-    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
+    slot::Union{ChannelSlot, Nothing}
     socket::Union{Socket, Nothing}
-    handler::Union{AbstractChannelHandler, Nothing}
+    handler::Any
     host::String
     port::Int
     is_local::Bool
@@ -37,8 +37,8 @@ mutable struct TCPSocket <: IO
     connect_error::Int
 end
 
-mutable struct _TCPSocketHandler <: AbstractChannelHandler
-    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
+mutable struct _TCPSocketHandler
+    slot::Union{ChannelSlot, Nothing}
     io::TCPSocket
 end
 
@@ -134,11 +134,10 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
     io.channel = channel
     io.slot = slot
     io.handler = handler
-    first_slot = channel_first_slot(channel)
-    if first_slot !== nothing && first_slot.handler isa SocketChannelHandler
-        io.socket = socket_channel_handler_get_socket(first_slot.handler)
+    if channel.socket !== nothing
+        io.socket = channel.socket
     end
-    channel.channel_state == ChannelState.ACTIVE && channel_trigger_read(channel)
+    channel.channel_state == ChannelLifecycleState.ACTIVE && channel_trigger_read(channel)
     return nothing
 end
 
@@ -655,8 +654,9 @@ function tlsupgrade!(
         _ = handler
         _ = ud
         negotiation_error[] = err
-        if err == AWS_OP_SUCCESS && slot !== nothing && slot.channel !== nothing
-            channel_trigger_read(slot.channel)
+        if err == AWS_OP_SUCCESS && slot !== nothing
+            channel = slot_channel_or_nothing(slot)
+            channel !== nothing && channel_trigger_read(channel)
         end
         notify(negotiation_event)
         return nothing
@@ -1012,7 +1012,8 @@ function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelS
             unlock(io.cond)
         end
     end
-    slot.channel !== nothing && channel_release_message_to_pool!(slot.channel, message)
+    channel = slot_channel_or_nothing(slot)
+    channel !== nothing && channel_release_message_to_pool!(channel, message)
     return nothing
 end
 

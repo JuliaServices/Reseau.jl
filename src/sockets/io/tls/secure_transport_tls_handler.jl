@@ -350,7 +350,7 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
     handler.protocol.len == 0 && return nothing
-    channel = slot.channel
+    channel = slot_channel_or_nothing(slot)
     channel === nothing && return nothing
 
     message = channel_acquire_message_from_pool(
@@ -551,9 +551,9 @@ function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, le
     requested = unsafe_load(len_ptr)
     slot_any = handler.slot
     slot_any === nothing && return _errSSLClosedNoNotify
-    slot = slot_any::ChannelSlot{Union{Channel, Nothing}}
-    channel = slot.channel
-    channel isa Channel || return _errSSLClosedNoNotify
+    slot = slot_any::ChannelSlot
+    channel = slot_channel_or_nothing(slot)
+    channel === nothing && return _errSSLClosedNoNotify
 
     processed = Csize_t(0)
     while processed < requested
@@ -648,7 +648,8 @@ function _secure_transport_initialize_read_delay_shutdown(handler::SecureTranspo
     if !handler.read_task_pending
         handler.read_task_pending = true
         channel_task_init!(handler.read_task, EventCallable(s -> _secure_transport_read_task(handler, _coerce_task_status(s))), "secure_transport_read_on_delay_shutdown")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
+        channel = slot_channel_or_nothing(slot)
+        channel !== nothing && channel_schedule_task_now!(channel, handler.read_task)
     end
     return nothing
 end
@@ -696,6 +697,9 @@ function handler_process_read_message(
         slot::ChannelSlot,
         message::Union{IoMessage, Nothing},
     )::Nothing
+    channel = slot_channel_or_nothing(slot)
+    channel === nothing && return nothing
+
     if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
         message !== nothing && message.owning_channel isa Channel && channel_release_message_to_pool!(message.owning_channel, message)
         return nothing
@@ -713,7 +717,7 @@ function handler_process_read_message(
                 negotiation_failed = true
             end
             if negotiation_failed
-                channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                channel_shutdown!(channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 return nothing
             end
             channel_slot_increment_read_window!(slot, message_len)
@@ -734,7 +738,7 @@ function handler_process_read_message(
 
     while processed < downstream_window
         outgoing = channel_acquire_message_from_pool(
-            slot.channel,
+            channel,
             IoMessageType.APPLICATION_DATA,
             downstream_window - processed,
         )
@@ -764,15 +768,15 @@ function handler_process_read_message(
                     channel_slot_send_message(slot, outgoing, ChannelDirection.READ)
                 catch e
                     e isa ReseauError || rethrow()
-                    channel_release_message_to_pool!(slot.channel, outgoing)
+                    channel_release_message_to_pool!(channel, outgoing)
                     shutdown_error_code = e.code
                     break
                 end
             else
-                channel_release_message_to_pool!(slot.channel, outgoing)
+                channel_release_message_to_pool!(channel, outgoing)
             end
         else
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            channel_release_message_to_pool!(channel, outgoing)
         end
 
         if status == _errSSLWouldBlock
@@ -808,7 +812,7 @@ function handler_process_read_message(
                 false,
             )
         else
-            channel_shutdown!(slot.channel, shutdown_error_code)
+            channel_shutdown!(channel, shutdown_error_code)
         end
     end
 
@@ -853,7 +857,8 @@ function handler_process_write_message(
         throw_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
     end
 
-    channel_release_message_to_pool!(slot.channel, message)
+    channel = slot_channel_or_nothing(slot)
+    channel !== nothing && channel_release_message_to_pool!(channel, message)
     return nothing
 end
 
@@ -916,7 +921,8 @@ function handler_increment_read_window(
     if handler.negotiation_finished && !handler.read_task_pending
         handler.read_task_pending = true
         channel_task_init!(handler.read_task, EventCallable(s -> _secure_transport_read_task(handler, _coerce_task_status(s))), "secure_transport_read_on_window_increment")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
+        channel = slot_channel_or_nothing(slot)
+        channel !== nothing && channel_schedule_task_now!(channel, handler.read_task)
     end
 
     return nothing

@@ -1,6 +1,6 @@
 using Reseau
 
-mutable struct ReadWriteTestHandler{FRead, FWrite, SlotRef <: Union{Sockets.ChannelSlot, Nothing}} <: Sockets.AbstractChannelHandler
+mutable struct ReadWriteTestHandler{FRead, FWrite, SlotRef <: Union{Sockets.ChannelSlot, Nothing}}
     slot::SlotRef
     on_read::FRead
     on_write::FWrite
@@ -50,6 +50,8 @@ function rw_handler_new(on_read, on_write, event_loop_driven::Bool, window::Inte
     )
 end
 
+@inline _slot_channel(slot::Sockets.ChannelSlot) = Sockets.slot_channel_or_nothing(slot)
+
 function Sockets.setchannelslot!(handler::ReadWriteTestHandler, slot::Sockets.ChannelSlot)::Nothing
     handler.slot = slot
     return nothing
@@ -72,13 +74,13 @@ function Sockets.handler_process_read_message(
     )::Nothing
     next_data = handler.on_read(handler, slot, message.message_data, handler.ctx)
 
-    if slot.channel !== nothing
-        Sockets.channel_release_message_to_pool!(slot.channel, message)
-    end
+    channel = _slot_channel(slot)
+    channel !== nothing && Sockets.channel_release_message_to_pool!(channel, message)
 
     if slot.adj_right !== nothing && next_data !== nothing
+        channel === nothing && Reseau.throw_error(Reseau.ERROR_INVALID_STATE)
         msg = Sockets.channel_acquire_message_from_pool(
-            slot.channel,
+            channel,
             EventLoops.IoMessageType.APPLICATION_DATA,
             Int(next_data.len),
         )
@@ -101,13 +103,13 @@ function Sockets.handler_process_write_message(
     )::Nothing
     next_data = handler.on_write(handler, slot, message.message_data, handler.ctx)
 
-    if slot.channel !== nothing
-        Sockets.channel_release_message_to_pool!(slot.channel, message)
-    end
+    channel = _slot_channel(slot)
+    channel !== nothing && Sockets.channel_release_message_to_pool!(channel, message)
 
     if slot.adj_left !== nothing && next_data !== nothing
+        channel === nothing && Reseau.throw_error(Reseau.ERROR_INVALID_STATE)
         msg = Sockets.channel_acquire_message_from_pool(
-            slot.channel,
+            channel,
             EventLoops.IoMessageType.APPLICATION_DATA,
             Int(next_data.len),
         )
@@ -196,9 +198,11 @@ function _rw_handler_write_now(
     )
     remaining = Int(buffer.len)
     cursor_ref = Ref(Reseau.byte_cursor_from_buf(buffer))
+    channel = _slot_channel(slot)
+    channel === nothing && return Reseau.ERROR_INVALID_STATE
     while remaining > 0
         msg = Sockets.channel_acquire_message_from_pool(
-            slot.channel,
+            channel,
             EventLoops.IoMessageType.APPLICATION_DATA,
             remaining,
         )
@@ -230,7 +234,9 @@ function rw_handler_write_with_callback(
         on_completion,
         user_data,
     )
-    if !handler.event_loop_driven || Sockets.channel_thread_is_callers_thread(slot.channel)
+    channel = _slot_channel(slot)
+    channel === nothing && return Reseau.ERROR_INVALID_STATE
+    if !handler.event_loop_driven || Sockets.channel_thread_is_callers_thread(channel)
         return _rw_handler_write_now(slot, buffer, on_completion, user_data)
     end
 
@@ -242,15 +248,17 @@ function rw_handler_write_with_callback(
         end
         nothing
     end), "rw_handler_write")
-    Sockets.channel_schedule_task_now!(slot.channel, task)
+    Sockets.channel_schedule_task_now!(channel, task)
     return nothing
 end
 
 function rw_handler_trigger_read(handler::ReadWriteTestHandler, slot::Sockets.ChannelSlot)
     next_data = handler.on_read(handler, slot, nothing, handler.ctx)
     next_data === nothing && return nothing
+    channel = _slot_channel(slot)
+    channel === nothing && return nothing
     msg = Sockets.channel_acquire_message_from_pool(
-        slot.channel,
+        channel,
         EventLoops.IoMessageType.APPLICATION_DATA,
         Int(next_data.len),
     )
@@ -274,7 +282,9 @@ function rw_handler_trigger_increment_read_window(
         window_update::Integer,
     )
     update = Csize_t(window_update)
-    if !handler.event_loop_driven || Sockets.channel_thread_is_callers_thread(slot.channel)
+    channel = _slot_channel(slot)
+    channel === nothing && return Reseau.ERROR_INVALID_STATE
+    if !handler.event_loop_driven || Sockets.channel_thread_is_callers_thread(channel)
         handler.window = Reseau.add_size_saturating(handler.window, update)
         return Sockets.channel_slot_increment_read_window!(slot, update)
     end
@@ -288,7 +298,7 @@ function rw_handler_trigger_increment_read_window(
         end
         nothing
     end), "increment_read_window_task")
-    Sockets.channel_schedule_task_now!(slot.channel, task)
+    Sockets.channel_schedule_task_now!(channel, task)
     return nothing
 end
 

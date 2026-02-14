@@ -142,18 +142,15 @@ function _tls_byo_new_handler(
         setup::TlsByoCryptoSetupOptions,
         options,
         slot::ChannelSlot,
-    )::AbstractChannelHandler
+    )
     handler = setup.new_handler_fn(options, slot, setup.user_data)
-    if !(handler isa AbstractChannelHandler)
-        throw_error(ERROR_INVALID_STATE)
-    end
     channel_slot_set_handler!(slot, handler)
     return handler
 end
 
 function _tls_byo_start_negotiation(
         setup::TlsByoCryptoSetupOptions,
-        handler::AbstractChannelHandler,
+        handler,
     )::Nothing
     if setup.start_negotiation_fn === nothing
         throw_error(ERROR_INVALID_STATE)
@@ -807,8 +804,9 @@ function _tls_key_operation_completion_task(operation::TlsKeyOperation, status::
         _ = _s2n_drive_negotiation(handler)
     else
         slot = handler.slot
-        if slot !== nothing && slot.channel !== nothing
-            channel_shutdown!(slot.channel, operation.completion_error_code)
+        if slot !== nothing
+            channel = slot_channel_or_nothing(slot)
+            channel !== nothing && channel_shutdown!(channel, operation.completion_error_code)
         end
     end
 
@@ -868,13 +866,16 @@ function _tls_key_operation_complete_common(
 
     if operation.s2n_op != C_NULL && operation.s2n_handler !== nothing
         handler = operation.s2n_handler
-        if handler isa S2nTlsHandler && handler.slot !== nothing && handler.slot.channel !== nothing
-            channel_task_init!(
-                operation.completion_task,
-                EventCallable(s -> _tls_key_operation_completion_task(operation, _coerce_task_status(s))),
-                "tls_key_operation_completion_task",
-            )
-            channel_schedule_task_now!(handler.slot.channel, operation.completion_task)
+        if handler isa S2nTlsHandler && handler.slot !== nothing
+            channel = slot_channel_or_nothing(handler.slot)
+            if channel !== nothing
+                channel_task_init!(
+                    operation.completion_task,
+                    EventCallable(s -> _tls_key_operation_completion_task(operation, _coerce_task_status(s))),
+                    "tls_key_operation_completion_task",
+                )
+                channel_schedule_task_now!(channel, operation.completion_task)
+            end
         end
     end
 
@@ -1486,7 +1487,7 @@ struct TlsNegotiatedProtocolMessage
 end
 
 # TLS handler base type
-abstract type TlsChannelHandler <: AbstractChannelHandler end
+abstract type TlsChannelHandler end
 
 function _tls_timeout_task(handler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
@@ -1494,7 +1495,7 @@ function _tls_timeout_task(handler, status::TaskStatus.T)
     handler.stats.handshake_status == TlsNegotiationStatus.ONGOING || return nothing
     slot = handler.slot
     slot === nothing && return nothing
-    channel = slot.channel
+    channel = slot_channel_or_nothing(slot)
     channel === nothing && return nothing
     channel_shutdown!(channel, ERROR_IO_TLS_NEGOTIATION_TIMEOUT)
     return nothing
@@ -1505,7 +1506,7 @@ function tls_on_drive_negotiation(handler::TlsChannelHandler)
         handler.stats.handshake_status = TlsNegotiationStatus.ONGOING
         slot = handler.slot
         slot === nothing && return nothing
-        channel = slot.channel
+        channel = slot_channel_or_nothing(slot)
         channel === nothing && return nothing
         now = channel_current_clock_time(channel)
         handler.stats.handshake_start_ns = now
@@ -1523,7 +1524,7 @@ function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::In
         error_code == AWS_OP_SUCCESS ? TlsNegotiationStatus.SUCCESS : TlsNegotiationStatus.FAILURE
     slot = handler.slot
     slot === nothing && return nothing
-    channel = slot.channel
+    channel = slot_channel_or_nothing(slot)
     channel === nothing && return nothing
     now = channel_current_clock_time(channel)
     handler.stats.handshake_end_ns = now
@@ -1604,7 +1605,7 @@ end
 function tls_client_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::AbstractChannelHandler
+    )
     if options.ctx.options.is_server
         throw_error(ERROR_INVALID_ARGUMENT)
     end
@@ -1625,7 +1626,7 @@ end
 function tls_server_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::AbstractChannelHandler
+    )
     if !options.ctx.options.is_server
         throw_error(ERROR_INVALID_ARGUMENT)
     end
@@ -1643,7 +1644,7 @@ function tls_server_handler_new(
     end
 end
 
-function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)::Nothing
+function tls_client_handler_start_negotiation(handler)::Nothing
     if _tls_byo_client_setup[] !== nothing
         _tls_byo_start_negotiation(_tls_byo_client_setup[], handler)
         return nothing
@@ -1653,23 +1654,27 @@ function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)::
         if !(handler isa S2nTlsHandler)
             throw_error(ERROR_INVALID_STATE)
         end
-        if handler.slot !== nothing && handler.slot.channel !== nothing && channel_thread_is_callers_thread(handler.slot.channel)
+        channel = handler.slot === nothing ? nothing : slot_channel_or_nothing(handler.slot)
+        if channel !== nothing && channel_thread_is_callers_thread(channel)
             _ = _s2n_drive_negotiation(handler)
             return nothing
         end
         channel_task_init!(handler.negotiation_task, EventCallable(s -> _s2n_negotiation_task(handler, _coerce_task_status(s))), "s2n_channel_handler_negotiation")
-        channel_schedule_task_now!(handler.slot.channel, handler.negotiation_task)
+        channel === nothing && throw_error(ERROR_INVALID_STATE)
+        channel_schedule_task_now!(channel, handler.negotiation_task)
         return nothing
     elseif Sys.isapple()
         if !(handler isa SecureTransportTlsHandler)
             throw_error(ERROR_INVALID_STATE)
         end
-        if handler.slot !== nothing && handler.slot.channel !== nothing && channel_thread_is_callers_thread(handler.slot.channel)
+        channel = handler.slot === nothing ? nothing : slot_channel_or_nothing(handler.slot)
+        if channel !== nothing && channel_thread_is_callers_thread(channel)
             _secure_transport_drive_negotiation(handler)
             return nothing
         end
         channel_task_init!(handler.negotiation_task, EventCallable(s -> _secure_transport_negotiation_task(handler, _coerce_task_status(s))), "secure_transport_channel_handler_start_negotiation")
-        channel_schedule_task_now!(handler.slot.channel, handler.negotiation_task)
+        channel === nothing && throw_error(ERROR_INVALID_STATE)
+        channel_schedule_task_now!(channel, handler.negotiation_task)
         return nothing
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -1699,11 +1704,11 @@ end
 function tls_channel_handler_new!(
         channel::Channel,
         options::TlsConnectionOptions,
-    )::AbstractChannelHandler
+    )
     channel.last === nothing && throw_error(ERROR_INVALID_STATE)
 
     tls_slot = ChannelSlot()
-    tls_slot.channel = channel
+    tls_slot.state = channel.state
 
     handler = options.ctx.options.is_server ?
         tls_server_handler_new(options, tls_slot) :
@@ -1718,12 +1723,12 @@ end
 function channel_setup_client_tls(
         right_of_slot::ChannelSlot,
         options::TlsConnectionOptions,
-    )::AbstractChannelHandler
-    channel = right_of_slot.channel
+    )
+    channel = slot_channel_or_nothing(right_of_slot)
     channel === nothing && throw_error(ERROR_INVALID_STATE)
 
     tls_slot = ChannelSlot()
-    tls_slot.channel = channel
+    tls_slot.state = channel.state
 
     handler = tls_client_handler_new(options, tls_slot)
 

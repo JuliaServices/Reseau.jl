@@ -349,12 +349,14 @@ function _s2n_generic_read(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
 end
 
 function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UInt32)::Cint
-    channel = handler.slot === nothing ? nothing : handler.slot.channel
+    slot = handler.slot
+    slot === nothing && return Cint(-1)
+    channel = slot_channel_or_nothing(slot)
     channel === nothing && return Cint(-1)
     processed = 0
 
     while processed < len
-        overhead = channel_slot_upstream_message_overhead(handler.slot)
+        overhead = channel_slot_upstream_message_overhead(slot)
         message_size_hint = Csize_t(len - processed) + overhead
         message = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, message_size_hint)
         message === nothing && return Cint(-1)
@@ -428,7 +430,7 @@ function _s2n_send_alpn_message(handler::S2nTlsHandler)
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
     handler.protocol.len == 0 && return nothing
-    channel = slot.channel
+    channel = slot_channel_or_nothing(slot)
     channel === nothing && return nothing
 
     message = channel_acquire_message_from_pool(
@@ -545,7 +547,8 @@ function _s2n_initialize_read_delay_shutdown(handler::S2nTlsHandler, slot::Chann
     if !handler.read_task_pending
         handler.read_task_pending = true
         channel_task_init!(handler.read_task, EventCallable(s -> _s2n_read_task(handler, _coerce_task_status(s))), "s2n_read_on_delay_shutdown")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
+        channel = slot_channel_or_nothing(slot)
+        channel !== nothing && channel_schedule_task_now!(channel, handler.read_task)
     end
     return nothing
 end
@@ -554,8 +557,10 @@ function _s2n_do_delayed_shutdown(handler::S2nTlsHandler, slot::ChannelSlot, err
     handler.shutdown_error_code = error_code
     _s2n_lib_handle()
     delay = ccall(_s2n_symbol(:s2n_connection_get_delay), UInt64, (Ptr{Cvoid},), handler.connection)
-    now = channel_current_clock_time(slot.channel)
-    channel_schedule_task_future!(slot.channel, handler.delayed_shutdown_task, now + delay)
+    channel = slot_channel_or_nothing(slot)
+    channel === nothing && return nothing
+    now = channel_current_clock_time(channel)
+    channel_schedule_task_future!(channel, handler.delayed_shutdown_task, now + delay)
     return nothing
 end
 
@@ -686,6 +691,9 @@ function handler_process_read_message(
         slot::ChannelSlot,
         message::Union{IoMessage, Nothing},
     )::Nothing
+    channel = slot_channel_or_nothing(slot)
+    channel === nothing && return nothing
+
     if handler.read_state == TlsHandlerReadState.SHUT_DOWN_COMPLETE
         message !== nothing && message.owning_channel isa Channel && channel_release_message_to_pool!(message.owning_channel, message)
         return nothing
@@ -704,7 +712,7 @@ function handler_process_read_message(
                 _s2n_drive_negotiation(handler)
             catch e
                 e isa ReseauError || rethrow()
-                channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+                channel_shutdown!(channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 return nothing
             end
             channel_slot_increment_read_window!(slot, message_len)
@@ -727,7 +735,7 @@ function handler_process_read_message(
 
     while processed < downstream_window
         outgoing = channel_acquire_message_from_pool(
-            slot.channel,
+            channel,
             IoMessageType.APPLICATION_DATA,
             downstream_window - processed,
         )
@@ -745,13 +753,13 @@ function handler_process_read_message(
         )
 
         if read_val == 0
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            channel_release_message_to_pool!(channel, outgoing)
             force_shutdown = true
             break
         end
 
         if read_val < 0
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            channel_release_message_to_pool!(channel, outgoing)
             err_type = _s2n_error_get_type(_s2n_errno())
             if err_type == S2N_ERR_T_BLOCKED
                 if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
@@ -778,12 +786,12 @@ function handler_process_read_message(
                 channel_slot_send_message(slot, outgoing, ChannelDirection.READ)
             catch e
                 e isa ReseauError || rethrow()
-                channel_release_message_to_pool!(slot.channel, outgoing)
+                channel_release_message_to_pool!(channel, outgoing)
                 shutdown_error_code = e.code
                 break
             end
         else
-            channel_release_message_to_pool!(slot.channel, outgoing)
+            channel_release_message_to_pool!(channel, outgoing)
         end
     end
 
@@ -801,7 +809,7 @@ function handler_process_read_message(
                 false,
             )
         else
-            channel_shutdown!(slot.channel, shutdown_error_code)
+            channel_shutdown!(channel, shutdown_error_code)
         end
     end
 
@@ -847,7 +855,8 @@ function handler_process_write_message(
         throw_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
     end
 
-    channel_release_message_to_pool!(slot.channel, message)
+    channel = slot_channel_or_nothing(slot)
+    channel !== nothing && channel_release_message_to_pool!(channel, message)
     return nothing
 end
 
@@ -914,7 +923,8 @@ function handler_increment_read_window(
     if handler.state == TlsNegotiationState.SUCCEEDED && !handler.read_task_pending
         handler.read_task_pending = true
         channel_task_init!(handler.read_task, EventCallable(s -> _s2n_read_task(handler, _coerce_task_status(s))), "s2n_read_on_window_increment")
-        channel_schedule_task_now!(slot.channel, handler.read_task)
+        channel = slot_channel_or_nothing(slot)
+        channel !== nothing && channel_schedule_task_now!(channel, handler.read_task)
     end
 
     return nothing

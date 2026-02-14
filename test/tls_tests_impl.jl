@@ -818,7 +818,7 @@ end
     EventLoops.event_loop_group_destroy!(elg)
 end
 
-mutable struct EchoHandler <: Sockets.AbstractChannelHandler
+mutable struct EchoHandler
     slot::Union{Sockets.ChannelSlot, Nothing}
     saw_ping::Base.RefValue{Bool}
 end
@@ -828,7 +828,7 @@ function EchoHandler(flag::Base.RefValue{Bool})
 end
 
 function Sockets.handler_process_read_message(handler::EchoHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
-    channel = slot.channel
+    channel = Sockets.slot_channel_or_nothing(slot)
     buf = message.message_data
     payload = String(Reseau.byte_cursor_from_buf(buf))
     if payload == "ping"
@@ -886,17 +886,15 @@ function SinkHandler()
 end
 
 function Sockets.handler_process_read_message(handler::SinkHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
-    if slot.channel !== nothing
-        Sockets.channel_release_message_to_pool!(slot.channel, message)
-    end
+    channel = Sockets.slot_channel_or_nothing(slot)
+    channel !== nothing && Sockets.channel_release_message_to_pool!(channel, message)
     return nothing
 end
 
 function Sockets.handler_process_write_message(handler::SinkHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
     handler.writes[] += 1
-    if slot.channel !== nothing
-        Sockets.channel_release_message_to_pool!(slot.channel, message)
-    end
+    channel = Sockets.slot_channel_or_nothing(slot)
+    channel !== nothing && Sockets.channel_release_message_to_pool!(channel, message)
     return nothing
 end
 
@@ -991,7 +989,7 @@ end
 
     tls_opts = Sockets.TlsConnectionOptions(ctx; server_name = "example.com")
     handler = Sockets.channel_setup_client_tls(left_slot, tls_opts)
-    @test handler isa Sockets.AbstractChannelHandler
+    @test handler isa Sockets.TlsChannelHandler
     @test new_called[]
     @test start_called[]
     @test seen_slot[] === left_slot.adj_right
@@ -1015,7 +1013,7 @@ end
                 Sockets.TlsConnectionOptions(server_ctx),
                 server_slot,
             )
-            @test server_handler isa Sockets.AbstractChannelHandler
+            @test server_handler isa Sockets.TlsChannelHandler
             @test server_new_called[]
             @test server_seen_slot[] === server_slot
             @test server_seen_ud[] == 99
@@ -1163,7 +1161,7 @@ end
     mark_tls_handler_negotiated!(handler)
 
     Sockets.handler_shutdown(handler, slot, Sockets.ChannelDirection.WRITE, 0, false)
-    @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
+    @test channel.channel_state == Sockets.ChannelLifecycleState.SHUT_DOWN
 
     EventLoops.event_loop_group_destroy!(elg)
 end
@@ -1575,9 +1573,8 @@ end
                 try
                     Sockets.handler_process_write_message(send_args.handler, send_args.slot, send_args.message)
                 catch e
-                    if send_args.slot.channel !== nothing
-                        Sockets.channel_release_message_to_pool!(send_args.slot.channel, send_args.message)
-                    end
+                    channel = Sockets.slot_channel_or_nothing(send_args.slot)
+                    channel !== nothing && Sockets.channel_release_message_to_pool!(channel, send_args.message)
                 end
             end
             nothing
@@ -2648,7 +2645,7 @@ end
         return isready(ch)
     end
 
-    mutable struct FakeSocketStatsHandler <: Sockets.AbstractChannelHandler
+    mutable struct FakeSocketStatsHandler
         stats::Sockets.SocketHandlerStatistics
     end
 

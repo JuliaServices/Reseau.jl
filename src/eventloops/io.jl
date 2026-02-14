@@ -228,9 +228,6 @@ end
 
 io_handle_is_valid(handle::IoHandle) = handle.fd >= 0 || handle.handle != C_NULL
 
-# Forward declarations for types defined in other io files
-abstract type AbstractChannelHandler end
-
 # IO Message - data unit flowing through channel pipeline
 mutable struct IoMessage
     message_data::ByteBuffer

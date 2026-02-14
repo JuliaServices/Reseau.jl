@@ -1,7 +1,7 @@
 using Test
 using Reseau
 
-mutable struct TestingChannelHandler{SlotRef <: Union{Sockets.ChannelSlot, Nothing}} <: Sockets.AbstractChannelHandler
+mutable struct TestingChannelHandler{SlotRef <: Union{Sockets.ChannelSlot, Nothing}}
     slot::SlotRef
     messages::Vector{EventLoops.IoMessage}
     latest_window_update::Csize_t
@@ -38,7 +38,13 @@ function Sockets.handler_process_write_message(
     )
     push!(handler.messages, message)
     if handler.complete_write_immediately && message.on_completion !== nothing && slot.adj_left === nothing
-        Base.invokelatest(message.on_completion, slot.channel, message, handler.complete_write_error_code, message.user_data)
+        Base.invokelatest(
+            message.on_completion,
+            Sockets.slot_channel_or_nothing(slot),
+            message,
+            handler.complete_write_error_code,
+            message.user_data,
+        )
         message.on_completion = nothing
     end
     return nothing
