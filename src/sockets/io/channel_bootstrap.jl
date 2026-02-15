@@ -618,7 +618,7 @@ function _initiate_socket_connect(request::R, address::HostAddress) where {R <: 
 end
 
 # Callback when socket connect completes
-function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::SocketConnectionAttempt)
+function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::SocketConnectionAttempt)::Nothing
     request = attempt.request
 
     if error_code != AWS_OP_SUCCESS
@@ -658,7 +658,7 @@ function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::S
     request.socket = socket
 
     # Create channel for this connection
-    _setup_client_channel(request)
+    _setup_client_channel(request)::Nothing
 
     return nothing
 end

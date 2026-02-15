@@ -1,37 +1,56 @@
 # Trim Echo Goal
 
-This directory is for validating a fully compiled executable using Julia's `juliac` flow with safe trimming.
+This directory tracks trim-verification progress for compiling a minimal Reseau echo executable.
 
 ## Objective
 
-Compile and run a minimal echo program using only `Reseau` socket constructs (`TCPServer` + `TCPSocket`) with:
+Compile and run `trim/echo_trim_safe.jl` as a native executable using `JuliaC.jl` with trim-safe mode.
 
-- `@main` entrypoint
-- `--experimental`
-- `--trim=safe`
-- executable output (not just script execution)
+The script should:
 
-Expected behavior of the script:
+1. Start a `TCPServer` on an ephemeral local port.
+2. Connect a `TCPSocket` client.
+3. Send `"hello"` from client to server.
+4. Echo `"hello"` back from server to client.
+5. Validate the echoed payload on the client.
 
-1. Start a `TCPServer` on any available local port.
-2. Connect a `TCPSocket` client to that port.
-3. Client sends `"hello"`.
-4. Server reads `"hello"` and writes `"hello"` back.
-5. Client reads response and verifies it is `"hello"`.
+## Tooling
 
-## Compilation Command
+Use the official JuliaC package (`https://github.com/JuliaLang/JuliaC.jl`) instead of `~/julia/contrib/juliac/juliac.jl`.
 
-Run from the repository root:
+## Recommended Compile Command
+
+Run from repository root:
 
 ```sh
-JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no \
-  ~/julia/contrib/juliac/juliac.jl \
-  --output-exe trim/echo_trim_safe \
+JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no --project -e 'using JuliaC; JuliaC.main(ARGS)' -- \
+  --output-exe echo_trim_safe \
   --project=. \
   --experimental --trim=safe \
   trim/echo_trim_safe.jl
 ```
 
-## What To Report
+To persist verifier output for analysis:
 
-When compilation fails, report verifier/trim blockers specifically attributable to `Reseau` code paths reached by this example.
+```sh
+JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no --project -e 'using JuliaC; JuliaC.main(ARGS)' -- \
+  --output-exe echo_trim_safe \
+  --project=. \
+  --experimental --trim=safe \
+  trim/echo_trim_safe.jl 2>&1 | tee /tmp/reseau_trim_verify_latest.log
+```
+
+## Runtime Sanity Check (script mode)
+
+```sh
+JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no trim/echo_trim_safe.jl
+```
+
+## Reporting Expectations
+
+When trim compile fails, capture:
+
+- current total verifier errors/warnings,
+- grouped root causes tied to Reseau paths,
+- what was fixed this iteration,
+- what remains and why it is currently blocked.
