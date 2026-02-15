@@ -13,7 +13,7 @@ mutable struct TCPSocket <: IO
     channel::Union{Channel, Nothing}
     slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
     socket::Union{Socket, Nothing}
-    handler::Union{AbstractChannelHandler, Nothing}
+    handler::Any
     host::String
     port::Int
     is_local::Bool
@@ -37,7 +37,7 @@ mutable struct TCPSocket <: IO
     connect_error::Int
 end
 
-mutable struct _TCPSocketHandler <: AbstractChannelHandler
+mutable struct _TCPSocketHandler
     slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
     io::TCPSocket
 end
@@ -134,10 +134,7 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
     io.channel = channel
     io.slot = slot
     io.handler = handler
-    first_slot = channel_first_slot(channel)
-    if first_slot !== nothing && first_slot.handler isa SocketChannelHandler
-        io.socket = socket_channel_handler_get_socket(first_slot.handler)
-    end
+    io.socket = channel.socket
     channel.channel_state == ChannelState.ACTIVE && channel_trigger_read(channel)
     return nothing
 end

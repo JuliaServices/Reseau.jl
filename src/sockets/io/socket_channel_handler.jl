@@ -7,7 +7,7 @@
 # It receives write messages and sends them out the socket (write direction)
 
 # Socket channel handler structure
-mutable struct SocketChannelHandler <: AbstractChannelHandler
+mutable struct SocketChannelHandler
     socket::Socket
     slot::Union{ChannelSlot, Nothing}
     max_rw_size::Csize_t
@@ -55,6 +55,18 @@ end
 
 function handler_destroy(handler::SocketChannelHandler)::Nothing
     logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER, "Socket handler: destroying")
+    socket = handler.socket
+    if socket !== nothing && socket.handler === handler
+        socket.handler = nothing
+    end
+    slot = handler.slot
+    if slot !== nothing
+        channel = slot.channel
+        if channel isa Channel && channel.socket === socket
+            channel.socket = nothing
+        end
+    end
+    handler.slot = nothing
     crt_statistics_socket_cleanup!(handler.stats)
     return nothing
 end
@@ -129,8 +141,13 @@ function _on_socket_write_complete(socket, message, error_code::Int, bytes_writt
 
     if socket !== nothing && socket.handler isa SocketChannelHandler
         socket.handler.stats.bytes_written += UInt64(bytes_written)
-    elseif channel isa Channel && channel.first !== nothing && channel.first.handler isa SocketChannelHandler
-        channel.first.handler.stats.bytes_written += UInt64(bytes_written)
+    elseif channel isa Channel && channel.socket !== nothing && channel.socket.handler isa SocketChannelHandler
+        channel.socket.handler.stats.bytes_written += UInt64(bytes_written)
+    elseif channel isa Channel && socket isa Socket
+        channel.socket = socket
+        if socket.handler isa SocketChannelHandler
+            socket.handler.stats.bytes_written += UInt64(bytes_written)
+        end
     end
 
     if message isa IoMessage && message.on_completion !== nothing
@@ -280,7 +297,7 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)::Nothing
     if slot === nothing
         return nothing
     end
-    if slot.adj_right === nothing || slot.adj_right.handler === nothing
+    if slot.adj_right === nothing || slot.adj_right.handler_read === nothing
         handler.pending_read = true
         return nothing
     end
@@ -460,6 +477,9 @@ function socket_channel_handler_new!(
     if socket.event_loop === nothing
         throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
+    if channel.socket !== nothing && channel.socket !== socket
+        throw_error(ERROR_INVALID_STATE)
+    end
 
     handler = SocketChannelHandler(
         socket;
@@ -475,6 +495,7 @@ function socket_channel_handler_new!(
 
     # Link handler to the socket
     socket.handler = handler
+    channel.socket = socket
 
     _socket_handler_wrap_channel_setup!(handler, channel)
 

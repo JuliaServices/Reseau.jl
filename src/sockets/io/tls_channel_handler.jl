@@ -142,9 +142,9 @@ function _tls_byo_new_handler(
         setup::TlsByoCryptoSetupOptions,
         options,
         slot::ChannelSlot,
-    )::AbstractChannelHandler
+    )
     handler = setup.new_handler_fn(options, slot, setup.user_data)
-    if !(handler isa AbstractChannelHandler)
+    if handler === nothing
         throw_error(ERROR_INVALID_STATE)
     end
     channel_slot_set_handler!(slot, handler)
@@ -153,7 +153,7 @@ end
 
 function _tls_byo_start_negotiation(
         setup::TlsByoCryptoSetupOptions,
-        handler::AbstractChannelHandler,
+        handler,
     )::Nothing
     if setup.start_negotiation_fn === nothing
         throw_error(ERROR_INVALID_STATE)
@@ -1486,7 +1486,7 @@ struct TlsNegotiatedProtocolMessage
 end
 
 # TLS handler base type
-abstract type TlsChannelHandler <: AbstractChannelHandler end
+abstract type TlsChannelHandler end
 
 function _tls_timeout_task(handler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
@@ -1604,7 +1604,7 @@ end
 function tls_client_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::AbstractChannelHandler
+    )
     if options.ctx.options.is_server
         throw_error(ERROR_INVALID_ARGUMENT)
     end
@@ -1625,7 +1625,7 @@ end
 function tls_server_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-    )::AbstractChannelHandler
+    )
     if !options.ctx.options.is_server
         throw_error(ERROR_INVALID_ARGUMENT)
     end
@@ -1643,7 +1643,7 @@ function tls_server_handler_new(
     end
 end
 
-function tls_client_handler_start_negotiation(handler::AbstractChannelHandler)::Nothing
+function tls_client_handler_start_negotiation(handler)::Nothing
     if _tls_byo_client_setup[] !== nothing
         _tls_byo_start_negotiation(_tls_byo_client_setup[], handler)
         return nothing
@@ -1699,7 +1699,7 @@ end
 function tls_channel_handler_new!(
         channel::Channel,
         options::TlsConnectionOptions,
-    )::AbstractChannelHandler
+    )
     channel.last === nothing && throw_error(ERROR_INVALID_STATE)
 
     tls_slot = ChannelSlot()
@@ -1718,7 +1718,7 @@ end
 function channel_setup_client_tls(
         right_of_slot::ChannelSlot,
         options::TlsConnectionOptions,
-    )::AbstractChannelHandler
+    )
     channel = right_of_slot.channel
     channel === nothing && throw_error(ERROR_INVALID_STATE)
 

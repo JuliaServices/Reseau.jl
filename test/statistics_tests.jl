@@ -10,7 +10,7 @@ function _wait_ready_stats(ch::Channel; timeout_ns::Integer = 5_000_000_000)
     return isready(ch)
 end
 
-mutable struct TestStatsChannelHandler <: Sockets.AbstractChannelHandler
+mutable struct TestStatsChannelHandler
     stats::Sockets.SocketHandlerStatistics
 end
 

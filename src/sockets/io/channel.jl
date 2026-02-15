@@ -86,7 +86,7 @@ end
 ChannelHandlerShutdownOptions() = ChannelHandlerShutdownOptions(false, false)
 
 # Trim-safe handler dispatch wrappers so hot channel send paths can avoid
-# abstract-method dispatch on `AbstractChannelHandler`.
+# abstract-method dispatch on handler reference types.
 struct _ChannelSlotReadCallWrapper <: Function end
 @inline function (::_ChannelSlotReadCallWrapper)(
         f::F,
@@ -136,7 +136,7 @@ function ChannelHandlerReadCallable(callable::F) where {F <: Function}
     return ChannelHandlerReadCallable(ptr, objptr, objref)
 end
 
-function ChannelHandlerReadCallable(handler::H) where {H <: AbstractChannelHandler}
+function ChannelHandlerReadCallable(handler::H) where {H}
     return ChannelHandlerReadCallable(_ChannelHandlerReadDispatch(handler))
 end
 
@@ -162,7 +162,7 @@ function ChannelHandlerWriteCallable(callable::F) where {F <: Function}
     return ChannelHandlerWriteCallable(ptr, objptr, objref)
 end
 
-function ChannelHandlerWriteCallable(handler::H) where {H <: AbstractChannelHandler}
+function ChannelHandlerWriteCallable(handler::H) where {H}
     return ChannelHandlerWriteCallable(_ChannelHandlerWriteDispatch(handler))
 end
 
@@ -205,7 +205,7 @@ function ChannelHandlerIncrementWindowCallable(callable::F) where {F <: Function
     return ChannelHandlerIncrementWindowCallable(ptr, objptr, objref)
 end
 
-function ChannelHandlerIncrementWindowCallable(handler::H) where {H <: AbstractChannelHandler}
+function ChannelHandlerIncrementWindowCallable(handler::H) where {H}
     return ChannelHandlerIncrementWindowCallable(_ChannelHandlerIncrementWindowDispatch(handler))
 end
 
@@ -254,7 +254,7 @@ function ChannelHandlerShutdownCallable(callable::F) where {F <: Function}
     return ChannelHandlerShutdownCallable(ptr, objptr, objref)
 end
 
-function ChannelHandlerShutdownCallable(handler::H) where {H <: AbstractChannelHandler}
+function ChannelHandlerShutdownCallable(handler::H) where {H}
     return ChannelHandlerShutdownCallable(_ChannelHandlerShutdownDispatch(handler))
 end
 
@@ -304,7 +304,7 @@ function ChannelHandlerMessageOverheadCallable(callable::F) where {F <: Function
     return ChannelHandlerMessageOverheadCallable(ptr, objptr, objref)
 end
 
-function ChannelHandlerMessageOverheadCallable(handler::H) where {H <: AbstractChannelHandler}
+function ChannelHandlerMessageOverheadCallable(handler::H) where {H}
     return ChannelHandlerMessageOverheadCallable(_ChannelHandlerMessageOverheadDispatch(handler))
 end
 
@@ -337,7 +337,7 @@ function ChannelHandlerDestroyCallable(callable::F) where {F <: Function}
     return ChannelHandlerDestroyCallable(ptr, objptr, objref)
 end
 
-function ChannelHandlerDestroyCallable(handler::H) where {H <: AbstractChannelHandler}
+function ChannelHandlerDestroyCallable(handler::H) where {H}
     return ChannelHandlerDestroyCallable(_ChannelHandlerDestroyDispatch(handler))
 end
 
@@ -371,7 +371,7 @@ function ChannelHandlerTriggerReadCallable(callable::F) where {F <: Function}
     return ChannelHandlerTriggerReadCallable(ptr, objptr, objref)
 end
 
-function ChannelHandlerTriggerReadCallable(handler::H) where {H <: AbstractChannelHandler}
+function ChannelHandlerTriggerReadCallable(handler::H) where {H}
     return ChannelHandlerTriggerReadCallable(_ChannelHandlerTriggerReadDispatch(handler))
 end
 
@@ -390,7 +390,6 @@ end
 mutable struct ChannelSlot{CH}
     adj_left::Union{ChannelSlot{CH}, Nothing}   # Toward the socket/network (write direction)
     adj_right::Union{ChannelSlot{CH}, Nothing}  # Toward the application (read direction)
-    handler::Union{AbstractChannelHandler, Nothing}
     handler_read::Union{ChannelHandlerReadCallable, Nothing}
     handler_write::Union{ChannelHandlerWriteCallable, Nothing}
     handler_increment_window::Union{ChannelHandlerIncrementWindowCallable, Nothing}
@@ -398,6 +397,8 @@ mutable struct ChannelSlot{CH}
     handler_message_overhead_fn::Union{ChannelHandlerMessageOverheadCallable, Nothing}
     handler_destroy_fn::Union{ChannelHandlerDestroyCallable, Nothing}
     handler_trigger_read_fn::Union{ChannelHandlerTriggerReadCallable, Nothing}
+    handler_reset_statistics_fn::Union{Function, Nothing}
+    handler_gather_statistics_fn::Union{Function, Nothing}
     channel::CH
     window_size::Csize_t
     current_window_update_batch_size::Csize_t
@@ -417,40 +418,41 @@ function ChannelSlot{CH}() where {CH}
         nothing,
         nothing,
         nothing,
+        nothing,
         Csize_t(0),
         Csize_t(0),
         Csize_t(0),
     )
 end
 
-struct _ChannelHandlerReadDispatch{H <: AbstractChannelHandler} <: Function
+struct _ChannelHandlerReadDispatch{H} <: Function
     handler::H
 end
 
-@inline function (f::_ChannelHandlerReadDispatch{H})(slot::ChannelSlot, message::IoMessage)::Nothing where {H <: AbstractChannelHandler}
+@inline function (f::_ChannelHandlerReadDispatch{H})(slot::ChannelSlot, message::IoMessage)::Nothing where {H}
     handler_process_read_message(f.handler, slot, message)
     return nothing
 end
 
-struct _ChannelHandlerWriteDispatch{H <: AbstractChannelHandler} <: Function
+struct _ChannelHandlerWriteDispatch{H} <: Function
     handler::H
 end
 
-@inline function (f::_ChannelHandlerWriteDispatch{H})(slot::ChannelSlot, message::IoMessage)::Nothing where {H <: AbstractChannelHandler}
+@inline function (f::_ChannelHandlerWriteDispatch{H})(slot::ChannelSlot, message::IoMessage)::Nothing where {H}
     handler_process_write_message(f.handler, slot, message)
     return nothing
 end
 
-struct _ChannelHandlerIncrementWindowDispatch{H <: AbstractChannelHandler} <: Function
+struct _ChannelHandlerIncrementWindowDispatch{H} <: Function
     handler::H
 end
 
-@inline function (f::_ChannelHandlerIncrementWindowDispatch{H})(slot::ChannelSlot, size::Csize_t)::Nothing where {H <: AbstractChannelHandler}
+@inline function (f::_ChannelHandlerIncrementWindowDispatch{H})(slot::ChannelSlot, size::Csize_t)::Nothing where {H}
     handler_increment_read_window(f.handler, slot, size)
     return nothing
 end
 
-struct _ChannelHandlerShutdownDispatch{H <: AbstractChannelHandler} <: Function
+struct _ChannelHandlerShutdownDispatch{H} <: Function
     handler::H
 end
 
@@ -459,34 +461,54 @@ end
         direction::ChannelDirection.T,
         error_code::Int,
         free_scarce_resources_immediately::Bool,
-    )::Nothing where {H <: AbstractChannelHandler}
+    )::Nothing where {H}
     handler_shutdown(f.handler, slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
 end
 
-struct _ChannelHandlerMessageOverheadDispatch{H <: AbstractChannelHandler} <: Function
+struct _ChannelHandlerMessageOverheadDispatch{H} <: Function
     handler::H
 end
 
-@inline function (f::_ChannelHandlerMessageOverheadDispatch{H})()::Csize_t where {H <: AbstractChannelHandler}
+@inline function (f::_ChannelHandlerMessageOverheadDispatch{H})()::Csize_t where {H}
     return handler_message_overhead(f.handler)
 end
 
-struct _ChannelHandlerDestroyDispatch{H <: AbstractChannelHandler} <: Function
+struct _ChannelHandlerDestroyDispatch{H} <: Function
     handler::H
 end
 
-@inline function (f::_ChannelHandlerDestroyDispatch{H})()::Nothing where {H <: AbstractChannelHandler}
+@inline function (f::_ChannelHandlerDestroyDispatch{H})()::Nothing where {H}
     handler_destroy(f.handler)
     return nothing
 end
 
-struct _ChannelHandlerTriggerReadDispatch{H <: AbstractChannelHandler} <: Function
+struct _ChannelHandlerTriggerReadDispatch{H} <: Function
     handler::H
 end
 
-@inline function (f::_ChannelHandlerTriggerReadDispatch{H})()::Nothing where {H <: AbstractChannelHandler}
+@inline function (f::_ChannelHandlerTriggerReadDispatch{H})()::Nothing where {H}
     handler_trigger_read(f.handler)
+    return nothing
+end
+
+@inline function _channel_slot_has_handler(slot::ChannelSlot)::Bool
+    return slot.handler_read !== nothing
+end
+
+@inline function _channel_slot_clear_handler!(slot::ChannelSlot)::Nothing
+    if slot.handler_destroy_fn !== nothing
+        (slot.handler_destroy_fn::ChannelHandlerDestroyCallable)()
+    end
+    slot.handler_read = nothing
+    slot.handler_write = nothing
+    slot.handler_increment_window = nothing
+    slot.handler_shutdown_fn = nothing
+    slot.handler_message_overhead_fn = nothing
+    slot.handler_destroy_fn = nothing
+    slot.handler_trigger_read_fn = nothing
+    slot.handler_reset_statistics_fn = nothing
+    slot.handler_gather_statistics_fn = nothing
     return nothing
 end
 
@@ -499,23 +521,23 @@ slot_right(slot::ChannelSlot) = slot.adj_right
 # These are dispatched via multiple dispatch on the vtable type
 
 # Process an incoming read message (from socket toward application)
-function handler_process_read_message(handler::AbstractChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+function handler_process_read_message(handler, slot::ChannelSlot, message::IoMessage)::Nothing
     error("handler_process_read_message must be implemented for $(typeof(handler))")
 end
 
 # Process an outgoing write message (from application toward socket)
-function handler_process_write_message(handler::AbstractChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+function handler_process_write_message(handler, slot::ChannelSlot, message::IoMessage)::Nothing
     error("handler_process_write_message must be implemented for $(typeof(handler))")
 end
 
 # Increment the read window (flow control) - more data can be read
-function handler_increment_read_window(handler::AbstractChannelHandler, slot::ChannelSlot, size::Csize_t)::Nothing
+function handler_increment_read_window(handler, slot::ChannelSlot, size::Csize_t)::Nothing
     error("handler_increment_read_window must be implemented for $(typeof(handler))")
 end
 
 # Initiate graceful shutdown of the handler
 function handler_shutdown(
-        handler::AbstractChannelHandler,
+        handler,
         slot::ChannelSlot,
         direction::ChannelDirection.T,
         error_code::Int,
@@ -525,46 +547,46 @@ function handler_shutdown(
 end
 
 # Get the current window size for the handler
-function handler_initial_window_size(handler::AbstractChannelHandler)::Csize_t
+function handler_initial_window_size(handler)::Csize_t
     error("handler_initial_window_size must be implemented for $(typeof(handler))")
 end
 
 # Get the message overhead size for this handler
-function handler_message_overhead(handler::AbstractChannelHandler)::Csize_t
+function handler_message_overhead(handler)::Csize_t
     error("handler_message_overhead must be implemented for $(typeof(handler))")
 end
 
 # Called when shutdown completes for cleanup
-function handler_destroy(handler::AbstractChannelHandler)::Nothing
+function handler_destroy(handler)::Nothing
     # Default implementation does nothing
     return nothing
 end
 
 # Reset handler statistics
-function handler_reset_statistics(handler::AbstractChannelHandler)::Nothing
+function handler_reset_statistics(handler)::Nothing
     # Default implementation does nothing
     return nothing
 end
 
 # Gather handler statistics
-function handler_gather_statistics(handler::AbstractChannelHandler)::Any
+function handler_gather_statistics(handler)::Any
     # Default implementation returns nothing
     return nothing
 end
 
 # Trigger handler to write its pending data
-function handler_trigger_write(handler::AbstractChannelHandler)::Nothing
+function handler_trigger_write(handler)::Nothing
     # Default implementation does nothing
     return nothing
 end
 
 # Trigger handler to read data if it is a data-source handler
-function handler_trigger_read(handler::AbstractChannelHandler)::Nothing
+function handler_trigger_read(handler)::Nothing
     # Default implementation does nothing
     return nothing
 end
 
-function setchannelslot!(handler::AbstractChannelHandler, slot::ChannelSlot)::Nothing
+function setchannelslot!(handler, slot::ChannelSlot)::Nothing
     _ = handler
     _ = slot
     return nothing
@@ -586,6 +608,7 @@ mutable struct Channel
     event_loop_group_lease::Union{EventLoopGroupLease, Nothing}
     first::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}  # nullable - Socket side (leftmost)
     last::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}   # nullable - Application side (rightmost)
+    socket::Union{Socket, Nothing}
     channel_state::ChannelState.T
     read_back_pressure_enabled::Bool
     channel_id::UInt64
@@ -652,6 +675,7 @@ function Channel(
         event_loop_group_lease,
         nothing,  # first
         nothing,  # last
+        nothing,  # socket
         ChannelState.NOT_INITIALIZED,
         enable_read_back_pressure,
         channel_id,
@@ -965,8 +989,8 @@ end
 function _channel_reset_statistics!(channel::Channel)
     current = channel.first
     while current !== nothing
-        handler = current.handler
-        handler !== nothing && handler_reset_statistics(handler)
+        reset_fn = current.handler_reset_statistics_fn
+        reset_fn !== nothing && reset_fn()
         current = current.adj_right
     end
     return nothing
@@ -988,9 +1012,9 @@ function _channel_gather_statistics_task(channel::Channel, status::TaskStatus.T)
     empty!(channel.statistics_list)
     current = channel.first
     while current !== nothing
-        handler = current.handler
-        if handler !== nothing
-            stats = handler_gather_statistics(handler)
+        gather_fn = current.handler_gather_statistics_fn
+        if gather_fn !== nothing
+            stats = gather_fn()
             stats !== nothing && push!(channel.statistics_list, stats)
         end
         current = current.adj_right
@@ -1173,18 +1197,8 @@ function channel_slot_remove!(slot::ChannelSlot)
     slot.adj_right = nothing
     slot.channel = nothing
 
-    if slot.handler !== nothing
-        if slot.handler_destroy_fn !== nothing
-            (slot.handler_destroy_fn::ChannelHandlerDestroyCallable)()
-        end
-        slot.handler = nothing
-        slot.handler_read = nothing
-        slot.handler_write = nothing
-        slot.handler_increment_window = nothing
-        slot.handler_shutdown_fn = nothing
-        slot.handler_message_overhead_fn = nothing
-        slot.handler_destroy_fn = nothing
-        slot.handler_trigger_read_fn = nothing
+    if _channel_slot_has_handler(slot)
+        _channel_slot_clear_handler!(slot)
     end
 
     if channel !== nothing
@@ -1219,18 +1233,8 @@ function channel_slot_replace!(remove::ChannelSlot, new_slot::ChannelSlot)
     remove.adj_right = nothing
     remove.channel = nothing
 
-    if remove.handler !== nothing
-        if remove.handler_destroy_fn !== nothing
-            (remove.handler_destroy_fn::ChannelHandlerDestroyCallable)()
-        end
-        remove.handler = nothing
-        remove.handler_read = nothing
-        remove.handler_write = nothing
-        remove.handler_increment_window = nothing
-        remove.handler_shutdown_fn = nothing
-        remove.handler_message_overhead_fn = nothing
-        remove.handler_destroy_fn = nothing
-        remove.handler_trigger_read_fn = nothing
+    if _channel_slot_has_handler(remove)
+        _channel_slot_clear_handler!(remove)
     end
 
     if channel !== nothing
@@ -1241,8 +1245,10 @@ function channel_slot_replace!(remove::ChannelSlot, new_slot::ChannelSlot)
 end
 
 # Set the handler for a slot
-function channel_slot_set_handler!(slot::ChannelSlot, handler::H) where {H <: AbstractChannelHandler}
-    slot.handler = handler
+function channel_slot_set_handler!(slot::ChannelSlot, handler)::Nothing
+    if _channel_slot_has_handler(slot)
+        _channel_slot_clear_handler!(slot)
+    end
     slot.handler_read = ChannelHandlerReadCallable(handler)
     slot.handler_write = ChannelHandlerWriteCallable(handler)
     slot.handler_increment_window = ChannelHandlerIncrementWindowCallable(handler)
@@ -1250,6 +1256,8 @@ function channel_slot_set_handler!(slot::ChannelSlot, handler::H) where {H <: Ab
     slot.handler_message_overhead_fn = ChannelHandlerMessageOverheadCallable(handler)
     slot.handler_destroy_fn = ChannelHandlerDestroyCallable(handler)
     slot.handler_trigger_read_fn = ChannelHandlerTriggerReadCallable(handler)
+    slot.handler_reset_statistics_fn = () -> handler_reset_statistics(handler)
+    slot.handler_gather_statistics_fn = () -> handler_gather_statistics(handler)
     setchannelslot!(handler, slot)
     if slot.channel !== nothing
         _channel_calculate_message_overheads!(slot_channel(slot))
@@ -1259,10 +1267,9 @@ function channel_slot_set_handler!(slot::ChannelSlot, handler::H) where {H <: Ab
 end
 
 # Replace handler in a slot
-function channel_slot_replace_handler!(slot::ChannelSlot, new_handler::H)::Union{AbstractChannelHandler, Nothing} where {H <: AbstractChannelHandler}
-    old_handler = slot.handler
+function channel_slot_replace_handler!(slot::ChannelSlot, new_handler)::Nothing
     channel_slot_set_handler!(slot, new_handler)
-    return old_handler
+    return nothing
 end
 
 # Message passing functions
@@ -1540,7 +1547,7 @@ function _channel_shutdown_task(channel::Channel, status::TaskStatus.T)
     channel.channel_state = ChannelState.SHUTTING_DOWN_READ
 
     slot = channel.first
-    if slot !== nothing && slot.handler !== nothing
+    if slot !== nothing && slot.handler_shutdown_fn !== nothing
         channel_slot_shutdown!(slot, ChannelDirection.READ, channel.shutdown_error_code, channel.shutdown_immediately)
         return nothing
     end
@@ -1708,7 +1715,7 @@ function _channel_destroy_impl!(channel::Channel)
     )
 
     slot = channel.first
-    if slot === nothing || slot.handler === nothing
+    if slot === nothing || slot.handler_shutdown_fn === nothing
         channel.channel_state = ChannelState.SHUT_DOWN
     end
 
@@ -1722,18 +1729,8 @@ function _channel_destroy_impl!(channel::Channel)
 
     while slot !== nothing
         next = slot.adj_right
-        if slot.handler !== nothing
-            if slot.handler_destroy_fn !== nothing
-                (slot.handler_destroy_fn::ChannelHandlerDestroyCallable)()
-            end
-            slot.handler = nothing
-            slot.handler_read = nothing
-            slot.handler_write = nothing
-            slot.handler_increment_window = nothing
-            slot.handler_shutdown_fn = nothing
-            slot.handler_message_overhead_fn = nothing
-            slot.handler_destroy_fn = nothing
-            slot.handler_trigger_read_fn = nothing
+        if _channel_slot_has_handler(slot)
+            _channel_slot_clear_handler!(slot)
         end
         slot.adj_left = nothing
         slot.adj_right = nothing
@@ -1750,6 +1747,7 @@ function _channel_destroy_impl!(channel::Channel)
 
     event_loop_group_close_lease!(channel.event_loop_group_lease)
     channel.event_loop_group_lease = nothing
+    channel.socket = nothing
     channel.first = nothing
     channel.last = nothing
     return nothing
@@ -1788,7 +1786,7 @@ end
 # Helper struct for simple passthrough handler
 struct PassthroughHandlerVTable end
 
-mutable struct PassthroughHandler <: AbstractChannelHandler
+mutable struct PassthroughHandler
     slot::Union{ChannelSlot, Nothing}
     initial_window_size::Csize_t
     message_overhead::Csize_t

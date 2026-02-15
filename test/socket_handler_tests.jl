@@ -13,7 +13,7 @@ function wait_for(predicate; timeout_s::Float64 = 5.0)
     return false
 end
 
-mutable struct TestReadHandler <: Sockets.AbstractChannelHandler
+mutable struct TestReadHandler
     slot::Union{Sockets.ChannelSlot, Nothing}
     received::Vector{UInt8}
     lock::ReentrantLock
