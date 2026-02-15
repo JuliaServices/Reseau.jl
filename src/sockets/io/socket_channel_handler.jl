@@ -55,14 +55,10 @@ end
 
 function handler_destroy(handler::SocketChannelHandler)::Nothing
     logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER, "Socket handler: destroying")
-    socket = handler.socket
-    if socket !== nothing && socket.handler === handler
-        socket.handler = nothing
-    end
     slot = handler.slot
     if slot !== nothing
         channel = slot.channel
-        if channel isa Channel && channel.socket === socket
+        if channel isa Channel && channel.socket === handler.socket
             channel.socket = nothing
         end
     end
@@ -95,7 +91,7 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
     socket = handler.socket
     _ = slot
 
-    write_complete = WriteCallable((error_code, bytes_written) -> _on_socket_write_complete(socket, message, error_code, bytes_written))
+    write_complete = WriteCallable((error_code, bytes_written) -> _on_socket_write_complete(handler, message, error_code, bytes_written))
 
     if !socket_is_open(socket)
         # Preserve async completion semantics: report error via completion path
@@ -124,7 +120,7 @@ function handler_process_write_message(handler::SocketChannelHandler, slot::Chan
 end
 
 # Socket write completion callback
-function _on_socket_write_complete(socket, message, error_code::Int, bytes_written::Csize_t)
+function _on_socket_write_complete(handler::SocketChannelHandler, message, error_code::Int, bytes_written::Csize_t)
     channel = message isa IoMessage ? message.owning_channel : nothing
 
     if error_code != AWS_OP_SUCCESS
@@ -139,16 +135,7 @@ function _on_socket_write_complete(socket, message, error_code::Int, bytes_writt
         )
     end
 
-    if socket !== nothing && socket.handler isa SocketChannelHandler
-        socket.handler.stats.bytes_written += UInt64(bytes_written)
-    elseif channel isa Channel && channel.socket !== nothing && channel.socket.handler isa SocketChannelHandler
-        channel.socket.handler.stats.bytes_written += UInt64(bytes_written)
-    elseif channel isa Channel && socket isa Socket
-        channel.socket = socket
-        if socket.handler isa SocketChannelHandler
-            socket.handler.stats.bytes_written += UInt64(bytes_written)
-        end
-    end
+    handler.stats.bytes_written += UInt64(bytes_written)
 
     if message isa IoMessage && message.on_completion !== nothing
         message.on_completion(error_code)
@@ -493,8 +480,6 @@ function socket_channel_handler_new!(
     end
     channel_slot_set_handler!(slot, handler)
 
-    # Link handler to the socket
-    socket.handler = handler
     channel.socket = socket
 
     _socket_handler_wrap_channel_setup!(handler, channel)

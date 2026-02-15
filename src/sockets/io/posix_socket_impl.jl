@@ -401,7 +401,6 @@ function socket_init_posix(
         copy(options),
         io_handle,
         nothing,  # event_loop
-        nothing,  # handler
         SocketState.INIT,
         nothing,  # readable_fn
         nothing,  # connection_result_fn

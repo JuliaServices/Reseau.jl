@@ -403,7 +403,6 @@ end
     end
     if accepted_socket[] isa Sockets.Socket
         @test socket_handler.socket === accepted_socket[]
-        @test socket_handler.socket.handler === socket_handler
     end
 
     send_done = Ref(false)
