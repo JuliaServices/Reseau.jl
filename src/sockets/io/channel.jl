@@ -426,8 +426,7 @@ end
 ShutdownChain() = ShutdownChain(Any[], Any[])
 
 # Shared channel runtime state that is threaded through slots and handlers.
-mutable struct ChannelState{CH}
-    channel::CH
+mutable struct ChannelState
     event_loop::EventLoop
     event_loop_group_lease::Union{EventLoopGroupLease, Nothing}
     channel_state::ChannelLifecycleState.T
@@ -438,10 +437,6 @@ mutable struct ChannelState{CH}
     message_pool::Union{MessagePool, Nothing}
     socket::Union{Socket, Nothing}
     shutdown_chain::ShutdownChain
-    downstream_read_setter::Any
-    downstream_read_handler::Any
-    downstream_read_slot::Any
-    tls_handler::Any
     on_setup_completed::Union{EventCallable, Nothing}
     on_shutdown_completed::Union{EventCallable, Nothing}
     shutdown_error_code::Int
@@ -705,10 +700,9 @@ function handler_shutdown(
 end
 
 function _channel_ensure_pipeline_downstream_slot!(channel)::_PipelineDownstreamReadHandler
-    slot = channel.downstream_read_slot
-    handler = channel.downstream_read_handler
-    if slot isa ChannelSlot && handler isa _PipelineDownstreamReadHandler
-        return handler
+    downstream = channel.downstream
+    if downstream isa _PipelineDownstreamState
+        return downstream.handler
     end
 
     slot = channel_slot_new!(channel)
@@ -718,8 +712,7 @@ function _channel_ensure_pipeline_downstream_slot!(channel)::_PipelineDownstream
 
     handler = _PipelineDownstreamReadHandler(nothing, channel.shutdown_chain)
     channel_slot_set_handler!(slot, handler)
-    channel.downstream_read_slot = slot
-    channel.downstream_read_handler = handler
+    channel.downstream = _PipelineDownstreamState(slot, handler)
     return handler
 end
 
@@ -732,23 +725,39 @@ function _channel_set_pipeline_downstream_read!(channel, read_fn)::Nothing
     return nothing
 end
 
+mutable struct _PipelineDownstreamState
+    slot::ChannelSlot
+    handler::_PipelineDownstreamReadHandler
+end
+
 # Channel - a bidirectional pipeline of slots/handlers.
 mutable struct Channel
     first::Union{ChannelSlot, Nothing}
     last::Union{ChannelSlot, Nothing}
-    state::ChannelState{Union{Channel, Nothing}}
+    downstream::Union{_PipelineDownstreamState, Nothing}
+    tls_handler_ref::Union{WeakRef, Nothing}
+    state::ChannelState
 end
 
+const _channel_state_registry = IdDict{ChannelState, Channel}()
+
 @inline function Base.getproperty(channel::Channel, name::Symbol)
-    if name === :first || name === :last || name === :state
+    if name === :first || name === :last || name === :downstream || name === :tls_handler_ref || name === :state
         return getfield(channel, name)
+    end
+    if name === :tls_handler
+        ref = getfield(channel, :tls_handler_ref)
+        return ref === nothing ? nothing : ref.value
     end
     return getproperty(getfield(channel, :state), name)
 end
 
 @inline function Base.setproperty!(channel::Channel, name::Symbol, value)
-    if name === :first || name === :last || name === :state
+    if name === :first || name === :last || name === :downstream || name === :tls_handler_ref || name === :state
         return setfield!(channel, name, value)
+    end
+    if name === :tls_handler
+        return setfield!(channel, :tls_handler_ref, value === nothing ? nothing : WeakRef(value))
     end
     return setproperty!(getfield(channel, :state), name, value)
 end
@@ -760,7 +769,8 @@ end
 end
 
 @inline function slot_channel(slot::ChannelSlot)::Channel
-    ch = slot_state(slot).channel
+    st = slot_state(slot)
+    ch = get(_channel_state_registry, st, nothing)
     ch isa Channel || error("ChannelSlot has no owning Channel")
     return ch::Channel
 end
@@ -768,9 +778,9 @@ end
 @inline function slot_channel_or_nothing(slot::ChannelSlot)::Union{Channel, Nothing}
     st = slot.state
     st isa ChannelState || return nothing
-    ch = st.channel
+    ch = get(_channel_state_registry, st, nothing)
     ch isa Channel || return nothing
-    return ch::Channel
+    return ch
 end
 
 # Global channel counter for unique IDs
@@ -792,8 +802,7 @@ function Channel(
     channel_id = _next_channel_id()
     window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
 
-    state = ChannelState{Union{Channel, Nothing}}(
-        nothing,   # channel
+    state = ChannelState(
         event_loop,
         event_loop_group_lease,
         ChannelLifecycleState.NOT_INITIALIZED,
@@ -804,10 +813,6 @@ function Channel(
         message_pool,
         nothing,  # socket
         ShutdownChain(),
-        nothing,  # downstream_read_setter
-        nothing,  # downstream_read_handler
-        nothing,  # downstream_read_slot
-        nothing,  # tls_handler
         nothing,  # on_setup_completed
         nothing,  # on_shutdown_completed
         0,        # shutdown_error_code
@@ -834,8 +839,8 @@ function Channel(
         ChannelTask(),
         ReentrantLock(),
     )
-    channel = Channel(nothing, nothing, state)
-    state.channel = channel
+    channel = Channel(nothing, nothing, nothing, nothing, state)
+    _channel_state_registry[state] = channel
     state.cross_thread_task = ScheduledTask(
         TaskFn(function(status)
             try
@@ -847,10 +852,6 @@ function Channel(
         end);
         type_tag = "channel_cross_thread_tasks",
     )
-    state.downstream_read_setter = read_fn -> begin
-        _channel_set_pipeline_downstream_read!(channel, read_fn)
-        return nothing
-    end
     return channel
 end
 
@@ -1031,6 +1032,25 @@ function pipeline_trigger_read(socket::Socket)::Nothing
     end
     channel_trigger_read(channel)
     return nothing
+end
+
+function pipeline_set_downstream_read!(channel::Channel, read_fn)::Nothing
+    _channel_set_pipeline_downstream_read!(channel, read_fn)
+    return nothing
+end
+
+function pipeline_add_read_shutdown_fn!(channel::Channel, shutdown_fn::Function)::Nothing
+    push!(channel.shutdown_chain.read_shutdown_fns, shutdown_fn)
+    return nothing
+end
+
+function pipeline_prepend_write_shutdown_fn!(channel::Channel, shutdown_fn::Function)::Nothing
+    pushfirst!(channel.shutdown_chain.write_shutdown_fns, shutdown_fn)
+    return nothing
+end
+
+function pipeline_tls_handler(channel::Channel)
+    return channel.tls_handler
 end
 
 # Channel creation API matching aws_channel_new
@@ -1977,12 +1997,12 @@ function _channel_destroy_impl!(channel::Channel)
     end
     channel.socket = nothing
     channel.tls_handler = nothing
-    channel.downstream_read_handler = nothing
-    channel.downstream_read_slot = nothing
+    channel.downstream = nothing
     empty!(channel.shutdown_chain.read_shutdown_fns)
     empty!(channel.shutdown_chain.write_shutdown_fns)
     channel.first = nothing
     channel.last = nothing
+    delete!(_channel_state_registry, channel.state)
     return nothing
 end
 

@@ -39,7 +39,7 @@ JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no --project=@v1.12 -
 ## Current Result (2026-02-15)
 
 - Compile still fails under trim verifier.
-- Current verifier set: `130` errors, `0` warnings.
+- Current verifier set: `129` errors, `0` warnings.
 - Latest log: `/tmp/reseau_trim_verify_latest.log`.
 - No executable emitted.
 

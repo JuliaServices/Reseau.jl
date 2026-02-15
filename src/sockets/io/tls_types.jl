@@ -5,6 +5,7 @@
 
 abstract type AbstractTlsContext end
 abstract type AbstractTlsConnectionOptions end
+abstract type TlsChannelHandler end
 
 const MaybeTlsConnectionOptions = Union{AbstractTlsConnectionOptions, Nothing}
 
