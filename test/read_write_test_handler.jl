@@ -1,6 +1,6 @@
 using Reseau
 
-mutable struct ReadWriteTestHandler{FRead, FWrite, SlotRef <: Union{Sockets.ChannelSlot, Nothing}} <: Sockets.AbstractChannelHandler
+mutable struct ReadWriteTestHandler{FRead, FWrite, SlotRef <: Union{Sockets.ChannelSlot, Nothing}}
     slot::SlotRef
     on_read::FRead
     on_write::FWrite

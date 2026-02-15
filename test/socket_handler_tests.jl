@@ -13,7 +13,7 @@ function wait_for(predicate; timeout_s::Float64 = 5.0)
     return false
 end
 
-mutable struct TestReadHandler <: Sockets.AbstractChannelHandler
+mutable struct TestReadHandler
     slot::Union{Sockets.ChannelSlot, Nothing}
     received::Vector{UInt8}
     lock::ReentrantLock
@@ -403,7 +403,6 @@ end
     end
     if accepted_socket[] isa Sockets.Socket
         @test socket_handler.socket === accepted_socket[]
-        @test socket_handler.socket.handler === socket_handler
     end
 
     send_done = Ref(false)

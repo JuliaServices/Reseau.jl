@@ -1,7 +1,7 @@
 # AWS IO Library - ALPN Handler
 # Port of aws-c-io/source/alpn_handler.c
 
-mutable struct AlpnHandler <: AbstractChannelHandler
+mutable struct AlpnHandler
     slot::Union{ChannelSlot, Nothing}
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
 end

@@ -818,7 +818,7 @@ end
     EventLoops.event_loop_group_destroy!(elg)
 end
 
-mutable struct EchoHandler <: Sockets.AbstractChannelHandler
+mutable struct EchoHandler
     slot::Union{Sockets.ChannelSlot, Nothing}
     saw_ping::Base.RefValue{Bool}
 end
@@ -991,7 +991,7 @@ end
 
     tls_opts = Sockets.TlsConnectionOptions(ctx; server_name = "example.com")
     handler = Sockets.channel_setup_client_tls(left_slot, tls_opts)
-    @test handler isa Sockets.AbstractChannelHandler
+    @test handler !== nothing
     @test new_called[]
     @test start_called[]
     @test seen_slot[] === left_slot.adj_right
@@ -1015,7 +1015,7 @@ end
                 Sockets.TlsConnectionOptions(server_ctx),
                 server_slot,
             )
-            @test server_handler isa Sockets.AbstractChannelHandler
+            @test server_handler !== nothing
             @test server_new_called[]
             @test server_seen_slot[] === server_slot
             @test server_seen_ud[] == 99
@@ -2648,7 +2648,7 @@ end
         return isready(ch)
     end
 
-    mutable struct FakeSocketStatsHandler <: Sockets.AbstractChannelHandler
+    mutable struct FakeSocketStatsHandler
         stats::Sockets.SocketHandlerStatistics
     end
 

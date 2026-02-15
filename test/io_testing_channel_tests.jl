@@ -1,7 +1,7 @@
 using Test
 using Reseau
 
-mutable struct TestingChannelHandler{SlotRef <: Union{Sockets.ChannelSlot, Nothing}} <: Sockets.AbstractChannelHandler
+mutable struct TestingChannelHandler{SlotRef <: Union{Sockets.ChannelSlot, Nothing}}
     slot::SlotRef
     messages::Vector{EventLoops.IoMessage}
     latest_window_update::Csize_t

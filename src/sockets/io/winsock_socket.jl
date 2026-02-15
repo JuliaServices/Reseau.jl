@@ -341,7 +341,6 @@
             copy(options),
             IoHandle(),
             nothing,
-            nothing,
             SocketState.INIT,
             nothing,
             nothing,
