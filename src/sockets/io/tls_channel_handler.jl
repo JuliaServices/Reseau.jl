@@ -1716,6 +1716,7 @@ function tls_channel_handler_new!(
 
     channel_slot_insert_right!(channel.last, tls_slot)
     channel_slot_set_handler!(tls_slot, handler)
+    channel.tls_handler = handler
 
     return handler
 end
@@ -1734,6 +1735,7 @@ function channel_setup_client_tls(
 
     channel_slot_insert_right!(right_of_slot, tls_slot)
     channel_slot_set_handler!(tls_slot, handler)
+    channel.tls_handler = handler
 
     tls_client_handler_start_negotiation(handler)
 

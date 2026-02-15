@@ -247,6 +247,7 @@ mutable struct Socket
     readable_fn::Union{EventCallable, Nothing}
     connection_result_fn::Union{EventCallable, Nothing}
     accept_result_fn::Union{ChannelCallable, Nothing}
+    read_fn::Any
     impl::Union{PlatformSocketImpl, Nothing}
 end
 

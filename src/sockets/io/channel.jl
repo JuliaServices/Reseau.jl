@@ -51,8 +51,7 @@ function ChannelTask(task_fn::EventCallable, type_tag::AbstractString)
         TaskFn(function(status)
             try
                 _channel_task_wrapper(ctx, _coerce_task_status(status))
-            catch e
-                Core.println("channel task ($type_tag) errored")
+            catch
             end
             return nothing
         end);
@@ -419,6 +418,13 @@ end
     SHUT_DOWN = 5
 end
 
+mutable struct ShutdownChain
+    read_shutdown_fns::Vector{Any}
+    write_shutdown_fns::Vector{Any}
+end
+
+ShutdownChain() = ShutdownChain(Any[], Any[])
+
 # Shared channel runtime state that is threaded through slots and handlers.
 mutable struct ChannelState{CH}
     channel::CH
@@ -431,6 +437,11 @@ mutable struct ChannelState{CH}
     destroy_pending::Bool
     message_pool::Union{MessagePool, Nothing}
     socket::Union{Socket, Nothing}
+    shutdown_chain::ShutdownChain
+    downstream_read_setter::Any
+    downstream_read_handler::Any
+    downstream_read_slot::Any
+    tls_handler::Any
     on_setup_completed::Union{EventCallable, Nothing}
     on_shutdown_completed::Union{EventCallable, Nothing}
     shutdown_error_code::Int
@@ -563,6 +574,164 @@ function setchannelslot!(handler, slot::ChannelSlot)::Nothing
     return nothing
 end
 
+mutable struct _PipelineDownstreamReadHandler
+    read_fn::Any
+    shutdown_chain::ShutdownChain
+end
+
+handler_initial_window_size(::_PipelineDownstreamReadHandler)::Csize_t = SIZE_MAX
+handler_message_overhead(::_PipelineDownstreamReadHandler)::Csize_t = Csize_t(0)
+_pipeline_downstream_increment_read_window(::_PipelineDownstreamReadHandler, _slot, _size)::Nothing = nothing
+
+function _pipeline_downstream_process_write_message(::_PipelineDownstreamReadHandler, _slot, _message)::Nothing
+    throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
+end
+
+function _pipeline_downstream_process_read_message(handler::_PipelineDownstreamReadHandler, slot, message::IoMessage)::Nothing
+    read_fn = handler.read_fn
+    if read_fn === nothing
+        channel = slot_channel_or_nothing(slot)
+        channel !== nothing && channel_release_message_to_pool!(channel, message)
+        return nothing
+    end
+    read_fn(message)
+    return nothing
+end
+
+function handler_destroy(handler::_PipelineDownstreamReadHandler)::Nothing
+    handler.read_fn = nothing
+    return nothing
+end
+
+function _channel_run_shutdown_chain!(
+        shutdown_fns::Vector{Any},
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+        on_complete::Function,
+    )::Nothing
+    idx_ref = Ref(1)
+
+    function _step(err::Int, scarce::Bool)::Nothing
+        idx = idx_ref[]
+        if idx > length(shutdown_fns)
+            on_complete(err, scarce)
+            return nothing
+        end
+
+        idx_ref[] = idx + 1
+        shutdown_fn = shutdown_fns[idx]
+        try
+            shutdown_fn(err, scarce, (next_err, next_scarce) -> _step(next_err, next_scarce))
+        catch e
+            if e isa ReseauError
+                _step(e.code != 0 ? e.code : err, scarce)
+                return nothing
+            end
+            rethrow()
+        end
+        return nothing
+    end
+
+    _step(error_code, free_scarce_resources_immediately)
+    return nothing
+end
+
+function _pipeline_downstream_handler_shutdown(
+        handler::_PipelineDownstreamReadHandler,
+        slot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    shutdown_fns = direction == ChannelDirection.READ ?
+        handler.shutdown_chain.read_shutdown_fns :
+        handler.shutdown_chain.write_shutdown_fns
+
+    on_complete = (err, scarce) -> begin
+        channel_slot_on_handler_shutdown_complete!(slot, direction, err, scarce)
+        return nothing
+    end
+    _channel_run_shutdown_chain!(
+        shutdown_fns,
+        error_code,
+        free_scarce_resources_immediately,
+        on_complete,
+    )
+    return nothing
+end
+
+function handler_process_read_message(
+        handler::_PipelineDownstreamReadHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _pipeline_downstream_process_read_message(handler, slot, message)
+    return nothing
+end
+
+function handler_process_write_message(
+        handler::_PipelineDownstreamReadHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _pipeline_downstream_process_write_message(handler, slot, message)
+    return nothing
+end
+
+function handler_increment_read_window(
+        handler::_PipelineDownstreamReadHandler,
+        slot::ChannelSlot,
+        size::Csize_t,
+    )::Nothing
+    _pipeline_downstream_increment_read_window(handler, slot, size)
+    return nothing
+end
+
+function handler_shutdown(
+        handler::_PipelineDownstreamReadHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    _pipeline_downstream_handler_shutdown(
+        handler,
+        slot,
+        direction,
+        error_code,
+        free_scarce_resources_immediately,
+    )
+    return nothing
+end
+
+function _channel_ensure_pipeline_downstream_slot!(channel)::_PipelineDownstreamReadHandler
+    slot = channel.downstream_read_slot
+    handler = channel.downstream_read_handler
+    if slot isa ChannelSlot && handler isa _PipelineDownstreamReadHandler
+        return handler
+    end
+
+    slot = channel_slot_new!(channel)
+    if channel.last !== slot
+        channel_slot_insert_end!(channel, slot)
+    end
+
+    handler = _PipelineDownstreamReadHandler(nothing, channel.shutdown_chain)
+    channel_slot_set_handler!(slot, handler)
+    channel.downstream_read_slot = slot
+    channel.downstream_read_handler = handler
+    return handler
+end
+
+function _channel_set_pipeline_downstream_read!(channel, read_fn)::Nothing
+    handler = _channel_ensure_pipeline_downstream_slot!(channel)
+    handler.read_fn = read_fn
+    if channel.socket !== nothing
+        channel.socket.read_fn = read_fn
+    end
+    return nothing
+end
+
 # Channel - a bidirectional pipeline of slots/handlers.
 mutable struct Channel
     first::Union{ChannelSlot, Nothing}
@@ -634,6 +803,11 @@ function Channel(
         false,  # destroy_pending
         message_pool,
         nothing,  # socket
+        ShutdownChain(),
+        nothing,  # downstream_read_setter
+        nothing,  # downstream_read_handler
+        nothing,  # downstream_read_slot
+        nothing,  # tls_handler
         nothing,  # on_setup_completed
         nothing,  # on_shutdown_completed
         0,        # shutdown_error_code
@@ -673,6 +847,10 @@ function Channel(
         end);
         type_tag = "channel_cross_thread_tasks",
     )
+    state.downstream_read_setter = read_fn -> begin
+        _channel_set_pipeline_downstream_read!(channel, read_fn)
+        return nothing
+    end
     return channel
 end
 
@@ -777,6 +955,84 @@ function channel_trigger_read(channel::Channel)::Nothing
     return nothing
 end
 
+pipeline_thread_is_callers_thread(channel::Channel) = channel_thread_is_callers_thread(channel)
+
+function pipeline_schedule_task_now!(channel::Channel, task::ChannelTask)::Nothing
+    channel_schedule_task_now!(channel, task)
+    return nothing
+end
+
+function pipeline_shutdown!(channel::Channel, error_code::Int = 0; shutdown_immediately::Bool = false)::Nothing
+    channel_shutdown!(channel, error_code; shutdown_immediately = shutdown_immediately)
+    return nothing
+end
+
+function pipeline_acquire_message_from_pool(
+        channel::Channel,
+        message_type::IoMessageType.T,
+        size_hint::Integer,
+    )::Union{IoMessage, Nothing}
+    return channel_acquire_message_from_pool(channel, message_type, size_hint)
+end
+
+function pipeline_release_message_to_pool!(channel::Channel, message::IoMessage)::Nothing
+    channel_release_message_to_pool!(channel, message)
+    return nothing
+end
+
+function pipeline_increment_read_window!(channel::Channel, size::Integer)::Nothing
+    slot = channel.last
+    slot === nothing && return nothing
+    add = size < 0 ? Csize_t(0) : Csize_t(size)
+    channel_slot_increment_read_window!(slot, add)
+    return nothing
+end
+
+@inline function _pipeline_channel_for_socket(socket::Socket)::Union{Channel, Nothing}
+    handler = socket.handler
+    if handler !== nothing && hasproperty(handler, :slot)
+        slot = getproperty(handler, :slot)
+        if slot isa ChannelSlot
+            return slot_channel_or_nothing(slot)
+        end
+    end
+    return nothing
+end
+
+function pipeline_write!(socket::Socket, msg::IoMessage)::Nothing
+    channel = _pipeline_channel_for_socket(socket)
+    channel === nothing && throw_error(ERROR_INVALID_STATE)
+
+    if pipeline_thread_is_callers_thread(channel)
+        start_slot = channel.last
+        start_slot === nothing && throw_error(ERROR_INVALID_STATE)
+        channel_slot_send_message(start_slot, msg, ChannelDirection.WRITE)
+        return nothing
+    end
+
+    task = ChannelTask(
+        EventCallable(_ -> begin
+            start_slot = channel.last
+            start_slot === nothing && throw_error(ERROR_INVALID_STATE)
+            channel_slot_send_message(start_slot, msg, ChannelDirection.WRITE)
+            return nothing
+        end),
+        "pipeline_write_cross_thread",
+    )
+    channel_schedule_task_now!(channel, task)
+    return nothing
+end
+
+function pipeline_trigger_read(socket::Socket)::Nothing
+    channel = _pipeline_channel_for_socket(socket)
+    channel === nothing && throw_error(ERROR_INVALID_STATE)
+    if !pipeline_thread_is_callers_thread(channel)
+        throw_error(ERROR_INVALID_STATE)
+    end
+    channel_trigger_read(channel)
+    return nothing
+end
+
 # Channel creation API matching aws_channel_new
 mutable struct ChannelSetupArgs
     channel::Channel
@@ -858,8 +1114,7 @@ function channel_new(options::ChannelOptions)::Channel
         TaskFn(function(status)
             try
                 _channel_setup_task(setup_args, _coerce_task_status(status))
-            catch e
-                Core.println("channel_setup task errored")
+            catch
             end
             return nothing
         end);
@@ -1717,7 +1972,15 @@ function _channel_destroy_impl!(channel::Channel)
 
     event_loop_group_close_lease!(channel.event_loop_group_lease)
     channel.event_loop_group_lease = nothing
+    if channel.socket !== nothing
+        channel.socket.read_fn = nothing
+    end
     channel.socket = nothing
+    channel.tls_handler = nothing
+    channel.downstream_read_handler = nothing
+    channel.downstream_read_slot = nothing
+    empty!(channel.shutdown_chain.read_shutdown_fns)
+    empty!(channel.shutdown_chain.write_shutdown_fns)
     channel.first = nothing
     channel.last = nothing
     return nothing

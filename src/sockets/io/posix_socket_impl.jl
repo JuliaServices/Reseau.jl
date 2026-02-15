@@ -406,6 +406,7 @@ function socket_init_posix(
         nothing,  # readable_fn
         nothing,  # connection_result_fn
         nothing,  # accept_result_fn
+        nothing,  # read_fn
         socket_impl,
     )
 

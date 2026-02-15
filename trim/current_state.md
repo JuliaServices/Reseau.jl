@@ -7,7 +7,7 @@ Build a fully compiled executable for a simple local TCP echo flow using only `R
 - `@main` entrypoint
 - `--experimental`
 - `--trim=safe`
-- `~/julia/contrib/juliac/juliac.jl`
+- official `JuliaC.jl` (`julia -m JuliaC`)
 
 Echo flow in `trim/echo_trim_safe.jl`:
 
@@ -17,65 +17,57 @@ Echo flow in `trim/echo_trim_safe.jl`:
 4. Server reads and replies `"hello"`.
 5. Client verifies response.
 
-## Compile Command
+## Compile Command (Current)
+
+Preferred:
 
 ```sh
-JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no \
-  ~/julia/contrib/juliac/juliac.jl \
-  --output-exe trim/echo_trim_safe \
-  --project=. \
-  --experimental --trim=safe \
-  trim/echo_trim_safe.jl
+trim/compile_echo_trim_safe.sh
 ```
 
-## Current Result (2026-02-12)
+Direct equivalent:
+
+```sh
+cd trim
+JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no --project=@v1.12 -m JuliaC \
+  --output-exe echo_trim_safe \
+  --project=.. \
+  --experimental --trim=safe \
+  echo_trim_safe.jl
+```
+
+## Current Result (2026-02-15)
 
 - Compile still fails under trim verifier.
-- Current verifier set: `19` errors + `2` warnings.
+- Current verifier set: `130` errors, `0` warnings.
 - Latest log: `/tmp/reseau_trim_verify_latest.log`.
-- Net from this pass: improved from `27` to `19` hard errors.
-- Kqueue event-loop verifier cluster is no longer present in current output.
+- No executable emitted.
 
-## Item-by-Item Status
+## Hard-Blocker Summary
 
-1. External JLL init (`aws_c_common_jll` / `JLLWrappers` sort/unique calls, verifier #1-#6)
-- Status: `PASS (for now)`
-- Reason: external package init path, not in Reseau-owned code.
+1. Error/stacktrace display in thread entry catch paths dominates verifier output.
+- Representative paths:
+  - `src/foreign_threads.jl` (`Base.showerror(..., catch_backtrace())`)
+  - `src/eventloops/epoll_event_loop.jl` (`Base.showerror(...)`)
+- These produce a large cluster of Base stacktrace/printing verifier failures (#1 through most of the early set).
 
-2. Kqueue event-loop paths (`kqueue_event_loop_thread`, `kqueue_* task callbacks`)
-- Status: `RESOLVED (for now)`
-- Result: no kqueue-specific verifier failures in `/tmp/reseau_trim_verify_latest.log`.
+2. Channel/socket state still has dynamic `Any` access in trim-reached paths.
+- Representative failures:
+  - `downstream_read_handler::Any` property access (`socket_channel_handler_new!`)
+  - `socket.handler::Any` and nested `stats` property access during write completion
+  - resolver `impl_data::Any` callback invocation path
 
-3. `_ClientChannelOnSetup` callback invocation still unresolved under trim (verifier #7)
-- Status: `PASS (for now)`
-- Work attempted: moved setup logic into direct callable method body on `_ClientChannelOnSetup`.
-- Result: unresolved invoke remains.
+3. Remaining unresolved invokes across channel bootstrap and socket handler trigger paths.
+- Representative failures:
+  - `_setup_client_channel(...)`
+  - `_socket_handler_trigger_read(...)`
+  - `channel_slot_increment_read_window!(..., size::Any)`
 
-4. Host resolver callback/impl path (`_dispatch_resolve_callback`, `_invoke_resolver_impl`, `impl_data::Any`, verifier #8-#9)
-- Status: `PASS (for now)`
-- Work attempted: explored stronger callback typing; reverted because it introduced additional unresolved `@cfunction` verifier failures.
-- Result: unresolved dynamic path remains and appears structural (callback + `impl_data` representation).
+## Validation Run Context
 
-5. Channel handler vtable dispatch wrappers (`handler_process_*`, `handler_shutdown`, `handler_increment_read_window`, verifier #10-#12 and #17/#19 + warnings #1/#2)
-- Status: `PASS (for now)`
-- Work attempted: multiple callable-wrapper rewrites; best stable state still yields unresolved `f::Any` handler field access under trim.
-- Result: unresolved dynamic handler dispatch remains.
+Local test suites currently passing with this code state:
 
-6. Socket handler trigger-read path (`_socket_handler_trigger_read`, verifier #13-#16 and #18)
-- Status: `PASS (for now)`
-- Work attempted: tightened return types and removed `slot.channel::Any` usage in trigger path.
-- Result: unresolved invoke remains at callback callsites.
-
-## Changes Kept From This Iteration
-
-1. Re-ran trim verifier echo compile and refreshed `/tmp/reseau_trim_verify_latest.log`.
-2. Current branch still includes EventLoopGroup constructor cleanup (`event_loop_group_new` removal, keyword constructor usage).
-3. Updated kqueue handle typing to `KqueueHandleData{KqueueEventLoop}` with a concrete `handle_registry`, which removed the prior kqueue verifier cluster.
-
-## Validation Run
-
-Default Reseau tests were run and passed:
-
-```sh
-JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'
-```
+- `Reseau` default
+- `Reseau` TLS + network
+- `AwsHTTP` default
+- `HTTP` default

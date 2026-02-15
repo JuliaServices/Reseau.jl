@@ -1,6 +1,6 @@
 # Trim Echo Goal
 
-This directory is for validating a fully compiled executable using Julia's `juliac` flow with safe trimming.
+This directory validates a fully compiled executable using the official `JuliaC.jl` CLI with safe trimming.
 
 ## Objective
 
@@ -24,12 +24,24 @@ Expected behavior of the script:
 Run from the repository root:
 
 ```sh
-JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no \
-  ~/julia/contrib/juliac/juliac.jl \
-  --output-exe trim/echo_trim_safe \
-  --project=. \
+trim/compile_echo_trim_safe.sh
+```
+
+The helper script:
+
+- installs `JuliaC` in `@v1.12` if missing
+- runs `julia -m JuliaC` from `trim/`
+- writes verifier output to `/tmp/reseau_trim_verify_latest.log` by default
+
+Direct equivalent command:
+
+```sh
+cd trim
+JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no --project=@v1.12 -m JuliaC \
+  --output-exe echo_trim_safe \
+  --project=.. \
   --experimental --trim=safe \
-  trim/echo_trim_safe.jl
+  echo_trim_safe.jl
 ```
 
 ## What To Report

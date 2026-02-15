@@ -475,6 +475,9 @@ function socket_channel_handler_new!(
     # Link handler to the socket
     socket.handler = handler
     channel.socket = socket
+    if channel.downstream_read_handler isa _PipelineDownstreamReadHandler
+        socket.read_fn = channel.downstream_read_handler.read_fn
+    end
 
     _socket_handler_wrap_channel_setup!(handler, channel)
 
