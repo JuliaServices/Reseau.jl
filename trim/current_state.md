@@ -51,17 +51,16 @@ JULIA_NUM_THREADS=1 julia --startup-file=no --history-file=no --project=@v1.12 -
   - `src/eventloops/epoll_event_loop.jl` (`Base.showerror(...)`)
 - These produce a large cluster of Base stacktrace/printing verifier failures (#1 through most of the early set).
 
-2. Channel/socket state still has dynamic `Any` access in trim-reached paths.
-- Representative failures:
-  - `downstream_read_handler::Any` property access (`socket_channel_handler_new!`)
-  - `socket.handler::Any` and nested `stats` property access during write completion
-  - resolver `impl_data::Any` callback invocation path
+2. Remaining trim blockers in I/O paths are now outside `ChannelState`.
+- `ChannelState` no longer carries `downstream_*::Any` or `tls_handler::Any` fields.
+- Representative remaining failures:
+  - `socket.handler::Any` and nested `stats` access during socket write completion
+  - resolver callback plumbing with `impl_data::Any`
 
-3. Remaining unresolved invokes across channel bootstrap and socket handler trigger paths.
+3. Remaining unresolved invokes across channel bootstrap and socket-handler trigger paths.
 - Representative failures:
   - `_setup_client_channel(...)`
   - `_socket_handler_trigger_read(...)`
-  - `channel_slot_increment_read_window!(..., size::Any)`
 
 ## Validation Run Context
 
