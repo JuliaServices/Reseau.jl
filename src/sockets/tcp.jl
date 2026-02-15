@@ -13,7 +13,6 @@ mutable struct TCPSocket <: IO
     channel::Union{Channel, Nothing}
     slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
     socket::Union{Socket, Nothing}
-    handler::Any
     host::String
     port::Int
     is_local::Bool
@@ -89,7 +88,6 @@ function _new_unconnected_socket(;
         nothing,
         nothing,
         nothing,
-        nothing,
         "",
         0,
         false,
@@ -133,7 +131,6 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
     channel_slot_set_handler!(slot, handler)
     io.channel = channel
     io.slot = slot
-    io.handler = handler
     io.socket = channel.socket
     channel.channel_state == ChannelState.ACTIVE && channel_trigger_read(channel)
     return nothing
