@@ -337,8 +337,7 @@ function _dispatch_simple_callback(
     callback === nothing && return nothing
     event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
     if event_loop !== nothing
-        task = ScheduledTask(callback; type_tag = "dns_purge_callback")
-        event_loop_schedule_task_now!(event_loop, task)
+        event_loop_schedule_task_now!(callback, event_loop; type_tag = "dns_purge_callback")
     else
         callback(UInt8(0))
     end
@@ -354,19 +353,15 @@ function _dispatch_resolve_callback(
     )::Nothing
     event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
     if event_loop !== nothing
-        task = ScheduledTask(
-            TaskFn(function(_status)
-                try
-                    callback(resolver, host_name, error_code, addresses)
-                catch err
-                    _ = err
-                    logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name'")
-                end
-                return nothing
-            end);
-            type_tag = "dns_resolve_callback",
-        )
-        event_loop_schedule_task_now!(event_loop, task)
+        event_loop_schedule_task_now!(event_loop; type_tag = "dns_resolve_callback") do _
+            try
+                callback(resolver, host_name, error_code, addresses)
+            catch err
+                _ = err
+                logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name'")
+            end
+            return nothing
+        end
     else
         try
             callback(resolver, host_name, error_code, addresses)

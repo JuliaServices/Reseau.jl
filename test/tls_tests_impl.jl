@@ -178,23 +178,26 @@ function _tls_network_connect(
         end,
     )
 
-    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(
         event_loop_group = elg,
         host_resolver = resolver,
-    ))
+    )
 
     _ = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         host,
-        port;
-        tls_connection_options = tls_conn_opts,
-        on_setup = (bs, err, channel, ud) -> begin
-            _ = bs
-            _ = ud
+        port,
+        client_bootstrap.socket_options,
+        tls_conn_opts,
+        client_bootstrap.on_protocol_negotiated,
+        Reseau.ChannelCallable((err, channel) -> begin
             setup_err[] = err
             channel_ref[] = channel
             return nothing
-        end,
+        end),
+        false,
+        nothing,
+        nothing,
     )
 
     wait_for_pred_tls(() -> setup_err[] !== nothing; timeout_s = 20.0)
@@ -1443,7 +1446,7 @@ end
     @test server_sock isa Sockets.Socket
 
     bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
-    @test Sockets.socket_bind(server_sock, Sockets.SocketBindOptions(bind_endpoint)) === nothing
+    @test Sockets.socket_bind(server_sock; local_endpoint = bind_endpoint) === nothing
     @test Sockets.socket_listen(server_sock, 16) === nothing
 
     server_ready = Ref(false)
@@ -1493,8 +1496,8 @@ end
         return nothing
     end)
 
-    listener_opts = Sockets.SocketListenerOptions(; on_accept_start = on_accept_start, on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server_sock, event_loop, listener_opts) === nothing
+    listener_opts = (;  on_accept_start = on_accept_start, on_accept_result = on_accept)
+    @test Sockets.socket_start_accept(server_sock, event_loop; listener_opts...) === nothing
     @test wait_for_flag_tls(accept_started)
 
     bound = Sockets.socket_get_bound_address(server_sock)
@@ -1527,9 +1530,7 @@ end
     client_channel_ref = Ref{Any}(nothing)
     client_tls_ref = Ref{Any}(nothing)
 
-    connect_opts = Sockets.SocketConnectOptions(
-        Sockets.SocketEndpoint("127.0.0.1", port);
-        event_loop = event_loop,
+    connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             if err != Reseau.AWS_OP_SUCCESS
                 negotiated[] = true
@@ -1554,7 +1555,7 @@ end
         end),
     )
 
-    @test Sockets.socket_connect(client_sock, connect_opts) === nothing
+    @test Sockets.socket_connect(client_sock; connect_opts...) === nothing
 
     @test wait_for_flag_tls(server_ready)
     @test wait_for_flag_tls(negotiated)
@@ -1815,14 +1816,13 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(
         event_loop_group = elg,
         host_resolver = resolver,
-    ))
+    )
 
     client_setup_called = Ref(false)
     client_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
-    client_shutdown = Ref(false)
     client_negotiated_called = Ref(false)
     client_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
     client_channel = Ref{Any}(nothing)
@@ -1830,8 +1830,9 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     @test Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
-        port;
-        tls_connection_options = Sockets.TlsConnectionOptions(
+        port,
+        client_bootstrap.socket_options,
+        Sockets.TlsConnectionOptions(
             client_ctx;
             server_name = "localhost",
             on_negotiation_result = (handler, slot, err) -> begin
@@ -1840,16 +1841,16 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
                 return nothing
             end,
         ),
-        on_setup = (bs, err, channel, ud) -> begin
+        client_bootstrap.on_protocol_negotiated,
+        Reseau.ChannelCallable((err, channel) -> begin
             client_setup_called[] = true
             client_setup_err[] = err
             client_channel[] = channel
             return nothing
-        end,
-        on_shutdown = (bs, err, channel, ud) -> begin
-            client_shutdown[] = true
-            return nothing
-        end,
+        end),
+        false,
+        nothing,
+        nothing,
     ) === nothing
 
     @test wait_for_flag_tls(server_setup_called)
@@ -1869,7 +1870,6 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     end
 
     @test wait_for_flag_tls(server_shutdown)
-    @test wait_for_flag_tls(client_shutdown)
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
@@ -1954,10 +1954,10 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(
         event_loop_group = elg,
         host_resolver = resolver,
-    ))
+    )
 
     function connect_once!()
         server_setup_called[] = false
@@ -1969,7 +1969,6 @@ end
 
         client_setup_called = Ref(false)
         client_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
-        client_shutdown = Ref(false)
         client_negotiated_called = Ref(false)
         client_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
         client_channel = Ref{Any}(nothing)
@@ -1977,8 +1976,9 @@ end
         @test Sockets.client_bootstrap_connect!(
             client_bootstrap,
             "127.0.0.1",
-            port;
-            tls_connection_options = Sockets.TlsConnectionOptions(
+            port,
+            client_bootstrap.socket_options,
+            Sockets.TlsConnectionOptions(
                 client_ctx;
                 server_name = "localhost",
                 on_negotiation_result = (handler, slot, err) -> begin
@@ -1987,16 +1987,16 @@ end
                     return nothing
                 end,
             ),
-            on_setup = (bs, err, channel, ud) -> begin
+            client_bootstrap.on_protocol_negotiated,
+            Reseau.ChannelCallable((err, channel) -> begin
                 client_setup_called[] = true
                 client_setup_err[] = err
                 client_channel[] = channel
                 return nothing
-            end,
-            on_shutdown = (bs, err, channel, ud) -> begin
-                client_shutdown[] = true
-                return nothing
-            end,
+            end),
+            false,
+            nothing,
+            nothing,
         ) === nothing
 
         @test wait_for_flag_tls(server_setup_called)
@@ -2013,7 +2013,6 @@ end
         end
 
         @test wait_for_flag_tls(server_shutdown)
-        @test wait_for_flag_tls(client_shutdown)
     end
 
     connect_once!()
@@ -2068,9 +2067,7 @@ end
     @test client_socket isa Sockets.Socket
 
     close_done = Ref(false)
-    connect_opts = Sockets.SocketConnectOptions(
-        Sockets.SocketEndpoint("127.0.0.1", port);
-        event_loop = EventLoops.event_loop_group_get_next_loop(elg),
+    connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = EventLoops.event_loop_group_get_next_loop(elg),
         on_connection_result = Reseau.EventCallable(err -> begin
             if err != Reseau.AWS_OP_SUCCESS
                 close_done[] = true
@@ -2093,7 +2090,7 @@ end
         end),
     )
 
-    @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+    @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
     @test wait_for_flag_tls(close_done)
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
@@ -2170,16 +2167,17 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(
         event_loop_group = elg,
         host_resolver = resolver,
-    ))
+    )
 
     @test Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
-        port;
-        tls_connection_options = Sockets.TlsConnectionOptions(
+        port,
+        client_bootstrap.socket_options,
+        Sockets.TlsConnectionOptions(
             client_ctx;
             server_name = "localhost",
             on_negotiation_result = (handler, slot, err) -> begin
@@ -2187,11 +2185,15 @@ end
                 return nothing
             end,
         ),
-        on_setup = (bs, err, channel, ud) -> begin
+        client_bootstrap.on_protocol_negotiated,
+        Reseau.ChannelCallable((err, channel) -> begin
             client_setup[] = err == Reseau.AWS_OP_SUCCESS
             client_channel[] = channel
             return nothing
-        end,
+        end),
+        false,
+        nothing,
+        nothing,
     ) === nothing
 
     @test wait_for_flag_tls(server_setup)
@@ -2348,10 +2350,10 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(
         event_loop_group = elg,
         host_resolver = resolver,
-    ))
+    )
 
     client_tls_opts = Sockets.TlsConnectionOptions(
         client_ctx;
@@ -2361,10 +2363,11 @@ end
     connect_res = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
-        port;
-        enable_read_back_pressure = true,
-        tls_connection_options = client_tls_opts,
-        on_setup = (bs, err, channel, ud) -> begin
+        port,
+        client_bootstrap.socket_options,
+        client_tls_opts,
+        client_bootstrap.on_protocol_negotiated,
+        Reseau.ChannelCallable((err, channel) -> begin
             if err == Reseau.AWS_OP_SUCCESS
                 handler = rw_handler_new(
                     tls_test_handle_read,
@@ -2383,7 +2386,10 @@ end
             end
             client_ready[] = true
             return nothing
-        end,
+        end),
+        true,
+        nothing,
+        nothing,
     )
     @test connect_res === nothing
 
@@ -2461,7 +2467,6 @@ end
         server_ready = Ref(false)
         client_ready = Ref(false)
         server_shutdown = Ref(false)
-        client_shutdown = Ref(false)
         shutdown_invoked = Ref(false)
         listener_setup_called = Ref(false)
         listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
@@ -2535,10 +2540,10 @@ end
         port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
 
-        client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+        client_bootstrap = Sockets.ClientBootstrap(
             event_loop_group = elg,
             host_resolver = resolver,
-        ))
+        )
 
         client_tls_opts = Sockets.TlsConnectionOptions(
             client_ctx;
@@ -2548,10 +2553,11 @@ end
         connect_res = Sockets.client_bootstrap_connect!(
             client_bootstrap,
             "127.0.0.1",
-            port;
-            enable_read_back_pressure = true,
-            tls_connection_options = client_tls_opts,
-            on_setup = (bs, err, channel, ud) -> begin
+            port,
+            client_bootstrap.socket_options,
+            client_tls_opts,
+            client_bootstrap.on_protocol_negotiated,
+            Reseau.ChannelCallable((err, channel) -> begin
                 if err == Reseau.AWS_OP_SUCCESS
                     client_channel_ref[] = channel
                     handler = rw_handler_new(
@@ -2571,11 +2577,10 @@ end
                 end
                 client_ready[] = true
                 return nothing
-            end,
-            on_shutdown = (bs, err, channel, ud) -> begin
-                client_shutdown[] = true
-                return nothing
-            end,
+            end),
+            true,
+            nothing,
+            nothing,
         )
         @test connect_res === nothing
 
@@ -2589,7 +2594,7 @@ end
             rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
         end
 
-        @test wait_for_flag_tls(client_shutdown)
+        @test wait_for_flag_tls(server_shutdown)
         @test client_rw_args.read_invocations == 2
         @test _buf_to_string(client_rw_args.received_message) == _buf_to_string(read_tag)
 

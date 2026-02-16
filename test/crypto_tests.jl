@@ -241,10 +241,10 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(
         event_loop_group = elg,
         host_resolver = resolver,
-    ))
+    )
 
     resolution_config = Sockets.HostResolutionConfig(impl = (host, impl_data) -> begin
         _ = impl_data
@@ -254,29 +254,20 @@ end
     @test Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
-        port;
-        host_resolution_config = resolution_config,
-        tls_connection_options = outgoing_args.tls_options,
-        enable_read_back_pressure = false,
-        on_setup = (bs, err, channel, ud) -> begin
-            _ = bs
-            _ = ud
+        port,
+        client_bootstrap.socket_options,
+        outgoing_args.tls_options,
+        client_bootstrap.on_protocol_negotiated,
+        Reseau.ChannelCallable((err, channel) -> begin
             lock(outgoing_args.lock) do
                 outgoing_args.channel = channel
                 outgoing_args.setup_completed = true
             end
             return nothing
-        end,
-        on_shutdown = (bs, err, channel, ud) -> begin
-            _ = bs
-            _ = channel
-            _ = ud
-            lock(outgoing_args.lock) do
-                outgoing_args.shutdown_invoked = true
-                outgoing_args.error_code = err
-            end
-            return nothing
-        end,
+        end),
+        false,
+        nothing,
+        resolution_config,
     ) === nothing
 
     @test wait_for_pred(() -> incoming_args.setup_completed)
@@ -300,7 +291,6 @@ end
     end
 
     @test wait_for_pred(() -> incoming_args.shutdown_invoked)
-    @test wait_for_pred(() -> outgoing_args.shutdown_invoked)
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     @test wait_for_pred(() -> incoming_args.listener_destroyed)

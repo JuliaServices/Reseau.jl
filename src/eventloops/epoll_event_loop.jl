@@ -246,17 +246,14 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Stopping event-loop thread")
 
         # Create and schedule stop task
-        impl.stop_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    epoll_stop_task_callback(event_loop, _coerce_task_status(status))
-                catch e
-                    Core.println("epoll_stop task errored")
-                end
-                return nothing
-            end);
-            type_tag = "epoll_event_loop_stop",
-        )
+        impl.stop_task = ScheduledTask(; type_tag = "epoll_event_loop_stop") do status
+            try
+                epoll_stop_task_callback(event_loop, _coerce_task_status(status))
+            catch e
+                Core.println("epoll_stop task errored")
+            end
+            return nothing
+        end
         event_loop_schedule_task_now!(event_loop, impl.stop_task)
 
         return nothing
@@ -637,22 +634,19 @@
             unlock(impl.subscribed_handle_data_mutex)
         end
 
-        event_data.cleanup_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    epoll_unsubscribe_cleanup_task_callback(
-                        event_loop,
-                        handle_data_key,
-                        event_data,
-                        _coerce_task_status(status),
-                    )
-                catch e
-                    Core.println("epoll_cleanup task errored")
-                end
-                return nothing
-            end);
-            type_tag = "epoll_event_loop_unsubscribe_cleanup",
-        )
+        event_data.cleanup_task = ScheduledTask(; type_tag = "epoll_event_loop_unsubscribe_cleanup") do status
+            try
+                epoll_unsubscribe_cleanup_task_callback(
+                    event_loop,
+                    handle_data_key,
+                    event_data,
+                    _coerce_task_status(status),
+                )
+            catch e
+                Core.println("epoll_cleanup task errored")
+            end
+            return nothing
+        end
 
         if (@atomic event_loop.running)
             event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)

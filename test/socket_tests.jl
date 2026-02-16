@@ -336,9 +336,9 @@ end
         accepted = Ref{Any}(nothing)
 
         try
-            bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
+            bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
             try
-                Sockets.socket_bind(server_socket, bind_opts)
+                Sockets.socket_bind(server_socket; bind_opts...)
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
@@ -414,8 +414,8 @@ end
                 return nothing
             end)
 
-            accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-            @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+            accept_opts = (; on_accept_result = on_accept)
+            @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
             client = Sockets.socket_init(opts)
             client_socket = client isa Sockets.Socket ? client : nothing
@@ -424,9 +424,7 @@ end
                 return
             end
 
-            connect_opts = Sockets.SocketConnectOptions(
-                Sockets.SocketEndpoint("127.0.0.1", port);
-                event_loop = el_val,
+            connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
                 on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
@@ -451,7 +449,7 @@ end
                 end),
             )
 
-            @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+            @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
             @test wait_for_flag(connect_done)
             @test connect_err[] == Reseau.AWS_OP_SUCCESS
             @test wait_for_flag(write_done)
@@ -500,9 +498,9 @@ end
 
         client_socket = nothing
         try
-            bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
+            bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
             try
-                Sockets.socket_bind(server_socket, bind_opts)
+                Sockets.socket_bind(server_socket; bind_opts...)
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
@@ -524,13 +522,11 @@ end
                 return
             end
 
-            connect_opts = Sockets.SocketConnectOptions(
-                Sockets.SocketEndpoint("127.0.0.1", port);
-                event_loop = el_val,
+            connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
                 on_connection_result = Reseau.EventCallable(err -> nothing),
             )
 
-            @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+            @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         finally
             if client_socket !== nothing
                 Sockets.socket_cleanup!(client_socket)
@@ -570,9 +566,9 @@ end
         accepted = Ref{Any}(nothing)
 
         try
-            bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("::1", 0))
+            bind_opts = (; local_endpoint = Sockets.SocketEndpoint("::1", 0))
             try
-                Sockets.socket_bind(server_socket, bind_opts)
+                Sockets.socket_bind(server_socket; bind_opts...)
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
@@ -597,8 +593,8 @@ end
                 return nothing
             end)
 
-            accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-            @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+            accept_opts = (; on_accept_result = on_accept)
+            @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
             client = Sockets.socket_init(opts6)
             client_socket = client isa Sockets.Socket ? client : nothing
@@ -607,9 +603,7 @@ end
                 return
             end
 
-            connect_opts = Sockets.SocketConnectOptions(
-                Sockets.SocketEndpoint("::1", port);
-                event_loop = el_val,
+            connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("::1", port), event_loop = el_val,
                 on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
@@ -617,7 +611,7 @@ end
                 end),
             )
 
-            @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+            @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
             @test wait_for_flag(connect_done)
             @test connect_err[] == Reseau.AWS_OP_SUCCESS
             @test accept_err[] == Reseau.AWS_OP_SUCCESS
@@ -688,9 +682,9 @@ end
         accepted = Ref{Any}(nothing)
 
         try
-            bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("1", 0))
+            bind_opts = (; local_endpoint = Sockets.SocketEndpoint("1", 0))
             try
-                Sockets.socket_bind(server_socket, bind_opts)
+                Sockets.socket_bind(server_socket; bind_opts...)
             catch e
                 @test e isa Reseau.ReseauError
                 @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
@@ -718,8 +712,8 @@ end
                 return nothing
             end)
 
-            accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-            @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+            accept_opts = (; on_accept_result = on_accept)
+            @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
             client = Sockets.socket_init(opts)
             client_socket = client isa Sockets.Socket ? client : nothing
@@ -728,9 +722,7 @@ end
                 return
             end
 
-            connect_opts = Sockets.SocketConnectOptions(
-                Sockets.SocketEndpoint("1", port);
-                event_loop = el_val,
+            connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("1", port), event_loop = el_val,
                 on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
@@ -739,7 +731,7 @@ end
             )
 
             try
-                Sockets.socket_connect(client_socket, connect_opts)
+                Sockets.socket_connect(client_socket; connect_opts...)
             catch e
                 @test e isa Reseau.ReseauError
                 @test _is_allowed_connect_error(e.code) ||
@@ -873,8 +865,8 @@ end
             return
         end
 
-        bind_opts = Sockets.SocketBindOptions(local_endpoint)
-        @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = local_endpoint)
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         accept_err = Ref{Int}(0)
@@ -930,8 +922,8 @@ end
             return nothing
         end)
 
-        accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -939,9 +931,7 @@ end
         if client_socket === nothing
             return
         end
-        connect_opts = Sockets.SocketConnectOptions(
-            local_endpoint;
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = local_endpoint, event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -967,7 +957,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
@@ -1040,8 +1030,8 @@ end
             return
         end
 
-        bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         on_accept_started = Reseau.EventCallable(err -> begin
@@ -1098,11 +1088,11 @@ end
             return nothing
         end)
 
-        accept_opts = Sockets.SocketListenerOptions(
+        accept_opts = (;
             on_accept_result = on_accept,
             on_accept_start = on_accept_started,
         )
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
         @test wait_for_flag(accept_started)
         @test port_ref[] != 0
@@ -1114,9 +1104,7 @@ end
             return
         end
 
-        connect_opts = Sockets.SocketConnectOptions(
-            Sockets.SocketEndpoint("127.0.0.1", port_ref[]);
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port_ref[]), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -1141,7 +1129,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
@@ -1186,8 +1174,8 @@ end
             return
         end
 
-        bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         bound = Sockets.socket_get_bound_address(server_socket)
@@ -1222,8 +1210,8 @@ end
             return nothing
         end)
 
-        accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1238,9 +1226,7 @@ end
         write_cb_sync = Threads.Atomic{Bool}(false)
         write_err = Ref{Int}(0)
 
-        connect_opts = Sockets.SocketConnectOptions(
-            Sockets.SocketEndpoint("127.0.0.1", port);
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_done[] = true
                 if err != Reseau.AWS_OP_SUCCESS
@@ -1270,7 +1256,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
         @test wait_for_flag(accept_done)
         @test wait_for_flag(write_started)
@@ -1317,9 +1303,7 @@ end
     connect_done = Threads.Atomic{Bool}(false)
     connect_err = Ref{Int}(0)
     endpoint = Sockets.SocketEndpoint("10.255.255.1", 81)
-    connect_opts = Sockets.SocketConnectOptions(
-        endpoint;
-        event_loop = el_val,
+    connect_opts = (; remote_endpoint = endpoint, event_loop = el_val,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
@@ -1329,7 +1313,7 @@ end
 
     try
         try
-            Sockets.socket_connect(socket_val, connect_opts)
+            Sockets.socket_connect(socket_val; connect_opts...)
             @test wait_for_flag(connect_done; timeout_s = 3.0)
             @test _is_allowed_connect_error(connect_err[])
         catch e
@@ -1368,9 +1352,7 @@ end
     connect_done = Threads.Atomic{Bool}(false)
     connect_err = Ref{Int}(0)
     endpoint = Sockets.SocketEndpoint("10.255.255.1", 81)
-    connect_opts = Sockets.SocketConnectOptions(
-        endpoint;
-        event_loop = el_val,
+    connect_opts = (; remote_endpoint = endpoint, event_loop = el_val,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
@@ -1380,7 +1362,7 @@ end
 
     try
         try
-            Sockets.socket_connect(socket_val, connect_opts)
+            Sockets.socket_connect(socket_val; connect_opts...)
             EventLoops.event_loop_group_destroy!(elg_val)
             @test connect_done[]
             @test connect_err[] == EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
@@ -1421,9 +1403,7 @@ end
         connect_err = Ref{Int}(0)
         cleanup_done = Threads.Atomic{Bool}(false)
         endpoint = Sockets.SocketEndpoint("10.255.255.1", 81)
-        connect_opts = Sockets.SocketConnectOptions(
-            endpoint;
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = endpoint, event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -1439,7 +1419,7 @@ end
 
         try
             try
-                Sockets.socket_connect(socket_val, connect_opts)
+                Sockets.socket_connect(socket_val; connect_opts...)
                 EventLoops.event_loop_schedule_task_now!(el_val, cleanup_task)
                 @test wait_for_flag(cleanup_done)
                 sleep(0.05)
@@ -1484,8 +1464,8 @@ end
     client_socket = nothing
 
     try
-        bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        @test Sockets.socket_bind(listener_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(listener_socket; bind_opts...) === nothing
         @test Sockets.socket_listen(listener_socket, 1024) === nothing
 
         bound = Sockets.socket_get_bound_address(listener_socket)
@@ -1505,8 +1485,8 @@ end
             return nothing
         end)
 
-        accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(listener_socket, el_val; accept_opts...) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1515,9 +1495,7 @@ end
             return
         end
 
-        connect_opts = Sockets.SocketConnectOptions(
-            Sockets.SocketEndpoint("127.0.0.1", port);
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -1525,7 +1503,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(accept_done)
         @test wait_for_flag(connect_done)
         @test accept_err[] == Reseau.AWS_OP_SUCCESS
@@ -1566,8 +1544,8 @@ end
     client_socket = nothing
 
     try
-        bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        @test Sockets.socket_bind(listener_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(listener_socket; bind_opts...) === nothing
         @test Sockets.socket_listen(listener_socket, 1024) === nothing
 
         bound = Sockets.socket_get_bound_address(listener_socket)
@@ -1583,8 +1561,8 @@ end
             return nothing
         end)
 
-        accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(listener_socket, el_val, accept_opts) === nothing
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(listener_socket, el_val; accept_opts...) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1593,16 +1571,14 @@ end
             return
         end
 
-        connect_opts = Sockets.SocketConnectOptions(
-            Sockets.SocketEndpoint("127.0.0.1", port);
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_done[] = true
                 return nothing
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(accept_done)
         @test wait_for_flag(connect_done)
 
@@ -1704,8 +1680,8 @@ end
             return
         end
 
-        bind_opts = Sockets.SocketBindOptions(endpoint)
-        @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = endpoint)
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
         @test Sockets.socket_listen(server_socket, 8) === nothing
 
         accept_err = Ref{Int}(0)
@@ -1761,8 +1737,8 @@ end
             return nothing
         end)
 
-        accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
         client = Sockets.socket_init(opts)
         client_socket = client isa Sockets.Socket ? client : nothing
@@ -1771,9 +1747,7 @@ end
             return
         end
 
-        connect_opts = Sockets.SocketConnectOptions(
-            endpoint;
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = endpoint, event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -1798,7 +1772,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
@@ -1849,8 +1823,8 @@ end
             return
         end
 
-        bind_opts = Sockets.SocketBindOptions(endpoint)
-        @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = endpoint)
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
         @test Sockets.socket_listen(server_socket, 1024) === nothing
 
         accept_err = Ref{Int}(0)
@@ -1865,9 +1839,7 @@ end
             return
         end
 
-        connect_opts = Sockets.SocketConnectOptions(
-            endpoint;
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = endpoint, event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -1875,7 +1847,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
 
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
@@ -1884,8 +1856,8 @@ end
             return nothing
         end)
 
-        accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-        @test Sockets.socket_start_accept(server_socket, el_val, accept_opts) === nothing
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
         @test wait_for_flag(connect_done)
         @test wait_for_flag(accept_done)
@@ -1928,8 +1900,8 @@ end
             return
         end
 
-        bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
 
         bound = Sockets.socket_get_bound_address(server_socket)
         @test bound isa Sockets.SocketEndpoint
@@ -1974,9 +1946,7 @@ end
         write_err = Ref{Int}(0)
         write_done = Threads.Atomic{Bool}(false)
 
-        connect_opts = Sockets.SocketConnectOptions(
-            Sockets.SocketEndpoint("127.0.0.1", port);
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -2000,7 +1970,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
@@ -2039,8 +2009,8 @@ end
             return
         end
 
-        bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        @test Sockets.socket_bind(server_socket, bind_opts) === nothing
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
 
         bound = Sockets.socket_get_bound_address(server_socket)
         @test bound isa Sockets.SocketEndpoint
@@ -2080,17 +2050,15 @@ end
             return
         end
 
-        local_bind = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
-        @test Sockets.socket_bind(client_socket, local_bind) === nothing
+        local_bind = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(client_socket; local_bind...) === nothing
 
         connect_err = Ref{Int}(0)
         connect_done = Threads.Atomic{Bool}(false)
         write_err = Ref{Int}(0)
         write_done = Threads.Atomic{Bool}(false)
 
-        connect_opts = Sockets.SocketConnectOptions(
-            Sockets.SocketEndpoint("127.0.0.1", port);
-            event_loop = el_val,
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
@@ -2114,7 +2082,7 @@ end
             end),
         )
 
-        @test Sockets.socket_connect(client_socket, connect_opts) === nothing
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
         @test connect_err[] == Reseau.AWS_OP_SUCCESS
         @test wait_for_flag(write_done)
@@ -2159,8 +2127,8 @@ end
         try
             endpoint = Sockets.SocketEndpoint()
             Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
-            bind_opts = Sockets.SocketBindOptions(endpoint)
-            @test Sockets.socket_bind(socket_val, bind_opts) === nothing
+            bind_opts = (; local_endpoint = endpoint)
+            @test Sockets.socket_bind(socket_val; bind_opts...) === nothing
             @test Sockets.socket_assign_to_event_loop(socket_val, el_val) === nothing
             Sockets.socket_subscribe_to_readable_events(socket_val, Reseau.EventCallable(err -> nothing))
 
@@ -2223,7 +2191,7 @@ end
     else
         endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    @test Sockets.socket_bind(socket_val, Sockets.SocketBindOptions(endpoint)) === nothing
+    @test Sockets.socket_bind(socket_val; local_endpoint = endpoint) === nothing
     @test Sockets.socket_listen(socket_val, 1024) === nothing
 
     bound = Sockets.socket_get_bound_address(socket_val)
@@ -2268,7 +2236,7 @@ end
     else
         endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    @test Sockets.socket_bind(socket_val, Sockets.SocketBindOptions(endpoint)) === nothing
+    @test Sockets.socket_bind(socket_val; local_endpoint = endpoint) === nothing
 
     bound = Sockets.socket_get_bound_address(socket_val)
     @test bound isa Sockets.SocketEndpoint
@@ -2308,18 +2276,18 @@ end
         @static if Sys.isapple()
             endpoint = Sockets.SocketEndpoint()
             Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
-            bind_opts = Sockets.SocketBindOptions(endpoint)
+            bind_opts = (; local_endpoint = endpoint)
         else
-            bind_opts = Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))
+            bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
         end
-        @test Sockets.socket_bind(sock1_val, bind_opts) === nothing
+        @test Sockets.socket_bind(sock1_val; bind_opts...) === nothing
         @test Sockets.socket_listen(sock1_val, 1024) === nothing
 
         @static if Sys.isapple()
             # On macOS LOCAL: duplicate bind on the same path
             if sock2_val !== nothing
                 try
-                    Sockets.socket_bind(sock2_val, bind_opts)
+                    Sockets.socket_bind(sock2_val; bind_opts...)
                     @test false
                 catch e
                     @test e isa Reseau.ReseauError
@@ -2332,7 +2300,7 @@ end
             if sock2_val !== nothing
                 dup_endpoint = Sockets.SocketEndpoint("127.0.0.1", Int(bound.port))
                 try
-                    Sockets.socket_bind(sock2_val, Sockets.SocketBindOptions(dup_endpoint))
+                    Sockets.socket_bind(sock2_val; local_endpoint = dup_endpoint)
                     @test false
                 catch e
                     @test e isa Reseau.ReseauError
@@ -2364,7 +2332,7 @@ end
         # Test bind to a path in a non-existent directory
         endpoint = Sockets.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
         try
-            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
+            Sockets.socket_bind(sock_val; local_endpoint = endpoint)
             @test false
         catch e
             @test e isa Reseau.ReseauError
@@ -2372,7 +2340,7 @@ end
     else
         endpoint = Sockets.SocketEndpoint("127.0.0.1", 80)
         try
-            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
+            Sockets.socket_bind(sock_val; local_endpoint = endpoint)
             # likely running with elevated privileges; skip assertion
             @test true
         catch e
@@ -2405,7 +2373,7 @@ end
         # Test bind to an invalid/non-existent path
         endpoint = Sockets.SocketEndpoint("/nonexistent_dir_xxxxx/sock", 0)
         try
-            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
+            Sockets.socket_bind(sock_val; local_endpoint = endpoint)
             @test false
         catch e
             @test e isa Reseau.ReseauError
@@ -2413,7 +2381,7 @@ end
     else
         endpoint = Sockets.SocketEndpoint("127.0", 80)
         try
-            Sockets.socket_bind(sock_val, Sockets.SocketBindOptions(endpoint))
+            Sockets.socket_bind(sock_val; local_endpoint = endpoint)
             @test false
         catch e
             @test e isa Reseau.ReseauError
@@ -2449,9 +2417,7 @@ end
 
     err_code = Ref{Int}(0)
     done = Threads.Atomic{Bool}(false)
-    connect_opts = Sockets.SocketConnectOptions(
-        endpoint;
-        event_loop = el_val,
+    connect_opts = (; remote_endpoint = endpoint, event_loop = el_val,
         on_connection_result = Reseau.EventCallable(err -> begin
             err_code[] = err
             done[] = true
@@ -2460,7 +2426,7 @@ end
     )
 
     try
-        Sockets.socket_connect(sock_val, connect_opts)
+        Sockets.socket_connect(sock_val; connect_opts...)
     catch e
         err_code[] = e isa Reseau.ReseauError ? e.code : -1
         done[] = true
@@ -2508,7 +2474,7 @@ end
 
         port = 0
         try
-            @test Sockets.socket_bind(temp_val, Sockets.SocketBindOptions(Sockets.SocketEndpoint("127.0.0.1", 0))) === nothing
+            @test Sockets.socket_bind(temp_val; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)) === nothing
             bound = Sockets.socket_get_bound_address(temp_val)
             if bound isa Sockets.SocketEndpoint
                 port = Int(bound.port)
@@ -2534,9 +2500,7 @@ end
 
     err_code = Ref{Int}(0)
     done = Threads.Atomic{Bool}(false)
-    connect_opts = Sockets.SocketConnectOptions(
-        connect_endpoint;
-        event_loop = el_val,
+    connect_opts = (; remote_endpoint = connect_endpoint, event_loop = el_val,
         on_connection_result = Reseau.EventCallable(err -> begin
             err_code[] = err
             done[] = true
@@ -2545,7 +2509,7 @@ end
     )
 
     try
-        Sockets.socket_connect(sock_val, connect_opts)
+        Sockets.socket_connect(sock_val; connect_opts...)
     catch e
         err_code[] = e isa Reseau.ReseauError ? e.code : -1
         done[] = true

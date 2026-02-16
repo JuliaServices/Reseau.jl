@@ -136,8 +136,7 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
     return nothing
 end
 
-function _on_setup(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
-    _ = bootstrap
+function _on_connect_setup(io::TCPSocket, error_code::Int, channel)::Nothing
     if error_code != AWS_OP_SUCCESS || channel === nothing
         io.connect_error = error_code
         _mark_closed!(io, error_code)
@@ -161,54 +160,6 @@ function _on_setup(bootstrap, error_code::Int, channel::Union{Channel, Nothing},
         "tcpsocket_install_handler",
     )
     channel_schedule_task_now!(channel, task)
-    return nothing
-end
-
-function _on_shutdown(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
-    _ = bootstrap
-    _ = channel
-    _mark_closed!(io, error_code)
-    return nothing
-end
-
-@inline function _on_setup_callback(bootstrap, error_code, channel, user_data)::Nothing
-    _ = bootstrap
-    io = user_data::TCPSocket
-    err = Int(error_code)
-    if err != AWS_OP_SUCCESS || !(channel isa Channel)
-        io.connect_error = err
-        _mark_closed!(io, err)
-        notify(io.connect_event)
-        return nothing
-    end
-
-    ch = channel::Channel
-    if channel_thread_is_callers_thread(ch)
-        _install_handler!(io, ch)
-        io.connect_error = AWS_OP_SUCCESS
-        notify(io.connect_event)
-        return nothing
-    end
-
-    task = ChannelTask(
-        EventCallable(s -> begin
-            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-            _install_handler!(io, ch)
-            io.connect_error = AWS_OP_SUCCESS
-            notify(io.connect_event)
-            return nothing
-        end),
-        "tcpsocket_install_handler",
-    )
-    channel_schedule_task_now!(ch, task)
-    return nothing
-end
-
-@inline function _on_shutdown_callback(bootstrap, error_code, channel, user_data)::Nothing
-    _ = bootstrap
-    _ = channel
-    io = user_data::TCPSocket
-    _mark_closed!(io, Int(error_code))
     return nothing
 end
 
@@ -332,11 +283,8 @@ function TCPSocket(
         port,
         socket_options,
         tls_conn,
-        nothing,
-        nothing,
-        _on_setup_callback,
-        _on_shutdown_callback,
-        io,
+        bootstrap.on_protocol_negotiated,
+        ChannelCallable((err, channel) -> _on_connect_setup(io, Int(err), channel)),
         enable_read_back_pressure,
         nothing,
         host_resolution_config,

@@ -448,6 +448,10 @@ function ScheduledTask(fn::TaskFn; type_tag::AbstractString = "task")
     return ScheduledTask(fn, String(type_tag), UInt64(0), false)
 end
 
+function ScheduledTask(callable::F; type_tag::AbstractString = "task") where {F}
+    return ScheduledTask(TaskFn(callable); type_tag = type_tag)
+end
+
 timestamp_less(a, b) = a.timestamp < b.timestamp
 
 mutable struct TaskScheduler
@@ -498,6 +502,16 @@ function task_scheduler_schedule_now!(scheduler::TaskScheduler, task::ScheduledT
     return nothing
 end
 
+function task_scheduler_schedule_now!(
+        scheduler::TaskScheduler,
+        callable::F;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    task_scheduler_schedule_now!(scheduler, task)
+    return task
+end
+
 function task_scheduler_schedule_future!(scheduler::TaskScheduler, task::ScheduledTask, time_to_run::UInt64)
     logf(
         LogLevel.TRACE,
@@ -506,6 +520,26 @@ function task_scheduler_schedule_future!(scheduler::TaskScheduler, task::Schedul
     task.scheduled = true
     push!(scheduler.timed, task)
     return nothing
+end
+
+function task_scheduler_schedule_future!(
+        scheduler::TaskScheduler,
+        callable::F,
+        time_to_run::UInt64;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    task_scheduler_schedule_future!(scheduler, task, time_to_run)
+    return task
+end
+
+function task_scheduler_schedule_future!(
+        scheduler::TaskScheduler,
+        callable::F,
+        time_to_run::Integer;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    return task_scheduler_schedule_future!(scheduler, callable, UInt64(time_to_run); type_tag = type_tag)
 end
 
 function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)

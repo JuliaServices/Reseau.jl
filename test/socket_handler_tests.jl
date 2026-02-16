@@ -104,8 +104,8 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     else
         bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    bind_opts = Sockets.SocketBindOptions(bind_endpoint)
-    @test Sockets.socket_bind(server, bind_opts) === nothing
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
     @test Sockets.socket_listen(server, 8) === nothing
     @static if !Sys.isapple()
         bound = Sockets.socket_get_bound_address(server)
@@ -163,24 +163,22 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
         return nothing
     end)
 
-    accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server, event_loop, accept_opts) === nothing
+    accept_opts = (; on_accept_result = on_accept)
+    @test Sockets.socket_start_accept(server, event_loop; accept_opts...) === nothing
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
 
     connect_done = Ref(false)
     connect_err = Ref(0)
-    connect_opts = Sockets.SocketConnectOptions(
-        connect_endpoint;
-        event_loop = event_loop,
+    connect_opts = (; remote_endpoint = connect_endpoint, event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
         end),
     )
-    @test Sockets.socket_connect(client, connect_opts) === nothing
+    @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
     @test connect_err[] == Reseau.AWS_OP_SUCCESS
     @test accept_err[] == Reseau.AWS_OP_SUCCESS
@@ -287,8 +285,8 @@ end
     else
         bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    bind_opts = Sockets.SocketBindOptions(bind_endpoint)
-    @test Sockets.socket_bind(server, bind_opts) === nothing
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
     @test Sockets.socket_listen(server, 8) === nothing
     @static if !Sys.isapple()
         bound = Sockets.socket_get_bound_address(server)
@@ -336,24 +334,22 @@ end
         return nothing
     end)
 
-    accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server, event_loop, accept_opts) === nothing
+    accept_opts = (; on_accept_result = on_accept)
+    @test Sockets.socket_start_accept(server, event_loop; accept_opts...) === nothing
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
 
     connect_done = Ref(false)
     connect_err = Ref(0)
-    connect_opts = Sockets.SocketConnectOptions(
-        connect_endpoint;
-        event_loop = event_loop,
+    connect_opts = (; remote_endpoint = connect_endpoint, event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
         end),
     )
-    @test Sockets.socket_connect(client, connect_opts) === nothing
+    @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
     @test connect_err[] == Reseau.AWS_OP_SUCCESS
     @test accept_err[] == Reseau.AWS_OP_SUCCESS
@@ -477,8 +473,8 @@ end
     else
         bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    bind_opts = Sockets.SocketBindOptions(bind_endpoint)
-    @test Sockets.socket_bind(server, bind_opts) === nothing
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
     @test Sockets.socket_listen(server, 8) === nothing
     @static if !Sys.isapple()
         bound = Sockets.socket_get_bound_address(server)
@@ -515,24 +511,22 @@ end
         return nothing
     end)
 
-    accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server, event_loop, accept_opts) === nothing
+    accept_opts = (; on_accept_result = on_accept)
+    @test Sockets.socket_start_accept(server, event_loop; accept_opts...) === nothing
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
 
     connect_done = Ref(false)
     connect_err = Ref(0)
-    connect_opts = Sockets.SocketConnectOptions(
-        connect_endpoint;
-        event_loop = event_loop,
+    connect_opts = (; remote_endpoint = connect_endpoint, event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
         end),
     )
-    @test Sockets.socket_connect(client, connect_opts) === nothing
+    @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
     @test connect_err[] == Reseau.AWS_OP_SUCCESS
     @test accept_err[] == Reseau.AWS_OP_SUCCESS

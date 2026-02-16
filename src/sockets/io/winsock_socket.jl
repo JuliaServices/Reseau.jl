@@ -616,17 +616,14 @@
 
         # Create connect args and timeout task. Note: ScheduledTask is parametric on ctx type.
         args = WinsockSocketConnectArgs(sock, nothing, impl.read_io_data)
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    _winsock_handle_socket_timeout(args, _coerce_task_status(status))
-                catch e
-                    Core.println("winsock_connect_timeout task errored")
-                end
-                return nothing
-            end);
-            type_tag = "winsock_connect_timeout",
-        )
+        task = ScheduledTask(; type_tag = "winsock_connect_timeout") do status
+            try
+                _winsock_handle_socket_timeout(args, _coerce_task_status(status))
+            catch e
+                Core.println("winsock_connect_timeout task errored")
+            end
+            return nothing
+        end
         args.timeout_task = task
 
         impl.connect_args = args
@@ -672,10 +669,17 @@
         return nothing
     end
 
-    function socket_connect_impl(::WinsockSocket, sock::Socket, options::SocketConnectOptions)::Nothing
-        remote_endpoint = options.remote_endpoint
-        connect_loop = options.event_loop
-        on_connection_result = options.on_connection_result
+    function socket_connect_impl(
+            ::WinsockSocket,
+            sock::Socket,
+            remote_endpoint::SocketEndpoint,
+            connect_loop::Union{EventLoop, Nothing},
+            event_loop_group::Union{EventLoopGroup, Nothing},
+            on_connection_result::Union{EventCallable, Nothing},
+            tls_connection_options::MaybeTlsConnectionOptions,
+        )::Nothing
+        _ = event_loop_group
+        _ = tls_connection_options
 
         if sock.options.type != SocketType.DGRAM
             if sock.state != SocketState.INIT
@@ -725,19 +729,15 @@
             end
 
             # Schedule success on the loop.
-            task = ScheduledTask(
-                TaskFn(function(status)
-                    try
-                        _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
-                        _winsock_local_and_udp_connection_success(sock)
-                    catch e
-                        Core.println("winsock_local_connect_success task errored")
-                    end
-                    return nothing
-                end);
-                type_tag = "winsock_local_connect_success",
-            )
-            event_loop_schedule_task_now!(connect_loop, task)
+            event_loop_schedule_task_now!(connect_loop; type_tag = "winsock_local_connect_success") do status
+                try
+                    _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
+                    _winsock_local_and_udp_connection_success(sock)
+                catch e
+                    Core.println("winsock_local_connect_success task errored")
+                end
+                return nothing
+            end
             return nothing
         end
 
@@ -791,19 +791,15 @@
                     sock.state = SocketState.ERROR
                     rethrow()
                 end
-                task = ScheduledTask(
-                    TaskFn(function(status)
-                        try
-                            _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
-                            _winsock_local_and_udp_connection_success(sock)
-                        catch e
-                            Core.println("winsock_udp_connect_success task errored")
-                        end
-                        return nothing
-                    end);
-                    type_tag = "winsock_udp_connect_success",
-                )
-                event_loop_schedule_task_now!(connect_loop, task)
+                event_loop_schedule_task_now!(connect_loop; type_tag = "winsock_udp_connect_success") do status
+                    try
+                        _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
+                        _winsock_local_and_udp_connection_success(sock)
+                    catch e
+                        Core.println("winsock_udp_connect_success task errored")
+                    end
+                    return nothing
+                end
             end
 
             return nothing
@@ -891,8 +887,15 @@
         return nothing
     end
 
-    function socket_bind_impl(::WinsockSocket, sock::Socket, options::SocketBindOptions)::Nothing
-        local_endpoint = options.local_endpoint
+    function socket_bind_impl(
+            ::WinsockSocket,
+            sock::Socket,
+            local_endpoint::SocketEndpoint,
+            event_loop::Union{EventLoop, Nothing},
+            tls_connection_options::MaybeTlsConnectionOptions,
+        )::Nothing
+        _ = event_loop
+        _ = tls_connection_options
 
         if sock.state != SocketState.INIT
             sock.state = SocketState.ERROR
@@ -1131,8 +1134,16 @@
         end
     end
 
-    function socket_start_accept_impl(::WinsockSocket, sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
-        options.on_accept_result === nothing && throw_error(ERROR_INVALID_ARGUMENT)
+    function socket_start_accept_impl(
+            ::WinsockSocket,
+            sock::Socket,
+            accept_loop::EventLoop,
+            on_accept_result::Union{ChannelCallable, Nothing},
+            on_accept_start::Union{EventCallable, Nothing},
+            event_loop_group::Union{EventLoopGroup, Nothing},
+        )::Nothing
+        _ = event_loop_group
+        on_accept_result === nothing && throw_error(ERROR_INVALID_ARGUMENT)
 
         if sock.state != SocketState.LISTENING
             throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
@@ -1145,10 +1156,10 @@
         impl = sock.impl::WinsockSocket
         impl.stop_accept = false
 
-        sock.accept_result_fn = options.on_accept_result
+        sock.accept_result_fn = on_accept_result
 
         if sock.options.domain == SocketDomain.LOCAL
-            return _winsock_local_start_accept(sock, accept_loop, options)
+            return _winsock_local_start_accept(sock, accept_loop, on_accept_start)
         end
 
         el_to_use = sock.event_loop === nothing ? accept_loop : nothing
@@ -1163,8 +1174,8 @@
                 rethrow()
             end
         end
-        if options.on_accept_start !== nothing
-            options.on_accept_start(AWS_OP_SUCCESS)
+        if on_accept_start !== nothing
+            on_accept_start(AWS_OP_SUCCESS)
         end
         return nothing
     end
@@ -1335,7 +1346,11 @@
         return nothing
     end
 
-    function _winsock_local_start_accept(sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
+    function _winsock_local_start_accept(
+            sock::Socket,
+            accept_loop::EventLoop,
+            on_accept_start::Union{EventCallable, Nothing},
+        )::Nothing
         impl = sock.impl::WinsockSocket
         impl.stop_accept = false
 
@@ -1367,23 +1382,19 @@
                 throw_error(aws_err)
             elseif err == ERROR_PIPE_CONNECTED
                 # No IOCP event will fire; schedule a task to finish the accept.
-                task = ScheduledTask(
-                    TaskFn(function(status)
-                        try
-                            _winsock_named_pipe_connected_immediately_task(impl.read_io_data, _coerce_task_status(status))
-                        catch e
-                            Core.println("winsock_pipe_connected_immediately task errored")
-                        end
-                        return nothing
-                    end);
-                    type_tag = "winsock_pipe_connected_immediately",
-                )
-                event_loop_schedule_task_now!(sock.event_loop, task)
+                event_loop_schedule_task_now!(sock.event_loop; type_tag = "winsock_pipe_connected_immediately") do status
+                    try
+                        _winsock_named_pipe_connected_immediately_task(impl.read_io_data, _coerce_task_status(status))
+                    catch e
+                        Core.println("winsock_pipe_connected_immediately task errored")
+                    end
+                    return nothing
+                end
             end
         end
 
-        if options.on_accept_start !== nothing
-            options.on_accept_start(AWS_OP_SUCCESS)
+        if on_accept_start !== nothing
+            on_accept_start(AWS_OP_SUCCESS)
         end
 
         return nothing

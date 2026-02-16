@@ -61,12 +61,12 @@ end
 
 # Socket endpoint struct
 mutable struct SocketEndpoint
-    address::NTuple{ADDRESS_MAX_LEN, UInt8}
+    address::String
     port::UInt32
 end
 
 function SocketEndpoint()
-    return SocketEndpoint(ntuple(_ -> UInt8(0), Val(ADDRESS_MAX_LEN)), UInt32(0))
+    return SocketEndpoint("", UInt32(0))
 end
 
 function SocketEndpoint(address::AbstractString, port::Integer)
@@ -76,36 +76,40 @@ function SocketEndpoint(address::AbstractString, port::Integer)
     return endpoint
 end
 
-function set_address!(endpoint::SocketEndpoint, address::AbstractString)
+@inline function _validate_endpoint_address(address::AbstractString)::Nothing
     bytes = codeunits(address)
-    len = min(length(bytes), ADDRESS_MAX_LEN - 1)
-    # Build new address tuple
-    addr = ntuple(Val(ADDRESS_MAX_LEN)) do i
-        if i <= len
-            bytes[i]
-        else
-            UInt8(0)
+    if length(bytes) >= ADDRESS_MAX_LEN
+        logf(
+            LogLevel.ERROR,
+            LS_IO_SOCKET,
+            "Socket endpoint address length $(length(bytes)) exceeds maximum $(ADDRESS_MAX_LEN - 1) bytes",
+        )
+        throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
+    end
+
+    for b in bytes
+        if b == 0x00
+            logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket endpoint address contains an embedded NUL byte")
+            throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
     end
-    endpoint.address = addr
+
+    return nothing
+end
+
+function set_address!(endpoint::SocketEndpoint, address::AbstractString)
+    _validate_endpoint_address(address)
+    endpoint.address = String(address)
     return endpoint
 end
 
 function get_address(endpoint::SocketEndpoint)::String
-    # Find null terminator
-    addr = endpoint.address
-    len = 0
-    for i in 1:ADDRESS_MAX_LEN
-        if addr[i] == 0
-            break
-        end
-        len = i
-    end
-    return String(UInt8[addr[i] for i in 1:len])
+    _validate_endpoint_address(endpoint.address)
+    return endpoint.address
 end
 
 function Base.copy!(dst::SocketEndpoint, src::SocketEndpoint)
-    dst.address = src.address
+    set_address!(dst, src.address)
     dst.port = src.port
     return dst
 end
@@ -163,69 +167,6 @@ function get_network_interface_name(options::SocketOptions)::String
     return String(UInt8[iface[i] for i in 1:len])
 end
 
-# Socket connect options
-struct SocketConnectOptions
-    remote_endpoint::SocketEndpoint
-    event_loop::Union{EventLoop, Nothing}
-    event_loop_group::Union{EventLoopGroup, Nothing}
-    on_connection_result::Union{EventCallable, Nothing}
-    tls_connection_options::MaybeTlsConnectionOptions
-end
-
-function SocketConnectOptions(
-        remote_endpoint::SocketEndpoint;
-        event_loop = nothing,
-        event_loop_group = nothing,
-        on_connection_result = nothing,
-        tls_connection_options::MaybeTlsConnectionOptions = nothing,
-    )
-    return SocketConnectOptions(
-        remote_endpoint,
-        event_loop,
-        event_loop_group,
-        on_connection_result,
-        tls_connection_options,
-    )
-end
-
-# Socket bind options
-struct SocketBindOptions
-    local_endpoint::SocketEndpoint
-    event_loop::Union{EventLoop, Nothing}
-    tls_connection_options::MaybeTlsConnectionOptions
-end
-
-function SocketBindOptions(
-        local_endpoint::SocketEndpoint;
-        event_loop = nothing,
-        tls_connection_options::MaybeTlsConnectionOptions = nothing,
-    )
-    return SocketBindOptions(
-        local_endpoint,
-        event_loop,
-        tls_connection_options,
-    )
-end
-
-# Socket listener options
-struct SocketListenerOptions
-    on_accept_result::Union{ChannelCallable, Nothing}
-    on_accept_start::Union{EventCallable, Nothing}
-    event_loop_group::Union{EventLoopGroup, Nothing}
-end
-
-function SocketListenerOptions(;
-        on_accept_result = nothing,
-        on_accept_start = nothing,
-        event_loop_group = nothing,
-    )
-    return SocketListenerOptions(
-        on_accept_result,
-        on_accept_start,
-        event_loop_group,
-    )
-end
-
 # Platform-specific socket implementation type
 const PlatformSocketImpl = @static if Sys.isapple()
     Union{PosixSocket, NWSocket}
@@ -272,10 +213,6 @@ function socket_cleanup!(socket::Socket)
     return socket_cleanup_impl(socket.impl, socket)
 end
 
-function socket_connect(socket::Socket, options::SocketConnectOptions)::Nothing
-    return socket_connect_impl(socket.impl, socket, options)
-end
-
 function socket_connect(
         socket::Socket,
         remote_endpoint::SocketEndpoint;
@@ -284,20 +221,33 @@ function socket_connect(
         on_connection_result::Union{EventCallable, Nothing} = nothing,
         tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )::Nothing
-    return socket_connect(
+    return socket_connect_impl(
+        socket.impl,
         socket,
-        SocketConnectOptions(
-            remote_endpoint;
-            event_loop = event_loop,
-            event_loop_group = event_loop_group,
-            on_connection_result = on_connection_result,
-            tls_connection_options = tls_connection_options,
-        ),
+        remote_endpoint,
+        event_loop,
+        event_loop_group,
+        on_connection_result,
+        tls_connection_options,
     )
 end
 
-function socket_bind(socket::Socket, options::SocketBindOptions)::Nothing
-    return socket_bind_impl(socket.impl, socket, options)
+function socket_connect(
+        socket::Socket;
+        remote_endpoint::SocketEndpoint,
+        event_loop::Union{EventLoop, Nothing} = nothing,
+        event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
+        on_connection_result::Union{EventCallable, Nothing} = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+    )::Nothing
+    return socket_connect(
+        socket,
+        remote_endpoint;
+        event_loop = event_loop,
+        event_loop_group = event_loop_group,
+        on_connection_result = on_connection_result,
+        tls_connection_options = tls_connection_options,
+    )
 end
 
 function socket_bind(
@@ -306,13 +256,26 @@ function socket_bind(
         event_loop::Union{EventLoop, Nothing} = nothing,
         tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )::Nothing
+    return socket_bind_impl(
+        socket.impl,
+        socket,
+        local_endpoint,
+        event_loop,
+        tls_connection_options,
+    )
+end
+
+function socket_bind(
+        socket::Socket;
+        local_endpoint::SocketEndpoint,
+        event_loop::Union{EventLoop, Nothing} = nothing,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+    )::Nothing
     return socket_bind(
         socket,
-        SocketBindOptions(
-            local_endpoint;
-            event_loop = event_loop,
-            tls_connection_options = tls_connection_options,
-        ),
+        local_endpoint;
+        event_loop = event_loop,
+        tls_connection_options = tls_connection_options,
     )
 end
 
@@ -320,8 +283,21 @@ function socket_listen(socket::Socket, backlog_size::Integer)::Nothing
     return socket_listen_impl(socket.impl, socket, backlog_size)
 end
 
-function socket_start_accept(socket::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
-    return socket_start_accept_impl(socket.impl, socket, accept_loop, options)
+function socket_start_accept(
+        socket::Socket,
+        accept_loop::EventLoop;
+        on_accept_result::Union{ChannelCallable, Nothing} = nothing,
+        on_accept_start::Union{EventCallable, Nothing} = nothing,
+        event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
+    )::Nothing
+    return socket_start_accept_impl(
+        socket.impl,
+        socket,
+        accept_loop,
+        on_accept_result,
+        on_accept_start,
+        event_loop_group,
+    )
 end
 
 function socket_stop_accept(socket::Socket)::Nothing
@@ -340,19 +316,15 @@ function socket_close(socket::Socket)::Nothing
     # `socket_close_impl` may need to unsubscribe from IO events and tear down
     # event-loop-owned resources. Always do that work on the socket's event loop thread.
     fut = Future{Nothing}()
-    task = ScheduledTask(
-        TaskFn(function(status)
-            try
-                socket_close_impl(socket.impl, socket)
-                notify(fut, nothing)
-            catch e
-                notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
-            end
-            return nothing
-        end);
-        type_tag = "socket_close_on_event_loop",
-    )
-    event_loop_schedule_task_now!(event_loop, task)
+    event_loop_schedule_task_now!(event_loop; type_tag = "socket_close_on_event_loop") do _
+        try
+            socket_close_impl(socket.impl, socket)
+            notify(fut, nothing)
+        catch e
+            notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
+        end
+        return nothing
+    end
     wait(fut)
     return nothing
 end
@@ -434,7 +406,7 @@ function socket_get_event_loop(socket::Socket)::Union{EventLoop, Nothing}
 end
 
 function socket_get_bound_address(socket::Socket)::SocketEndpoint
-    if socket.local_endpoint.address[1] == 0
+    if isempty(socket.local_endpoint.address)
         logf(
             LogLevel.ERROR, LS_IO_SOCKET,
             "Socket has no local address. Socket must be bound first. fd=$(socket.io_handle.fd)"

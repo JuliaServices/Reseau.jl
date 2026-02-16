@@ -542,17 +542,14 @@
         impl.handle_registry[handle_data_ptr] = handle_data
 
         # Create subscribe task
-        handle_data.subscribe_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    kqueue_subscribe_task_callback(handle_data, TaskStatus.T(status))
-                catch e
-                    Core.println("kqueue_subscribe task errored")
-                end
-                return nothing
-            end);
-            type_tag = "kqueue_subscribe",
-        )
+        handle_data.subscribe_task = ScheduledTask(; type_tag = "kqueue_subscribe") do status
+            try
+                kqueue_subscribe_task_callback(handle_data, TaskStatus.T(status))
+            catch e
+                Core.println("kqueue_subscribe task errored")
+            end
+            return nothing
+        end
 
         event_loop_schedule_task_now!(event_loop, handle_data.subscribe_task)
 
@@ -651,30 +648,24 @@
                 end
 
                 # Schedule cleanup task
-                handle_data.cleanup_task = ScheduledTask(
-                    TaskFn(function(status)
-                        try
-                            kqueue_cleanup_task_callback(handle_data, TaskStatus.T(status))
-                        catch e
-                            Core.println("kqueue_cleanup task errored")
-                        end
-                        return nothing
-                    end);
-                    type_tag = "kqueue_cleanup",
-                )
+                handle_data.cleanup_task = ScheduledTask(; type_tag = "kqueue_cleanup") do status
+                    try
+                        kqueue_cleanup_task_callback(handle_data, TaskStatus.T(status))
+                    catch e
+                        Core.println("kqueue_cleanup task errored")
+                    end
+                    return nothing
+                end
             else
                 # Off-thread unsubscribe must run registration deletion from the event-loop thread.
-                handle_data.cleanup_task = ScheduledTask(
-                    TaskFn(function(status)
-                        try
-                            kqueue_unsubscribe_task_callback(handle_data, TaskStatus.T(status))
-                        catch e
-                            Core.println("kqueue_unsubscribe task errored")
-                        end
-                        return nothing
-                    end);
-                    type_tag = "kqueue_unsubscribe",
-                )
+                handle_data.cleanup_task = ScheduledTask(; type_tag = "kqueue_unsubscribe") do status
+                    try
+                        kqueue_unsubscribe_task_callback(handle_data, TaskStatus.T(status))
+                    catch e
+                        Core.println("kqueue_unsubscribe task errored")
+                    end
+                    return nothing
+                end
             end
             event_loop_schedule_task_now!(event_loop, handle_data.cleanup_task)
         else

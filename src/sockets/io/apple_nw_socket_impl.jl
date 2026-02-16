@@ -1079,33 +1079,29 @@
             ccall((:dispatch_retain, _NW_DISPATCH_LIB), Cvoid, (dispatch_data_t,), data)
         end
 
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    if data != C_NULL
-                        node = ReadQueueNode(data, 0)
-                        push!(nw_socket.read_queue, node)
-                    end
-
-                    socket = _nw_base_socket(nw_socket)
-                    if socket !== nothing
-                        if socket.options.type != SocketType.DGRAM && is_complete
-                            _nw_lock_synced(nw_socket)
-                            _nw_set_socket_state!(nw_socket, ~Int(_nw_state_mask(NWSocketState.CONNECTED_READ)))
-                            _nw_unlock_synced(nw_socket)
-                        end
-                        if nw_socket.on_readable !== nothing
-                            nw_socket.on_readable(error_code)
-                        end
-                    end
-                catch e
-                    Core.println("nw_readable_task task errored")
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_readable_task") do _
+            try
+                if data != C_NULL
+                    node = ReadQueueNode(data, 0)
+                    push!(nw_socket.read_queue, node)
                 end
-                return nothing
-            end);
-            type_tag = "nw_readable_task",
-        )
-        event_loop_schedule_task_now!(nw_socket.event_loop, task)
+
+                socket = _nw_base_socket(nw_socket)
+                if socket !== nothing
+                    if socket.options.type != SocketType.DGRAM && is_complete
+                        _nw_lock_synced(nw_socket)
+                        _nw_set_socket_state!(nw_socket, ~Int(_nw_state_mask(NWSocketState.CONNECTED_READ)))
+                        _nw_unlock_synced(nw_socket)
+                    end
+                    if nw_socket.on_readable !== nothing
+                        nw_socket.on_readable(error_code)
+                    end
+                end
+            catch e
+                Core.println("nw_readable_task task errored")
+            end
+            return nothing
+        end
         return nothing
     end
 
@@ -1146,20 +1142,16 @@
             written_fn::Union{WriteCallable, Nothing},
         )
         nw_socket.event_loop === nothing && return nothing
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    if _coerce_task_status(status) != TaskStatus.CANCELED && written_fn !== nothing
-                        written_fn(error_code, bytes_written)
-                    end
-                catch e
-                    Core.println("nw_written_task task errored")
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_written_task") do status
+            try
+                if _coerce_task_status(status) != TaskStatus.CANCELED && written_fn !== nothing
+                    written_fn(error_code, bytes_written)
                 end
-                return nothing
-            end);
-            type_tag = "nw_written_task",
-        )
-        event_loop_schedule_task_now!(nw_socket.event_loop, task)
+            catch e
+                Core.println("nw_written_task task errored")
+            end
+            return nothing
+        end
         return nothing
     end
 
@@ -1265,67 +1257,63 @@
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    if _coerce_task_status(status) == TaskStatus.CANCELED
-                        return nothing
-                    end
-
-                    if state == 5 # nw_connection_state_cancelled
-                        _nw_lock_synced(nw_socket)
-                        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
-                        _nw_unlock_synced(nw_socket)
-                        if nw_socket.on_close_complete !== nothing
-                            nw_socket.on_close_complete(UInt8(0))
-                        end
-                        if nw_socket.connection != C_NULL
-                            ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.connection)
-                            nw_socket.connection = C_NULL
-                        end
-                        _nw_release_event_loop!(nw_socket)
-                        _nw_unregister_socket!(nw_socket)
-                        if nw_socket.cleanup_requested
-                            _nw_destroy_socket!(nw_socket)
-                        end
-                    elseif state == 3 # nw_connection_state_ready
-                        _nw_connection_ready!(nw_socket, nw_socket.connection)
-                    end
-
-                    if err_code != 0
-                        logf(
-                            LogLevel.ERROR,
-                            LS_IO_SOCKET,
-                            "nw_connection error (domain=$(Int(raw_domain)) raw=$(Int(raw_code)) mapped=$err_code)",
-                        )
-                        nw_socket.last_error = err_code
-                        _nw_lock_synced(nw_socket)
-                        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
-                        _nw_unlock_synced(nw_socket)
-
-                        if !nw_socket.connection_setup
-                            if nw_socket.on_connection_result !== nothing
-                                _nw_lock_base(nw_socket)
-                                socket = _nw_base_socket(nw_socket)
-                                nw_socket.on_connection_result(err_code)
-                                _nw_unlock_base(nw_socket)
-                            end
-                            nw_socket.connection_setup = true
-                            if nw_socket.timeout_task !== nothing && nw_socket.event_loop !== nothing
-                                event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
-                            end
-                        else
-                            _nw_handle_incoming_data(nw_socket, err_code, C_NULL, false)
-                        end
-                    end
-                catch e
-                    Core.println("nw_conn_state task errored")
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_conn_state") do status
+            try
+                if _coerce_task_status(status) == TaskStatus.CANCELED
+                    return nothing
                 end
-                return nothing
-            end);
-            type_tag = "nw_conn_state",
-        )
-        event_loop_schedule_task_now!(nw_socket.event_loop, task)
+
+                if state == 5 # nw_connection_state_cancelled
+                    _nw_lock_synced(nw_socket)
+                    _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
+                    _nw_unlock_synced(nw_socket)
+                    if nw_socket.on_close_complete !== nothing
+                        nw_socket.on_close_complete(UInt8(0))
+                    end
+                    if nw_socket.connection != C_NULL
+                        ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.connection)
+                        nw_socket.connection = C_NULL
+                    end
+                    _nw_release_event_loop!(nw_socket)
+                    _nw_unregister_socket!(nw_socket)
+                    if nw_socket.cleanup_requested
+                        _nw_destroy_socket!(nw_socket)
+                    end
+                elseif state == 3 # nw_connection_state_ready
+                    _nw_connection_ready!(nw_socket, nw_socket.connection)
+                end
+
+                if err_code != 0
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_SOCKET,
+                        "nw_connection error (domain=$(Int(raw_domain)) raw=$(Int(raw_code)) mapped=$err_code)",
+                    )
+                    nw_socket.last_error = err_code
+                    _nw_lock_synced(nw_socket)
+                    _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
+                    _nw_unlock_synced(nw_socket)
+
+                    if !nw_socket.connection_setup
+                        if nw_socket.on_connection_result !== nothing
+                            _nw_lock_base(nw_socket)
+                            socket = _nw_base_socket(nw_socket)
+                            nw_socket.on_connection_result(err_code)
+                            _nw_unlock_base(nw_socket)
+                        end
+                        nw_socket.connection_setup = true
+                        if nw_socket.timeout_task !== nothing && nw_socket.event_loop !== nothing
+                            event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
+                        end
+                    else
+                        _nw_handle_incoming_data(nw_socket, err_code, C_NULL, false)
+                    end
+                end
+            catch e
+                Core.println("nw_conn_state task errored")
+            end
+            return nothing
+        end
         return nothing
     end
 
@@ -1336,57 +1324,53 @@
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    if _coerce_task_status(status) == TaskStatus.CANCELED
-                        return nothing
-                    end
-
-                    if state == 2 # nw_listener_state_ready
-                        # Network.framework may report port 0 briefly even after READY when binding
-                        # to port 0. Delay the accept-started callback until we can observe a
-                        # non-zero port (or time out and proceed with 0).
-                        _nw_listener_poll_port_until_ready!(nw_socket)
-                    elseif state == 3 # nw_listener_state_failed
-                        logf(
-                            LogLevel.ERROR,
-                            LS_IO_SOCKET,
-                            "nw_listener failed (domain=$(Int(raw_domain)) raw=$(Int(raw_code)) mapped=$err_code)",
-                        )
-                        _nw_lock_synced(nw_socket)
-                        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
-                        _nw_unlock_synced(nw_socket)
-                        _nw_lock_base(nw_socket)
-                        if nw_socket.on_accept_started !== nothing && nw_socket.base_socket !== nothing
-                            nw_socket.on_accept_started(err_code)
-                        end
-                        _nw_unlock_base(nw_socket)
-                    elseif state == 4 # nw_listener_state_cancelled
-                        _nw_lock_synced(nw_socket)
-                        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
-                        _nw_unlock_synced(nw_socket)
-                        if nw_socket.on_close_complete !== nothing
-                            nw_socket.on_close_complete(UInt8(0))
-                        end
-                        if nw_socket.listener != C_NULL
-                            ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.listener)
-                            nw_socket.listener = C_NULL
-                        end
-                        _nw_release_event_loop!(nw_socket)
-                        _nw_unregister_socket!(nw_socket)
-                        if nw_socket.cleanup_requested
-                            _nw_destroy_socket!(nw_socket)
-                        end
-                    end
-                catch e
-                    Core.println("nw_listener_state task errored")
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_listener_state") do status
+            try
+                if _coerce_task_status(status) == TaskStatus.CANCELED
+                    return nothing
                 end
-                return nothing
-            end);
-            type_tag = "nw_listener_state",
-        )
-        event_loop_schedule_task_now!(nw_socket.event_loop, task)
+
+                if state == 2 # nw_listener_state_ready
+                    # Network.framework may report port 0 briefly even after READY when binding
+                    # to port 0. Delay the accept-started callback until we can observe a
+                    # non-zero port (or time out and proceed with 0).
+                    _nw_listener_poll_port_until_ready!(nw_socket)
+                elseif state == 3 # nw_listener_state_failed
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_SOCKET,
+                        "nw_listener failed (domain=$(Int(raw_domain)) raw=$(Int(raw_code)) mapped=$err_code)",
+                    )
+                    _nw_lock_synced(nw_socket)
+                    _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.ERROR)))
+                    _nw_unlock_synced(nw_socket)
+                    _nw_lock_base(nw_socket)
+                    if nw_socket.on_accept_started !== nothing && nw_socket.base_socket !== nothing
+                        nw_socket.on_accept_started(err_code)
+                    end
+                    _nw_unlock_base(nw_socket)
+                elseif state == 4 # nw_listener_state_cancelled
+                    _nw_lock_synced(nw_socket)
+                    _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
+                    _nw_unlock_synced(nw_socket)
+                    if nw_socket.on_close_complete !== nothing
+                        nw_socket.on_close_complete(UInt8(0))
+                    end
+                    if nw_socket.listener != C_NULL
+                        ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), nw_socket.listener)
+                        nw_socket.listener = C_NULL
+                    end
+                    _nw_release_event_loop!(nw_socket)
+                    _nw_unregister_socket!(nw_socket)
+                    if nw_socket.cleanup_requested
+                        _nw_destroy_socket!(nw_socket)
+                    end
+                end
+            catch e
+                Core.println("nw_listener_state task errored")
+            end
+            return nothing
+        end
         return nothing
     end
 
@@ -1473,10 +1457,7 @@
             time_ns() + 2_000_000_000,
             task_ref,
         )
-        task = ScheduledTask(
-            TaskFn(_NwListenerPortPollTaskFn(state));
-            type_tag = "nw_listener_port_poll",
-        )
+        task = ScheduledTask(_NwListenerPortPollTaskFn(state); type_tag = "nw_listener_port_poll")
         task_ref[] = task
         run_at = event_loop_current_clock_time(event_loop) + 1_000_000
         event_loop_schedule_task_future!(event_loop, task, run_at)
@@ -1490,102 +1471,94 @@
         end
 
         ccall((:nw_retain, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    if _coerce_task_status(status) == TaskStatus.CANCELED
-                        ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
-                        return nothing
-                    end
-                    _nw_lock_base(nw_socket)
-                    listener = _nw_base_socket(nw_socket)
-                    if listener === nothing || listener.accept_result_fn === nothing
-                        _nw_unlock_base(nw_socket)
-                        ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
-                        return nothing
-                    end
-
-                    options = copy(listener.options)
-                    local new_socket
-                    try
-                        new_socket = socket_init_apple_nw(options)
-                    catch e
-                        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        listener.accept_result_fn(err, nothing)
-                        _nw_unlock_base(nw_socket)
-                        ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
-                        return nothing
-                    end
-
-                    endpoint = ccall((:nw_connection_copy_endpoint, _NW_NETWORK_LIB), nw_endpoint_t, (nw_connection_t,), connection)
-                    hostname = ccall((:nw_endpoint_get_hostname, _NW_NETWORK_LIB), Cstring, (nw_endpoint_t,), endpoint)
-                    port = ccall((:nw_endpoint_get_port, _NW_NETWORK_LIB), UInt16, (nw_endpoint_t,), endpoint)
-                    endpoint != C_NULL && ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
-                    if hostname != C_NULL
-                        set_address!(new_socket.remote_endpoint, unsafe_string(hostname))
-                        new_socket.remote_endpoint.port = port
-                    end
-
-                    new_socket.io_handle.handle = connection
-                    new_socket.io_handle.set_queue = _nw_client_set_queue_c[]
-                    new_nw_socket = new_socket.impl::NWSocket
-                    new_nw_socket.tls_ctx = nw_socket.tls_ctx
-                    new_nw_socket.host_name = nw_socket.host_name
-                    new_nw_socket.alpn_list = nw_socket.alpn_list
-                    new_nw_socket.connection = connection
-                    new_nw_socket.connection_setup = true
-                    _nw_set_socket_state!(new_nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTED_READ)) | Int(_nw_state_mask(NWSocketState.CONNECTED_WRITE)))
-
-                    _nw_ensure_callbacks!()
-                    st_ctx = pointer_from_objref(new_nw_socket)
-                    st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
-                    try
-                        ccall(
-                            (:nw_connection_set_state_changed_handler, _NW_NETWORK_LIB),
-                            Cvoid,
-                            (nw_connection_t, Ptr{Cvoid}),
-                            connection,
-                            st_blk.ptr,
-                        )
-                    finally
-                        BlocksABI.free!(st_blk)
-                    end
-
-                    listener.accept_result_fn(0, new_socket)
-                    _nw_unlock_base(nw_socket)
-                catch e
-                    Core.println("nw_listener_accept task errored")
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_listener_accept") do status
+            try
+                if _coerce_task_status(status) == TaskStatus.CANCELED
+                    ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
+                    return nothing
                 end
-                return nothing
-            end);
-            type_tag = "nw_listener_accept",
-        )
-        event_loop_schedule_task_now!(nw_socket.event_loop, task)
+                _nw_lock_base(nw_socket)
+                listener = _nw_base_socket(nw_socket)
+                if listener === nothing || listener.accept_result_fn === nothing
+                    _nw_unlock_base(nw_socket)
+                    ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
+                    return nothing
+                end
+
+                options = copy(listener.options)
+                local new_socket
+                try
+                    new_socket = socket_init_apple_nw(options)
+                catch e
+                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                    listener.accept_result_fn(err, nothing)
+                    _nw_unlock_base(nw_socket)
+                    ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
+                    return nothing
+                end
+
+                endpoint = ccall((:nw_connection_copy_endpoint, _NW_NETWORK_LIB), nw_endpoint_t, (nw_connection_t,), connection)
+                hostname = ccall((:nw_endpoint_get_hostname, _NW_NETWORK_LIB), Cstring, (nw_endpoint_t,), endpoint)
+                port = ccall((:nw_endpoint_get_port, _NW_NETWORK_LIB), UInt16, (nw_endpoint_t,), endpoint)
+                endpoint != C_NULL && ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
+                if hostname != C_NULL
+                    set_address!(new_socket.remote_endpoint, unsafe_string(hostname))
+                    new_socket.remote_endpoint.port = port
+                end
+
+                new_socket.io_handle.handle = connection
+                new_socket.io_handle.set_queue = _nw_client_set_queue_c[]
+                new_nw_socket = new_socket.impl::NWSocket
+                new_nw_socket.tls_ctx = nw_socket.tls_ctx
+                new_nw_socket.host_name = nw_socket.host_name
+                new_nw_socket.alpn_list = nw_socket.alpn_list
+                new_nw_socket.connection = connection
+                new_nw_socket.connection_setup = true
+                _nw_set_socket_state!(new_nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTED_READ)) | Int(_nw_state_mask(NWSocketState.CONNECTED_WRITE)))
+
+                _nw_ensure_callbacks!()
+                st_ctx = pointer_from_objref(new_nw_socket)
+                st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
+                try
+                    ccall(
+                        (:nw_connection_set_state_changed_handler, _NW_NETWORK_LIB),
+                        Cvoid,
+                        (nw_connection_t, Ptr{Cvoid}),
+                        connection,
+                        st_blk.ptr,
+                    )
+                finally
+                    BlocksABI.free!(st_blk)
+                end
+
+                listener.accept_result_fn(0, new_socket)
+                _nw_unlock_base(nw_socket)
+            catch e
+                Core.println("nw_listener_accept task errored")
+            end
+            return nothing
+        end
         return nothing
     end
 
     function _nw_cancel_socket!(nw_socket::NWSocket)
         nw_socket.event_loop === nothing && return nothing
 
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    if nw_socket.mode == NWSocketMode.CONNECTION && nw_socket.timeout_task !== nothing && !nw_socket.connection_setup
-                        event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
-                    end
-                    if nw_socket.mode == NWSocketMode.LISTENER && nw_socket.listener != C_NULL
-                        ccall((:nw_listener_cancel, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
-                    elseif nw_socket.mode == NWSocketMode.CONNECTION && nw_socket.connection != C_NULL
-                        ccall((:nw_connection_cancel, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), nw_socket.connection)
-                    end
-                catch e
-                    Core.println("nw_cancel task errored")
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_cancel") do _
+            try
+                if nw_socket.mode == NWSocketMode.CONNECTION && nw_socket.timeout_task !== nothing && !nw_socket.connection_setup
+                    event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
                 end
-                return nothing
-            end);
-            type_tag = "nw_cancel",
-        )
-        event_loop_schedule_task_now!(nw_socket.event_loop, task)
+                if nw_socket.mode == NWSocketMode.LISTENER && nw_socket.listener != C_NULL
+                    ccall((:nw_listener_cancel, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
+                elseif nw_socket.mode == NWSocketMode.CONNECTION && nw_socket.connection != C_NULL
+                    ccall((:nw_connection_cancel, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), nw_socket.connection)
+                end
+            catch e
+                Core.println("nw_cancel task errored")
+            end
+            return nothing
+        end
         return nothing
     end
 
@@ -1699,19 +1672,22 @@
     function socket_connect_impl(
             ::NWSocket,
             socket::Socket,
-            options::SocketConnectOptions,
+            remote_endpoint::SocketEndpoint,
+            event_loop::Union{EventLoop, Nothing},
+            event_loop_group::Union{EventLoopGroup, Nothing},
+            on_connection_result::Union{EventCallable, Nothing},
+            tls_connection_options::MaybeTlsConnectionOptions,
         )::Nothing
         nw_socket = _nw_impl(socket)
         if socket.event_loop !== nothing
             throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
 
-        _nw_setup_tls_from_connection_options!(nw_socket, options.tls_connection_options)
+        _nw_setup_tls_from_connection_options!(nw_socket, tls_connection_options)
 
-        event_loop = options.event_loop
         event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
-        _nw_set_event_loop!(socket, event_loop, options.event_loop_group)
+        _nw_set_event_loop!(socket, event_loop, event_loop_group)
 
         _nw_setup_socket_params!(nw_socket, socket.options)
 
@@ -1722,9 +1698,9 @@
 	        end
 
 	        # Mirror the POSIX/Winsock implementations: record the requested remote endpoint.
-	        copy!(socket.remote_endpoint, options.remote_endpoint)
+	        copy!(socket.remote_endpoint, remote_endpoint)
 
-	        endpoint = _nw_endpoint_from_socket_endpoint(options.remote_endpoint, socket.options.domain)
+	        endpoint = _nw_endpoint_from_socket_endpoint(remote_endpoint, socket.options.domain)
 
         connection = ccall(
             (:nw_connection_create, _NW_NETWORK_LIB),
@@ -1764,8 +1740,8 @@
             _nw_unlock_synced(nw_socket)
         end
 
-        if options.on_connection_result !== nothing
-            nw_socket.on_connection_result = options.on_connection_result
+        if on_connection_result !== nothing
+            nw_socket.on_connection_result = on_connection_result
             logf(
                 LogLevel.TRACE,
                 LS_IO_SOCKET,
@@ -1786,26 +1762,23 @@
         if socket.options.connect_timeout_ms > 0
             now = event_loop_current_clock_time(event_loop)
             timeout = UInt64(socket.options.connect_timeout_ms) * 1_000_000 + now
-            nw_socket.timeout_task = ScheduledTask(
-                TaskFn(function(status)
-                    try
-                        _nw_lock_base(nw_socket)
-                        if !nw_socket.connection_setup && nw_socket.base_socket !== nothing
-                            err = ERROR_IO_SOCKET_TIMEOUT
-                            nw_socket.connection_setup = true
-                            socket_close(_nw_base_socket(nw_socket)::Socket)
-                            if nw_socket.on_connection_result !== nothing
-                                nw_socket.on_connection_result(err)
-                            end
+            nw_socket.timeout_task = ScheduledTask(; type_tag = "nw_timeout") do _
+                try
+                    _nw_lock_base(nw_socket)
+                    if !nw_socket.connection_setup && nw_socket.base_socket !== nothing
+                        err = ERROR_IO_SOCKET_TIMEOUT
+                        nw_socket.connection_setup = true
+                        socket_close(_nw_base_socket(nw_socket)::Socket)
+                        if nw_socket.on_connection_result !== nothing
+                            nw_socket.on_connection_result(err)
                         end
-                        _nw_unlock_base(nw_socket)
-                    catch e
-                        Core.println("nw_timeout task errored")
                     end
-                    return nothing
-                end);
-                type_tag = "nw_timeout",
-            )
+                    _nw_unlock_base(nw_socket)
+                catch e
+                    Core.println("nw_timeout task errored")
+                end
+                return nothing
+            end
             event_loop_schedule_task_future!(event_loop, nw_socket.timeout_task, timeout)
         end
 
@@ -1815,7 +1788,9 @@
     function socket_bind_impl(
             ::NWSocket,
             socket::Socket,
-            options::SocketBindOptions,
+            local_endpoint::SocketEndpoint,
+            event_loop::Union{EventLoop, Nothing},
+            tls_connection_options::MaybeTlsConnectionOptions,
         )::Nothing
         nw_socket = _nw_impl(socket)
 
@@ -1825,14 +1800,13 @@
             throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
-        socket.local_endpoint.address = options.local_endpoint.address
-        socket.local_endpoint.port = options.local_endpoint.port
+        copy!(socket.local_endpoint, local_endpoint)
 
         if nw_socket.parameters == C_NULL
-            _nw_setup_tls_from_connection_options!(nw_socket, options.tls_connection_options)
+            _nw_setup_tls_from_connection_options!(nw_socket, tls_connection_options)
 
-            if options.event_loop !== nothing
-                nw_socket.event_loop = options.event_loop
+            if event_loop !== nothing
+                nw_socket.event_loop = event_loop
             end
             try
                 _nw_setup_socket_params!(nw_socket, socket.options)
@@ -1841,7 +1815,7 @@
             end
         end
 
-        endpoint = _nw_endpoint_from_socket_endpoint(options.local_endpoint, socket.options.domain)
+        endpoint = _nw_endpoint_from_socket_endpoint(local_endpoint, socket.options.domain)
 
         ccall(
             (:nw_parameters_set_local_endpoint, _NW_NETWORK_LIB),
@@ -1903,7 +1877,9 @@
 	            ::NWSocket,
 	            socket::Socket,
 	            accept_loop::EventLoop,
-	            options::SocketListenerOptions,
+	            on_accept_result::Union{ChannelCallable, Nothing},
+	            on_accept_start::Union{EventCallable, Nothing},
+	            event_loop_group::Union{EventLoopGroup, Nothing},
 	        )::Nothing
         nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
@@ -1912,10 +1888,10 @@
             throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
         end
 
-        nw_socket.on_accept_started = options.on_accept_start
-        socket.accept_result_fn = options.on_accept_result
+        nw_socket.on_accept_started = on_accept_start
+        socket.accept_result_fn = on_accept_result
 
-        _nw_set_event_loop!(socket, accept_loop, options.event_loop_group)
+        _nw_set_event_loop!(socket, accept_loop, event_loop_group)
 
         event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle)
 

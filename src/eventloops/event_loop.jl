@@ -104,6 +104,36 @@ end
 #   event_loop_cancel_task!, event_loop_subscribe_to_io_events!,
 #   event_loop_unsubscribe_from_io_events!, event_loop_thread_is_callers_thread
 
+function event_loop_schedule_task_now!(
+        callable::F,
+        event_loop::EventLoop;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    event_loop_schedule_task_now!(event_loop, task)
+    return task
+end
+
+function event_loop_schedule_task_future!(
+        callable::F,
+        event_loop::EventLoop,
+        run_at_nanos::UInt64;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    event_loop_schedule_task_future!(event_loop, task, run_at_nanos)
+    return task
+end
+
+function event_loop_schedule_task_future!(
+        callable::F,
+        event_loop::EventLoop,
+        run_at_nanos::Integer;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    return event_loop_schedule_task_future!(callable, event_loop, UInt64(run_at_nanos); type_tag = type_tag)
+end
+
 function event_loop_subscribe_to_io_events!(
         event_loop::EventLoop,
         handle::IoHandle,
@@ -495,17 +525,16 @@ function task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing
     end
 
     wake = Base.Threads.Event()
-    task = ScheduledTask(
-        TaskFn(function(status)
-            try; notify(wake); catch; end
-            return nothing
-        end);
-        type_tag = "task_sleep",
-    )
 
     now = clock_now_ns(event_loop.clock)
     run_at = add_u64_saturating(now, UInt64(ns))
-    event_loop_schedule_task_future!(event_loop, task, run_at)
+    event_loop_schedule_task_future!(event_loop, run_at; type_tag = "task_sleep") do _
+        try
+            notify(wake)
+        catch
+        end
+        return nothing
+    end
 
     wait(wake)
     return nothing
