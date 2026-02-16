@@ -113,20 +113,6 @@ mutable struct SocketConnectionAttempt
     host_address::HostAddress
 end
 
-struct _HostResolvedCallback
-    request::SocketConnectionRequest
-end
-
-@inline function (cb::_HostResolvedCallback)(
-        _resolver::HostResolver,
-        _host::String,
-        error_code::Int,
-        addresses::Vector{HostAddress},
-    )::Nothing
-    _on_host_resolved(cb.request, error_code, addresses)
-    return nothing
-end
-
 function client_bootstrap_connect!(
         bootstrap::ClientBootstrap,
         host::AbstractString,
@@ -181,12 +167,20 @@ function client_bootstrap_connect!(
         false,
     )
 
-    host_resolver_resolve!(
-        bootstrap.host_resolver,
-        host_str,
-        _HostResolvedCallback(request),
-        request_resolution_config,
-    )
+    try
+        host_resolver_resolve!(
+            addresses -> _on_host_resolved(request, addresses),
+            bootstrap.host_resolver,
+            host_str,
+            request_resolution_config,
+        )
+    catch e
+        _connection_request_complete(
+            request,
+            e isa ReseauError ? e.code : e isa DNSError ? Int(e.code) : ERROR_UNKNOWN,
+            nothing,
+        )
+    end
 
     return nothing
 end
@@ -276,16 +270,7 @@ function _start_connection_attempt(
 end
 
 # Callback when host resolution completes
-function _on_host_resolved(request::SocketConnectionRequest, error_code::Int, addresses::Vector{HostAddress})::Nothing
-    if error_code != AWS_OP_SUCCESS
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: DNS resolution failed for $(request.host) with error $error_code"
-        )
-        _connection_request_complete(request, error_code, nothing)
-        return nothing
-    end
-
+function _on_host_resolved(request::SocketConnectionRequest, addresses::Vector{HostAddress})::Nothing
     if isempty(addresses)
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
@@ -451,7 +436,7 @@ end
 function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::SocketConnectionAttempt)::Nothing
     request = attempt.request
 
-    if error_code != AWS_OP_SUCCESS
+    if error_code != OP_SUCCESS
         logf(
             LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: connection failed with error $error_code"
@@ -509,7 +494,7 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
     socket = ctx.socket
     channel = ctx.channel::Channel
 
-    if error_code != AWS_OP_SUCCESS
+    if error_code != OP_SUCCESS
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: channel setup failed"
@@ -548,9 +533,9 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
             end
         end
         if tls_options.on_negotiation_result !== nothing
-            tls_options.on_negotiation_result(handler_result, channel.first, AWS_OP_SUCCESS)
+            tls_options.on_negotiation_result(handler_result, channel.first, OP_SUCCESS)
         end
-        _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+        _connection_request_complete(request, OP_SUCCESS, channel)
         if channel_thread_is_callers_thread(channel)
             try
                 channel_trigger_read(channel)
@@ -582,8 +567,8 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
             if tls_options.on_negotiation_result !== nothing
                 tls_options.on_negotiation_result(handler, slot, err)
             end
-            if err == AWS_OP_SUCCESS
-                _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+            if err == OP_SUCCESS
+                _connection_request_complete(request, OP_SUCCESS, channel)
             else
                 channel_shutdown!(channel, err)
                 socket_close(socket)
@@ -656,7 +641,7 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
         LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
         "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)"
     )
-    _connection_request_complete(request, AWS_OP_SUCCESS, channel)
+    _connection_request_complete(request, OP_SUCCESS, channel)
     return nothing
 end
 
@@ -998,11 +983,11 @@ function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
         event_loop_schedule_task_now!(listener_loop; type_tag = "server_listener_destroy") do _
             cb = bootstrap.on_listener_destroy
             cb === nothing && return nothing
-            cb(bootstrap, AWS_OP_SUCCESS, bootstrap.user_data)
+            cb(bootstrap, OP_SUCCESS, bootstrap.user_data)
             return nothing
         end
     else
-        bootstrap.on_listener_destroy(bootstrap, AWS_OP_SUCCESS, bootstrap.user_data)
+        bootstrap.on_listener_destroy(bootstrap, OP_SUCCESS, bootstrap.user_data)
     end
 
     return nothing
@@ -1022,7 +1007,7 @@ end
 
 # Callback for incoming connections
 function _on_incoming_connection(bootstrap::ServerBootstrap, error_code::Int, new_socket::Socket)::Nothing
-    if error_code != AWS_OP_SUCCESS
+    if error_code != OP_SUCCESS
         logf(
             LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: incoming connection error $error_code"
@@ -1081,7 +1066,7 @@ end
     channel = ctx.channel
     shutdown_err = err
     if !ctx.incoming_called
-        if shutdown_err == AWS_OP_SUCCESS
+        if shutdown_err == OP_SUCCESS
             shutdown_err = ERROR_UNKNOWN
         end
         _incoming_channel_invoke_callback!(ctx, shutdown_err, nothing)
@@ -1102,7 +1087,7 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
     socket = ctx.socket
     channel = ctx.channel::Channel
 
-    if error_code != AWS_OP_SUCCESS
+    if error_code != OP_SUCCESS
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
             "ServerBootstrap: incoming channel setup failed"
@@ -1139,10 +1124,10 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
             end
         end
         if tls_options.on_negotiation_result !== nothing
-            tls_options.on_negotiation_result(handler_result, channel.first, AWS_OP_SUCCESS)
+            tls_options.on_negotiation_result(handler_result, channel.first, OP_SUCCESS)
         end
         ctx.setup_succeeded = true
-        _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, channel)
+        _incoming_channel_invoke_callback!(ctx, OP_SUCCESS, channel)
         if channel_thread_is_callers_thread(channel)
             try
                 channel_trigger_read(channel)
@@ -1172,9 +1157,9 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
             if tls_options.on_negotiation_result !== nothing
                 tls_options.on_negotiation_result(handler, slot, err)
             end
-            if err == AWS_OP_SUCCESS
+            if err == OP_SUCCESS
                 ctx.setup_succeeded = true
-                _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, channel)
+                _incoming_channel_invoke_callback!(ctx, OP_SUCCESS, channel)
             else
                 channel_shutdown!(channel, err)
             end
@@ -1234,7 +1219,7 @@ function _incoming_channel_on_setup!(ctx::_IncomingChannelSetupCtx, error_code::
         LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
         "ServerBootstrap: incoming channel $(channel.channel_id) setup complete"
     )
-    _incoming_channel_invoke_callback!(ctx, AWS_OP_SUCCESS, channel)
+    _incoming_channel_invoke_callback!(ctx, OP_SUCCESS, channel)
     return nothing
 end
 

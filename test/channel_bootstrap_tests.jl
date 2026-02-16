@@ -9,12 +9,8 @@ function _bootstrap_test_config()
         Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
         host = Sockets.get_address(endpoint)
         sock_opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
-        # Custom resolver that returns the local path as an address (DNS doesn't apply to LOCAL domain)
-        resolve_fn = (h, impl_data) -> begin
-            _ = impl_data
-            return [Sockets.HostAddress(host, Sockets.HostAddressType.A, h, UInt64(0))]
-        end
-        res_config = Sockets.HostResolutionConfig(impl = resolve_fn)
+        # Local socket path should be treated as the resolved address directly.
+        res_config = Sockets.HostResolutionConfig(resolve_host_as_address = true)
         return (; host, sock_opts, use_port = false, resolution_config = res_config)
     else
         return (; host = "127.0.0.1", sock_opts = Sockets.SocketOptions(), use_port = true, resolution_config = nothing)
@@ -100,13 +96,13 @@ end
 
     @test res === nothing
     @test wait_for_pred(() -> setup_called[])
-    @test setup_error[] == Reseau.AWS_OP_SUCCESS
+    @test setup_error[] == Reseau.OP_SUCCESS
     @test setup_channel[] !== nothing
     @test setup_has_pool[]
     @test setup_channel[].read_back_pressure_enabled
 
     @test wait_for_pred(() -> server_setup_called[])
-    @test server_setup_error[] == Reseau.AWS_OP_SUCCESS
+    @test server_setup_error[] == Reseau.OP_SUCCESS
     @test server_setup_has_pool[]
 
     if setup_channel[] !== nothing
@@ -162,28 +158,15 @@ end
     setup_error = Ref{Int}(-1)
     setup_channel = Ref{Any}(nothing)
 
-    @static if Sys.isapple()
-        # On macOS LOCAL domain, resolver returns the local path directly
-        resolve_impl = (host, impl_data) -> begin
-            _ = impl_data
-            return [
-                Sockets.HostAddress(cfg.host, Sockets.HostAddressType.A, host, UInt64(0)),
-            ]
-        end
+    resolution_config = @static if Sys.isapple()
+        Sockets.HostResolutionConfig(resolve_host_as_address = true)
     else
-        resolve_impl = (host, impl_data) -> begin
-            _ = impl_data
-            return [
-                Sockets.HostAddress("::1", Sockets.HostAddressType.AAAA, host, UInt64(0)),
-                Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, UInt64(0)),
-            ]
-        end
+        Sockets.HostResolutionConfig()
     end
-    resolution_config = Sockets.HostResolutionConfig(impl = resolve_impl)
 
     res = Sockets.client_bootstrap_connect!(
         client_bootstrap,
-        "example.com",
+        cfg.host,
         port,
         cfg.sock_opts,
         client_bootstrap.tls_connection_options,
@@ -201,7 +184,7 @@ end
 
     @test res === nothing
     @test wait_for_pred(() -> setup_called[])
-    @test setup_error[] == Reseau.AWS_OP_SUCCESS
+    @test setup_error[] == Reseau.OP_SUCCESS
     @test setup_channel[] !== nothing
     @test wait_for_pred(() -> server_setup_called[])
 
@@ -339,7 +322,7 @@ end
     @test second_task.timestamp > first_task.timestamp
 
     scheduled_attempts = copy(request.connection_attempt_tasks)
-    Sockets._connection_request_complete(request, Sockets.AWS_OP_SUCCESS, nothing)
+    Sockets._connection_request_complete(request, Sockets.OP_SUCCESS, nothing)
     @test isempty(request.connection_attempt_tasks)
     @test all(!task.scheduled for task in scheduled_attempts)
 
@@ -378,7 +361,7 @@ end
     @test second_task.timestamp > first_task.timestamp
     single_family_attempts = copy(request.connection_attempt_tasks)
 
-    Sockets._connection_request_complete(request, Sockets.AWS_OP_SUCCESS, nothing)
+    Sockets._connection_request_complete(request, Sockets.OP_SUCCESS, nothing)
     @test isempty(request.connection_attempt_tasks)
     @test all(!task.scheduled for task in single_family_attempts)
 
@@ -425,7 +408,7 @@ if tls_tests_enabled()
         port = 0,
         tls_connection_options = server_tls_opts,
         on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-            server_setup[] = err == Reseau.AWS_OP_SUCCESS
+            server_setup[] = err == Reseau.OP_SUCCESS
             server_channel[] = channel
             return nothing
         end,
@@ -464,7 +447,7 @@ if tls_tests_enabled()
         client_tls_opts,
         client_bootstrap.on_protocol_negotiated,
         Reseau.ChannelCallable((err, channel) -> begin
-            client_setup[] = err == Reseau.AWS_OP_SUCCESS
+            client_setup[] = err == Reseau.OP_SUCCESS
             client_channel[] = channel
             return nothing
         end),
@@ -510,7 +493,7 @@ end
         host = cfg.host,
         port = 0,
         on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-            server_setup[] = err == Reseau.AWS_OP_SUCCESS
+            server_setup[] = err == Reseau.OP_SUCCESS
             if channel !== nothing
                 push!(server_channels, channel)
                 if @atomic bs.shutdown
@@ -553,7 +536,7 @@ end
         client_bootstrap.tls_connection_options,
         client_bootstrap.on_protocol_negotiated,
         Reseau.ChannelCallable((err, channel) -> begin
-            if err == Reseau.AWS_OP_SUCCESS
+            if err == Reseau.OP_SUCCESS
                 client_channel[] = channel
             end
             return nothing

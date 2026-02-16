@@ -123,7 +123,7 @@ end
 function _on_socket_write_complete(handler::SocketChannelHandler, message, error_code::Int, bytes_written::Csize_t)
     channel = message isa IoMessage ? message.owning_channel : nothing
 
-    if error_code != AWS_OP_SUCCESS
+    if error_code != OP_SUCCESS
         logf(
             LogLevel.DEBUG, LS_IO_SOCKET_HANDLER,
             "Socket handler: socket write completed with error $error_code, wrote $bytes_written bytes"
@@ -147,7 +147,7 @@ function _on_socket_write_complete(handler::SocketChannelHandler, message, error
     end
 
     # If error, trigger shutdown
-    if error_code != AWS_OP_SUCCESS && channel isa Channel
+    if error_code != OP_SUCCESS && channel isa Channel
         channel_shutdown!(channel, error_code)
     end
 
@@ -443,7 +443,7 @@ function _socket_handler_wrap_channel_setup!(handler::SocketChannelHandler, chan
         if original_cb !== nothing
             original_cb(err)
         end
-        if err == AWS_OP_SUCCESS &&
+        if err == OP_SUCCESS &&
                 channel.channel_state == ChannelState.ACTIVE &&
                 handler.pending_read &&
                 !handler.shutdown_in_progress

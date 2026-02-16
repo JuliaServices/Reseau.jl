@@ -20,11 +20,7 @@
         return _epoll_handle_data_key(handle.additional_ref)
     end
 
-    # Channel-based rendezvous for passing EventLoop to the thread function.
-    const _EPOLL_THREAD_STARTUP = Channel{Any}(1)
-
-    @wrap_thread_fn function _epoll_event_loop_thread_entry()
-        event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
+    @wrap_thread_fn function _epoll_event_loop_thread_entry(event_loop::EventLoop)
         try
             epoll_event_loop_thread(event_loop)
         catch e
@@ -186,11 +182,9 @@
         @atomic impl.running_thread_id = UInt64(0)
 
         # Launch the event loop thread via ForeignThread
-        put!(_EPOLL_THREAD_STARTUP, event_loop)
         try
-            impl.thread_created_on = ForeignThread("aws-el-epoll", _EPOLL_THREAD_ENTRY_C)
+            impl.thread_created_on = ForeignThread("aws-el-epoll", _EPOLL_THREAD_ENTRY_C, event_loop)
         catch
-            take!(_EPOLL_THREAD_STARTUP)  # drain on failure
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             impl.should_continue = false
             impl.thread_state = EpollEventThreadState.READY_TO_RUN

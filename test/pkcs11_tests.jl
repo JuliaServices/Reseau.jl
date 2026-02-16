@@ -1082,7 +1082,7 @@ end
                 port = 0,
                 tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
                 on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-                    server_ready[] = err == Reseau.AWS_OP_SUCCESS
+                    server_ready[] = err == Reseau.OP_SUCCESS
                     return nothing
                 end,
                 on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
@@ -1121,9 +1121,9 @@ end
                 Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
                 client_bootstrap.on_protocol_negotiated,
                 Reseau.ChannelCallable((err, channel) -> begin
-                    client_ready[] = err == Reseau.AWS_OP_SUCCESS
-                    if err == Reseau.AWS_OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                    client_ready[] = err == Reseau.OP_SUCCESS
+                    if err == Reseau.OP_SUCCESS
+                        Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
                     end
                     return nothing
                 end),
@@ -1197,7 +1197,7 @@ end
                 port = 0,
                 tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
                 on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-                    server_ready[] = err == Reseau.AWS_OP_SUCCESS
+                    server_ready[] = err == Reseau.OP_SUCCESS
                     return nothing
                 end,
                 on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
@@ -1236,9 +1236,9 @@ end
                 Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
                 client_bootstrap.on_protocol_negotiated,
                 Reseau.ChannelCallable((err, channel) -> begin
-                    client_ready[] = err == Reseau.AWS_OP_SUCCESS
-                    if err == Reseau.AWS_OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                    client_ready[] = err == Reseau.OP_SUCCESS
+                    if err == Reseau.OP_SUCCESS
+                        Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
                     end
                     return nothing
                 end),

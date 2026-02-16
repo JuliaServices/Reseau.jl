@@ -257,7 +257,7 @@ end
                 read_lock = ReentrantLock()
 
                 on_readable = Reseau.EventCallable(err -> begin
-                    if err != Reseau.AWS_OP_SUCCESS
+                    if err != Reseau.OP_SUCCESS
                         return nothing
                     end
 
@@ -1637,10 +1637,10 @@ end
             @test _wait_for_channel(setup_ch)
             @test _wait_for_channel(setup_ch)
             if isready(setup_ch)
-                @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
+                @test take!(setup_ch) == Reseau.OP_SUCCESS
             end
             if isready(setup_ch)
-                @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
+                @test take!(setup_ch) == Reseau.OP_SUCCESS
             end
 
             @test ch1.message_pool isa Sockets.MessagePool

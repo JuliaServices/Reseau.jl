@@ -102,9 +102,9 @@ function _new_unconnected_socket(;
         1,
         Base.Threads.Condition(),
         false,
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         0,
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         enable_read_back_pressure,
         initial_window,
         Base.Threads.Event(),
@@ -137,7 +137,7 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
 end
 
 function _on_connect_setup(io::TCPSocket, error_code::Int, channel)::Nothing
-    if error_code != AWS_OP_SUCCESS || channel === nothing
+    if error_code != OP_SUCCESS || channel === nothing
         io.connect_error = error_code
         _mark_closed!(io, error_code)
         notify(io.connect_event)
@@ -145,7 +145,7 @@ function _on_connect_setup(io::TCPSocket, error_code::Int, channel)::Nothing
     end
     if channel_thread_is_callers_thread(channel)
         _install_handler!(io, channel)
-        io.connect_error = AWS_OP_SUCCESS
+        io.connect_error = OP_SUCCESS
         notify(io.connect_event)
         return nothing
     end
@@ -153,7 +153,7 @@ function _on_connect_setup(io::TCPSocket, error_code::Int, channel)::Nothing
         EventCallable(s -> begin
             _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
             _install_handler!(io, channel)
-            io.connect_error = AWS_OP_SUCCESS
+            io.connect_error = OP_SUCCESS
             notify(io.connect_event)
             return nothing
         end),
@@ -290,7 +290,7 @@ function TCPSocket(
         host_resolution_config,
     )
     wait(io.connect_event)
-    io.connect_error == AWS_OP_SUCCESS || error("TCPSocket connect failed: $(io.connect_error)")
+    io.connect_error == OP_SUCCESS || error("TCPSocket connect failed: $(io.connect_error)")
     io.tls_enabled = tls_conn !== nothing
     return io
 end
@@ -318,10 +318,9 @@ function connect(path::AbstractString;
         socket_options::SocketOptions = SocketOptions(domain = SocketDomain.LOCAL, type = SocketType.STREAM),
         kwargs...,
     )
-    # Use the host resolver "impl" hook to bypass DNS and treat `path` as the address.
+    # Bypass DNS for local socket paths and treat the path as the resolved address.
     config = HostResolutionConfig(;
-        impl = (host, impl_data) -> ([HostAddress(String(host), HostAddressType.A, String(host), UInt64(0))], AWS_OP_SUCCESS),
-        impl_data = nothing,
+        resolve_host_as_address = true,
     )
     return TCPSocket(path, 0; socket_options = socket_options, host_resolution_config = config, kwargs...)
 end
@@ -363,7 +362,7 @@ function Base.close(server::TCPServer)::Nothing
 end
 
 function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, channel, _user_data)
-    if error_code != AWS_OP_SUCCESS || channel === nothing
+    if error_code != OP_SUCCESS || channel === nothing
         return nothing
     end
     io = _new_unconnected_socket(
@@ -461,9 +460,9 @@ function listen(host::AbstractString, port::Integer;
         TCPSocket[],
         Base.Threads.Condition(),
         false,
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         Base.Threads.Event(),
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         Int(read_buffer_capacity),
         enable_read_back_pressure,
         initial_window_size === nothing ? nothing : Int(initial_window_size),
@@ -483,7 +482,7 @@ function listen(host::AbstractString, port::Integer;
         enable_read_back_pressure = enable_read_back_pressure,
     )
     wait(state.listen_event)
-    state.listen_error == AWS_OP_SUCCESS || error("listen failed: $(state.listen_error)")
+    state.listen_error == OP_SUCCESS || error("listen failed: $(state.listen_error)")
     return TCPServer(bootstrap, state)
 end
 
@@ -591,13 +590,13 @@ function tlsupgrade!(
         ssl_insecure = ssl_insecure,
     )
 
-    negotiation_error = Ref(AWS_OP_SUCCESS)
+    negotiation_error = Ref(OP_SUCCESS)
     negotiation_event = Base.Threads.Event()
     on_negotiation = (handler, slot, err, ud) -> begin
         _ = handler
         _ = ud
         negotiation_error[] = err
-        if err == AWS_OP_SUCCESS && slot !== nothing && slot.channel !== nothing
+        if err == OP_SUCCESS && slot !== nothing && slot.channel !== nothing
             channel_trigger_read(slot.channel)
         end
         notify(negotiation_event)
@@ -627,7 +626,7 @@ function tlsupgrade!(
     end
 
     wait(negotiation_event)
-    negotiation_error[] == AWS_OP_SUCCESS || error("TLS negotiation failed: $(negotiation_error[])")
+    negotiation_error[] == OP_SUCCESS || error("TLS negotiation failed: $(negotiation_error[])")
     io.tls_enabled = true
     return nothing
 end
@@ -786,7 +785,7 @@ function _begin_write!(io::TCPSocket)::_WriteCtx
     finally
         unlock(io.cond)
     end
-    return _WriteCtx(io, 0, AWS_OP_SUCCESS)
+    return _WriteCtx(io, 0, OP_SUCCESS)
 end
 
 function _finish_write!(ctx::_WriteCtx)::Nothing
@@ -795,7 +794,7 @@ function _finish_write!(ctx::_WriteCtx)::Nothing
     try
         io.pending_writes -= 1
         io.pending_writes < 0 && (io.pending_writes = 0)
-        if ctx.error_code != AWS_OP_SUCCESS && io.write_error == AWS_OP_SUCCESS
+        if ctx.error_code != OP_SUCCESS && io.write_error == OP_SUCCESS
             io.write_error = ctx.error_code
         end
         notify(io.cond)
@@ -806,14 +805,14 @@ function _finish_write!(ctx::_WriteCtx)::Nothing
 end
 
 function _write_fail!(ctx::_WriteCtx, error_code::Int)::Int
-    ctx.error_code == AWS_OP_SUCCESS && (ctx.error_code = error_code)
+    ctx.error_code == OP_SUCCESS && (ctx.error_code = error_code)
     ctx.remaining == 0 && _finish_write!(ctx)
     return error_code
 end
 
 function _make_write_completion(ctx::_WriteCtx)::EventCallable
     return EventCallable(error_code -> begin
-        error_code != AWS_OP_SUCCESS && ctx.error_code == AWS_OP_SUCCESS && (ctx.error_code = error_code)
+        error_code != OP_SUCCESS && ctx.error_code == OP_SUCCESS && (ctx.error_code = error_code)
         ctx.remaining -= 1
         if ctx.remaining <= 0
             _finish_write!(ctx)
@@ -917,7 +916,7 @@ function Base.flush(io::TCPSocket)
         while io.pending_writes > 0 && !io.closed
             wait(io.cond)
         end
-        io.write_error == AWS_OP_SUCCESS || error("TCPSocket write failed: $(io.write_error)")
+        io.write_error == OP_SUCCESS || error("TCPSocket write failed: $(io.write_error)")
     finally
         unlock(io.cond)
     end

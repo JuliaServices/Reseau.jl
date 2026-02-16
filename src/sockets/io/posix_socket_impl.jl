@@ -1114,7 +1114,7 @@ function _on_connection_success(sock::Socket)
 
     # Invoke success callback
     if sock.connection_result_fn !== nothing
-        sock.connection_result_fn(AWS_OP_SUCCESS)
+        sock.connection_result_fn(OP_SUCCESS)
     end
     return nothing
 end
@@ -1255,7 +1255,7 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
 
     aws_error = socket_get_error(sock)
 
-    if aws_error == AWS_OP_SUCCESS
+    if aws_error == OP_SUCCESS
         if _is_socket_connect_ready_for_completion(fd)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
@@ -1650,7 +1650,7 @@ function _on_socket_io_event(sock, events::Int)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: is readable")
         if sock.readable_fn !== nothing
             if _is_socket_readable_now(fd)
-                sock.readable_fn(AWS_OP_SUCCESS)
+                sock.readable_fn(OP_SUCCESS)
             else
                 _schedule_socket_readable_recheck_task(sock, fd, _SOCKET_READABLE_RETRY_COUNT)
             end
@@ -1798,7 +1798,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
     fd = sock.io_handle.fd
 
     purge = false
-    aws_error = AWS_OP_SUCCESS
+    aws_error = OP_SUCCESS
     parent_request_failed = false
     pushed_to_written_queue = false
 
@@ -1853,7 +1853,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
             # Write complete
             logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: write request completed")
             popfirst!(socket_impl.write_queue)
-            write_request.error_code = AWS_OP_SUCCESS
+            write_request.error_code = OP_SUCCESS
             push!(socket_impl.written_queue, write_request)
             pushed_to_written_queue = true
         end
@@ -1965,7 +1965,7 @@ function socket_get_error_impl(::PosixSocket, sock::Socket)::Int
         return determine_socket_error(connect_result[])
     end
 
-    return AWS_OP_SUCCESS
+    return OP_SUCCESS
 end
 
 # POSIX impl - is open
@@ -2032,7 +2032,7 @@ function socket_start_accept_impl(
 
     # Invoke on_accept_start callback if provided
     if on_accept_start !== nothing
-        on_accept_start(AWS_OP_SUCCESS)
+        on_accept_start(OP_SUCCESS)
     end
 
     return nothing
@@ -2139,7 +2139,7 @@ function _socket_accept_event(sock, events::Int)
             close_occurred = Ref(false)
             socket_impl.close_happened = close_occurred
 
-            sock.accept_result_fn(AWS_OP_SUCCESS, new_sock)
+            sock.accept_result_fn(OP_SUCCESS, new_sock)
 
             if close_occurred[]
                 return nothing

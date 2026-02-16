@@ -124,7 +124,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         accept_err[] = err
-        if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
             accept_done[] = true
             return nothing
         end
@@ -180,8 +180,8 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     )
     @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
-    @test connect_err[] == Reseau.AWS_OP_SUCCESS
-    @test accept_err[] == Reseau.AWS_OP_SUCCESS
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
 
     app_handler = app_handler_ref[]
     @test app_handler isa TestReadHandler
@@ -191,7 +191,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     end
 
     write_done = Ref(false)
-    write_err = Ref(Reseau.AWS_OP_SUCCESS)
+    write_err = Ref(Reseau.OP_SUCCESS)
     write_bytes = Ref(0)
 
     payload = "abcdefghij"
@@ -215,7 +215,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
-    @test write_err[] == Reseau.AWS_OP_SUCCESS
+    @test write_err[] == Reseau.OP_SUCCESS
     @test write_bytes[] == ncodeunits(payload)
 
     channel = channel_ref[]
@@ -305,7 +305,7 @@ end
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         accept_err[] = err
-        if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
             accept_done[] = true
             return nothing
         end
@@ -351,8 +351,8 @@ end
     )
     @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
-    @test connect_err[] == Reseau.AWS_OP_SUCCESS
-    @test accept_err[] == Reseau.AWS_OP_SUCCESS
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
 
     read_done = Ref(false)
     read_err = Ref(0)
@@ -363,7 +363,7 @@ end
         try
             Sockets.socket_subscribe_to_readable_events(client, Reseau.EventCallable(err -> begin
                 read_err[] = err
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     read_done[] = true
                     return nothing
                 end
@@ -436,9 +436,9 @@ end
     Sockets.channel_schedule_task_now!(channel, send_task)
 
     @test wait_for(() -> send_done[])
-    @test send_err[] == Reseau.AWS_OP_SUCCESS
+    @test send_err[] == Reseau.OP_SUCCESS
     @test wait_for(() -> read_done[])
-    @test read_err[] == Reseau.AWS_OP_SUCCESS
+    @test read_err[] == Reseau.OP_SUCCESS
     @test read_payload[] == payload
 
     if accepted_socket[] isa Sockets.Socket
@@ -492,7 +492,7 @@ end
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         accept_err[] = err
-        if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
             accept_done[] = true
             return nothing
         end
@@ -528,8 +528,8 @@ end
     )
     @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
-    @test connect_err[] == Reseau.AWS_OP_SUCCESS
-    @test accept_err[] == Reseau.AWS_OP_SUCCESS
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
 
     socket_handler = socket_handler_ref[]
     @test socket_handler isa Sockets.SocketChannelHandler
@@ -539,7 +539,7 @@ end
     end
 
     write_done = Ref(false)
-    write_err = Ref(Reseau.AWS_OP_SUCCESS)
+    write_err = Ref(Reseau.OP_SUCCESS)
 
     payload = "pending"
     cursor = Reseau.ByteCursor(payload)
@@ -561,7 +561,7 @@ end
     EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
-    @test write_err[] == Reseau.AWS_OP_SUCCESS
+    @test write_err[] == Reseau.OP_SUCCESS
     @test wait_for(() -> socket_handler.pending_read)
 
     channel_any = channel_ref[]
@@ -590,7 +590,7 @@ end
             app_handler.slot = app_slot
 
             Sockets.channel_setup_complete!(channel)
-            setup_err[] = Reseau.AWS_OP_SUCCESS
+            setup_err[] = Reseau.OP_SUCCESS
             app_handler_ref[] = app_handler
         catch e
             setup_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
@@ -601,7 +601,7 @@ end
     Sockets.channel_schedule_task_now!(channel, setup_task)
 
     @test wait_for(() -> setup_done[])
-    @test setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test setup_err[] == Reseau.OP_SUCCESS
 
     app_handler = app_handler_ref[]
     @test app_handler isa TestReadHandler

@@ -87,7 +87,7 @@ end
     @test channel.last === args.new_slot
     @test args.new_handler !== nothing
 
-    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+    Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
     @test wait_for_flag_alpn(shutdown_done)
     EventLoops.event_loop_group_destroy!(elg)
 end
@@ -123,7 +123,7 @@ end
         @test e.code == EventLoops.ERROR_IO_MISSING_ALPN_MESSAGE
     end
 
-    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+    Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
     EventLoops.event_loop_group_destroy!(elg)
 end
 
@@ -287,6 +287,6 @@ end
         @test e.code == EventLoops.ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE
     end
 
-    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+    Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
     EventLoops.event_loop_group_destroy!(elg)
 end

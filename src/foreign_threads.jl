@@ -73,10 +73,11 @@ end
 
 # ── Thread creation ──────────────────────────────────────────────────
 
-function ForeignThread(name::String, thread_fn::Ref{Ptr{Cvoid}};
+function ForeignThread(name::String, thread_fn::Ref{Ptr{Cvoid}}, arg = nothing;
         join_strategy::ThreadJoinStrategy.T = ThreadJoinStrategy.MANAGED)
     managed = join_strategy == ThreadJoinStrategy.MANAGED
     id = _thread_next_id()
+    thread_arg = arg === nothing ? C_NULL : pointer_from_objref(arg)
     if managed
         managed_thread_started!()
     end
@@ -85,7 +86,7 @@ function ForeignThread(name::String, thread_fn::Ref{Ptr{Cvoid}};
             ret = ccall(
                 (:CreateThread, "kernel32"), Ptr{Cvoid},
                 (Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}),
-                C_NULL, Csize_t(0), thread_fn[], Ptr{Cvoid}(UInt(id)), UInt32(0), C_NULL,
+                C_NULL, Csize_t(0), thread_fn[], thread_arg, UInt32(0), C_NULL,
             )
             ret == C_NULL && throw(ArgumentError("error creating OS thread for ForeignThread"))
             # Close handle — thread keeps running, OS auto-cleans on exit
@@ -95,7 +96,7 @@ function ForeignThread(name::String, thread_fn::Ref{Ptr{Cvoid}};
             ret = ccall(
                 :pthread_create, Cint,
                 (Ref{pthread_t}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
-                pthread_ref, C_NULL, thread_fn[], Ptr{Cvoid}(id),
+                pthread_ref, C_NULL, thread_fn[], thread_arg,
             )
             ret != 0 && throw(ArgumentError("error creating OS thread for ForeignThread"))
             ccall(:pthread_detach, Cint, (pthread_t,), pthread_ref[])
@@ -111,40 +112,58 @@ end
 
 # ── @wrap_thread_fn macro ────────────────────────────────────────────
 
-# Transform a zero-arg function definition into an OS thread entry point.
+# Transform a function definition into an OS thread entry point.
 # The output function takes `(::Ptr{Cvoid})::Ptr{Cvoid}` and runs the
 # body on the adopted foreign thread (@cfunction trampoline).
 #
+# Supports two forms:
+#   Zero-arg: ForeignThread passes C_NULL (no arg needed).
+#   One-arg:  ForeignThread passes pointer_from_objref(arg) via `arg=` kwarg.
+#             The macro recovers the object with unsafe_pointer_to_objref.
+#
 # Usage:
-#   @wrap_thread_fn function my_worker()
-#       try
-#           # ... do work ...
-#       finally
-#           managed_thread_finished!()   # if managed
-#       end
-#   end
+#   @wrap_thread_fn function my_worker()          # zero-arg
+#   @wrap_thread_fn function my_worker(el::EventLoop)  # one typed arg
+#
 #   const MY_WORKER_C = Ref{Ptr{Cvoid}}(C_NULL)
-#   # in __init__:
 #   MY_WORKER_C[] = @cfunction(my_worker, Ptr{Cvoid}, (Ptr{Cvoid},))
-#   ForeignThread("worker", MY_WORKER_C)
+#   ForeignThread("worker", MY_WORKER_C, event_loop)
 macro wrap_thread_fn(fndef)
     Meta.isexpr(fndef, :function) || error("@wrap_thread_fn requires a function definition")
     sig = fndef.args[1]
     body = fndef.args[2]
-    Meta.isexpr(sig, :call) || error("@wrap_thread_fn: expected `function name() ... end`")
+    Meta.isexpr(sig, :call) || error("@wrap_thread_fn: expected `function name(...) ... end`")
     name = sig.args[1]
-    length(sig.args) == 1 || error("@wrap_thread_fn: function must take zero arguments")
-    return quote
-        function $(esc(name))(arg::Ptr{Cvoid})::Ptr{Cvoid}
-            thread_id = UInt64(UInt(arg))
-            try
-                _ = thread_id
-                $(esc(body))
-            catch
-                Core.println("foreign thread ($thread_id) errored")
+    nargs = length(sig.args) - 1
+    if nargs == 0
+        return quote
+            function $(esc(name))(_arg::Ptr{Cvoid})::Ptr{Cvoid}
+                try
+                    $(esc(body))
+                catch
+                    Core.println("foreign thread errored")
+                end
+                return C_NULL
             end
-            return C_NULL
         end
+    elseif nargs == 1
+        arg_expr = sig.args[2]
+        Meta.isexpr(arg_expr, :(::)) || error("@wrap_thread_fn: argument must have a type annotation, e.g. `arg::Type`")
+        arg_name = arg_expr.args[1]
+        arg_type = arg_expr.args[2]
+        return quote
+            function $(esc(name))(_arg::Ptr{Cvoid})::Ptr{Cvoid}
+                $(esc(arg_name)) = unsafe_pointer_to_objref(_arg)::$(esc(arg_type))
+                try
+                    $(esc(body))
+                catch
+                    Core.println("foreign thread errored")
+                end
+                return C_NULL
+            end
+        end
+    else
+        error("@wrap_thread_fn: function must take zero or one argument")
     end
 end
 

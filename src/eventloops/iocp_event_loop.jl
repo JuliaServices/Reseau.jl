@@ -5,11 +5,7 @@
 @static if Sys.iswindows()
     using LibAwsCal
 
-    # Channel-based rendezvous for passing EventLoop to the thread function.
-    const _IOCP_THREAD_STARTUP = Channel{Any}(1)
-
-    @wrap_thread_fn function _iocp_event_loop_thread_entry()
-        event_loop = take!(_IOCP_THREAD_STARTUP)::EventLoop
+    @wrap_thread_fn function _iocp_event_loop_thread_entry(event_loop::EventLoop)
         try
             _iocp_event_loop_thread(event_loop)
         catch e
@@ -415,11 +411,9 @@
         impl.synced_data.state = IocpEventThreadState.RUNNING
 
         # Launch the event loop thread via ForeignThread
-        put!(_IOCP_THREAD_STARTUP, event_loop)
         try
-            impl.thread_created_on = ForeignThread("aws-el-iocp", _IOCP_THREAD_ENTRY_C)
+            impl.thread_created_on = ForeignThread("aws-el-iocp", _IOCP_THREAD_ENTRY_C, event_loop)
         catch
-            take!(_IOCP_THREAD_STARTUP)  # drain on failure
             impl.synced_data.state = IocpEventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             throw_error(ERROR_THREAD_NO_SUCH_THREAD_ID)

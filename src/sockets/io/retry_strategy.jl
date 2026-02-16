@@ -224,7 +224,7 @@ function retry_strategy_acquire_token!(
     # Schedule callback
     event_loop_schedule_task_now!(event_loop; type_tag = "retry_token_acquired") do _
         try
-            on_acquired(token, AWS_OP_SUCCESS, user_data)
+            on_acquired(token, OP_SUCCESS, user_data)
         catch e
             Core.println("retry_token_acquired task errored")
         end
@@ -437,7 +437,7 @@ function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T
     end
 
     if on_retry_ready !== nothing
-        on_retry_ready(token, AWS_OP_SUCCESS, user_data)
+        on_retry_ready(token, OP_SUCCESS, user_data)
     end
 
     return nothing
@@ -605,12 +605,12 @@ function retry_strategy_acquire_token!(
             cb_user_data = token.acquired_user_data
             token.on_acquired = nothing
         end
-        if code != AWS_OP_SUCCESS || exp_token === nothing
+        if code != OP_SUCCESS || exp_token === nothing
             cb !== nothing && cb(nothing, code, cb_user_data)
             return nothing
         end
         token.exp_token = exp_token
-        cb !== nothing && cb(token, AWS_OP_SUCCESS, cb_user_data)
+        cb !== nothing && cb(token, OP_SUCCESS, cb_user_data)
         return nothing
     end
 

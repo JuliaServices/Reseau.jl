@@ -371,7 +371,7 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
         mem = unsafe_wrap(Memory{UInt8}, buf_ptr + processed, to_write; own = false)
         chunk = ByteCursor(mem, to_write)
         buf_ref = Ref(message.message_data)
-        if byte_buf_append(buf_ref, chunk) != AWS_OP_SUCCESS
+        if byte_buf_append(buf_ref, chunk) != OP_SUCCESS
             channel_release_message_to_pool!(channel, message)
             return Cint(-1)
         end
@@ -472,7 +472,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
                 handler.server_name = _byte_buf_from_c_str(server_name_ptr)
             end
             _s2n_send_alpn_message(handler)
-            _s2n_on_negotiation_result(handler, handler.slot, AWS_OP_SUCCESS)
+            _s2n_on_negotiation_result(handler, handler.slot, OP_SUCCESS)
             return nothing
         end
 

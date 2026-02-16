@@ -181,7 +181,7 @@ function _pipe_read_event_handler(read_end, events::Int)
 
     if (events & Int(IoEventType.READABLE)) != 0
         if read_end.on_readable !== nothing
-            read_end.on_readable(AWS_OP_SUCCESS)
+            read_end.on_readable(OP_SUCCESS)
         end
     end
 
@@ -433,7 +433,7 @@ function _process_pipe_writes(write_end::PipeWriteEnd)
             # Write complete
             popfirst!(write_end.write_queue)
             if req.written_fn !== nothing
-                req.written_fn(AWS_OP_SUCCESS, req.original_len)
+                req.written_fn(OP_SUCCESS, req.original_len)
             end
         end
     end

@@ -17,7 +17,7 @@ function TestingChannelHandler(initial_window::Integer)
         Csize_t(0),
         Csize_t(initial_window),
         true,
-        Reseau.AWS_OP_SUCCESS,
+        Reseau.OP_SUCCESS,
     )
 end
 
@@ -125,7 +125,7 @@ function _setup_channel(; enable_read_back_pressure::Bool = false)
 
     @test _wait_ready_channel(setup_ch)
     if isready(setup_ch)
-        @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
+        @test take!(setup_ch) == Reseau.OP_SUCCESS
     end
 
     return (el = el, channel = channel)

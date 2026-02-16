@@ -72,7 +72,7 @@ function PipeState(loop_setup::PipeLoopSetup, buffer_size::Integer)
         nothing,
         PipeResults(false, false, 0),
         PipeBuffers(empty_buf, empty_buf, Csize_t(0)),
-        PipeReadableEvents(Reseau.AWS_OP_SUCCESS, 0, 0),
+        PipeReadableEvents(Reseau.OP_SUCCESS, 0, 0),
         nothing,
     )
 end
@@ -211,7 +211,7 @@ function _clean_up_write_end_task(state::PipeState)
 end
 
 function _clean_up_write_end_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
-    if error_code == Reseau.AWS_OP_SUCCESS
+    if error_code == Reseau.OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
     try
@@ -305,7 +305,7 @@ function _sentonce_subscribe_task(state::PipeState)
 end
 
 function _subscribe_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
-    if error_code == Reseau.AWS_OP_SUCCESS
+    if error_code == Reseau.OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
     try
@@ -372,7 +372,7 @@ function _resubscribe_write_task(state::PipeState)
 end
 
 function _readall_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
-    if error_code != Reseau.AWS_OP_SUCCESS
+    if error_code != Reseau.OP_SUCCESS
         _signal_error!(state)
         return nothing
     end
@@ -460,7 +460,7 @@ function _clean_up_write_end_then_schedule_subscribe_task(state::PipeState)
 end
 
 function _close_write_end_after_all_writes_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
-    if error_code != Reseau.AWS_OP_SUCCESS
+    if error_code != Reseau.OP_SUCCESS
         _signal_error!(state)
         return nothing
     end
@@ -497,7 +497,7 @@ end
 function _cancelled_on_write_completed(state::PipeState, error_code::Int, bytes_written::Csize_t)
     status_ref = state.test_data::Base.RefValue{Int}
     status_ref[] = error_code
-    if error_code == Reseau.AWS_OP_SUCCESS
+    if error_code == Reseau.OP_SUCCESS
         state.buffers.num_bytes_written += bytes_written
     end
     _schedule_read_end_task(state, _clean_up_read_end_task)
@@ -573,7 +573,7 @@ end
 
             @testset "readable_event_after_write $(loop_setup)" begin
                 _run_pipe_case("readable_after_write", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 1
                     _schedule_read_end_task(state, _subscribe_task)
                     _schedule_write_end_task(state, _write_once_task)
@@ -584,7 +584,7 @@ end
 
             @testset "readable_event_sent_once $(loop_setup)" begin
                 _run_pipe_case("readable_sent_once", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.OP_SUCCESS
                     _schedule_read_end_task(state, _sentonce_subscribe_task)
                     _schedule_write_end_task(state, _write_once_task)
                     @test _wait_for_results(state) == 0
@@ -594,7 +594,7 @@ end
 
             @testset "readable_on_subscribe_if_data_present $(loop_setup)" begin
                 _run_pipe_case("readable_on_subscribe", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 1
                     _schedule_write_end_task(state, _write_once_then_subscribe_task)
                     @test _wait_for_results(state) == 0
@@ -604,7 +604,7 @@ end
 
             @testset "readable_on_resubscribe_if_data_present $(loop_setup)" begin
                 _run_pipe_case("readable_on_resubscribe", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 2
                     _schedule_write_end_task(state, _resubscribe_write_task)
                     @test _wait_for_results(state) == 0
@@ -614,7 +614,7 @@ end
 
             @testset "readable_event_sent_again_after_all_data_read $(loop_setup)" begin
                 _run_pipe_case("readable_readall", SMALL_BUFFER_SIZE, loop_setup) do state
-                    state.readable_events.error_code_to_monitor = Reseau.AWS_OP_SUCCESS
+                    state.readable_events.error_code_to_monitor = Reseau.OP_SUCCESS
                     state.readable_events.close_read_end_after_n_events = 2
                     _schedule_read_end_task(state, _readall_subscribe_task)
                     _schedule_write_end_task(state, _readall_write_task)

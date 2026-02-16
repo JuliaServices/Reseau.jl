@@ -374,7 +374,7 @@ end
             on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
                 accept_err[] = err
                 accepted[] = new_sock
-                if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+                if err != Reseau.OP_SUCCESS || new_sock === nothing
                     read_done[] = true
                     return nothing
                 end
@@ -391,7 +391,7 @@ end
                     Sockets.socket_subscribe_to_readable_events(
                         new_sock, Reseau.EventCallable(err -> begin
                             read_err[] = err
-                            if err != Reseau.AWS_OP_SUCCESS
+                            if err != Reseau.OP_SUCCESS
                                 read_done[] = true
                                 return nothing
                             end
@@ -428,7 +428,7 @@ end
                 on_connection_result = Reseau.EventCallable(err -> begin
                     connect_err[] = err
                     connect_done[] = true
-                    if err != Reseau.AWS_OP_SUCCESS
+                    if err != Reseau.OP_SUCCESS
                         return nothing
                     end
 
@@ -451,12 +451,12 @@ end
 
             @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
             @test wait_for_flag(connect_done)
-            @test connect_err[] == Reseau.AWS_OP_SUCCESS
+            @test connect_err[] == Reseau.OP_SUCCESS
             @test wait_for_flag(write_done)
-            @test write_err[] == Reseau.AWS_OP_SUCCESS
+            @test write_err[] == Reseau.OP_SUCCESS
             @test wait_for_flag(read_done)
-            @test accept_err[] == Reseau.AWS_OP_SUCCESS
-            @test read_err[] == Reseau.AWS_OP_SUCCESS
+            @test accept_err[] == Reseau.OP_SUCCESS
+            @test read_err[] == Reseau.OP_SUCCESS
             @test payload[] == "ping"
         finally
             if client_socket !== nothing
@@ -613,8 +613,8 @@ end
 
             @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
             @test wait_for_flag(connect_done)
-            @test connect_err[] == Reseau.AWS_OP_SUCCESS
-            @test accept_err[] == Reseau.AWS_OP_SUCCESS
+            @test connect_err[] == Reseau.OP_SUCCESS
+            @test accept_err[] == Reseau.OP_SUCCESS
         finally
             if client_socket !== nothing
                 Sockets.socket_cleanup!(client_socket)
@@ -740,11 +740,11 @@ end
                 return
             end
             @test wait_for_flag(connect_done)
-            if connect_err[] != Reseau.AWS_OP_SUCCESS
+            if connect_err[] != Reseau.OP_SUCCESS
                 @test _is_allowed_connect_error(connect_err[]) ||
                     connect_err[] == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
             else
-                @test accept_err[] == Reseau.AWS_OP_SUCCESS
+                @test accept_err[] == Reseau.OP_SUCCESS
             end
         finally
             if client_socket !== nothing
@@ -882,7 +882,7 @@ end
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             accepted[] = new_sock
-            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.OP_SUCCESS || new_sock === nothing
                 read_done[] = true
                 return nothing
             end
@@ -899,7 +899,7 @@ end
                 Sockets.socket_subscribe_to_readable_events(
                     new_sock, Reseau.EventCallable(err -> begin
                         read_err[] = err
-                        if err != Reseau.AWS_OP_SUCCESS
+                        if err != Reseau.OP_SUCCESS
                             read_done[] = true
                             return nothing
                         end
@@ -935,7 +935,7 @@ end
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     return nothing
                 end
 
@@ -959,12 +959,12 @@ end
 
         @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == Reseau.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == Reseau.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test accept_err[] == Reseau.AWS_OP_SUCCESS
-        @test read_err[] == Reseau.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.OP_SUCCESS
+        @test read_err[] == Reseau.OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
@@ -1036,7 +1036,7 @@ end
 
         on_accept_started = Reseau.EventCallable(err -> begin
             accept_started[] = true
-            if err == Reseau.AWS_OP_SUCCESS && server_socket !== nothing
+            if err == Reseau.OP_SUCCESS && server_socket !== nothing
                 bound = Sockets.socket_get_bound_address(server_socket)
                 if bound isa Sockets.SocketEndpoint
                     port_ref[] = Int(bound.port)
@@ -1048,7 +1048,7 @@ end
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             accepted[] = new_sock
-            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.OP_SUCCESS || new_sock === nothing
                 read_done[] = true
                 return nothing
             end
@@ -1065,7 +1065,7 @@ end
                 Sockets.socket_subscribe_to_readable_events(
                     new_sock, Reseau.EventCallable(err -> begin
                         read_err[] = err
-                        if err != Reseau.AWS_OP_SUCCESS
+                        if err != Reseau.OP_SUCCESS
                             read_done[] = true
                             return nothing
                         end
@@ -1108,7 +1108,7 @@ end
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     return nothing
                 end
 
@@ -1131,12 +1131,12 @@ end
 
         @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == Reseau.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == Reseau.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test accept_err[] == Reseau.AWS_OP_SUCCESS
-        @test read_err[] == Reseau.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.OP_SUCCESS
+        @test read_err[] == Reseau.OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
@@ -1189,7 +1189,7 @@ end
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accepted[] = new_sock
             accept_done[] = true
-            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.OP_SUCCESS || new_sock === nothing
                 return nothing
             end
             try
@@ -1199,7 +1199,7 @@ end
             end
             _ = Sockets.socket_subscribe_to_readable_events(
                 new_sock, Reseau.EventCallable(err -> begin
-                    if err != Reseau.AWS_OP_SUCCESS
+                    if err != Reseau.OP_SUCCESS
                         return nothing
                     end
                     buf = Reseau.ByteBuffer(64)
@@ -1229,7 +1229,7 @@ end
         connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_done[] = true
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     write_started[] = true
                     return nothing
                 end
@@ -1262,7 +1262,7 @@ end
         @test wait_for_flag(write_started)
         @test wait_for_flag(write_cb_invoked)
         @test !write_cb_sync[]
-        @test write_err[] == Reseau.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.OP_SUCCESS
     finally
         if client_socket !== nothing
             Sockets.socket_close(client_socket)
@@ -1506,8 +1506,8 @@ end
         @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(accept_done)
         @test wait_for_flag(connect_done)
-        @test accept_err[] == Reseau.AWS_OP_SUCCESS
-        @test connect_err[] == Reseau.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.OP_SUCCESS
+        @test connect_err[] == Reseau.OP_SUCCESS
     finally
         if client_socket !== nothing
             Sockets.socket_cleanup!(client_socket)
@@ -1641,8 +1641,8 @@ end
         @test wait_for_flag(write_done_client)
         EventLoops.event_loop_schedule_task_now!(el_val, write_task_server)
         @test wait_for_flag(write_done_server)
-        @test write_err_client[] == Reseau.AWS_OP_SUCCESS
-        @test write_err_server[] == Reseau.AWS_OP_SUCCESS
+        @test write_err_client[] == Reseau.OP_SUCCESS
+        @test write_err_server[] == Reseau.OP_SUCCESS
     finally
         if client_socket !== nothing
             Sockets.socket_cleanup!(client_socket)
@@ -1697,7 +1697,7 @@ end
         on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
             accept_err[] = err
             accepted[] = new_sock
-            if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+            if err != Reseau.OP_SUCCESS || new_sock === nothing
                 read_done[] = true
                 return nothing
             end
@@ -1714,7 +1714,7 @@ end
                 Sockets.socket_subscribe_to_readable_events(
                     new_sock, Reseau.EventCallable(err -> begin
                         read_err[] = err
-                        if err != Reseau.AWS_OP_SUCCESS
+                        if err != Reseau.OP_SUCCESS
                             read_done[] = true
                             return nothing
                         end
@@ -1751,7 +1751,7 @@ end
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     return nothing
                 end
 
@@ -1774,12 +1774,12 @@ end
 
         @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == Reseau.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == Reseau.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test accept_err[] == Reseau.AWS_OP_SUCCESS
-        @test read_err[] == Reseau.AWS_OP_SUCCESS
+        @test accept_err[] == Reseau.OP_SUCCESS
+        @test read_err[] == Reseau.OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
@@ -1861,8 +1861,8 @@ end
 
         @test wait_for_flag(connect_done)
         @test wait_for_flag(accept_done)
-        @test connect_err[] == Reseau.AWS_OP_SUCCESS
-        @test accept_err[] == Reseau.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.OP_SUCCESS
+        @test accept_err[] == Reseau.OP_SUCCESS
     finally
         if client_socket !== nothing
             Sockets.socket_cleanup!(client_socket)
@@ -1918,7 +1918,7 @@ end
         Sockets.socket_subscribe_to_readable_events(
             server_socket, Reseau.EventCallable(err -> begin
                 read_err[] = err
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     read_done[] = true
                     return nothing
                 end
@@ -1950,7 +1950,7 @@ end
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     return nothing
                 end
                 cursor = Reseau.ByteCursor("ping")
@@ -1972,11 +1972,11 @@ end
 
         @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == Reseau.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == Reseau.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test read_err[] == Reseau.AWS_OP_SUCCESS
+        @test read_err[] == Reseau.OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing
@@ -2027,7 +2027,7 @@ end
         Sockets.socket_subscribe_to_readable_events(
             server_socket, Reseau.EventCallable(err -> begin
                 read_err[] = err
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     read_done[] = true
                     return nothing
                 end
@@ -2062,7 +2062,7 @@ end
             on_connection_result = Reseau.EventCallable(err -> begin
                 connect_err[] = err
                 connect_done[] = true
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     return nothing
                 end
                 cursor = Reseau.ByteCursor("ping")
@@ -2084,11 +2084,11 @@ end
 
         @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
         @test wait_for_flag(connect_done)
-        @test connect_err[] == Reseau.AWS_OP_SUCCESS
+        @test connect_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(write_done)
-        @test write_err[] == Reseau.AWS_OP_SUCCESS
+        @test write_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag(read_done)
-        @test read_err[] == Reseau.AWS_OP_SUCCESS
+        @test read_err[] == Reseau.OP_SUCCESS
         @test payload[] == "ping"
     finally
         if client_socket !== nothing

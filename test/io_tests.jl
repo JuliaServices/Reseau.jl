@@ -713,7 +713,7 @@ end
         )
         Sockets.custom_key_op_handler_perform_operation(handler, op_dec)
         @test op_dec.completed
-        @test op_dec.error_code == Reseau.AWS_OP_SUCCESS
+        @test op_dec.error_code == Reseau.OP_SUCCESS
         @test collect(op_dec.output.mem[1:Int(op_dec.output.len)]) == _pkcs11_test_decrypt_output[]
 
         _pkcs11_test_sign_output[] = UInt8[0x55]
@@ -725,7 +725,7 @@ end
         )
         Sockets.custom_key_op_handler_perform_operation(handler, op_sig)
         @test op_sig.completed
-        @test op_sig.error_code == Reseau.AWS_OP_SUCCESS
+        @test op_sig.error_code == Reseau.OP_SUCCESS
         @test collect(op_sig.output.mem[1:Int(op_sig.output.len)]) == _pkcs11_test_sign_output[]
 
         Sockets.custom_key_op_handler_release(handler)

@@ -53,18 +53,11 @@ function Base.copy(addr::HostAddress)
     )
 end
 
-# Host resolver callback types (closures capture context for trim-safe dispatch)
-
 @enumx DefaultResolverState::UInt8 begin
     ACTIVE = 0
     SHUTTING_DOWN = 1
 end
 
-mutable struct PendingCallback
-    callback::HostResolveCallback  # (resolver, host_name, error_code, addresses) -> nothing
-end
-
-# Host resolver configuration
 struct HostResolverConfig
     max_entries::UInt64
     max_ttl_secs::UInt64
@@ -76,43 +69,32 @@ struct HostResolverConfig
 end
 
 struct HostResolutionConfig
-    impl::Union{HostResolveImpl, Nothing}
     max_ttl_secs::UInt64
     resolve_frequency_ns::UInt64
     resolution_delay_ns::UInt64
     first_address_family_count::UInt64
     connection_attempt_delay_ns::UInt64
     min_connection_attempt_delay_ns::UInt64
-    impl_data::Any
+    resolve_host_as_address::Bool
 end
 
-@inline _host_resolve_impl_callable(::Nothing) = nothing
-@inline _host_resolve_impl_callable(impl::HostResolveImpl) = impl
-@inline _host_resolve_impl_callable(impl) = HostResolveImpl(impl)
-
-@inline _host_resolve_callback_callable(::Nothing) = throw_error(ERROR_INVALID_ARGUMENT)
-@inline _host_resolve_callback_callable(callback::HostResolveCallback) = callback
-@inline _host_resolve_callback_callable(callback) = HostResolveCallback(callback)
-
 function HostResolutionConfig(;
-        impl = nothing,
         max_ttl_secs::Integer = 0,
         resolve_frequency_ns::Integer = 0,
         resolution_delay_ns::Integer = HOST_RESOLVER_HAPPY_EYEBALLS_RESOLUTION_DELAY_NS,
         first_address_family_count::Integer = Int(HOST_RESOLVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT),
         connection_attempt_delay_ns::Integer = HOST_RESOLVER_HAPPY_EYEBALLS_CONNECTION_ATTEMPT_DELAY_NS,
         min_connection_attempt_delay_ns::Integer = HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_NS,
-        impl_data = nothing,
+        resolve_host_as_address::Bool = false,
     )
     return HostResolutionConfig(
-        _host_resolve_impl_callable(impl),
         UInt64(max_ttl_secs),
         UInt64(resolve_frequency_ns),
         UInt64(resolution_delay_ns),
         UInt64(first_address_family_count),
         UInt64(connection_attempt_delay_ns),
         UInt64(min_connection_attempt_delay_ns),
-        impl_data,
+        resolve_host_as_address,
     )
 end
 
@@ -159,13 +141,32 @@ end
     return max(delay_ns, min_delay_ns)
 end
 
-const HostResolverCache = Dict{String, Any}
+mutable struct HostEntry{T}
+    resolver::T
+    host_name::String
+    resolution_config::HostResolutionConfig
+    resolve_frequency_ns::UInt64
+    entry_lock::ReentrantLock
+    entry_signal::ConditionVariable
+    a_records::LRUCache{String, HostAddress}
+    aaaa_records::LRUCache{String, HostAddress}
+    failed_a_records::LRUCache{String, HostAddress}
+    failed_aaaa_records::LRUCache{String, HostAddress}
+    pending_resolve_futures::Vector{Future{Vector{HostAddress}}}
+    last_resolve_request_time::UInt64
+    resolves_since_last_request::UInt32
+    @atomic state::DefaultResolverState.T
+    new_addresses::Vector{HostAddress}
+    expired_addresses::Vector{HostAddress}
+    on_host_purge_complete::Union{TaskFn, Nothing}  # late-init: nothing → TaskFn
+    resolver_thread::Union{ForeignThread, Nothing}
+end
 
 # Host resolver with caching
 mutable struct HostResolver
     event_loop_group::EventLoopGroup
     config::HostResolverConfig
-    cache::HostResolverCache
+    cache::Dict{String, HostEntry{HostResolver}}
     resolver_lock::ReentrantLock
     @atomic shutdown::Bool
 end
@@ -179,7 +180,7 @@ function HostResolver(
         event_loop_group::EventLoopGroup,
         config::HostResolverConfig = HostResolverConfig(),
     )
-    cache = Dict{String, Any}()
+    cache = Dict{String, HostEntry{HostResolver}}()
     sizehint!(cache, Int(config.max_entries))
     resolver = HostResolver(
         event_loop_group,
@@ -214,26 +215,8 @@ function default_host_resolver()::HostResolver
     end
 end
 
-mutable struct HostEntry
-    resolver::HostResolver
-    host_name::String
-    resolution_config::HostResolutionConfig
-    resolve_frequency_ns::UInt64
-    entry_lock::ReentrantLock
-    entry_signal::ConditionVariable
-    a_records::LRUCache{String, HostAddress}
-    aaaa_records::LRUCache{String, HostAddress}
-    failed_a_records::LRUCache{String, HostAddress}
-    failed_aaaa_records::LRUCache{String, HostAddress}
-    pending_callbacks::Vector{PendingCallback}
-    last_resolve_request_time::UInt64
-    resolves_since_last_request::UInt32
-    @atomic state::DefaultResolverState.T
-    new_addresses::Vector{HostAddress}
-    expired_addresses::Vector{HostAddress}
-    on_host_purge_complete::Union{TaskFn, Nothing}  # late-init: nothing → TaskFn
-    resolver_thread::Union{ForeignThread, Nothing}
-end
+"""Type alias for HostResolver.cache; values are always `HostEntry{HostResolver}`."""
+const HostResolverCache = Dict{String, HostEntry{HostResolver}}
 
 function _entry_cache_capacity(resolver::HostResolver, config::HostResolutionConfig)
     ttl = config.max_ttl_secs != 0 ? config.max_ttl_secs : resolver.config.max_ttl_secs
@@ -263,7 +246,7 @@ function HostEntry(
         aaaa_records,
         failed_a_records,
         failed_aaaa_records,
-        PendingCallback[],
+        Future{Vector{HostAddress}}[],
         timestamp,
         UInt32(0),
         DefaultResolverState.ACTIVE,
@@ -285,23 +268,18 @@ function _normalize_resolution_config(
 
     if config === nothing
         return HostResolutionConfig(
-            nothing,
             base_max_ttl,
             base_resolve_freq,
             HOST_RESOLVER_HAPPY_EYEBALLS_RESOLUTION_DELAY_NS,
             HOST_RESOLVER_HAPPY_EYEBALLS_FIRST_ADDRESS_FAMILY_COUNT,
             HOST_RESOLVER_HAPPY_EYEBALLS_CONNECTION_ATTEMPT_DELAY_NS,
             HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_NS,
-            resolver.config.max_addresses_per_host,
+            false,
         )
     end
 
-    impl = config.impl === nothing ? nothing : (config.impl::HostResolveImpl)
     max_ttl = config.max_ttl_secs != 0 ? config.max_ttl_secs : base_max_ttl
     resolve_freq = config.resolve_frequency_ns != 0 ? config.resolve_frequency_ns : base_resolve_freq
-    impl_data = config.impl_data === nothing && config.impl === nothing ?
-        resolver.config.max_addresses_per_host :
-        config.impl_data
 
     resolution_delay_ns = config.resolution_delay_ns == 0 ?
         HOST_RESOLVER_HAPPY_EYEBALLS_RESOLUTION_DELAY_NS : config.resolution_delay_ns
@@ -319,14 +297,13 @@ function _normalize_resolution_config(
     )
 
     return HostResolutionConfig(
-        impl,
         max_ttl,
         resolve_freq,
         resolution_delay_ns,
         first_address_family_count,
         connection_attempt_delay_ns,
         min_connection_attempt_delay_ns,
-        impl_data,
+        config.resolve_host_as_address,
     )
 end
 
@@ -340,35 +317,6 @@ function _dispatch_simple_callback(
         event_loop_schedule_task_now!(callback, event_loop; type_tag = "dns_purge_callback")
     else
         callback(UInt8(0))
-    end
-    return nothing
-end
-
-function _dispatch_resolve_callback(
-        resolver::HostResolver,
-        callback::HostResolveCallback,
-        host_name::String,
-        error_code::Int,
-        addresses::Vector{HostAddress},
-    )::Nothing
-    event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
-    if event_loop !== nothing
-        event_loop_schedule_task_now!(event_loop; type_tag = "dns_resolve_callback") do _
-            try
-                callback(resolver, host_name, error_code, addresses)
-            catch err
-                _ = err
-                logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name'")
-            end
-            return nothing
-        end
-    else
-        try
-            callback(resolver, host_name, error_code, addresses)
-        catch err
-            _ = err
-            logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: callback failed for '$host_name'")
-        end
     end
     return nothing
 end
@@ -534,27 +482,8 @@ function _host_entry_finished_pred(entry::HostEntry)
 end
 
 function _host_entry_finished_or_pending_pred(entry::HostEntry)
-    return ((@atomic entry.state) == DefaultResolverState.SHUTTING_DOWN) || !isempty(entry.pending_callbacks)
+    return ((@atomic entry.state) == DefaultResolverState.SHUTTING_DOWN) || !isempty(entry.pending_resolve_futures)
 end
-
-function _invoke_resolver_impl(impl::HostResolveImpl, host::String, impl_data)::Tuple{Vector{HostAddress}, Int}
-    result = impl(host, impl_data)
-    if result isa Tuple
-        if length(result) == 2
-            addrs_any = result[1]
-            err_any = result[2]
-            if addrs_any isa Vector{HostAddress} && err_any isa Integer
-                return addrs_any, Int(err_any)
-            end
-        end
-        return HostAddress[], ERROR_IO_DNS_QUERY_FAILED
-    end
-    if result isa Vector{HostAddress}
-        return result, AWS_OP_SUCCESS
-    end
-    return HostAddress[], ERROR_IO_DNS_QUERY_FAILED
-end
-
 
 @inline function _is_ipv4_literal(host::AbstractString)::Bool
     parts = split(host, '.')
@@ -569,17 +498,15 @@ end
     return true
 end
 
-function _default_dns_resolve(host::String, impl_data)
-    max_addresses = impl_data isa Integer ? Int(impl_data) : 0
+function _default_dns_resolve(host::String, max_addresses::Int)
 
     # Fast path: for numeric IP literals, skip getaddrinfo() entirely.
     if _is_ipv4_literal(host)
-        return [HostAddress(host, HostAddressType.A, host, UInt64(0))], AWS_OP_SUCCESS
+        return [HostAddress(host, HostAddressType.A, host, UInt64(0))], OP_SUCCESS
     end
 
-    # Preserve `getaddrinfo()` result ordering (aws-c-io parity). Callers that want
-    # different address selection strategies can provide a custom `HostResolutionConfig.impl`.
-    error_code = AWS_OP_SUCCESS
+    # Preserve `getaddrinfo()` result ordering (aws-c-io parity).
+    error_code = OP_SUCCESS
     flags = @static Sys.isopenbsd() ? Cint(0) : (AI_ALL | AI_V4MAPPED)
     raw_addresses = _native_getaddrinfo(host; flags = flags)
     addresses = HostAddress[]
@@ -603,28 +530,24 @@ end
 
 function _resolve_addresses(entry::HostEntry)::Tuple{Vector{HostAddress}, Int}
     host_name = entry.host_name
-    impl = entry.resolution_config.impl
+    if entry.resolution_config.resolve_host_as_address
+        return [HostAddress(host_name, HostAddressType.A, host_name, UInt64(0))], OP_SUCCESS
+    end
+
     addresses::Vector{HostAddress} = HostAddress[]
     error_code::Int = ERROR_IO_DNS_QUERY_FAILED
 
     try
-        if impl !== nothing
-            resolved, err = _invoke_resolver_impl(impl::HostResolveImpl, host_name, entry.resolution_config.impl_data)
-            addresses = resolved
-            error_code = err
-        else
-            impl_data_any = entry.resolution_config.impl_data
-            max_addresses::UInt64 = impl_data_any isa Integer ? UInt64(impl_data_any::Integer) : UInt64(0)
-            resolved, err = _default_dns_resolve(host_name, max_addresses)
-            addresses = resolved
-            error_code = Int(err)
-        end
+        max_addresses = Int(entry.resolver.config.max_addresses_per_host)
+        resolved, err = _default_dns_resolve(host_name, max_addresses)
+        addresses = resolved
+        error_code = Int(err)
     catch
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve failed for '$host_name'")
         return HostAddress[], ERROR_IO_DNS_QUERY_FAILED
     end
 
-    error_code == AWS_OP_SUCCESS || return HostAddress[], error_code
+    error_code == OP_SUCCESS || return HostAddress[], error_code
 
     normalized = HostAddress[]
     sizehint!(normalized, length(addresses))
@@ -634,14 +557,10 @@ function _resolve_addresses(entry::HostEntry)::Tuple{Vector{HostAddress}, Int}
         push!(normalized, addr_copy)
     end
 
-    return normalized, AWS_OP_SUCCESS
+    return normalized, OP_SUCCESS
 end
 
-# Channel-based rendezvous for passing HostEntry to the resolver thread.
-const _RESOLVER_THREAD_STARTUP = Base.Channel{Any}(1)
-
-@wrap_thread_fn function _resolver_thread_entry()
-    entry = take!(_RESOLVER_THREAD_STARTUP)::HostEntry
+@wrap_thread_fn function _resolver_thread_entry(entry::HostEntry)
     try
         _host_resolver_thread(entry)
     catch e
@@ -685,23 +604,23 @@ function _host_resolver_thread(entry::HostEntry)
             timestamp = _resolver_clock(entry.resolver)
             new_expiry = timestamp + entry.resolution_config.max_ttl_secs * UInt64(1_000_000_000)
 
-            pending = PendingCallback[]
+            pending = Future{Vector{HostAddress}}[]
             lock(entry.entry_lock)
             try
-                if err_code == AWS_OP_SUCCESS
+                if err_code == OP_SUCCESS
                     _update_address_cache!(entry, addresses, new_expiry)
                 end
                 _process_records!(entry, entry.aaaa_records, entry.failed_aaaa_records, timestamp)
                 _process_records!(entry, entry.a_records, entry.failed_a_records, timestamp)
 
-                pending = entry.pending_callbacks
-                entry.pending_callbacks = PendingCallback[]
+                pending = entry.pending_resolve_futures
+                entry.pending_resolve_futures = Future{Vector{HostAddress}}[]
             finally
                 unlock(entry.entry_lock)
             end
 
             while !isempty(pending)
-                pending_callback = popfirst!(pending)
+                pending_future = popfirst!(pending)
                 callback_addresses = HostAddress[]
                 lock(entry.entry_lock)
                 try
@@ -711,12 +630,23 @@ function _host_resolver_thread(entry::HostEntry)
                 end
 
                 error_code = if isempty(callback_addresses)
-                    err_code == AWS_OP_SUCCESS ? ERROR_IO_DNS_QUERY_FAILED : err_code
+                    err_code == OP_SUCCESS ? ERROR_IO_DNS_NO_ADDRESS_FOR_HOST : err_code
                 else
-                    AWS_OP_SUCCESS
+                    OP_SUCCESS
                 end
                 addrs = isempty(callback_addresses) ? HostAddress[] : callback_addresses
-                _dispatch_resolve_callback(entry.resolver, pending_callback.callback, entry.host_name, error_code, addrs)
+                if error_code == OP_SUCCESS
+                    if isempty(addrs)
+                        notify(
+                            pending_future,
+                            DNSError(entry.host_name, Int32(ERROR_IO_DNS_NO_ADDRESS_FOR_HOST)),
+                        )
+                    else
+                        notify(pending_future, addrs)
+                    end
+                else
+                    notify(pending_future, DNSError(entry.host_name, Int32(error_code)))
+                end
             end
 
             empty!(entry.new_addresses)
@@ -754,7 +684,7 @@ function _host_resolver_thread(entry::HostEntry)
                 try
                     now = _resolver_clock(resolver)
                     if resolver.shutdown || (
-                            isempty(entry.pending_callbacks) &&
+                            isempty(entry.pending_resolve_futures) &&
                             entry.last_resolve_request_time + max_no_solicitation_interval < now
                         )
                         @atomic entry.state = DefaultResolverState.SHUTTING_DOWN
@@ -784,20 +714,26 @@ function _host_resolver_thread(entry::HostEntry)
 end
 
 function _host_entry_shutdown!(entry::HostEntry)
+    pending = Future{Vector{HostAddress}}[]
     lock(entry.entry_lock)
+    pending = entry.pending_resolve_futures
+    entry.pending_resolve_futures = Future{Vector{HostAddress}}[]
     @atomic entry.state = DefaultResolverState.SHUTTING_DOWN
     condition_variable_notify_all(entry.entry_signal)
     unlock(entry.entry_lock)
+    for resolve_future in pending
+        notify(resolve_future, DNSError(entry.host_name, Int32(ERROR_IO_EVENT_LOOP_SHUTDOWN)))
+    end
     return nothing
 end
 
 # Resolve a hostname to addresses
 function host_resolver_resolve!(
+        on_resolved::F,
         resolver::HostResolver,
         host_name::AbstractString,
-        on_resolved,
-        resolution_config::Union{HostResolutionConfig, Nothing},
-    )::Nothing
+        resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
+)::Nothing where {F}
     if @atomic resolver.shutdown
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve called after shutdown")
         throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
@@ -805,64 +741,63 @@ function host_resolver_resolve!(
 
     host = String(host_name)
     timestamp = _resolver_clock(resolver)
-
-    callback = _host_resolve_callback_callable(on_resolved)
+    result = Future{Vector{HostAddress}}()
     normalized_config = _normalize_resolution_config(resolver, resolution_config)
 
     lock(resolver.resolver_lock)
-    entry_any = get(resolver.cache, host, nothing)
+    entry_any = get(() -> nothing, resolver.cache, host)
     if entry_any === nothing
         _host_resolver_ensure_thread_entry!()
         new_entry = HostEntry(resolver, host, normalized_config, timestamp)
         push!(
-            new_entry.pending_callbacks,
-            PendingCallback(callback),
+            new_entry.pending_resolve_futures,
+            result,
         )
         resolver.cache[host] = new_entry
-        put!(_RESOLVER_THREAD_STARTUP, new_entry)
         try
-            new_entry.resolver_thread = ForeignThread("ReseauHostResolver", _RESOLVER_THREAD_ENTRY_C)
+            new_entry.resolver_thread = ForeignThread(
+                "ReseauHostResolver",
+                _RESOLVER_THREAD_ENTRY_C,
+                new_entry,
+            )
         catch
-            take!(_RESOLVER_THREAD_STARTUP)  # drain on failure
             delete!(resolver.cache, host)
             unlock(resolver.resolver_lock)
             rethrow()
         end
         unlock(resolver.resolver_lock)
+        addresses = Base.wait(result)
+        on_resolved(addresses)
         return nothing
-    end
 
-    entry = entry_any::HostEntry
-    lock(entry.entry_lock)
-    unlock(resolver.resolver_lock)
+    else
+        entry = entry_any::HostEntry
+        lock(entry.entry_lock)
+        unlock(resolver.resolver_lock)
 
-    entry.last_resolve_request_time = timestamp
-    entry.resolves_since_last_request = 0
-    cached_addresses = _collect_callback_addresses(entry)
+        entry.last_resolve_request_time = timestamp
+        entry.resolves_since_last_request = 0
+        cached_addresses = _collect_callback_addresses(entry)
 
-    if !isempty(cached_addresses)
+        if !isempty(cached_addresses)
+            unlock(entry.entry_lock)
+            notify(result, cached_addresses)
+            addresses = Base.wait(result)
+            on_resolved(addresses)
+            return nothing
+        end
+
+        push!(
+            entry.pending_resolve_futures,
+            result,
+        )
+        condition_variable_notify_all(entry.entry_signal)
         unlock(entry.entry_lock)
-        callback(resolver, host, AWS_OP_SUCCESS, cached_addresses)
+
+        addresses = Base.wait(result)
+        on_resolved(addresses)
         return nothing
     end
-
-    push!(
-        entry.pending_callbacks,
-        PendingCallback(callback),
-    )
-    condition_variable_notify_all(entry.entry_signal)
-    unlock(entry.entry_lock)
-
-    return nothing
-end
-
-function host_resolver_resolve!(
-        resolver::HostResolver,
-        host_name::AbstractString,
-        on_resolved;
-        resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
-    )::Nothing
-    return host_resolver_resolve!(resolver, host_name, on_resolved, resolution_config)
 end
 
 # Purge the entire cache
@@ -1012,7 +947,7 @@ end
 # Shutdown the resolver
 function host_resolver_shutdown!(resolver::HostResolver)
     @atomic resolver.shutdown = true
-    entries = HostEntry[]
+    entries = HostEntry{HostResolver}[]
     lock(resolver.resolver_lock)
     for (_, entry_any) in resolver.cache
         entry = entry_any::HostEntry

@@ -140,7 +140,7 @@ function _load_resource_buf(name::AbstractString)
         return nothing
     end
     buf_ref = Ref(Reseau.null_buffer())
-    Reseau.byte_buf_init_copy_from_cursor(buf_ref, Reseau.ByteCursor(bytes)) == Reseau.AWS_OP_SUCCESS || return nothing
+    Reseau.byte_buf_init_copy_from_cursor(buf_ref, Reseau.ByteCursor(bytes)) == Reseau.OP_SUCCESS || return nothing
     return buf_ref[]
 end
 
@@ -760,9 +760,9 @@ end
     output_cursor = Reseau.ByteCursor(UInt8[0x0a, 0x0b])
     @test Sockets.tls_key_operation_complete!(operation, output_cursor) === nothing
     @test operation.completed
-    @test operation.error_code == Reseau.AWS_OP_SUCCESS
+    @test operation.error_code == Reseau.OP_SUCCESS
     @test cb_called[]
-    @test cb_err[] == Reseau.AWS_OP_SUCCESS
+    @test cb_err[] == Reseau.OP_SUCCESS
     @test cb_ud[] == 99
     @test cb_op[] === operation
     @test Reseau.byte_cursor_eq(Reseau.byte_cursor_from_buf(operation.output), output_cursor)
@@ -963,7 +963,7 @@ end
         start_called[] = true
         seen_handler[] = handler
         seen_start_ud[] = ud
-        return Reseau.AWS_OP_SUCCESS
+        return Reseau.OP_SUCCESS
     end
     server_new_handler = (options, slot, ud) -> begin
         server_new_called[] = true
@@ -1466,7 +1466,7 @@ end
     end
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
-        if err != Reseau.AWS_OP_SUCCESS
+        if err != Reseau.OP_SUCCESS
             return nothing
         end
         Sockets.socket_assign_to_event_loop(new_sock, event_loop)
@@ -1490,7 +1490,7 @@ end
     end)
 
     on_accept_start = Reseau.EventCallable(err -> begin
-        if err == Reseau.AWS_OP_SUCCESS
+        if err == Reseau.OP_SUCCESS
             accept_started[] = true
         end
         return nothing
@@ -1532,7 +1532,7 @@ end
 
     connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
-            if err != Reseau.AWS_OP_SUCCESS
+            if err != Reseau.OP_SUCCESS
                 negotiated[] = true
                 return nothing
             end
@@ -1771,13 +1771,13 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     @test client_ctx isa Sockets.TlsContext
 
     server_setup_called = Ref(false)
-    server_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    server_setup_err = Ref(Reseau.OP_SUCCESS)
     server_shutdown = Ref(false)
     server_channel = Ref{Any}(nothing)
     server_negotiated_called = Ref(false)
-    server_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
+    server_negotiated_err = Ref(Reseau.OP_SUCCESS)
     listener_setup_called = Ref(false)
-    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_err = Ref(Reseau.OP_SUCCESS)
 
     server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -1811,7 +1811,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     @test wait_for_flag_tls(listener_setup_called)
-    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test listener_setup_err[] == Reseau.OP_SUCCESS
     bound = Sockets.socket_get_bound_address(listener)
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -1822,9 +1822,9 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     )
 
     client_setup_called = Ref(false)
-    client_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    client_setup_err = Ref(Reseau.OP_SUCCESS)
     client_negotiated_called = Ref(false)
-    client_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
+    client_negotiated_err = Ref(Reseau.OP_SUCCESS)
     client_channel = Ref{Any}(nothing)
 
     @test Sockets.client_bootstrap_connect!(
@@ -1854,19 +1854,19 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     ) === nothing
 
     @test wait_for_flag_tls(server_setup_called)
-    @test server_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test server_setup_err[] == Reseau.OP_SUCCESS
     @test wait_for_flag_tls(client_setup_called)
-    @test client_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test client_setup_err[] == Reseau.OP_SUCCESS
     @test wait_for_flag_tls(server_negotiated_called)
-    @test server_negotiated_err[] == Reseau.AWS_OP_SUCCESS
+    @test server_negotiated_err[] == Reseau.OP_SUCCESS
     @test wait_for_flag_tls(client_negotiated_called)
-    @test client_negotiated_err[] == Reseau.AWS_OP_SUCCESS
+    @test client_negotiated_err[] == Reseau.OP_SUCCESS
 
     if server_channel[] !== nothing
-        Sockets.channel_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(server_channel[], Reseau.OP_SUCCESS)
     end
     if client_channel[] !== nothing
-        Sockets.channel_shutdown!(client_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(client_channel[], Reseau.OP_SUCCESS)
     end
 
     @test wait_for_flag_tls(server_shutdown)
@@ -1909,13 +1909,13 @@ end
     @test client_ctx isa Sockets.TlsContext
 
     server_setup_called = Ref(false)
-    server_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    server_setup_err = Ref(Reseau.OP_SUCCESS)
     server_shutdown = Ref(false)
     server_channel = Ref{Any}(nothing)
     server_negotiated_called = Ref(false)
-    server_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
+    server_negotiated_err = Ref(Reseau.OP_SUCCESS)
     listener_setup_called = Ref(false)
-    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_err = Ref(Reseau.OP_SUCCESS)
 
     server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -1949,7 +1949,7 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     @test wait_for_flag_tls(listener_setup_called)
-    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test listener_setup_err[] == Reseau.OP_SUCCESS
     bound = Sockets.socket_get_bound_address(listener)
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -1961,16 +1961,16 @@ end
 
     function connect_once!()
         server_setup_called[] = false
-        server_setup_err[] = Reseau.AWS_OP_SUCCESS
+        server_setup_err[] = Reseau.OP_SUCCESS
         server_shutdown[] = false
         server_channel[] = nothing
         server_negotiated_called[] = false
-        server_negotiated_err[] = Reseau.AWS_OP_SUCCESS
+        server_negotiated_err[] = Reseau.OP_SUCCESS
 
         client_setup_called = Ref(false)
-        client_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+        client_setup_err = Ref(Reseau.OP_SUCCESS)
         client_negotiated_called = Ref(false)
-        client_negotiated_err = Ref(Reseau.AWS_OP_SUCCESS)
+        client_negotiated_err = Ref(Reseau.OP_SUCCESS)
         client_channel = Ref{Any}(nothing)
 
         @test Sockets.client_bootstrap_connect!(
@@ -2000,16 +2000,16 @@ end
         ) === nothing
 
         @test wait_for_flag_tls(server_setup_called)
-        @test server_setup_err[] == Reseau.AWS_OP_SUCCESS
+        @test server_setup_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag_tls(client_setup_called)
-        @test client_setup_err[] == Reseau.AWS_OP_SUCCESS
+        @test client_setup_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag_tls(server_negotiated_called)
-        @test server_negotiated_err[] == Reseau.AWS_OP_SUCCESS
+        @test server_negotiated_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag_tls(client_negotiated_called)
-        @test client_negotiated_err[] == Reseau.AWS_OP_SUCCESS
+        @test client_negotiated_err[] == Reseau.OP_SUCCESS
 
         if server_channel[] !== nothing
-            Sockets.channel_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
+            Sockets.channel_shutdown!(server_channel[], Reseau.OP_SUCCESS)
         end
 
         @test wait_for_flag_tls(server_shutdown)
@@ -2037,7 +2037,7 @@ end
 
     listener_destroyed = Ref(false)
     listener_setup_called = Ref(false)
-    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_err = Ref(Reseau.OP_SUCCESS)
     server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         host = "127.0.0.1",
@@ -2057,7 +2057,7 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     @test wait_for_flag_tls(listener_setup_called)
-    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test listener_setup_err[] == Reseau.OP_SUCCESS
     bound = Sockets.socket_get_bound_address(listener)
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -2069,7 +2069,7 @@ end
     close_done = Ref(false)
     connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = EventLoops.event_loop_group_get_next_loop(elg),
         on_connection_result = Reseau.EventCallable(err -> begin
-            if err != Reseau.AWS_OP_SUCCESS
+            if err != Reseau.OP_SUCCESS
                 close_done[] = true
                 return nothing
             end
@@ -2134,7 +2134,7 @@ end
     server_channel = Ref{Any}(nothing)
     client_channel = Ref{Any}(nothing)
     listener_setup_called = Ref(false)
-    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_err = Ref(Reseau.OP_SUCCESS)
 
     server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -2143,12 +2143,12 @@ end
         tls_connection_options = Sockets.TlsConnectionOptions(
             server_ctx;
             on_negotiation_result = (handler, slot, err) -> begin
-                server_negotiated[] = err == Reseau.AWS_OP_SUCCESS
+                server_negotiated[] = err == Reseau.OP_SUCCESS
                 return nothing
             end,
         ),
         on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-            server_setup[] = err == Reseau.AWS_OP_SUCCESS
+            server_setup[] = err == Reseau.OP_SUCCESS
             server_channel[] = channel
             return nothing
         end,
@@ -2162,7 +2162,7 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     @test wait_for_flag_tls(listener_setup_called)
-    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test listener_setup_err[] == Reseau.OP_SUCCESS
     bound = Sockets.socket_get_bound_address(listener)
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
@@ -2181,13 +2181,13 @@ end
             client_ctx;
             server_name = "localhost",
             on_negotiation_result = (handler, slot, err) -> begin
-                client_negotiated[] = err == Reseau.AWS_OP_SUCCESS
+                client_negotiated[] = err == Reseau.OP_SUCCESS
                 return nothing
             end,
         ),
         client_bootstrap.on_protocol_negotiated,
         Reseau.ChannelCallable((err, channel) -> begin
-            client_setup[] = err == Reseau.AWS_OP_SUCCESS
+            client_setup[] = err == Reseau.OP_SUCCESS
             client_channel[] = channel
             return nothing
         end),
@@ -2202,10 +2202,10 @@ end
     @test wait_for_flag_tls(client_negotiated)
 
     if server_channel[] !== nothing
-        Sockets.channel_shutdown!(server_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(server_channel[], Reseau.OP_SUCCESS)
     end
     if client_channel[] !== nothing
-        Sockets.channel_shutdown!(client_channel[], Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(client_channel[], Reseau.OP_SUCCESS)
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
@@ -2306,7 +2306,7 @@ end
     client_ready = Ref(false)
     server_ready = Ref(false)
     listener_setup_called = Ref(false)
-    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_err = Ref(Reseau.OP_SUCCESS)
 
     server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
@@ -2315,7 +2315,7 @@ end
         enable_read_back_pressure = true,
         tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
         on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-            if err == Reseau.AWS_OP_SUCCESS
+            if err == Reseau.OP_SUCCESS
                 handler = rw_handler_new(
                     tls_test_handle_read,
                     tls_test_handle_write,
@@ -2344,7 +2344,7 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     @test wait_for_flag_tls(listener_setup_called)
-    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test listener_setup_err[] == Reseau.OP_SUCCESS
     bound = Sockets.socket_get_bound_address(listener)
     @test bound isa Sockets.SocketEndpoint
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
@@ -2368,7 +2368,7 @@ end
         client_tls_opts,
         client_bootstrap.on_protocol_negotiated,
         Reseau.ChannelCallable((err, channel) -> begin
-            if err == Reseau.AWS_OP_SUCCESS
+            if err == Reseau.OP_SUCCESS
                 handler = rw_handler_new(
                     tls_test_handle_read,
                     tls_test_handle_write,
@@ -2469,7 +2469,7 @@ end
         server_shutdown = Ref(false)
         shutdown_invoked = Ref(false)
         listener_setup_called = Ref(false)
-        listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+        listener_setup_err = Ref(Reseau.OP_SUCCESS)
 
         function client_on_read(handler, slot, data_read, user_data)
             args = user_data::TlsTestRwArgs
@@ -2479,7 +2479,7 @@ end
                     rw_handler_trigger_increment_read_window(client_handler_ref[], client_slot_ref[], 100)
                 end
                 if server_channel_ref[] !== nothing
-                    Sockets.channel_shutdown!(server_channel_ref[], Reseau.AWS_OP_SUCCESS)
+                    Sockets.channel_shutdown!(server_channel_ref[], Reseau.OP_SUCCESS)
                 end
             end
             lock(args.lock) do
@@ -2501,7 +2501,7 @@ end
             enable_read_back_pressure = true,
             tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
             on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-                if err == Reseau.AWS_OP_SUCCESS
+                if err == Reseau.OP_SUCCESS
                     server_channel_ref[] = channel
                     handler = rw_handler_new(
                         tls_test_handle_read,
@@ -2535,7 +2535,7 @@ end
         listener = server_bootstrap.listener_socket
         @test listener !== nothing
         @test wait_for_flag_tls(listener_setup_called)
-        @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
+        @test listener_setup_err[] == Reseau.OP_SUCCESS
         bound = Sockets.socket_get_bound_address(listener)
         port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
@@ -2558,7 +2558,7 @@ end
             client_tls_opts,
             client_bootstrap.on_protocol_negotiated,
             Reseau.ChannelCallable((err, channel) -> begin
-                if err == Reseau.AWS_OP_SUCCESS
+                if err == Reseau.OP_SUCCESS
                     client_channel_ref[] = channel
                     handler = rw_handler_new(
                         client_on_read,
@@ -2747,7 +2747,7 @@ end
         @test tls_stats.handshake_status == Sockets.TlsNegotiationStatus.SUCCESS
     end
 
-    Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+    Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
     EventLoops.event_loop_group_destroy!(elg)
 end
 
@@ -2761,68 +2761,68 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
             return opts -> Sockets.tls_ctx_options_override_default_trust_store_from_path(opts; ca_file = path)
         end
 
-        @test _tls_network_connect("www.amazon.com", 443) == Reseau.AWS_OP_SUCCESS
-        @test _tls_network_connect("ecc256.badssl.com", 443) == Reseau.AWS_OP_SUCCESS
-        @test _tls_network_connect("ecc384.badssl.com", 443) == Reseau.AWS_OP_SUCCESS
+        @test _tls_network_connect("www.amazon.com", 443) == Reseau.OP_SUCCESS
+        @test _tls_network_connect("ecc256.badssl.com", 443) == Reseau.OP_SUCCESS
+        @test _tls_network_connect("ecc384.badssl.com", 443) == Reseau.OP_SUCCESS
         if !Sys.isapple()
-            @test _tls_network_connect("sha384.badssl.com", 443) == Reseau.AWS_OP_SUCCESS
-            @test _tls_network_connect("sha512.badssl.com", 443) == Reseau.AWS_OP_SUCCESS
-            @test _tls_network_connect("rsa8192.badssl.com", 443) == Reseau.AWS_OP_SUCCESS
+            @test _tls_network_connect("sha384.badssl.com", 443) == Reseau.OP_SUCCESS
+            @test _tls_network_connect("sha512.badssl.com", 443) == Reseau.OP_SUCCESS
+            @test _tls_network_connect("rsa8192.badssl.com", 443) == Reseau.OP_SUCCESS
         end
 
-        @test _tls_network_connect("expired.badssl.com", 443) != Reseau.AWS_OP_SUCCESS
-        @test _tls_network_connect("wrong.host.badssl.com", 443) != Reseau.AWS_OP_SUCCESS
-        @test _tls_network_connect("self-signed.badssl.com", 443) != Reseau.AWS_OP_SUCCESS
-        @test _tls_network_connect("untrusted-root.badssl.com", 443) != Reseau.AWS_OP_SUCCESS
-        @test _tls_network_connect("rc4.badssl.com", 443) != Reseau.AWS_OP_SUCCESS
-        @test _tls_network_connect("rc4-md5.badssl.com", 443) != Reseau.AWS_OP_SUCCESS
+        @test _tls_network_connect("expired.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("wrong.host.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("self-signed.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("untrusted-root.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("rc4.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("rc4-md5.badssl.com", 443) != Reseau.OP_SUCCESS
 
         digicert_path = _resource_path("DigiCertGlobalRootCA.crt.pem")
         @test _tls_network_connect(
             "wrong.host.badssl.com",
             443;
             ctx_options_override = override_ca_file(digicert_path),
-        ) != Reseau.AWS_OP_SUCCESS
+        ) != Reseau.OP_SUCCESS
 
         ca_override_path = _resource_path("ca_root.crt")
         @test _tls_network_connect(
             "www.amazon.com",
             443;
             ctx_options_override = override_ca_file(ca_override_path),
-        ) != Reseau.AWS_OP_SUCCESS
+        ) != Reseau.OP_SUCCESS
 
         @test _tls_network_connect(
             "www.amazon.com",
             443;
             ctx_options_override = disable_verify_peer,
-        ) == Reseau.AWS_OP_SUCCESS
+        ) == Reseau.OP_SUCCESS
         @test _tls_network_connect(
             "expired.badssl.com",
             443;
             ctx_options_override = disable_verify_peer,
-        ) == Reseau.AWS_OP_SUCCESS
+        ) == Reseau.OP_SUCCESS
         @test _tls_network_connect(
             "wrong.host.badssl.com",
             443;
             ctx_options_override = disable_verify_peer,
-        ) == Reseau.AWS_OP_SUCCESS
+        ) == Reseau.OP_SUCCESS
         @test _tls_network_connect(
             "self-signed.badssl.com",
             443;
             ctx_options_override = disable_verify_peer,
-        ) == Reseau.AWS_OP_SUCCESS
+        ) == Reseau.OP_SUCCESS
         @test _tls_network_connect(
             "untrusted-root.badssl.com",
             443;
             ctx_options_override = disable_verify_peer,
-        ) == Reseau.AWS_OP_SUCCESS
+        ) == Reseau.OP_SUCCESS
 
         if Sys.isapple()
             @test _tls_network_connect(
                 "ecc256.badssl.com",
                 443;
                 ctx_options_override = set_tls13,
-            ) != Reseau.AWS_OP_SUCCESS
+            ) != Reseau.OP_SUCCESS
         end
     end
 else

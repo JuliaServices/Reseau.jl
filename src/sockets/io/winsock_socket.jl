@@ -455,7 +455,7 @@
     function _winsock_local_and_udp_connection_success(sock::Socket)
         sock.state = SocketState.CONNECTED
         if sock.connection_result_fn !== nothing
-            sock.connection_result_fn(AWS_OP_SUCCESS)
+            sock.connection_result_fn(OP_SUCCESS)
         end
         return nothing
     end
@@ -502,7 +502,7 @@
         )
 
         sock.state = SocketState.CONNECTED
-        sock.connection_result_fn !== nothing && sock.connection_result_fn(AWS_OP_SUCCESS)
+        sock.connection_result_fn !== nothing && sock.connection_result_fn(OP_SUCCESS)
         return nothing
     end
 
@@ -1067,7 +1067,7 @@
         accepted = incoming
         impl.incoming_socket = nothing
 
-        sock.accept_result_fn !== nothing && sock.accept_result_fn(AWS_OP_SUCCESS, accepted)
+        sock.accept_result_fn !== nothing && sock.accept_result_fn(OP_SUCCESS, accepted)
 
         io_data.socket === nothing && return nothing
 
@@ -1175,7 +1175,7 @@
             end
         end
         if on_accept_start !== nothing
-            on_accept_start(AWS_OP_SUCCESS)
+            on_accept_start(OP_SUCCESS)
         end
         return nothing
     end
@@ -1292,7 +1292,7 @@
                 return nothing
             end
 
-            sock.accept_result_fn !== nothing && sock.accept_result_fn(AWS_OP_SUCCESS, new_sock)
+            sock.accept_result_fn !== nothing && sock.accept_result_fn(OP_SUCCESS, new_sock)
 
             if io_data.socket === nothing
                 io_data.in_use = false
@@ -1342,7 +1342,7 @@
             return nothing
         end
         sock = io_data.socket::Socket
-        _winsock_incoming_pipe_connection_event(sock.event_loop, io_data.signal, AWS_OP_SUCCESS, Csize_t(0))
+        _winsock_incoming_pipe_connection_event(sock.event_loop, io_data.signal, OP_SUCCESS, Csize_t(0))
         return nothing
     end
 
@@ -1394,7 +1394,7 @@
         end
 
         if on_accept_start !== nothing
-            on_accept_start(AWS_OP_SUCCESS)
+            on_accept_start(OP_SUCCESS)
         end
 
         return nothing
@@ -1483,7 +1483,7 @@
 
         impl.waiting_on_readable = false
 
-        err_code = AWS_OP_SUCCESS
+        err_code = OP_SUCCESS
         if status_code != 0 && status_code != ERROR_IO_PENDING
             err_code = _winsock_determine_socket_error(status_code)
             if err_code == ERROR_IO_SOCKET_CLOSED
@@ -1519,7 +1519,7 @@
 
         impl.waiting_on_readable = false
 
-        err_code = AWS_OP_SUCCESS
+        err_code = OP_SUCCESS
         if status_code != 0 && status_code != ERROR_IO_PENDING && status_code != IO_STATUS_BUFFER_OVERFLOW
             err_code = _winsock_determine_socket_error(status_code)
             if err_code == ERROR_IO_SOCKET_CLOSED
@@ -1871,7 +1871,7 @@
 
         req = overlapped.user_data::WinsockSocketWriteRequest
         sock = req.socket::Union{Socket, Nothing}
-        aws_err = status_code == 0 ? AWS_OP_SUCCESS : _winsock_determine_socket_error(status_code)
+        aws_err = status_code == 0 ? OP_SUCCESS : _winsock_determine_socket_error(status_code)
 
         # Remove from pending list if possible.
         if sock !== nothing
@@ -1880,7 +1880,7 @@
             idx !== nothing && deleteat!(impl.pending_writes, idx)
         end
 
-        if aws_err != AWS_OP_SUCCESS
+        if aws_err != OP_SUCCESS
             raise_error(aws_err)
         end
 
@@ -1922,7 +1922,7 @@
         else
             return _winsock_determine_socket_error(_wsa_get_last_error())
         end
-        return AWS_OP_SUCCESS
+        return OP_SUCCESS
     end
 
     function socket_is_open_impl(::WinsockSocket, sock::Socket)::Bool

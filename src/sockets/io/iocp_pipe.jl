@@ -293,7 +293,7 @@
         if impl.state == IocpPipeReadEndState.SUBSCRIBED
             readable_error_code = if status_code == 0
                 impl.monitoring_request_reasons &= ~MONITORING_BECAUSE_WAITING_FOR_DATA
-                AWS_OP_SUCCESS
+                OP_SUCCESS
             else
                 impl.state = IocpPipeReadEndState.SUBSCRIBE_ERROR
                 ERROR_IO_BROKEN_PIPE
@@ -499,7 +499,7 @@
         idx = findfirst(==(req), impl.writes)
         idx !== nothing && deleteat!(impl.writes, idx)
 
-        error_code = status_code == 0 ? AWS_OP_SUCCESS : _iocp_pipe_translate_windows_error(status_code)
+        error_code = status_code == 0 ? OP_SUCCESS : _iocp_pipe_translate_windows_error(status_code)
 
         if req.on_complete !== nothing
             req.on_complete(error_code, num_bytes_transferred)

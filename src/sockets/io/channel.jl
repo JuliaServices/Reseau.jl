@@ -859,7 +859,7 @@ function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
     channel.channel_state = ChannelState.ACTIVE
 
     if channel.on_setup_completed !== nothing
-        channel.on_setup_completed(AWS_OP_SUCCESS)
+        channel.on_setup_completed(OP_SUCCESS)
     end
     if channel.destroy_pending
         channel.destroy_pending = false
@@ -1447,7 +1447,7 @@ function channel_setup_complete!(channel::Channel)::Nothing
 
     # Invoke setup callback
     if channel.on_setup_completed !== nothing
-        channel.on_setup_completed(AWS_OP_SUCCESS)
+        channel.on_setup_completed(OP_SUCCESS)
     end
 
     return nothing

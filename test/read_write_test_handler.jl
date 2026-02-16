@@ -32,7 +32,7 @@ function ReadWriteTestHandler(
         ReentrantLock(),
         Base.Threads.Condition(),
         false,
-        Reseau.AWS_OP_SUCCESS,
+        Reseau.OP_SUCCESS,
         false,
         nothing,
         nothing,

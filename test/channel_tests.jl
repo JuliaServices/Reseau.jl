@@ -37,7 +37,7 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
 
     @test _wait_ready_channel(setup_ch)
     if isready(setup_ch)
-        @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
+        @test take!(setup_ch) == Reseau.OP_SUCCESS
     end
 
     return (el = el, channel = channel, shutdown_ch = shutdown_ch)
@@ -104,7 +104,7 @@ end
 
             @test _wait_ready_channel(setup_ch)
             if isready(setup_ch)
-                @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
+                @test take!(setup_ch) == Reseau.OP_SUCCESS
             end
 
             deadline = Base.time_ns() + 1_000_000_000
@@ -328,7 +328,7 @@ end
             channel = setup.channel
             shutdown_ch = setup.shutdown_ch
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
             @test _wait_ready_channel(shutdown_ch)
 
             task_status = Ref{Reseau.TaskStatus.T}(Reseau.TaskStatus.RUN_READY)
@@ -359,7 +359,7 @@ end
             Sockets.channel_schedule_task_future!(channel, task, typemax(UInt64) - 1)
             @test task_status[] == 100
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
             @test _wait_ready_channel(shutdown_ch)
 
             deadline = Base.time_ns() + 2_000_000_000
@@ -378,10 +378,10 @@ end
             channel = setup.channel
             shutdown_ch = setup.shutdown_ch
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
             @test _wait_ready_channel(shutdown_ch)
 
-            Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+            Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
 
             Sockets.channel_destroy!(channel)
             EventLoops.event_loop_destroy!(el)
@@ -401,7 +401,7 @@ end
                 while !go[]
                     yield()
                 end
-                Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
+                Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
                 return nothing
             end)
             t2 = errormonitor(Threads.@spawn begin
@@ -424,7 +424,7 @@ end
 
             @test _wait_ready_channel(shutdown_ch)
             err = take!(shutdown_ch)
-            @test err == Reseau.AWS_OP_SUCCESS || err == Reseau.ERROR_INVALID_STATE
+            @test err == Reseau.OP_SUCCESS || err == Reseau.ERROR_INVALID_STATE
 
             extra_deadline = Base.time_ns() + 500_000_000
             while Base.time_ns() < extra_deadline && !isready(shutdown_ch)

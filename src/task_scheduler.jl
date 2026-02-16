@@ -209,34 +209,7 @@ end
     return ccall(f.ptr, Any, (Ptr{Cvoid}, Any, Any), f.objptr, slot, protocol)
 end
 
-# ── HostResolveCallback: typed resolver callback wrapper ──
-# (resolver, host_name, error_code, addresses) -> nothing.
-
-struct HostResolveCallback{F}
-    callback::F
-end
-
-@inline function (f::HostResolveCallback{F})(resolver, host_name, error_code::Int, addresses)::Nothing where {F}
-    f.callback(resolver, host_name, error_code, addresses)
-    return nothing
-end
-
-# ── HostResolveImpl: typed resolver implementation wrapper ──
-# Supports both forms:
-#   (host, impl_data) -> result
-#   (host, address_type, impl_data) -> result
-
-struct HostResolveImpl{F}
-    callable::F
-end
-
-@inline function (f::HostResolveImpl{F})(host, impl_data) where {F}
-    return f.callable(host, impl_data)
-end
-
-@inline function (f::HostResolveImpl{F})(host, address_type, impl_data) where {F}
-    return f.callable(host, address_type, impl_data)
-end
+# Host resolution hooks are represented as plain Julia callables (no cfunction wrapper needed).
 
 # ── TLS callback wrappers ──
 # Covers callback fields in TlsConnectionOptions + backend handlers.

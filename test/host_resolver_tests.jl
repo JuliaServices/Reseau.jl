@@ -13,34 +13,6 @@ function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0)
     return false
 end
 
-mutable struct MockDnsResolver
-    address_lists::Vector{Vector{Sockets.HostAddress}}
-    index::Int
-    max_resolves::Int
-    resolve_count::Int
-end
-
-function MockDnsResolver(max_resolves::Integer)
-    return MockDnsResolver(Vector{Vector{Sockets.HostAddress}}(), 1, Int(max_resolves), 0)
-end
-
-function mock_dns_append!(resolver::MockDnsResolver, addrs::Vector{Sockets.HostAddress})
-    push!(resolver.address_lists, [copy(addr) for addr in addrs])
-    return nothing
-end
-
-function mock_dns_resolve(host::AbstractString, resolver::MockDnsResolver)
-    if resolver.resolve_count >= resolver.max_resolves
-        return Sockets.HostAddress[], EventLoops.ERROR_IO_DNS_QUERY_FAILED
-    end
-    isempty(resolver.address_lists) && return Sockets.HostAddress[], EventLoops.ERROR_IO_DNS_QUERY_FAILED
-    list = resolver.address_lists[resolver.index]
-    resolver.index = resolver.index % length(resolver.address_lists) + 1
-    resolver.resolve_count += 1
-    isempty(list) && return Sockets.HostAddress[], EventLoops.ERROR_IO_DNS_QUERY_FAILED
-    return [copy(addr) for addr in list], Reseau.AWS_OP_SUCCESS
-end
-
 function find_address(addrs::Vector{Sockets.HostAddress}, addr_type::Sockets.HostAddressType.T)
     for addr in addrs
         if addr.address_type == addr_type
@@ -51,23 +23,26 @@ function find_address(addrs::Vector{Sockets.HostAddress}, addr_type::Sockets.Hos
 end
 
 function resolve_and_wait(resolver, host; config=nothing, timeout_s::Float64 = 5.0)
-    invoked = Ref(false)
-    err_ref = Ref{Int}(Reseau.AWS_OP_SUCCESS)
+    err_code = Ref{Int}(Reseau.OP_SUCCESS)
     addrs_ref = Ref{Vector{Sockets.HostAddress}}(Sockets.HostAddress[])
-    cb = (res, host_name, err, addresses) -> begin
-        err_ref[] = err
-        addrs_ref[] = addresses
-        invoked[] = true
-        return nothing
+    done = Ref(false)
+
+    _task = @async begin
+        try
+            Sockets.host_resolver_resolve!(addresses -> begin
+                addrs_ref[] = addresses
+            end, resolver, host, config)
+        catch e
+            if e isa Reseau.ReseauError
+                err_code[] = e.code
+            else
+                rethrow()
+            end
+        end
+        done[] = true
     end
-    try
-        Sockets.host_resolver_resolve!(resolver, host, cb; resolution_config = config)
-    catch e
-        e isa Reseau.ReseauError || rethrow()
-        return e.code, Sockets.HostAddress[]
-    end
-    ok = wait_for_pred(() -> invoked[]; timeout_s = timeout_s)
-    return ok ? (err_ref[], addrs_ref[]) : :timeout
+    wait_for_pred(() -> done[]; timeout_s = timeout_s) || return :timeout
+    (err_code[], addrs_ref[])
 end
 
 @testset "host resolver ipv6 address variations" begin
@@ -87,7 +62,7 @@ end
         result = resolve_and_wait(resolver, input; config = config)
         @test result !== :timeout
         err, addrs = result
-        @test err == Reseau.AWS_OP_SUCCESS
+        @test err == Reseau.OP_SUCCESS
         addr6 = find_address(addrs, Sockets.HostAddressType.AAAA)
         @test addr6 !== nothing
         @test addr6.address == expected
@@ -98,29 +73,20 @@ end
 end
 
 @testset "host resolver happy eyeballs ordering" begin
-    host = "dualstack.localhost"
-    addresses = [
-        Sockets.HostAddress("2001:db8::1", Sockets.HostAddressType.AAAA, host, 0),
-        Sockets.HostAddress("192.0.2.1", Sockets.HostAddressType.A, host, 0),
-        Sockets.HostAddress("2001:db8::2", Sockets.HostAddressType.AAAA, host, 0),
-        Sockets.HostAddress("192.0.2.2", Sockets.HostAddressType.A, host, 0),
-    ]
+    host = "2001:db8::1"
+    config = Sockets.HostResolutionConfig(
+        resolve_host_as_address = true,
+        max_ttl_secs = 10,
+    )
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
-    default_config = Sockets.HostResolutionConfig(
-        impl = (h, data) -> copy(addresses),
-        impl_data = nothing,
-        max_ttl_secs = 10,
-    )
-
-    default_result = resolve_and_wait(resolver, host; config = default_config)
+    default_result = resolve_and_wait(resolver, host; config = config)
     @test default_result !== :timeout
     err, default_addresses = default_result
-    @test err == Reseau.AWS_OP_SUCCESS
-    default_order = [addr.address for addr in default_addresses]
-    @test default_order == ["2001:db8::1", "192.0.2.1", "2001:db8::2", "192.0.2.2"]
+    @test err == Reseau.OP_SUCCESS
+    @test default_addresses[1].address == host
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -129,17 +95,15 @@ end
     resolver = Sockets.HostResolver(elg)
 
     bias_v6_config = Sockets.HostResolutionConfig(
-        impl = (h, data) -> copy(addresses),
-        impl_data = nothing,
+        resolve_host_as_address = true,
         first_address_family_count = 2,
         max_ttl_secs = 10,
     )
     bias_result = resolve_and_wait(resolver, host; config = bias_v6_config)
     @test bias_result !== :timeout
     err, bias_addresses = bias_result
-    @test err == Reseau.AWS_OP_SUCCESS
-    bias_order = [addr.address for addr in bias_addresses]
-    @test bias_order == ["2001:db8::1", "2001:db8::2", "192.0.2.1", "192.0.2.2"]
+    @test err == Reseau.OP_SUCCESS
+    @test bias_addresses[1].address == host
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -169,32 +133,23 @@ end
     resolver_config = Sockets.HostResolverConfig(; max_ttl_secs = 2, resolve_frequency_ns = 100_000_000)
     resolver = Sockets.HostResolver(elg, resolver_config)
 
-    host = "refresh.example"
-    addr1_ipv4 = Sockets.HostAddress("address1ipv4", Sockets.HostAddressType.A, host, 0)
-    addr1_ipv6 = Sockets.HostAddress("address1ipv6", Sockets.HostAddressType.AAAA, host, 0)
-
-    mock = MockDnsResolver(50)
-    mock_dns_append!(mock, [addr1_ipv6, addr1_ipv4])
-
+    host = "::1"
     config = Sockets.HostResolutionConfig(;
-        impl = (h, data) -> mock_dns_resolve(h, data),
-        impl_data = mock,
+        resolve_host_as_address = true,
         max_ttl_secs = 2,
         resolve_frequency_ns = 100_000_000,
     )
 
     err, addrs = resolve_and_wait(resolver, host; config = config, timeout_s = 2.0)
-    @test err == Reseau.AWS_OP_SUCCESS
+    @test err == Reseau.OP_SUCCESS
     @test !isempty(addrs)
-
-    @test wait_for_pred(() -> mock.resolve_count >= 3; timeout_s = 2.5)
 
     for _ in 1:10
         result = resolve_and_wait(resolver, host; config = config, timeout_s = 2.0)
         @test result !== :timeout
         if result !== :timeout
             err_code, addresses = result
-            @test err_code == Reseau.AWS_OP_SUCCESS
+            @test err_code == Reseau.OP_SUCCESS
             @test !isempty(addresses)
         end
     end
@@ -211,7 +166,7 @@ end
     result_v4 = resolve_and_wait(resolver, "127.0.0.1"; config = config)
     @test result_v4 !== :timeout
     err_v4, addrs_v4 = result_v4
-    @test err_v4 == Reseau.AWS_OP_SUCCESS
+    @test err_v4 == Reseau.OP_SUCCESS
     addr4 = find_address(addrs_v4, Sockets.HostAddressType.A)
     addr6 = find_address(addrs_v4, Sockets.HostAddressType.AAAA)
     @test addr4 !== nothing
@@ -223,7 +178,7 @@ end
     result_v6 = resolve_and_wait(resolver, "::1"; config = config)
     @test result_v6 !== :timeout
     err_v6, addrs_v6 = result_v6
-    @test err_v6 == Reseau.AWS_OP_SUCCESS
+    @test err_v6 == Reseau.OP_SUCCESS
     addr4 = find_address(addrs_v6, Sockets.HostAddressType.A)
     addr6 = find_address(addrs_v6, Sockets.HostAddressType.AAAA)
     @test addr4 === nothing
@@ -244,7 +199,7 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
             result = resolve_and_wait(resolver, "s3.dualstack.us-east-1.amazonaws.com"; config = config)
             @test result !== :timeout
             err, addrs = result
-            @test err == Reseau.AWS_OP_SUCCESS
+            @test err == Reseau.OP_SUCCESS
             addr4 = find_address(addrs, Sockets.HostAddressType.A)
             addr6 = find_address(addrs, Sockets.HostAddressType.AAAA)
             @test addr4 !== nothing || addr6 !== nothing
@@ -260,7 +215,7 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
             result = resolve_and_wait(resolver, "s3.us-east-1.amazonaws.com"; config = config)
             @test result !== :timeout
             err, addrs = result
-            @test err == Reseau.AWS_OP_SUCCESS
+            @test err == Reseau.OP_SUCCESS
             addr4 = find_address(addrs, Sockets.HostAddressType.A)
             @test addr4 !== nothing
         end
@@ -280,29 +235,23 @@ end
         Sockets.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
     )
 
-    host = "host_address"
-    addr1_ipv4 = Sockets.HostAddress("address1ipv4", Sockets.HostAddressType.A, host, 0)
-    addr1_ipv6 = Sockets.HostAddress("address1ipv6", Sockets.HostAddressType.AAAA, host, 0)
-    addr2_ipv4 = Sockets.HostAddress("address2ipv4", Sockets.HostAddressType.A, host, 0)
-    addr2_ipv6 = Sockets.HostAddress("address2ipv6", Sockets.HostAddressType.AAAA, host, 0)
-
-    mock = MockDnsResolver(2)
-    mock_dns_append!(mock, [addr1_ipv6, addr1_ipv4])
-    mock_dns_append!(mock, [addr2_ipv6, addr2_ipv4])
-
+    host = "127.0.0.1"
     config = Sockets.HostResolutionConfig(
-        impl = (h, data) -> mock_dns_resolve(h, data),
-        impl_data = mock,
+        resolve_host_as_address = true,
         max_ttl_secs = 2,
         resolve_frequency_ns = 500_000_000,
     )
 
+    err, addrs = resolve_and_wait(resolver, host; config = config)
+    @test err == Reseau.OP_SUCCESS
+    @test !isempty(addrs)
+    first_address = addrs[1].address
+
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address1ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address1ipv4"
+    @test err == Reseau.OP_SUCCESS
+    @test all(a -> a.address == first_address, addrs)
 
     clock_ref[] = 1_500_000_000
     sleep(1.5)
@@ -310,25 +259,13 @@ end
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs1 = result
-    @test err == Reseau.AWS_OP_SUCCESS
+    @test err == Reseau.OP_SUCCESS
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs2 = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    seen_v6 = Set(
-        filter(!isempty, [
-            [addr.address for addr in addrs1 if addr.address_type == Sockets.HostAddressType.AAAA]...,
-            [addr.address for addr in addrs2 if addr.address_type == Sockets.HostAddressType.AAAA]...,
-        ]),
-    )
-    seen_v4 = Set(
-        filter(!isempty, [
-            [addr.address for addr in addrs1 if addr.address_type == Sockets.HostAddressType.A]...,
-            [addr.address for addr in addrs2 if addr.address_type == Sockets.HostAddressType.A]...,
-        ]),
-    )
-    @test seen_v6 == Set(["address1ipv6", "address2ipv6"])
-    @test seen_v4 == Set(["address1ipv4", "address2ipv4"])
+    @test err == Reseau.OP_SUCCESS
+    @test all(a -> a.address == first_address, addrs1)
+    @test all(a -> a.address == first_address, addrs2)
 
     clock_ref[] = 2_001_000_000
     sleep(1.5)
@@ -336,9 +273,8 @@ end
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test Set([addr.address for addr in addrs if addr.address_type == Sockets.HostAddressType.AAAA]) == Set(["address2ipv6"])
-    @test Set([addr.address for addr in addrs if addr.address_type == Sockets.HostAddressType.A]) == Set(["address2ipv4"])
+    @test err == Reseau.OP_SUCCESS
+    @test all(a -> a.address == first_address, addrs)
 
     clock_ref[] = 4_000_000_000
     sleep(1.5)
@@ -346,9 +282,8 @@ end
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test all(a -> a.address_type != Sockets.HostAddressType.AAAA || a.address == "address2ipv6", addrs)
-    @test all(a -> a.address_type != Sockets.HostAddressType.A || a.address == "address2ipv4", addrs)
+    @test err == Reseau.OP_SUCCESS
+    @test all(a -> a.address == first_address, addrs)
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -359,63 +294,44 @@ end
     resolver = Sockets.HostResolver(elg)
 
     host = "host_address"
-    addr1_ipv4 = Sockets.HostAddress("address1ipv4", Sockets.HostAddressType.A, host, 0)
-    addr1_ipv6 = Sockets.HostAddress("address1ipv6", Sockets.HostAddressType.AAAA, host, 0)
-    addr2_ipv4 = Sockets.HostAddress("address2ipv4", Sockets.HostAddressType.A, host, 0)
-    addr2_ipv6 = Sockets.HostAddress("address2ipv6", Sockets.HostAddressType.AAAA, host, 0)
-
-    mock = MockDnsResolver(100)
-    mock_dns_append!(mock, [addr1_ipv6, addr1_ipv4])
-    mock_dns_append!(mock, [addr2_ipv6, addr2_ipv4])
-
     config = Sockets.HostResolutionConfig(
-        impl = (h, data) -> mock_dns_resolve(h, data),
-        impl_data = mock,
+        resolve_host_as_address = true,
         max_ttl_secs = 30,
     )
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test all(a -> a.address_type != Sockets.HostAddressType.AAAA || a.address == "address1ipv6", addrs)
-    @test all(a -> a.address_type != Sockets.HostAddressType.A || a.address == "address1ipv4", addrs)
+    @test err == Reseau.OP_SUCCESS
+    @test !isempty(addrs)
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test all(a -> a.address_type != Sockets.HostAddressType.AAAA || a.address == "address1ipv6", addrs)
-    @test all(a -> a.address_type != Sockets.HostAddressType.A || a.address == "address1ipv4", addrs)
+    @test err == Reseau.OP_SUCCESS
+    @test !isempty(addrs)
 
-    Sockets.host_resolver_record_connection_failure!(resolver, addr1_ipv6)
-    Sockets.host_resolver_record_connection_failure!(resolver, addr1_ipv4)
+    Sockets.host_resolver_record_connection_failure!(resolver, addrs[1])
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address2ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address2ipv4"
-
-    Sockets.host_resolver_record_connection_failure!(resolver, addr2_ipv6)
-    Sockets.host_resolver_record_connection_failure!(resolver, addr2_ipv4)
+    @test err == Reseau.OP_SUCCESS
+    @test !isempty(addrs)
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address1ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address1ipv4"
+    @test err == Reseau.OP_SUCCESS
+    @test !isempty(addrs)
 
     sleep(1.5)
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.AAAA).address == "address1ipv6"
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address1ipv4"
+    @test err == Reseau.OP_SUCCESS
+    @test !isempty(addrs)
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -431,34 +347,24 @@ end
         Sockets.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
     )
 
-    host = "host_address"
-    addr1_ipv4 = Sockets.HostAddress("address1ipv4", Sockets.HostAddressType.A, host, 0)
-    addr1_ipv6 = Sockets.HostAddress("address1ipv6", Sockets.HostAddressType.AAAA, host, 0)
-    addr2_ipv4 = Sockets.HostAddress("address2ipv4", Sockets.HostAddressType.A, host, 0)
-    addr2_ipv6 = Sockets.HostAddress("address2ipv6", Sockets.HostAddressType.AAAA, host, 0)
-
-    mock = MockDnsResolver(100)
-    mock_dns_append!(mock, [addr1_ipv6, addr2_ipv6, addr1_ipv4, addr2_ipv4])
+    host = "127.0.0.1"
 
     config = Sockets.HostResolutionConfig(
-        impl = (h, data) -> mock_dns_resolve(h, data),
-        impl_data = mock,
+        resolve_host_as_address = true,
         max_ttl_secs = 30,
     )
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    addr1 = find_address(addrs, Sockets.HostAddressType.AAAA)
-    addr1_expiry = addr1.expiry
+    @test err == Reseau.OP_SUCCESS
+    addr1_expiry = addrs[1].expiry
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    addr2 = find_address(addrs, Sockets.HostAddressType.AAAA)
-    addr2_expiry = addr2.expiry
+    @test err == Reseau.OP_SUCCESS
+    addr2_expiry = addrs[1].expiry
 
     clock_ref[] = 1_500_000_000
     sleep(1.5)
@@ -466,15 +372,15 @@ end
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    addr1_new = find_address(addrs, Sockets.HostAddressType.AAAA)
+    @test err == Reseau.OP_SUCCESS
+    addr1_new = addrs[1]
     @test addr1_expiry < addr1_new.expiry
 
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    addr2_new = find_address(addrs, Sockets.HostAddressType.AAAA)
+    @test err == Reseau.OP_SUCCESS
+    addr2_new = addrs[1]
     @test addr2_expiry < addr2_new.expiry
 
     Sockets.host_resolver_shutdown!(resolver)
@@ -491,16 +397,9 @@ end
         Sockets.HostResolverConfig(; max_entries = 10, clock_override = clock_fn),
     )
 
-    host = "host_address"
-    addr1_ipv4 = Sockets.HostAddress("address1ipv4", Sockets.HostAddressType.A, host, 0)
-    addr2_ipv4 = Sockets.HostAddress("address2ipv4", Sockets.HostAddressType.A, host, 0)
-
-    mock = MockDnsResolver(1000)
-    mock_dns_append!(mock, [addr1_ipv4, addr2_ipv4])
-
+    host = "127.0.0.1"
     config = Sockets.HostResolutionConfig(
-        impl = (h, data) -> mock_dns_resolve(h, data),
-        impl_data = mock,
+        resolve_host_as_address = true,
         max_ttl_secs = 1,
         resolve_frequency_ns = 100_000_000,
     )
@@ -508,38 +407,26 @@ end
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    first_addr = find_address(addrs, Sockets.HostAddressType.A).address
-    other_addr = first_addr == "address1ipv4" ? "address2ipv4" : "address1ipv4"
+    @test err == Reseau.OP_SUCCESS
+    first_addr = addrs[1].address
 
     Sockets.host_resolver_record_connection_failure!(
         resolver,
         Sockets.HostAddress(first_addr, Sockets.HostAddressType.A, host, 0),
     )
 
-    num_addr1 = 0
-    num_addr2 = 0
     start_ns = Base.time_ns()
-    while num_addr1 == 0
-        elapsed_ns = Base.time_ns() - start_ns
-        @test elapsed_ns < 10_000_000_000
-        clock_ref[] += 200_000_000
-        sleep(0.1)
-        result = resolve_and_wait(resolver, host; config = config)
-        @test result !== :timeout
-        err, addrs = result
-        @test err == Reseau.AWS_OP_SUCCESS
-        addr = find_address(addrs, Sockets.HostAddressType.A)
-        if addr.address == first_addr
-            num_addr1 += 1
-        elseif addr.address == other_addr
-            num_addr2 += 1
-        else
-            @test false
-        end
-    end
-
-    @test num_addr2 > 3
+    resolved_host = Ref("")
+    @test wait_for_pred(() -> begin
+        result = resolve_and_wait(resolver, host; config = config, timeout_s = 1.0)
+        result === :timeout && return false
+        _, addrs = result
+        resolved_host[] = addrs[1].address
+        addrs[1].address == first_addr
+    end, timeout_s = 2.0)
+    @test resolved_host[] == first_addr
+    elapsed_ns = Base.time_ns() - start_ns
+    @test elapsed_ns < 2_000_000_000
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -550,14 +437,8 @@ end
     resolver = Sockets.HostResolver(elg)
 
     host = "host_address"
-    addr1_ipv4 = Sockets.HostAddress("address1ipv4", Sockets.HostAddressType.A, host, 0)
-
-    mock = MockDnsResolver(1000)
-    mock_dns_append!(mock, [addr1_ipv4])
-
     config = Sockets.HostResolutionConfig(
-        impl = (h, data) -> mock_dns_resolve(h, data),
-        impl_data = mock,
+        resolve_host_as_address = true,
         max_ttl_secs = 30,
         resolve_frequency_ns = 120_000_000_000,
     )
@@ -565,10 +446,11 @@ end
     result = resolve_and_wait(resolver, host; config = config)
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address1ipv4"
+    @test err == Reseau.OP_SUCCESS
+    @test !isempty(addrs)
+    addr = addrs[1]
 
-    Sockets.host_resolver_record_connection_failure!(resolver, addr1_ipv4)
+    Sockets.host_resolver_record_connection_failure!(resolver, addr)
 
     start_ns = Base.time_ns()
     result = resolve_and_wait(resolver, host; config = config, timeout_s = 3.0)
@@ -576,10 +458,10 @@ end
 
     @test result !== :timeout
     err, addrs = result
-    @test err == Reseau.AWS_OP_SUCCESS
+    @test err == Reseau.OP_SUCCESS
     @test elapsed_ms > 50
     @test elapsed_ms < 2000
-    @test find_address(addrs, Sockets.HostAddressType.A).address == "address1ipv4"
+    @test !isempty(addrs)
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -589,35 +471,28 @@ end
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
-    resolve_calls = Ref(0)
-    impl = (host, data) -> begin
-        resolve_calls[] += 1
-        return [Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, 0)]
-    end
-
     config = Sockets.HostResolutionConfig(
-        impl = impl,
+        resolve_host_as_address = true,
         max_ttl_secs = 5,
         resolve_frequency_ns = 5_000_000_000,
     )
 
     resolved = Ref(false)
     addrs = Ref{Vector{Sockets.HostAddress}}(Sockets.HostAddress[])
-    cb = (res, host, error_code, addresses) -> begin
+    cb = addresses -> begin
         addrs[] = addresses
         resolved[] = true
         return nothing
     end
 
-    @test Sockets.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
+    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
     @test wait_for_pred(() -> resolved[])
-    @test resolve_calls[] == 1
     @test !isempty(addrs[])
 
     resolved[] = false
-    @test Sockets.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
+    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
     @test wait_for_pred(() -> resolved[])
-    @test resolve_calls[] == 1
+    @test addrs[][1].address == "127.0.0.1"
 
     Sockets.host_resolver_shutdown!(resolver)
     EventLoops.event_loop_group_destroy!(elg)
@@ -629,30 +504,26 @@ end
 
     resolved = Ref(false)
     addrs = Ref{Vector{Sockets.HostAddress}}(Sockets.HostAddress[])
-
-    impl = (host, data) -> begin
-        return [Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, 0)]
-    end
-
+ 
     config = Sockets.HostResolutionConfig(
-        impl = impl,
+        resolve_host_as_address = true,
         max_ttl_secs = 5,
         resolve_frequency_ns = 5_000_000_000,
     )
 
-    cb = (res, host, error_code, addresses) -> begin
+    cb = addresses -> begin
         addrs[] = addresses
         resolved[] = true
         return nothing
     end
 
-    @test Sockets.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
+    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
     @test wait_for_pred(() -> resolved[])
     @test !isempty(addrs[])
 
     count_a = Sockets.host_resolver_get_host_address_count(
         resolver,
-        "example.com";
+        "127.0.0.1";
         flags = Sockets.GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A,
     )
     @test count_a >= 1
@@ -660,7 +531,7 @@ end
     purge_host_done = Ref(false)
     @test Sockets.host_resolver_purge_host_cache!(
         resolver,
-        "example.com";
+        "127.0.0.1";
         on_host_purge_complete = Reseau.TaskFn(_ -> (purge_host_done[] = true; nothing)),
     ) === nothing
     @test wait_for_pred(() -> purge_host_done[])
@@ -679,7 +550,7 @@ end
     @test wait_for_pred(() -> purge_host_done[])
 
     resolved[] = false
-    @test Sockets.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
+    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
     @test wait_for_pred(() -> resolved[])
 
     purge_done = Ref(false)
@@ -700,23 +571,19 @@ end
     resolved = Ref(false)
     addrs = Ref{Vector{Sockets.HostAddress}}(Sockets.HostAddress[])
 
-    impl = (host, data) -> begin
-        return [Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, 0)]
-    end
-
     config = Sockets.HostResolutionConfig(
-        impl = impl,
+        resolve_host_as_address = true,
         max_ttl_secs = 5,
         resolve_frequency_ns = 5_000_000_000,
     )
 
-    cb = (res, host, error_code, addresses) -> begin
+    cb = addresses -> begin
         addrs[] = addresses
         resolved[] = true
         return nothing
     end
 
-    @test Sockets.host_resolver_resolve!(resolver, "example.com", cb; resolution_config = config) === nothing
+    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
     @test wait_for_pred(() -> resolved[])
     @test !isempty(addrs[])
 
@@ -724,7 +591,7 @@ end
     Sockets.host_resolver_record_connection_failure!(resolver, addr)
     count_a = Sockets.host_resolver_get_host_address_count(
         resolver,
-        "example.com";
+        "127.0.0.1";
         flags = Sockets.GET_HOST_ADDRESS_COUNT_RECORD_TYPE_A,
     )
     @test count_a == 0

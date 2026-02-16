@@ -5,12 +5,8 @@
 @static if Sys.isapple() || Sys.isbsd()
     using LibAwsCal
 
-    # Channel-based rendezvous for passing EventLoop to the thread function.
-    const _KQUEUE_THREAD_STARTUP = Channel{Any}(1)
-
     # Thread entry point for the kqueue event loop.
-    @wrap_thread_fn function _kqueue_event_loop_thread_entry()
-        event_loop = take!(_KQUEUE_THREAD_STARTUP)::EventLoop
+    @wrap_thread_fn function _kqueue_event_loop_thread_entry(event_loop::EventLoop)
         try
             kqueue_event_loop_thread(event_loop)
         catch e
@@ -236,11 +232,9 @@
         impl.cross_thread_data.state = EventThreadState.RUNNING
 
         # Launch the event loop thread via ForeignThread
-        put!(_KQUEUE_THREAD_STARTUP, event_loop)
         try
-            impl.thread_created_on = ForeignThread("aws-el-kqueue", _KQUEUE_THREAD_ENTRY_C)
+            impl.thread_created_on = ForeignThread("aws-el-kqueue", _KQUEUE_THREAD_ENTRY_C, event_loop)
         catch
-            take!(_KQUEUE_THREAD_STARTUP)  # drain on failure
             impl.cross_thread_data.state = EventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             throw_error(ERROR_THREAD_NO_SUCH_THREAD_ID)

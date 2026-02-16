@@ -159,7 +159,7 @@ function _tls_byo_start_negotiation(
         throw_error(ERROR_INVALID_STATE)
     end
     res = setup.start_negotiation_fn(handler, setup.user_data)
-    if res isa Integer && res != AWS_OP_SUCCESS
+    if res isa Integer && res != OP_SUCCESS
         throw_error(Int(res))
     end
     return nothing
@@ -886,7 +886,7 @@ function _tls_key_operation_complete_common(
 end
 
 function tls_key_operation_complete!(operation::TlsKeyOperation, output::ByteCursor)
-    return _tls_key_operation_complete_common(operation, AWS_OP_SUCCESS, output)
+    return _tls_key_operation_complete_common(operation, OP_SUCCESS, output)
 end
 
 function tls_key_operation_complete_with_error!(operation::TlsKeyOperation, error_code::Int)
@@ -1520,7 +1520,7 @@ end
 
 function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::Int)
     handler.stats.handshake_status =
-        error_code == AWS_OP_SUCCESS ? TlsNegotiationStatus.SUCCESS : TlsNegotiationStatus.FAILURE
+        error_code == OP_SUCCESS ? TlsNegotiationStatus.SUCCESS : TlsNegotiationStatus.FAILURE
     slot = handler.slot
     slot === nothing && return nothing
     channel = slot.channel

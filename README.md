@@ -25,8 +25,8 @@ using Reseau
 elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
 resolver = Reseau.HostResolver(elg)
 
-Reseau.host_resolver_resolve!(resolver, "localhost") do res, host, err, addrs
-    @show err addrs
+Reseau.host_resolver_resolve!(resolver, "localhost") do addresses
+    @show addresses
 end
 ```
 
