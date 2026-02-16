@@ -50,10 +50,10 @@
     const tls_protocol_version_TLSv12 = UInt16(0x0303)
     const tls_protocol_version_TLSv13 = UInt16(0x0304)
 
-    const _nw_socket_registry = Dict{Ptr{Cvoid}, NWSocket}()
+    const _nw_socket_registry = Dict{Ptr{Cvoid},NWSocket}()
     const _nw_socket_registry_lock = ReentrantLock()
 
-    const _nw_send_registry = Dict{Ptr{Cvoid}, NWSendContext}()
+    const _nw_send_registry = Dict{Ptr{Cvoid},NWSendContext}()
     const _nw_send_registry_lock = ReentrantLock()
 
     function _nw_register_socket!(sock::NWSocket)
@@ -92,7 +92,7 @@
         return nothing
     end
 
-    function _nw_lookup_socket(ctx::Ptr{Cvoid})::Union{NWSocket, Nothing}
+    function _nw_lookup_socket(ctx::Ptr{Cvoid})::Union{NWSocket,Nothing}
         ctx == C_NULL && return nothing
         lock(_nw_socket_registry_lock)
         sock = get(_nw_socket_registry, ctx, nothing)
@@ -100,7 +100,7 @@
         return sock
     end
 
-    function _nw_lookup_send(ctx::Ptr{Cvoid})::Union{NWSendContext, Nothing}
+    function _nw_lookup_send(ctx::Ptr{Cvoid})::Union{NWSendContext,Nothing}
         ctx == C_NULL && return nothing
         lock(_nw_send_registry_lock)
         send_ctx = get(_nw_send_registry, ctx, nothing)
@@ -114,12 +114,12 @@
     @inline _nw_unlock_base(sock::NWSocket) = unlock(sock.base_socket_lock)
     @inline _nw_impl(socket::Socket)::NWSocket = socket.impl::NWSocket
 
-    @inline function _nw_base_socket(nw_socket::NWSocket)::Union{Socket, Nothing}
+    @inline function _nw_base_socket(nw_socket::NWSocket)::Union{Socket,Nothing}
         base = nw_socket.base_socket
         return base === nothing ? nothing : (base::Socket)
     end
 
-    @inline function _nw_tls_ctx(nw_socket::NWSocket)::Union{AbstractTlsContext, Nothing}
+    @inline function _nw_tls_ctx(nw_socket::NWSocket)::Union{AbstractTlsContext,Nothing}
         ctx = nw_socket.tls_ctx
         return ctx === nothing ? nothing : (ctx::AbstractTlsContext)
     end
@@ -129,15 +129,15 @@
         return key == C_NULL ? pointer_from_objref(sock) : key
     end
 
-    function _nw_validate_event_loop(event_loop::Union{EventLoop, Nothing})::Bool
+    function _nw_validate_event_loop(event_loop::Union{EventLoop,Nothing})::Bool
         return event_loop !== nothing
     end
 
     function _nw_set_event_loop!(
-            socket::Socket,
-            event_loop::EventLoop,
-            event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
-        )::Nothing
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup,Nothing}=nothing,
+    )::Nothing
         nw_socket = _nw_impl(socket)
         nw_socket.event_loop !== nothing && throw_error(ERROR_INVALID_STATE)
 
@@ -220,13 +220,13 @@
         result_state = current & ~_nw_state_mask(NWSocketState.CONNECTED_WRITE) & ~_nw_state_mask(NWSocketState.CONNECTED_READ)
 
         if state == ~Int(_nw_state_mask(NWSocketState.CONNECTED_WRITE)) ||
-                state == ~Int(_nw_state_mask(NWSocketState.CONNECTED_READ))
+           state == ~Int(_nw_state_mask(NWSocketState.CONNECTED_READ))
             state = Int(NWSocketState.INVALID)
         end
 
         state_u = UInt16(state & 0xFFFF)
         if result_state < state_u ||
-                (state_u == _nw_state_mask(NWSocketState.LISTENING) && result_state == _nw_state_mask(NWSocketState.STOPPED))
+           (state_u == _nw_state_mask(NWSocketState.LISTENING) && result_state == _nw_state_mask(NWSocketState.STOPPED))
             result_state = state_u
         end
 
@@ -348,7 +348,7 @@
             return false
         end
         @inbounds for i in 1:len
-            buf.mem[Int(buf.len) + i] = unsafe_load(src, i)
+            buf.mem[Int(buf.len)+i] = unsafe_load(src, i)
         end
         buf.len += Csize_t(len)
         return true
@@ -391,10 +391,10 @@
     end
 
     function _nw_tls_verify_block(
-            nw_socket::NWSocket,
-            metadata::sec_protocol_metadata_t,
-            trust::sec_trust_t,
-        )::Bool
+        nw_socket::NWSocket,
+        metadata::sec_protocol_metadata_t,
+        trust::sec_trust_t,
+    )::Bool
         _ = metadata
         tls_ctx = _nw_tls_ctx(nw_socket)
         tls_ctx === nothing && return false
@@ -490,7 +490,7 @@
         else
             err_desc = _nw_error_description(error_ref[])
             err_code = error_ref[] == C_NULL ? 0 :
-                Int(ccall((:CFErrorGetCode, _COREFOUNDATION_LIB), Clong, (CFErrorRef,), error_ref[]))
+                       Int(ccall((:CFErrorGetCode, _COREFOUNDATION_LIB), Clong, (CFErrorRef,), error_ref[]))
             crt_error = _nw_determine_socket_error(err_code)
             logf(
                 LogLevel.DEBUG,
@@ -578,7 +578,7 @@
         end
 
         if nw_socket.alpn_list !== nothing
-            for proto in split(nw_socket.alpn_list, ';'; keepempty = false)
+            for proto in split(nw_socket.alpn_list, ';'; keepempty=false)
                 ccall(
                     (:sec_protocol_options_add_tls_application_protocol, _NW_SECURITY_LIB),
                     Cvoid,
@@ -701,8 +701,8 @@
                 tls_ctx === nothing && throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 min_tls_version = tls_context_minimum_tls_version_code(tls_ctx)
                 if min_tls_version == UInt8(TlsVersion.SSLv3) ||
-                        min_tls_version == UInt8(TlsVersion.TLSv1) ||
-                        min_tls_version == UInt8(TlsVersion.TLSv1_1)
+                   min_tls_version == UInt8(TlsVersion.TLSv1) ||
+                   min_tls_version == UInt8(TlsVersion.TLSv1_1)
                     throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
                 end
 
@@ -810,12 +810,12 @@
     end
 
     function _nw_receive_completion(
-            ctx::Ptr{Cvoid},
-            data::dispatch_data_t,
-            context::nw_content_context_t,
-            is_complete::UInt8,
-            error::nw_error_t,
-        )
+        ctx::Ptr{Cvoid},
+        data::dispatch_data_t,
+        context::nw_content_context_t,
+        is_complete::UInt8,
+        error::nw_error_t,
+    )
         nw_socket = _nw_lookup_socket(ctx)
         nw_socket === nothing && return nothing
         _nw_handle_receive_completion(nw_socket, data, context, is_complete != 0, error)
@@ -831,10 +831,10 @@
     end
 
     function _nw_tls_verify_callback(
-            ctx::Ptr{Cvoid},
-            metadata::sec_protocol_metadata_t,
-            trust::sec_trust_t,
-        )::UInt8
+        ctx::Ptr{Cvoid},
+        metadata::sec_protocol_metadata_t,
+        trust::sec_trust_t,
+    )::UInt8
         nw_socket = _nw_lookup_socket(ctx)
         nw_socket === nothing && return UInt8(0)
         return _nw_tls_verify_block(nw_socket, metadata, trust) ? UInt8(1) : UInt8(0)
@@ -898,12 +898,12 @@
     end
 
     function _nw_receive_completion_invoke(
-            block_ptr::Ptr{Cvoid},
-            data::dispatch_data_t,
-            context::nw_content_context_t,
-            is_complete::UInt8,
-            error::nw_error_t,
-        )::Cvoid
+        block_ptr::Ptr{Cvoid},
+        data::dispatch_data_t,
+        context::nw_content_context_t,
+        is_complete::UInt8,
+        error::nw_error_t,
+    )::Cvoid
         try
             ctx = BlocksABI.captured_ctx(block_ptr)
             _nw_receive_completion(ctx, data, context, is_complete, error)
@@ -935,11 +935,11 @@
     end
 
     function _nw_tls_verify_invoke(
-            block_ptr::Ptr{Cvoid},
-            metadata::sec_protocol_metadata_t,
-            trust::sec_trust_t,
-            complete::Ptr{Cvoid},
-        )::Cvoid
+        block_ptr::Ptr{Cvoid},
+        metadata::sec_protocol_metadata_t,
+        trust::sec_trust_t,
+        complete::Ptr{Cvoid},
+    )::Cvoid
         verified = false
         try
             ctx = BlocksABI.captured_ctx(block_ptr)
@@ -1035,7 +1035,7 @@
             return nothing
         end
         if (nw_socket.state & _nw_state_mask(NWSocketState.CLOSING)) != 0 ||
-                (nw_socket.state & _nw_state_mask(NWSocketState.CONNECTED_READ)) == 0
+           (nw_socket.state & _nw_state_mask(NWSocketState.CONNECTED_READ)) == 0
             _nw_unlock_synced(nw_socket)
             return nothing
         end
@@ -1068,18 +1068,18 @@
     end
 
     function _nw_handle_incoming_data(
-            nw_socket::NWSocket,
-            error_code::Int,
-            data::dispatch_data_t,
-            is_complete::Bool,
-        )
+        nw_socket::NWSocket,
+        error_code::Int,
+        data::dispatch_data_t,
+        is_complete::Bool,
+    )
         nw_socket.event_loop === nothing && return nothing
 
         if data != C_NULL
             ccall((:dispatch_retain, _NW_DISPATCH_LIB), Cvoid, (dispatch_data_t,), data)
         end
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_readable_task") do _
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_readable_task") do _
             try
                 if data != C_NULL
                     node = ReadQueueNode(data, 0)
@@ -1106,12 +1106,12 @@
     end
 
     function _nw_handle_receive_completion(
-            nw_socket::NWSocket,
-            data::dispatch_data_t,
-            context::nw_content_context_t,
-            is_complete::Bool,
-            error::nw_error_t,
-        )
+        nw_socket::NWSocket,
+        data::dispatch_data_t,
+        context::nw_content_context_t,
+        is_complete::Bool,
+        error::nw_error_t,
+    )
         _nw_lock_synced(nw_socket)
         nw_socket.read_scheduled = false
         _nw_unlock_synced(nw_socket)
@@ -1136,13 +1136,13 @@
     end
 
     function _nw_handle_write_result(
-            nw_socket::NWSocket,
-            error_code::Int,
-            bytes_written::Csize_t,
-            written_fn::Union{WriteCallable, Nothing},
-        )
+        nw_socket::NWSocket,
+        error_code::Int,
+        bytes_written::Csize_t,
+        written_fn::Union{WriteCallable,Nothing},
+    )
         nw_socket.event_loop === nothing && return nothing
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_written_task") do status
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_written_task") do status
             try
                 if _coerce_task_status(status) != TaskStatus.CANCELED && written_fn !== nothing
                     written_fn(error_code, bytes_written)
@@ -1156,11 +1156,11 @@
     end
 
     function _nw_handle_send_completion(
-            nw_socket::NWSocket,
-            error::nw_error_t,
-            data::dispatch_data_t,
-            written_fn::WriteCallable,
-        )
+        nw_socket::NWSocket,
+        error::nw_error_t,
+        data::dispatch_data_t,
+        written_fn::WriteCallable,
+    )
         err_code = _nw_convert_nw_error(error)
         if err_code != 0
             nw_socket.last_error = err_code
@@ -1257,7 +1257,7 @@
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_conn_state") do status
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_conn_state") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     return nothing
@@ -1324,7 +1324,7 @@
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_listener_state") do status
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_state") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     return nothing
@@ -1412,7 +1412,7 @@
     struct _NwListenerPortPollState
         nw_socket::NWSocket
         deadline_ns::UInt64
-        task_ref::Base.RefValue{Union{ScheduledTask, Nothing}}
+        task_ref::Base.RefValue{Union{ScheduledTask,Nothing}}
     end
 
     struct _NwListenerPortPollTaskFn
@@ -1451,13 +1451,13 @@
 
         _nw_listener_try_finish_port_ready!(nw_socket) && return nothing
 
-        task_ref = Ref{Union{ScheduledTask, Nothing}}(nothing)
+        task_ref = Ref{Union{ScheduledTask,Nothing}}(nothing)
         state = _NwListenerPortPollState(
             nw_socket,
             time_ns() + 2_000_000_000,
             task_ref,
         )
-        task = ScheduledTask(_NwListenerPortPollTaskFn(state); type_tag = "nw_listener_port_poll")
+        task = ScheduledTask(_NwListenerPortPollTaskFn(state); type_tag="nw_listener_port_poll")
         task_ref[] = task
         run_at = event_loop_current_clock_time(event_loop) + 1_000_000
         event_loop_schedule_task_future!(event_loop, task, run_at)
@@ -1471,7 +1471,7 @@
         end
 
         ccall((:nw_retain, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_listener_accept") do status
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_accept") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
@@ -1544,7 +1544,7 @@
     function _nw_cancel_socket!(nw_socket::NWSocket)
         nw_socket.event_loop === nothing && return nothing
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag = "nw_cancel") do _
+        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_cancel") do _
             try
                 if nw_socket.mode == NWSocketMode.CONNECTION && nw_socket.timeout_task !== nothing && !nw_socket.connection_setup
                     event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
@@ -1589,9 +1589,9 @@
     end
 
     function _nw_setup_tls_from_connection_options!(
-            nw_socket::NWSocket,
-            options::MaybeTlsConnectionOptions,
-        )::Nothing
+        nw_socket::NWSocket,
+        options::MaybeTlsConnectionOptions,
+    )::Nothing
         if nw_socket.tls_ctx !== nothing || nw_socket.host_name !== nothing || nw_socket.alpn_list !== nothing
             throw_error(ERROR_INVALID_STATE)
         end
@@ -1670,14 +1670,14 @@
     end
 
     function socket_connect_impl(
-            ::NWSocket,
-            socket::Socket,
-            remote_endpoint::SocketEndpoint,
-            event_loop::Union{EventLoop, Nothing},
-            event_loop_group::Union{EventLoopGroup, Nothing},
-            on_connection_result::Union{EventCallable, Nothing},
-            tls_connection_options::MaybeTlsConnectionOptions,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        remote_endpoint::SocketEndpoint,
+        event_loop::Union{EventLoop,Nothing},
+        event_loop_group::Union{EventLoopGroup,Nothing},
+        on_connection_result::Union{EventCallable,Nothing},
+        tls_connection_options::MaybeTlsConnectionOptions,
+    )::Nothing
         nw_socket = _nw_impl(socket)
         if socket.event_loop !== nothing
             throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
@@ -1691,51 +1691,51 @@
 
         _nw_setup_socket_params!(nw_socket, socket.options)
 
-	        _nw_lock_synced(nw_socket)
-	        try
-	        if nw_socket.state != _nw_state_mask(NWSocketState.INIT)
-	            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-	        end
-
-	        # Mirror the POSIX/Winsock implementations: record the requested remote endpoint.
-	        copy!(socket.remote_endpoint, remote_endpoint)
-
-	        endpoint = _nw_endpoint_from_socket_endpoint(remote_endpoint, socket.options.domain)
-
-        connection = ccall(
-            (:nw_connection_create, _NW_NETWORK_LIB),
-            nw_connection_t,
-            (nw_endpoint_t, nw_parameters_t),
-            endpoint,
-            nw_socket.parameters,
-        )
-        ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
-
-        if connection == C_NULL
-            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        end
-
-        socket.io_handle.handle = connection
-        socket.io_handle.set_queue = _nw_client_set_queue_c[]
-        nw_socket.connection = connection
-        nw_socket.mode = NWSocketMode.CONNECTION
-
-        _nw_ensure_callbacks!()
-        st_ctx = pointer_from_objref(nw_socket)
-        st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
+        _nw_lock_synced(nw_socket)
         try
-            ccall(
-                (:nw_connection_set_state_changed_handler, _NW_NETWORK_LIB),
-                Cvoid,
-                (nw_connection_t, Ptr{Cvoid}),
-                connection,
-                st_blk.ptr,
-            )
-        finally
-            BlocksABI.free!(st_blk)
-        end
+            if nw_socket.state != _nw_state_mask(NWSocketState.INIT)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            end
 
-        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTING)))
+            # Mirror the POSIX/Winsock implementations: record the requested remote endpoint.
+            copy!(socket.remote_endpoint, remote_endpoint)
+
+            endpoint = _nw_endpoint_from_socket_endpoint(remote_endpoint, socket.options.domain)
+
+            connection = ccall(
+                (:nw_connection_create, _NW_NETWORK_LIB),
+                nw_connection_t,
+                (nw_endpoint_t, nw_parameters_t),
+                endpoint,
+                nw_socket.parameters,
+            )
+            ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
+
+            if connection == C_NULL
+                throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            end
+
+            socket.io_handle.handle = connection
+            socket.io_handle.set_queue = _nw_client_set_queue_c[]
+            nw_socket.connection = connection
+            nw_socket.mode = NWSocketMode.CONNECTION
+
+            _nw_ensure_callbacks!()
+            st_ctx = pointer_from_objref(nw_socket)
+            st_blk = BlocksABI.make_stack_block_ctx(_nw_state_changed_cb[], st_ctx)
+            try
+                ccall(
+                    (:nw_connection_set_state_changed_handler, _NW_NETWORK_LIB),
+                    Cvoid,
+                    (nw_connection_t, Ptr{Cvoid}),
+                    connection,
+                    st_blk.ptr,
+                )
+            finally
+                BlocksABI.free!(st_blk)
+            end
+
+            _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CONNECTING)))
         finally
             _nw_unlock_synced(nw_socket)
         end
@@ -1762,7 +1762,7 @@
         if socket.options.connect_timeout_ms > 0
             now = event_loop_current_clock_time(event_loop)
             timeout = UInt64(socket.options.connect_timeout_ms) * 1_000_000 + now
-            nw_socket.timeout_task = ScheduledTask(; type_tag = "nw_timeout") do _
+            nw_socket.timeout_task = ScheduledTask(; type_tag="nw_timeout") do _
                 try
                     _nw_lock_base(nw_socket)
                     if !nw_socket.connection_setup && nw_socket.base_socket !== nothing
@@ -1786,47 +1786,47 @@
     end
 
     function socket_bind_impl(
-            ::NWSocket,
-            socket::Socket,
-            local_endpoint::SocketEndpoint,
-            event_loop::Union{EventLoop, Nothing},
-            tls_connection_options::MaybeTlsConnectionOptions,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        local_endpoint::SocketEndpoint,
+        event_loop::Union{EventLoop,Nothing},
+        tls_connection_options::MaybeTlsConnectionOptions,
+    )::Nothing
         nw_socket = _nw_impl(socket)
 
         _nw_lock_synced(nw_socket)
         try
-        if nw_socket.state != _nw_state_mask(NWSocketState.INIT)
-            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        end
-
-        copy!(socket.local_endpoint, local_endpoint)
-
-        if nw_socket.parameters == C_NULL
-            _nw_setup_tls_from_connection_options!(nw_socket, tls_connection_options)
-
-            if event_loop !== nothing
-                nw_socket.event_loop = event_loop
+            if nw_socket.state != _nw_state_mask(NWSocketState.INIT)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
             end
-            try
-                _nw_setup_socket_params!(nw_socket, socket.options)
-            finally
-                nw_socket.event_loop = nothing
+
+            copy!(socket.local_endpoint, local_endpoint)
+
+            if nw_socket.parameters == C_NULL
+                _nw_setup_tls_from_connection_options!(nw_socket, tls_connection_options)
+
+                if event_loop !== nothing
+                    nw_socket.event_loop = event_loop
+                end
+                try
+                    _nw_setup_socket_params!(nw_socket, socket.options)
+                finally
+                    nw_socket.event_loop = nothing
+                end
             end
-        end
 
-        endpoint = _nw_endpoint_from_socket_endpoint(local_endpoint, socket.options.domain)
+            endpoint = _nw_endpoint_from_socket_endpoint(local_endpoint, socket.options.domain)
 
-        ccall(
-            (:nw_parameters_set_local_endpoint, _NW_NETWORK_LIB),
-            Cvoid,
-            (nw_parameters_t, nw_endpoint_t),
-            nw_socket.parameters,
-            endpoint,
-        )
-        ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
+            ccall(
+                (:nw_parameters_set_local_endpoint, _NW_NETWORK_LIB),
+                Cvoid,
+                (nw_parameters_t, nw_endpoint_t),
+                nw_socket.parameters,
+                endpoint,
+            )
+            ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), endpoint)
 
-        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.BOUND)))
+            _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.BOUND)))
         finally
             _nw_unlock_synced(nw_socket)
         end
@@ -1834,107 +1834,107 @@
     end
 
     function socket_listen_impl(
-            ::NWSocket,
-            socket::Socket,
-            backlog_size::Integer,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        backlog_size::Integer,
+    )::Nothing
         _ = backlog_size
         nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         try
-        if nw_socket.state != _nw_state_mask(NWSocketState.BOUND)
-            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        end
-        if nw_socket.parameters == C_NULL
-            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        end
+            if nw_socket.state != _nw_state_mask(NWSocketState.BOUND)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            end
+            if nw_socket.parameters == C_NULL
+                throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            end
 
-        listener = ccall((:nw_listener_create, _NW_NETWORK_LIB), nw_listener_t, (nw_parameters_t,), nw_socket.parameters)
-        if listener == C_NULL
-            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        end
+            listener = ccall((:nw_listener_create, _NW_NETWORK_LIB), nw_listener_t, (nw_parameters_t,), nw_socket.parameters)
+            if listener == C_NULL
+                throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            end
 
-        # When binding to port 0, Network.framework may already have chosen an ephemeral port
-        # at listener creation time. Grab it early so `socket_get_bound_address()` reflects it
-        # before `socket_start_accept()` transitions to READY.
-        port = ccall((:nw_listener_get_port, _NW_NETWORK_LIB), UInt16, (nw_listener_t,), listener)
-        if port != 0
-            socket.local_endpoint.port = port
-        end
+            # When binding to port 0, Network.framework may already have chosen an ephemeral port
+            # at listener creation time. Grab it early so `socket_get_bound_address()` reflects it
+            # before `socket_start_accept()` transitions to READY.
+            port = ccall((:nw_listener_get_port, _NW_NETWORK_LIB), UInt16, (nw_listener_t,), listener)
+            if port != 0
+                socket.local_endpoint.port = port
+            end
 
-        socket.io_handle.handle = listener
-        socket.io_handle.set_queue = _nw_listener_set_queue_c[]
-        nw_socket.listener = listener
-        nw_socket.mode = NWSocketMode.LISTENER
-        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.LISTENING)))
+            socket.io_handle.handle = listener
+            socket.io_handle.set_queue = _nw_listener_set_queue_c[]
+            nw_socket.listener = listener
+            nw_socket.mode = NWSocketMode.LISTENER
+            _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.LISTENING)))
         finally
             _nw_unlock_synced(nw_socket)
         end
         return nothing
     end
 
-	    function socket_start_accept_impl(
-	            ::NWSocket,
-	            socket::Socket,
-	            accept_loop::EventLoop,
-	            on_accept_result::Union{ChannelCallable, Nothing},
-	            on_accept_start::Union{EventCallable, Nothing},
-	            event_loop_group::Union{EventLoopGroup, Nothing},
-	        )::Nothing
+    function socket_start_accept_impl(
+        ::NWSocket,
+        socket::Socket,
+        accept_loop::EventLoop,
+        on_accept_result::Union{ChannelCallable,Nothing},
+        on_accept_start::Union{EventCallable,Nothing},
+        event_loop_group::Union{EventLoopGroup,Nothing},
+    )::Nothing
         nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         try
-        if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
-            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        end
+            if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            end
 
-        nw_socket.on_accept_started = on_accept_start
-        socket.accept_result_fn = on_accept_result
+            nw_socket.on_accept_started = on_accept_start
+            socket.accept_result_fn = on_accept_result
 
-        _nw_set_event_loop!(socket, accept_loop, event_loop_group)
+            _nw_set_event_loop!(socket, accept_loop, event_loop_group)
 
-        event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle)
+            event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle)
 
-        _nw_ensure_callbacks!()
-        lctx = pointer_from_objref(nw_socket)
-        state_blk = BlocksABI.make_stack_block_ctx(_nw_listener_state_changed_cb[], lctx)
-        conn_blk = BlocksABI.make_stack_block_ctx(_nw_listener_new_conn_cb[], lctx)
-	        try
-	            ccall(
-	                (:nw_listener_set_state_changed_handler, _NW_NETWORK_LIB),
-	                Cvoid,
-	                (nw_listener_t, Ptr{Cvoid}),
-	                nw_socket.listener,
-	                state_blk.ptr,
-	            )
-	            ccall(
-	                (:nw_listener_set_new_connection_handler, _NW_NETWORK_LIB),
-	                Cvoid,
-	                (nw_listener_t, Ptr{Cvoid}),
-	                nw_socket.listener,
-	                conn_blk.ptr,
-	            )
-	        finally
-	            BlocksABI.free!(state_blk)
-	            BlocksABI.free!(conn_blk)
-	        end
+            _nw_ensure_callbacks!()
+            lctx = pointer_from_objref(nw_socket)
+            state_blk = BlocksABI.make_stack_block_ctx(_nw_listener_state_changed_cb[], lctx)
+            conn_blk = BlocksABI.make_stack_block_ctx(_nw_listener_new_conn_cb[], lctx)
+            try
+                ccall(
+                    (:nw_listener_set_state_changed_handler, _NW_NETWORK_LIB),
+                    Cvoid,
+                    (nw_listener_t, Ptr{Cvoid}),
+                    nw_socket.listener,
+                    state_blk.ptr,
+                )
+                ccall(
+                    (:nw_listener_set_new_connection_handler, _NW_NETWORK_LIB),
+                    Cvoid,
+                    (nw_listener_t, Ptr{Cvoid}),
+                    nw_socket.listener,
+                    conn_blk.ptr,
+                )
+            finally
+                BlocksABI.free!(state_blk)
+                BlocksABI.free!(conn_blk)
+            end
 
-	        ccall((:nw_listener_start, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
+            ccall((:nw_listener_start, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
         finally
-	        _nw_unlock_synced(nw_socket)
+            _nw_unlock_synced(nw_socket)
         end
-	        return nothing
-	    end
+        return nothing
+    end
 
     function socket_stop_accept_impl(::NWSocket, socket::Socket)::Nothing
         nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
         try
-        if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
-            throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
-        end
-        ccall((:nw_listener_cancel, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
-        _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.STOPPED)))
+            if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
+                throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
+            end
+            ccall((:nw_listener_cancel, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
+            _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.STOPPED)))
         finally
             _nw_unlock_synced(nw_socket)
         end
@@ -1962,10 +1962,10 @@
     end
 
     function socket_set_options_impl(
-            ::NWSocket,
-            socket::Socket,
-            options::SocketOptions,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        options::SocketOptions,
+    )::Nothing
         if socket.options.domain != options.domain || socket.options.type != options.type
             throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
         end
@@ -1976,10 +1976,10 @@
     end
 
     function _nw_socket_assign_to_event_loop_impl(
-            socket::Socket,
-            event_loop::EventLoop,
-            event_loop_group::Union{EventLoopGroup, Nothing},
-        )::Nothing
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup,Nothing},
+    )::Nothing
         nw_socket = _nw_impl(socket)
         if socket.event_loop !== nothing
             throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
@@ -1996,27 +1996,27 @@
     end
 
     function socket_assign_to_event_loop_impl(
-            ::NWSocket,
-            socket::Socket,
-            event_loop::EventLoop,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        event_loop::EventLoop,
+    )::Nothing
         return _nw_socket_assign_to_event_loop_impl(socket, event_loop, nothing)
     end
 
     function socket_assign_to_event_loop_impl(
-            ::NWSocket,
-            socket::Socket,
-            event_loop::EventLoop,
-            event_loop_group::Union{EventLoopGroup, Nothing},
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup,Nothing},
+    )::Nothing
         return _nw_socket_assign_to_event_loop_impl(socket, event_loop, event_loop_group)
     end
 
     function socket_subscribe_to_readable_events_impl(
-            ::NWSocket,
-            socket::Socket,
-            on_readable::EventCallable,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        on_readable::EventCallable,
+    )::Nothing
         nw_socket = _nw_impl(socket)
         if nw_socket.mode == NWSocketMode.LISTENER
             throw_error(ERROR_IO_SOCKET_INVALID_OPERATION_FOR_TYPE)
@@ -2027,10 +2027,10 @@
     end
 
     function socket_read_impl(
-            ::NWSocket,
-            socket::Socket,
-            buffer::ByteBuffer,
-        )::Tuple{Nothing, Csize_t}
+        ::NWSocket,
+        socket::Socket,
+        buffer::ByteBuffer,
+    )::Tuple{Nothing,Csize_t}
         nw_socket = _nw_impl(socket)
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
@@ -2079,11 +2079,11 @@
     end
 
     function socket_write_impl(
-            ::NWSocket,
-            socket::Socket,
-            cursor::ByteCursor,
-            written_fn::Union{WriteCallable, Nothing},
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        cursor::ByteCursor,
+        written_fn::Union{WriteCallable,Nothing},
+    )::Nothing
         nw_socket = _nw_impl(socket)
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
@@ -2095,16 +2095,16 @@
         local data
         _nw_lock_synced(nw_socket)
         try
-        if (nw_socket.state & _nw_state_mask(NWSocketState.CONNECTED_WRITE)) == 0
-            throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
-        end
+            if (nw_socket.state & _nw_state_mask(NWSocketState.CONNECTED_WRITE)) == 0
+                throw_error(ERROR_IO_SOCKET_NOT_CONNECTED)
+            end
 
-        data = _nw_create_dispatch_data(cursor)
-        if data == C_NULL
-            throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-        end
+            data = _nw_create_dispatch_data(cursor)
+            if data == C_NULL
+                throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
+            end
 
-        nw_socket.pending_writes += 1
+            nw_socket.pending_writes += 1
         finally
             _nw_unlock_synced(nw_socket)
         end
@@ -2153,20 +2153,20 @@
     end
 
     function socket_set_close_callback_impl(
-            ::NWSocket,
-            socket::Socket,
-            fn::TaskFn,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        fn::TaskFn,
+    )::Nothing
         nw_socket = _nw_impl(socket)
         nw_socket.on_close_complete = fn
         return nothing
     end
 
     function socket_set_cleanup_callback_impl(
-            ::NWSocket,
-            socket::Socket,
-            fn::TaskFn,
-        )::Nothing
+        ::NWSocket,
+        socket::Socket,
+        fn::TaskFn,
+    )::Nothing
         nw_socket = _nw_impl(socket)
         nw_socket.on_cleanup_complete = fn
         return nothing
@@ -2183,9 +2183,9 @@
     end
 
     function _nw_endpoint_from_socket_endpoint(
-            endpoint::SocketEndpoint,
-            domain::SocketDomain.T,
-        )::nw_endpoint_t
+        endpoint::SocketEndpoint,
+        domain::SocketDomain.T,
+    )::nw_endpoint_t
         addr = get_address(endpoint)
         port = Int(endpoint.port)
 
@@ -2206,7 +2206,7 @@
             addr_bytes = codeunits(addr)
             len = min(length(addr_bytes), ADDRESS_MAX_LEN - 1)
             for i in 1:len
-                sockaddr_buf[2 + i] = addr_bytes[i]
+                sockaddr_buf[2+i] = addr_bytes[i]
             end
         else
             throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)

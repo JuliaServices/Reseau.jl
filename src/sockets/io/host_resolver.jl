@@ -560,7 +560,7 @@ function _resolve_addresses(entry::HostEntry)::Tuple{Vector{HostAddress}, Int}
     return normalized, OP_SUCCESS
 end
 
-@wrap_thread_fn function _resolver_thread_entry(entry::HostEntry)
+@wrap_thread_fn function _resolver_thread_entry(entry::HostEntry{HostResolver})
     try
         _host_resolver_thread(entry)
     catch e
