@@ -145,6 +145,8 @@
             nw_queue = _kqueue_dispatch_queue_create("com.reseau.kqueue-nw")
             if nw_queue != C_NULL
                 impl.nw_queue = nw_queue
+            else
+                logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to create dispatch queue for NW sockets")
             end
         end
 
@@ -162,6 +164,9 @@
             if handle.set_queue == C_NULL
                 throw_error(ERROR_INVALID_ARGUMENT)
             end
+            if impl.nw_queue == C_NULL
+                throw_error(ERROR_INVALID_STATE)
+            end
             ccall(
                 handle.set_queue,
                 Cvoid,
@@ -174,7 +179,7 @@
     end
 
     # Signal that cross-thread data has changed
-    function signal_cross_thread_data_changed(event_loop::EventLoop)
+    function signal_cross_thread_data_changed(event_loop::EventLoop)::Bool
         impl = event_loop.impl
         logf(
             LogLevel.TRACE,
@@ -188,20 +193,25 @@
                 write_val::Ptr{UInt32},
                 write_size::Csize_t,
             )::Cssize_t
+            if wrote == write_size
+                return true
+            end
             if wrote == -1
                 errno_val = Base.Libc.errno()
                 if errno_val == Libc.EINTR
                     continue
                 end
-                if errno_val != Libc.EAGAIN
-                    logf(
-                        LogLevel.ERROR,
-                        LS_IO_EVENT_LOOP,string("failed to signal event-loop via pipe (errno=%d)", " ", errno_val, " ", ))
+                if errno_val == Libc.EAGAIN
+                    return true
                 end
+                logf(
+                    LogLevel.ERROR,
+                    LS_IO_EVENT_LOOP,string("failed to signal event-loop via pipe (errno=%d)", " ", errno_val, " ", ))
+                return false
             end
-            break
+            logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "failed to signal event-loop via pipe (short write)")
+            return false
         end
-        return nothing
     end
 
     # Run the event loop
@@ -270,7 +280,15 @@
             unlock(impl.cross_thread_data.mutex)
         end
         if signal_thread
-            signal_cross_thread_data_changed(event_loop)
+            signaled = signal_cross_thread_data_changed(event_loop)
+            if !signaled
+                lock(impl.cross_thread_data.mutex)
+                try
+                    impl.cross_thread_data.thread_signaled = false
+                finally
+                    unlock(impl.cross_thread_data.mutex)
+                end
+            end
         end
 
         return nothing
@@ -307,7 +325,15 @@
             unlock(impl.cross_thread_data.mutex)
         end
         if should_signal_thread
-            signal_cross_thread_data_changed(event_loop)
+            signaled = signal_cross_thread_data_changed(event_loop)
+            if !signaled
+                lock(impl.cross_thread_data.mutex)
+                try
+                    impl.cross_thread_data.thread_signaled = false
+                finally
+                    unlock(impl.cross_thread_data.mutex)
+                end
+            end
         end
         return nothing
     end
@@ -549,12 +575,8 @@
             return nothing
         end
 
-        if handle_data.state == HandleState.UNSUBSCRIBED
-            return nothing
-        end
-
         impl = handle_data.event_loop
-        if handle_data.state == HandleState.SUBSCRIBED
+        if handle_data.connected
             changelist = impl.unsubscribe_changelist
             empty!(changelist)
 
@@ -721,10 +743,12 @@
                 impl.thread_data.state = EventThreadState.STOPPING
             end
 
-            empty!(tasks_to_schedule)
-            while !isempty(impl.cross_thread_data.tasks_to_schedule)
-                push!(tasks_to_schedule, popfirst!(impl.cross_thread_data.tasks_to_schedule))
-            end
+            pending = impl.cross_thread_data.tasks_to_schedule
+            spare = impl.cross_thread_data.tasks_to_schedule_spare
+            empty!(spare)
+            impl.cross_thread_data.tasks_to_schedule = spare
+            impl.cross_thread_data.tasks_to_schedule_spare = pending
+            tasks_to_schedule = pending
         finally
             unlock(impl.cross_thread_data.mutex)
         end
