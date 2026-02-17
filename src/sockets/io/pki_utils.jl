@@ -1080,7 +1080,7 @@ end
 end
 
 @inline function _x509_err_to_tls_error(err::Int, depth::Int)::Int
-    err == 0 && return AWS_OP_SUCCESS
+    err == 0 && return OP_SUCCESS
     if err == 10
         return depth == 0 ? ERROR_IO_TLS_PEER_CERTIFICATE_EXPIRED : ERROR_IO_TLS_CERTIFICATE_EXPIRED
     elseif err == 9

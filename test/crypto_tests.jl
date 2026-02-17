@@ -58,7 +58,7 @@ function _byo_handle_read(handler, slot, data_read, rw_args::ByoCryptoRwArgs)
         rw_args.test_args.negotiation_result_fn(
             handler,
             slot,
-            Reseau.AWS_OP_SUCCESS,
+            Reseau.OP_SUCCESS,
         )
         rw_args.test_args.negotiation_result_fn = nothing
     end
@@ -83,11 +83,11 @@ function _byo_start_negotiation(handler::ReadWriteTestHandler, test_args::ByoCry
         test_args.negotiation_result_fn(
             handler,
             handler.slot,
-            Reseau.AWS_OP_SUCCESS,
+            Reseau.OP_SUCCESS,
         )
         test_args.negotiation_result_fn = nothing
     end
-    return Reseau.AWS_OP_SUCCESS
+    return Reseau.OP_SUCCESS
 end
 
 function _byo_tls_handler_new(options, slot, test_args::ByoCryptoTestArgs)
@@ -144,7 +144,7 @@ end
             end,
         ),
         nothing,
-        Reseau.AWS_OP_SUCCESS,
+        Reseau.OP_SUCCESS,
         false,
         false,
         false,
@@ -165,7 +165,7 @@ end
             end,
         ),
         nothing,
-        Reseau.AWS_OP_SUCCESS,
+        Reseau.OP_SUCCESS,
         false,
         false,
         false,
@@ -189,7 +189,7 @@ end
     @test Sockets.tls_byo_crypto_set_server_setup_options(server_setup) === nothing
 
     listener_setup_called = Ref(false)
-    listener_setup_err = Ref(Reseau.AWS_OP_SUCCESS)
+    listener_setup_err = Ref(Reseau.OP_SUCCESS)
     server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
         event_loop_group = elg,
         host = "127.0.0.1",
@@ -235,49 +235,35 @@ end
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
     @test wait_for_pred(() -> listener_setup_called[])
-    @test listener_setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test listener_setup_err[] == Reseau.OP_SUCCESS
     bound = Sockets.socket_get_bound_address(listener)
     @test bound isa Sockets.SocketEndpoint
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+    client_bootstrap = Sockets.ClientBootstrap(
         event_loop_group = elg,
         host_resolver = resolver,
-    ))
+    )
 
-    resolution_config = Sockets.HostResolutionConfig(impl = (host, impl_data) -> begin
-        _ = impl_data
-        return [Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, UInt64(0))]
-    end)
+    resolution_config = Sockets.HostResolutionConfig()
 
-    @test Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
-        port;
-        host_resolution_config = resolution_config,
-        tls_connection_options = outgoing_args.tls_options,
-        enable_read_back_pressure = false,
-        on_setup = (bs, err, channel, ud) -> begin
-            _ = bs
-            _ = ud
-            lock(outgoing_args.lock) do
-                outgoing_args.channel = channel
-                outgoing_args.setup_completed = true
-            end
-            return nothing
-        end,
-        on_shutdown = (bs, err, channel, ud) -> begin
-            _ = bs
-            _ = channel
-            _ = ud
-            lock(outgoing_args.lock) do
-                outgoing_args.shutdown_invoked = true
-                outgoing_args.error_code = err
-            end
-            return nothing
-        end,
-    ) === nothing
+        port,
+        client_bootstrap.socket_options,
+        outgoing_args.tls_options,
+        client_bootstrap.on_protocol_negotiated,
+        false,
+        nothing,
+        resolution_config,
+    )
+    outgoing_channel = wait(connect_future)
+    lock(outgoing_args.lock) do
+        outgoing_args.channel = outgoing_channel
+        outgoing_args.setup_completed = true
+    end
 
     @test wait_for_pred(() -> incoming_args.setup_completed)
     @test wait_for_pred(() -> outgoing_args.setup_completed)
@@ -293,20 +279,19 @@ end
     @test outgoing_args.negotiated
 
     if incoming_args.channel !== nothing
-        Sockets.channel_shutdown!(incoming_args.channel, Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(incoming_args.channel, Reseau.OP_SUCCESS)
     end
     if outgoing_args.channel !== nothing
-        Sockets.channel_shutdown!(outgoing_args.channel, Reseau.AWS_OP_SUCCESS)
+        Sockets.channel_shutdown!(outgoing_args.channel, Reseau.OP_SUCCESS)
     end
 
     @test wait_for_pred(() -> incoming_args.shutdown_invoked)
-    @test wait_for_pred(() -> outgoing_args.shutdown_invoked)
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     @test wait_for_pred(() -> incoming_args.listener_destroyed)
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
     finally
         Sockets._tls_byo_client_setup[] = old_client_setup
         Sockets._tls_byo_server_setup[] = old_server_setup

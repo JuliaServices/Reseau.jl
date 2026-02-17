@@ -92,7 +92,7 @@ end
                 end
 
                 Sockets.retry_strategy_shutdown!(strategy)
-                EventLoops.event_loop_group_release!(elg)
+                close(elg)
                 Sockets.io_library_clean_up()
             end
         end
@@ -170,7 +170,7 @@ end
         end
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -248,7 +248,7 @@ end
         end
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -330,7 +330,7 @@ end
         end
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -352,7 +352,7 @@ end
     @test err isa Reseau.ReseauError
     @test err.code == Reseau.ERROR_INVALID_ARGUMENT
 
-    EventLoops.event_loop_group_release!(elg)
+    close(elg)
     Sockets.io_library_clean_up()
 end
 
@@ -383,14 +383,14 @@ end
         _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
         @test _wait_ready(acquired_ch)
         token1, code1 = take!(acquired_ch)
-        @test code1 == Reseau.AWS_OP_SUCCESS
+        @test code1 == Reseau.OP_SUCCESS
 
         acquired_ch2 = Channel{Tuple{Any, Int}}(1)
         on_acquired2 = (token, code, ud) -> put!(acquired_ch2, (token, code))
         _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired2, nothing, 0)
         @test _wait_ready(acquired_ch2)
         token2, code2 = take!(acquired_ch2)
-        @test code2 == Reseau.AWS_OP_SUCCESS
+        @test code2 == Reseau.OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
@@ -398,7 +398,7 @@ end
         @test _wait_ready(ready_ch)
         ready_token, ready_code = take!(ready_ch)
         @test ready_token === token1
-        @test ready_code == Reseau.AWS_OP_SUCCESS
+        @test ready_code == Reseau.OP_SUCCESS
 
         ready_ch2 = Channel{Tuple{Any, Int}}(1)
         on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
@@ -406,7 +406,7 @@ end
         @test _wait_ready(ready_ch2)
         ready_token2, ready_code2 = take!(ready_ch2)
         @test ready_token2 === token2
-        @test ready_code2 == Reseau.AWS_OP_SUCCESS
+        @test ready_code2 == Reseau.OP_SUCCESS
 
         err1 = try
             Sockets.retry_token_schedule_retry(
@@ -444,7 +444,7 @@ end
         _ = Sockets.retry_strategy_acquire_token!(strategy, nothing, on_acquired3, nothing, 0)
         @test _wait_ready(acquired_ch3)
         token3, code3 = take!(acquired_ch3)
-        @test code3 == Reseau.AWS_OP_SUCCESS
+        @test code3 == Reseau.OP_SUCCESS
 
         ready_ch3 = Channel{Tuple{Any, Int}}(1)
         on_ready3 = (token, code, ud) -> put!(ready_ch3, (token, code))
@@ -452,12 +452,12 @@ end
         @test _wait_ready(ready_ch3)
         ready_token3, ready_code3 = take!(ready_ch3)
         @test ready_token3 === token3
-        @test ready_code3 == Reseau.AWS_OP_SUCCESS
+        @test ready_code3 == Reseau.OP_SUCCESS
 
         Sockets.retry_token_release!(token3)
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -489,7 +489,7 @@ end
         _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
         @test _wait_ready(acquired_ch)
         token, code = take!(acquired_ch)
-        @test code == Reseau.AWS_OP_SUCCESS
+        @test code == Reseau.OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
@@ -520,7 +520,7 @@ end
             _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
             @test _wait_ready(acquired_ch)
             token, code = take!(acquired_ch)
-            @test code == Reseau.AWS_OP_SUCCESS
+            @test code == Reseau.OP_SUCCESS
             Sockets.retry_token_record_success(token)
             Sockets.retry_token_release!(token)
         end
@@ -530,7 +530,7 @@ end
         _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
         @test _wait_ready(acquired_ch)
         token, code = take!(acquired_ch)
-        @test code == Reseau.AWS_OP_SUCCESS
+        @test code == Reseau.OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
         on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
@@ -550,7 +550,7 @@ end
         Sockets.retry_token_release!(token)
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end

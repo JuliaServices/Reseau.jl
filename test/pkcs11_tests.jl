@@ -1082,7 +1082,7 @@ end
                 port = 0,
                 tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
                 on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-                    server_ready[] = err == Reseau.AWS_OP_SUCCESS
+                    server_ready[] = err == Reseau.OP_SUCCESS
                     return nothing
                 end,
                 on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
@@ -1109,31 +1109,27 @@ end
             @test client_ctx isa Sockets.TlsContext
 
             client_ready = Ref(false)
-            client_shutdown = Ref(false)
-            client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+            client_bootstrap = Sockets.ClientBootstrap(
                 event_loop_group = elg,
                 host_resolver = resolver,
-            ))
-            @test Sockets.client_bootstrap_connect!(
+            )
+            connect_future = Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
-                port;
-                tls_connection_options = Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
-                on_setup = (bs, err, channel, ud) -> begin
-                    client_ready[] = err == Reseau.AWS_OP_SUCCESS
-                    if err == Reseau.AWS_OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
-                    end
-                    return nothing
-                end,
-                on_shutdown = (bs, err, channel, ud) -> begin
-                    client_shutdown[] = true
-                    return nothing
-                end,
-            ) === nothing
+                port,
+                client_bootstrap.socket_options,
+                Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
+                client_bootstrap.on_protocol_negotiated,
+                false,
+                nothing,
+                nothing,
+            )
+            client_channel = wait(connect_future)
+            client_ready[] = true
+            Sockets.channel_shutdown!(client_channel, Reseau.OP_SUCCESS)
 
             wait_start = time()
-            while !(client_ready[] && server_ready[] && client_shutdown[] && server_shutdown[])
+            while !(client_ready[] && server_ready[] && server_shutdown[])
                 if (time() - wait_start) > TIMEOUT_SEC
                     break
                 end
@@ -1141,12 +1137,11 @@ end
             end
             @test client_ready[]
             @test server_ready[]
-            @test client_shutdown[]
             @test server_shutdown[]
 
             Sockets.server_bootstrap_shutdown!(server_bootstrap)
             Sockets.host_resolver_shutdown!(resolver)
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -1198,7 +1193,7 @@ end
                 port = 0,
                 tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
                 on_incoming_channel_setup = (bs, err, channel, ud) -> begin
-                    server_ready[] = err == Reseau.AWS_OP_SUCCESS
+                    server_ready[] = err == Reseau.OP_SUCCESS
                     return nothing
                 end,
                 on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
@@ -1225,31 +1220,27 @@ end
             @test client_ctx isa Sockets.TlsContext
 
             client_ready = Ref(false)
-            client_shutdown = Ref(false)
-            client_bootstrap = Sockets.ClientBootstrap(Sockets.ClientBootstrapOptions(
+            client_bootstrap = Sockets.ClientBootstrap(
                 event_loop_group = elg,
                 host_resolver = resolver,
-            ))
-            @test Sockets.client_bootstrap_connect!(
+            )
+            connect_future = Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
-                port;
-                tls_connection_options = Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
-                on_setup = (bs, err, channel, ud) -> begin
-                    client_ready[] = err == Reseau.AWS_OP_SUCCESS
-                    if err == Reseau.AWS_OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.AWS_OP_SUCCESS)
-                    end
-                    return nothing
-                end,
-                on_shutdown = (bs, err, channel, ud) -> begin
-                    client_shutdown[] = true
-                    return nothing
-                end,
-            ) === nothing
+                port,
+                client_bootstrap.socket_options,
+                Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
+                client_bootstrap.on_protocol_negotiated,
+                false,
+                nothing,
+                nothing,
+            )
+            client_channel = wait(connect_future)
+            client_ready[] = true
+            Sockets.channel_shutdown!(client_channel, Reseau.OP_SUCCESS)
 
             wait_start = time()
-            while !(client_ready[] && server_ready[] && client_shutdown[] && server_shutdown[])
+            while !(client_ready[] && server_ready[] && server_shutdown[])
                 if (time() - wait_start) > TIMEOUT_SEC
                     break
                 end
@@ -1257,12 +1248,11 @@ end
             end
             @test client_ready[]
             @test server_ready[]
-            @test client_shutdown[]
             @test server_shutdown[]
 
             Sockets.server_bootstrap_shutdown!(server_bootstrap)
             Sockets.host_resolver_shutdown!(resolver)
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         finally
             pkcs11_tester_cleanup!(tester)
         end

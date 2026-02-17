@@ -47,17 +47,14 @@ const _noop_event_callable = EventCallable((_::Int) -> nothing)
 
 function ChannelTask(task_fn::EventCallable, type_tag::AbstractString)
     ctx = ChannelTaskContext{Any, Union{ChannelTask, Nothing}}(nothing, nothing)
-    wrapper_task = ScheduledTask(
-        TaskFn(function(status)
-            try
-                _channel_task_wrapper(ctx, _coerce_task_status(status))
-            catch e
-                Core.println("channel task ($type_tag) errored")
-            end
-            return nothing
-        end);
-        type_tag = type_tag,
-    )
+    wrapper_task = ScheduledTask(; type_tag = type_tag) do status
+        try
+            _channel_task_wrapper(ctx, _coerce_task_status(status))
+        catch e
+            Core.println("channel task ($type_tag) errored")
+        end
+        return nothing
+    end
     task = ChannelTask(wrapper_task, task_fn, String(type_tag), ctx)
     setfield!(ctx, :task, task)
     return task
@@ -605,7 +602,7 @@ end
 # Channel - a bidirectional pipeline of handlers
 mutable struct Channel
     event_loop::EventLoop
-    event_loop_group_lease::Union{EventLoopGroupLease, Nothing}
+    has_event_loop_lease::Bool
     first::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}  # nullable - Socket side (leftmost)
     last::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}   # nullable - Application side (rightmost)
     socket::Union{Socket, Nothing}
@@ -665,14 +662,13 @@ function Channel(
         event_loop::EventLoop,
         message_pool::Union{MessagePool, Nothing} = nothing;
         enable_read_back_pressure::Bool = false,
-        event_loop_group_lease::Union{EventLoopGroupLease, Nothing} = nothing,
     )
     channel_id = _next_channel_id()
     window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
 
     channel = Channel(
         event_loop,
-        event_loop_group_lease,
+        false,    # has_event_loop_lease
         nothing,  # first
         nothing,  # last
         nothing,  # socket
@@ -699,26 +695,20 @@ function Channel(
         ChannelTask[],
         ReentrantLock(),
         false,
-        ScheduledTask(
-            TaskFn(function(_status); return nothing; end);
-            type_tag = "channel_cross_thread_placeholder",
-        ),
+        ScheduledTask((_) -> nothing; type_tag = "channel_cross_thread_placeholder"),
         false,    # shutdown_pending
         false,    # shutdown_immediately
         ChannelTask(),
         ReentrantLock(),
     )
-    channel.cross_thread_task = ScheduledTask(
-        TaskFn(function(status)
-            try
-                _channel_schedule_cross_thread_tasks(channel, _coerce_task_status(status))
-            catch e
-                Core.println("channel_cross_thread_tasks errored")
-            end
-            return nothing
-        end);
-        type_tag = "channel_cross_thread_tasks",
-    )
+    channel.cross_thread_task = ScheduledTask(; type_tag = "channel_cross_thread_tasks") do status
+        try
+            _channel_schedule_cross_thread_tasks(channel, _coerce_task_status(status))
+        catch e
+            Core.println("channel_cross_thread_tasks errored")
+        end
+        return nothing
+    end
     return channel
 end
 
@@ -732,6 +722,14 @@ end
 function _channel_remove_pending_task!(channel::Channel, task::ChannelTask)
     lock(channel.pending_tasks_lock) do
         delete!(channel.pending_tasks, task)
+    end
+    return nothing
+end
+
+@inline function _channel_release_event_loop_lease!(channel::Channel)
+    if channel.has_event_loop_lease
+        channel.has_event_loop_lease = false
+        Base.release(channel.event_loop)
     end
     return nothing
 end
@@ -768,7 +766,7 @@ function _channel_schedule_cross_thread_tasks(channel::Channel, status::TaskStat
         if task.wrapper_task.timestamp == 0 || final_status == TaskStatus.CANCELED
             _channel_task_wrapper(task.ctx, final_status)
         else
-            event_loop_schedule_task_future!(channel.event_loop, task.wrapper_task, task.wrapper_task.timestamp)
+            schedule_task_future!(channel.event_loop, task.wrapper_task, task.wrapper_task.timestamp)
         end
     end
     return nothing
@@ -792,7 +790,7 @@ function _channel_register_task_cross_thread!(channel::Channel, task::ChannelTas
         if channel.channel_state == ChannelState.SHUT_DOWN
             _channel_task_wrapper(task.ctx, TaskStatus.CANCELED)
         else
-            event_loop_schedule_task_now!(channel.event_loop, channel.cross_thread_task)
+            schedule_task_now!(channel.event_loop, channel.cross_thread_task)
         end
     end
     return nothing
@@ -805,7 +803,7 @@ channel_event_loop(channel::Channel) = channel.event_loop
 channel_thread_is_callers_thread(channel::Channel) = event_loop_thread_is_callers_thread(channel.event_loop)
 
 # Get current clock time from event loop
-channel_current_clock_time(channel::Channel) = event_loop_current_clock_time(channel.event_loop)
+channel_current_clock_time(channel::Channel) = clock_now_ns()
 
 # Force a read by the data-source handler (socket side)
 function channel_trigger_read(channel::Channel)::Nothing
@@ -837,14 +835,12 @@ function _channel_get_or_create_message_pool(channel::Channel)::MessagePool
         channel.event_loop.message_pool = nothing
     end
 
-    creation_args = MessagePoolCreationArgs(;
+    pool = MessagePool(;
         application_data_msg_data_size = Int(g_aws_channel_max_fragment_size[]),
         application_data_msg_count = 4,
         small_block_msg_data_size = 128,
         small_block_msg_count = 4,
     )
-
-    pool = MessagePool(creation_args)
     channel.event_loop.message_pool = pool
     return pool
 end
@@ -856,10 +852,8 @@ function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
         if channel.on_setup_completed !== nothing
             channel.on_setup_completed(ERROR_SYS_CALL_FAILURE)
         end
-        if channel.destroy_pending
-            channel.destroy_pending = false
-            channel_destroy!(channel)
-        end
+        channel.destroy_pending = false
+        channel_destroy!(channel)
         return nothing
     end
 
@@ -868,7 +862,7 @@ function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
     channel.channel_state = ChannelState.ACTIVE
 
     if channel.on_setup_completed !== nothing
-        channel.on_setup_completed(AWS_OP_SUCCESS)
+        channel.on_setup_completed(OP_SUCCESS)
     end
     if channel.destroy_pending
         channel.destroy_pending = false
@@ -882,37 +876,37 @@ function channel_new(options::ChannelOptions)::Channel
         throw_error(ERROR_INVALID_ARGUMENT)
     end
 
-    lease = options.event_loop_group === nothing ? nothing : event_loop_group_open_lease!(options.event_loop_group)
-    if options.event_loop_group !== nothing && lease === nothing
-        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-    end
+    Base.acquire(options.event_loop)
+    acquired = true
+    try
+        channel = Channel(
+            options.event_loop,
+            nothing;
+            enable_read_back_pressure = options.enable_read_back_pressure,
+        )
+        channel.has_event_loop_lease = true
+        channel.on_setup_completed = options.on_setup_completed
+        channel.on_shutdown_completed = options.on_shutdown_completed
+        channel.channel_state = ChannelState.SETTING_UP
+        channel.setup_pending = true
+        channel.destroy_pending = false
 
-    channel = Channel(
-        options.event_loop,
-        nothing;
-        enable_read_back_pressure = options.enable_read_back_pressure,
-        event_loop_group_lease = lease,
-    )
-    channel.on_setup_completed = options.on_setup_completed
-    channel.on_shutdown_completed = options.on_shutdown_completed
-    channel.channel_state = ChannelState.SETTING_UP
-    channel.setup_pending = true
-    channel.destroy_pending = false
-
-    setup_args = ChannelSetupArgs(channel)
-    task = ScheduledTask(
-        TaskFn(function(status)
+        setup_args = ChannelSetupArgs(channel)
+        schedule_task_now!(options.event_loop; type_tag = "channel_setup") do status
             try
                 _channel_setup_task(setup_args, _coerce_task_status(status))
             catch e
                 Core.println("channel_setup task errored")
             end
             return nothing
-        end);
-        type_tag = "channel_setup",
-    )
-    event_loop_schedule_task_now!(options.event_loop, task)
-    return channel
+        end
+        acquired = false
+        return channel
+    finally
+        if acquired
+            Base.release(options.event_loop)
+        end
+    end
 end
 
 # Get unique channel ID
@@ -948,9 +942,9 @@ function _channel_register_task!(
 
     if channel_thread_is_callers_thread(channel)
         if run_at_nanos == 0
-            event_loop_schedule_task_now!(channel.event_loop, task.wrapper_task)
+            schedule_task_now!(channel.event_loop, task.wrapper_task)
         else
-            event_loop_schedule_task_future!(channel.event_loop, task.wrapper_task, run_at_nanos)
+            schedule_task_future!(channel.event_loop, task.wrapper_task, run_at_nanos)
         end
     else
         _channel_register_task_cross_thread!(channel, task)
@@ -1006,7 +1000,7 @@ function _channel_gather_statistics_task(channel::Channel, status::TaskStatus.T)
         return nothing
     end
 
-    now_ns = event_loop_current_clock_time(channel.event_loop)
+    now_ns = clock_now_ns()
     now_ms = timestamp_convert(now_ns, TIMESTAMP_NANOS, TIMESTAMP_MILLIS, nothing)
 
     empty!(channel.statistics_list)
@@ -1031,7 +1025,7 @@ function _channel_gather_statistics_task(channel::Channel, status::TaskStatus.T)
         nothing,
     )
     if channel.statistics_task !== nothing
-        event_loop_schedule_task_future!(channel.event_loop, channel.statistics_task, now_ns + report_ns)
+        schedule_task_future!(channel.event_loop, channel.statistics_task, now_ns + report_ns)
     end
     channel.statistics_interval_start_time_ms = now_ms
     return nothing
@@ -1041,25 +1035,22 @@ function channel_set_statistics_handler!(channel::Channel, handler::Union{Statis
     if channel.statistics_handler !== nothing
         close!(channel.statistics_handler)
         if channel.statistics_task !== nothing
-            event_loop_cancel_task!(channel.event_loop, channel.statistics_task)
+            cancel_task!(channel.event_loop, channel.statistics_task)
         end
         channel.statistics_handler = nothing
         channel.statistics_task = nothing
     end
 
     if handler !== nothing
-        task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    _channel_gather_statistics_task(channel, _coerce_task_status(status))
-                catch e
-                    Core.println("gather_statistics task errored")
-                end
-                return nothing
-            end);
-            type_tag = "gather_statistics",
-        )
-        now_ns = event_loop_current_clock_time(channel.event_loop)
+        task = ScheduledTask(; type_tag = "gather_statistics") do status
+            try
+                _channel_gather_statistics_task(channel, _coerce_task_status(status))
+            catch e
+                Core.println("gather_statistics task errored")
+            end
+            return nothing
+        end
+        now_ns = clock_now_ns()
         report_ns = timestamp_convert(
             report_interval_ms(handler),
             TIMESTAMP_MILLIS,
@@ -1069,7 +1060,7 @@ function channel_set_statistics_handler!(channel::Channel, handler::Union{Statis
         channel.statistics_interval_start_time_ms =
             timestamp_convert(now_ns, TIMESTAMP_NANOS, TIMESTAMP_MILLIS, nothing)
         _channel_reset_statistics!(channel)
-        event_loop_schedule_task_future!(channel.event_loop, task, now_ns + report_ns)
+        schedule_task_future!(channel.event_loop, task, now_ns + report_ns)
         channel.statistics_task = task
     end
 
@@ -1463,7 +1454,7 @@ function channel_setup_complete!(channel::Channel)::Nothing
 
     # Invoke setup callback
     if channel.on_setup_completed !== nothing
-        channel.on_setup_completed(AWS_OP_SUCCESS)
+        channel.on_setup_completed(OP_SUCCESS)
     end
 
     return nothing
@@ -1498,12 +1489,12 @@ function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.
     end
 
     for task in tasks
-        event_loop_cancel_task!(channel.event_loop, task.wrapper_task)
+        cancel_task!(channel.event_loop, task.wrapper_task)
     end
 
     if channel.statistics_handler !== nothing
         if channel.statistics_task !== nothing
-            event_loop_cancel_task!(channel.event_loop, channel.statistics_task)
+            cancel_task!(channel.event_loop, channel.statistics_task)
         end
         close!(channel.statistics_handler)
         channel.statistics_handler = nothing
@@ -1522,18 +1513,14 @@ function _channel_schedule_shutdown_completion!(channel::Channel)
         LogLevel.INFO, LS_IO_CHANNEL,
         "Channel id=$(channel.channel_id): shutdown complete, error=$(channel.shutdown_error_code)"
     )
-    task = ScheduledTask(
-        TaskFn(function(status)
-            try
-                _channel_shutdown_completion_task(channel, _coerce_task_status(status))
-            catch
-                Core.println("channel_shutdown_complete task errored")
-            end
-            return nothing
-        end);
-        type_tag = "channel_shutdown_complete",
-    )
-    event_loop_schedule_task_now!(channel.event_loop, task)
+    schedule_task_now!(channel.event_loop; type_tag = "channel_shutdown_complete") do status
+        try
+            _channel_shutdown_completion_task(channel, _coerce_task_status(status))
+        catch
+            Core.println("channel_shutdown_complete task errored")
+        end
+        return nothing
+    end
     return nothing
 end
 
@@ -1553,6 +1540,7 @@ function _channel_shutdown_task(channel::Channel, status::TaskStatus.T)
     end
 
     channel.channel_state = ChannelState.SHUT_DOWN
+    _channel_release_event_loop_lease!(channel)
     _channel_schedule_shutdown_completion!(channel)
     return nothing
 end
@@ -1640,18 +1628,14 @@ function channel_slot_on_handler_shutdown_complete!(
 
         channel.channel_state = ChannelState.SHUTTING_DOWN_WRITE
         write_args = ChannelShutdownWriteArgs(slot, error_code, free_scarce_resources_immediately)
-        write_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    _channel_shutdown_write_task(write_args, _coerce_task_status(status))
-                catch e
-                    Core.println("channel_shutdown_write task errored")
-                end
-                return nothing
-            end);
-            type_tag = "channel_shutdown_write",
-        )
-        event_loop_schedule_task_now!(channel.event_loop, write_task)
+        schedule_task_now!(channel.event_loop; type_tag = "channel_shutdown_write") do status
+            try
+                _channel_shutdown_write_task(write_args, _coerce_task_status(status))
+            catch e
+                Core.println("channel_shutdown_write task errored")
+            end
+            return nothing
+        end
         return nothing
     end
 
@@ -1667,6 +1651,7 @@ function channel_slot_on_handler_shutdown_complete!(
 
     if slot === channel.first
         channel.channel_state = ChannelState.SHUT_DOWN
+        _channel_release_event_loop_lease!(channel)
         _channel_schedule_shutdown_completion!(channel)
     end
 
@@ -1691,7 +1676,7 @@ function channel_acquire_message_from_pool(channel::Channel, message_type::IoMes
         return message
     end
 
-    message = message_pool_acquire(channel.message_pool, message_type, size_hint)
+    message = Base.acquire(channel.message_pool, message_type, size_hint)
     if message !== nothing
         message.owning_channel = channel
     end
@@ -1705,7 +1690,7 @@ function channel_release_message_to_pool!(channel::Channel, message::IoMessage)
         return nothing
     end
 
-    return message_pool_release!(channel.message_pool, message)
+    return Base.release(channel.message_pool, message)
 end
 
 function _channel_destroy_impl!(channel::Channel)
@@ -1745,11 +1730,10 @@ function _channel_destroy_impl!(channel::Channel)
         channel.statistics_task = nothing
     end
 
-    event_loop_group_close_lease!(channel.event_loop_group_lease)
-    channel.event_loop_group_lease = nothing
     channel.socket = nothing
     channel.first = nothing
     channel.last = nothing
+    _channel_release_event_loop_lease!(channel)
     return nothing
 end
 
@@ -1768,18 +1752,14 @@ function channel_destroy!(channel::Channel)
         return _channel_destroy_impl!(channel)
     end
 
-    task = ScheduledTask(
-        TaskFn(function(status)
-            try
-                _channel_destroy_task(channel, _coerce_task_status(status))
-            catch e
-                Core.println("channel_destroy task errored")
-            end
-            return nothing
-        end);
-        type_tag = "channel_destroy",
-    )
-    event_loop_schedule_task_now!(channel.event_loop, task)
+    schedule_task_now!(channel.event_loop; type_tag = "channel_destroy") do status
+        try
+            _channel_destroy_task(channel, _coerce_task_status(status))
+        catch e
+            Core.println("channel_destroy task errored")
+        end
+        return nothing
+    end
     return nothing
 end
 

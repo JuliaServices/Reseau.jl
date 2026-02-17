@@ -5,19 +5,14 @@
 @static if Sys.iswindows()
     using LibAwsCal
 
-    # Channel-based rendezvous for passing EventLoop to the thread function.
-    const _IOCP_THREAD_STARTUP = Channel{Any}(1)
-
-    @wrap_thread_fn function _iocp_event_loop_thread_entry()
-        event_loop = take!(_IOCP_THREAD_STARTUP)::EventLoop
+    @wrap_thread_fn function _iocp_event_loop_thread_entry(event_loop::EventLoop)
         try
             _iocp_event_loop_thread(event_loop)
         catch e
             Core.println("iocp event loop thread errored")
         finally
-            impl = event_loop.impl_data
+            impl = event_loop.impl
             notify(impl.completion_event)
-            managed_thread_finished!()
         end
     end
 
@@ -200,7 +195,7 @@
     end
 
     function _iocp_signal_synced_data_changed(event_loop::EventLoop)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         completion_key = UInt(impl.iocp_handle)
         ok = _win_post_queued_completion_status(impl.iocp_handle, UInt32(0), completion_key, C_NULL)
         if !ok
@@ -211,7 +206,7 @@
         return nothing
     end
 
-    function event_loop_new_with_iocp(clock::ClockSource = HighResClock())::EventLoop
+    function event_loop_new_with_iocp()::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing IO Completion Port event loop")
 
         impl = IocpEventLoop()
@@ -231,9 +226,7 @@
         end
         impl.iocp_handle = iocp_handle
 
-        event_loop = EventLoop(clock, impl)
-
-        return event_loop
+        return EventLoop(impl)
     end
 
     function _iocp_process_tasks_to_schedule(impl::IocpEventLoop, tasks::Vector{ScheduledTask})
@@ -250,7 +243,7 @@
     end
 
     function _iocp_process_synced_data(event_loop::EventLoop)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         tasks_to_schedule = ScheduledTask[]
         lock(impl.synced_data.mutex)
@@ -276,7 +269,7 @@
 
     function _iocp_event_loop_thread(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "main loop started")
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         @atomic impl.running_thread_id = UInt64(Base.Threads.threadid())
         impl.thread_data.state = IocpEventThreadState.RUNNING
@@ -300,7 +293,7 @@
                 0::Int32, # Alertable = false
             )::Int32
 
-            event_loop_register_tick_start!(event_loop)
+            register_tick_start!(event_loop)
 
             if ok != 0
                 count = Int(num_entries[])
@@ -350,13 +343,13 @@
 
             if @atomic event_loop.should_stop
                 impl.thread_data.state = IocpEventThreadState.STOPPING
-                event_loop_register_tick_end!(event_loop)
+                register_tick_end!(event_loop)
                 break
             end
 
             # Run scheduled tasks.
             now_ns = try
-                clock_now_ns(event_loop.clock)
+                clock_now_ns()
             catch
                 UInt64(0)
             end
@@ -365,7 +358,7 @@
             # Compute next timeout.
             use_default_timeout = false
             now2 = try
-                clock_now_ns(event_loop.clock)
+                clock_now_ns()
             catch
                 use_default_timeout = true
                 UInt64(0)
@@ -384,18 +377,17 @@
                 timeout_ms = timeout_ms64 > typemax(UInt32) ? typemax(UInt32) : UInt32(timeout_ms64)
             end
 
-            event_loop_register_tick_end!(event_loop)
+            register_tick_end!(event_loop)
         end
 
         logf(LogLevel.DEBUG, LS_IO_EVENT_LOOP, "exiting main loop")
-        event_loop_thread_exit_s2n_cleanup!(event_loop)
         @atomic impl.running_thread_id = UInt64(0)
         LibAwsCal.aws_cal_thread_clean_up()
         return nothing
     end
 
-    function event_loop_run!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
+    function run!(event_loop::EventLoop, impl::IocpEventLoop)::Nothing
+        impl = event_loop.impl
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
 
@@ -415,11 +407,14 @@
         impl.synced_data.state = IocpEventThreadState.RUNNING
 
         # Launch the event loop thread via ForeignThread
-        put!(_IOCP_THREAD_STARTUP, event_loop)
         try
-            impl.thread_created_on = ForeignThread("aws-el-iocp", _IOCP_THREAD_ENTRY_C)
+            impl.thread_created_on = ForeignThread(
+                "aws-el-iocp",
+                _IOCP_THREAD_ENTRY_C,
+                event_loop;
+                join_strategy = ThreadJoinStrategy.MANUAL,
+            )
         catch
-            take!(_IOCP_THREAD_STARTUP)  # drain on failure
             impl.synced_data.state = IocpEventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             throw_error(ERROR_THREAD_NO_SUCH_THREAD_ID)
@@ -437,8 +432,8 @@
         return nothing
     end
 
-    function event_loop_stop!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
+    function stop!(event_loop::EventLoop, impl::IocpEventLoop)::Nothing
+        impl = event_loop.impl
         @atomic event_loop.should_stop = true
 
         if event_loop_thread_is_callers_thread(event_loop)
@@ -469,8 +464,8 @@
         return nothing
     end
 
-    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
+    function wait_for_stop_completion(event_loop::EventLoop, impl::IocpEventLoop)::Nothing
+        impl = event_loop.impl
 
         if impl.thread_created_on !== nothing
             wait(impl.completion_event)
@@ -482,17 +477,17 @@
         return nothing
     end
 
-    function event_loop_schedule_task_now!(event_loop::EventLoop, task::ScheduledTask)
+    function schedule_task_now!(event_loop::EventLoop, impl::IocpEventLoop, task::ScheduledTask)
         _iocp_schedule_task_common(event_loop, task, UInt64(0); serialized = false)
         return nothing
     end
 
-    function event_loop_schedule_task_now_serialized!(event_loop::EventLoop, task::ScheduledTask)
+    function schedule_task_now_serialized!(event_loop::EventLoop, impl::IocpEventLoop, task::ScheduledTask)
         _iocp_schedule_task_common(event_loop, task, UInt64(0); serialized = true)
         return nothing
     end
 
-    function event_loop_schedule_task_future!(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function schedule_task_future!(event_loop::EventLoop, impl::IocpEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         _iocp_schedule_task_common(event_loop, task, run_at_nanos; serialized = false)
         return nothing
     end
@@ -503,7 +498,7 @@
             run_at_nanos::UInt64;
             serialized::Bool,
         )
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         if !serialized && event_loop_thread_is_callers_thread(event_loop)
             if run_at_nanos == 0
@@ -536,9 +531,9 @@
         return nothing
     end
 
-    function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
+    function cancel_task!(event_loop::EventLoop, impl::IocpEventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         if !task.scheduled
             return nothing
         end
@@ -566,17 +561,18 @@
         return nothing
     end
 
-    function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
-        impl = event_loop.impl_data
+    function event_loop_thread_is_callers_thread(event_loop::EventLoop, impl::IocpEventLoop)::Bool
+        impl = event_loop.impl
         running_id = @atomic impl.running_thread_id
         return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
     end
 
-    function event_loop_connect_to_io_completion_port!(
+    function connect_to_io_completion_port(
             event_loop::EventLoop,
+            impl::IocpEventLoop,
             handle::IoHandle,
         )::Nothing
-        impl = event_loop.impl_data
+        _ = event_loop
 
         if handle.handle == C_NULL
             throw_error(ERROR_INVALID_ARGUMENT)
@@ -613,8 +609,9 @@
         return nothing
     end
 
-    function event_loop_subscribe_to_io_events!(
+    function subscribe_to_io_events!(
             event_loop::EventLoop,
+            impl::IocpEventLoop,
             handle::IoHandle,
             events::Int,
             on_event::EventCallable,
@@ -626,8 +623,9 @@
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 
-    function event_loop_unsubscribe_from_io_events!(
+    function unsubscribe_from_io_events!(
             event_loop::EventLoop,
+            impl::IocpEventLoop,
             handle::IoHandle,
         )::Nothing
         _ = event_loop
@@ -637,12 +635,12 @@
         return _win_unsubscribe_handle_from_iocp(handle.handle)
     end
 
-    function event_loop_complete_destroy!(event_loop::EventLoop)
+    function close(event_loop::EventLoop, impl::IocpEventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "destroying event_loop")
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
-        event_loop_stop!(event_loop)
-        event_loop_wait_for_stop_completion!(event_loop)
+        stop!(event_loop)
+        wait_for_stop_completion(event_loop)
 
         # Make cancellation callbacks that check `event_loop_thread_is_callers_thread` behave.
         impl.thread_joined_to = UInt64(Base.Threads.threadid())
@@ -665,17 +663,7 @@
             _ = _win_close_handle(impl.iocp_handle)
             impl.iocp_handle = C_NULL
         end
-
-        _event_loop_clean_up_shared_resources!(event_loop)
-
         return nothing
     end
 
 end # @static if Sys.iswindows()
-
-@static if !Sys.iswindows()
-function event_loop_new_with_iocp(clock::ClockSource = HighResClock())::EventLoop
-    _ = clock
-    throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
-end
-end

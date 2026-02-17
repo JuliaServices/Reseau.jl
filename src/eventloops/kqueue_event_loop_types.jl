@@ -110,7 +110,7 @@
     # Handle data attached to IoHandle while subscribed
     mutable struct KqueueHandleData{T}
         owner::IoHandle
-        event_loop::T
+        event_loop::T # T is KqueueEventLoop
         on_event::EventCallable
         events_subscribed::Int  # IoEventType bitmask
         events_this_loop::Int   # Events received during current loop iteration

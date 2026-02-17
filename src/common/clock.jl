@@ -310,3 +310,59 @@ function timedwait_poll(testcb, timeout_s::Real; poll_s::Real = 0.001)::Symbol
     poll_ns = poll_s <= 0 ? 0 : Int(round(Float64(poll_s) * Float64(TIMESTAMP_NANOS)))
     return timedwait_poll_ns(testcb, timeout_ns; poll_ns = poll_ns)
 end
+
+# High resolution clock function - returns nanoseconds
+function high_res_clock()::UInt64
+    ticks = Ref{UInt64}(0)
+    high_res_clock_get_ticks(ticks)
+    return ticks[]
+end
+
+# Concrete clock source variants used by event loops and host resolver.
+struct HighResClock end
+
+struct RefClock
+    value::Base.RefValue{UInt64}
+end
+
+RefClock(value::Integer) = RefClock(Ref(UInt64(value)))
+
+mutable struct SequenceClock
+    values::Vector{UInt64}
+    index::Int
+end
+
+function SequenceClock(values::AbstractVector{UInt64})
+    return SequenceClock(copy(values), 0)
+end
+
+function SequenceClock(values::AbstractVector{<:Integer})
+    converted = Vector{UInt64}(undef, length(values))
+    @inbounds for i in eachindex(values)
+        converted[i] = UInt64(values[i])
+    end
+    return SequenceClock(converted, 0)
+end
+
+const ClockSource = Union{HighResClock, RefClock, SequenceClock}
+
+@inline clock_now_ns(::HighResClock)::UInt64 = high_res_clock()
+@inline clock_now_ns(clock::RefClock)::UInt64 = clock.value[]
+
+@inline function clock_now_ns(clock::SequenceClock)::UInt64
+    values = clock.values
+    isempty(values) && return UInt64(0)
+    next_index = min(clock.index + 1, length(values))
+    clock.index = next_index
+    return values[next_index]
+end
+
+const CLOCK = ScopedValue{ClockSource}(HighResClock())
+
+function with_clock(f, clock::ClockSource)
+    return @with CLOCK => clock f()
+end
+
+get_clock() = CLOCK[]
+
+clock_now_ns() = clock_now_ns(get_clock())

@@ -32,8 +32,6 @@ mutable struct TCPSocket <: IO
     write_error::Int
     enable_read_back_pressure::Bool
     initial_window_size::Int
-    connect_event::Base.Threads.Event
-    connect_error::Int
 end
 
 mutable struct _TCPSocketHandler
@@ -102,13 +100,11 @@ function _new_unconnected_socket(;
         1,
         Base.Threads.Condition(),
         false,
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         0,
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         enable_read_back_pressure,
         initial_window,
-        Base.Threads.Event(),
-        ERROR_IO_SOCKET_NOT_CONNECTED,
     )
 end
 
@@ -136,79 +132,27 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
     return nothing
 end
 
-function _on_setup(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
-    _ = bootstrap
-    if error_code != AWS_OP_SUCCESS || channel === nothing
-        io.connect_error = error_code
-        _mark_closed!(io, error_code)
-        notify(io.connect_event)
-        return nothing
-    end
+function _install_handler_for_connected_channel!(io::TCPSocket, channel::Channel)::Nothing
     if channel_thread_is_callers_thread(channel)
         _install_handler!(io, channel)
-        io.connect_error = AWS_OP_SUCCESS
-        notify(io.connect_event)
         return nothing
     end
+    install_future = Future{Nothing}()
     task = ChannelTask(
         EventCallable(s -> begin
             _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-            _install_handler!(io, channel)
-            io.connect_error = AWS_OP_SUCCESS
-            notify(io.connect_event)
+            try
+                _install_handler!(io, channel)
+                notify(install_future, nothing)
+            catch e
+                notify(install_future, e isa Exception ? e : ReseauError(ERROR_UNKNOWN))
+            end
             return nothing
         end),
         "tcpsocket_install_handler",
     )
     channel_schedule_task_now!(channel, task)
-    return nothing
-end
-
-function _on_shutdown(bootstrap, error_code::Int, channel::Union{Channel, Nothing}, io::TCPSocket)::Nothing
-    _ = bootstrap
-    _ = channel
-    _mark_closed!(io, error_code)
-    return nothing
-end
-
-@inline function _on_setup_callback(bootstrap, error_code, channel, user_data)::Nothing
-    _ = bootstrap
-    io = user_data::TCPSocket
-    err = Int(error_code)
-    if err != AWS_OP_SUCCESS || !(channel isa Channel)
-        io.connect_error = err
-        _mark_closed!(io, err)
-        notify(io.connect_event)
-        return nothing
-    end
-
-    ch = channel::Channel
-    if channel_thread_is_callers_thread(ch)
-        _install_handler!(io, ch)
-        io.connect_error = AWS_OP_SUCCESS
-        notify(io.connect_event)
-        return nothing
-    end
-
-    task = ChannelTask(
-        EventCallable(s -> begin
-            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-            _install_handler!(io, ch)
-            io.connect_error = AWS_OP_SUCCESS
-            notify(io.connect_event)
-            return nothing
-        end),
-        "tcpsocket_install_handler",
-    )
-    channel_schedule_task_now!(ch, task)
-    return nothing
-end
-
-@inline function _on_shutdown_callback(bootstrap, error_code, channel, user_data)::Nothing
-    _ = bootstrap
-    _ = channel
-    io = user_data::TCPSocket
-    _mark_closed!(io, Int(error_code))
+    wait(install_future)
     return nothing
 end
 
@@ -278,7 +222,7 @@ function TCPSocket(
     owns_elg = false
     owns_resolver = false
     if elg === nothing
-        elg = EventLoops.default_event_loop_group()
+        elg = EventLoops.get_event_loop_group()
         resolver = default_host_resolver()
     else
         if resolver === nothing
@@ -326,23 +270,19 @@ function TCPSocket(
     io.owns_event_loop_group = owns_elg
     io.owns_host_resolver = owns_resolver
 
-    result = client_bootstrap_connect!(
+    connect_future = client_bootstrap_connect!(
         bootstrap,
         host,
         port,
         socket_options,
         tls_conn,
-        nothing,
-        nothing,
-        _on_setup_callback,
-        _on_shutdown_callback,
-        io,
+        bootstrap.on_protocol_negotiated,
         enable_read_back_pressure,
         nothing,
         host_resolution_config,
     )
-    wait(io.connect_event)
-    io.connect_error == AWS_OP_SUCCESS || error("TCPSocket connect failed: $(io.connect_error)")
+    channel = wait(connect_future)
+    _install_handler_for_connected_channel!(io, channel)
     io.tls_enabled = tls_conn !== nothing
     return io
 end
@@ -370,10 +310,9 @@ function connect(path::AbstractString;
         socket_options::SocketOptions = SocketOptions(domain = SocketDomain.LOCAL, type = SocketType.STREAM),
         kwargs...,
     )
-    # Use the host resolver "impl" hook to bypass DNS and treat `path` as the address.
+    # Bypass DNS for local socket paths and treat the path as the resolved address.
     config = HostResolutionConfig(;
-        impl = (host, impl_data) -> ([HostAddress(String(host), HostAddressType.A, String(host), UInt64(0))], AWS_OP_SUCCESS),
-        impl_data = nothing,
+        resolve_host_as_address = true,
     )
     return TCPSocket(path, 0; socket_options = socket_options, host_resolution_config = config, kwargs...)
 end
@@ -415,7 +354,7 @@ function Base.close(server::TCPServer)::Nothing
 end
 
 function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, channel, _user_data)
-    if error_code != AWS_OP_SUCCESS || channel === nothing
+    if error_code != OP_SUCCESS || channel === nothing
         return nothing
     end
     io = _new_unconnected_socket(
@@ -501,7 +440,7 @@ function listen(host::AbstractString, port::Integer;
         event_loop_group = nothing,
         socket_options::SocketOptions = SocketOptions(),
     )
-    elg = event_loop_group === nothing ? EventLoops.default_event_loop_group() : event_loop_group
+    elg = event_loop_group === nothing ? EventLoops.get_event_loop_group() : event_loop_group
 
     tls_conn = tls_options
     if tls_conn === nothing && tls
@@ -513,9 +452,9 @@ function listen(host::AbstractString, port::Integer;
         TCPSocket[],
         Base.Threads.Condition(),
         false,
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         Base.Threads.Event(),
-        AWS_OP_SUCCESS,
+        OP_SUCCESS,
         Int(read_buffer_capacity),
         enable_read_back_pressure,
         initial_window_size === nothing ? nothing : Int(initial_window_size),
@@ -535,7 +474,7 @@ function listen(host::AbstractString, port::Integer;
         enable_read_back_pressure = enable_read_back_pressure,
     )
     wait(state.listen_event)
-    state.listen_error == AWS_OP_SUCCESS || error("listen failed: $(state.listen_error)")
+    state.listen_error == OP_SUCCESS || error("listen failed: $(state.listen_error)")
     return TCPServer(bootstrap, state)
 end
 
@@ -643,13 +582,13 @@ function tlsupgrade!(
         ssl_insecure = ssl_insecure,
     )
 
-    negotiation_error = Ref(AWS_OP_SUCCESS)
+    negotiation_error = Ref(OP_SUCCESS)
     negotiation_event = Base.Threads.Event()
     on_negotiation = (handler, slot, err, ud) -> begin
         _ = handler
         _ = ud
         negotiation_error[] = err
-        if err == AWS_OP_SUCCESS && slot !== nothing && slot.channel !== nothing
+        if err == OP_SUCCESS && slot !== nothing && slot.channel !== nothing
             channel_trigger_read(slot.channel)
         end
         notify(negotiation_event)
@@ -679,7 +618,7 @@ function tlsupgrade!(
     end
 
     wait(negotiation_event)
-    negotiation_error[] == AWS_OP_SUCCESS || error("TLS negotiation failed: $(negotiation_error[])")
+    negotiation_error[] == OP_SUCCESS || error("TLS negotiation failed: $(negotiation_error[])")
     io.tls_enabled = true
     return nothing
 end
@@ -697,7 +636,7 @@ function Base.close(io::TCPSocket)::Nothing
     channel !== nothing && channel_shutdown!(channel, ERROR_IO_SOCKET_CLOSED)
     io.socket !== nothing && socket_close(io.socket)
     io.owns_host_resolver && io.host_resolver !== nothing && host_resolver_shutdown!(io.host_resolver)
-    io.owns_event_loop_group && io.event_loop_group !== nothing && event_loop_group_release!(io.event_loop_group)
+    io.owns_event_loop_group && io.event_loop_group !== nothing && close(io.event_loop_group)
     return nothing
 end
 
@@ -838,7 +777,7 @@ function _begin_write!(io::TCPSocket)::_WriteCtx
     finally
         unlock(io.cond)
     end
-    return _WriteCtx(io, 0, AWS_OP_SUCCESS)
+    return _WriteCtx(io, 0, OP_SUCCESS)
 end
 
 function _finish_write!(ctx::_WriteCtx)::Nothing
@@ -847,7 +786,7 @@ function _finish_write!(ctx::_WriteCtx)::Nothing
     try
         io.pending_writes -= 1
         io.pending_writes < 0 && (io.pending_writes = 0)
-        if ctx.error_code != AWS_OP_SUCCESS && io.write_error == AWS_OP_SUCCESS
+        if ctx.error_code != OP_SUCCESS && io.write_error == OP_SUCCESS
             io.write_error = ctx.error_code
         end
         notify(io.cond)
@@ -858,14 +797,14 @@ function _finish_write!(ctx::_WriteCtx)::Nothing
 end
 
 function _write_fail!(ctx::_WriteCtx, error_code::Int)::Int
-    ctx.error_code == AWS_OP_SUCCESS && (ctx.error_code = error_code)
+    ctx.error_code == OP_SUCCESS && (ctx.error_code = error_code)
     ctx.remaining == 0 && _finish_write!(ctx)
     return error_code
 end
 
 function _make_write_completion(ctx::_WriteCtx)::EventCallable
     return EventCallable(error_code -> begin
-        error_code != AWS_OP_SUCCESS && ctx.error_code == AWS_OP_SUCCESS && (ctx.error_code = error_code)
+        error_code != OP_SUCCESS && ctx.error_code == OP_SUCCESS && (ctx.error_code = error_code)
         ctx.remaining -= 1
         if ctx.remaining <= 0
             _finish_write!(ctx)
@@ -969,7 +908,7 @@ function Base.flush(io::TCPSocket)
         while io.pending_writes > 0 && !io.closed
             wait(io.cond)
         end
-        io.write_error == AWS_OP_SUCCESS || error("TCPSocket write failed: $(io.write_error)")
+        io.write_error == OP_SUCCESS || error("TCPSocket write failed: $(io.write_error)")
     finally
         unlock(io.cond)
     end

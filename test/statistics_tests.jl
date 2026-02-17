@@ -94,7 +94,7 @@ end
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-        event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+        event_loop = EventLoops.get_next_event_loop()
         @test event_loop !== nothing
         event_loop === nothing && return
 
@@ -112,14 +112,14 @@ end
         set_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             Sockets.channel_set_statistics_handler!(channel, stats_handler)
         end); type_tag = "set_stats_handler")
-        EventLoops.event_loop_schedule_task_now!(event_loop, set_task)
+        EventLoops.schedule_task_now!(event_loop, set_task)
 
         update_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             handler.stats.bytes_read = 111
             handler.stats.bytes_written = 222
             return nothing
         end); type_tag = "update_stats")
-        EventLoops.event_loop_schedule_task_now!(event_loop, update_task)
+        EventLoops.schedule_task_now!(event_loop, update_task)
 
         @test _wait_ready_stats(results; timeout_ns = 5_000_000_000)
         interval, stats_vec = take!(results)
@@ -136,9 +136,9 @@ end
         clear_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
             Sockets.channel_set_statistics_handler!(channel, nothing)
         end); type_tag = "clear_stats_handler")
-        EventLoops.event_loop_schedule_task_now!(event_loop, clear_task)
+        EventLoops.schedule_task_now!(event_loop, clear_task)
 
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end

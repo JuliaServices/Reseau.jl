@@ -197,7 +197,7 @@ function retry_strategy_acquire_token!(
         throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
-    event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
+    event_loop = get_next_event_loop(strategy.event_loop_group)
     if event_loop === nothing
         throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
@@ -222,18 +222,14 @@ function retry_strategy_acquire_token!(
     )
 
     # Schedule callback
-    task = ScheduledTask(
-        TaskFn(function(status)
-            try
-                on_acquired(token, AWS_OP_SUCCESS, user_data)
-            catch e
-                Core.println("retry_token_acquired task errored")
-            end
-            return nothing
-        end);
-        type_tag = "retry_token_acquired",
-    )
-    event_loop_schedule_task_now!(event_loop, task)
+    schedule_task_now!(event_loop; type_tag = "retry_token_acquired") do _
+        try
+            on_acquired(token, OP_SUCCESS, user_data)
+        catch e
+            Core.println("retry_token_acquired task errored")
+        end
+        return nothing
+    end
 
     return nothing
 end
@@ -370,7 +366,7 @@ function retry_token_schedule_retry(
             throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         end
 
-        current_time = event_loop_current_clock_time(event_loop)
+        current_time = clock_now_ns()
 
         schedule_at = current_time + backoff_ns
         @atomic token.last_backoff = backoff_ns
@@ -381,17 +377,14 @@ function retry_token_schedule_retry(
         throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
-    task = ScheduledTask(
-        TaskFn(function(status)
-            try
-                _exponential_backoff_retry_task(token, _coerce_task_status(status))
-            catch e
-                Core.println("exponential_backoff_retry task errored")
-            end
-            return nothing
-        end);
-        type_tag = "exponential_backoff_retry",
-    )
+    task = ScheduledTask(; type_tag = "exponential_backoff_retry") do status
+        try
+            _exponential_backoff_retry_task(token, _coerce_task_status(status))
+        catch e
+            Core.println("exponential_backoff_retry task errored")
+        end
+        return nothing
+    end
     already_scheduled = false
     lock(token.lock) do
         if token.scheduled_retry_task !== nothing
@@ -413,7 +406,7 @@ function retry_token_schedule_retry(
 
     event_loop = token.bound_loop
     event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-    event_loop_schedule_task_future!(event_loop, task, schedule_at)
+    schedule_task_future!(event_loop, task, schedule_at)
 
     return nothing
 end
@@ -444,7 +437,7 @@ function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T
     end
 
     if on_retry_ready !== nothing
-        on_retry_ready(token, AWS_OP_SUCCESS, user_data)
+        on_retry_ready(token, OP_SUCCESS, user_data)
     end
 
     return nothing
@@ -612,12 +605,12 @@ function retry_strategy_acquire_token!(
             cb_user_data = token.acquired_user_data
             token.on_acquired = nothing
         end
-        if code != AWS_OP_SUCCESS || exp_token === nothing
+        if code != OP_SUCCESS || exp_token === nothing
             cb !== nothing && cb(nothing, code, cb_user_data)
             return nothing
         end
         token.exp_token = exp_token
-        cb !== nothing && cb(token, AWS_OP_SUCCESS, cb_user_data)
+        cb !== nothing && cb(token, OP_SUCCESS, cb_user_data)
         return nothing
     end
 

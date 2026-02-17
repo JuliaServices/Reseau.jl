@@ -17,7 +17,7 @@ function TestingChannelHandler(initial_window::Integer)
         Csize_t(0),
         Csize_t(initial_window),
         true,
-        Reseau.AWS_OP_SUCCESS,
+        Reseau.OP_SUCCESS,
     )
 end
 
@@ -105,8 +105,8 @@ function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
 end
 
 function _setup_channel(; enable_read_back_pressure::Bool = false)
-    el = EventLoops.event_loop_new()
-    EventLoops.event_loop_run!(el)
+    el = EventLoops.EventLoop()
+    EventLoops.run!(el)
 
     setup_ch = Channel{Int}(1)
 
@@ -125,7 +125,7 @@ function _setup_channel(; enable_read_back_pressure::Bool = false)
 
     @test _wait_ready_channel(setup_ch)
     if isready(setup_ch)
-        @test take!(setup_ch) == Reseau.AWS_OP_SUCCESS
+        @test take!(setup_ch) == Reseau.OP_SUCCESS
     end
 
     return (el = el, channel = channel)
@@ -176,6 +176,6 @@ end
         @test left_handler.latest_window_update == Csize_t(12345)
 
         Sockets.channel_destroy!(channel)
-        EventLoops.event_loop_destroy!(el)
+        close(el)
     end
 end

@@ -236,22 +236,19 @@
         impl.error_code_to_report = _iocp_pipe_translate_windows_error(_iocp_pipe_get_last_error())
 
         if impl.error_report_task === nothing
-            impl.error_report_task = ScheduledTask(
-                TaskFn(function(status)
-                    try
-                        _iocp_pipe_read_end_report_error_task(read_end, _coerce_task_status(status))
-                    catch e
-                        Core.println("pipe_read_end_report_error task errored")
-                    end
-                    return nothing
-                end);
-                type_tag = "pipe_read_end_report_error",
-            )
+            impl.error_report_task = ScheduledTask(; type_tag = "pipe_read_end_report_error") do status
+                try
+                    _iocp_pipe_read_end_report_error_task(read_end, _coerce_task_status(status))
+                catch e
+                    Core.println("pipe_read_end_report_error task errored")
+                end
+                return nothing
+            end
         end
 
         impl.error_task_active = true
         if read_end.event_loop !== nothing
-            event_loop_schedule_task_now!(read_end.event_loop, impl.error_report_task)
+            schedule_task_now!(read_end.event_loop, impl.error_report_task)
         end
 
         return nothing
@@ -296,7 +293,7 @@
         if impl.state == IocpPipeReadEndState.SUBSCRIBED
             readable_error_code = if status_code == 0
                 impl.monitoring_request_reasons &= ~MONITORING_BECAUSE_WAITING_FOR_DATA
-                AWS_OP_SUCCESS
+                OP_SUCCESS
             else
                 impl.state = IocpPipeReadEndState.SUBSCRIBE_ERROR
                 ERROR_IO_BROKEN_PIPE
@@ -502,7 +499,7 @@
         idx = findfirst(==(req), impl.writes)
         idx !== nothing && deleteat!(impl.writes, idx)
 
-        error_code = status_code == 0 ? AWS_OP_SUCCESS : _iocp_pipe_translate_windows_error(status_code)
+        error_code = status_code == 0 ? OP_SUCCESS : _iocp_pipe_translate_windows_error(status_code)
 
         if req.on_complete !== nothing
             req.on_complete(error_code, num_bytes_transferred)

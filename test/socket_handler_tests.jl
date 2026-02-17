@@ -81,10 +81,10 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
 @testset "socket handler read backpressure" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -104,8 +104,8 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     else
         bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    bind_opts = Sockets.SocketBindOptions(bind_endpoint)
-    @test Sockets.socket_bind(server, bind_opts) === nothing
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
     @test Sockets.socket_listen(server, 8) === nothing
     @static if !Sys.isapple()
         bound = Sockets.socket_get_bound_address(server)
@@ -124,7 +124,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         accept_err[] = err
-        if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
             accept_done[] = true
             return nothing
         end
@@ -149,7 +149,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
         # Ensure deterministic window size for backpressure checks
         if channel.window_update_task.wrapper_task.scheduled
-            EventLoops.event_loop_cancel_task!(event_loop, channel.window_update_task.wrapper_task)
+            EventLoops.cancel_task!(event_loop, channel.window_update_task.wrapper_task)
         end
         channel.window_update_scheduled = false
         app_slot.window_size = Csize_t(4)
@@ -163,37 +163,35 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
         return nothing
     end)
 
-    accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server, event_loop, accept_opts) === nothing
+    accept_opts = (; on_accept_result = on_accept)
+    @test Sockets.socket_start_accept(server, event_loop; accept_opts...) === nothing
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
 
     connect_done = Ref(false)
     connect_err = Ref(0)
-    connect_opts = Sockets.SocketConnectOptions(
-        connect_endpoint;
-        event_loop = event_loop,
+    connect_opts = (; remote_endpoint = connect_endpoint, event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
         end),
     )
-    @test Sockets.socket_connect(client, connect_opts) === nothing
+    @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
-    @test connect_err[] == Reseau.AWS_OP_SUCCESS
-    @test accept_err[] == Reseau.AWS_OP_SUCCESS
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
 
     app_handler = app_handler_ref[]
     @test app_handler isa TestReadHandler
     if !(app_handler isa TestReadHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
     write_done = Ref(false)
-    write_err = Ref(Reseau.AWS_OP_SUCCESS)
+    write_err = Ref(Reseau.OP_SUCCESS)
     write_bytes = Ref(0)
 
     payload = "abcdefghij"
@@ -214,10 +212,10 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
         end
         return nothing
     end); type_tag = "client_write")
-    EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
+    EventLoops.schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
-    @test write_err[] == Reseau.AWS_OP_SUCCESS
+    @test write_err[] == Reseau.OP_SUCCESS
     @test write_bytes[] == ncodeunits(payload)
 
     channel = channel_ref[]
@@ -225,7 +223,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     @test channel isa Sockets.Channel
     @test socket_handler isa Sockets.SocketChannelHandler
     if !(channel isa Sockets.Channel && socket_handler isa Sockets.SocketChannelHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -260,15 +258,15 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     end
     Sockets.socket_close(client)
     Sockets.socket_close(server)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "socket handler write completion" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -287,8 +285,8 @@ end
     else
         bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    bind_opts = Sockets.SocketBindOptions(bind_endpoint)
-    @test Sockets.socket_bind(server, bind_opts) === nothing
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
     @test Sockets.socket_listen(server, 8) === nothing
     @static if !Sys.isapple()
         bound = Sockets.socket_get_bound_address(server)
@@ -307,7 +305,7 @@ end
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         accept_err[] = err
-        if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
             accept_done[] = true
             return nothing
         end
@@ -336,27 +334,25 @@ end
         return nothing
     end)
 
-    accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server, event_loop, accept_opts) === nothing
+    accept_opts = (; on_accept_result = on_accept)
+    @test Sockets.socket_start_accept(server, event_loop; accept_opts...) === nothing
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
 
     connect_done = Ref(false)
     connect_err = Ref(0)
-    connect_opts = Sockets.SocketConnectOptions(
-        connect_endpoint;
-        event_loop = event_loop,
+    connect_opts = (; remote_endpoint = connect_endpoint, event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
         end),
     )
-    @test Sockets.socket_connect(client, connect_opts) === nothing
+    @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
-    @test connect_err[] == Reseau.AWS_OP_SUCCESS
-    @test accept_err[] == Reseau.AWS_OP_SUCCESS
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
 
     read_done = Ref(false)
     read_err = Ref(0)
@@ -367,7 +363,7 @@ end
         try
             Sockets.socket_subscribe_to_readable_events(client, Reseau.EventCallable(err -> begin
                 read_err[] = err
-                if err != Reseau.AWS_OP_SUCCESS
+                if err != Reseau.OP_SUCCESS
                     read_done[] = true
                     return nothing
                 end
@@ -388,7 +384,7 @@ end
         subscribe_done[] = true
         return nothing
     end); type_tag = "client_subscribe")
-    EventLoops.event_loop_schedule_task_now!(event_loop, subscribe_task)
+    EventLoops.schedule_task_now!(event_loop, subscribe_task)
     @test wait_for(() -> subscribe_done[])
 
     channel = channel_ref[]
@@ -398,7 +394,7 @@ end
     @test app_slot isa Sockets.ChannelSlot
     @test socket_handler isa Sockets.SocketChannelHandler
     if !(channel isa Sockets.Channel && app_slot isa Sockets.ChannelSlot && socket_handler isa Sockets.SocketChannelHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     if accepted_socket[] isa Sockets.Socket
@@ -440,9 +436,9 @@ end
     Sockets.channel_schedule_task_now!(channel, send_task)
 
     @test wait_for(() -> send_done[])
-    @test send_err[] == Reseau.AWS_OP_SUCCESS
+    @test send_err[] == Reseau.OP_SUCCESS
     @test wait_for(() -> read_done[])
-    @test read_err[] == Reseau.AWS_OP_SUCCESS
+    @test read_err[] == Reseau.OP_SUCCESS
     @test read_payload[] == payload
 
     if accepted_socket[] isa Sockets.Socket
@@ -450,15 +446,15 @@ end
     end
     Sockets.socket_close(client)
     Sockets.socket_close(server)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "socket handler pending read before downstream setup" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -477,8 +473,8 @@ end
     else
         bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
     end
-    bind_opts = Sockets.SocketBindOptions(bind_endpoint)
-    @test Sockets.socket_bind(server, bind_opts) === nothing
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
     @test Sockets.socket_listen(server, 8) === nothing
     @static if !Sys.isapple()
         bound = Sockets.socket_get_bound_address(server)
@@ -496,7 +492,7 @@ end
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         accept_err[] = err
-        if err != Reseau.AWS_OP_SUCCESS || new_sock === nothing
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
             accept_done[] = true
             return nothing
         end
@@ -515,37 +511,35 @@ end
         return nothing
     end)
 
-    accept_opts = Sockets.SocketListenerOptions(on_accept_result = on_accept)
-    @test Sockets.socket_start_accept(server, event_loop, accept_opts) === nothing
+    accept_opts = (; on_accept_result = on_accept)
+    @test Sockets.socket_start_accept(server, event_loop; accept_opts...) === nothing
 
     client = Sockets.socket_init(opts)
     @test client isa Sockets.Socket
 
     connect_done = Ref(false)
     connect_err = Ref(0)
-    connect_opts = Sockets.SocketConnectOptions(
-        connect_endpoint;
-        event_loop = event_loop,
+    connect_opts = (; remote_endpoint = connect_endpoint, event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             connect_err[] = err
             connect_done[] = true
             return nothing
         end),
     )
-    @test Sockets.socket_connect(client, connect_opts) === nothing
+    @test Sockets.socket_connect(client; connect_opts...) === nothing
     @test wait_for(() -> connect_done[] && accept_done[])
-    @test connect_err[] == Reseau.AWS_OP_SUCCESS
-    @test accept_err[] == Reseau.AWS_OP_SUCCESS
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
 
     socket_handler = socket_handler_ref[]
     @test socket_handler isa Sockets.SocketChannelHandler
     if !(socket_handler isa Sockets.SocketChannelHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
     write_done = Ref(false)
-    write_err = Ref(Reseau.AWS_OP_SUCCESS)
+    write_err = Ref(Reseau.OP_SUCCESS)
 
     payload = "pending"
     cursor = Reseau.ByteCursor(payload)
@@ -564,16 +558,16 @@ end
         end
         return nothing
     end); type_tag = "client_write_pending")
-    EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
+    EventLoops.schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
-    @test write_err[] == Reseau.AWS_OP_SUCCESS
+    @test write_err[] == Reseau.OP_SUCCESS
     @test wait_for(() -> socket_handler.pending_read)
 
     channel_any = channel_ref[]
     @test channel_any isa Sockets.Channel
     if !(channel_any isa Sockets.Channel)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     channel = channel_any::Sockets.Channel
@@ -596,7 +590,7 @@ end
             app_handler.slot = app_slot
 
             Sockets.channel_setup_complete!(channel)
-            setup_err[] = Reseau.AWS_OP_SUCCESS
+            setup_err[] = Reseau.OP_SUCCESS
             app_handler_ref[] = app_handler
         catch e
             setup_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
@@ -607,12 +601,12 @@ end
     Sockets.channel_schedule_task_now!(channel, setup_task)
 
     @test wait_for(() -> setup_done[])
-    @test setup_err[] == Reseau.AWS_OP_SUCCESS
+    @test setup_err[] == Reseau.OP_SUCCESS
 
     app_handler = app_handler_ref[]
     @test app_handler isa TestReadHandler
     if !(app_handler isa TestReadHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     @test wait_for(() -> _received_string(app_handler::TestReadHandler) == payload)
@@ -626,5 +620,5 @@ end
     if server isa Sockets.Socket
         Sockets.socket_close(server)
     end
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end

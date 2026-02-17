@@ -99,19 +99,49 @@ end
 
 # Event loop interface - platform backends (kqueue, epoll) implement these methods:
 #   event_loop_run!, event_loop_stop!, event_loop_wait_for_stop_completion!,
-#   event_loop_complete_destroy!, event_loop_schedule_task_now!,
-#   event_loop_schedule_task_now_serialized!, event_loop_schedule_task_future!,
-#   event_loop_cancel_task!, event_loop_subscribe_to_io_events!,
+#   event_loop_complete_destroy!, schedule_task_now!,
+#   event_loop_schedule_task_now_serialized!, schedule_task_future!,
+#   event_loop_cancel_task!, subscribe_to_io_events!,
 #   event_loop_unsubscribe_from_io_events!, event_loop_thread_is_callers_thread
 
-function event_loop_subscribe_to_io_events!(
+function schedule_task_now!(
+        callable::F,
+        event_loop::EventLoop;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    schedule_task_now!(event_loop, task)
+    return task
+end
+
+function schedule_task_future!(
+        callable::F,
+        event_loop::EventLoop,
+        run_at_nanos::UInt64;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    schedule_task_future!(event_loop, task, run_at_nanos)
+    return task
+end
+
+function schedule_task_future!(
+        callable::F,
+        event_loop::EventLoop,
+        run_at_nanos::Integer;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    return schedule_task_future!(callable, event_loop, UInt64(run_at_nanos); type_tag = type_tag)
+end
+
+function subscribe_to_io_events!(
         event_loop::EventLoop,
         handle::IoHandle,
         events::Int,
         on_event::F,
         user_data::Any,
     ) where {F}
-    return event_loop_subscribe_to_io_events!(
+    return subscribe_to_io_events!(
         event_loop,
         handle,
         events,
@@ -163,7 +193,7 @@ function _event_loop_clean_up_shared_resources!(event_loop::EventLoop)
     pool === nothing && return nothing
 
     try
-        message_pool_clean_up!(pool)
+        close(pool)
     finally
         event_loop.message_pool = nothing
     end
@@ -298,7 +328,7 @@ function EventLoopGroup(;loop_count::Integer = 0, cpu_group::Union{Nothing, Inte
 
         return elg
     catch
-        event_loop_group_destroy!(elg)
+        close(elg)
         rethrow()
     end
 end
@@ -343,9 +373,9 @@ function _event_loop_group_try_destroy!(elg::EventLoopGroup)::Nothing
     _event_loop_group_ready_to_destroy(elg) || return nothing
 
     if _event_loop_group_called_from_loop_thread(elg)
-        errormonitor(Threads.@spawn event_loop_group_destroy!(elg))
+        errormonitor(Threads.@spawn close(elg))
     else
-        event_loop_group_destroy!(elg)
+        close(elg)
     end
     return nothing
 end
@@ -377,7 +407,7 @@ function event_loop_group_release!(elg::EventLoopGroup)::Nothing
     return nothing
 end
 
-function event_loop_group_destroy!(elg::EventLoopGroup)::Nothing
+function close(elg::EventLoopGroup)::Nothing
     expected = false
     if !(@atomicreplace elg.destroying expected => true).success
         return nothing
@@ -495,17 +525,16 @@ function task_sleep_ns(event_loop::EventLoop, ns::Integer)::Nothing
     end
 
     wake = Base.Threads.Event()
-    task = ScheduledTask(
-        TaskFn(function(status)
-            try; notify(wake); catch; end
-            return nothing
-        end);
-        type_tag = "task_sleep",
-    )
 
     now = clock_now_ns(event_loop.clock)
     run_at = add_u64_saturating(now, UInt64(ns))
-    event_loop_schedule_task_future!(event_loop, task, run_at)
+    schedule_task_future!(event_loop, run_at; type_tag = "task_sleep") do _
+        try
+            notify(wake)
+        catch
+        end
+        return nothing
+    end
 
     wait(wake)
     return nothing

@@ -209,34 +209,7 @@ end
     return ccall(f.ptr, Any, (Ptr{Cvoid}, Any, Any), f.objptr, slot, protocol)
 end
 
-# ── HostResolveCallback: typed resolver callback wrapper ──
-# (resolver, host_name, error_code, addresses) -> nothing.
-
-struct HostResolveCallback{F}
-    callback::F
-end
-
-@inline function (f::HostResolveCallback{F})(resolver, host_name, error_code::Int, addresses)::Nothing where {F}
-    f.callback(resolver, host_name, error_code, addresses)
-    return nothing
-end
-
-# ── HostResolveImpl: typed resolver implementation wrapper ──
-# Supports both forms:
-#   (host, impl_data) -> result
-#   (host, address_type, impl_data) -> result
-
-struct HostResolveImpl{F}
-    callable::F
-end
-
-@inline function (f::HostResolveImpl{F})(host, impl_data) where {F}
-    return f.callable(host, impl_data)
-end
-
-@inline function (f::HostResolveImpl{F})(host, address_type, impl_data) where {F}
-    return f.callable(host, address_type, impl_data)
-end
+# Host resolution hooks are represented as plain Julia callables (no cfunction wrapper needed).
 
 # ── TLS callback wrappers ──
 # Covers callback fields in TlsConnectionOptions + backend handlers.
@@ -437,17 +410,14 @@ end
 
 # ── ScheduledTask ──
 
-mutable struct ScheduledTask
+@kwdef mutable struct ScheduledTask
     fn::TaskFn
-    type_tag::String
-    timestamp::UInt64
-    scheduled::Bool
+    type_tag::String = "task"
+    timestamp::UInt64 = UInt64(0)
+    scheduled::Bool = false
 end
 
-function ScheduledTask(fn::TaskFn; type_tag::AbstractString = "task")
-    return ScheduledTask(fn, String(type_tag), UInt64(0), false)
-end
-
+ScheduledTask(fn::F; kw...) where {F} = ScheduledTask(; fn = TaskFn(fn), kw...)
 timestamp_less(a, b) = a.timestamp < b.timestamp
 
 mutable struct TaskScheduler
@@ -498,6 +468,16 @@ function task_scheduler_schedule_now!(scheduler::TaskScheduler, task::ScheduledT
     return nothing
 end
 
+function task_scheduler_schedule_now!(
+        scheduler::TaskScheduler,
+        callable::F;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    task_scheduler_schedule_now!(scheduler, task)
+    return task
+end
+
 function task_scheduler_schedule_future!(scheduler::TaskScheduler, task::ScheduledTask, time_to_run::UInt64)
     logf(
         LogLevel.TRACE,
@@ -506,6 +486,26 @@ function task_scheduler_schedule_future!(scheduler::TaskScheduler, task::Schedul
     task.scheduled = true
     push!(scheduler.timed, task)
     return nothing
+end
+
+function task_scheduler_schedule_future!(
+        scheduler::TaskScheduler,
+        callable::F,
+        time_to_run::UInt64;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    task = ScheduledTask(callable; type_tag = type_tag)
+    task_scheduler_schedule_future!(scheduler, task, time_to_run)
+    return task
+end
+
+function task_scheduler_schedule_future!(
+        scheduler::TaskScheduler,
+        callable::F,
+        time_to_run::Integer;
+        type_tag::AbstractString = "task",
+    ) where {F}
+    return task_scheduler_schedule_future!(scheduler, callable, UInt64(time_to_run); type_tag = type_tag)
 end
 
 function task_scheduler_cancel!(scheduler::TaskScheduler, task::ScheduledTask)

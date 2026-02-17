@@ -117,31 +117,25 @@ function ByteBufferInputStream(data::AbstractVector{UInt8}; owns_buffer::Bool = 
 end
 
 function stream_read(stream::ByteBufferInputStream, buffer::ByteBuffer, length::Integer)::Tuple{Csize_t, StreamStatus.T}
-    tracing_task_begin(tracing_input_stream_read)
-    try
-        available = stream.buffer.len - stream.position
-        space = buffer.capacity - buffer.len
-        to_read = min(Csize_t(length), available, space)
+    available = stream.buffer.len - stream.position
+    space = buffer.capacity - buffer.len
+    to_read = min(Csize_t(length), available, space)
 
-        if to_read == 0
-            return (Csize_t(0), available == 0 ? StreamStatus.END_OF_STREAM : StreamStatus.OK)
-        end
-
-        # Copy data
-        src_start = Int(stream.position) + 1
-        dst_start = Int(buffer.len) + 1
-        copyto!(buffer.mem, dst_start, stream.buffer.mem, src_start, Int(to_read))
-        buffer.len = buffer.len + to_read
-
-        stream.position += to_read
-
-        status = stream.position >= stream.buffer.len ? StreamStatus.END_OF_STREAM : StreamStatus.OK
-        return (to_read, status)
-    finally
-        tracing_task_end(tracing_input_stream_read)
+    if to_read == 0
+        return (Csize_t(0), available == 0 ? StreamStatus.END_OF_STREAM : StreamStatus.OK)
     end
-end
 
+    # Copy data
+    src_start = Int(stream.position) + 1
+    dst_start = Int(buffer.len) + 1
+    copyto!(buffer.mem, dst_start, stream.buffer.mem, src_start, Int(to_read))
+    buffer.len = buffer.len + to_read
+
+    stream.position += to_read
+
+    status = stream.position >= stream.buffer.len ? StreamStatus.END_OF_STREAM : StreamStatus.OK
+    return (to_read, status)
+end
 function stream_seek(stream::ByteBufferInputStream, offset::Int64, basis::StreamSeekBasis.T)::Nothing
     new_pos = if basis == StreamSeekBasis.BEGIN
         offset
@@ -249,50 +243,45 @@ function FileInputStream(file::Libc.FILE; close_on_cleanup::Bool = false)
 end
 
 function stream_read(stream::FileInputStream, buffer::ByteBuffer, length::Integer)::Tuple{Csize_t, StreamStatus.T}
-    tracing_task_begin(tracing_input_stream_read)
-    try
-        if stream.file === nothing
+    if stream.file === nothing
+        throw_error(ERROR_IO_STREAM_READ_FAILED)
+    end
+
+    space = buffer.capacity - buffer.len
+    to_read = min(Csize_t(length), space)
+
+    if to_read == 0
+        return (Csize_t(0), StreamStatus.OK)
+    end
+
+    bytes_read = Csize_t(0)
+    GC.@preserve buffer stream begin
+        dest_ptr = pointer(buffer.mem) + Int(buffer.len)
+        bytes_read = ccall(
+            :fread,
+            Csize_t,
+            (Ptr{Cvoid}, Csize_t, Csize_t, Ptr{Cvoid}),
+            dest_ptr,
+            1,
+            to_read,
+            stream.file.ptr,
+        )
+    end
+
+    if bytes_read == 0
+        if ccall(:ferror, Cint, (Ptr{Cvoid},), stream.file.ptr) != 0
             throw_error(ERROR_IO_STREAM_READ_FAILED)
         end
-
-        space = buffer.capacity - buffer.len
-        to_read = min(Csize_t(length), space)
-
-        if to_read == 0
-            return (Csize_t(0), StreamStatus.OK)
-        end
-
-        bytes_read = Csize_t(0)
-        GC.@preserve buffer stream begin
-            dest_ptr = pointer(buffer.mem) + Int(buffer.len)
-            bytes_read = ccall(
-                :fread,
-                Csize_t,
-                (Ptr{Cvoid}, Csize_t, Csize_t, Ptr{Cvoid}),
-                dest_ptr,
-                1,
-                to_read,
-                stream.file.ptr,
-            )
-        end
-
-        if bytes_read == 0
-            if ccall(:ferror, Cint, (Ptr{Cvoid},), stream.file.ptr) != 0
-                throw_error(ERROR_IO_STREAM_READ_FAILED)
-            end
-        end
-
-        if bytes_read > 0
-            buffer.len = buffer.len + bytes_read
-        end
-
-        status = ccall(:feof, Cint, (Ptr{Cvoid},), stream.file.ptr) != 0 ?
-            StreamStatus.END_OF_STREAM :
-            StreamStatus.OK
-        return (bytes_read, status)
-    finally
-        tracing_task_end(tracing_input_stream_read)
     end
+
+    if bytes_read > 0
+        buffer.len = buffer.len + bytes_read
+    end
+
+    status = ccall(:feof, Cint, (Ptr{Cvoid},), stream.file.ptr) != 0 ?
+        StreamStatus.END_OF_STREAM :
+        StreamStatus.OK
+    return (bytes_read, status)
 end
 
 function stream_seek(stream::FileInputStream, offset::Int64, basis::StreamSeekBasis.T)::Nothing
@@ -413,29 +402,24 @@ function CursorInputStream(cursor::ByteCursor)
 end
 
 function stream_read(stream::CursorInputStream, buffer::ByteBuffer, length::Integer)::Tuple{Csize_t, StreamStatus.T}
-    tracing_task_begin(tracing_input_stream_read)
-    try
-        available = stream.cursor.len - stream.position
-        space = buffer.capacity - buffer.len
-        to_read = min(Csize_t(length), available, space)
+    available = stream.cursor.len - stream.position
+    space = buffer.capacity - buffer.len
+    to_read = min(Csize_t(length), available, space)
 
-        if to_read == 0
-            return (Csize_t(0), available == 0 ? StreamStatus.END_OF_STREAM : StreamStatus.OK)
-        end
-
-        src_ref = memref_advance(stream.cursor.ptr, Int(stream.position))
-        src_mem = parent(src_ref)
-        src_start = memref_offset(src_ref)
-        copyto!(buffer.mem, Int(buffer.len) + 1, src_mem, src_start, Int(to_read))
-        buffer.len = buffer.len + to_read
-
-        stream.position += to_read
-
-        status = stream.position >= stream.cursor.len ? StreamStatus.END_OF_STREAM : StreamStatus.OK
-        return (to_read, status)
-    finally
-        tracing_task_end(tracing_input_stream_read)
+    if to_read == 0
+        return (Csize_t(0), available == 0 ? StreamStatus.END_OF_STREAM : StreamStatus.OK)
     end
+
+    src_ref = memref_advance(stream.cursor.ptr, Int(stream.position))
+    src_mem = parent(src_ref)
+    src_start = memref_offset(src_ref)
+    copyto!(buffer.mem, Int(buffer.len) + 1, src_mem, src_start, Int(to_read))
+    buffer.len = buffer.len + to_read
+
+    stream.position += to_read
+
+    status = stream.position >= stream.cursor.len ? StreamStatus.END_OF_STREAM : StreamStatus.OK
+    return (to_read, status)
 end
 
 function stream_seek(stream::CursorInputStream, offset::Int64, basis::StreamSeekBasis.T)::Nothing

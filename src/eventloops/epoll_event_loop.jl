@@ -20,11 +20,7 @@
         return _epoll_handle_data_key(handle.additional_ref)
     end
 
-    # Channel-based rendezvous for passing EventLoop to the thread function.
-    const _EPOLL_THREAD_STARTUP = Channel{Any}(1)
-
-    @wrap_thread_fn function _epoll_event_loop_thread_entry()
-        event_loop = take!(_EPOLL_THREAD_STARTUP)::EventLoop
+    @wrap_thread_fn function _epoll_event_loop_thread_entry(event_loop::EventLoop)
         try
             epoll_event_loop_thread(event_loop)
         catch e
@@ -32,9 +28,8 @@
             Base.showerror(Core.stdout, e, catch_backtrace())
             Core.println()
         finally
-            impl = event_loop.impl_data
+            impl = event_loop.impl
             notify(impl.completion_event)
-            managed_thread_finished!()
         end
     end
 
@@ -98,9 +93,7 @@
     end
 
     # Create a new epoll event loop
-    function event_loop_new_with_epoll(
-            clock::ClockSource = HighResClock(),
-        )::EventLoop
+    function event_loop_new_with_epoll()::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered epoll event loop")
 
         impl = EpollEventLoop()
@@ -140,16 +133,12 @@
         end
 
         impl.should_continue = false
-
-        # Create the event loop
-        event_loop = EventLoop(clock, impl)
-
-        return event_loop
+        return EventLoop(impl)
     end
 
     # Stop task callback
     function epoll_stop_task_callback(event_loop::EventLoop, status::TaskStatus.T)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         # Now okay to reschedule stop tasks
         @atomic impl.stop_task_scheduled = false
@@ -162,8 +151,8 @@
     end
 
     # Run the event loop
-    function event_loop_run!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
+    function run!(event_loop::EventLoop, impl::EpollEventLoop)::Nothing
+        impl = event_loop.impl
         event_loop_running = @atomic event_loop.running
         thread_ready = impl.thread_state == EpollEventThreadState.READY_TO_RUN
 
@@ -186,11 +175,14 @@
         @atomic impl.running_thread_id = UInt64(0)
 
         # Launch the event loop thread via ForeignThread
-        put!(_EPOLL_THREAD_STARTUP, event_loop)
         try
-            impl.thread_created_on = ForeignThread("aws-el-epoll", _EPOLL_THREAD_ENTRY_C)
+            impl.thread_created_on = ForeignThread(
+                "aws-el-epoll",
+                _EPOLL_THREAD_ENTRY_C,
+                event_loop;
+                join_strategy = ThreadJoinStrategy.MANUAL,
+            )
         catch
-            take!(_EPOLL_THREAD_STARTUP)  # drain on failure
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             impl.should_continue = false
             impl.thread_state = EpollEventThreadState.READY_TO_RUN
@@ -217,8 +209,8 @@
     end
 
     # Stop the event loop
-    function event_loop_stop!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
+    function stop!(event_loop::EventLoop, impl::EpollEventLoop)::Nothing
+        impl = event_loop.impl
 
         if !@atomic event_loop.running
             return nothing
@@ -246,25 +238,22 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Stopping event-loop thread")
 
         # Create and schedule stop task
-        impl.stop_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    epoll_stop_task_callback(event_loop, _coerce_task_status(status))
-                catch e
-                    Core.println("epoll_stop task errored")
-                end
-                return nothing
-            end);
-            type_tag = "epoll_event_loop_stop",
-        )
-        event_loop_schedule_task_now!(event_loop, impl.stop_task)
+        impl.stop_task = ScheduledTask(; type_tag = "epoll_event_loop_stop") do status
+            try
+                epoll_stop_task_callback(event_loop, _coerce_task_status(status))
+            catch e
+                Core.println("epoll_stop task errored")
+            end
+            return nothing
+        end
+        schedule_task_now!(event_loop, impl.stop_task)
 
         return nothing
     end
 
     # Wait for the event loop to stop
-    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
+    function wait_for_stop_completion(event_loop::EventLoop, impl::EpollEventLoop)::Nothing
+        impl = event_loop.impl
 
         if impl.thread_created_on !== nothing
             wait(impl.completion_event)
@@ -283,7 +272,7 @@
 
     # Schedule task cross-thread
     function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         should_signal = false
         lock(impl.task_pre_queue_mutex)
@@ -390,7 +379,7 @@
 
     # Schedule task common implementation
     function schedule_task_common(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         # If we're on the event thread, schedule directly
         if event_loop_thread_is_callers_thread(event_loop)
@@ -432,24 +421,24 @@
     end
 
     # Schedule task now
-    function event_loop_schedule_task_now!(event_loop::EventLoop, task::ScheduledTask)
+    function schedule_task_now!(event_loop::EventLoop, impl::EpollEventLoop, task::ScheduledTask)
         schedule_task_common(event_loop, task, UInt64(0))
     end
 
     # Schedule task now (serialized - always goes cross-thread)
-    function event_loop_schedule_task_now_serialized!(event_loop::EventLoop, task::ScheduledTask)
+    function schedule_task_now_serialized!(event_loop::EventLoop, impl::EpollEventLoop, task::ScheduledTask)
         schedule_task_cross_thread(event_loop, task, UInt64(0))
     end
 
     # Schedule task future
-    function event_loop_schedule_task_future!(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function schedule_task_future!(event_loop::EventLoop, impl::EpollEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         schedule_task_common(event_loop, task, run_at_nanos)
     end
 
     # Cancel task
-    function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
+    function cancel_task!(event_loop::EventLoop, impl::EpollEventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling %s task", " ", task.type_tag))
         removed = false
         lock(impl.task_pre_queue_mutex)
@@ -478,15 +467,16 @@
     end
 
     # Check if on event thread
-    function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
-        impl = event_loop.impl_data
+    function event_loop_thread_is_callers_thread(event_loop::EventLoop, impl::EpollEventLoop)::Bool
+        impl = event_loop.impl
         running_id = @atomic impl.running_thread_id
         return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
     end
 
     # Subscribe to IO events
-    function event_loop_subscribe_to_io_events!(
+    function subscribe_to_io_events!(
             event_loop::EventLoop,
+            impl::EpollEventLoop,
             handle::IoHandle,
             events::Int,
             on_event::EventCallable,
@@ -505,7 +495,7 @@
         # Store handle data reference
         epoll_store_handle_data!(handle, epoll_event_data)
 
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         if impl.epoll_fd < 0
             epoll_release_handle_data!(handle)
             throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
@@ -556,11 +546,6 @@
         return nothing
     end
 
-    # Free IO event resources
-    function event_loop_free_io_event_resources!(event_loop::EventLoop, handle::IoHandle)
-        return nothing
-    end
-
     # Cleanup task callback
     function epoll_unsubscribe_cleanup_task_callback(
             event_loop::EventLoop,
@@ -570,7 +555,7 @@
         )
         event_data.cleanup_task = nothing
 
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         status == TaskStatus.CANCELED && return nothing
 
         lock(impl.subscribed_handle_data_mutex)
@@ -586,8 +571,9 @@
     end
 
     # Unsubscribe from IO events
-    function event_loop_unsubscribe_from_io_events!(
+    function unsubscribe_from_io_events!(
             event_loop::EventLoop,
+            impl::EpollEventLoop,
             handle::IoHandle,
         )::Nothing
         if handle.fd < 0
@@ -598,7 +584,7 @@
         end
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
 
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         if impl.epoll_fd < 0
             throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
         end
@@ -637,25 +623,22 @@
             unlock(impl.subscribed_handle_data_mutex)
         end
 
-        event_data.cleanup_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    epoll_unsubscribe_cleanup_task_callback(
-                        event_loop,
-                        handle_data_key,
-                        event_data,
-                        _coerce_task_status(status),
-                    )
-                catch e
-                    Core.println("epoll_cleanup task errored")
-                end
-                return nothing
-            end);
-            type_tag = "epoll_event_loop_unsubscribe_cleanup",
-        )
+        event_data.cleanup_task = ScheduledTask(; type_tag = "epoll_event_loop_unsubscribe_cleanup") do status
+            try
+                epoll_unsubscribe_cleanup_task_callback(
+                    event_loop,
+                    handle_data_key,
+                    event_data,
+                    _coerce_task_status(status),
+                )
+            catch e
+                Core.println("epoll_cleanup task errored")
+            end
+            return nothing
+        end
 
         if (@atomic event_loop.running)
-            event_loop_schedule_task_now!(event_loop, event_data.cleanup_task)
+            schedule_task_now!(event_loop, event_data.cleanup_task)
         else
             epoll_unsubscribe_cleanup_task_callback(
                 event_loop,
@@ -673,7 +656,7 @@
     # Callback for cross-thread task pipe/eventfd
     function on_tasks_to_schedule(event_loop::EventLoop, events::Int)
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread tasks to schedule")
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         if (events & Int(IoEventType.READABLE)) == 0
             if events != 0
@@ -698,7 +681,7 @@
 
     # Process cross-thread task queue
     function process_task_pre_queue(event_loop::EventLoop)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
 
@@ -792,7 +775,7 @@
     # Main event loop thread function
     function epoll_event_loop_thread(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "main loop started")
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         subscribed_for_task_notifications = false
 
         # Set running thread ID
@@ -802,7 +785,7 @@
             # Subscribe to events on the read task handle for cross-thread notifications.
             # Signal `startup_event` once subscription is complete.
             try
-                event_loop_subscribe_to_io_events!(
+                subscribe_to_io_events!(
                     event_loop,
                     impl.read_task_handle,
                     Int(IoEventType.READABLE),
@@ -859,91 +842,81 @@
                     logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "expanded epoll event wait capacity to $event_wait_capacity")
                 end
 
-                event_loop_register_tick_start!(event_loop)
+                register_tick_start!(event_loop)
 
                 logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("wake up with %d events to process", " ", event_count))
 
                 # Process events
-                if event_count > 0
-                    tracing_task_begin(tracing_event_loop_events)
-                end
                 for i in 1:event_count
-                    tracing_task_begin(tracing_event_loop_event)
+                    ev = events[i]
+                    event_data_key = UInt64(UInt(_epoll_event_data_ptr(ev)))
+                    event_data = nothing
+
+                    if event_data_key == 0
+                        continue
+                    end
+
+                    lock(impl.subscribed_handle_data_mutex)
                     try
-                        ev = events[i]
-                        event_data_key = UInt64(UInt(_epoll_event_data_ptr(ev)))
-                        event_data = nothing
+                        event_data = get(impl.subscribed_handle_data, event_data_key, nothing)
+                    finally
+                        unlock(impl.subscribed_handle_data_mutex)
+                    end
+                    if event_data === nothing
+                        logf(
+                            LogLevel.TRACE,
+                            LS_IO_EVENT_LOOP,
+                            "skipping event for stale or unknown handle id $event_data_key",
+                        )
+                        continue
+                    end
 
-                        if event_data_key == 0
-                            continue
-                        end
-                        lock(impl.subscribed_handle_data_mutex)
+                    # Convert epoll events to our event mask
+                    event_mask = 0
+
+                    if (ev.events & EPOLLIN) != 0
+                        event_mask |= Int(IoEventType.READABLE)
+                    end
+
+                    if (ev.events & EPOLLOUT) != 0
+                        event_mask |= Int(IoEventType.WRITABLE)
+                    end
+
+                    if (ev.events & EPOLLRDHUP) != 0
+                        event_mask |= Int(IoEventType.REMOTE_HANG_UP)
+                    end
+
+                    if (ev.events & EPOLLHUP) != 0
+                        event_mask |= Int(IoEventType.CLOSED)
+                    end
+
+                    if (ev.events & EPOLLERR) != 0
+                        event_mask |= Int(IoEventType.ERROR)
+                    end
+
+                    if event_data.is_subscribed
+                        logf(
+                            LogLevel.TRACE,
+                            LS_IO_EVENT_LOOP,
+                            "activity on fd $(event_data.handle.fd) invoking handler",
+                        )
                         try
-                            event_data = get(impl.subscribed_handle_data, event_data_key, nothing)
-                        finally
-                            unlock(impl.subscribed_handle_data_mutex)
-                        end
-                        if event_data === nothing
-                            logf(
-                                LogLevel.TRACE,
-                                LS_IO_EVENT_LOOP,
-                                "skipping event for stale or unknown handle id $event_data_key",
-                            )
-                            continue
-                        end
-
-                        # Convert epoll events to our event mask
-                        event_mask = 0
-
-                        if (ev.events & EPOLLIN) != 0
-                            event_mask |= Int(IoEventType.READABLE)
-                        end
-
-                        if (ev.events & EPOLLOUT) != 0
-                            event_mask |= Int(IoEventType.WRITABLE)
-                        end
-
-                        if (ev.events & EPOLLRDHUP) != 0
-                            event_mask |= Int(IoEventType.REMOTE_HANG_UP)
-                        end
-
-                        if (ev.events & EPOLLHUP) != 0
-                            event_mask |= Int(IoEventType.CLOSED)
-                        end
-
-                        if (ev.events & EPOLLERR) != 0
-                            event_mask |= Int(IoEventType.ERROR)
-                        end
-
-                        if event_data.is_subscribed
-                            logf(
-                                LogLevel.TRACE,
-                                LS_IO_EVENT_LOOP,
-                                "activity on fd $(event_data.handle.fd) invoking handler",
-                            )
-                            try
-                                event_data.on_event(event_mask)
-                            catch e
-                                if e isa ReseauError &&
-                                    (e.code == ERROR_IO_SOCKET_CLOSED ||
-                                    e.code == ERROR_IO_SOCKET_NOT_CONNECTED ||
-                                    e.code == ERROR_IO_READ_WOULD_BLOCK)
-                                    logf(
-                                        LogLevel.DEBUG,
-                                        LS_IO_EVENT_LOOP,
-                                        "ignoring non-fatal IO callback error during event dispatch: $(e.code)",
-                                    )
-                                else
-                                    logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "unhandled IO callback exception during event dispatch: $e")
-                                end
+                            event_data.on_event(event_mask)
+                        catch e
+                            if e isa ReseauError &&
+                                (e.code == ERROR_IO_SOCKET_CLOSED ||
+                                e.code == ERROR_IO_SOCKET_NOT_CONNECTED ||
+                                e.code == ERROR_IO_READ_WOULD_BLOCK)
+                                logf(
+                                    LogLevel.DEBUG,
+                                    LS_IO_EVENT_LOOP,
+                                    "ignoring non-fatal IO callback error during event dispatch: $(e.code)",
+                                )
+                            else
+                                logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "unhandled IO callback exception during event dispatch: $e")
                             end
                         end
-                    finally
-                        tracing_task_end(tracing_event_loop_event)
                     end
-                end
-                if event_count > 0
-                    tracing_task_end(tracing_event_loop_events)
                 end
 
                 # Process cross-thread tasks
@@ -951,31 +924,24 @@
 
                 # Run scheduled tasks
                 now_ns = try
-                    clock_now_ns(event_loop.clock)
+                    clock_now_ns()
                 catch
                     UInt64(0)
                 end
 
                 logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
-                tracing_task_begin(tracing_event_loop_run_tasks)
+                lock(impl.task_pre_queue_mutex)
                 try
-                    lock(impl.task_pre_queue_mutex)
-                    try
-                        task_scheduler_run_all!(impl.scheduler, now_ns)
-                    finally
-                        unlock(impl.task_pre_queue_mutex)
-                    end
-                catch e
-                    logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "unhandled scheduled-task exception in main loop: $e")
+                    task_scheduler_run_all!(impl.scheduler, now_ns)
                 finally
-                    tracing_task_end(tracing_event_loop_run_tasks)
+                    unlock(impl.task_pre_queue_mutex)
                 end
 
                 # Calculate next timeout
                 use_default_timeout = false
 
                 try
-                    now_ns = clock_now_ns(event_loop.clock)
+                    now_ns = clock_now_ns()
                 catch
                     use_default_timeout = true
                 end
@@ -1012,14 +978,14 @@
                     timeout = Cint(timeout_ms)
                 end
 
-                event_loop_register_tick_end!(event_loop)
+                register_tick_end!(event_loop)
             end
 
             logf(LogLevel.DEBUG, LS_IO_EVENT_LOOP, "exiting main loop")
         finally
             if subscribed_for_task_notifications
                 try
-                    event_loop_unsubscribe_from_io_events!(event_loop, impl.read_task_handle)
+                    unsubscribe_from_io_events!(event_loop, impl.read_task_handle)
                 catch e
                     logf(
                         LogLevel.ERROR,
@@ -1044,15 +1010,15 @@
     end
 
     # Destroy epoll event loop
-    function event_loop_complete_destroy!(event_loop::EventLoop)
+    function close(event_loop::EventLoop, impl::EpollEventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "destroying event_loop")
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         destroy_error = nothing
 
         try
             # Stop and wait
-            event_loop_stop!(event_loop)
-            event_loop_wait_for_stop_completion!(event_loop)
+            stop!(event_loop)
+            wait_for_stop_completion(event_loop)
 
             # Set thread ID for cancellation callbacks
             impl.thread_joined_to = UInt64(Base.Threads.threadid())
@@ -1146,8 +1112,6 @@
                 end
             end
             impl.epoll_fd = Int32(-1)
-
-            _event_loop_clean_up_shared_resources!(event_loop)
         end
 
         destroy_error === nothing || throw(destroy_error)

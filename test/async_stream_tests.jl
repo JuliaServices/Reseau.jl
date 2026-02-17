@@ -84,7 +84,7 @@ function _async_test_read(stream::Sockets.AsyncInputStream, dest::Reseau.ByteBuf
             task = Reseau.ScheduledTask(Reseau.TaskFn(status -> do_read!());
                 type_tag = "async_stream_test_read",
             )
-            EventLoops.event_loop_schedule_task_now!(state.event_loop, task)
+            EventLoops.schedule_task_now!(state.event_loop, task)
         else
             do_read!()
         end
@@ -94,7 +94,7 @@ function _async_test_read(stream::Sockets.AsyncInputStream, dest::Reseau.ByteBuf
             task = Reseau.ScheduledTask(Reseau.TaskFn(status -> do_read!());
                 type_tag = "async_stream_test_read",
             )
-            EventLoops.event_loop_schedule_task_now!(state.event_loop, task)
+            EventLoops.schedule_task_now!(state.event_loop, task)
         else
             do_read!()
         end
@@ -131,7 +131,7 @@ end
 
 @testset "async input stream read_to_fill async" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     state = AsyncStreamTestState(data = collect(codeunits("abcd")), event_loop = event_loop, completion_strategy = :event_loop)
     stream = Sockets.AsyncInputStream(_async_test_read, s -> nothing, state)
 
@@ -142,12 +142,12 @@ end
     @test EventLoops.future_get_result(fut) == true
     @test String(Reseau.byte_cursor_from_buf(dest)) == "abcd"
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "async input stream fill completes on thread" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     state = AsyncStreamTestState(
         data = collect(codeunits("123456789")),
         event_loop = event_loop,
@@ -170,7 +170,7 @@ end
     @test EventLoops.future_get_result(fut2) == true
     @test String(Reseau.byte_cursor_from_buf(buf)) == "6789"
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "async input stream fill completes immediately" begin
@@ -198,7 +198,7 @@ end
 
 @testset "async input stream fill completes randomly" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     state = AsyncStreamTestState(
         data = collect(codeunits("123456789")),
         event_loop = event_loop,
@@ -221,7 +221,7 @@ end
     @test EventLoops.future_get_result(fut2) == true
     @test String(Reseau.byte_cursor_from_buf(buf)) == "6789"
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "async input stream fill eof requires extra read" begin

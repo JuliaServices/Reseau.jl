@@ -227,7 +227,7 @@ function _cancel_accept_retry_task_if_needed!(socket_impl::PosixSocket, event_lo
     end
 
     if event_loop !== nothing
-        event_loop_cancel_task!(event_loop, socket_impl.accept_retry_task)
+        cancel_task!(event_loop, socket_impl.accept_retry_task)
     end
     socket_impl.accept_retry_task = nothing
     return nothing
@@ -249,26 +249,23 @@ function _schedule_connect_poll_retry_task!(sock::Socket, connect_args::PosixSoc
         return nothing
     end
 
-    event_loop_schedule_task_future!(
+    schedule_task_future!(
         connect_loop,
-        ScheduledTask(
-            TaskFn(function(status)
-                status = _coerce_task_status(status)
-                if sock.impl === nothing || status != TaskStatus.RUN_READY
-                    return nothing
-                end
+        clock_now_ns() + _SOCKET_CONNECT_RETRY_DELAY_NS;
+        type_tag = "posix_connect_poll_retry",
+    ) do status
+        status = _coerce_task_status(status)
+        if sock.impl === nothing || status != TaskStatus.RUN_READY
+            return nothing
+        end
 
-                if connect_args.socket === nothing || !(_posix_impl(sock).currently_subscribed)
-                    return nothing
-                end
+        if connect_args.socket === nothing || !(_posix_impl(sock).currently_subscribed)
+            return nothing
+        end
 
-                _run_connect_poll(connect_args, status)
-                return nothing
-            end);
-            type_tag = "posix_connect_poll_retry",
-        ),
-        event_loop_current_clock_time(connect_loop) + _SOCKET_CONNECT_RETRY_DELAY_NS,
-    )
+        _run_connect_poll(connect_args, status)
+        return nothing
+    end
 
     return nothing
 end
@@ -293,36 +290,33 @@ function _schedule_accept_retry_task!(sock::Socket)
     end
 
     fd = sock.io_handle.fd
-    retry_task = ScheduledTask(
-        TaskFn(function(status)
-            status = _coerce_task_status(status)
-            if sock.impl === nothing || status != TaskStatus.RUN_READY
-                if sock.impl !== nothing
-                    _posix_impl(sock).accept_retry_task = nothing
-                end
-                return nothing
+    retry_task = ScheduledTask(; type_tag = "posix_socket_start_accept_retry") do status
+        status = _coerce_task_status(status)
+        if sock.impl === nothing || status != TaskStatus.RUN_READY
+            if sock.impl !== nothing
+                _posix_impl(sock).accept_retry_task = nothing
             end
-
-            socket_impl = _posix_impl(sock)
-            socket_impl.accept_retry_task = nothing
-
-            if sock.event_loop !== accept_loop ||
-                !socket_impl.continue_accept ||
-                !socket_impl.currently_subscribed
-                return nothing
-            end
-
-            _socket_accept_event(sock, Int(IoEventType.READABLE))
             return nothing
-        end);
-        type_tag = "posix_socket_start_accept_retry",
-    )
+        end
+
+        socket_impl = _posix_impl(sock)
+        socket_impl.accept_retry_task = nothing
+
+        if sock.event_loop !== accept_loop ||
+            !socket_impl.continue_accept ||
+            !socket_impl.currently_subscribed
+            return nothing
+        end
+
+        _socket_accept_event(sock, Int(IoEventType.READABLE))
+        return nothing
+    end
     socket_impl.accept_retry_task = retry_task
 
-    event_loop_schedule_task_future!(
+    schedule_task_future!(
         accept_loop,
         retry_task,
-        event_loop_current_clock_time(accept_loop) + _SOCKET_ACCEPT_RETRY_DELAY_NS,
+        clock_now_ns() + _SOCKET_ACCEPT_RETRY_DELAY_NS,
     )
 
     return nothing
@@ -728,10 +722,17 @@ function socket_cleanup_impl(::PosixSocket, sock::Socket)
 end
 
 # POSIX impl - connect
-function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnectOptions)::Nothing
-    remote_endpoint = options.remote_endpoint
-    event_loop = options.event_loop
-    on_connection_result = options.on_connection_result
+function socket_connect_impl(
+        ::PosixSocket,
+        sock::Socket,
+        remote_endpoint::SocketEndpoint,
+        event_loop::Union{EventLoop, Nothing},
+        event_loop_group::Union{EventLoopGroup, Nothing},
+        on_connection_result::Union{EventCallable, Nothing},
+        tls_connection_options::MaybeTlsConnectionOptions,
+    )::Nothing
+    _ = event_loop_group
+    _ = tls_connection_options
 
     fd = sock.io_handle.fd
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: beginning connect")
@@ -847,18 +848,15 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: connected immediately")
 
         # Schedule success callback
-        connect_args.task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    _run_connect_success(connect_args, _coerce_task_status(status))
-                catch e
-                    Core.println("posix_connect_success task errored")
-                end
-                return nothing
-            end);
-            type_tag = "posix_connect_success",
-        )
-        event_loop_schedule_task_now!(event_loop, connect_args.task)
+        connect_args.task = ScheduledTask(; type_tag = "posix_connect_success") do status
+            try
+                _run_connect_success(connect_args, _coerce_task_status(status))
+            catch e
+                Core.println("posix_connect_success task errored")
+            end
+            return nothing
+        end
+        schedule_task_now!(event_loop, connect_args.task)
         return nothing
     end
 
@@ -866,42 +864,33 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: connection pending")
 
         # Create timeout task
-        timeout_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    _handle_socket_timeout(connect_args, _coerce_task_status(status))
-                catch e
-                    Core.println("posix_connect_timeout task errored")
-                end
-                return nothing
-            end);
-            type_tag = "posix_connect_timeout",
-        )
+        timeout_task = ScheduledTask(; type_tag = "posix_connect_timeout") do status
+            try
+                _handle_socket_timeout(connect_args, _coerce_task_status(status))
+            catch e
+                Core.println("posix_connect_timeout task errored")
+            end
+            return nothing
+        end
         connect_args.task = timeout_task
 
         # Subscribe to write events (connection completion triggers writable)
         socket_impl.currently_subscribed = true
         try
-            event_loop_subscribe_to_io_events!(
+            subscribe_to_io_events!(
                 event_loop,
                 sock.io_handle,
                 Int(IoEventType.WRITABLE),
                 EventCallable(events -> _socket_connect_event(connect_args, events)),
             )
-            event_loop_schedule_task_now!(
-                event_loop,
-                ScheduledTask(
-                    TaskFn(function(status)
-                        try
-                            _run_connect_poll(connect_args, _coerce_task_status(status))
-                        catch e
-                            Core.println("posix_connect_poll task errored")
-                        end
-                        return nothing
-                    end);
-                    type_tag = "posix_connect_poll",
-                ),
-            )
+            schedule_task_now!(event_loop; type_tag = "posix_connect_poll") do status
+                try
+                    _run_connect_poll(connect_args, _coerce_task_status(status))
+                catch e
+                    Core.println("posix_connect_poll task errored")
+                end
+                return nothing
+            end
         catch
             logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to subscribe to event loop")
             socket_impl.currently_subscribed = false
@@ -911,11 +900,11 @@ function socket_connect_impl(::PosixSocket, sock::Socket, options::SocketConnect
         end
 
         # Schedule timeout
-        timeout_ns = event_loop_current_clock_time(event_loop)
+        timeout_ns = clock_now_ns()
         timeout_ns += UInt64(sock.options.connect_timeout_ms) * 1_000_000  # ms to ns
 
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: scheduling timeout at $timeout_ns")
-        event_loop_schedule_task_future!(event_loop, timeout_task, timeout_ns)
+        schedule_task_future!(event_loop, timeout_task, timeout_ns)
 
         return nothing
     end
@@ -1031,33 +1020,30 @@ function _schedule_socket_readable_recheck_task(
         return nothing
     end
 
-    event_loop_schedule_task_future!(
+    schedule_task_future!(
         event_loop,
-        ScheduledTask(
-            TaskFn(function(status)
-                status = _coerce_task_status(status)
-                if status != TaskStatus.RUN_READY
-                    return nothing
-                end
+        clock_now_ns() + _SOCKET_READABLE_RETRY_DELAY_NS;
+        type_tag = "posix_socket_readable_retry",
+    ) do status
+        status = _coerce_task_status(status)
+        if status != TaskStatus.RUN_READY
+            return nothing
+        end
 
-                if sock.readable_fn === nothing || sock.impl === nothing
-                    return nothing
-                end
+        if sock.readable_fn === nothing || sock.impl === nothing
+            return nothing
+        end
 
-                if _is_socket_readable_now(fd)
-                    _on_socket_io_event(sock, Int(IoEventType.READABLE))
-                    return nothing
-                end
+        if _is_socket_readable_now(fd)
+            _on_socket_io_event(sock, Int(IoEventType.READABLE))
+            return nothing
+        end
 
-                if retries_left > 1
-                    _schedule_socket_readable_recheck_task(sock, fd, retries_left - 1, allow_dgram)
-                end
-                return nothing
-            end);
-            type_tag = "posix_socket_readable_retry",
-        ),
-        event_loop_current_clock_time(event_loop) + _SOCKET_READABLE_RETRY_DELAY_NS,
-    )
+        if retries_left > 1
+            _schedule_socket_readable_recheck_task(sock, fd, retries_left - 1, allow_dgram)
+        end
+        return nothing
+    end
     return nothing
 end
 
@@ -1083,7 +1069,7 @@ function _on_connection_success(sock::Socket)
     fd = sock.io_handle.fd
 
     if socket_impl.currently_subscribed
-        event_loop_unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
+        unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
         socket_impl.currently_subscribed = false
     end
 
@@ -1128,7 +1114,7 @@ function _on_connection_success(sock::Socket)
 
     # Invoke success callback
     if sock.connection_result_fn !== nothing
-        sock.connection_result_fn(AWS_OP_SUCCESS)
+        sock.connection_result_fn(OP_SUCCESS)
     end
     return nothing
 end
@@ -1177,7 +1163,7 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
             end
             if socket_impl.currently_subscribed && sock.event_loop !== nothing
                 try
-                    event_loop_unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
+                    unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
                 catch e
                 end
             end
@@ -1215,10 +1201,9 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs{S}, status:
                 _on_connection_success(sock)
                 return nothing
             end
-            event_loop_unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
+            unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
         else
             error_code = ERROR_IO_EVENT_LOOP_SHUTDOWN
-            event_loop_free_io_event_resources!(sock.event_loop, sock.io_handle)
         end
 
         sock.event_loop = nothing
@@ -1269,7 +1254,7 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
 
     aws_error = socket_get_error(sock)
 
-    if aws_error == AWS_OP_SUCCESS
+    if aws_error == OP_SUCCESS
         if _is_socket_connect_ready_for_completion(fd)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
@@ -1295,7 +1280,7 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
 
     if socket_impl.currently_subscribed && sock.event_loop !== nothing
         try
-            event_loop_unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
+            unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
         catch e
         end
         socket_impl.currently_subscribed = false
@@ -1345,14 +1330,14 @@ function _update_local_endpoint!(sock::Socket)
     elseif family == AF_UNIX
         # Find null terminator
         path_start = 3
-        path_end = path_start
+        path_end = path_start - 1
         for i in path_start:min(path_start + 107, length(address))
             if address[i] == 0
                 break
             end
             path_end = i
         end
-        path = String(address[path_start:path_end])
+        path = path_end >= path_start ? String(address[path_start:path_end]) : ""
         set_address!(sock.local_endpoint, path)
         sock.local_endpoint.port = UInt32(0)
         return nothing
@@ -1370,8 +1355,15 @@ function _update_local_endpoint!(sock::Socket)
 end
 
 # POSIX impl - bind
-function socket_bind_impl(::PosixSocket, sock::Socket, options::SocketBindOptions)::Nothing
-    local_endpoint = options.local_endpoint
+function socket_bind_impl(
+        ::PosixSocket,
+        sock::Socket,
+        local_endpoint::SocketEndpoint,
+        event_loop::Union{EventLoop, Nothing},
+        tls_connection_options::MaybeTlsConnectionOptions,
+    )::Nothing
+    _ = event_loop
+    _ = tls_connection_options
     fd = sock.io_handle.fd
 
     if sock.state != SocketState.INIT
@@ -1519,7 +1511,7 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
             if sock.state == SocketState.LISTENING
                 socket_stop_accept(sock)
             else
-                event_loop_unsubscribe_from_io_events!(event_loop, sock.io_handle)
+                unsubscribe_from_io_events!(event_loop, sock.io_handle)
             end
             socket_impl.currently_subscribed = false
             sock.event_loop = nothing
@@ -1544,7 +1536,7 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
 
         # Cancel written task if scheduled
         if socket_impl.written_task_scheduled && event_loop !== nothing
-            event_loop_cancel_task!(event_loop, socket_impl.written_task)
+            cancel_task!(event_loop, socket_impl.written_task)
         end
 
         # Complete pending writes with error
@@ -1618,7 +1610,7 @@ function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loo
     socket_impl.has_pending_readable_event = false
 
     try
-        event_loop_subscribe_to_io_events!(
+        subscribe_to_io_events!(
             event_loop,
             sock.io_handle,
             Int(IoEventType.WRITABLE) | Int(IoEventType.READABLE),
@@ -1633,22 +1625,16 @@ function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loo
 
     # In edge-triggered mode, data can arrive before a readable callback is registered,
     # and epoll may miss that readiness transition.
-    event_loop_schedule_task_now!(
-        event_loop,
-        ScheduledTask(
-            TaskFn(function(status)
-                try
-                    status = _coerce_task_status(status)
-                    status == TaskStatus.CANCELED && return nothing
-                    _on_socket_io_event(sock, Int(IoEventType.READABLE) | Int(IoEventType.WRITABLE))
-                catch e
-                    Core.println("socket assign immediate io poll task errored")
-                end
-                return nothing
-            end);
-            type_tag = "posix_socket_assign_immediate_io_poll",
-        ),
-    )
+    schedule_task_now!(event_loop; type_tag = "posix_socket_assign_immediate_io_poll") do status
+        try
+            status = _coerce_task_status(status)
+            status == TaskStatus.CANCELED && return nothing
+            _on_socket_io_event(sock, Int(IoEventType.READABLE) | Int(IoEventType.WRITABLE))
+        catch e
+            Core.println("socket assign immediate io poll task errored")
+        end
+        return nothing
+    end
 
     return nothing
 end
@@ -1663,7 +1649,7 @@ function _on_socket_io_event(sock, events::Int)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: is readable")
         if sock.readable_fn !== nothing
             if _is_socket_readable_now(fd)
-                sock.readable_fn(AWS_OP_SUCCESS)
+                sock.readable_fn(OP_SUCCESS)
             else
                 _schedule_socket_readable_recheck_task(sock, fd, _SOCKET_READABLE_RETRY_COUNT)
             end
@@ -1720,22 +1706,16 @@ function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, o
     if socket_impl.has_pending_readable_event && sock.event_loop !== nothing
         socket_impl.has_pending_readable_event = false
         event_loop = sock.event_loop
-        event_loop_schedule_task_now!(
-            event_loop,
-            ScheduledTask(
-                TaskFn(function(status)
-                    try
-                        status = _coerce_task_status(status)
-                        status == TaskStatus.CANCELED && return nothing
-                        _on_socket_io_event(sock, Int(IoEventType.READABLE))
-                    catch e
-                        Core.println("socket pending readable dispatch task errored")
-                    end
-                    return nothing
-                end);
-                type_tag = "posix_socket_pending_readable_dispatch",
-            ),
-        )
+        schedule_task_now!(event_loop; type_tag = "posix_socket_pending_readable_dispatch") do status
+            try
+                status = _coerce_task_status(status)
+                status == TaskStatus.CANCELED && return nothing
+                _on_socket_io_event(sock, Int(IoEventType.READABLE))
+            catch e
+                Core.println("socket pending readable dispatch task errored")
+            end
+            return nothing
+        end
     elseif sock.options.type == SocketType.DGRAM && sock.event_loop !== nothing
         _schedule_socket_readable_recheck_task(
             sock,
@@ -1817,7 +1797,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
     fd = sock.io_handle.fd
 
     purge = false
-    aws_error = AWS_OP_SUCCESS
+    aws_error = OP_SUCCESS
     parent_request_failed = false
     pushed_to_written_queue = false
 
@@ -1872,7 +1852,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
             # Write complete
             logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: write request completed")
             popfirst!(socket_impl.write_queue)
-            write_request.error_code = AWS_OP_SUCCESS
+            write_request.error_code = OP_SUCCESS
             push!(socket_impl.written_queue, write_request)
             pushed_to_written_queue = true
         end
@@ -1894,18 +1874,15 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
     # Schedule written task if needed
     if pushed_to_written_queue && !socket_impl.written_task_scheduled
         socket_impl.written_task_scheduled = true
-        socket_impl.written_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    _written_task_fn(sock, _coerce_task_status(status))
-                catch e
-                    Core.println("socket_written_task task errored")
-                end
-                return nothing
-            end);
-            type_tag = "socket_written_task",
-        )
-        event_loop_schedule_task_now!(sock.event_loop, socket_impl.written_task)
+        socket_impl.written_task = ScheduledTask(; type_tag = "socket_written_task") do status
+            try
+                _written_task_fn(sock, _coerce_task_status(status))
+            catch e
+                Core.println("socket_written_task task errored")
+            end
+            return nothing
+        end
+        schedule_task_now!(sock.event_loop, socket_impl.written_task)
     end
 
     return !parent_request_failed
@@ -1987,7 +1964,7 @@ function socket_get_error_impl(::PosixSocket, sock::Socket)::Int
         return determine_socket_error(connect_result[])
     end
 
-    return AWS_OP_SUCCESS
+    return OP_SUCCESS
 end
 
 # POSIX impl - is open
@@ -1996,7 +1973,15 @@ function socket_is_open_impl(::PosixSocket, sock::Socket)::Bool
 end
 
 # POSIX impl - start accept
-function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::EventLoop, options::SocketListenerOptions)::Nothing
+function socket_start_accept_impl(
+        ::PosixSocket,
+        sock::Socket,
+        accept_loop::EventLoop,
+        on_accept_result::Union{ChannelCallable, Nothing},
+        on_accept_start::Union{EventCallable, Nothing},
+        event_loop_group::Union{EventLoopGroup, Nothing},
+    )::Nothing
+    _ = event_loop_group
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing
@@ -2009,7 +1994,7 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
         throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
     end
 
-    sock.accept_result_fn = options.on_accept_result
+    sock.accept_result_fn = on_accept_result
     sock.event_loop = accept_loop
 
     socket_impl = _posix_impl(sock)
@@ -2018,7 +2003,7 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
     socket_impl.accept_retry_task = nothing
 
     try
-        event_loop_subscribe_to_io_events!(
+        subscribe_to_io_events!(
             accept_loop,
             sock.io_handle,
             Int(IoEventType.READABLE),
@@ -2027,19 +2012,13 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
         # In edge-triggered epoll mode, adding a subscription can miss an already-ready
         # readiness notification. Schedule an immediate poll on the event loop so an
         # already-pending connection is processed deterministically.
-        event_loop_schedule_task_now!(
-            accept_loop,
-            ScheduledTask(
-                TaskFn(function(status)
-                    if _coerce_task_status(status) != TaskStatus.RUN_READY
-                        return nothing
-                    end
-                    _socket_accept_event(sock, Int(IoEventType.READABLE))
-                    return nothing
-                end);
-                type_tag = "posix_socket_start_accept_poll",
-            ),
-        )
+        schedule_task_now!(accept_loop; type_tag = "posix_socket_start_accept_poll") do status
+            if _coerce_task_status(status) != TaskStatus.RUN_READY
+                return nothing
+            end
+            _socket_accept_event(sock, Int(IoEventType.READABLE))
+            return nothing
+        end
 
     catch
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: failed to subscribe to event loop")
@@ -2051,8 +2030,8 @@ function socket_start_accept_impl(::PosixSocket, sock::Socket, accept_loop::Even
     end
 
     # Invoke on_accept_start callback if provided
-    if options.on_accept_start !== nothing
-        options.on_accept_start(AWS_OP_SUCCESS)
+    if on_accept_start !== nothing
+        on_accept_start(OP_SUCCESS)
     end
 
     return nothing
@@ -2159,7 +2138,7 @@ function _socket_accept_event(sock, events::Int)
             close_occurred = Ref(false)
             socket_impl.close_happened = close_occurred
 
-            sock.accept_result_fn(AWS_OP_SUCCESS, new_sock)
+            sock.accept_result_fn(OP_SUCCESS, new_sock)
 
             if close_occurred[]
                 return nothing
@@ -2187,7 +2166,7 @@ function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Nothing
     socket_impl = _posix_impl(sock)
     if socket_impl.currently_subscribed
         _cancel_accept_retry_task_if_needed!(socket_impl, sock.event_loop)
-        event_loop_unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
+        unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
         socket_impl.currently_subscribed = false
         socket_impl.continue_accept = false
         sock.event_loop = nothing

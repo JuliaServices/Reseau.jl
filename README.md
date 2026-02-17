@@ -25,8 +25,8 @@ using Reseau
 elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
 resolver = Reseau.HostResolver(elg)
 
-Reseau.host_resolver_resolve!(resolver, "localhost") do res, host, err, addrs
-    @show err addrs
+Reseau.host_resolver_resolve!(resolver, "localhost") do addresses
+    @show addresses
 end
 ```
 
@@ -38,13 +38,12 @@ elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
 el = Reseau.event_loop_group_get_next_loop(elg)
 sock = Reseau.socket_init_posix(Reseau.SocketOptions(; type = Reseau.SocketType.STREAM, domain = Reseau.SocketDomain.IPV4))
 
-connect_opts = Reseau.SocketConnectOptions(
+Reseau.socket_connect(
+    sock,
     Reseau.SocketEndpoint("127.0.0.1", 8080);
     event_loop = el,
     on_connection_result = (sock_obj, err, ud) -> @show err,
 )
-
-Reseau.socket_connect(sock, connect_opts)
 ```
 
 ### TLS channel handler

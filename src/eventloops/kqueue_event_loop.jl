@@ -5,20 +5,15 @@
 @static if Sys.isapple() || Sys.isbsd()
     using LibAwsCal
 
-    # Channel-based rendezvous for passing EventLoop to the thread function.
-    const _KQUEUE_THREAD_STARTUP = Channel{Any}(1)
-
     # Thread entry point for the kqueue event loop.
-    @wrap_thread_fn function _kqueue_event_loop_thread_entry()
-        event_loop = take!(_KQUEUE_THREAD_STARTUP)::EventLoop
+    @wrap_thread_fn function _kqueue_event_loop_thread_entry(event_loop::EventLoop)
         try
             kqueue_event_loop_thread(event_loop)
         catch e
             Core.println("kqueue event loop thread errored")
         finally
-            impl = event_loop.impl_data
+            impl = event_loop.impl
             notify(impl.completion_event)
-            managed_thread_finished!()
         end
     end
 
@@ -90,9 +85,7 @@
     end
 
     # Create a new kqueue event loop
-    function event_loop_new_with_kqueue(
-            clock::ClockSource = HighResClock(),
-        )::EventLoop
+    function event_loop_new_with_kqueue()::EventLoop
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "Initializing edge-triggered kqueue event loop")
 
         impl = KqueueEventLoop()
@@ -149,28 +142,26 @@
 
         # Create dispatch queue for NW sockets (Apple only)
         @static if Sys.isapple()
-            nw_queue = _kqueue_dispatch_queue_create("com.amazonaws.commonruntime.kqueue-nw")
+            nw_queue = _kqueue_dispatch_queue_create("com.reseau.kqueue-nw")
             if nw_queue != C_NULL
                 impl.nw_queue = nw_queue
             end
         end
 
-        # Create the event loop
-        event_loop = EventLoop(clock, impl)
-
-        return event_loop
+        return EventLoop(impl)
     end
 
     # Connect an IO handle to the event loop's completion port (for NW sockets)
     @static if Sys.isapple()
-        function event_loop_connect_to_io_completion_port!(
+        function connect_to_io_completion_port(
                 event_loop::EventLoop,
+                impl::KqueueEventLoop,
                 handle::IoHandle,
             )::Nothing
+            _ = event_loop
             if handle.set_queue == C_NULL
                 throw_error(ERROR_INVALID_ARGUMENT)
             end
-            impl = event_loop.impl_data
             ccall(
                 handle.set_queue,
                 Cvoid,
@@ -184,7 +175,7 @@
 
     # Signal that cross-thread data has changed
     function signal_cross_thread_data_changed(event_loop::EventLoop)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         logf(
             LogLevel.TRACE,
             LS_IO_EVENT_LOOP,string("signaling event-loop that cross-thread tasks need to be scheduled", " ", ))
@@ -214,12 +205,9 @@
     end
 
     # Run the event loop
-    function event_loop_run!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
-
+    function run!(event_loop::EventLoop, impl::KqueueEventLoop)::Nothing
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "starting event-loop thread")
-
-        # Thread startup synchronization (avoid libuv-backed `sleep`/`time_ns` polling).
+        # Thread startup synchronization
         impl.startup_event = Base.Threads.Event()
         impl.completion_event = Base.Threads.Event()
         @atomic impl.startup_error = 0
@@ -236,11 +224,14 @@
         impl.cross_thread_data.state = EventThreadState.RUNNING
 
         # Launch the event loop thread via ForeignThread
-        put!(_KQUEUE_THREAD_STARTUP, event_loop)
         try
-            impl.thread_created_on = ForeignThread("aws-el-kqueue", _KQUEUE_THREAD_ENTRY_C)
+            impl.thread_created_on = ForeignThread(
+                "reseau-el-kqueue",
+                _KQUEUE_THREAD_ENTRY_C,
+                event_loop;
+                join_strategy = ThreadJoinStrategy.MANUAL,
+            )
         catch
-            take!(_KQUEUE_THREAD_STARTUP)  # drain on failure
             impl.cross_thread_data.state = EventThreadState.READY_TO_RUN
             logf(LogLevel.FATAL, LS_IO_EVENT_LOOP, "thread creation failed")
             throw_error(ERROR_THREAD_NO_SUCH_THREAD_ID)
@@ -259,8 +250,7 @@
     end
 
     # Stop the event loop
-    function event_loop_stop!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
+    function stop!(event_loop::EventLoop, impl::KqueueEventLoop)::Nothing
         @atomic event_loop.should_stop = true
 
         if event_loop_thread_is_callers_thread(event_loop)
@@ -287,36 +277,28 @@
     end
 
     # Wait for the event loop to stop
-    function event_loop_wait_for_stop_completion!(event_loop::EventLoop)::Nothing
-        impl = event_loop.impl_data
-
+    function wait_for_stop_completion(event_loop::EventLoop, impl::KqueueEventLoop)::Nothing
         if impl.thread_created_on !== nothing
             wait(impl.completion_event)
         end
-
         impl.cross_thread_data.state = EventThreadState.READY_TO_RUN
         impl.thread_data.state = EventThreadState.READY_TO_RUN
         @atomic event_loop.running = false
-
         return nothing
     end
 
     # Schedule task cross-thread
     function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
-        impl = event_loop.impl_data
-
+        impl = event_loop.impl
         logf(
             LogLevel.TRACE,
             LS_IO_EVENT_LOOP,string("scheduling task cross-thread for timestamp %d", " ", run_at_nanos, " ", ))
-
         task.timestamp = run_at_nanos
         task.scheduled = true
         should_signal_thread = false
-
         lock(impl.cross_thread_data.mutex)
         try
             push!(impl.cross_thread_data.tasks_to_schedule, task)
-
             if !impl.cross_thread_data.thread_signaled
                 should_signal_thread = true
                 impl.cross_thread_data.thread_signaled = true
@@ -324,18 +306,15 @@
         finally
             unlock(impl.cross_thread_data.mutex)
         end
-
         if should_signal_thread
             signal_cross_thread_data_changed(event_loop)
         end
-
         return nothing
     end
 
     # Schedule task common implementation
     function schedule_task_common(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
-        impl = event_loop.impl_data
-
+        impl = event_loop.impl
         # If we're on the event thread, schedule directly
         if event_loop_thread_is_callers_thread(event_loop)
             logf(
@@ -348,36 +327,33 @@
             end
             return nothing
         end
-
         # Otherwise, add to cross-thread queue
         schedule_task_cross_thread(event_loop, task, run_at_nanos)
         return nothing
     end
 
     # Schedule task now
-    function event_loop_schedule_task_now!(event_loop::EventLoop, task::ScheduledTask)
+    function schedule_task_now!(event_loop::EventLoop, impl::KqueueEventLoop, task::ScheduledTask)
         schedule_task_common(event_loop, task, UInt64(0))
     end
 
     # Schedule task now (serialized)
-    function event_loop_schedule_task_now_serialized!(event_loop::EventLoop, task::ScheduledTask)
+    function schedule_task_now_serialized!(event_loop::EventLoop, impl::KqueueEventLoop, task::ScheduledTask)
         schedule_task_cross_thread(event_loop, task, UInt64(0))
     end
 
     # Schedule task future
-    function event_loop_schedule_task_future!(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
+    function schedule_task_future!(event_loop::EventLoop, impl::KqueueEventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         schedule_task_common(event_loop, task, run_at_nanos)
     end
 
     # Cancel task
-    function event_loop_cancel_task!(event_loop::EventLoop, task::ScheduledTask)
+    function cancel_task!(event_loop::EventLoop, impl::KqueueEventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
-        impl = event_loop.impl_data
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling task %s", " ", task.type_tag))
         if !task.scheduled
             return nothing
         end
-
         removed = false
         lock(impl.cross_thread_data.mutex)
         try
@@ -391,18 +367,15 @@
         finally
             unlock(impl.cross_thread_data.mutex)
         end
-
         if removed
             task_run!(task, TaskStatus.CANCELED)
             return nothing
         end
-
         task_scheduler_cancel!(impl.thread_data.scheduler, task)
     end
 
     # Check if on event thread
-    function event_loop_thread_is_callers_thread(event_loop::EventLoop)::Bool
-        impl = event_loop.impl_data
+    function event_loop_thread_is_callers_thread(::EventLoop, impl::KqueueEventLoop)::Bool
         running_id = @atomic impl.running_thread_id
         return running_id != 0 && running_id == UInt64(Base.Threads.threadid())
     end
@@ -518,8 +491,9 @@
     end
 
     # Subscribe to IO events
-    function event_loop_subscribe_to_io_events!(
+    function subscribe_to_io_events!(
             event_loop::EventLoop,
+            impl::KqueueEventLoop,
             handle::IoHandle,
             events::Int,
             on_event::EventCallable,
@@ -531,7 +505,7 @@
             throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
         end
 
-        impl = event_loop.impl_data::KqueueEventLoop
+        impl = event_loop.impl::KqueueEventLoop
         handle_data = KqueueHandleData(handle, impl, on_event, events)
 
         # Store handle data reference
@@ -542,19 +516,16 @@
         impl.handle_registry[handle_data_ptr] = handle_data
 
         # Create subscribe task
-        handle_data.subscribe_task = ScheduledTask(
-            TaskFn(function(status)
-                try
-                    kqueue_subscribe_task_callback(handle_data, TaskStatus.T(status))
-                catch e
-                    Core.println("kqueue_subscribe task errored")
-                end
-                return nothing
-            end);
-            type_tag = "kqueue_subscribe",
-        )
+        handle_data.subscribe_task = ScheduledTask(; type_tag = "kqueue_subscribe") do status
+            try
+                kqueue_subscribe_task_callback(handle_data, TaskStatus.T(status))
+            catch e
+                Core.println("kqueue_subscribe task errored")
+            end
+            return nothing
+        end
 
-        event_loop_schedule_task_now!(event_loop, handle_data.subscribe_task)
+        schedule_task_now!(event_loop, handle_data.subscribe_task)
 
         return nothing
     end
@@ -611,8 +582,9 @@
     end
 
     # Unsubscribe from IO events
-    function event_loop_unsubscribe_from_io_events!(
+    function unsubscribe_from_io_events!(
             event_loop::EventLoop,
+            impl::KqueueEventLoop,
             handle::IoHandle,
         )::Nothing
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("un-subscribing from events on fd %d", " ", handle.fd))
@@ -622,7 +594,7 @@
         end
 
         handle_data = unsafe_pointer_to_objref(handle.additional_data)::KqueueHandleData{KqueueEventLoop}
-        impl = event_loop.impl_data::KqueueEventLoop
+        impl = event_loop.impl::KqueueEventLoop
 
         if @atomic event_loop.running
             if event_loop_thread_is_callers_thread(event_loop)
@@ -651,32 +623,26 @@
                 end
 
                 # Schedule cleanup task
-                handle_data.cleanup_task = ScheduledTask(
-                    TaskFn(function(status)
-                        try
-                            kqueue_cleanup_task_callback(handle_data, TaskStatus.T(status))
-                        catch e
-                            Core.println("kqueue_cleanup task errored")
-                        end
-                        return nothing
-                    end);
-                    type_tag = "kqueue_cleanup",
-                )
+                handle_data.cleanup_task = ScheduledTask(; type_tag = "kqueue_cleanup") do status
+                    try
+                        kqueue_cleanup_task_callback(handle_data, TaskStatus.T(status))
+                    catch e
+                        Core.println("kqueue_cleanup task errored")
+                    end
+                    return nothing
+                end
             else
                 # Off-thread unsubscribe must run registration deletion from the event-loop thread.
-                handle_data.cleanup_task = ScheduledTask(
-                    TaskFn(function(status)
-                        try
-                            kqueue_unsubscribe_task_callback(handle_data, TaskStatus.T(status))
-                        catch e
-                            Core.println("kqueue_unsubscribe task errored")
-                        end
-                        return nothing
-                    end);
-                    type_tag = "kqueue_unsubscribe",
-                )
+                handle_data.cleanup_task = ScheduledTask(; type_tag = "kqueue_unsubscribe") do status
+                    try
+                        kqueue_unsubscribe_task_callback(handle_data, TaskStatus.T(status))
+                    catch e
+                        Core.println("kqueue_unsubscribe task errored")
+                    end
+                    return nothing
+                end
             end
-            event_loop_schedule_task_now!(event_loop, handle_data.cleanup_task)
+            schedule_task_now!(event_loop, handle_data.cleanup_task)
         else
             # Event loop is no longer running, so task scheduling won't make forward progress.
             # Perform the minimal cleanup synchronously to avoid leaking handle registry entries.
@@ -725,7 +691,7 @@
 
     # Process tasks from cross-thread queue
     function process_tasks_to_schedule(event_loop::EventLoop, tasks::Vector{ScheduledTask})
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "processing cross-thread tasks")
 
         for task in tasks
@@ -740,7 +706,7 @@
 
     # Process cross-thread data
     function process_cross_thread_data(event_loop::EventLoop)
-        impl = event_loop.impl_data
+        impl = event_loop.impl
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "notified of cross-thread data to process")
 
         tasks_to_schedule = impl.cross_thread_data.tasks_to_schedule_spare
@@ -769,7 +735,7 @@
     # Main event loop thread function
     function kqueue_event_loop_thread(event_loop::EventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "main loop started")
-        impl = event_loop.impl_data::KqueueEventLoop
+        impl = event_loop.impl::KqueueEventLoop
 
         # Set running thread ID
         @atomic impl.running_thread_id = UInt64(Base.Threads.threadid())
@@ -804,7 +770,7 @@
                 timeout_ref::Ptr{Timespec},
             )::Cint
 
-            event_loop_register_tick_start!(event_loop)
+            register_tick_start!(event_loop)
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("wake up with %d events to process", " ", num_kevents))
 
@@ -814,54 +780,43 @@
             end
 
             # Process kevents
-            if num_kevents > 0
-                tracing_task_begin(tracing_event_loop_events)
-            end
             for i in 1:num_kevents
-                tracing_task_begin(tracing_event_loop_event)
-                try
-                    kevent = kevents[i]
-                    # Check if this is the cross-thread signal
-                        if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
-                            should_process_cross_thread_data = true
-                            read_val = Ref{UInt32}(0)
-                            read_size = Csize_t(sizeof(UInt32))
-                            while true
-                                read_result = @ccall gc_safe = true read(
-                                    impl.cross_thread_signal_pipe[READ_FD]::Cint,
-                                    read_val::Ptr{UInt32},
-                                    read_size::Csize_t,
-                                )::Cssize_t
-                                if read_result <= 0
-                                    if read_result == -1 && Base.Libc.errno() == Libc.EINTR
-                                        continue
-                                    end
-                                    break
-                                end
+                kevent = kevents[i]
+                # Check if this is the cross-thread signal
+                if Int(kevent.ident) == impl.cross_thread_signal_pipe[READ_FD]
+                    should_process_cross_thread_data = true
+                    read_val = Ref{UInt32}(0)
+                    read_size = Csize_t(sizeof(UInt32))
+                    while true
+                        read_result = @ccall gc_safe = true read(
+                            impl.cross_thread_signal_pipe[READ_FD]::Cint,
+                            read_val::Ptr{UInt32},
+                            read_size::Csize_t,
+                        )::Cssize_t
+                        if read_result <= 0
+                            if read_result == -1 && Base.Libc.errno() == Libc.EINTR
+                                continue
                             end
-                            continue
+                            break
                         end
-
-                    # Process normal event
-                    event_flags = event_flags_from_kevent(kevent)
-                    if event_flags == 0
-                        continue
                     end
-
-                    if kevent.udata != C_NULL
-                        handle_data = get(impl.handle_registry, kevent.udata, nothing)
-                        handle_data === nothing && continue
-                        if handle_data.events_this_loop == 0
-                            push!(io_handle_events, handle_data)
-                        end
-                        handle_data.events_this_loop |= event_flags
-                    end
-                finally
-                    tracing_task_end(tracing_event_loop_event)
+                    continue
                 end
-            end
-            if num_kevents > 0
-                tracing_task_end(tracing_event_loop_events)
+
+                # Process normal event
+                event_flags = event_flags_from_kevent(kevent)
+                if event_flags == 0
+                    continue
+                end
+
+                if kevent.udata != C_NULL
+                    handle_data = get(impl.handle_registry, kevent.udata, nothing)
+                    handle_data === nothing && continue
+                    if handle_data.events_this_loop == 0
+                        push!(io_handle_events, handle_data)
+                    end
+                    handle_data.events_this_loop |= event_flags
+                end
             end
 
             # Invoke callbacks for handles with events
@@ -922,20 +877,15 @@
             end
 
             # Run scheduled tasks
-            now_ns = clock_now_ns(event_loop.clock)
+            now_ns = clock_now_ns()
 
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "running scheduled tasks")
-            tracing_task_begin(tracing_event_loop_run_tasks)
-            try
-                task_scheduler_run_all!(impl.thread_data.scheduler, now_ns)
-            finally
-                tracing_task_end(tracing_event_loop_run_tasks)
-            end
+            task_scheduler_run_all!(impl.thread_data.scheduler, now_ns)
 
             # Calculate next timeout
             use_default_timeout = false
 
-            now_ns = clock_now_ns(event_loop.clock)
+            now_ns = clock_now_ns()
 
             has_tasks, next_run_time = task_scheduler_has_tasks(impl.thread_data.scheduler)
             if !has_tasks
@@ -961,24 +911,23 @@
                 timeout = Timespec(Clong(timeout_sec), Clong(timeout_remainder_ns))
             end
 
-            event_loop_register_tick_end!(event_loop)
+            register_tick_end!(event_loop)
         end
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "exiting main loop")
-        event_loop_thread_exit_s2n_cleanup!(event_loop)
         @atomic impl.running_thread_id = UInt64(0)
         LibAwsCal.aws_cal_thread_clean_up()
         return nothing
     end
 
     # Destroy kqueue event loop
-    function event_loop_complete_destroy!(event_loop::EventLoop)
+    function close(event_loop::EventLoop, impl::KqueueEventLoop)
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "destroying event_loop")
-        impl = event_loop.impl_data
+        impl = event_loop.impl
 
         # Stop and wait
-        event_loop_stop!(event_loop)
-        event_loop_wait_for_stop_completion!(event_loop)
+        stop!(event_loop)
+        wait_for_stop_completion(event_loop)
 
         # Set thread ID for cancellation callbacks
         impl.thread_joined_to = UInt64(Base.Threads.threadid())
@@ -1025,9 +974,6 @@
                 impl.nw_queue = C_NULL
             end
         end
-
-        _event_loop_clean_up_shared_resources!(event_loop)
-
         return nothing
     end
 

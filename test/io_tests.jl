@@ -713,7 +713,7 @@ end
         )
         Sockets.custom_key_op_handler_perform_operation(handler, op_dec)
         @test op_dec.completed
-        @test op_dec.error_code == Reseau.AWS_OP_SUCCESS
+        @test op_dec.error_code == Reseau.OP_SUCCESS
         @test collect(op_dec.output.mem[1:Int(op_dec.output.len)]) == _pkcs11_test_decrypt_output[]
 
         _pkcs11_test_sign_output[] = UInt8[0x55]
@@ -725,7 +725,7 @@ end
         )
         Sockets.custom_key_op_handler_perform_operation(handler, op_sig)
         @test op_sig.completed
-        @test op_sig.error_code == Reseau.AWS_OP_SUCCESS
+        @test op_sig.error_code == Reseau.OP_SUCCESS
         @test collect(op_sig.output.mem[1:Int(op_sig.output.len)]) == _pkcs11_test_sign_output[]
 
         Sockets.custom_key_op_handler_release(handler)
@@ -784,9 +784,18 @@ end
             end
         end
 
+        intentionally_removed = Set((
+            "ERROR_IO_PINNED_EVENT_LOOP_MISMATCH",
+            "ERROR_IO_STREAM_SEEK_FAILED",
+            "ERROR_IO_STREAM_GET_LENGTH_FAILED",
+            "ERROR_IO_STREAM_GET_LENGTH_UNSUPPORTED",
+        ))
+
         missing = String[]
         for name in parse_aws_io_errors(header_path)
-            mapped = Symbol(map_aws_error_name(name))
+            mapped_name = map_aws_error_name(name)
+            mapped_name in intentionally_removed && continue
+            mapped = Symbol(mapped_name)
             if !isdefined(EventLoops, mapped)
                 push!(missing, String(mapped))
             end

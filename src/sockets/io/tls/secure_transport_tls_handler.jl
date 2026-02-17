@@ -399,7 +399,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             logf(LogLevel.DEBUG, LS_IO_TLS, "negotiated protocol: $(String(byte_cursor_from_buf(handler.protocol)))")
         end
         _secure_transport_send_alpn_message(handler)
-        _secure_transport_on_negotiation_result(handler, AWS_OP_SUCCESS)
+        _secure_transport_on_negotiation_result(handler, OP_SUCCESS)
         return nothing
     elseif status == _errSSLPeerAuthCompleted
         logf(
@@ -475,6 +475,8 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             logf(
                 LogLevel.WARN,
                 LS_IO_TLS,string("SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])", " ", ))
+            handler.negotiation_finished = false
+            _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 
@@ -573,7 +575,7 @@ function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, le
         mem = unsafe_wrap(Memory{UInt8}, data + Int(processed), to_write; own = false)
         chunk = ByteCursor(mem, to_write)
         buf_ref = Ref(message.message_data)
-        if byte_buf_append(buf_ref, chunk) != AWS_OP_SUCCESS
+        if byte_buf_append(buf_ref, chunk) != OP_SUCCESS
             channel_release_message_to_pool!(channel, message)
             return _errSecBufferTooSmall
         end

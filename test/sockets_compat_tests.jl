@@ -61,7 +61,8 @@ using Reseau.Sockets
     @testset "LOCAL Echo" begin
         # Use a unique path to avoid collisions/leaks if a prior test run crashed.
         name = string("reseau-sock-", string(rand(UInt128); base = 16))
-        path = Sys.iswindows() ? string("\\\\.\\pipe\\", name) : joinpath(mktempdir(), string(name, ".sock"))
+        # Keep Unix socket paths short enough for platform sockaddr_un limits.
+        path = Sys.iswindows() ? string("\\\\.\\pipe\\", name) : string(name, ".sock")
 
         server = listen(path)
         msg = Vector{UInt8}(codeunits("ping"))

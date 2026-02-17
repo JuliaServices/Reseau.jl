@@ -73,7 +73,6 @@ function io_library_init()
     _io_library_initialized[] && return nothing
     _io_library_initialized[] = true
     _cal_init()
-    io_tracing_init()
     return nothing
 end
 
