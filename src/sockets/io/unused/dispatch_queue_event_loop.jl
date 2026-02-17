@@ -138,7 +138,7 @@
             return nothing
         end
 
-        now_ns = event_loop_current_clock_time(dispatch_loop.base_loop)
+        now_ns = clock_now_ns()
         now_ns = now_ns isa ErrorResult ? UInt64(0) : now_ns
         delta = timestamp > now_ns ? timestamp - now_ns : UInt64(0)
         delta = min(delta, DISPATCH_QUEUE_MAX_FUTURE_SERVICE_INTERVAL)
@@ -200,11 +200,11 @@
             end
         end
 
-        event_loop_register_tick_start!(dispatch_loop.base_loop)
-        now_ns = event_loop_current_clock_time(dispatch_loop.base_loop)
+        register_tick_start!(dispatch_loop.base_loop)
+        now_ns = clock_now_ns()
         now_ns = now_ns isa ErrorResult ? UInt64(0) : now_ns
         task_scheduler_run_all!(dispatch_loop.scheduler, now_ns)
-        event_loop_register_tick_end!(dispatch_loop.base_loop)
+        register_tick_end!(dispatch_loop.base_loop)
 
         _dispatch_lock(dispatch_loop)
         synced.is_executing = false
@@ -403,7 +403,7 @@
         return nothing
     end
 
-    function event_loop_schedule_task_now!(event_loop::DispatchQueueEventLoop, task::ScheduledTask)
+    function schedule_task_now!(event_loop::DispatchQueueEventLoop, task::ScheduledTask)
         dispatch_loop = event_loop.impl_data
         task.timestamp = UInt64(0)
         task.scheduled = true
@@ -415,10 +415,10 @@
     end
 
     function event_loop_schedule_task_now_serialized!(event_loop::DispatchQueueEventLoop, task::ScheduledTask)
-        return event_loop_schedule_task_now!(event_loop, task)
+        return schedule_task_now!(event_loop, task)
     end
 
-    function event_loop_schedule_task_future!(
+    function schedule_task_future!(
             event_loop::DispatchQueueEventLoop,
             task::ScheduledTask,
             run_at_nanos::UInt64,
@@ -457,14 +457,13 @@
         return nothing
     end
 
-    function event_loop_connect_to_io_completion_port!(
-            event_loop::DispatchQueueEventLoop,
+    function connect_to_io_completion_port(
+            dispatch_loop::DispatchQueueEventLoop,
             handle::IoHandle,
         )::Union{Nothing, ErrorResult}
         if handle.set_queue == C_NULL
             return ErrorResult(raise_error(ERROR_INVALID_ARGUMENT))
         end
-        dispatch_loop = event_loop.impl_data
         ccall(
             handle.set_queue,
             Cvoid,
@@ -475,7 +474,7 @@
         return nothing
     end
 
-    function event_loop_subscribe_to_io_events!(
+    function subscribe_to_io_events!(
             event_loop::DispatchQueueEventLoop,
             handle::IoHandle,
             events::Int,
@@ -501,12 +500,6 @@
             LogLevel.ERROR,
             LS_IO_EVENT_LOOP,string("unsubscribe_from_io_events not supported for dispatch queue event loops", " ", ))
         return ErrorResult(raise_error(ERROR_PLATFORM_NOT_SUPPORTED))
-    end
-
-    function event_loop_free_io_event_resources!(event_loop::DispatchQueueEventLoop, handle::IoHandle)
-        _ = event_loop
-        _ = handle
-        return nothing
     end
 
     function event_loop_thread_is_callers_thread(event_loop::DispatchQueueEventLoop)::Bool

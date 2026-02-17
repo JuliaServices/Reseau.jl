@@ -410,21 +410,14 @@ end
 
 # ── ScheduledTask ──
 
-mutable struct ScheduledTask
+@kwdef mutable struct ScheduledTask
     fn::TaskFn
-    type_tag::String
-    timestamp::UInt64
-    scheduled::Bool
+    type_tag::String = "task"
+    timestamp::UInt64 = UInt64(0)
+    scheduled::Bool = false
 end
 
-function ScheduledTask(fn::TaskFn; type_tag::AbstractString = "task")
-    return ScheduledTask(fn, String(type_tag), UInt64(0), false)
-end
-
-function ScheduledTask(callable::F; type_tag::AbstractString = "task") where {F}
-    return ScheduledTask(TaskFn(callable); type_tag = type_tag)
-end
-
+ScheduledTask(fn::F; kw...) where {F} = ScheduledTask(; fn = TaskFn(fn), kw...)
 timestamp_less(a, b) = a.timestamp < b.timestamp
 
 mutable struct TaskScheduler

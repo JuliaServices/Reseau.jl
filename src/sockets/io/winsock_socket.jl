@@ -430,7 +430,7 @@
 
         sock.event_loop = event_loop
         try
-            event_loop_connect_to_io_completion_port!(event_loop, sock.io_handle)
+            connect_to_io_completion_port(event_loop, sock.io_handle)
         catch
             sock.event_loop = nothing
             rethrow()
@@ -648,7 +648,7 @@
             iocp_overlapped_ptr(impl.read_io_data.signal),
         ) != 0
 
-        now_ns = event_loop_current_clock_time(connect_loop)
+        now_ns = clock_now_ns()
         time_to_run = now_ns
 
         if !connect_res
@@ -665,7 +665,7 @@
             time_to_run += UInt64(500) * UInt64(1_000_000)
         end
 
-        event_loop_schedule_task_future!(connect_loop, task, time_to_run)
+        schedule_task_future!(connect_loop, task, time_to_run)
         return nothing
     end
 
@@ -729,7 +729,7 @@
             end
 
             # Schedule success on the loop.
-            event_loop_schedule_task_now!(connect_loop; type_tag = "winsock_local_connect_success") do status
+            schedule_task_now!(connect_loop; type_tag = "winsock_local_connect_success") do status
                 try
                     _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                     _winsock_local_and_udp_connection_success(sock)
@@ -791,7 +791,7 @@
                     sock.state = SocketState.ERROR
                     rethrow()
                 end
-                event_loop_schedule_task_now!(connect_loop; type_tag = "winsock_udp_connect_success") do status
+                schedule_task_now!(connect_loop; type_tag = "winsock_udp_connect_success") do status
                     try
                         _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
                         _winsock_local_and_udp_connection_success(sock)
@@ -1248,7 +1248,7 @@
             new_sock.io_handle.set_queue = sock.io_handle.set_queue
             new_sock.io_handle.additional_ref = sock.io_handle.additional_ref
             if sock.event_loop !== nothing
-                _ = event_loop_unsubscribe_from_io_events!(sock.event_loop, new_sock.io_handle)
+                _ = unsubscribe_from_io_events!(sock.event_loop, new_sock.io_handle)
             end
             new_sock.event_loop = nothing
 
@@ -1382,7 +1382,7 @@
                 throw_error(aws_err)
             elseif err == ERROR_PIPE_CONNECTED
                 # No IOCP event will fire; schedule a task to finish the accept.
-                event_loop_schedule_task_now!(sock.event_loop; type_tag = "winsock_pipe_connected_immediately") do status
+                schedule_task_now!(sock.event_loop; type_tag = "winsock_pipe_connected_immediately") do status
                     try
                         _winsock_named_pipe_connected_immediately_task(impl.read_io_data, _coerce_task_status(status))
                     catch e

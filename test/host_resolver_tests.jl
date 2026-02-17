@@ -29,12 +29,12 @@ function resolve_and_wait(resolver, host; config=nothing, timeout_s::Float64 = 5
 
     _task = @async begin
         try
-            Sockets.host_resolver_resolve!(addresses -> begin
-                addrs_ref[] = addresses
-            end, resolver, host, config)
+            addrs_ref[] = wait(Sockets.host_resolver_resolve!(resolver, host, config))
         catch e
             if e isa Reseau.ReseauError
                 err_code[] = e.code
+            elseif e isa DNSError
+                err_code[] = Int(e.code)
             else
                 rethrow()
             end
@@ -69,7 +69,7 @@ end
     end
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver happy eyeballs ordering" begin
@@ -89,7 +89,7 @@ end
     @test default_addresses[1].address == host
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
@@ -106,7 +106,7 @@ end
     @test bias_addresses[1].address == host
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver happy eyeballs config normalization" begin
@@ -125,7 +125,7 @@ end
     @test normalized.connection_attempt_delay_ns == Sockets.HOST_RESOLVER_HAPPY_EYEBALLS_MIN_CONNECTION_ATTEMPT_DELAY_FLOOR_NS
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver background refresh stress" begin
@@ -155,7 +155,7 @@ end
     end
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver literal address lookups" begin
@@ -186,7 +186,7 @@ end
     @test addr6.host == "::1"
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
@@ -196,32 +196,46 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         config = Sockets.HostResolutionConfig(max_ttl_secs = 10)
 
         @testset "ipv6 dualstack lookup" begin
-            result = resolve_and_wait(resolver, "s3.dualstack.us-east-1.amazonaws.com"; config = config)
+            result = resolve_and_wait(
+                resolver,
+                "s3.dualstack.us-east-1.amazonaws.com";
+                config = config,
+                timeout_s = 15.0,
+            )
             @test result !== :timeout
-            err, addrs = result
-            @test err == Reseau.OP_SUCCESS
-            addr4 = find_address(addrs, Sockets.HostAddressType.A)
-            addr6 = find_address(addrs, Sockets.HostAddressType.AAAA)
-            @test addr4 !== nothing || addr6 !== nothing
-            if addr6 === nothing
-                @info "Dualstack lookup did not return AAAA record; environment/network only returned IPv4" host = "s3.dualstack.us-east-1.amazonaws.com"
-            end
-            if addr4 === nothing
-                @info "Dualstack lookup missing A record; environment appears IPv6-only" host = "s3.dualstack.us-east-1.amazonaws.com"
+            if result !== :timeout
+                err, addrs = result
+                @test err == Reseau.OP_SUCCESS
+                addr4 = find_address(addrs, Sockets.HostAddressType.A)
+                addr6 = find_address(addrs, Sockets.HostAddressType.AAAA)
+                @test addr4 !== nothing || addr6 !== nothing
+                if addr6 === nothing
+                    @info "Dualstack lookup did not return AAAA record; environment/network only returned IPv4" host = "s3.dualstack.us-east-1.amazonaws.com"
+                end
+                if addr4 === nothing
+                    @info "Dualstack lookup missing A record; environment appears IPv6-only" host = "s3.dualstack.us-east-1.amazonaws.com"
+                end
             end
         end
 
         @testset "ipv4 lookup" begin
-            result = resolve_and_wait(resolver, "s3.us-east-1.amazonaws.com"; config = config)
+            result = resolve_and_wait(
+                resolver,
+                "s3.us-east-1.amazonaws.com";
+                config = config,
+                timeout_s = 15.0,
+            )
             @test result !== :timeout
-            err, addrs = result
-            @test err == Reseau.OP_SUCCESS
-            addr4 = find_address(addrs, Sockets.HostAddressType.A)
-            @test addr4 !== nothing
+            if result !== :timeout
+                err, addrs = result
+                @test err == Reseau.OP_SUCCESS
+                addr4 = find_address(addrs, Sockets.HostAddressType.A)
+                @test addr4 !== nothing
+            end
         end
 
         Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
     end
 end
 
@@ -286,7 +300,7 @@ end
     @test all(a -> a.address == first_address, addrs)
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver connection failure handling" begin
@@ -334,7 +348,7 @@ end
     @test !isempty(addrs)
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver ttl refreshes on resolve" begin
@@ -384,7 +398,7 @@ end
     @test addr2_expiry < addr2_new.expiry
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver bad list expires eventually" begin
@@ -429,7 +443,7 @@ end
     @test elapsed_ns < 2_000_000_000
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver low frequency starvation" begin
@@ -464,7 +478,7 @@ end
     @test !isempty(addrs)
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver cached results" begin
@@ -477,49 +491,28 @@ end
         resolve_frequency_ns = 5_000_000_000,
     )
 
-    resolved = Ref(false)
-    addrs = Ref{Vector{Sockets.HostAddress}}(Sockets.HostAddress[])
-    cb = addresses -> begin
-        addrs[] = addresses
-        resolved[] = true
-        return nothing
-    end
+    addrs = wait(Sockets.host_resolver_resolve!(resolver, "127.0.0.1", config))
+    @test !isempty(addrs)
 
-    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
-    @test wait_for_pred(() -> resolved[])
-    @test !isempty(addrs[])
-
-    resolved[] = false
-    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
-    @test wait_for_pred(() -> resolved[])
-    @test addrs[][1].address == "127.0.0.1"
+    addrs = wait(Sockets.host_resolver_resolve!(resolver, "127.0.0.1", config))
+    @test addrs[1].address == "127.0.0.1"
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver purge and count" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
 
-    resolved = Ref(false)
-    addrs = Ref{Vector{Sockets.HostAddress}}(Sockets.HostAddress[])
- 
     config = Sockets.HostResolutionConfig(
         resolve_host_as_address = true,
         max_ttl_secs = 5,
         resolve_frequency_ns = 5_000_000_000,
     )
 
-    cb = addresses -> begin
-        addrs[] = addresses
-        resolved[] = true
-        return nothing
-    end
-
-    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
-    @test wait_for_pred(() -> resolved[])
-    @test !isempty(addrs[])
+    addrs = wait(Sockets.host_resolver_resolve!(resolver, "127.0.0.1", config))
+    @test !isempty(addrs)
 
     count_a = Sockets.host_resolver_get_host_address_count(
         resolver,
@@ -549,9 +542,7 @@ end
     ) === nothing
     @test wait_for_pred(() -> purge_host_done[])
 
-    resolved[] = false
-    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
-    @test wait_for_pred(() -> resolved[])
+    _ = wait(Sockets.host_resolver_resolve!(resolver, "127.0.0.1", config))
 
     purge_done = Ref(false)
     @test Sockets.host_resolver_purge_cache_with_callback!(
@@ -561,15 +552,12 @@ end
     @test wait_for_pred(() -> purge_done[])
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "host resolver record failure moves address" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver(elg)
-
-    resolved = Ref(false)
-    addrs = Ref{Vector{Sockets.HostAddress}}(Sockets.HostAddress[])
 
     config = Sockets.HostResolutionConfig(
         resolve_host_as_address = true,
@@ -577,17 +565,10 @@ end
         resolve_frequency_ns = 5_000_000_000,
     )
 
-    cb = addresses -> begin
-        addrs[] = addresses
-        resolved[] = true
-        return nothing
-    end
+    addrs = wait(Sockets.host_resolver_resolve!(resolver, "127.0.0.1", config))
+    @test !isempty(addrs)
 
-    @test Sockets.host_resolver_resolve!(cb, resolver, "127.0.0.1", config) === nothing
-    @test wait_for_pred(() -> resolved[])
-    @test !isempty(addrs[])
-
-    addr = addrs[][1]
+    addr = addrs[1]
     Sockets.host_resolver_record_connection_failure!(resolver, addr)
     count_a = Sockets.host_resolver_get_host_address_count(
         resolver,
@@ -597,5 +578,5 @@ end
     @test count_a == 0
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end

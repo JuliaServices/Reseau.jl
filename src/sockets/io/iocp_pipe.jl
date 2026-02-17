@@ -248,7 +248,7 @@
 
         impl.error_task_active = true
         if read_end.event_loop !== nothing
-            event_loop_schedule_task_now!(read_end.event_loop, impl.error_report_task)
+            schedule_task_now!(read_end.event_loop, impl.error_report_task)
         end
 
         return nothing

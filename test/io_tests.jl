@@ -784,9 +784,18 @@ end
             end
         end
 
+        intentionally_removed = Set((
+            "ERROR_IO_PINNED_EVENT_LOOP_MISMATCH",
+            "ERROR_IO_STREAM_SEEK_FAILED",
+            "ERROR_IO_STREAM_GET_LENGTH_FAILED",
+            "ERROR_IO_STREAM_GET_LENGTH_UNSUPPORTED",
+        ))
+
         missing = String[]
         for name in parse_aws_io_errors(header_path)
-            mapped = Symbol(map_aws_error_name(name))
+            mapped_name = map_aws_error_name(name)
+            mapped_name in intentionally_removed && continue
+            mapped = Symbol(mapped_name)
             if !isdefined(EventLoops, mapped)
                 push!(missing, String(mapped))
             end

@@ -95,7 +95,7 @@ function pipe_read_end_close!(read_end::PipeReadEnd)::Nothing
         logf(LogLevel.DEBUG, LS_IO_GENERAL, "Pipe: closing read end fd=$fd")
 
         if read_end.is_subscribed && read_end.event_loop !== nothing
-            event_loop_unsubscribe_from_io_events!(read_end.event_loop, read_end.io_handle)
+            unsubscribe_from_io_events!(read_end.event_loop, read_end.io_handle)
             read_end.is_subscribed = false
         end
 
@@ -120,7 +120,7 @@ function pipe_write_end_close!(write_end::PipeWriteEnd)::Nothing
         logf(LogLevel.DEBUG, LS_IO_GENERAL, "Pipe: closing write end fd=$fd")
 
         if write_end.is_subscribed && write_end.event_loop !== nothing
-            event_loop_unsubscribe_from_io_events!(write_end.event_loop, write_end.io_handle)
+            unsubscribe_from_io_events!(write_end.event_loop, write_end.io_handle)
             write_end.is_subscribed = false
         end
 
@@ -159,7 +159,7 @@ function pipe_read_end_subscribe!(
     read_end.on_readable = on_readable
     read_end.event_loop = event_loop
 
-    event_loop_subscribe_to_io_events!(
+    subscribe_to_io_events!(
         event_loop,
         read_end.io_handle,
         Int(IoEventType.READABLE),
@@ -210,8 +210,8 @@ function pipe_init(
     @static if Sys.iswindows()
         # Associate handles with each loop's IOCP.
         try
-            event_loop_connect_to_io_completion_port!(write_end_event_loop, write_end.io_handle)
-            event_loop_connect_to_io_completion_port!(read_end_event_loop, read_end.io_handle)
+            connect_to_io_completion_port(write_end_event_loop, write_end.io_handle)
+            connect_to_io_completion_port(read_end_event_loop, read_end.io_handle)
         catch
             pipe_read_end_close!(read_end)
             pipe_write_end_close!(write_end)
@@ -314,7 +314,7 @@ function pipe_unsubscribe_from_readable_events(read_end::PipeReadEnd)::Nothing
         throw_error(ERROR_IO_NOT_SUBSCRIBED)
     end
 
-    event_loop_unsubscribe_from_io_events!(read_end.event_loop, read_end.io_handle)
+    unsubscribe_from_io_events!(read_end.event_loop, read_end.io_handle)
     read_end.is_subscribed = false
     return nothing
 end
@@ -370,7 +370,7 @@ function pipe_write_end_subscribe!(
 
     write_end.event_loop = event_loop
 
-    event_loop_subscribe_to_io_events!(
+    subscribe_to_io_events!(
         event_loop,
         write_end.io_handle,
         Int(IoEventType.WRITABLE),

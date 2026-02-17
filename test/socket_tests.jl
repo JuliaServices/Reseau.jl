@@ -221,23 +221,22 @@ function _mem_from_bytes(bytes::NTuple{16, UInt8})
 end
 
 @testset "message pool" begin
-    args = Sockets.MessagePoolCreationArgs(
+    pool = Sockets.MessagePool(;
         application_data_msg_data_size = 128,
         application_data_msg_count = 2,
         small_block_msg_data_size = 16,
         small_block_msg_count = 2,
     )
-    pool = Sockets.MessagePool(args)
     @test pool isa Sockets.MessagePool
     @test length(pool.application_data_pool) == 2
     @test length(pool.small_block_pool) == 2
 
-    msg = Sockets.message_pool_acquire(pool, EventLoops.IoMessageType.APPLICATION_DATA, 8)
+    msg = Base.acquire(pool, EventLoops.IoMessageType.APPLICATION_DATA, 8)
     @test msg isa EventLoops.IoMessage
     @test length(pool.small_block_pool) == 1
     @test Reseau.capacity(msg.message_data) == Csize_t(8)
 
-    Sockets.message_pool_release!(pool, msg)
+    Base.release(pool, msg)
     @test length(pool.small_block_pool) == 2
 end
 
@@ -245,21 +244,21 @@ end
     pool = Sockets.MemoryPool(2, 32)
     @test length(pool) == 2
 
-    seg1 = Sockets.memory_pool_acquire(pool)
-    seg2 = Sockets.memory_pool_acquire(pool)
+    seg1 = Base.acquire(pool)
+    seg2 = Base.acquire(pool)
     @test length(pool) == 0
     @test length(seg1) == 32
     @test length(seg2) == 32
 
-    seg3 = Sockets.memory_pool_acquire(pool)
+    seg3 = Base.acquire(pool)
     @test length(pool) == 0
     @test length(seg3) == 32
 
-    Sockets.memory_pool_release!(pool, seg1)
+    Base.release(pool, seg1)
     @test length(pool) == 1
-    Sockets.memory_pool_release!(pool, seg2)
+    Base.release(pool, seg2)
     @test length(pool) == 2
-    Sockets.memory_pool_release!(pool, seg3)
+    Base.release(pool, seg3)
     @test length(pool) == 2
 end
 
@@ -303,13 +302,13 @@ end
         end
 
         # IPv4 stream
-        el = EventLoops.event_loop_new()
+        el = EventLoops.EventLoop()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test EventLoops.event_loop_run!(el_val) === nothing
+        @test EventLoops.run!(el_val) === nothing
 
         opts = Sockets.SocketOptions(;
             type = Sockets.SocketType.STREAM,
@@ -328,7 +327,7 @@ end
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
                 e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
             return
         end
 
@@ -466,17 +465,17 @@ end
                 Sockets.socket_cleanup!(accepted[])
             end
             Sockets.socket_cleanup!(server_socket)
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
         end
 
         # IPv4 UDP
-        el = EventLoops.event_loop_new()
+        el = EventLoops.EventLoop()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test EventLoops.event_loop_run!(el_val) === nothing
+        @test EventLoops.run!(el_val) === nothing
 
         opts_udp = Sockets.SocketOptions(;
             type = Sockets.SocketType.DGRAM,
@@ -492,7 +491,7 @@ end
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
                 e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
             return
         end
 
@@ -532,17 +531,17 @@ end
                 Sockets.socket_cleanup!(client_socket)
             end
             Sockets.socket_cleanup!(server_socket)
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
         end
 
         # IPv6 stream
-        el = EventLoops.event_loop_new()
+        el = EventLoops.EventLoop()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test EventLoops.event_loop_run!(el_val) === nothing
+        @test EventLoops.run!(el_val) === nothing
 
         opts6 = Sockets.SocketOptions(;
             type = Sockets.SocketType.STREAM,
@@ -558,7 +557,7 @@ end
             @test e isa Reseau.ReseauError
             @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
                 e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
             return
         end
 
@@ -623,7 +622,7 @@ end
                 Sockets.socket_cleanup!(accepted[])
             end
             Sockets.socket_cleanup!(server_socket)
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
         end
     end
 end
@@ -657,13 +656,13 @@ end
     if !Sys.islinux()
         @test true
     else
-        el = EventLoops.event_loop_new()
+        el = EventLoops.EventLoop()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test EventLoops.event_loop_run!(el_val) === nothing
+        @test EventLoops.run!(el_val) === nothing
 
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.VSOCK, connect_timeout_ms = 3000)
         local server_socket
@@ -674,7 +673,7 @@ end
             @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
                 e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED ||
                 e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
             return
         end
 
@@ -754,7 +753,7 @@ end
                 Sockets.socket_cleanup!(accepted[])
             end
             Sockets.socket_cleanup!(server_socket)
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
         end
     end
 end
@@ -841,13 +840,13 @@ end
 end
 
 @testset "socket connect read write" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
     # Use LOCAL domain to ensure POSIX path (standalone event loop, no ELG)
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
     server = Sockets.socket_init(opts)
@@ -976,7 +975,7 @@ end
         if server_socket !== nothing
             Sockets.socket_close(server_socket)
         end
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
         # Clean up Unix domain socket file (Windows LOCAL uses named pipes, not a filesystem path).
         @static if !Sys.iswindows()
             sock_path = Sockets.get_address(local_endpoint)
@@ -997,10 +996,10 @@ end
     if elg_val === nothing
         return
     end
-    el_val = EventLoops.event_loop_group_get_next_loop(elg_val)
+    el_val = EventLoops.get_next_event_loop(elg_val)
     @test el_val isa EventLoops.EventLoop
     if !(el_val isa EventLoops.EventLoop)
-        EventLoops.event_loop_group_destroy!(elg_val)
+        close(elg_val)
         return
     end
 
@@ -1148,18 +1147,18 @@ end
         if server_socket !== nothing
             Sockets.socket_close(server_socket)
         end
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
     end
 end
 
 @testset "sock write cb is async" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     server = Sockets.socket_init(opts)
@@ -1273,7 +1272,7 @@ end
         if server_socket !== nothing
             Sockets.socket_close(server_socket)
         end
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
     end
 end
 
@@ -1284,10 +1283,10 @@ end
     if elg_val === nothing
         return
     end
-    el_val = EventLoops.event_loop_group_get_next_loop(elg_val)
+    el_val = EventLoops.get_next_event_loop(elg_val)
     @test el_val isa EventLoops.EventLoop
     if !(el_val isa EventLoops.EventLoop)
-        EventLoops.event_loop_group_destroy!(elg_val)
+        close(elg_val)
         return
     end
 
@@ -1296,7 +1295,7 @@ end
     socket_val = sock isa Sockets.Socket ? sock : nothing
     @test socket_val !== nothing
     if socket_val === nothing
-        EventLoops.event_loop_group_destroy!(elg_val)
+        close(elg_val)
         return
     end
 
@@ -1322,7 +1321,7 @@ end
         end
     finally
         Sockets.socket_cleanup!(socket_val)
-        EventLoops.event_loop_group_destroy!(elg_val)
+        close(elg_val)
     end
 end
 
@@ -1333,10 +1332,10 @@ end
     if elg_val === nothing
         return
     end
-    el_val = EventLoops.event_loop_group_get_next_loop(elg_val)
+    el_val = EventLoops.get_next_event_loop(elg_val)
     @test el_val isa EventLoops.EventLoop
     if !(el_val isa EventLoops.EventLoop)
-        EventLoops.event_loop_group_destroy!(elg_val)
+        close(elg_val)
         return
     end
 
@@ -1345,7 +1344,7 @@ end
     socket_val = sock isa Sockets.Socket ? sock : nothing
     @test socket_val !== nothing
     if socket_val === nothing
-        EventLoops.event_loop_group_destroy!(elg_val)
+        close(elg_val)
         return
     end
 
@@ -1363,7 +1362,7 @@ end
     try
         try
             Sockets.socket_connect(socket_val; connect_opts...)
-            EventLoops.event_loop_group_destroy!(elg_val)
+            close(elg_val)
             @test connect_done[]
             @test connect_err[] == EventLoops.ERROR_IO_EVENT_LOOP_SHUTDOWN ||
                 _is_allowed_connect_error(connect_err[])
@@ -1383,10 +1382,10 @@ end
         if elg_val === nothing
             return
         end
-        el_val = EventLoops.event_loop_group_get_next_loop(elg_val)
+        el_val = EventLoops.get_next_event_loop(elg_val)
         @test el_val isa EventLoops.EventLoop
         if !(el_val isa EventLoops.EventLoop)
-            EventLoops.event_loop_group_destroy!(elg_val)
+            close(elg_val)
             return
         end
 
@@ -1395,7 +1394,7 @@ end
         socket_val = sock isa Sockets.Socket ? sock : nothing
         @test socket_val !== nothing
         if socket_val === nothing
-            EventLoops.event_loop_group_destroy!(elg_val)
+            close(elg_val)
             return
         end
 
@@ -1420,7 +1419,7 @@ end
         try
             try
                 Sockets.socket_connect(socket_val; connect_opts...)
-                EventLoops.event_loop_schedule_task_now!(el_val, cleanup_task)
+                EventLoops.schedule_task_now!(el_val, cleanup_task)
                 @test wait_for_flag(cleanup_done)
                 sleep(0.05)
                 if connect_done[]
@@ -1434,25 +1433,25 @@ end
             end
         finally
             Sockets.socket_cleanup!(socket_val)
-            EventLoops.event_loop_group_destroy!(elg_val)
+            close(elg_val)
         end
 end
 
 @testset "cleanup in accept doesn't explode" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     listener = Sockets.socket_init(opts)
     listener_socket = listener isa Sockets.Socket ? listener : nothing
     @test listener_socket !== nothing
     if listener_socket === nothing
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
         return
     end
 
@@ -1516,25 +1515,25 @@ end
             Sockets.socket_cleanup!(incoming[])
         end
         Sockets.socket_cleanup!(listener_socket)
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
     end
 end
 
 @testset "cleanup in write cb doesn't explode" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
     listener = Sockets.socket_init(opts)
     listener_socket = listener isa Sockets.Socket ? listener : nothing
     @test listener_socket !== nothing
     if listener_socket === nothing
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
         return
     end
 
@@ -1637,9 +1636,9 @@ end
             return nothing
         end); type_tag = "socket_write_cleanup_server")
 
-        EventLoops.event_loop_schedule_task_now!(el_val, write_task_client)
+        EventLoops.schedule_task_now!(el_val, write_task_client)
         @test wait_for_flag(write_done_client)
-        EventLoops.event_loop_schedule_task_now!(el_val, write_task_server)
+        EventLoops.schedule_task_now!(el_val, write_task_server)
         @test wait_for_flag(write_done_server)
         @test write_err_client[] == Reseau.OP_SUCCESS
         @test write_err_server[] == Reseau.OP_SUCCESS
@@ -1651,18 +1650,18 @@ end
             Sockets.socket_cleanup!(accepted[])
         end
         Sockets.socket_cleanup!(listener_socket)
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
     end
 end
 
 @testset "local socket communication" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
     server = Sockets.socket_init(opts)
@@ -1791,7 +1790,7 @@ end
         if server_socket !== nothing
             Sockets.socket_close(server_socket)
         end
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -1799,13 +1798,13 @@ end
 end
 
 @testset "local socket connect before accept" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
     server = Sockets.socket_init(opts)
@@ -1873,7 +1872,7 @@ end
         if server_socket !== nothing
             Sockets.socket_cleanup!(server_socket)
         end
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
         if !isempty(local_path) && isfile(local_path)
             rm(local_path; force = true)
         end
@@ -1881,13 +1880,13 @@ end
 end
 
 @testset "udp socket communication" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.IPV4)
     server = Sockets.socket_init(opts)
@@ -1985,18 +1984,18 @@ end
         if server_socket !== nothing
             Sockets.socket_close(server_socket)
         end
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
     end
 end
 
 @testset "udp bind connect communication" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.IPV4)
     server = Sockets.socket_init(opts)
@@ -2097,7 +2096,7 @@ end
         if server_socket !== nothing
             Sockets.socket_close(server_socket)
         end
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
     end
 end
 
@@ -2105,13 +2104,13 @@ end
     if Sys.iswindows()
         @test true
     else
-        el = EventLoops.event_loop_new()
+        el = EventLoops.EventLoop()
         el_val = el isa EventLoops.EventLoop ? el : nothing
         @test el_val !== nothing
         if el_val === nothing
             return
         end
-        @test EventLoops.event_loop_run!(el_val) === nothing
+        @test EventLoops.run!(el_val) === nothing
 
         # Use LOCAL domain (POSIX path on all platforms) since this test
         # exercises POSIX-specific bind/assign/read/write/close flow
@@ -2120,7 +2119,7 @@ end
         socket_val = sock isa Sockets.Socket ? sock : nothing
         @test socket_val !== nothing
         if socket_val === nothing
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
             return
         end
 
@@ -2155,10 +2154,10 @@ end
                 close_done[] = true
                 return nothing
             end); type_tag = "socket_close_wrong_thread")
-            EventLoops.event_loop_schedule_task_now!(el_val, close_task)
+            EventLoops.schedule_task_now!(el_val, close_task)
             @test wait_for_flag(close_done)
         finally
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
         end
     end
 end
@@ -2392,20 +2391,20 @@ end
 end
 
 @testset "outgoing local socket errors" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
     sock = Sockets.socket_init(opts)
     sock_val = sock isa Sockets.Socket ? sock : nothing
     @test sock_val !== nothing
     if sock_val === nothing
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
         return
     end
 
@@ -2443,17 +2442,17 @@ end
     end
 
     Sockets.socket_close(sock_val)
-    EventLoops.event_loop_destroy!(el_val)
+    close(el_val)
 end
 
 @testset "outgoing tcp socket error" begin
-    el = EventLoops.event_loop_new()
+    el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
     @test el_val !== nothing
     if el_val === nothing
         return
     end
-    @test EventLoops.event_loop_run!(el_val) === nothing
+    @test EventLoops.run!(el_val) === nothing
 
     @static if Sys.isapple()
         # On macOS, use LOCAL domain (POSIX path) with a nonexistent socket
@@ -2468,7 +2467,7 @@ end
         temp_val = temp isa Sockets.Socket ? temp : nothing
         @test temp_val !== nothing
         if temp_val === nothing
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
             return
         end
 
@@ -2484,7 +2483,7 @@ end
         end
 
         if port == 0
-            EventLoops.event_loop_destroy!(el_val)
+            close(el_val)
             return
         end
         connect_endpoint = Sockets.SocketEndpoint("127.0.0.1", port)
@@ -2494,7 +2493,7 @@ end
     sock_val = sock isa Sockets.Socket ? sock : nothing
     @test sock_val !== nothing
     if sock_val === nothing
-        EventLoops.event_loop_destroy!(el_val)
+        close(el_val)
         return
     end
 
@@ -2520,5 +2519,5 @@ end
         err_code[] == Reseau.ERROR_FILE_INVALID_PATH
 
     Sockets.socket_close(sock_val)
-    EventLoops.event_loop_destroy!(el_val)
+    close(el_val)
 end

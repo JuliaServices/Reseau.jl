@@ -12,7 +12,7 @@ function future_on_event_loop!(
         user_data = nothing,
     )
     schedule_callback = () -> begin
-        event_loop_schedule_task_now!(event_loop; type_tag = "future_event_loop_callback") do _
+        schedule_task_now!(event_loop; type_tag = "future_event_loop_callback") do _
             try
                 callback(future, user_data)
             catch e
@@ -38,7 +38,7 @@ function future_on_channel!(
         user_data = nothing,
     )
     schedule_callback = () -> begin
-        event_loop_schedule_task_now!(channel.event_loop; type_tag = "future_channel_callback") do _
+        schedule_task_now!(channel.event_loop; type_tag = "future_channel_callback") do _
             try
                 callback(future, user_data)
             catch e

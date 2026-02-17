@@ -161,7 +161,7 @@ function _tls_network_connect(
         ctx = Sockets.tls_context_new(ctx_opts)
     catch e
         Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return e isa Reseau.ReseauError ? e.code : rethrow()
     end
 
@@ -183,31 +183,29 @@ function _tls_network_connect(
         host_resolver = resolver,
     )
 
-    _ = Sockets.client_bootstrap_connect!(
-        client_bootstrap,
-        host,
-        port,
-        client_bootstrap.socket_options,
-        tls_conn_opts,
-        client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            setup_err[] = err
-            channel_ref[] = channel
-            return nothing
-        end),
-        false,
-        nothing,
-        nothing,
-    )
-
-    wait_for_pred_tls(() -> setup_err[] !== nothing; timeout_s = 20.0)
+    try
+        channel_ref[] = wait(Sockets.client_bootstrap_connect!(
+            client_bootstrap,
+            host,
+            port,
+            client_bootstrap.socket_options,
+            tls_conn_opts,
+            client_bootstrap.on_protocol_negotiated,
+            false,
+            nothing,
+            nothing,
+        ))
+        setup_err[] = Reseau.OP_SUCCESS
+    catch e
+        setup_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
+    end
 
     if channel_ref[] !== nothing
         Sockets.channel_shutdown!(channel_ref[], 0)
     end
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 
     return setup_err[]
 end
@@ -526,10 +524,10 @@ end
     end
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -544,7 +542,7 @@ end
         @test e.code == EventLoops.ERROR_IO_TLS_CTX_ERROR
     end
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS ctx options custom key ops" begin
@@ -702,10 +700,10 @@ end
 
 @testset "TLS timeout task" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -725,7 +723,7 @@ end
     @test channel.shutdown_pending
     @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_NEGOTIATION_TIMEOUT
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS key operations" begin
@@ -797,10 +795,10 @@ end
     @test ctx isa Sockets.TlsContext
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -818,7 +816,7 @@ end
     handler.protocol = Reseau.byte_buf_from_c_str("h2")
     @test _buf_to_string(Sockets.tls_handler_protocol(handler)) == "h2"
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 mutable struct EchoHandler
@@ -932,10 +930,10 @@ end
 
 @testset "TLS BYO crypto integration" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1028,15 +1026,15 @@ end
 
     Sockets._tls_byo_client_setup[] = nothing
     Sockets._tls_byo_server_setup[] = nothing
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS client/server handler API" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1102,15 +1100,15 @@ end
     end
 
     @test Sockets.tls_is_alpn_available()
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS read shutdown ignores data" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1143,15 +1141,15 @@ end
     Sockets.handler_process_read_message(handler, slot, msg)
 
     @test !saw_data[]
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS shutdown clears pending writes" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1168,15 +1166,15 @@ end
     Sockets.handler_shutdown(handler, slot, Sockets.ChannelDirection.WRITE, 0, false)
     @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS write after failure" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1202,7 +1200,7 @@ end
         @test e.code == EventLoops.ERROR_IO_TLS_ERROR_NOT_NEGOTIATED
     end
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS alert handling" begin
@@ -1212,10 +1210,10 @@ end
     end
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1280,7 +1278,7 @@ end
     Sockets.handler_process_read_message(handler, slot, msg)
     @test channel.shutdown_error_code == EventLoops.ERROR_IO_TLS_ERROR_ALERT_RECEIVED
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS handshake stats" begin
@@ -1290,10 +1288,10 @@ end
     end
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1342,7 +1340,7 @@ end
         @test handler.stats.handshake_end_ns >= handler.stats.handshake_start_ns
     end
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS mTLS custom key op handshake" begin
@@ -1352,10 +1350,10 @@ end
     end
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1429,15 +1427,15 @@ end
         end
     end
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "tls handler" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1592,15 +1590,15 @@ end
 
     Sockets.socket_close(server_sock)
     Sockets.socket_close(client_sock)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "channel_setup_client_tls" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -1621,7 +1619,7 @@ end
         @test wait_for_handshake_status(handler, Sockets.TlsNegotiationStatus.ONGOING)
     end
 
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS concurrent cert import" begin
@@ -1749,7 +1747,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
         server_ctx = Sockets.tls_context_new(server_opts)
     catch e
         Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     @test server_ctx isa Sockets.TlsContext
@@ -1765,7 +1763,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
         client_ctx = Sockets.tls_context_new(client_opts)
     catch e
         Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     @test client_ctx isa Sockets.TlsContext
@@ -1827,7 +1825,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     client_negotiated_err = Ref(Reseau.OP_SUCCESS)
     client_channel = Ref{Any}(nothing)
 
-    @test Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
@@ -1842,16 +1840,13 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
             end,
         ),
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            client_setup_called[] = true
-            client_setup_err[] = err
-            client_channel[] = channel
-            return nothing
-        end),
         false,
         nothing,
         nothing,
-    ) === nothing
+    )
+    client_channel[] = wait(connect_future)
+    client_setup_called[] = true
+    client_setup_err[] = Reseau.OP_SUCCESS
 
     @test wait_for_flag_tls(server_setup_called)
     @test server_setup_err[] == Reseau.OP_SUCCESS
@@ -1873,7 +1868,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
     return nothing
 end
 
@@ -1973,7 +1968,7 @@ end
         client_negotiated_err = Ref(Reseau.OP_SUCCESS)
         client_channel = Ref{Any}(nothing)
 
-        @test Sockets.client_bootstrap_connect!(
+        connect_future = Sockets.client_bootstrap_connect!(
             client_bootstrap,
             "127.0.0.1",
             port,
@@ -1988,16 +1983,13 @@ end
                 end,
             ),
             client_bootstrap.on_protocol_negotiated,
-            Reseau.ChannelCallable((err, channel) -> begin
-                client_setup_called[] = true
-                client_setup_err[] = err
-                client_channel[] = channel
-                return nothing
-            end),
             false,
             nothing,
             nothing,
-        ) === nothing
+        )
+        client_channel[] = wait(connect_future)
+        client_setup_called[] = true
+        client_setup_err[] = Reseau.OP_SUCCESS
 
         @test wait_for_flag_tls(server_setup_called)
         @test server_setup_err[] == Reseau.OP_SUCCESS
@@ -2020,7 +2012,7 @@ end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS server hangup during negotiation" begin
@@ -2067,7 +2059,7 @@ end
     @test client_socket isa Sockets.Socket
 
     close_done = Ref(false)
-    connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = EventLoops.event_loop_group_get_next_loop(elg),
+    connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = EventLoops.get_next_event_loop(),
         on_connection_result = Reseau.EventCallable(err -> begin
             if err != Reseau.OP_SUCCESS
                 close_done[] = true
@@ -2078,14 +2070,14 @@ end
                 close_done[] = true
                 return nothing
             end
-            now = EventLoops.event_loop_current_clock_time(loop)
+            now = Reseau.clock_now_ns()
             task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                 Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
                 Sockets.socket_close(client_socket)
                 close_done[] = true
                 return nothing
             end); type_tag = "close_client_socket")
-            EventLoops.event_loop_schedule_task_future!(loop, task, now + UInt64(1_000_000_000))
+            EventLoops.schedule_task_future!(loop, task, now + UInt64(1_000_000_000))
             return nothing
         end),
     )
@@ -2098,7 +2090,7 @@ end
 
     Sockets.socket_close(client_socket)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS certificate chain" begin
@@ -2172,7 +2164,7 @@ end
         host_resolver = resolver,
     )
 
-    @test Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
@@ -2186,15 +2178,12 @@ end
             end,
         ),
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            client_setup[] = err == Reseau.OP_SUCCESS
-            client_channel[] = channel
-            return nothing
-        end),
         false,
         nothing,
         nothing,
-    ) === nothing
+    )
+    client_channel[] = wait(connect_future)
+    client_setup[] = true
 
     @test wait_for_flag_tls(server_setup)
     @test wait_for_flag_tls(client_setup)
@@ -2210,7 +2199,7 @@ end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 
     Reseau.byte_buf_clean_up(Ref(cert_buf))
     Reseau.byte_buf_clean_up(Ref(key_buf))
@@ -2218,10 +2207,10 @@ end
 
 @testset "TLS handler overhead + max fragment size" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -2255,7 +2244,7 @@ end
         end
         return nothing
     end); type_tag = "tls_overhead_test")
-    EventLoops.event_loop_schedule_task_now!(event_loop, task)
+    EventLoops.schedule_task_now!(event_loop, task)
 
     cap = take!(results)
     expected = Int(Sockets.g_aws_channel_max_fragment_size[] - Csize_t(Sockets.TLS_EST_RECORD_OVERHEAD))
@@ -2267,7 +2256,7 @@ end
     end
 
     Sockets.g_aws_channel_max_fragment_size[] = prev_max
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "TLS echo + backpressure" begin
@@ -2288,7 +2277,7 @@ end
     @test client_ctx isa Sockets.TlsContext
     if !(server_ctx isa Sockets.TlsContext) || !(client_ctx isa Sockets.TlsContext)
         Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -2360,38 +2349,33 @@ end
         server_name = "localhost",
     )
 
-    connect_res = Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
         client_bootstrap.socket_options,
         client_tls_opts,
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            if err == Reseau.OP_SUCCESS
-                handler = rw_handler_new(
-                    tls_test_handle_read,
-                    tls_test_handle_write,
-                    true,
-                    Int(write_tag.len ÷ 2),
-                    client_rw_args,
-                )
-                client_handler_ref[] = handler
-                slot = Sockets.channel_slot_new!(channel)
-                if Sockets.channel_first_slot(channel) !== slot
-                    Sockets.channel_slot_insert_end!(channel, slot)
-                end
-                Sockets.channel_slot_set_handler!(slot, handler)
-                client_slot_ref[] = slot
-            end
-            client_ready[] = true
-            return nothing
-        end),
         true,
         nothing,
         nothing,
     )
-    @test connect_res === nothing
+    client_channel = wait(connect_future)
+    handler = rw_handler_new(
+        tls_test_handle_read,
+        tls_test_handle_write,
+        true,
+        Int(write_tag.len ÷ 2),
+        client_rw_args,
+    )
+    client_handler_ref[] = handler
+    slot = Sockets.channel_slot_new!(client_channel)
+    if Sockets.channel_first_slot(client_channel) !== slot
+        Sockets.channel_slot_insert_end!(client_channel, slot)
+    end
+    Sockets.channel_slot_set_handler!(slot, handler)
+    client_slot_ref[] = slot
+    client_ready[] = true
 
     @test wait_for_flag_tls(server_ready)
     @test wait_for_flag_tls(client_ready)
@@ -2424,7 +2408,7 @@ end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
     Sockets.g_aws_channel_max_fragment_size[] = prev_max
 end
 
@@ -2447,7 +2431,7 @@ end
         @test client_ctx isa Sockets.TlsContext
         if !(server_ctx isa Sockets.TlsContext) || !(client_ctx isa Sockets.TlsContext)
             Sockets.host_resolver_shutdown!(resolver)
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
             Sockets.g_aws_channel_max_fragment_size[] = prev_max
             continue
         end
@@ -2550,39 +2534,33 @@ end
             server_name = "localhost",
         )
 
-        connect_res = Sockets.client_bootstrap_connect!(
+        connect_future = Sockets.client_bootstrap_connect!(
             client_bootstrap,
             "127.0.0.1",
             port,
             client_bootstrap.socket_options,
             client_tls_opts,
             client_bootstrap.on_protocol_negotiated,
-            Reseau.ChannelCallable((err, channel) -> begin
-                if err == Reseau.OP_SUCCESS
-                    client_channel_ref[] = channel
-                    handler = rw_handler_new(
-                        client_on_read,
-                        tls_test_handle_write,
-                        true,
-                        Int(read_tag.len ÷ 2),
-                        client_rw_args,
-                    )
-                    client_handler_ref[] = handler
-                    slot = Sockets.channel_slot_new!(channel)
-                    if Sockets.channel_first_slot(channel) !== slot
-                        Sockets.channel_slot_insert_end!(channel, slot)
-                    end
-                    Sockets.channel_slot_set_handler!(slot, handler)
-                    client_slot_ref[] = slot
-                end
-                client_ready[] = true
-                return nothing
-            end),
             true,
             nothing,
             nothing,
         )
-        @test connect_res === nothing
+        client_channel_ref[] = wait(connect_future)
+        handler = rw_handler_new(
+            client_on_read,
+            tls_test_handle_write,
+            true,
+            Int(read_tag.len ÷ 2),
+            client_rw_args,
+        )
+        client_handler_ref[] = handler
+        slot = Sockets.channel_slot_new!(client_channel_ref[])
+        if Sockets.channel_first_slot(client_channel_ref[]) !== slot
+            Sockets.channel_slot_insert_end!(client_channel_ref[], slot)
+        end
+        Sockets.channel_slot_set_handler!(slot, handler)
+        client_slot_ref[] = slot
+        client_ready[] = true
 
         @test wait_for_flag_tls(server_ready)
         @test wait_for_flag_tls(client_ready)
@@ -2600,7 +2578,7 @@ end
 
         Sockets.server_bootstrap_shutdown!(server_bootstrap)
         Sockets.host_resolver_shutdown!(resolver)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         Sockets.g_aws_channel_max_fragment_size[] = prev_max
     end
 end
@@ -2685,7 +2663,7 @@ end
     Sockets.handler_gather_statistics(handler::FakeSocketStatsHandler) = handler.stats
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     event_loop === nothing && return
 
@@ -2713,7 +2691,7 @@ end
     set_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
         Sockets.channel_set_statistics_handler!(channel, stats_handler)
     end); type_tag = "set_tls_stats")
-    EventLoops.event_loop_schedule_task_now!(event_loop, set_task)
+    EventLoops.schedule_task_now!(event_loop, set_task)
 
     update_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
         socket_handler.stats.bytes_read = 111
@@ -2721,7 +2699,7 @@ end
         Sockets.handler_gather_statistics(tls_handler).handshake_status = Sockets.TlsNegotiationStatus.SUCCESS
         return nothing
     end); type_tag = "update_tls_stats")
-    EventLoops.event_loop_schedule_task_now!(event_loop, update_task)
+    EventLoops.schedule_task_now!(event_loop, update_task)
 
     @test wait_for_stats(stats_results)
     interval, stats_vec = take!(stats_results)
@@ -2748,7 +2726,7 @@ end
     end
 
     Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"

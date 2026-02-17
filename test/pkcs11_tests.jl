@@ -1113,24 +1113,20 @@ end
                 event_loop_group = elg,
                 host_resolver = resolver,
             )
-            @test Sockets.client_bootstrap_connect!(
+            connect_future = Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
                 port,
                 client_bootstrap.socket_options,
                 Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
                 client_bootstrap.on_protocol_negotiated,
-                Reseau.ChannelCallable((err, channel) -> begin
-                    client_ready[] = err == Reseau.OP_SUCCESS
-                    if err == Reseau.OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
-                    end
-                    return nothing
-                end),
                 false,
                 nothing,
                 nothing,
-            ) === nothing
+            )
+            client_channel = wait(connect_future)
+            client_ready[] = true
+            Sockets.channel_shutdown!(client_channel, Reseau.OP_SUCCESS)
 
             wait_start = time()
             while !(client_ready[] && server_ready[] && server_shutdown[])
@@ -1145,7 +1141,7 @@ end
 
             Sockets.server_bootstrap_shutdown!(server_bootstrap)
             Sockets.host_resolver_shutdown!(resolver)
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         finally
             pkcs11_tester_cleanup!(tester)
         end
@@ -1228,24 +1224,20 @@ end
                 event_loop_group = elg,
                 host_resolver = resolver,
             )
-            @test Sockets.client_bootstrap_connect!(
+            connect_future = Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
                 port,
                 client_bootstrap.socket_options,
                 Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost"),
                 client_bootstrap.on_protocol_negotiated,
-                Reseau.ChannelCallable((err, channel) -> begin
-                    client_ready[] = err == Reseau.OP_SUCCESS
-                    if err == Reseau.OP_SUCCESS
-                        Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
-                    end
-                    return nothing
-                end),
                 false,
                 nothing,
                 nothing,
-            ) === nothing
+            )
+            client_channel = wait(connect_future)
+            client_ready[] = true
+            Sockets.channel_shutdown!(client_channel, Reseau.OP_SUCCESS)
 
             wait_start = time()
             while !(client_ready[] && server_ready[] && server_shutdown[])
@@ -1260,7 +1252,7 @@ end
 
             Sockets.server_bootstrap_shutdown!(server_bootstrap)
             Sockets.host_resolver_shutdown!(resolver)
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         finally
             pkcs11_tester_cleanup!(tester)
         end

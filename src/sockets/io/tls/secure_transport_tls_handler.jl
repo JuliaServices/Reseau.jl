@@ -475,6 +475,8 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             logf(
                 LogLevel.WARN,
                 LS_IO_TLS,string("SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])", " ", ))
+            handler.negotiation_finished = false
+            _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 

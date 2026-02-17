@@ -124,22 +124,22 @@ function _schedule_task(state::PipeState, loop::EventLoops.EventLoop, fn; delay_
 
     if delay_secs == 0
         if serialized
-            EventLoops.event_loop_schedule_task_now_serialized!(loop, task)
+            EventLoops.schedule_task_now_serialized!(loop, task)
         else
-            EventLoops.event_loop_schedule_task_now!(loop, task)
+            EventLoops.schedule_task_now!(loop, task)
         end
         return nothing
     end
 
     local now_ns
     try
-        now_ns = EventLoops.event_loop_current_clock_time(loop)
+        now_ns = Reseau.clock_now_ns()
     catch
         _signal_error!(state)
         return nothing
     end
     run_at = UInt64(now_ns + UInt64(delay_secs) * 1_000_000_000)
-    EventLoops.event_loop_schedule_task_future!(loop, task, run_at)
+    EventLoops.schedule_task_future!(loop, task, run_at)
     return nothing
 end
 
@@ -150,13 +150,13 @@ _schedule_write_end_task(state::PipeState, fn; delay_secs::Int = 0) =
     _schedule_task(state, state.write_loop::EventLoops.EventLoop, fn; delay_secs = delay_secs)
 
 function _fixture_before!(state::PipeState)
-    read_loop = EventLoops.event_loop_new()
-    EventLoops.event_loop_run!(read_loop)
+    read_loop = EventLoops.EventLoop()
+    EventLoops.run!(read_loop)
     state.read_loop = read_loop
 
     if state.loop_setup == DIFFERENT_EVENT_LOOPS
-        write_loop = EventLoops.event_loop_new()
-        EventLoops.event_loop_run!(write_loop)
+        write_loop = EventLoops.EventLoop()
+        EventLoops.run!(write_loop)
         state.write_loop = write_loop
     else
         state.write_loop = read_loop
@@ -182,10 +182,10 @@ end
 
 function _fixture_after!(state::PipeState)
     if state.read_loop !== nothing
-        EventLoops.event_loop_destroy!(state.read_loop)
+        close(state.read_loop)
     end
     if state.write_loop !== nothing && state.write_loop !== state.read_loop
-        EventLoops.event_loop_destroy!(state.write_loop)
+        close(state.write_loop)
     end
     return nothing
 end

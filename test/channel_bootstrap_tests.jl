@@ -75,27 +75,23 @@ end
     setup_channel = Ref{Any}(nothing)
     setup_has_pool = Ref(false)
 
-    res = Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
         cfg.sock_opts,
         client_bootstrap.tls_connection_options,
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            setup_called[] = true
-            setup_error[] = err
-            setup_channel[] = channel
-            setup_has_pool[] = channel !== nothing && channel.message_pool !== nothing
-            return nothing
-        end),
         true,
         nothing,
         cfg.resolution_config,
     )
+    setup_channel[] = wait(connect_future)
+    setup_called[] = true
+    setup_error[] = Reseau.OP_SUCCESS
+    setup_has_pool[] = setup_channel[] !== nothing && setup_channel[].message_pool !== nothing
 
-    @test res === nothing
-    @test wait_for_pred(() -> setup_called[])
+    @test setup_called[]
     @test setup_error[] == Reseau.OP_SUCCESS
     @test setup_channel[] !== nothing
     @test setup_has_pool[]
@@ -115,7 +111,7 @@ end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "client bootstrap attempts multiple resolved addresses" begin
@@ -164,26 +160,22 @@ end
         Sockets.HostResolutionConfig()
     end
 
-    res = Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
         cfg.sock_opts,
         client_bootstrap.tls_connection_options,
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            setup_called[] = true
-            setup_error[] = err
-            setup_channel[] = channel
-            return nothing
-        end),
         false,
         nothing,
         resolution_config,
     )
+    setup_channel[] = wait(connect_future)
+    setup_called[] = true
+    setup_error[] = Reseau.OP_SUCCESS
 
-    @test res === nothing
-    @test wait_for_pred(() -> setup_called[])
+    @test setup_called[]
     @test setup_error[] == Reseau.OP_SUCCESS
     @test setup_channel[] !== nothing
     @test wait_for_pred(() -> server_setup_called[])
@@ -198,7 +190,7 @@ end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "client bootstrap requested event loop mismatch" begin
@@ -209,64 +201,23 @@ end
         host_resolver = resolver,
     )
 
-    bad_loop = EventLoops.event_loop_new()
-    @test_throws Reseau.ReseauError Sockets.client_bootstrap_connect!(
+    bad_loop = EventLoops.EventLoop()
+    fut = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "localhost",
         80,
         client_bootstrap.socket_options,
         client_bootstrap.tls_connection_options,
         client_bootstrap.on_protocol_negotiated,
-        nothing,
         false,
         bad_loop,
         nothing,
     )
-    EventLoops.event_loop_destroy!(bad_loop)
+    @test_throws Reseau.ReseauError wait(fut)
+    close(bad_loop)
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
-end
-
-@testset "client bootstrap on_setup runs on requested event loop" begin
-    elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
-    requested_loop = EventLoops.event_loop_group_get_loop_at(elg, 0)
-    @test requested_loop !== nothing
-    setup_called = Ref(false)
-    setup_on_loop = Ref(false)
-    request = Sockets.SocketConnectionRequest(
-        client_bootstrap,
-        "example.com",
-        UInt32(443),
-        client_bootstrap.socket_options,
-        nothing,
-        nothing,
-        Reseau.ChannelCallable((err, channel) -> begin
-            _ = channel
-            setup_called[] = true
-            setup_on_loop[] = EventLoops.event_loop_thread_is_callers_thread(requested_loop)
-            return nothing
-        end),
-        false,
-        requested_loop,
-        nothing,
-        Sockets.HostResolutionConfig(),
-        Sockets.HostAddress[],
-        0,
-        0,
-        Sockets.ScheduledTask[],
-        false,
-    )
-    Sockets._connection_request_complete(request, EventLoops.ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
-    @test wait_for_pred(() -> setup_called[])
-    @test setup_on_loop[]
-    Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "client bootstrap staggered connection scheduling" begin
@@ -276,12 +227,12 @@ end
         event_loop_group = elg,
         host_resolver = resolver,
     )
-    el = EventLoops.event_loop_group_get_loop_at(elg, 0)
+    el = elg.event_loops[1]
     @test el !== nothing
     event_loop = el isa EventLoops.EventLoop ? el : nothing
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -290,7 +241,6 @@ end
         "example.com",
         UInt32(443),
         client_bootstrap.socket_options,
-        nothing,
         nothing,
         nothing,
         false,
@@ -306,6 +256,8 @@ end
         0,
         Sockets.ScheduledTask[],
         false,
+        Sockets.Future{Sockets.Socket}(),
+        Sockets.Future{Sockets.Channel}(),
     )
 
     addresses = [
@@ -322,7 +274,7 @@ end
     @test second_task.timestamp > first_task.timestamp
 
     scheduled_attempts = copy(request.connection_attempt_tasks)
-    Sockets._connection_request_complete(request, Sockets.OP_SUCCESS, nothing)
+    Sockets._cancel_connection_attempts(request)
     @test isempty(request.connection_attempt_tasks)
     @test all(!task.scheduled for task in scheduled_attempts)
 
@@ -331,7 +283,6 @@ end
         "example.com",
         UInt32(443),
         client_bootstrap.socket_options,
-        nothing,
         nothing,
         nothing,
         false,
@@ -347,6 +298,8 @@ end
         0,
         Sockets.ScheduledTask[],
         false,
+        Sockets.Future{Sockets.Socket}(),
+        Sockets.Future{Sockets.Channel}(),
     )
     single_family_addresses = [
         Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, "example.com", 0),
@@ -361,12 +314,12 @@ end
     @test second_task.timestamp > first_task.timestamp
     single_family_attempts = copy(request.connection_attempt_tasks)
 
-    Sockets._connection_request_complete(request, Sockets.OP_SUCCESS, nothing)
+    Sockets._cancel_connection_attempts(request)
     @test isempty(request.connection_attempt_tasks)
     @test all(!task.scheduled for task in single_family_attempts)
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 if tls_tests_enabled()
@@ -439,22 +392,19 @@ if tls_tests_enabled()
         host_resolver = resolver,
     )
 
-    @test Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
         cfg.sock_opts,
         client_tls_opts,
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            client_setup[] = err == Reseau.OP_SUCCESS
-            client_channel[] = channel
-            return nothing
-        end),
         false,
         nothing,
         cfg.resolution_config,
-    ) === nothing
+    )
+    client_channel[] = wait(connect_future)
+    client_setup[] = true
 
     @test wait_for_pred(() -> server_setup[])
     @test wait_for_pred(() -> client_setup[])
@@ -470,7 +420,7 @@ if tls_tests_enabled()
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 else
     @info "Skipping bootstrap TLS negotiation (set RESEAU_RUN_TLS_TESTS=1 to enable)"
@@ -528,23 +478,18 @@ end
         host_resolver = resolver,
     )
 
-    @test Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
         cfg.sock_opts,
         client_bootstrap.tls_connection_options,
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            if err == Reseau.OP_SUCCESS
-                client_channel[] = channel
-            end
-            return nothing
-        end),
         false,
         nothing,
         cfg.resolution_config,
-    ) === nothing
+    )
+    client_channel[] = wait(connect_future)
 
     @test wait_for_pred(() -> server_setup[])
 
@@ -563,7 +508,7 @@ end
     @test wait_for_pred(() -> destroy_called[])
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "server bootstrap destroy callback without channels" begin
@@ -587,5 +532,5 @@ end
     @test wait_for_pred(() -> destroy_called[])
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end

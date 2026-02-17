@@ -92,7 +92,7 @@ end
                 end
 
                 Sockets.retry_strategy_shutdown!(strategy)
-                EventLoops.event_loop_group_release!(elg)
+                close(elg)
                 Sockets.io_library_clean_up()
             end
         end
@@ -170,7 +170,7 @@ end
         end
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -248,7 +248,7 @@ end
         end
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -330,7 +330,7 @@ end
         end
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -352,7 +352,7 @@ end
     @test err isa Reseau.ReseauError
     @test err.code == Reseau.ERROR_INVALID_ARGUMENT
 
-    EventLoops.event_loop_group_release!(elg)
+    close(elg)
     Sockets.io_library_clean_up()
 end
 
@@ -457,7 +457,7 @@ end
         Sockets.retry_token_release!(token3)
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end
@@ -550,7 +550,7 @@ end
         Sockets.retry_token_release!(token)
 
         Sockets.retry_strategy_shutdown!(strategy)
-        EventLoops.event_loop_group_release!(elg)
+        close(elg)
         Sockets.io_library_clean_up()
     end
 end

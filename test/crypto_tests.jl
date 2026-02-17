@@ -248,24 +248,22 @@ end
 
     resolution_config = Sockets.HostResolutionConfig()
 
-    @test Sockets.client_bootstrap_connect!(
+    connect_future = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
         client_bootstrap.socket_options,
         outgoing_args.tls_options,
         client_bootstrap.on_protocol_negotiated,
-        Reseau.ChannelCallable((err, channel) -> begin
-            lock(outgoing_args.lock) do
-                outgoing_args.channel = channel
-                outgoing_args.setup_completed = true
-            end
-            return nothing
-        end),
         false,
         nothing,
         resolution_config,
-    ) === nothing
+    )
+    outgoing_channel = wait(connect_future)
+    lock(outgoing_args.lock) do
+        outgoing_args.channel = outgoing_channel
+        outgoing_args.setup_completed = true
+    end
 
     @test wait_for_pred(() -> incoming_args.setup_completed)
     @test wait_for_pred(() -> outgoing_args.setup_completed)
@@ -293,7 +291,7 @@ end
     @test wait_for_pred(() -> incoming_args.listener_destroyed)
 
     Sockets.host_resolver_shutdown!(resolver)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
     finally
         Sockets._tls_byo_client_setup[] = old_client_setup
         Sockets._tls_byo_server_setup[] = old_server_setup

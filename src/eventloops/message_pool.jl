@@ -24,46 +24,24 @@ end
 Base.length(pool::MemoryPool) = length(pool.stack)
 Base.isempty(pool::MemoryPool) = isempty(pool.stack)
 
-function memory_pool_clean_up!(pool::MemoryPool)
+function Base.close(pool::MemoryPool)
     empty!(pool.stack)
     return nothing
 end
 
-function memory_pool_acquire(pool::MemoryPool)::Memory{UInt8}
+function Base.acquire(pool::MemoryPool)::Memory{UInt8}
     if !isempty(pool.stack)
         return pop!(pool.stack)
     end
     return Memory{UInt8}(undef, Int(pool.segment_size))
 end
 
-function memory_pool_release!(pool::MemoryPool, segment::Memory{UInt8})
+function Base.release(pool::MemoryPool, segment::Memory{UInt8})
     if length(pool.stack) >= pool.ideal_segment_count
         return nothing
     end
     push!(pool.stack, segment)
     return nothing
-end
-
-# Message pool creation arguments
-struct MessagePoolCreationArgs
-    application_data_msg_data_size::Csize_t
-    application_data_msg_count::UInt8
-    small_block_msg_data_size::Csize_t
-    small_block_msg_count::UInt8
-end
-
-function MessagePoolCreationArgs(;
-        application_data_msg_data_size::Integer = 16384,  # 16KB default
-        application_data_msg_count::Integer = 4,
-        small_block_msg_data_size::Integer = 256,
-        small_block_msg_count::Integer = 16,
-    )
-    return MessagePoolCreationArgs(
-        Csize_t(application_data_msg_data_size),
-        UInt8(application_data_msg_count),
-        Csize_t(small_block_msg_data_size),
-        UInt8(small_block_msg_count),
-    )
 end
 
 # Message pool - manages pools of pre-allocated message buffers
@@ -75,24 +53,31 @@ mutable struct MessagePool
 end
 
 function MessagePool(
-        args::MessagePoolCreationArgs = MessagePoolCreationArgs(),
+        ;
+        application_data_msg_data_size::Integer = 16384,  # 16KB default
+        application_data_msg_count::Integer = 4,
+        small_block_msg_data_size::Integer = 256,
+        small_block_msg_count::Integer = 16,
     )::MessagePool
-    application_data_pool = MemoryPool(args.application_data_msg_count, args.application_data_msg_data_size)
-    small_block_pool = MemoryPool(args.small_block_msg_count, args.small_block_msg_data_size)
+    application_data_size = Csize_t(application_data_msg_data_size)
+    small_block_size = Csize_t(small_block_msg_data_size)
+
+    application_data_pool = MemoryPool(application_data_msg_count, application_data_size)
+    small_block_pool = MemoryPool(small_block_msg_count, small_block_size)
 
     pool = MessagePool(
         application_data_pool,
         small_block_pool,
-        args.application_data_msg_data_size,
-        args.small_block_msg_data_size,
+        application_data_size,
+        small_block_size,
     )
 
     return pool
 end
 
-function message_pool_clean_up!(pool::MessagePool)
-    memory_pool_clean_up!(pool.application_data_pool)
-    memory_pool_clean_up!(pool.small_block_pool)
+function Base.close(pool::MessagePool)
+    close(pool.application_data_pool)
+    close(pool.small_block_pool)
     return nothing
 end
 
@@ -109,7 +94,7 @@ end
 end
 
 # Acquire a message from the pool
-function message_pool_acquire(
+function Base.acquire(
         pool::MessagePool,
         message_type::IoMessageType.T,
         size_hint::Integer,
@@ -122,10 +107,10 @@ function message_pool_acquire(
     size_hint_val = size_hint < 0 ? 0 : size_hint
 
     if Csize_t(size_hint_val) > pool.small_block_size
-        segment = memory_pool_acquire(pool.application_data_pool)
+        segment = Base.acquire(pool.application_data_pool)
         max_size = pool.application_data_size
     else
-        segment = memory_pool_acquire(pool.small_block_pool)
+        segment = Base.acquire(pool.small_block_pool)
         max_size = pool.small_block_size
     end
 
@@ -150,7 +135,7 @@ function message_pool_acquire(
 end
 
 # Release a message back to the pool
-function message_pool_release!(pool::MessagePool, message::IoMessage)
+function Base.release(pool::MessagePool, message::IoMessage)
     len = message.message_data.len
     if len > 0
         mem = getfield(message.message_data, :mem)
@@ -164,9 +149,9 @@ function message_pool_release!(pool::MessagePool, message::IoMessage)
 
     capacity = message.message_data.capacity
     if capacity > pool.small_block_size
-        memory_pool_release!(pool.application_data_pool, segment)
+        Base.release(pool.application_data_pool, segment)
     else
-        memory_pool_release!(pool.small_block_pool, segment)
+        Base.release(pool.small_block_pool, segment)
     end
 
     message.pool_segment = nothing

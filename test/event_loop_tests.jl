@@ -24,7 +24,7 @@ function _wait_for_loop_stop(el::EventLoops.EventLoop; timeout_ns::Int = 5_000_0
     done_ch = Channel{Any}(1)
     errormonitor(Threads.@spawn begin
         try
-            EventLoops.event_loop_wait_for_stop_completion!(el)
+            EventLoops.wait_for_stop_completion(el)
             put!(done_ch, nothing)
         catch e
             put!(done_ch, e)
@@ -48,7 +48,7 @@ function _schedule_event_loop_task(el::EventLoops.EventLoop, fn; type_tag::Abstr
         put!(done_ch, (ok, result))
         return nothing
     end); type_tag = type_tag)
-    EventLoops.event_loop_schedule_task_now!(el, task)
+    EventLoops.schedule_task_now!(el, task)
     return done_ch
 end
 
@@ -73,20 +73,6 @@ function _drain_pipe(read_end::Sockets.PipeReadEnd)
 end
 
 @testset "Event Loops" begin
-    @testset "EventLoopGroup indexing convenience" begin
-        elg = EventLoops.EventLoopGroup(; loop_count = 1)
-
-        try
-            @test length(elg) == 1
-            @test elg[1] isa EventLoops.EventLoop
-            @test elg[1] === EventLoops.event_loop_group_get_loop_at(elg, 0)
-            @test_throws BoundsError elg[0]
-            @test_throws BoundsError elg[2]
-        finally
-            EventLoops.event_loop_group_release!(elg)
-        end
-    end
-
     @testset "Epoll pipe cloexec flags" begin
         if Sys.islinux()
             read_fd, write_fd = EventLoops.open_nonblocking_posix_pipe()
@@ -109,14 +95,14 @@ end
     end
 
     @testset "Event loop scheduling" begin
-        el = EventLoops.event_loop_new()
+        el = EventLoops.EventLoop()
 
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
             @test true
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         else
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
@@ -128,7 +114,7 @@ end
                     done[] = true
                     return nothing
                 end); type_tag = "event_loop_test_task")
-                EventLoops.event_loop_schedule_task_now!(el, task)
+                EventLoops.schedule_task_now!(el, task)
 
                 deadline = Base.time_ns() + 2_000_000_000
                 while !done[] && Base.time_ns() < deadline
@@ -138,7 +124,7 @@ end
                 @test done[]
                 @test thread_ok[]
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -148,24 +134,24 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
                 done = Ref(false)
                 actual_time = Ref{UInt64}(0)
 
-                start_time = EventLoops.event_loop_current_clock_time(el)
+                start_time = Reseau.clock_now_ns()
                 target_time = start_time + 50_000_000
 
                 task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                    actual_time[] = EventLoops.event_loop_current_clock_time(el)
+                    actual_time[] = Reseau.clock_now_ns()
                     done[] = true
                     return nothing
                 end); type_tag = "future_timing")
-                EventLoops.event_loop_schedule_task_future!(el, task, target_time)
+                EventLoops.schedule_task_future!(el, task, target_time)
 
                 deadline = Base.time_ns() + 2_000_000_000
                 while !done[] && Base.time_ns() < deadline
@@ -178,7 +164,7 @@ end
                     @test actual_time[] - target_time < 1_000_000_000
                 end
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -188,9 +174,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
@@ -211,7 +197,7 @@ end
                         end
                         return nothing
                     end); type_tag = "stress_now")
-                    EventLoops.event_loop_schedule_task_now!(el, task)
+                    EventLoops.schedule_task_now!(el, task)
                 end
 
                 deadline = Base.time_ns() + 3_000_000_000
@@ -222,7 +208,7 @@ end
                 @test isready(done_ch)
                 isready(done_ch) && take!(done_ch)
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -232,9 +218,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             read_end = nothing
@@ -300,7 +286,7 @@ end
             finally
                 read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                 write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -313,9 +299,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -324,22 +310,20 @@ end
                     read_end, write_end = Sockets.pipe_create()
 
                     subscribe_task = _schedule_event_loop_task(el, () -> begin
-                        res1 = EventLoops.event_loop_subscribe_to_io_events!(
+                        res1 = EventLoops.subscribe_to_io_events!(
                             el,
                             read_end.io_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            (loop, handle, events, data) -> nothing,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> nothing),
                         )
-                        res2 = EventLoops.event_loop_subscribe_to_io_events!(
+                        res2 = EventLoops.subscribe_to_io_events!(
                             el,
                             write_end.io_handle,
                             Int(EventLoops.IoEventType.WRITABLE),
-                            (loop, handle, events, data) -> nothing,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> nothing),
                         )
-                        res3 = EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
-                        res4 = EventLoops.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
+                        res3 = EventLoops.unsubscribe_from_io_events!(el, read_end.io_handle)
+                        res4 = EventLoops.unsubscribe_from_io_events!(el, write_end.io_handle)
                         return (res1, res2, res3, res4)
                     end; type_tag = "event_loop_subscribe_unsubscribe")
 
@@ -354,7 +338,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -368,9 +352,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -381,12 +365,11 @@ end
                     subscription_task = _schedule_event_loop_task(
                         el,
                         () -> begin
-                            EventLoops.event_loop_subscribe_to_io_events!(
+                            EventLoops.subscribe_to_io_events!(
                                 el,
                                 read_end.io_handle,
                                 Int(EventLoops.IoEventType.READABLE),
-                                (loop, handle, events, data) -> nothing,
-                                nothing,
+                                EventLoops.EventCallable((events::Int) -> nothing),
                             )
                             @test read_end.io_handle.additional_data != C_NULL
                             @test read_end.io_handle.additional_ref isa EventLoops.EpollEventHandleData
@@ -402,7 +385,7 @@ end
                     unsubscribe_task = _schedule_event_loop_task(
                         el,
                         () -> begin
-                            EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                            EventLoops.unsubscribe_from_io_events!(el, read_end.io_handle)
                             return nothing
                         end;
                         type_tag = "epoll_subscription_payload_release",
@@ -414,7 +397,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -428,9 +411,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -460,12 +443,11 @@ end
                     end
 
                     sub_task = _schedule_event_loop_task(el, () -> begin
-                        return EventLoops.event_loop_subscribe_to_io_events!(
+                        return EventLoops.subscribe_to_io_events!(
                             el,
                             write_end.io_handle,
                             Int(EventLoops.IoEventType.WRITABLE),
-                            on_writable,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_writable(el, write_end.io_handle, events, nothing)),
                         )
                     end; type_tag = "event_loop_writable_subscribe")
 
@@ -483,7 +465,7 @@ end
                     @test thread_ok[]
 
                     unsub_task = _schedule_event_loop_task(el, () -> begin
-                        return EventLoops.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
+                        return EventLoops.unsubscribe_from_io_events!(el, write_end.io_handle)
                     end; type_tag = "event_loop_writable_unsubscribe")
                     @test _wait_for_channel(unsub_task)
                     ok2, unsub_res = take!(unsub_task)
@@ -492,7 +474,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -506,9 +488,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -529,12 +511,11 @@ end
                     end
 
                     sub_task = _schedule_event_loop_task(el, () -> begin
-                        return EventLoops.event_loop_subscribe_to_io_events!(
+                        return EventLoops.subscribe_to_io_events!(
                             el,
                             read_end.io_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            on_readable,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_readable(el, read_end.io_handle, events, nothing)),
                         )
                     end; type_tag = "event_loop_readable_subscribe")
 
@@ -550,7 +531,7 @@ end
                     end
 
                     unsub_task = _schedule_event_loop_task(el, () -> begin
-                        return EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                        return EventLoops.unsubscribe_from_io_events!(el, read_end.io_handle)
                     end; type_tag = "event_loop_readable_unsubscribe")
                     @test _wait_for_channel(unsub_task)
                     ok2, unsub_res = take!(unsub_task)
@@ -559,7 +540,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -573,9 +554,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -608,12 +589,11 @@ end
                     end
 
                     sub_task = _schedule_event_loop_task(el, () -> begin
-                        return EventLoops.event_loop_subscribe_to_io_events!(
+                        return EventLoops.subscribe_to_io_events!(
                             el,
                             read_end.io_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            on_readable,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_readable(el, read_end.io_handle, events, nothing)),
                         )
                     end; type_tag = "event_loop_readable_subscribe_present")
 
@@ -630,7 +610,7 @@ end
                     end
 
                     unsub_task = _schedule_event_loop_task(el, () -> begin
-                        return EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                        return EventLoops.unsubscribe_from_io_events!(el, read_end.io_handle)
                     end; type_tag = "event_loop_readable_unsubscribe_present")
                     @test _wait_for_channel(unsub_task)
                     ok2, unsub_res = take!(unsub_task)
@@ -639,7 +619,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -653,9 +633,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -696,19 +676,17 @@ end
                     end
 
                     sub_task = _schedule_event_loop_task(el, () -> begin
-                        res1 = EventLoops.event_loop_subscribe_to_io_events!(
+                        res1 = EventLoops.subscribe_to_io_events!(
                             el,
                             write_end.io_handle,
                             Int(EventLoops.IoEventType.WRITABLE),
-                            on_writable,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_writable(el, write_end.io_handle, events, nothing)),
                         )
-                        res2 = EventLoops.event_loop_subscribe_to_io_events!(
+                        res2 = EventLoops.subscribe_to_io_events!(
                             el,
                             read_end.io_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            on_readable,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_readable(el, read_end.io_handle, events, nothing)),
                         )
                         return (res1, res2)
                     end; type_tag = "event_loop_readable_after_write_sub")
@@ -732,8 +710,8 @@ end
                     end
 
                     unsub_task = _schedule_event_loop_task(el, () -> begin
-                        res1 = EventLoops.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
-                        res2 = EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                        res1 = EventLoops.unsubscribe_from_io_events!(el, write_end.io_handle)
+                        res2 = EventLoops.unsubscribe_from_io_events!(el, read_end.io_handle)
                         return (res1, res2)
                     end; type_tag = "event_loop_readable_after_write_unsub")
                     @test _wait_for_channel(unsub_task)
@@ -745,7 +723,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -759,9 +737,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -805,19 +783,17 @@ end
                     end
 
                     sub_task = _schedule_event_loop_task(el, () -> begin
-                        res1 = EventLoops.event_loop_subscribe_to_io_events!(
+                        res1 = EventLoops.subscribe_to_io_events!(
                             el,
                             write_end.io_handle,
                             Int(EventLoops.IoEventType.WRITABLE),
-                            on_writable,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_writable(el, write_end.io_handle, events, nothing)),
                         )
-                        res2 = EventLoops.event_loop_subscribe_to_io_events!(
+                        res2 = EventLoops.subscribe_to_io_events!(
                             el,
                             read_end.io_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            on_readable,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_readable(el, read_end.io_handle, events, nothing)),
                         )
                         return (res1, res2)
                     end; type_tag = "event_loop_readable_second_sub")
@@ -844,8 +820,8 @@ end
                     end
 
                     unsub_task = _schedule_event_loop_task(el, () -> begin
-                        res1 = EventLoops.event_loop_unsubscribe_from_io_events!(el, write_end.io_handle)
-                        res2 = EventLoops.event_loop_unsubscribe_from_io_events!(el, read_end.io_handle)
+                        res1 = EventLoops.unsubscribe_from_io_events!(el, write_end.io_handle)
+                        res2 = EventLoops.unsubscribe_from_io_events!(el, read_end.io_handle)
                         return (res1, res2)
                     end; type_tag = "event_loop_readable_second_unsub")
                     @test _wait_for_channel(unsub_task)
@@ -857,7 +833,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -871,9 +847,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_ends = nothing
@@ -948,8 +924,8 @@ end
                             end
 
                             for i in 1:2
-                                _ = EventLoops.event_loop_unsubscribe_from_io_events!(el, read_ends[i].io_handle)
-                                _ = EventLoops.event_loop_unsubscribe_from_io_events!(el, write_ends[i].io_handle)
+                                _ = EventLoops.unsubscribe_from_io_events!(el, read_ends[i].io_handle)
+                                _ = EventLoops.unsubscribe_from_io_events!(el, write_ends[i].io_handle)
                                 Sockets.pipe_read_end_close!(read_ends[i])
                                 Sockets.pipe_write_end_close!(write_ends[i])
                             end
@@ -957,7 +933,7 @@ end
                             unsubscribed[] = true
                         end
 
-                        now = EventLoops.event_loop_current_clock_time(el)
+                        now = Reseau.clock_now_ns()
                         run_at = now + 1_000_000_000
                         done_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                                 if !isready(done_ch)
@@ -965,25 +941,23 @@ end
                                 end
                                 return nothing
                             end); type_tag = "unsubrace_done")
-                        EventLoops.event_loop_schedule_task_future!(el, done_task, run_at)
+                        EventLoops.schedule_task_future!(el, done_task, run_at)
                         return nothing
                     end
 
                     setup_task = _schedule_event_loop_task(el, () -> begin
                         for i in 1:2
-                            _ = EventLoops.event_loop_subscribe_to_io_events!(
+                            _ = EventLoops.subscribe_to_io_events!(
                                 el,
                                 write_ends[i].io_handle,
                                 Int(EventLoops.IoEventType.WRITABLE),
-                                on_writable,
-                                nothing,
+                                EventLoops.EventCallable((events::Int) -> on_writable(el, write_ends[i].io_handle, events, nothing)),
                             )
-                            _ = EventLoops.event_loop_subscribe_to_io_events!(
+                            _ = EventLoops.subscribe_to_io_events!(
                                 el,
                                 read_ends[i].io_handle,
                                 Int(EventLoops.IoEventType.READABLE),
-                                on_readable,
-                                nothing,
+                                EventLoops.EventCallable((events::Int) -> on_readable(el, read_ends[i].io_handle, events, nothing)),
                             )
                         end
                         return nothing
@@ -1001,7 +975,7 @@ end
                             Sockets.pipe_write_end_close!(write_ends[i])
                         end
                     end
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -1015,8 +989,8 @@ end
             elg = EventLoops.EventLoopGroup(; loop_count = 2)
 
             try
-                loop1 = EventLoops.event_loop_group_get_next_loop(elg)
-                loop2 = EventLoops.event_loop_group_get_next_loop(elg)
+                loop1 = EventLoops.get_next_event_loop()
+                loop2 = EventLoops.get_next_event_loop()
 
                 @test loop1 !== loop2
 
@@ -1038,7 +1012,7 @@ end
                         end
                         return nothing
                     end); type_tag = "elg_affinity")
-                    EventLoops.event_loop_schedule_task_now!(loop1, task1)
+                    EventLoops.schedule_task_now!(loop1, task1)
 
                     task2 = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                         Base.lock(lock) do
@@ -1050,7 +1024,7 @@ end
                         end
                         return nothing
                     end); type_tag = "elg_affinity")
-                    EventLoops.event_loop_schedule_task_now!(loop2, task2)
+                    EventLoops.schedule_task_now!(loop2, task2)
                 end
 
                 deadline = Base.time_ns() + 3_000_000_000
@@ -1068,7 +1042,7 @@ end
                     @test all(==(ids2[1]), ids2)
                 end
             finally
-                EventLoops.event_loop_group_destroy!(elg)
+                close(elg)
             end
         end
     end
@@ -1081,9 +1055,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -1092,12 +1066,11 @@ end
                 try
                     read_end, write_end = Sockets.pipe_create()
 
-                    sub_res = EventLoops.event_loop_subscribe_to_io_events!(
+                    sub_res = EventLoops.subscribe_to_io_events!(
                         el,
                         read_end.io_handle,
                         Int(EventLoops.IoEventType.READABLE),
-                        (loop, handle, events, data) -> nothing,
-                        nothing,
+                        EventLoops.EventCallable((events::Int) -> nothing),
                     )
                     @test sub_res === nothing
                     @test read_end.io_handle.additional_data != C_NULL
@@ -1105,11 +1078,11 @@ end
                     done_ch = Channel{Nothing}(1)
                     handle = read_end.io_handle
                     unsub_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                        EventLoops.event_loop_unsubscribe_from_io_events!(el, handle)
+                        EventLoops.unsubscribe_from_io_events!(el, handle)
                         put!(done_ch, nothing)
                         return nothing
                     end); type_tag = "handle_unsubscribe")
-                    EventLoops.event_loop_schedule_task_now!(el, unsub_task)
+                    EventLoops.schedule_task_now!(el, unsub_task)
 
                     deadline = Base.time_ns() + 2_000_000_000
                     while !isready(done_ch) && Base.time_ns() < deadline
@@ -1122,7 +1095,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -1133,9 +1106,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
@@ -1143,7 +1116,7 @@ end
                 bad_handle = EventLoops.IoHandle()
                 task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
                     code = try
-                        EventLoops.event_loop_unsubscribe_from_io_events!(el, bad_handle)
+                        EventLoops.unsubscribe_from_io_events!(el, bad_handle)
                         0
                     catch e
                         e isa Reseau.ReseauError ? e.code : rethrow()
@@ -1151,7 +1124,7 @@ end
                     put!(done_ch, code)
                     return nothing
                 end); type_tag = "unsubscribe_error")
-                EventLoops.event_loop_schedule_task_now!(el, task)
+                EventLoops.schedule_task_now!(el, task)
 
                 deadline = Base.time_ns() + 2_000_000_000
                 while !isready(done_ch) && Base.time_ns() < deadline
@@ -1164,7 +1137,7 @@ end
                     @test code == EventLoops.ERROR_IO_NOT_SUBSCRIBED
                 end
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -1177,9 +1150,9 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
+                el = EventLoops.EventLoop()
 
-                run_res = EventLoops.event_loop_run!(el)
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_end = nothing
@@ -1194,12 +1167,11 @@ end
 
                     if Sys.islinux()
                         err = try
-                            EventLoops.event_loop_subscribe_to_io_events!(
+                            EventLoops.subscribe_to_io_events!(
                                 el,
                                 bad_handle,
                                 Int(EventLoops.IoEventType.READABLE),
-                                (loop, handle, events, data) -> nothing,
-                                nothing,
+                                EventLoops.EventCallable((events::Int) -> nothing),
                             )
                             nothing
                         catch e
@@ -1210,16 +1182,15 @@ end
                     elseif Sys.isapple()
                         done_ch = Channel{Int}(1)
                         on_event = (loop, handle, events, data) -> begin
-                            _ = EventLoops.event_loop_unsubscribe_from_io_events!(loop, handle)
+                            _ = EventLoops.unsubscribe_from_io_events!(loop, handle)
                             put!(done_ch, events)
                             return nothing
                         end
-                        res = EventLoops.event_loop_subscribe_to_io_events!(
+                        res = EventLoops.subscribe_to_io_events!(
                             el,
                             bad_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            on_event,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_event(el, bad_handle, events, nothing)),
                         )
                         @test res === nothing
 
@@ -1239,7 +1210,7 @@ end
                 finally
                     read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                     write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
                 end
         end
@@ -1253,8 +1224,8 @@ end
             if interactive_threads <= 1
                 @test true
             else
-                el = EventLoops.event_loop_new()
-                run_res = EventLoops.event_loop_run!(el)
+                el = EventLoops.EventLoop()
+                run_res = EventLoops.run!(el)
                 @test run_res === nothing
 
                 read_a = nothing
@@ -1268,7 +1239,7 @@ end
                     read_b, write_b = Sockets.pipe_create()
 
                     on_a = (loop, handle, events, data) -> begin
-                        EventLoops.event_loop_unsubscribe_from_io_events!(loop, read_b.io_handle)
+                        EventLoops.unsubscribe_from_io_events!(loop, read_b.io_handle)
                         put!(events_ch, :a)
                         return nothing
                     end
@@ -1278,19 +1249,17 @@ end
                     end
 
                     sub_done = _schedule_event_loop_task(el, () -> begin
-                        @test EventLoops.event_loop_subscribe_to_io_events!(
+                        @test EventLoops.subscribe_to_io_events!(
                             el,
                             read_a.io_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            on_a,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_a(el, read_a.io_handle, events, nothing)),
                         ) === nothing
-                        @test EventLoops.event_loop_subscribe_to_io_events!(
+                        @test EventLoops.subscribe_to_io_events!(
                             el,
                             read_b.io_handle,
                             Int(EventLoops.IoEventType.READABLE),
-                            on_b,
-                            nothing,
+                            EventLoops.EventCallable((events::Int) -> on_b(el, read_b.io_handle, events, nothing)),
                         ) === nothing
                         Sockets.pipe_write!(write_a, _payload_abc())
                         Sockets.pipe_write!(write_b, _payload_abc())
@@ -1314,7 +1283,7 @@ end
                     write_a !== nothing && Sockets.pipe_write_end_close!(write_a)
                     read_b !== nothing && Sockets.pipe_read_end_close!(read_b)
                     write_b !== nothing && Sockets.pipe_write_end_close!(write_b)
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 end
             end
         end
@@ -1325,9 +1294,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
@@ -1349,7 +1318,7 @@ end
                             end
                             return nothing
                         end); type_tag = "serialized_order")
-                        EventLoops.event_loop_schedule_task_now_serialized!(el, task)
+                        EventLoops.schedule_task_now_serialized!(el, task)
                     end
                 end
 
@@ -1364,7 +1333,7 @@ end
                     @test order == collect(1:total)
                 end
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -1374,9 +1343,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
@@ -1386,14 +1355,14 @@ end
                     return nothing
                 end); type_tag = "future_task")
 
-                now = EventLoops.event_loop_current_clock_time(el)
-                EventLoops.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
+                now = Reseau.clock_now_ns()
+                EventLoops.schedule_task_future!(el, future_task, now + 10_000_000_000)
 
                 cancel_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                    EventLoops.event_loop_cancel_task!(el, future_task)
+                    EventLoops.cancel_task!(el, future_task)
                     return nothing
                 end); type_tag = "cancel_task")
-                EventLoops.event_loop_schedule_task_now!(el, cancel_task)
+                EventLoops.schedule_task_now!(el, cancel_task)
 
                 deadline = Base.time_ns() + 2_000_000_000
                 while !isready(status_ch) && Base.time_ns() < deadline
@@ -1407,7 +1376,7 @@ end
                     @test thread_ok
                 end
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -1417,9 +1386,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             status_ch = Channel{Reseau.TaskStatus.T}(1)
@@ -1428,9 +1397,9 @@ end
                 return nothing
             end); type_tag = "future_task_destroy")
 
-            now = EventLoops.event_loop_current_clock_time(el)
-            EventLoops.event_loop_schedule_task_future!(el, future_task, now + 10_000_000_000)
-            EventLoops.event_loop_destroy!(el)
+            now = Reseau.clock_now_ns()
+            EventLoops.schedule_task_future!(el, future_task, now + 10_000_000_000)
+            close(el)
 
             @test isready(status_ch)
             if isready(status_ch)
@@ -1445,8 +1414,8 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
-            run_res = EventLoops.event_loop_run!(el)
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
             destroy_called = Ref(false)
             destroy_threw = Ref(false)
@@ -1454,20 +1423,20 @@ end
                 Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
                 destroy_called[] = true
                 try
-                    EventLoops.event_loop_destroy!(el)
+                    close(el)
                 catch err
                     destroy_threw[] = err isa ErrorException
                 end
                 return nothing
             end); type_tag = "destroy_on_loop")
-            EventLoops.event_loop_schedule_task_now!(el, task)
+            EventLoops.schedule_task_now!(el, task)
             deadline = Base.time_ns() + 2_000_000_000
             while !destroy_called[] && Base.time_ns() < deadline
                 sleep(0.01)
             end
             @test destroy_called[]
             @test destroy_threw[]
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
     end
 
@@ -1475,12 +1444,9 @@ end
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
         try
-            @test EventLoops.event_loop_group_get_loop_count(elg) == 1
-            lease = EventLoops.event_loop_group_open_lease!(elg)
-            @test lease !== nothing
-            EventLoops.event_loop_group_close_lease!(lease)
+            @test EventLoops.loop_count(elg) == 1
         finally
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         end
     end
 
@@ -1493,17 +1459,17 @@ end
 
             done = false
             try
-                el = EventLoops.event_loop_group_get_next_loop(elg)
+                el = EventLoops.get_next_event_loop()
                 @test el !== nothing
                 if el === nothing
                     return
                 end
 
                 release_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                    EventLoops.event_loop_group_release!(elg)
+                    close(elg)
                     return nothing
                 end); type_tag = "elg_release_async")
-                EventLoops.event_loop_schedule_task_now!(el, release_task)
+                EventLoops.schedule_task_now!(el, release_task)
                 deadline = Base.time_ns() + 2_000_000_000
                 while !(@atomic elg.destroyed) && Base.time_ns() < deadline
                     yield()
@@ -1512,7 +1478,7 @@ end
                 @test done
             finally
                 if !done
-                    EventLoops.event_loop_group_destroy!(elg)
+                    close(elg)
                 end
             end
         end
@@ -1523,10 +1489,10 @@ end
         elg = EventLoops.EventLoopGroup(; loop_count = typemax(UInt16), cpu_group = 0)
 
         try
-            el_count = EventLoops.event_loop_group_get_loop_count(elg)
+            el_count = EventLoops.loop_count(elg)
             @test el_count == cpu_count
         finally
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         end
     end
 
@@ -1535,9 +1501,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             done1 = Channel{Bool}(1)
@@ -1547,13 +1513,13 @@ end
                 end
                 return nothing
             end); type_tag = "event_loop_stop_restart_first")
-            EventLoops.event_loop_schedule_task_now!(el, task1)
+            EventLoops.schedule_task_now!(el, task1)
             @test _wait_for_channel(done1)
             @test take!(done1)
 
-            @test EventLoops.event_loop_stop!(el) === nothing
+            @test EventLoops.stop!(el) === nothing
             @test _wait_for_loop_stop(el)
-            @test EventLoops.event_loop_run!(el) === nothing
+            @test EventLoops.run!(el) === nothing
 
             done2 = Channel{Bool}(1)
             task2 = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
@@ -1562,11 +1528,11 @@ end
                 end
                 return nothing
             end); type_tag = "event_loop_stop_restart_second")
-            EventLoops.event_loop_schedule_task_now!(el, task2)
+            EventLoops.schedule_task_now!(el, task2)
             @test _wait_for_channel(done2)
             @test take!(done2)
 
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
     end
 
@@ -1575,16 +1541,16 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             for _ in 1:8
-                @test EventLoops.event_loop_stop!(el) === nothing
+                @test EventLoops.stop!(el) === nothing
             end
 
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
     end
 
@@ -1594,11 +1560,11 @@ end
         elg = EventLoops.EventLoopGroup(; loop_count = 0)
 
         try
-            @test EventLoops.event_loop_group_get_loop_count(elg) == expected
-            loop = EventLoops.event_loop_group_get_next_loop(elg)
+            @test EventLoops.loop_count(elg) == expected
+            loop = EventLoops.get_next_event_loop()
             @test loop !== nothing
         finally
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         end
     end
 
@@ -1609,9 +1575,9 @@ end
         else
             elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
             @test (@atomic elg.destroyed)
-            @test EventLoops.event_loop_group_destroy!(elg) === nothing
+            @test close(elg) === nothing
         end
     end
 
@@ -1620,9 +1586,9 @@ end
         if interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            run_res = EventLoops.event_loop_run!(el)
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             setup_ch = Channel{Int}(2)
@@ -1651,7 +1617,7 @@ end
             Sockets.channel_destroy!(ch1)
             Sockets.channel_destroy!(ch2)
 
-            EventLoops.event_loop_destroy!(el)
+            close(el)
             @test el.message_pool === nothing
         end
     end
@@ -1660,33 +1626,32 @@ end
         times = UInt64[1_000_000_000, 1_000_000_500, 12_000_000_000]
         clock = EventLoops.SequenceClock(times)
 
-        el = EventLoops.event_loop_new(clock)
-        EventLoops.event_loop_register_tick_start!(el)
-        EventLoops.event_loop_register_tick_end!(el)
+        el = EventLoops.EventLoop()
+        Reseau.with_clock(clock) do
+            EventLoops.register_tick_start!(el)
+            EventLoops.register_tick_end!(el)
 
-        # Force stale state and confirm load factor reports 0
-        @atomic el.next_flush_time = UInt64(0)
-        @test EventLoops.event_loop_get_load_factor(el) == 0
+            # Force stale state and confirm load factor reports 0
+            @atomic el.next_flush_time = UInt64(0)
+            @test EventLoops.load_factor(el) == 0
+        end
     end
 
     @testset "Event loop clock override" begin
         clock = EventLoops.RefClock(UInt64(42))
 
-        el = EventLoops.event_loop_new(clock)
-        @test EventLoops.event_loop_current_clock_time(el) == UInt64(42)
-
-        interactive_threads = Base.Threads.nthreads(:interactive)
-        if interactive_threads > 1
-            elg = EventLoops.EventLoopGroup(; loop_count = 1, clock = clock)
-
+        el = EventLoops.EventLoop()
+        Reseau.with_clock(clock) do
+            @test Reseau.clock_now_ns() == UInt64(42)
+            elg = EventLoops.EventLoopGroup(; loop_count = 1)
             try
-                loop = EventLoops.event_loop_group_get_next_loop(elg)
+                loop = EventLoops.get_next_event_loop()
                 @test loop !== nothing
                 if loop !== nothing
-                    @test EventLoops.event_loop_current_clock_time(loop) == UInt64(42)
+                    @test Reseau.clock_now_ns() == UInt64(42)
                 end
             finally
-                EventLoops.event_loop_group_destroy!(elg)
+                close(elg)
             end
         end
     end
@@ -1697,9 +1662,9 @@ end
         elg = EventLoops.EventLoopGroup(; loop_count = UInt16(2))
 
         try
-            @test EventLoops.event_loop_group_get_loop_count(elg) == 2
+            @test EventLoops.loop_count(elg) == 2
         finally
-            EventLoops.event_loop_group_destroy!(elg)
+            close(elg)
         end
     end
 
@@ -1707,9 +1672,9 @@ end
         if !Sys.islinux()
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
-            impl = el.impl_data
+            impl = el.impl
 
             tasks = [
                 Reseau.ScheduledTask(Reseau.TaskFn(status -> nothing); type_tag = "pre_queue_task_1"),
@@ -1759,7 +1724,7 @@ end
                 @test impl.task_pre_queue_spare === pre_spare
             end
 
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
     end
 
@@ -1768,8 +1733,8 @@ end
         if !Sys.islinux() || interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
-            run_res = EventLoops.event_loop_run!(el)
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
@@ -1794,7 +1759,7 @@ end
 
                 Threads.@spawn begin
                     for task in tasks
-                        EventLoops.event_loop_schedule_task_now!(el, task)
+                        EventLoops.schedule_task_now!(el, task)
                     end
                 end
 
@@ -1804,7 +1769,7 @@ end
                 end
                 @test Base.Threads.atomic_load(executed) == task_count
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -1814,8 +1779,8 @@ end
         if !Sys.islinux() || interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
-            run_res = EventLoops.event_loop_run!(el)
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             read_ends = Vector{Sockets.PipeReadEnd}()
@@ -1823,7 +1788,7 @@ end
             events_seen = Base.Threads.Atomic{Int}(0)
 
             try
-                impl = el.impl_data
+                impl = el.impl
                 burst_count = 256
                 payload_byte = Ref{UInt8}(0x31)
 
@@ -1848,7 +1813,7 @@ end
                         end)
                     end
 
-                    EventLoops.event_loop_subscribe_to_io_events!(
+                    EventLoops.subscribe_to_io_events!(
                         el,
                         read_end.io_handle,
                         Int(EventLoops.IoEventType.READABLE),
@@ -1873,7 +1838,7 @@ end
                 @test Base.Threads.atomic_load(events_seen) == burst_count
                 @test impl.event_wait_capacity >= burst_count
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
 
                 for read_end in read_ends
                     Sockets.pipe_read_end_close!(read_end)
@@ -1889,12 +1854,12 @@ end
         if !Sys.islinux()
             @test true
         else
-            el = EventLoops.event_loop_new()
-            run_res = EventLoops.event_loop_run!(el)
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
-                now = EventLoops.event_loop_current_clock_time(el)
+                now = Reseau.clock_now_ns()
                 future_deadline = now + 250_000_000
 
                 fired = Channel{UInt64}(1)
@@ -1905,7 +1870,7 @@ end
                         if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
                             return nothing
                         end
-                        now = EventLoops.event_loop_current_clock_time(el)
+                        now = Reseau.clock_now_ns()
                         put!(fired, now)
                         return nothing
                     end),
@@ -1917,18 +1882,18 @@ end
                         if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
                             return nothing
                         end
-                        EventLoops.event_loop_schedule_task_future!(el, target_task, future_deadline)
+                        EventLoops.schedule_task_future!(el, target_task, future_deadline)
                         put!(scheduled, nothing)
                         return nothing
                     end),
                     type_tag = "epoll_future_schedule_task",
                 )
 
-                EventLoops.event_loop_schedule_task_now!(el, schedule_future_task)
+                EventLoops.schedule_task_now!(el, schedule_future_task)
                 @test _wait_for_channel(scheduled)
 
                 # A concurrent cross-thread schedule for the same task must not rewrite the future timestamp.
-                EventLoops.event_loop_schedule_task_now!(el, target_task)
+                EventLoops.schedule_task_now!(el, target_task)
 
                 if _wait_for_channel(fired)
                     @test take!(fired) >= future_deadline
@@ -1936,7 +1901,7 @@ end
                     @test false
                 end
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -1946,8 +1911,8 @@ end
         if !Sys.islinux() || interactive_threads <= 1
             @test true
         else
-            el = EventLoops.event_loop_new()
-            run_res = EventLoops.event_loop_run!(el)
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
             @test run_res === nothing
 
             try
@@ -1971,23 +1936,23 @@ end
 
                         if isready(request_ch)
                             take!(request_ch)
-                            EventLoops.event_loop_cancel_task!(el, churn_task)
+                            EventLoops.cancel_task!(el, churn_task)
                             Base.Threads.atomic_add!(canceled_count, 1)
                         end
 
                         if Base.Threads.atomic_load(canceled_count) < churn_count
-                            EventLoops.event_loop_schedule_task_now!(el, canceller_task)
+                            EventLoops.schedule_task_now!(el, canceller_task)
                         end
                         return nothing
                     end),
                     type_tag = "epoll_churn_canceller",
                 )
 
-                EventLoops.event_loop_schedule_task_now!(el, canceller_task)
+                EventLoops.schedule_task_now!(el, canceller_task)
 
                 for i in 1:churn_count
-                    now = EventLoops.event_loop_current_clock_time(el)
-                    EventLoops.event_loop_schedule_task_future!(
+                    now = Reseau.clock_now_ns()
+                    EventLoops.schedule_task_future!(
                         el,
                         churn_task,
                         now + UInt64(10_000_000_000),
@@ -2006,7 +1971,7 @@ end
                     @test take!(status_ch) == Reseau.TaskStatus.CANCELED
                 end
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end
@@ -2015,14 +1980,14 @@ end
         if !Sys.isapple()
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
             read_end = nothing
             write_end = nothing
             try
                 read_end, write_end = Sockets.pipe_create()
 
-                impl = el.impl_data
+                impl = el.impl
                 handle_data = EventLoops.KqueueHandleData(
                     read_end.io_handle,
                     impl,
@@ -2055,27 +2020,27 @@ end
         if !Sys.isapple()
             @test true
         else
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
             try
                 # Verify nw_queue was created
-                @test el.impl_data.nw_queue != C_NULL
+                @test el.impl.nw_queue != C_NULL
 
                 # Test connect_to_io_completion_port sets the queue
                 handle = EventLoops.IoHandle()
                 handle.set_queue = _dispatch_queue_setter_c
                 _dispatch_queue_store[] = C_NULL
 
-                conn_res = EventLoops.event_loop_connect_to_io_completion_port!(el, handle)
+                conn_res = EventLoops.connect_to_io_completion_port(el, handle)
                 @test conn_res === nothing
-                @test _dispatch_queue_store[] == el.impl_data.nw_queue
+                @test _dispatch_queue_store[] == el.impl.nw_queue
 
                 # Test with null set_queue
                 handle2 = EventLoops.IoHandle()
                 handle2.set_queue = C_NULL
-                @test_throws Reseau.ReseauError EventLoops.event_loop_connect_to_io_completion_port!(el, handle2)
+                @test_throws Reseau.ReseauError EventLoops.connect_to_io_completion_port(el, handle2)
             finally
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
     end

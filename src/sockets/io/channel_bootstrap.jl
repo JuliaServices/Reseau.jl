@@ -96,7 +96,6 @@ mutable struct SocketConnectionRequest
     socket_options::SocketOptions
     tls_connection_options::MaybeTlsConnectionOptions
     on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
-    on_setup::Union{ChannelCallable, Nothing}
     enable_read_back_pressure::Bool
     requested_event_loop::Union{EventLoop, Nothing}
     event_loop::Union{EventLoop, Nothing}
@@ -106,11 +105,17 @@ mutable struct SocketConnectionRequest
     failed_count::Int
     connection_attempt_tasks::Vector{ScheduledTask}
     connection_chosen::Bool
+    connect_future::Future{Socket}
+    result_future::Future{Channel}
 end
 
-mutable struct SocketConnectionAttempt
-    request::SocketConnectionRequest
-    host_address::HostAddress
+@inline function _as_exception(err)::Exception
+    return err isa Exception ? err : ReseauError(ERROR_UNKNOWN)
+end
+
+@inline function _notify_future_error!(future::Future, err)::Nothing
+    notify(future, _as_exception(err))
+    return nothing
 end
 
 function client_bootstrap_connect!(
@@ -120,29 +125,24 @@ function client_bootstrap_connect!(
         socket_options::SocketOptions,
         tls_connection_options::MaybeTlsConnectionOptions,
         on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing},
-        on_setup::Union{ChannelCallable, Nothing},
         enable_read_back_pressure::Bool,
         requested_event_loop::Union{EventLoop, Nothing},
         host_resolution_config::Union{HostResolutionConfig, Nothing},
-    )::Nothing
-    if @atomic bootstrap.shutdown
-        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
-    end
+    )::Future{Channel}
+    result_future = Future{Channel}()
 
-    if requested_event_loop !== nothing &&
-            !_event_loop_group_contains_loop(bootstrap.event_loop_group, requested_event_loop)
-        throw_error(ERROR_IO_PINNED_EVENT_LOOP_MISMATCH)
+    if @atomic bootstrap.shutdown
+        _notify_future_error!(result_future, ReseauError(ERROR_IO_EVENT_LOOP_SHUTDOWN))
+        return result_future
     end
 
     host_str = String(host)
-
     logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: initiating connection to $host_str:$port"
+        LogLevel.DEBUG,
+        LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: initiating connection to $host_str:$port",
     )
 
-    protocol_negotiated_cb = on_protocol_negotiated
-    on_setup_cb = on_setup
     request_resolution_config = _normalize_resolution_config(
         bootstrap.host_resolver,
         host_resolution_config,
@@ -154,8 +154,7 @@ function client_bootstrap_connect!(
         UInt32(port),
         socket_options,
         tls_connection_options,
-        protocol_negotiated_cb,
-        on_setup_cb,
+        on_protocol_negotiated,
         enable_read_back_pressure,
         requested_event_loop,
         nothing,
@@ -165,42 +164,47 @@ function client_bootstrap_connect!(
         0,
         ScheduledTask[],
         false,
+        Future{Socket}(),
+        result_future,
     )
 
-    try
-        host_resolver_resolve!(
-            addresses -> _on_host_resolved(request, addresses),
-            bootstrap.host_resolver,
-            host_str,
-            request_resolution_config,
-        )
-    catch e
-        _connection_request_complete(
-            request,
-            e isa ReseauError ? e.code : e isa DNSError ? Int(e.code) : ERROR_UNKNOWN,
-            nothing,
-        )
-    end
-
-    return nothing
+    @async _run_client_connection_pipeline(request)
+    return result_future
 end
 
-function _event_loop_group_contains_loop(elg, event_loop::EventLoop)::Bool
-    count = Int(event_loop_group_get_loop_count(elg))
-    for idx in 0:(count - 1)
-        loop = event_loop_group_get_loop_at(elg, idx)
-        if loop === event_loop
-            return true
-        end
+function _run_client_connection_pipeline(request::SocketConnectionRequest)::Nothing
+    try
+        addresses = wait(host_resolver_resolve!(
+            request.bootstrap.host_resolver,
+            request.host,
+            request.host_resolution_config,
+        ))
+        socket = wait(_start_connection_attempts(request, addresses))
+        channel = wait(_setup_client_channel(request, socket))
+        notify(request.result_future, channel)
+    catch err
+        _cancel_connection_attempts(request)
+        _notify_future_error!(request.result_future, err)
     end
-    return false
+    return nothing
 end
 
 function _get_connection_event_loop(request::SocketConnectionRequest)::Union{EventLoop, Nothing}
     request.event_loop !== nothing && return request.event_loop
-    request.event_loop = request.requested_event_loop === nothing ?
-        event_loop_group_get_next_loop(request.bootstrap.event_loop_group) :
-        request.requested_event_loop
+
+    if request.requested_event_loop === nothing
+        request.event_loop = get_next_event_loop(request.bootstrap.event_loop_group)
+        return request.event_loop
+    end
+
+    for loop in request.bootstrap.event_loop_group.event_loops
+        if loop === request.requested_event_loop
+            request.event_loop = request.requested_event_loop
+            return request.event_loop
+        end
+    end
+
+    request.event_loop = nothing
     return request.event_loop
 end
 
@@ -223,7 +227,9 @@ end
         base_timestamp::UInt64,
         attempt_idx::Int,
     )::UInt64
-    delay_ns = attempt_idx == 0 ? request.host_resolution_config.resolution_delay_ns : request.host_resolution_config.connection_attempt_delay_ns
+    delay_ns = attempt_idx == 0 ?
+        request.host_resolution_config.resolution_delay_ns :
+        request.host_resolution_config.connection_attempt_delay_ns
     if !_connection_request_has_both_families(request.addresses)
         delay_ns = 0
     end
@@ -236,7 +242,7 @@ function _cancel_connection_attempts(request::SocketConnectionRequest)
     event_loop === nothing && return nothing
     for task in request.connection_attempt_tasks
         if task.scheduled
-            event_loop_cancel_task!(event_loop, task)
+            cancel_task!(event_loop, task)
         end
     end
     empty!(request.connection_attempt_tasks)
@@ -254,7 +260,7 @@ function _start_connection_attempt(
             _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
             request.connection_chosen && return nothing
             _initiate_socket_connect(request, address)
-        catch e
+        catch
             Core.println("client_bootstrap_attempt task errored")
         end
         return nothing
@@ -262,85 +268,57 @@ function _start_connection_attempt(
     push!(request.connection_attempt_tasks, task)
 
     if run_at_timestamp == 0
-        event_loop_schedule_task_now!(event_loop, task)
+        schedule_task_now!(event_loop, task)
     else
-        event_loop_schedule_task_future!(event_loop, task, run_at_timestamp)
+        schedule_task_future!(event_loop, task, run_at_timestamp)
     end
     return nothing
 end
 
-# Callback when host resolution completes
-function _on_host_resolved(request::SocketConnectionRequest, addresses::Vector{HostAddress})::Nothing
-    if isempty(addresses)
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: no addresses returned for $(request.host)"
-        )
-        _connection_request_complete(request, ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
-        return nothing
-    end
-
+function _start_connection_attempts(
+        request::SocketConnectionRequest,
+        addresses::Vector{HostAddress},
+    )::Future{Socket}
     event_loop = _get_connection_event_loop(request)
     if event_loop === nothing
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: no event loop available"
-        )
-        _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
-        return nothing
+        request.connect_future = Future{Socket}()
+        _notify_future_error!(request.connect_future, ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+        return request.connect_future
     end
-
-    logf(
-        LogLevel.TRACE, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: DNS resolution completed. Kicking off connections on $(length(addresses)) addresses. First one back wins."
-    )
-
-    event_loop_schedule_task_now!(event_loop; type_tag = "client_bootstrap_attempts") do status
-        try
-            _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
-            _start_connection_attempts(request, addresses, event_loop)
-        catch e
-            Core.println("client_bootstrap_attempts task errored")
-        end
-        return nothing
-    end
-
-    return nothing
+    return _start_connection_attempts(request, addresses, event_loop)
 end
 
-# Start connection attempts for all resolved addresses
 function _start_connection_attempts(
         request::SocketConnectionRequest,
         addresses::Vector{HostAddress},
         event_loop::EventLoop,
-    )
+    )::Future{Socket}
     request.event_loop = event_loop
     request.addresses = addresses
     request.addresses_count = length(addresses)
     request.failed_count = 0
     request.connection_chosen = false
-    if request.connection_attempt_tasks !== nothing
-        _cancel_connection_attempts(request)
-    end
+    _cancel_connection_attempts(request)
+    request.connection_attempt_tasks = ScheduledTask[]
+    request.connect_future = Future{Socket}()
+
     if request.addresses_count == 0
-        _connection_request_complete(request, ERROR_IO_DNS_NO_ADDRESS_FOR_HOST, nothing)
-        return nothing
+        _notify_future_error!(request.connect_future, ReseauError(ERROR_IO_DNS_NO_ADDRESS_FOR_HOST))
+        return request.connect_future
     end
 
-    request.connection_attempt_tasks = ScheduledTask[]
-    now = event_loop_current_clock_time(event_loop)
+    now = clock_now_ns()
     for (idx, address) in enumerate(addresses)
         run_at_timestamp = _attempt_schedule_run_at(request, now, idx - 1)
         logf(
-            LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-            string(
-                "ClientBootstrap: scheduling connection attempt at ",
-                run_at_timestamp,
-            ),
+            LogLevel.DEBUG,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            string("ClientBootstrap: scheduling connection attempt at ", run_at_timestamp),
         )
         _start_connection_attempt(request, address, run_at_timestamp, event_loop)
     end
-    return nothing
+
+    return request.connect_future
 end
 
 function _record_connection_failure(request::SocketConnectionRequest, address::HostAddress)
@@ -354,75 +332,62 @@ function _note_connection_attempt_failure(request::SocketConnectionRequest, erro
     request.failed_count += 1
     if request.failed_count == request.addresses_count
         logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: last attempt failed with error $error_code"
+            LogLevel.ERROR,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: last attempt failed with error $error_code",
         )
         request.connection_chosen = true
-        _connection_request_complete(request, error_code, nothing)
+        _cancel_connection_attempts(request)
+        _notify_future_error!(request.connect_future, ReseauError(error_code))
         return nothing
     end
     logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: socket connect attempt $(request.failed_count)/$(request.addresses_count) failed with error $error_code. More attempts ongoing..."
+        LogLevel.DEBUG,
+        LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: socket connect attempt $(request.failed_count)/$(request.addresses_count) failed with error $error_code. More attempts ongoing...",
     )
     return nothing
 end
 
-# Initiate socket connection
 function _initiate_socket_connect(request::SocketConnectionRequest, address::HostAddress)
     event_loop = request.event_loop
 
-    # Create socket
     options = copy(request.socket_options)
-    # Only override domain for IP sockets; LOCAL/VSOCK keep their domain
     if options.domain != SocketDomain.LOCAL && options.domain != SocketDomain.VSOCK
         options.domain = address.address_type == HostAddressType.AAAA ? SocketDomain.IPV6 : SocketDomain.IPV4
     end
+
     local socket
     try
         socket = socket_init(options)
     catch e
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create socket"
-        )
+        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: failed to create socket")
         _note_connection_attempt_failure(request, e isa ReseauError ? e.code : ERROR_UNKNOWN)
         return nothing
     end
 
-    # Create remote endpoint
     remote_endpoint = SocketEndpoint()
     set_address!(remote_endpoint, address.address)
     remote_endpoint.port = request.port
 
-    # Get event loop
     if event_loop === nothing
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: no event loop available"
-        )
+        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: no event loop available")
         socket_close(socket)
-        _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
+        _notify_future_error!(request.connect_future, ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
         return nothing
     end
 
-    attempt = SocketConnectionAttempt(request, address)
-
-    # Initiate async connect
     try
         socket_connect(
             socket,
             remote_endpoint;
             event_loop = event_loop,
             event_loop_group = request.bootstrap.event_loop_group,
-            on_connection_result = EventCallable(err -> _on_socket_connect_complete(socket, err, attempt)),
+            on_connection_result = EventCallable(err -> _on_socket_connect_complete(socket, err, request, address)),
             tls_connection_options = request.tls_connection_options,
         )
     catch e
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to initiate connection"
-        )
+        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: failed to initiate connection")
         _record_connection_failure(request, address)
         socket_close(socket)
         _note_connection_attempt_failure(request, e isa ReseauError ? e.code : ERROR_UNKNOWN)
@@ -432,16 +397,19 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Hos
     return nothing
 end
 
-# Callback when socket connect completes
-function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::SocketConnectionAttempt)::Nothing
-    request = attempt.request
-
+function _on_socket_connect_complete(
+        socket::Socket,
+        error_code::Int,
+        request::SocketConnectionRequest,
+        address::HostAddress,
+    )::Nothing
     if error_code != OP_SUCCESS
         logf(
-            LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: connection failed with error $error_code"
+            LogLevel.DEBUG,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: connection failed with error $error_code",
         )
-        _record_connection_failure(request, attempt.host_address)
+        _record_connection_failure(request, address)
         if _socket_uses_network_framework_tls(socket, request.tls_connection_options) &&
                 io_error_code_is_tls(error_code)
             if request.connection_chosen
@@ -451,7 +419,7 @@ function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::S
             request.connection_chosen = true
             _cancel_connection_attempts(request)
             socket_close(socket)
-            _connection_request_complete(request, error_code, nothing)
+            _notify_future_error!(request.connect_future, ReseauError(error_code))
             return nothing
         end
         socket_close(socket)
@@ -465,27 +433,70 @@ function _on_socket_connect_complete(socket::Socket, error_code::Int, attempt::S
     end
 
     logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: connection established to $(request.host):$(request.port)"
+        LogLevel.DEBUG,
+        LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: connection established to $(request.host):$(request.port)",
     )
     _cancel_connection_attempts(request)
     request.connection_chosen = true
-
-    # Create channel for this connection
-    _setup_client_channel(request, socket)::Nothing
-
+    notify(request.connect_future, socket)
     return nothing
 end
 
-# Set up channel for connected socket
 mutable struct _ClientChannelSetupCtx
     request::SocketConnectionRequest
     socket::Socket
     channel::Union{Channel, Nothing}
+    result_future::Future{Channel}
 end
 
 struct _ClientChannelOnSetup{C <: _ClientChannelSetupCtx}
     ctx::C
+end
+
+function _notify_channel_setup_error!(ctx::_ClientChannelSetupCtx, error_code::Int)::Nothing
+    if ctx.channel !== nothing
+        channel_shutdown!(ctx.channel, error_code)
+    end
+    socket_close(ctx.socket)
+    _notify_future_error!(ctx.result_future, ReseauError(error_code))
+    return nothing
+end
+
+function _schedule_trigger_read(
+        channel::Channel,
+        socket::Socket,
+        result_future::Future{Channel},
+    )::Nothing
+    if channel_thread_is_callers_thread(channel)
+        try
+            channel_trigger_read(channel)
+        catch e
+            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            channel_shutdown!(channel, err)
+            socket_close(socket)
+            _notify_future_error!(result_future, ReseauError(err))
+        end
+        return nothing
+    end
+
+    trigger_task = ChannelTask(
+        EventCallable(s -> begin
+            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+            try
+                channel_trigger_read(channel)
+            catch e
+                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                channel_shutdown!(channel, err)
+                socket_close(socket)
+                _notify_future_error!(result_future, ReseauError(err))
+            end
+            return nothing
+        end),
+        "client_tls_trigger_read",
+    )
+    channel_schedule_task_now!(channel, trigger_task)
+    return nothing
 end
 
 function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
@@ -495,13 +506,8 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
     channel = ctx.channel::Channel
 
     if error_code != OP_SUCCESS
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: channel setup failed"
-        )
-        channel_shutdown!(channel, error_code)
-        socket_close(socket)
-        _connection_request_complete(request, error_code, nothing)
+        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: channel setup failed")
+        _notify_channel_setup_error!(ctx, error_code)
         return nothing
     end
 
@@ -511,54 +517,31 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create socket channel handler"
+            LogLevel.ERROR,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: failed to create socket channel handler",
         )
-        socket_close(socket)
-        _connection_request_complete(request, err, nothing)
+        _notify_channel_setup_error!(ctx, err)
         return nothing
     end
 
-    if request.tls_connection_options !== nothing && _socket_uses_network_framework_tls(socket, request.tls_connection_options)
+    if request.tls_connection_options !== nothing &&
+            _socket_uses_network_framework_tls(socket, request.tls_connection_options)
         tls_options = request.tls_connection_options::TlsConnectionOptions
         if request.on_protocol_negotiated !== nothing
             try
                 _install_protocol_handler_from_socket(channel, socket, request.on_protocol_negotiated)
             catch e
                 err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                _connection_request_complete(request, err, nothing)
+                _notify_channel_setup_error!(ctx, err)
                 return nothing
             end
         end
         if tls_options.on_negotiation_result !== nothing
             tls_options.on_negotiation_result(handler_result, channel.first, OP_SUCCESS)
         end
-        _connection_request_complete(request, OP_SUCCESS, channel)
-        if channel_thread_is_callers_thread(channel)
-            try
-                channel_trigger_read(channel)
-            catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                _connection_request_complete(request, err, nothing)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask(EventCallable(s -> begin
-                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                try
-                    channel_trigger_read(channel)
-                catch e
-                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                    channel_shutdown!(channel, err)
-                end
-                return nothing
-            end), "client_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
+        _schedule_trigger_read(channel, socket, ctx.result_future)
+        notify(ctx.result_future, channel)
         return nothing
     elseif request.tls_connection_options !== nothing
         tls_options = request.tls_connection_options::TlsConnectionOptions
@@ -568,11 +551,11 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
                 tls_options.on_negotiation_result(handler, slot, err)
             end
             if err == OP_SUCCESS
-                _connection_request_complete(request, OP_SUCCESS, channel)
+                notify(ctx.result_future, channel)
             else
                 channel_shutdown!(channel, err)
                 socket_close(socket)
-                _connection_request_complete(request, err, nothing)
+                _notify_future_error!(ctx.result_future, ReseauError(err))
             end
             return nothing
         end
@@ -591,9 +574,7 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
             tls_handler = tls_channel_handler_new!(channel, wrapped)
         catch e
             err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-            channel_shutdown!(channel, err)
-            socket_close(socket)
-            _connection_request_complete(request, err, nothing)
+            _notify_channel_setup_error!(ctx, err)
             return nothing
         end
         if advertise_alpn
@@ -606,58 +587,40 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
             tls_client_handler_start_negotiation(tls_handler)
         catch e
             err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-            channel_shutdown!(channel, err)
-            socket_close(socket)
-            _connection_request_complete(request, err, nothing)
+            _notify_channel_setup_error!(ctx, err)
             return nothing
         end
-        if channel_thread_is_callers_thread(channel)
-            try
-                channel_trigger_read(channel)
-            catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                _connection_request_complete(request, err, nothing)
-                return nothing
-            end
-        else
-            trigger_task = ChannelTask(EventCallable(s -> begin
-                _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                try
-                    channel_trigger_read(channel)
-                catch e
-                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                    channel_shutdown!(channel, err)
-                end
-                return nothing
-            end), "client_tls_trigger_read")
-            channel_schedule_task_now!(channel, trigger_task)
-        end
+        _schedule_trigger_read(channel, socket, ctx.result_future)
         return nothing
     end
 
     logf(
-        LogLevel.INFO, LS_IO_CHANNEL_BOOTSTRAP,
-        "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)"
+        LogLevel.INFO,
+        LS_IO_CHANNEL_BOOTSTRAP,
+        "ClientBootstrap: channel $(channel.channel_id) setup complete for $(request.host):$(request.port)",
     )
-    _connection_request_complete(request, OP_SUCCESS, channel)
+    notify(ctx.result_future, channel)
     return nothing
 end
 
-function _setup_client_channel(request::SocketConnectionRequest, socket::Socket)::Nothing
+function _setup_client_channel(
+        request::SocketConnectionRequest,
+        socket::Socket,
+    )::Future{Channel}
+    result_future = Future{Channel}()
     event_loop = socket.event_loop
     if event_loop === nothing
         logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: no event loop available for channel setup"
+            LogLevel.ERROR,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ClientBootstrap: no event loop available for channel setup",
         )
         socket_close(socket)
-        _connection_request_complete(request, ERROR_IO_SOCKET_MISSING_EVENT_LOOP, nothing)
-        return nothing
+        _notify_future_error!(result_future, ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+        return result_future
     end
 
-    ctx = _ClientChannelSetupCtx(request, socket, nothing)
+    ctx = _ClientChannelSetupCtx(request, socket, nothing, result_future)
     on_setup = EventCallable(_ClientChannelOnSetup(ctx))
     options = ChannelOptions(
         event_loop = event_loop,
@@ -671,58 +634,16 @@ function _setup_client_channel(request::SocketConnectionRequest, socket::Socket)
     try
         channel = channel_new(options)
     catch e
-        logf(
-            LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,
-            "ClientBootstrap: failed to create channel"
-        )
+        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: failed to create channel")
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
         socket_close(socket)
-        _connection_request_complete(request, err, nothing)
-        return nothing
+        _notify_future_error!(result_future, ReseauError(err))
+        return result_future
     end
 
     ctx.channel = channel
-    return nothing
+    return result_future
 end
-
-# Complete connection request and invoke callback
-function _connection_request_invoke_on_setup(
-        request::SocketConnectionRequest,
-        error_code::Int,
-        channel::Union{Channel, Nothing},
-    )
-    request.on_setup === nothing && return nothing
-    try
-        request.on_setup(error_code, channel)
-    catch err
-        logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: on_setup callback threw")
-    end
-    return nothing
-end
-
-function _connection_request_complete(request::SocketConnectionRequest, error_code::Int, channel::Union{Channel, Nothing})
-    _cancel_connection_attempts(request)
-    logf(
-        LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP,string("ClientBootstrap: connection request complete error=%d on_setup=%s", " ", string(error_code), " ", string(request.on_setup === nothing ? "nothing" : "set"), " ", ))
-    if request.on_setup !== nothing
-        requested_loop = request.requested_event_loop
-        if requested_loop !== nothing && !event_loop_thread_is_callers_thread(requested_loop)
-            event_loop_schedule_task_now!(requested_loop; type_tag = "client_bootstrap_on_setup") do status
-                try
-                    _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
-                    _connection_request_invoke_on_setup(request, error_code, channel)
-                catch e
-                    Core.println("client_bootstrap_on_setup task errored")
-                end
-                return nothing
-            end
-        else
-            _connection_request_invoke_on_setup(request, error_code, channel)
-        end
-    end
-    return nothing
-end
-
 # =============================================================================
 # Server Bootstrap - for accepting incoming connections
 # =============================================================================
@@ -869,7 +790,7 @@ function ServerBootstrap(options::ServerBootstrapOptions)
         socket_listen(listener, options.backlog)
 
         # Get event loop and start accepting
-        event_loop = event_loop_group_get_next_loop(options.event_loop_group)
+        event_loop = get_next_event_loop(bootstrap.event_loop_group)
 
         if event_loop === nothing
             logf(
@@ -980,7 +901,7 @@ function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
 
     listener_loop = bootstrap.listener_event_loop
     if listener_loop !== nothing && !event_loop_thread_is_callers_thread(listener_loop)
-        event_loop_schedule_task_now!(listener_loop; type_tag = "server_listener_destroy") do _
+        schedule_task_now!(listener_loop; type_tag = "server_listener_destroy") do _
             cb = bootstrap.on_listener_destroy
             cb === nothing && return nothing
             cb(bootstrap, OP_SUCCESS, bootstrap.user_data)
@@ -1231,7 +1152,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
     _server_bootstrap_incoming_started!(bootstrap)
     ctx = _IncomingChannelSetupCtx(bootstrap, socket, nothing, false, false)
 
-    event_loop = event_loop_group_get_next_loop(bootstrap.event_loop_group)
+    event_loop = get_next_event_loop(bootstrap.event_loop_group)
     if event_loop === nothing
         logf(
             LogLevel.ERROR,
@@ -1296,7 +1217,7 @@ function server_bootstrap_shutdown!(bootstrap::ServerBootstrap)
     end
 
     if bootstrap.listener_socket !== nothing && bootstrap.listener_event_loop !== nothing
-        event_loop_schedule_task_now!(bootstrap.listener_event_loop; type_tag = "server_listener_shutdown") do status
+        schedule_task_now!(bootstrap.listener_event_loop; type_tag = "server_listener_shutdown") do status
             try
                 _server_bootstrap_listener_destroy_task(bootstrap, _coerce_task_status(status))
             catch

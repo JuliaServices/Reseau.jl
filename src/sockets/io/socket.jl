@@ -316,7 +316,7 @@ function socket_close(socket::Socket)::Nothing
     # `socket_close_impl` may need to unsubscribe from IO events and tear down
     # event-loop-owned resources. Always do that work on the socket's event loop thread.
     fut = Future{Nothing}()
-    event_loop_schedule_task_now!(event_loop; type_tag = "socket_close_on_event_loop") do _
+    schedule_task_now!(event_loop; type_tag = "socket_close_on_event_loop") do _
         try
             socket_close_impl(socket.impl, socket)
             notify(fut, nothing)

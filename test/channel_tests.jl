@@ -10,8 +10,8 @@ function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
 end
 
 function _setup_channel(; with_shutdown_cb::Bool = false)
-    el = EventLoops.event_loop_new()
-    EventLoops.event_loop_run!(el)
+    el = EventLoops.EventLoop()
+    EventLoops.run!(el)
 
     setup_ch = Channel{Int}(1)
     shutdown_ch = Channel{Int}(1)
@@ -79,11 +79,11 @@ end
             @test slot_3.adj_left === slot_5
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "destroy before setup completes waits for setup" begin
-            el = EventLoops.event_loop_new()
+            el = EventLoops.EventLoop()
 
             setup_ch = Channel{Int}(1)
             on_setup = Reseau.EventCallable(err -> begin
@@ -100,7 +100,7 @@ end
             channel = Sockets.channel_new(channel_opts)
 
             Sockets.channel_destroy!(channel)
-            @test EventLoops.event_loop_run!(el) === nothing
+            @test EventLoops.run!(el) === nothing
 
             @test _wait_ready_channel(setup_ch)
             if isready(setup_ch)
@@ -113,7 +113,7 @@ end
             end
             @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
 
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "channel tasks run" begin
@@ -141,7 +141,7 @@ end
                 Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
                 return nothing
             end); type_tag = "schedule_on_thread")
-            EventLoops.event_loop_schedule_task_now!(el, scheduler_task)
+            EventLoops.schedule_task_now!(el, scheduler_task)
 
             deadline = Base.time_ns() + 2_000_000_000
             results = Dict{Int, Reseau.TaskStatus.T}()
@@ -160,7 +160,7 @@ end
             end
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "channel tasks run cross-thread" begin
@@ -207,7 +207,7 @@ end
             end
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "channel tasks serialized run" begin
@@ -235,7 +235,7 @@ end
                 Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
                 return nothing
             end); type_tag = "schedule_on_thread_serialized")
-            EventLoops.event_loop_schedule_task_now!(el, scheduler_task)
+            EventLoops.schedule_task_now!(el, scheduler_task)
 
             deadline = Base.time_ns() + 2_000_000_000
             results = Dict{Int, Reseau.TaskStatus.T}()
@@ -254,7 +254,7 @@ end
             end
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "channel serialized tasks queued via cross-thread list" begin
@@ -286,7 +286,7 @@ end
             end); type_tag = "block_serialized_queue")
 
             try
-                EventLoops.event_loop_schedule_task_now!(el, blocker)
+                EventLoops.schedule_task_now!(el, blocker)
                 @test take!(ready_ch)
 
                 queued = false
@@ -318,7 +318,7 @@ end
                     end
                 end
                 Sockets.channel_destroy!(channel)
-                EventLoops.event_loop_destroy!(el)
+                close(el)
             end
         end
 
@@ -341,7 +341,7 @@ end
             @test task_status[] == Reseau.TaskStatus.CANCELED
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "pending tasks canceled on shutdown" begin
@@ -369,7 +369,7 @@ end
             @test task_status[] == Int(Reseau.TaskStatus.CANCELED)
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "duplicate shutdown" begin
@@ -384,7 +384,7 @@ end
             Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
 
         @testset "concurrent shutdown schedules once" begin
@@ -433,7 +433,7 @@ end
             @test !isready(shutdown_ch)
 
             Sockets.channel_destroy!(channel)
-            EventLoops.event_loop_destroy!(el)
+            close(el)
         end
     end
 end

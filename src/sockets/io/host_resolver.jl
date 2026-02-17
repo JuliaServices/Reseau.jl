@@ -172,8 +172,8 @@ mutable struct HostResolver
 end
 
 @inline function _resolver_clock(resolver::HostResolver)::UInt64
-    clock_override = resolver.config.clock_override
-    return clock_override === nothing ? high_res_clock() : clock_now_ns(clock_override)
+    override_clock = resolver.config.clock_override
+    return override_clock === nothing ? clock_now_ns() : clock_now_ns(override_clock)
 end
 
 function HostResolver(
@@ -199,14 +199,14 @@ const _DEFAULT_HOST_RESOLVER = Ref{Union{HostResolver, Nothing}}(nothing)
     default_host_resolver() -> HostResolver
 
 Return a process-wide default `HostResolver`, bound to
-`EventLoops.default_event_loop_group()`.
+`EventLoops.get_event_loop_group()`.
 """
 function default_host_resolver()::HostResolver
     lock(_DEFAULT_HOST_RESOLVER_LOCK)
     try
         resolver = _DEFAULT_HOST_RESOLVER[]
         if resolver === nothing
-            resolver = HostResolver(EventLoops.default_event_loop_group())
+            resolver = HostResolver(EventLoops.get_event_loop_group())
             _DEFAULT_HOST_RESOLVER[] = resolver
         end
         return resolver::HostResolver
@@ -312,9 +312,9 @@ function _dispatch_simple_callback(
         callback::Union{TaskFn, Nothing},
     )
     callback === nothing && return nothing
-    event_loop = event_loop_group_get_next_loop(resolver.event_loop_group)
+    event_loop = get_next_event_loop(resolver.event_loop_group)
     if event_loop !== nothing
-        event_loop_schedule_task_now!(callback, event_loop; type_tag = "dns_purge_callback")
+        schedule_task_now!(callback, event_loop; type_tag = "dns_purge_callback")
     else
         callback(UInt8(0))
     end
@@ -682,7 +682,7 @@ function _host_resolver_thread(entry::HostEntry)
             try
                 lock(entry.entry_lock)
                 try
-                    now = _resolver_clock(resolver)
+                    now = clock_now_ns()
                     if resolver.shutdown || (
                             isempty(entry.pending_resolve_futures) &&
                             entry.last_resolve_request_time + max_no_solicitation_interval < now
@@ -727,76 +727,67 @@ function _host_entry_shutdown!(entry::HostEntry)
     return nothing
 end
 
-# Resolve a hostname to addresses
+# Resolve a hostname to addresses.
+# Returns a future that will be completed with either:
+# - Vector{HostAddress} on success
+# - Exception (typically DNSError/ReseauError) on failure
 function host_resolver_resolve!(
-        on_resolved::F,
         resolver::HostResolver,
         host_name::AbstractString,
         resolution_config::Union{HostResolutionConfig, Nothing} = nothing,
-)::Nothing where {F}
+)::Future{Vector{HostAddress}}
+    result = Future{Vector{HostAddress}}()
     if @atomic resolver.shutdown
         logf(LogLevel.ERROR, LS_IO_DNS, "Host resolver: resolve called after shutdown")
-        throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
+        notify(result, DNSError(String(host_name), Int32(ERROR_IO_EVENT_LOOP_SHUTDOWN)))
+        return result
     end
 
     host = String(host_name)
-    timestamp = _resolver_clock(resolver)
-    result = Future{Vector{HostAddress}}()
+    timestamp = clock_now_ns()
     normalized_config = _normalize_resolution_config(resolver, resolution_config)
 
     lock(resolver.resolver_lock)
-    entry_any = get(() -> nothing, resolver.cache, host)
-    if entry_any === nothing
-        _host_resolver_ensure_thread_entry!()
-        new_entry = HostEntry(resolver, host, normalized_config, timestamp)
-        push!(
-            new_entry.pending_resolve_futures,
-            result,
-        )
-        resolver.cache[host] = new_entry
-        try
-            new_entry.resolver_thread = ForeignThread(
-                "ReseauHostResolver",
-                _RESOLVER_THREAD_ENTRY_C,
-                new_entry,
-            )
-        catch
-            delete!(resolver.cache, host)
-            unlock(resolver.resolver_lock)
-            rethrow()
+    try
+        entry_any = get(() -> nothing, resolver.cache, host)
+        if entry_any === nothing
+            _host_resolver_ensure_thread_entry!()
+            new_entry = HostEntry(resolver, host, normalized_config, timestamp)
+            push!(new_entry.pending_resolve_futures, result)
+            resolver.cache[host] = new_entry
+            try
+                new_entry.resolver_thread = ForeignThread(
+                    "ReseauHostResolver",
+                    _RESOLVER_THREAD_ENTRY_C,
+                    new_entry,
+                )
+            catch e
+                delete!(resolver.cache, host)
+                notify(result, e isa Exception ? e : ReseauError(ERROR_UNKNOWN))
+            end
+            return result
         end
-        unlock(resolver.resolver_lock)
-        addresses = Base.wait(result)
-        on_resolved(addresses)
-        return nothing
 
-    else
         entry = entry_any::HostEntry
         lock(entry.entry_lock)
-        unlock(resolver.resolver_lock)
+        try
+            entry.last_resolve_request_time = timestamp
+            entry.resolves_since_last_request = 0
+            cached_addresses = _collect_callback_addresses(entry)
 
-        entry.last_resolve_request_time = timestamp
-        entry.resolves_since_last_request = 0
-        cached_addresses = _collect_callback_addresses(entry)
+            if !isempty(cached_addresses)
+                notify(result, cached_addresses)
+                return result
+            end
 
-        if !isempty(cached_addresses)
+            push!(entry.pending_resolve_futures, result)
+            condition_variable_notify_all(entry.entry_signal)
+            return result
+        finally
             unlock(entry.entry_lock)
-            notify(result, cached_addresses)
-            addresses = Base.wait(result)
-            on_resolved(addresses)
-            return nothing
         end
-
-        push!(
-            entry.pending_resolve_futures,
-            result,
-        )
-        condition_variable_notify_all(entry.entry_signal)
-        unlock(entry.entry_lock)
-
-        addresses = Base.wait(result)
-        on_resolved(addresses)
-        return nothing
+    finally
+        unlock(resolver.resolver_lock)
     end
 end
 

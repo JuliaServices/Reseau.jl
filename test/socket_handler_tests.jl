@@ -81,10 +81,10 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
 @testset "socket handler read backpressure" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -149,7 +149,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
 
         # Ensure deterministic window size for backpressure checks
         if channel.window_update_task.wrapper_task.scheduled
-            EventLoops.event_loop_cancel_task!(event_loop, channel.window_update_task.wrapper_task)
+            EventLoops.cancel_task!(event_loop, channel.window_update_task.wrapper_task)
         end
         channel.window_update_scheduled = false
         app_slot.window_size = Csize_t(4)
@@ -186,7 +186,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     app_handler = app_handler_ref[]
     @test app_handler isa TestReadHandler
     if !(app_handler isa TestReadHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -212,7 +212,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
         end
         return nothing
     end); type_tag = "client_write")
-    EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
+    EventLoops.schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
     @test write_err[] == Reseau.OP_SUCCESS
@@ -223,7 +223,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     @test channel isa Sockets.Channel
     @test socket_handler isa Sockets.SocketChannelHandler
     if !(channel isa Sockets.Channel && socket_handler isa Sockets.SocketChannelHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -258,15 +258,15 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     end
     Sockets.socket_close(client)
     Sockets.socket_close(server)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "socket handler write completion" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -384,7 +384,7 @@ end
         subscribe_done[] = true
         return nothing
     end); type_tag = "client_subscribe")
-    EventLoops.event_loop_schedule_task_now!(event_loop, subscribe_task)
+    EventLoops.schedule_task_now!(event_loop, subscribe_task)
     @test wait_for(() -> subscribe_done[])
 
     channel = channel_ref[]
@@ -394,7 +394,7 @@ end
     @test app_slot isa Sockets.ChannelSlot
     @test socket_handler isa Sockets.SocketChannelHandler
     if !(channel isa Sockets.Channel && app_slot isa Sockets.ChannelSlot && socket_handler isa Sockets.SocketChannelHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     if accepted_socket[] isa Sockets.Socket
@@ -446,15 +446,15 @@ end
     end
     Sockets.socket_close(client)
     Sockets.socket_close(server)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "socket handler pending read before downstream setup" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -534,7 +534,7 @@ end
     socket_handler = socket_handler_ref[]
     @test socket_handler isa Sockets.SocketChannelHandler
     if !(socket_handler isa Sockets.SocketChannelHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -558,7 +558,7 @@ end
         end
         return nothing
     end); type_tag = "client_write_pending")
-    EventLoops.event_loop_schedule_task_now!(event_loop, write_task)
+    EventLoops.schedule_task_now!(event_loop, write_task)
 
     @test wait_for(() -> write_done[])
     @test write_err[] == Reseau.OP_SUCCESS
@@ -567,7 +567,7 @@ end
     channel_any = channel_ref[]
     @test channel_any isa Sockets.Channel
     if !(channel_any isa Sockets.Channel)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     channel = channel_any::Sockets.Channel
@@ -606,7 +606,7 @@ end
     app_handler = app_handler_ref[]
     @test app_handler isa TestReadHandler
     if !(app_handler isa TestReadHandler)
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     @test wait_for(() -> _received_string(app_handler::TestReadHandler) == payload)
@@ -620,5 +620,5 @@ end
     if server isa Sockets.Socket
         Sockets.socket_close(server)
     end
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end

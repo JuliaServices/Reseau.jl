@@ -105,8 +105,8 @@ function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
 end
 
 function _setup_channel(; enable_read_back_pressure::Bool = false)
-    el = EventLoops.event_loop_new()
-    EventLoops.event_loop_run!(el)
+    el = EventLoops.EventLoop()
+    EventLoops.run!(el)
 
     setup_ch = Channel{Int}(1)
 
@@ -176,6 +176,6 @@ end
         @test left_handler.latest_window_update == Csize_t(12345)
 
         Sockets.channel_destroy!(channel)
-        EventLoops.event_loop_destroy!(el)
+        close(el)
     end
 end

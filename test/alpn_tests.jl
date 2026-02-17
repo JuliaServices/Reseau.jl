@@ -26,10 +26,10 @@ end
 
 @testset "alpn handler" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -89,15 +89,15 @@ end
 
     Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
     @test wait_for_flag_alpn(shutdown_done)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "alpn missing protocol message" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -124,7 +124,7 @@ end
     end
 
     Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "alpn empty protocol does not send message" begin
@@ -133,10 +133,10 @@ end
         return
     end
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
     channel = Sockets.Channel(event_loop, nothing)
@@ -184,7 +184,7 @@ end
     tls_handler.protocol = Reseau.byte_buf_from_c_str("h2")
     Sockets._secure_transport_send_alpn_message(tls_handler)
     @test message_count[] == 1
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end
 
 @testset "secure transport ALPN does not fabricate protocol" begin
@@ -257,10 +257,10 @@ end
 
 @testset "alpn error creating handler" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    event_loop = EventLoops.event_loop_group_get_next_loop(elg)
+    event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
     if event_loop === nothing
-        EventLoops.event_loop_group_destroy!(elg)
+        close(elg)
         return
     end
 
@@ -288,5 +288,5 @@ end
     end
 
     Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
-    EventLoops.event_loop_group_destroy!(elg)
+    close(elg)
 end

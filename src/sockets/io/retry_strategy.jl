@@ -197,7 +197,7 @@ function retry_strategy_acquire_token!(
         throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
-    event_loop = event_loop_group_get_next_loop(strategy.event_loop_group)
+    event_loop = get_next_event_loop(strategy.event_loop_group)
     if event_loop === nothing
         throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     end
@@ -222,7 +222,7 @@ function retry_strategy_acquire_token!(
     )
 
     # Schedule callback
-    event_loop_schedule_task_now!(event_loop; type_tag = "retry_token_acquired") do _
+    schedule_task_now!(event_loop; type_tag = "retry_token_acquired") do _
         try
             on_acquired(token, OP_SUCCESS, user_data)
         catch e
@@ -366,7 +366,7 @@ function retry_token_schedule_retry(
             throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
         end
 
-        current_time = event_loop_current_clock_time(event_loop)
+        current_time = clock_now_ns()
 
         schedule_at = current_time + backoff_ns
         @atomic token.last_backoff = backoff_ns
@@ -406,7 +406,7 @@ function retry_token_schedule_retry(
 
     event_loop = token.bound_loop
     event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
-    event_loop_schedule_task_future!(event_loop, task, schedule_at)
+    schedule_task_future!(event_loop, task, schedule_at)
 
     return nothing
 end

@@ -32,8 +32,6 @@ mutable struct TCPSocket <: IO
     write_error::Int
     enable_read_back_pressure::Bool
     initial_window_size::Int
-    connect_event::Base.Threads.Event
-    connect_error::Int
 end
 
 mutable struct _TCPSocketHandler
@@ -107,8 +105,6 @@ function _new_unconnected_socket(;
         OP_SUCCESS,
         enable_read_back_pressure,
         initial_window,
-        Base.Threads.Event(),
-        ERROR_IO_SOCKET_NOT_CONNECTED,
     )
 end
 
@@ -136,30 +132,27 @@ function _install_handler!(io::TCPSocket, channel::Channel)::Nothing
     return nothing
 end
 
-function _on_connect_setup(io::TCPSocket, error_code::Int, channel)::Nothing
-    if error_code != OP_SUCCESS || channel === nothing
-        io.connect_error = error_code
-        _mark_closed!(io, error_code)
-        notify(io.connect_event)
-        return nothing
-    end
+function _install_handler_for_connected_channel!(io::TCPSocket, channel::Channel)::Nothing
     if channel_thread_is_callers_thread(channel)
         _install_handler!(io, channel)
-        io.connect_error = OP_SUCCESS
-        notify(io.connect_event)
         return nothing
     end
+    install_future = Future{Nothing}()
     task = ChannelTask(
         EventCallable(s -> begin
             _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-            _install_handler!(io, channel)
-            io.connect_error = OP_SUCCESS
-            notify(io.connect_event)
+            try
+                _install_handler!(io, channel)
+                notify(install_future, nothing)
+            catch e
+                notify(install_future, e isa Exception ? e : ReseauError(ERROR_UNKNOWN))
+            end
             return nothing
         end),
         "tcpsocket_install_handler",
     )
     channel_schedule_task_now!(channel, task)
+    wait(install_future)
     return nothing
 end
 
@@ -229,7 +222,7 @@ function TCPSocket(
     owns_elg = false
     owns_resolver = false
     if elg === nothing
-        elg = EventLoops.default_event_loop_group()
+        elg = EventLoops.get_event_loop_group()
         resolver = default_host_resolver()
     else
         if resolver === nothing
@@ -277,20 +270,19 @@ function TCPSocket(
     io.owns_event_loop_group = owns_elg
     io.owns_host_resolver = owns_resolver
 
-    result = client_bootstrap_connect!(
+    connect_future = client_bootstrap_connect!(
         bootstrap,
         host,
         port,
         socket_options,
         tls_conn,
         bootstrap.on_protocol_negotiated,
-        ChannelCallable((err, channel) -> _on_connect_setup(io, Int(err), channel)),
         enable_read_back_pressure,
         nothing,
         host_resolution_config,
     )
-    wait(io.connect_event)
-    io.connect_error == OP_SUCCESS || error("TCPSocket connect failed: $(io.connect_error)")
+    channel = wait(connect_future)
+    _install_handler_for_connected_channel!(io, channel)
     io.tls_enabled = tls_conn !== nothing
     return io
 end
@@ -448,7 +440,7 @@ function listen(host::AbstractString, port::Integer;
         event_loop_group = nothing,
         socket_options::SocketOptions = SocketOptions(),
     )
-    elg = event_loop_group === nothing ? EventLoops.default_event_loop_group() : event_loop_group
+    elg = event_loop_group === nothing ? EventLoops.get_event_loop_group() : event_loop_group
 
     tls_conn = tls_options
     if tls_conn === nothing && tls
@@ -644,7 +636,7 @@ function Base.close(io::TCPSocket)::Nothing
     channel !== nothing && channel_shutdown!(channel, ERROR_IO_SOCKET_CLOSED)
     io.socket !== nothing && socket_close(io.socket)
     io.owns_host_resolver && io.host_resolver !== nothing && host_resolver_shutdown!(io.host_resolver)
-    io.owns_event_loop_group && io.event_loop_group !== nothing && event_loop_group_release!(io.event_loop_group)
+    io.owns_event_loop_group && io.event_loop_group !== nothing && close(io.event_loop_group)
     return nothing
 end
 

@@ -119,9 +119,9 @@
         return base === nothing ? nothing : (base::Socket)
     end
 
-    @inline function _nw_tls_ctx(nw_socket::NWSocket)::Union{AbstractTlsContext,Nothing}
+    @inline function _nw_tls_ctx(nw_socket::NWSocket)::Union{TlsContext,Nothing}
         ctx = nw_socket.tls_ctx
-        return ctx === nothing ? nothing : (ctx::AbstractTlsContext)
+        return ctx === nothing ? nothing : (ctx::TlsContext)
     end
 
     @inline function _nw_socket_ptr(sock::NWSocket)::Ptr{Cvoid}
@@ -141,27 +141,20 @@
         nw_socket = _nw_impl(socket)
         nw_socket.event_loop !== nothing && throw_error(ERROR_INVALID_STATE)
 
-        lease = nothing
-        if event_loop_group !== nothing
-            lease = event_loop_group_open_lease!(event_loop_group)
-            if lease === nothing
-                logf(LogLevel.ERROR, LS_IO_SOCKET, "nw_socket: failed to acquire event loop group lease.")
-                throw_error(ERROR_INVALID_STATE)
-            end
-        end
-
+        Base.acquire(event_loop)
         socket.event_loop = event_loop
-        nw_socket.event_loop_group_lease = lease
         nw_socket.event_loop = event_loop
         return nothing
     end
 
     function _nw_release_event_loop!(nw_socket::NWSocket)
-        if nw_socket.event_loop_group_lease !== nothing
-            event_loop_group_close_lease!(nw_socket.event_loop_group_lease)
-            nw_socket.event_loop_group_lease = nothing
-        end
         if nw_socket.event_loop !== nothing
+            event_loop = nw_socket.event_loop
+            socket = _nw_base_socket(nw_socket)
+            if socket !== nothing && socket.event_loop === event_loop
+                socket.event_loop = nothing
+            end
+            Base.release(event_loop)
             nw_socket.event_loop = nothing
         end
         return nothing
@@ -597,7 +590,7 @@
             )
         else
             _nw_ensure_callbacks!()
-            dispatch_queue = nw_socket.event_loop.impl_data.dispatch_queue
+            dispatch_queue = nw_socket.event_loop.impl.nw_queue
             verify_ctx = pointer_from_objref(nw_socket)
             blk = BlocksABI.make_stack_block_ctx(_nw_tls_verify_cb[], verify_ctx)
             try
@@ -1079,7 +1072,7 @@
             ccall((:dispatch_retain, _NW_DISPATCH_LIB), Cvoid, (dispatch_data_t,), data)
         end
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_readable_task") do _
+        schedule_task_now!(nw_socket.event_loop; type_tag="nw_readable_task") do _
             try
                 if data != C_NULL
                     node = ReadQueueNode(data, 0)
@@ -1142,7 +1135,7 @@
         written_fn::Union{WriteCallable,Nothing},
     )
         nw_socket.event_loop === nothing && return nothing
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_written_task") do status
+        schedule_task_now!(nw_socket.event_loop; type_tag="nw_written_task") do status
             try
                 if _coerce_task_status(status) != TaskStatus.CANCELED && written_fn !== nothing
                     written_fn(error_code, bytes_written)
@@ -1230,7 +1223,7 @@
 
         nw_socket.connection_setup = true
         if nw_socket.timeout_task !== nothing && nw_socket.event_loop !== nothing
-            event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
+            cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
         end
 
         if nw_socket.on_connection_result !== nothing
@@ -1257,7 +1250,7 @@
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_conn_state") do status
+        schedule_task_now!(nw_socket.event_loop; type_tag="nw_conn_state") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     return nothing
@@ -1303,7 +1296,7 @@
                         end
                         nw_socket.connection_setup = true
                         if nw_socket.timeout_task !== nothing && nw_socket.event_loop !== nothing
-                            event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
+                            cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
                         end
                     else
                         _nw_handle_incoming_data(nw_socket, err_code, C_NULL, false)
@@ -1324,7 +1317,7 @@
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_state") do status
+        schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_state") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     return nothing
@@ -1437,8 +1430,8 @@
             event_loop === nothing && return nothing
             task = state.task_ref[]
             task === nothing && return nothing
-            run_at = event_loop_current_clock_time(event_loop) + 1_000_000
-            event_loop_schedule_task_future!(event_loop, task, run_at)
+            run_at = clock_now_ns() + 1_000_000
+            schedule_task_future!(event_loop, task, run_at)
         catch
             Core.println("nw_listener_port_poll task errored")
         end
@@ -1459,8 +1452,8 @@
         )
         task = ScheduledTask(_NwListenerPortPollTaskFn(state); type_tag="nw_listener_port_poll")
         task_ref[] = task
-        run_at = event_loop_current_clock_time(event_loop) + 1_000_000
-        event_loop_schedule_task_future!(event_loop, task, run_at)
+        run_at = clock_now_ns() + 1_000_000
+        schedule_task_future!(event_loop, task, run_at)
         return nothing
     end
 
@@ -1471,7 +1464,7 @@
         end
 
         ccall((:nw_retain, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_accept") do status
+        schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_accept") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
@@ -1544,10 +1537,10 @@
     function _nw_cancel_socket!(nw_socket::NWSocket)
         nw_socket.event_loop === nothing && return nothing
 
-        event_loop_schedule_task_now!(nw_socket.event_loop; type_tag="nw_cancel") do _
+        schedule_task_now!(nw_socket.event_loop; type_tag="nw_cancel") do _
             try
                 if nw_socket.mode == NWSocketMode.CONNECTION && nw_socket.timeout_task !== nothing && !nw_socket.connection_setup
-                    event_loop_cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
+                    cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
                 end
                 if nw_socket.mode == NWSocketMode.LISTENER && nw_socket.listener != C_NULL
                     ccall((:nw_listener_cancel, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
@@ -1755,12 +1748,12 @@
             )
         end
 
-        event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)
+        connect_to_io_completion_port(event_loop, socket.io_handle)
 
         ccall((:nw_connection_start, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), nw_socket.connection)
 
         if socket.options.connect_timeout_ms > 0
-            now = event_loop_current_clock_time(event_loop)
+            now = clock_now_ns()
             timeout = UInt64(socket.options.connect_timeout_ms) * 1_000_000 + now
             nw_socket.timeout_task = ScheduledTask(; type_tag="nw_timeout") do _
                 try
@@ -1779,7 +1772,7 @@
                 end
                 return nothing
             end
-            event_loop_schedule_task_future!(event_loop, nw_socket.timeout_task, timeout)
+            schedule_task_future!(event_loop, nw_socket.timeout_task, timeout)
         end
 
         return nothing
@@ -1893,7 +1886,7 @@
 
             _nw_set_event_loop!(socket, accept_loop, event_loop_group)
 
-            event_loop_connect_to_io_completion_port!(accept_loop, socket.io_handle)
+            connect_to_io_completion_port(accept_loop, socket.io_handle)
 
             _nw_ensure_callbacks!()
             lctx = pointer_from_objref(nw_socket)
@@ -1987,7 +1980,7 @@
 
         _nw_set_event_loop!(socket, event_loop, event_loop_group)
 
-        event_loop_connect_to_io_completion_port!(event_loop, socket.io_handle)
+        connect_to_io_completion_port(event_loop, socket.io_handle)
 
         if nw_socket.mode == NWSocketMode.CONNECTION && socket.io_handle.handle != C_NULL
             ccall((:nw_connection_start, _NW_NETWORK_LIB), Cvoid, (nw_connection_t,), socket.io_handle.handle)
