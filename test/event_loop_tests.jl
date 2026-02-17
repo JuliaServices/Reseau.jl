@@ -2035,11 +2035,152 @@ end
                 @test conn_res === nothing
                 @test _dispatch_queue_store[] == el.impl.nw_queue
 
+                # If dispatch queue setup failed/was unavailable, the call must fail safely.
+                original_queue = el.impl.nw_queue
+                el.impl.nw_queue = C_NULL
+                @test_throws Reseau.ReseauError EventLoops.connect_to_io_completion_port(el, handle)
+                el.impl.nw_queue = original_queue
+
                 # Test with null set_queue
                 handle2 = EventLoops.IoHandle()
                 handle2.set_queue = C_NULL
                 @test_throws Reseau.ReseauError EventLoops.connect_to_io_completion_port(el, handle2)
             finally
+                close(el)
+            end
+        end
+    end
+
+    @testset "Kqueue off-thread unsubscribe removes registry entry and decrements count" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.isapple() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
+            @test run_res === nothing
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+                handle = read_end.io_handle
+                sub_res = EventLoops.subscribe_to_io_events!(
+                    el,
+                    handle,
+                    Int(EventLoops.IoEventType.READABLE),
+                    EventLoops.EventCallable((events::Int) -> nothing),
+                )
+                @test sub_res === nothing
+
+                handle_data = nothing
+                subscribed = false
+                wait_deadline = Base.time_ns() + 2_000_000_000
+                while Base.time_ns() < wait_deadline
+                    if handle.additional_data != C_NULL
+                        handle_data = unsafe_pointer_to_objref(handle.additional_data)::EventLoops.KqueueHandleData{EventLoops.KqueueEventLoop}
+                        if handle_data.state == EventLoops.HandleState.SUBSCRIBED && handle_data.connected
+                            subscribed = true
+                            break
+                        end
+                    end
+                    yield()
+                end
+
+                @test subscribed
+                if subscribed
+                    @test !EventLoops.event_loop_thread_is_callers_thread(el)
+
+                    impl = el.impl
+                    registry_key = handle_data.registry_key
+                    @test haskey(impl.handle_registry, registry_key)
+                    @test impl.thread_data.connected_handle_count == 1
+
+                    EventLoops.unsubscribe_from_io_events!(el, handle)
+
+                    cleaned = false
+                    cleanup_deadline = Base.time_ns() + 2_000_000_000
+                    while Base.time_ns() < cleanup_deadline
+                        if handle.additional_data == C_NULL &&
+                                !handle_data.connected &&
+                                handle_data.registry_key == C_NULL &&
+                                impl.thread_data.connected_handle_count == 0 &&
+                                !haskey(impl.handle_registry, registry_key)
+                            cleaned = true
+                            break
+                        end
+                        yield()
+                    end
+
+                    @test cleaned
+                end
+            finally
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+                close(el)
+            end
+        end
+    end
+
+    @testset "Kqueue unsubscribe cleans up synchronously when loop is stopped" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.isapple() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
+            @test run_res === nothing
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+                handle = read_end.io_handle
+
+                sub_res = EventLoops.subscribe_to_io_events!(
+                    el,
+                    handle,
+                    Int(EventLoops.IoEventType.READABLE),
+                    EventLoops.EventCallable((events::Int) -> nothing),
+                )
+                @test sub_res === nothing
+
+                handle_data = nothing
+                subscribed = false
+                wait_deadline = Base.time_ns() + 2_000_000_000
+                while Base.time_ns() < wait_deadline
+                    if handle.additional_data != C_NULL
+                        handle_data = unsafe_pointer_to_objref(handle.additional_data)::EventLoops.KqueueHandleData{EventLoops.KqueueEventLoop}
+                        if handle_data.state == EventLoops.HandleState.SUBSCRIBED && handle_data.connected
+                            subscribed = true
+                            break
+                        end
+                    end
+                    yield()
+                end
+
+                @test subscribed
+                if subscribed
+                    impl = el.impl
+                    registry_key = handle_data.registry_key
+                    @test haskey(impl.handle_registry, registry_key)
+                    @test impl.thread_data.connected_handle_count == 1
+
+                    EventLoops.stop!(el)
+                    @test _wait_for_loop_stop(el)
+                    @test !(@atomic el.running)
+
+                    EventLoops.unsubscribe_from_io_events!(el, handle)
+
+                    @test handle.additional_data == C_NULL
+                    @test !handle_data.connected
+                    @test handle_data.registry_key == C_NULL
+                    @test impl.thread_data.connected_handle_count == 0
+                    @test !haskey(impl.handle_registry, registry_key)
+                end
+            finally
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
                 close(el)
             end
         end
