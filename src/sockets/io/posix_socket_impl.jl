@@ -1004,13 +1004,13 @@ function socket_connect_impl(
 end
 
 function _is_socket_connect_ready_for_completion(fd::Integer)::Bool
-    pollfd = PollFd(Cint(fd), _POLLIN | _POLLOUT, Cshort(0))
-    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), Ref(pollfd), Culong(1), Cint(0))
+    pollfd_ref = Ref(PollFd(Cint(fd), _POLLIN | _POLLOUT, Cshort(0)))
+    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), pollfd_ref, Culong(1), Cint(0))
     if rc <= 0
         return false
     end
 
-    revents = pollfd.revents
+    revents = pollfd_ref[].revents
     ready = (revents & _POLLOUT) != 0 && (revents & _POLLNVAL) == 0 &&
         (revents & _POLLERR) == 0
     if !ready
@@ -1019,8 +1019,8 @@ function _is_socket_connect_ready_for_completion(fd::Integer)::Bool
 end
 
 function _is_socket_readable_now(fd::Integer)::Bool
-    pollfd = PollFd(Cint(fd), _POLLIN, Cshort(0))
-    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), Ref(pollfd), Culong(1), Cint(0))
+    pollfd_ref = Ref(PollFd(Cint(fd), _POLLIN, Cshort(0)))
+    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), pollfd_ref, Culong(1), Cint(0))
     if rc <= 0
         # Some kernels/edge-triggered paths can transiently clear pollable events,
         # so try a non-consuming readability probe before declaring not readable.
@@ -1049,7 +1049,7 @@ function _is_socket_readable_now(fd::Integer)::Bool
         return false
     end
 
-    revents = pollfd.revents
+    revents = pollfd_ref[].revents
     readable = (revents & _POLLIN) != 0 && (revents & _POLLNVAL) == 0 &&
         (revents & _POLLERR) == 0
     if !readable
@@ -1232,13 +1232,11 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
         sock = connect_args.socket::Socket
         socket_impl = _posix_impl(sock)
 
-        # Match aws-c-io semantics: writable/readable only indicates successful
-        # completion when no error bits are present on the same event.
+        # On some Linux/epoll paths we can observe writable/readable activity
+        # before the connect handshake has fully settled. Reuse the poll-based
+        # connect-completion path so readiness/error checks are centralized.
         if connectable && !has_error
-            _cancel_connect_pending_tasks!(sock, connect_args)
-            connect_args.socket = nothing
-            socket_impl.connect_args = nothing
-            _on_connection_success(sock)
+            _run_connect_poll(connect_args, TaskStatus.RUN_READY)
             return nothing
         end
 
