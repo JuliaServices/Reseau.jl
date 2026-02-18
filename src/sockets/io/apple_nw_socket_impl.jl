@@ -142,18 +142,22 @@
         return event_loop !== nothing
     end
 
-    function _nw_set_event_loop!(
-        socket::Socket,
-        event_loop::EventLoop,
-        event_loop_group::Union{EventLoopGroup,Nothing}=nothing,
-    )::Nothing
+    function _nw_set_event_loop!(socket::Socket, event_loop::EventLoop)::Nothing
         nw_socket = _nw_impl(socket)
         nw_socket.event_loop !== nothing && throw_error(ERROR_INVALID_STATE)
-
         Base.acquire(event_loop)
         socket.event_loop = event_loop
         nw_socket.event_loop = event_loop
         return nothing
+    end
+
+    function _nw_set_event_loop!(
+        socket::Socket,
+        event_loop::EventLoop,
+        event_loop_group::Union{EventLoopGroup,Nothing},
+    )::Nothing
+        _ = event_loop_group
+        return _nw_set_event_loop!(socket, event_loop)
     end
 
     function _nw_release_event_loop!(nw_socket::NWSocket)
@@ -1800,7 +1804,7 @@
     end
 
     function socket_init_apple_nw(options::SocketOptions)::Socket
-        if options.network_interface_name[1] != 0
+        if !isempty(get_network_interface_name(options))
             throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
         end
 
@@ -2157,17 +2161,13 @@
         return nothing
     end
 
-    function _nw_socket_assign_to_event_loop_impl(
-        socket::Socket,
-        event_loop::EventLoop,
-        event_loop_group::Union{EventLoopGroup,Nothing},
-    )::Nothing
+    function _nw_socket_assign_to_event_loop_impl(socket::Socket, event_loop::EventLoop)::Nothing
         nw_socket = _nw_impl(socket)
         if socket.event_loop !== nothing
             throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
         end
 
-        _nw_set_event_loop!(socket, event_loop, event_loop_group)
+        _nw_set_event_loop!(socket, event_loop)
 
         connect_to_io_completion_port(event_loop, socket.io_handle)
 
@@ -2182,16 +2182,7 @@
         socket::Socket,
         event_loop::EventLoop,
     )::Nothing
-        return _nw_socket_assign_to_event_loop_impl(socket, event_loop, nothing)
-    end
-
-    function socket_assign_to_event_loop_impl(
-        ::NWSocket,
-        socket::Socket,
-        event_loop::EventLoop,
-        event_loop_group::Union{EventLoopGroup,Nothing},
-    )::Nothing
-        return _nw_socket_assign_to_event_loop_impl(socket, event_loop, event_loop_group)
+        return _nw_socket_assign_to_event_loop_impl(socket, event_loop)
     end
 
     function socket_subscribe_to_readable_events_impl(
@@ -2228,7 +2219,7 @@
         ::NWSocket,
         socket::Socket,
         buffer::ByteBuffer,
-    )::Tuple{Nothing,Csize_t}
+    )::Csize_t
         nw_socket = _nw_impl(socket)
         if socket.event_loop === nothing || !event_loop_thread_is_callers_thread(socket.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
@@ -2273,7 +2264,7 @@
         end
 
         _nw_read_queue_compact!(nw_socket)
-        return (nothing, amount_read)
+        return amount_read
     end
 
     function socket_write_impl(
@@ -2424,7 +2415,6 @@
         endpoint_ptr == C_NULL && throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         return endpoint_ptr
     end
-
 else
     function socket_init_apple_nw(options::SocketOptions)::Socket
         _ = options

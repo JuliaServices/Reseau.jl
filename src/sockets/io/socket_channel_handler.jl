@@ -385,7 +385,7 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
 
         local bytes_read
         try
-            _, bytes_read = socket_read(socket, message.message_data)
+            bytes_read = socket_read(socket, message.message_data)
         catch e
             if e isa ReseauError
                 last_error = e.code
