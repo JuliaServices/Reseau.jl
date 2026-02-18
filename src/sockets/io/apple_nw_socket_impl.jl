@@ -151,15 +151,6 @@
         return nothing
     end
 
-    function _nw_set_event_loop!(
-        socket::Socket,
-        event_loop::EventLoop,
-        event_loop_group::Union{EventLoopGroup,Nothing},
-    )::Nothing
-        _ = event_loop_group
-        return _nw_set_event_loop!(socket, event_loop)
-    end
-
     function _nw_release_event_loop!(nw_socket::NWSocket)
         if nw_socket.event_loop !== nothing
             event_loop = nw_socket.event_loop
@@ -1873,7 +1864,7 @@
 
         event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
-        _nw_set_event_loop!(socket, event_loop, event_loop_group)
+        _nw_set_event_loop!(socket, event_loop)
 
         _nw_setup_socket_params!(nw_socket, socket.options)
 
@@ -2077,7 +2068,7 @@
             nw_socket.on_accept_started = on_accept_start
             socket.accept_result_fn = on_accept_result
 
-            _nw_set_event_loop!(socket, accept_loop, event_loop_group)
+            _nw_set_event_loop!(socket, accept_loop)
 
             connect_to_io_completion_port(accept_loop, socket.io_handle)
 
