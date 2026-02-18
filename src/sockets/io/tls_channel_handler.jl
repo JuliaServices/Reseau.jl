@@ -38,10 +38,10 @@ function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
     return true
 end
 
-mutable struct TlsByoCryptoSetupOptions
+mutable struct TlsByoCryptoSetupOptions{UD}
     new_handler_fn::Union{Function, Nothing}
     start_negotiation_fn::Union{Function, Nothing}
-    user_data::Any
+    user_data::UD
 end
 
 function TlsByoCryptoSetupOptions(;
@@ -715,7 +715,7 @@ function tls_ctx_options_init_default_client(;
         alpn_list::Union{String, Nothing} = nothing,
         minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
         cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
-        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+        max_fragment_size::Integer = g_channel_max_fragment_size[],
     )
     @static if Sys.isapple()
         _tls_set_use_secitem_from_env()
@@ -1132,7 +1132,7 @@ function tls_context_new_client(;
         alpn_list::Union{String, Nothing} = nothing,
         minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
         cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
-        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+        max_fragment_size::Integer = g_channel_max_fragment_size[],
     )
     opts = tls_ctx_options_init_default_client(;
         verify_peer = verify_peer,
@@ -1153,7 +1153,7 @@ function tls_context_new_server(;
         alpn_list::Union{String, Nothing} = nothing,
         minimum_tls_version::TlsVersion.T = TlsVersion.TLS_VER_SYS_DEFAULTS,
         cipher_pref::TlsCipherPref.T = TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT,
-        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+        max_fragment_size::Integer = g_channel_max_fragment_size[],
     )
     opts = tls_ctx_options_init_default_server(
         certificate,

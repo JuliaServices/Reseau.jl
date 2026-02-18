@@ -108,14 +108,14 @@ end
 # =============================================================================
 
 # Exponential backoff configuration (matches aws-c-io options)
-struct ExponentialBackoffConfig
+struct ExponentialBackoffConfig{UD}
     backoff_scale_factor_ms::UInt64
     max_backoff_secs::UInt64
     max_retries::UInt32
     jitter_mode::Symbol  # :default, :none, :full, :decorrelated
     generate_random::Union{Nothing, Function}
     generate_random_impl::Union{Nothing, Function}
-    generate_random_user_data::Any
+    generate_random_user_data::UD
 end
 
 function _default_generate_random(_user_data)

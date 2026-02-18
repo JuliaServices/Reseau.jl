@@ -61,8 +61,8 @@ const TLS_HASH_SHA512 = UInt8(5)
 const TLS_SIGNATURE_RSA = UInt8(1)
 const TLS_SIGNATURE_ECDSA = UInt8(2)
 
-const AWS_SUPPORTED_CRYPTOKI_VERSION_MAJOR = UInt8(2)
-const AWS_MIN_SUPPORTED_CRYPTOKI_VERSION_MINOR = UInt8(20)
+const SUPPORTED_CRYPTOKI_VERSION_MAJOR = UInt8(2)
+const MIN_SUPPORTED_CRYPTOKI_VERSION_MINOR = UInt8(20)
 
 struct CK_VERSION
     major::UInt8
@@ -192,7 +192,7 @@ struct CK_FUNCTION_LIST
 end
 
 function _pkcs11_function_list_stub(;
-        version = CK_VERSION(AWS_SUPPORTED_CRYPTOKI_VERSION_MAJOR, AWS_MIN_SUPPORTED_CRYPTOKI_VERSION_MINOR),
+        version = CK_VERSION(SUPPORTED_CRYPTOKI_VERSION_MAJOR, MIN_SUPPORTED_CRYPTOKI_VERSION_MINOR),
         C_Initialize::Ptr{Cvoid} = C_NULL,
         C_Finalize::Ptr{Cvoid} = C_NULL,
         C_GetInfo::Ptr{Cvoid} = C_NULL,
@@ -489,8 +489,8 @@ function _pkcs11_init_with_function_list!(lib::Pkcs11Lib)::Nothing
 
     fl = unsafe_load(Ptr{CK_FUNCTION_LIST}(lib.function_list))
     version = fl.version
-    if version.major != AWS_SUPPORTED_CRYPTOKI_VERSION_MAJOR ||
-        version.minor < AWS_MIN_SUPPORTED_CRYPTOKI_VERSION_MINOR
+    if version.major != SUPPORTED_CRYPTOKI_VERSION_MAJOR ||
+        version.minor < MIN_SUPPORTED_CRYPTOKI_VERSION_MINOR
         throw_error(ERROR_IO_PKCS11_VERSION_UNSUPPORTED)
     end
 

@@ -22,11 +22,11 @@ end
 
 mutable struct ByoCryptoTestArgs
     lock::ReentrantLock
-    channel::Any
+    channel::Union{Sockets.Channel, Nothing}
     rw_handler::ReadWriteTestHandler
     tls_ctx::Sockets.TlsContext
     tls_options::Sockets.TlsConnectionOptions
-    negotiation_result_fn::Any
+    negotiation_result_fn::Union{Sockets.TlsNegotiationResultCallback, Nothing}
     error_code::Int
     shutdown_invoked::Bool
     listener_destroyed::Bool

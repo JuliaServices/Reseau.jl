@@ -444,8 +444,8 @@ function create_posix_socket_fd(options::SocketOptions)::Cint
     errno_val = get_errno()
 
     if fd == -1
-        aws_error = determine_socket_error(errno_val)
-        throw_error(aws_error)
+        socket_error = determine_socket_error(errno_val)
+        throw_error(socket_error)
     end
 
     # Set non-blocking and close-on-exec
@@ -983,10 +983,10 @@ function socket_connect_impl(
 
     # Connection failed immediately
     logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: connect failed with errno=$errno_val")
-    aws_error = determine_socket_error(errno_val)
+    socket_error = determine_socket_error(errno_val)
     sock.event_loop = nothing
     socket_impl.connect_args = nothing
-    throw_error(aws_error)
+    throw_error(socket_error)
 end
 
 function _is_socket_connect_ready_for_completion(fd::Integer)::Bool
@@ -1156,16 +1156,16 @@ function _on_connection_success(sock::Socket)
             fd, SOL_SOCKET, SO_ERROR, connect_result, result_len
         ) < 0
         errno_val = get_errno()
-        aws_error = determine_socket_error(errno_val)
-        raise_error(aws_error)
-        _on_connection_error(sock, aws_error)
+        socket_error = determine_socket_error(errno_val)
+        raise_error(socket_error)
+        _on_connection_error(sock, socket_error)
         return
     end
 
     if connect_result[] != 0
-        aws_error = determine_socket_error(connect_result[])
-        raise_error(aws_error)
-        _on_connection_error(sock, aws_error)
+        socket_error = determine_socket_error(connect_result[])
+        raise_error(socket_error)
+        _on_connection_error(sock, socket_error)
         return
     end
 
@@ -1228,11 +1228,11 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
         end
 
         if has_error
-            aws_error = socket_get_error(sock)
-            if aws_error == ERROR_IO_READ_WOULD_BLOCK
+            socket_error = socket_get_error(sock)
+            if socket_error == ERROR_IO_READ_WOULD_BLOCK
                 return nothing  # Spurious event
             end
-            if aws_error == ERROR_IO_SOCKET_NOT_CONNECTED
+            if socket_error == ERROR_IO_SOCKET_NOT_CONNECTED
                 return nothing
             end
             if socket_impl.currently_subscribed && sock.event_loop !== nothing
@@ -1245,8 +1245,8 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
             _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
-            raise_error(aws_error)
-            _on_connection_error(sock, aws_error)
+            raise_error(socket_error)
+            _on_connection_error(sock, socket_error)
             return nothing
         end
 
@@ -1336,9 +1336,9 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
     socket_impl = _posix_impl(sock)
     fd = sock.io_handle.fd
 
-    aws_error = socket_get_error(sock)
+    socket_error = socket_get_error(sock)
 
-    if aws_error == OP_SUCCESS
+    if socket_error == OP_SUCCESS
         if _is_socket_connect_ready_for_completion(fd)
             _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
@@ -1351,7 +1351,7 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
         return nothing
     end
 
-    if aws_error == ERROR_IO_READ_WOULD_BLOCK || aws_error == ERROR_IO_SOCKET_NOT_CONNECTED
+    if socket_error == ERROR_IO_READ_WOULD_BLOCK || socket_error == ERROR_IO_SOCKET_NOT_CONNECTED
         _schedule_connect_poll_retry_task!(sock, connect_args)
         return nothing
     end
@@ -1367,8 +1367,8 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
     _cancel_connect_pending_tasks!(sock, connect_args)
     connect_args.socket = nothing
     socket_impl.connect_args = nothing
-    raise_error(aws_error)
-    _on_connection_error(sock, aws_error)
+    raise_error(socket_error)
+    _on_connection_error(sock, socket_error)
 
     return nothing
 end
@@ -1530,9 +1530,9 @@ function socket_bind_impl(
     if result != 0
         errno_val = get_errno()
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: bind failed with errno=$errno_val")
-        aws_error = determine_socket_error(errno_val)
+        socket_error = determine_socket_error(errno_val)
         sock.state = SocketState.ERROR
-        throw_error(aws_error)
+        throw_error(socket_error)
     end
 
     _update_local_endpoint!(sock)
@@ -1572,8 +1572,8 @@ function socket_listen_impl(::PosixSocket, sock::Socket, backlog_size::Integer):
     errno_val = get_errno()
     logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: listen failed with errno=$errno_val")
     sock.state = SocketState.ERROR
-    aws_error = determine_socket_error(errno_val)
-    throw_error(aws_error)
+    socket_error = determine_socket_error(errno_val)
+    throw_error(socket_error)
 end
 
 # POSIX impl - close
@@ -1659,8 +1659,8 @@ function socket_shutdown_dir_impl(::PosixSocket, sock::Socket, dir::ChannelDirec
 
     if ccall(:shutdown, Cint, (Cint, Cint), fd, how) != 0
         errno_val = get_errno()
-        aws_error = determine_socket_error(errno_val)
-        throw_error(aws_error)
+        socket_error = determine_socket_error(errno_val)
+        throw_error(socket_error)
     end
 
     if dir == ChannelDirection.READ
@@ -1765,11 +1765,11 @@ function _on_socket_io_event(sock, events::Int)
             sock.readable_fn(ERROR_IO_SOCKET_CLOSED)
         end
     elseif socket_impl.currently_subscribed && (events & Int(IoEventType.ERROR)) != 0
-        aws_error = socket_get_error(sock)
-        raise_error(aws_error)
+        socket_error = socket_get_error(sock)
+        raise_error(socket_error)
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: error event occurred")
         if sock.readable_fn !== nothing
-            sock.readable_fn(aws_error)
+            sock.readable_fn(socket_error)
         end
     end
 
@@ -1877,9 +1877,9 @@ function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Csiz
         throw_error(ERROR_IO_SOCKET_TIMEOUT)
     end
 
-    aws_error = determine_socket_error(errno_val)
+    socket_error = determine_socket_error(errno_val)
     logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: read failed with errno=$errno_val")
-    throw_error(aws_error)
+    throw_error(socket_error)
 end
 
 # Process socket write requests
@@ -1888,7 +1888,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
     fd = sock.io_handle.fd
 
     purge = false
-    aws_error = OP_SUCCESS
+    socket_error = OP_SUCCESS
     parent_request_failed = false
     pushed_to_written_queue = false
 
@@ -1938,16 +1938,16 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
 
             if errno_val == EPIPE
                 logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: closed before write")
-                aws_error = ERROR_IO_SOCKET_CLOSED
-                raise_error(aws_error)
+                socket_error = ERROR_IO_SOCKET_CLOSED
+                raise_error(socket_error)
                 purge = true
                 break
             end
 
             purge = true
             logf(LogLevel.DEBUG, LS_IO_SOCKET, "Socket fd=$fd: write error errno=$errno_val")
-            aws_error = determine_socket_error(errno_val)
-            raise_error(aws_error)
+            socket_error = determine_socket_error(errno_val)
+            raise_error(socket_error)
             break
         end
 
@@ -1974,7 +1974,7 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
             if write_request === parent_request
                 parent_request_failed = true
             else
-                write_request.error_code = aws_error
+                write_request.error_code = socket_error
                 _write_request_queue_push_back!(socket_impl.written_queue, write_request)
                 pushed_to_written_queue = true
             end
@@ -2180,9 +2180,9 @@ function _socket_accept_event(sock, events::Int)
                 if errno_val == EINTR
                     continue
                 end
-                aws_error = socket_get_error(sock)
-                raise_error(aws_error)
-                _on_connection_error(sock, aws_error)
+                socket_error = socket_get_error(sock)
+                raise_error(socket_error)
+                _on_connection_error(sock, socket_error)
                 break
             end
 

@@ -226,8 +226,8 @@
         )
 
         if rc != 0
-            aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-            throw_error(aws_err)
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            throw_error(socket_err)
         end
 
         family = unsafe_load(Ptr{Cushort}(pointer(address))) |> Cint
@@ -321,19 +321,19 @@
         handle = ccall((:socket, _WS2_32), UInt, (Cint, Cint, Cint), domain, stype, Cint(0))
         if handle == UInt(typemax(UInt))
             wsa_err = _wsa_get_last_error()
-            aws_err = _winsock_determine_socket_error(wsa_err)
+            socket_err = _winsock_determine_socket_error(wsa_err)
             logf(LogLevel.ERROR, LS_IO_SOCKET,string("socket() failed with WSAError %d", " ", wsa_err))
-            throw_error(aws_err)
+            throw_error(socket_err)
         end
 
         # Set non-blocking
         non_blocking = Ref{UInt32}(1)
         if ccall((:ioctlsocket, _WS2_32), Cint, (UInt, UInt32, Ptr{UInt32}), handle, FIONBIO, non_blocking) != 0
             wsa_err = _wsa_get_last_error()
-            aws_err = _winsock_determine_socket_error(wsa_err)
+            socket_err = _winsock_determine_socket_error(wsa_err)
             logf(LogLevel.ERROR, LS_IO_SOCKET,string("ioctlsocket(FIONBIO) failed with WSAError %d", " ", wsa_err))
             _ = ccall((:closesocket, _WS2_32), Cint, (UInt,), handle)
-            throw_error(aws_err)
+            throw_error(socket_err)
         end
 
         sock.io_handle.handle = Ptr{Cvoid}(handle)
@@ -492,13 +492,13 @@
                 connect_result,
                 result_length,
             ) != 0
-            aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-            throw_error(aws_err)
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            throw_error(socket_err)
         end
 
         if connect_result[] != 0
-            aws_err = _winsock_determine_socket_error(connect_result[])
-            throw_error(aws_err)
+            socket_err = _winsock_determine_socket_error(connect_result[])
+            throw_error(socket_err)
         end
 
         _winsock_update_local_endpoint_ipv4_ipv6!(sock)
@@ -566,9 +566,9 @@
                 _winsock_connection_error(sock, e.code)
             end
         else
-            aws_err = _winsock_determine_socket_error(status_code)
-            raise_error(aws_err)
-            _winsock_connection_error(sock, aws_err)
+            socket_err = _winsock_determine_socket_error(status_code)
+            raise_error(socket_err)
+            _winsock_connection_error(sock, socket_err)
         end
 
         impl.read_in_use = false
@@ -691,8 +691,8 @@
                 impl.connect_timeout_task = nothing
                 impl.connect_active = false
                 impl.read_in_use = false
-                aws_err = _winsock_determine_socket_error(err)
-                throw_error(aws_err)
+                socket_err = _winsock_determine_socket_error(err)
+                throw_error(socket_err)
             end
             time_to_run += UInt64(sock.options.connect_timeout_ms) * UInt64(1_000_000)
         else
@@ -751,9 +751,9 @@
             )
             if handle == INVALID_HANDLE_VALUE
                 win_err = _win_get_last_error()
-                aws_err = _winsock_determine_socket_error(win_err)
+                socket_err = _winsock_determine_socket_error(win_err)
                 sock.state = SocketState.ERROR
-                throw_error(aws_err)
+                throw_error(socket_err)
             end
             sock.io_handle.handle = handle
             try
@@ -794,9 +794,9 @@
                     Cint(sizeof(SockaddrIn)),
                 )
                 if rc != 0
-                    aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
+                    socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
                     sock.state = SocketState.ERROR
-                    throw_error(aws_err)
+                    throw_error(socket_err)
                 end
             else
                 addr6 = _winsock_inet_pton_ipv6(address)
@@ -810,9 +810,9 @@
                     Cint(sizeof(SockaddrIn6)),
                 )
                 if rc != 0
-                    aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
+                    socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
                     sock.state = SocketState.ERROR
-                    throw_error(aws_err)
+                    throw_error(socket_err)
                 end
             end
 
@@ -891,16 +891,16 @@
             Cint(sizeof(Cint)),
         )
         if rc != 0
-            aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
             sock.state = SocketState.ERROR
-            throw_error(aws_err)
+            throw_error(socket_err)
         end
 
         rc = ccall((:bind, _WS2_32), Cint, (UInt, Ptr{Cvoid}, Cint), handle, sockaddr_ptr, sock_size)
         if rc != 0
-            aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
             sock.state = SocketState.ERROR
-            throw_error(aws_err)
+            throw_error(socket_err)
         end
 
         _winsock_update_local_endpoint_ipv4_ipv6!(sock)
@@ -912,9 +912,9 @@
         handle = _winsock_socket_handle(sock)
         rc = ccall((:bind, _WS2_32), Cint, (UInt, Ptr{Cvoid}, Cint), handle, sockaddr_ptr, sock_size)
         if rc != 0
-            aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
             sock.state = SocketState.ERROR
-            throw_error(aws_err)
+            throw_error(socket_err)
         end
 
         _winsock_update_local_endpoint_ipv4_ipv6!(sock)
@@ -957,9 +957,9 @@
             )
             if handle == INVALID_HANDLE_VALUE
                 win_err = _win_get_last_error()
-                aws_err = _winsock_determine_socket_error(win_err)
+                socket_err = _winsock_determine_socket_error(win_err)
                 sock.state = SocketState.ERROR
-                throw_error(aws_err)
+                throw_error(socket_err)
             end
             sock.io_handle.handle = handle
             sock.state = SocketState.BOUND
@@ -1009,8 +1009,8 @@
             return nothing
         end
 
-        aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-        throw_error(aws_err)
+        socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
+        throw_error(socket_err)
     end
 
     # =============================================================================
@@ -1040,10 +1040,10 @@
         end
 
         if status_code != 0
-            aws_err = _winsock_determine_socket_error(status_code)
-            raise_error(aws_err)
+            socket_err = _winsock_determine_socket_error(status_code)
+            raise_error(socket_err)
             sock.state = SocketState.ERROR
-            _winsock_connection_error(sock, aws_err)
+            _winsock_connection_error(sock, socket_err)
             socket_cleanup!(incoming)
             impl.read_in_use = false
             _winsock_maybe_finish_cleanup!(sock)
@@ -1168,8 +1168,8 @@
             impl.read_in_use = false
             socket_cleanup!(incoming_sock)
             impl.incoming_accept_handle = C_NULL
-            aws_err = _winsock_determine_socket_error(win_err)
-            throw_error(aws_err)
+            socket_err = _winsock_determine_socket_error(win_err)
+            throw_error(socket_err)
         end
     end
 
@@ -1271,10 +1271,10 @@
         end
 
         if status_code != 0
-            aws_err = _winsock_determine_socket_error(status_code)
-            raise_error(aws_err)
-            sock.state = aws_err == ERROR_IO_SOCKET_CLOSED ? SocketState.CLOSED : SocketState.ERROR
-            _winsock_connection_error(sock, aws_err)
+            socket_err = _winsock_determine_socket_error(status_code)
+            raise_error(socket_err)
+            sock.state = socket_err == ERROR_IO_SOCKET_CLOSED ? SocketState.CLOSED : SocketState.ERROR
+            _winsock_connection_error(sock, socket_err)
             impl.read_in_use = false
             _winsock_maybe_finish_cleanup!(sock)
             return nothing
@@ -1324,9 +1324,9 @@
             )
             if handle == INVALID_HANDLE_VALUE
                 sock.state = SocketState.ERROR
-                aws_err = _winsock_determine_socket_error(_win_get_last_error())
-                raise_error(aws_err)
-                _winsock_connection_error(sock, aws_err)
+                socket_err = _winsock_determine_socket_error(_win_get_last_error())
+                raise_error(socket_err)
+                _winsock_connection_error(sock, socket_err)
                 impl.read_in_use = false
                 _winsock_maybe_finish_cleanup!(sock)
                 return nothing
@@ -1377,11 +1377,11 @@
             if err == ERROR_PIPE_CONNECTED
                 continue
             elseif err != ERROR_IO_PENDING
-                aws_err = _winsock_determine_socket_error(err)
-                raise_error(aws_err)
+                socket_err = _winsock_determine_socket_error(err)
+                raise_error(socket_err)
                 sock.state = SocketState.ERROR
                 impl.read_in_use = false
-                _winsock_connection_error(sock, aws_err)
+                _winsock_connection_error(sock, socket_err)
                 _winsock_maybe_finish_cleanup!(sock)
                 return nothing
             end
@@ -1443,8 +1443,8 @@
             err = _win_get_last_error()
             if err != ERROR_IO_PENDING && err != ERROR_PIPE_CONNECTED
                 impl.read_in_use = false
-                aws_err = _winsock_determine_socket_error(err)
-                throw_error(aws_err)
+                socket_err = _winsock_determine_socket_error(err)
+                throw_error(socket_err)
             elseif err == ERROR_PIPE_CONNECTED
                 # No IOCP event will fire; schedule a task to finish the accept.
                 schedule_task_now!(sock.event_loop; type_tag = "winsock_pipe_connected_immediately") do status
@@ -1531,8 +1531,8 @@
     function socket_shutdown_dir_impl(::WinsockSocket, sock::Socket, dir::ChannelDirection.T)::Nothing
         how = dir == ChannelDirection.READ ? WS_SD_RECEIVE : WS_SD_SEND
         if ccall((:shutdown, _WS2_32), Cint, (UInt, Cint), _winsock_socket_handle(sock), how) != 0
-            aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-            throw_error(aws_err)
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            throw_error(socket_err)
         end
 
         if dir == ChannelDirection.READ
@@ -1660,8 +1660,8 @@
                 if err != ERROR_IO_PENDING
                     impl.read_in_use = false
                     impl.waiting_on_readable = false
-                    aws_err = _winsock_determine_socket_error(err)
-                    throw_error(aws_err)
+                    socket_err = _winsock_determine_socket_error(err)
+                    throw_error(socket_err)
                 end
             end
             return nothing
@@ -1685,8 +1685,8 @@
             if err != ERROR_IO_PENDING
                 impl.read_in_use = false
                 impl.waiting_on_readable = false
-                aws_err = _winsock_determine_socket_error(err)
-                throw_error(aws_err)
+                socket_err = _winsock_determine_socket_error(err)
+                throw_error(socket_err)
             end
         end
 
@@ -1724,8 +1724,8 @@
                     if err != ERROR_IO_PENDING
                         impl.waiting_on_readable = false
                         impl.read_in_use = false
-                        aws_err = _winsock_determine_socket_error(err)
-                        throw_error(aws_err)
+                        socket_err = _winsock_determine_socket_error(err)
+                        throw_error(socket_err)
                     end
                 end
             else
@@ -1746,8 +1746,8 @@
                     if err != ERROR_IO_PENDING
                         impl.waiting_on_readable = false
                         impl.read_in_use = false
-                        aws_err = _winsock_determine_socket_error(err)
-                        throw_error(aws_err)
+                        socket_err = _winsock_determine_socket_error(err)
+                        throw_error(socket_err)
                     end
                 end
             end
@@ -1807,8 +1807,8 @@
 
             if !peek_ok
                 win_err = _win_get_last_error()
-                aws_err = _winsock_determine_socket_error(win_err)
-                throw_error(aws_err)
+                socket_err = _winsock_determine_socket_error(win_err)
+                throw_error(socket_err)
             end
 
             if bytes_available[] == 0
@@ -1833,8 +1833,8 @@
                         if err != ERROR_IO_PENDING
                             impl.waiting_on_readable = false
                             impl.read_in_use = false
-                            aws_err = _winsock_determine_socket_error(err)
-                            throw_error(aws_err)
+                            socket_err = _winsock_determine_socket_error(err)
+                            throw_error(socket_err)
                         end
                     end
                 end
@@ -1858,13 +1858,13 @@
 
             if !ok
                 win_err = _win_get_last_error()
-                aws_err = _winsock_determine_socket_error(win_err)
-                if aws_err == ERROR_IO_SOCKET_CLOSED
+                socket_err = _winsock_determine_socket_error(win_err)
+                if socket_err == ERROR_IO_SOCKET_CLOSED
                     sock.state = SocketState.CLOSED
                 else
                     sock.state = SocketState.ERROR
                 end
-                throw_error(aws_err)
+                throw_error(socket_err)
             end
 
             amount = Csize_t(bytes_read[])
@@ -1885,8 +1885,8 @@
                     FIONREAD,
                     bytes_available,
                 ) != 0
-                aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
-                throw_error(aws_err)
+                socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
+                throw_error(socket_err)
             end
 
             if bytes_available[] == 0
@@ -1926,8 +1926,8 @@
             _winsock_read_would_block(sock)
         end
 
-        aws_err = _winsock_determine_socket_error(err)
-        throw_error(aws_err)
+        socket_err = _winsock_determine_socket_error(err)
+        throw_error(socket_err)
     end
 
     function socket_write_impl(::WinsockSocket, sock::Socket, cursor::ByteCursor, written_fn::Union{WriteCallable, Nothing})::Nothing
@@ -1961,8 +1961,8 @@
             err = _win_get_last_error()
             if err != ERROR_IO_PENDING
                 _winsock_pending_write_remove!(impl, req)
-                aws_err = _winsock_determine_socket_error(err)
-                throw_error(aws_err)
+                socket_err = _winsock_determine_socket_error(err)
+                throw_error(socket_err)
             end
         end
 
@@ -1974,14 +1974,14 @@
 
         sock = overlapped.user_data::Socket
         req = overlapped.user_data_aux::WinsockSocketWriteRequest
-        aws_err = status_code == 0 ? OP_SUCCESS : _winsock_determine_socket_error(status_code)
+        socket_err = status_code == 0 ? OP_SUCCESS : _winsock_determine_socket_error(status_code)
 
         # Remove from pending list if possible.
         if sock.impl !== nothing
             impl = sock.impl::WinsockSocket
             _winsock_pending_write_remove!(impl, req)
-            if aws_err != OP_SUCCESS
-                if aws_err == ERROR_IO_SOCKET_CLOSED
+            if socket_err != OP_SUCCESS
+                if socket_err == ERROR_IO_SOCKET_CLOSED
                     sock.state = SocketState.CLOSED
                 else
                     sock.state = SocketState.ERROR
@@ -1989,12 +1989,12 @@
             end
         end
 
-        if aws_err != OP_SUCCESS
-            raise_error(aws_err)
+        if socket_err != OP_SUCCESS
+            raise_error(socket_err)
         end
 
         if req.written_fn !== nothing
-            req.written_fn(aws_err, num_bytes_transferred)
+            req.written_fn(socket_err, num_bytes_transferred)
         end
 
         _winsock_maybe_finish_cleanup!(sock)

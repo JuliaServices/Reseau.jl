@@ -68,7 +68,7 @@
 
     # Extra header to find the Julia callback object when IO completes.
     # OVERLAPPED must be the first field, so pointer to this struct == pointer to OVERLAPPED.
-    struct AwsOverlappedHeader
+    struct IocpOverlappedHeader
         overlapped::Win32OVERLAPPED
         objref::Ptr{Cvoid} # pointer_from_objref(IocpOverlapped)
     end
@@ -92,7 +92,7 @@
     const IocpOnCompletionFn = Function
 
     mutable struct IocpOverlapped
-        storage::Base.RefValue{AwsOverlappedHeader}
+        storage::Base.RefValue{IocpOverlappedHeader}
         on_completion::Union{Nothing, IocpOnCompletionFn}
         user_data::Any
         user_data_aux::Any
@@ -101,13 +101,13 @@
 
     function IocpOverlapped()
         op = IocpOverlapped(
-            Ref(AwsOverlappedHeader(_ZERO_OVERLAPPED, C_NULL)),
+            Ref(IocpOverlappedHeader(_ZERO_OVERLAPPED, C_NULL)),
             nothing,
             nothing,
             nothing,
             false,
         )
-        op.storage[] = AwsOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
+        op.storage[] = IocpOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
         return op
     end
 
@@ -120,7 +120,7 @@
         op.user_data = user_data
         op.user_data_aux = nothing
         op.active = false
-        op.storage[] = AwsOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
+        op.storage[] = IocpOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
         return op
     end
 
@@ -134,17 +134,17 @@
         op.user_data = user_data
         op.user_data_aux = user_data_aux
         op.active = false
-        op.storage[] = AwsOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
+        op.storage[] = IocpOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
         return op
     end
 
     function iocp_overlapped_reset!(op::IocpOverlapped)
-        op.storage[] = AwsOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
+        op.storage[] = IocpOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
         return nothing
     end
 
     @inline function iocp_overlapped_ptr(op::IocpOverlapped)::Ptr{Cvoid}
-        return Ptr{Cvoid}(Base.unsafe_convert(Ptr{AwsOverlappedHeader}, op.storage))
+        return Ptr{Cvoid}(Base.unsafe_convert(Ptr{IocpOverlappedHeader}, op.storage))
     end
 
     @inline function _win_get_last_error()::UInt32
@@ -349,7 +349,7 @@
                     ov_ptr = entry.lpOverlapped
                     ov_ptr == C_NULL && continue
 
-                    hdr = unsafe_load(Ptr{AwsOverlappedHeader}(ov_ptr))
+                    hdr = unsafe_load(Ptr{IocpOverlappedHeader}(ov_ptr))
                     op = unsafe_pointer_to_objref(hdr.objref)::IocpOverlapped
                     cb = op.on_completion
                     cb === nothing && continue

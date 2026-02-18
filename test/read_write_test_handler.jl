@@ -1,6 +1,6 @@
 using Reseau
 
-mutable struct ReadWriteTestHandler{FRead, FWrite, SlotRef <: Union{Sockets.ChannelSlot, Nothing}}
+mutable struct ReadWriteTestHandler{FRead, FWrite, SlotRef <: Union{Sockets.ChannelSlot, Nothing}, Ctx}
     slot::SlotRef
     on_read::FRead
     on_write::FWrite
@@ -13,7 +13,7 @@ mutable struct ReadWriteTestHandler{FRead, FWrite, SlotRef <: Union{Sockets.Chan
     increment_read_window_called::Bool
     destroy_called::Union{Base.RefValue{Bool}, Nothing}
     destroy_condition::Union{Base.Threads.Condition, Nothing}
-    ctx::Any
+    ctx::Ctx
 end
 
 function ReadWriteTestHandler(
@@ -23,7 +23,7 @@ function ReadWriteTestHandler(
         window::Integer = 0,
         ctx = nothing,
     )
-    return ReadWriteTestHandler{typeof(on_read), typeof(on_write), Union{Sockets.ChannelSlot, Nothing}}(
+    return ReadWriteTestHandler{typeof(on_read), typeof(on_write), Union{Sockets.ChannelSlot, Nothing}, typeof(ctx)}(
         nothing,
         on_read,
         on_write,
@@ -180,7 +180,7 @@ mutable struct RwWriteTaskArgs
     handler::ReadWriteTestHandler
     slot::Sockets.ChannelSlot
     buffer::Reseau.ByteBuffer
-    on_completion::Any
+    on_completion::Union{Reseau.EventCallable, Nothing}
     user_data::Any
 end
 

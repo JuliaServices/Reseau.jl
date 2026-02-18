@@ -4,7 +4,7 @@
 # Channel read/write directions are defined in socket.jl as ChannelDirection
 
 const DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE = 16 * 1024
-const g_aws_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE))
+const g_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE))
 
 struct ChannelOptions
     event_loop::EventLoop
@@ -664,7 +664,7 @@ function Channel(
         enable_read_back_pressure::Bool = false,
     )
     channel_id = _next_channel_id()
-    window_threshold = enable_read_back_pressure ? Csize_t(g_aws_channel_max_fragment_size[] * 2) : Csize_t(0)
+    window_threshold = enable_read_back_pressure ? Csize_t(g_channel_max_fragment_size[] * 2) : Csize_t(0)
 
     channel = Channel(
         event_loop,
@@ -836,7 +836,7 @@ function _channel_get_or_create_message_pool(channel::Channel)::MessagePool
     end
 
     pool = MessagePool(;
-        application_data_msg_data_size = Int(g_aws_channel_max_fragment_size[]),
+        application_data_msg_data_size = Int(g_channel_max_fragment_size[]),
         application_data_msg_count = 4,
         small_block_msg_data_size = 128,
         small_block_msg_count = 4,
@@ -1341,10 +1341,10 @@ function channel_slot_acquire_max_message_for_write(slot::ChannelSlot)
         throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
     end
     overhead = channel_slot_upstream_message_overhead(slot)
-    if overhead >= g_aws_channel_max_fragment_size[]
+    if overhead >= g_channel_max_fragment_size[]
         fatal_assert("Upstream overhead exceeds channel max fragment size", "<unknown>", 0)
     end
-    size_hint = g_aws_channel_max_fragment_size[] - overhead
+    size_hint = g_channel_max_fragment_size[] - overhead
     return channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, size_hint)
 end
 
@@ -1666,7 +1666,7 @@ function channel_acquire_message_from_pool(channel::Channel, message_type::IoMes
         if size_hint isa Signed && size_hint < 0
             effective_size = 0
         end
-        max_size = Csize_t(g_aws_channel_max_fragment_size[])
+        max_size = Csize_t(g_channel_max_fragment_size[])
         effective_csize = Csize_t(effective_size)
         if effective_csize > max_size
             effective_csize = max_size
