@@ -1260,6 +1260,7 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
                     unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
                 catch e
                 end
+                socket_impl.currently_subscribed = false
             end
             _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
