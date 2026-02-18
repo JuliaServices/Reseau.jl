@@ -529,9 +529,8 @@
         _ = num_bytes_transferred
 
         connect_loop = event_loop
-        user_data = overlapped.user_data::Tuple{Socket, UInt64}
-        sock = user_data[1]
-        generation = user_data[2]
+        sock = overlapped.user_data::Socket
+        generation = overlapped.user_data_aux::UInt64
 
         sock.impl === nothing && return nothing
         impl = sock.impl::WinsockSocket
@@ -665,7 +664,7 @@
         impl.connect_timeout_task = task
         impl.read_in_use = true
 
-        iocp_overlapped_init!(impl.read_signal, _winsock_socket_connection_completion, (sock, generation))
+        iocp_overlapped_init!(impl.read_signal, _winsock_socket_connection_completion, sock, generation)
 
         fake_buffer = Ref{Int32}(0)
         _ = ccall((:bind, _WS2_32), Cint, (UInt, Ptr{Cvoid}, Cint), _winsock_socket_handle(sock), bind_addr_ptr, sock_size)
@@ -1022,9 +1021,8 @@
         _ = event_loop
         _ = num_bytes_transferred
 
-        user_data = overlapped.user_data::Tuple{Socket, Socket}
-        sock = user_data[1]
-        incoming = user_data[2]
+        sock = overlapped.user_data::Socket
+        incoming = overlapped.user_data_aux::Socket
 
         if sock.impl === nothing
             socket_cleanup!(incoming)
@@ -1135,7 +1133,7 @@
             end
         end
 
-        iocp_overlapped_init!(impl.read_signal, _winsock_tcp_accept_event, (sock, incoming_sock))
+        iocp_overlapped_init!(impl.read_signal, _winsock_tcp_accept_event, sock, incoming_sock)
         impl.read_in_use = true
 
         accept_ptr = winsock_get_acceptex_fn()
@@ -1945,7 +1943,7 @@
 
         impl = sock.impl::WinsockSocket
         req = WinsockSocketWriteRequest(false, cursor, cursor.len, written_fn, IocpOverlapped())
-        iocp_overlapped_init!(req.overlapped, _winsock_socket_written_event, (sock, req))
+        iocp_overlapped_init!(req.overlapped, _winsock_socket_written_event, sock, req)
         _winsock_pending_write_push!(impl, req)
 
         ok = ccall(
@@ -1974,9 +1972,8 @@
     function _winsock_socket_written_event(event_loop, overlapped::IocpOverlapped, status_code::Int, num_bytes_transferred::Csize_t)
         _ = event_loop
 
-        user_data = overlapped.user_data::Tuple{Socket, WinsockSocketWriteRequest}
-        sock = user_data[1]
-        req = user_data[2]
+        sock = overlapped.user_data::Socket
+        req = overlapped.user_data_aux::WinsockSocketWriteRequest
         aws_err = status_code == 0 ? OP_SUCCESS : _winsock_determine_socket_error(status_code)
 
         # Remove from pending list if possible.

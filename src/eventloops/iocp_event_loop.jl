@@ -95,12 +95,14 @@
         storage::Base.RefValue{AwsOverlappedHeader}
         on_completion::Union{Nothing, IocpOnCompletionFn}
         user_data::Any
+        user_data_aux::Any
         active::Bool
     end
 
     function IocpOverlapped()
         op = IocpOverlapped(
             Ref(AwsOverlappedHeader(_ZERO_OVERLAPPED, C_NULL)),
+            nothing,
             nothing,
             nothing,
             false,
@@ -116,6 +118,21 @@
         )::IocpOverlapped
         op.on_completion = on_completion
         op.user_data = user_data
+        op.user_data_aux = nothing
+        op.active = false
+        op.storage[] = AwsOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
+        return op
+    end
+
+    function iocp_overlapped_init!(
+            op::IocpOverlapped,
+            on_completion::IocpOnCompletionFn,
+            user_data,
+            user_data_aux,
+        )::IocpOverlapped
+        op.on_completion = on_completion
+        op.user_data = user_data
+        op.user_data_aux = user_data_aux
         op.active = false
         op.storage[] = AwsOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
         return op
