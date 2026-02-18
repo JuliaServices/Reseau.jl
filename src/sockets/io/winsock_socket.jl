@@ -18,6 +18,7 @@
     # Socket option levels/options (Windows values)
     const WS_SOL_SOCKET = Cint(0xFFFF)
     const WS_IPPROTO_TCP = Cint(6)
+    const WS_TCP_KEEPCNT = Cint(16) # ws2tcpip.h
 
     const WS_SO_REUSEADDR = Cint(0x0004)
     const WS_SO_KEEPALIVE = Cint(0x0008)
@@ -293,6 +294,21 @@
                     C_NULL,
                 )
             end
+
+            # Only supported on newer Windows builds; best-effort like aws-c-io.
+            if sock.options.keep_alive_max_failed_probes != 0
+                max_probes = Ref{UInt32}(UInt32(sock.options.keep_alive_max_failed_probes))
+                _ = ccall(
+                    (:setsockopt, _WS2_32),
+                    Cint,
+                    (UInt, Cint, Cint, Ptr{UInt32}, Cint),
+                    handle,
+                    WS_IPPROTO_TCP,
+                    WS_TCP_KEEPCNT,
+                    max_probes,
+                    Cint(sizeof(UInt32)),
+                )
+            end
         end
 
         return nothing
@@ -334,7 +350,7 @@
     function socket_init_winsock(options::SocketOptions)::Socket
         winsock_check_and_init!()
 
-        impl = WinsockSocket()
+        impl = WinsockSocket{Socket}()
         sock = Socket(
             SocketEndpoint(),
             SocketEndpoint(),
@@ -533,6 +549,15 @@
             sock.readable_fn = nothing
             impl.connect_args = nothing
             args.socket = nothing
+            timeout_task = args.timeout_task
+            args.timeout_task = nothing
+            if timeout_task !== nothing && sock.event_loop !== nothing
+                try
+                    cancel_task!(sock.event_loop, timeout_task)
+                catch e
+                    e isa ReseauError || rethrow()
+                end
+            end
 
             if status_code == 0
                 try
@@ -570,12 +595,14 @@
         end
 
         conn_cb = sock.connection_result_fn
+        args.timeout_task = nothing
 
         raise_error(error_code)
         socket_close(sock)
 
         conn_cb !== nothing && conn_cb(error_code)
         args.socket = nothing
+        args.timeout_task = nothing
         return nothing
     end
 
@@ -974,7 +1001,7 @@
             return nothing
         end
 
-        aws_err = _winsock_determine_socket_error(_win_get_last_error())
+        aws_err = _winsock_determine_socket_error(_wsa_get_last_error())
         throw_error(aws_err)
     end
 
@@ -1074,8 +1101,14 @@
         # Setup next accept.
         try
             _winsock_socket_setup_accept(sock, nothing)
-        catch
-            # best-effort; ignore errors (including ERROR_IO_READ_WOULD_BLOCK)
+        catch e
+            if e isa ReseauError && e.code == ERROR_IO_READ_WOULD_BLOCK
+                return nothing
+            end
+            e isa ReseauError || rethrow()
+            sock.state = SocketState.ERROR
+            _winsock_connection_error(sock, e.code)
+            _winsock_maybe_finish_cleanup!(sock)
         end
         return nothing
     end
@@ -1180,7 +1213,7 @@
         return nothing
     end
 
-    function socket_stop_accept_impl(::WinsockSocket, sock::Socket)::Nothing
+    function _winsock_stop_accept_on_event_loop_thread!(sock::Socket)::Nothing
         impl = sock.impl::WinsockSocket
         impl.stop_accept = true
 
@@ -1189,6 +1222,26 @@
         end
 
         return nothing
+    end
+
+    function socket_stop_accept_impl(::WinsockSocket, sock::Socket)::Nothing
+        event_loop = sock.event_loop
+        if event_loop !== nothing && (@atomic event_loop.running) && !event_loop_thread_is_callers_thread(event_loop)
+            fut = Future{Nothing}()
+            schedule_task_now!(event_loop; type_tag = "winsock_stop_accept_on_event_loop") do _
+                try
+                    _winsock_stop_accept_on_event_loop_thread!(sock)
+                    notify(fut, nothing)
+                catch e
+                    notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
+                end
+                return nothing
+            end
+            wait(fut)
+            return nothing
+        end
+
+        return _winsock_stop_accept_on_event_loop_thread!(sock)
     end
 
     # =============================================================================
@@ -1412,6 +1465,15 @@
         end
 
         if impl.connect_args !== nothing
+            timeout_task = impl.connect_args.timeout_task
+            if timeout_task !== nothing && sock.event_loop !== nothing
+                try
+                    cancel_task!(sock.event_loop, timeout_task)
+                catch e
+                    e isa ReseauError || rethrow()
+                end
+            end
+            impl.connect_args.timeout_task = nothing
             impl.connect_args.socket = nothing
             impl.connect_args = nothing
         end
@@ -1675,6 +1737,28 @@
         throw_error(ERROR_IO_READ_WOULD_BLOCK)
     end
 
+    @inline function _winsock_pending_write_push!(impl::WinsockSocket, req::WinsockSocketWriteRequest)::Nothing
+        push!(impl.pending_writes, req)
+        impl.pending_write_indices[req] = length(impl.pending_writes)
+        return nothing
+    end
+
+    function _winsock_pending_write_remove!(impl::WinsockSocket, req::WinsockSocketWriteRequest)::Bool
+        idx = get(() -> 0, impl.pending_write_indices, req)
+        idx == 0 && return false
+
+        last_idx = length(impl.pending_writes)
+        if idx != last_idx
+            moved = impl.pending_writes[last_idx]
+            impl.pending_writes[idx] = moved
+            impl.pending_write_indices[moved] = idx
+        end
+
+        pop!(impl.pending_writes)
+        delete!(impl.pending_write_indices, req)
+        return true
+    end
+
     function socket_read_impl(::WinsockSocket, sock::Socket, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
         if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
@@ -1841,7 +1925,7 @@
         impl = sock.impl::WinsockSocket
         req = WinsockSocketWriteRequest(sock, false, cursor, cursor.len, written_fn, IocpOverlapped())
         iocp_overlapped_init!(req.overlapped, _winsock_socket_written_event, req)
-        push!(impl.pending_writes, req)
+        _winsock_pending_write_push!(impl, req)
 
         ok = ccall(
             (:WriteFile, _WIN_KERNEL32),
@@ -1857,7 +1941,7 @@
         if !ok
             err = _win_get_last_error()
             if err != ERROR_IO_PENDING
-                pop!(impl.pending_writes)
+                _winsock_pending_write_remove!(impl, req)
                 aws_err = _winsock_determine_socket_error(err)
                 throw_error(aws_err)
             end
@@ -1876,8 +1960,14 @@
         # Remove from pending list if possible.
         if sock !== nothing
             impl = (sock::Socket).impl::WinsockSocket
-            idx = findfirst(==(req), impl.pending_writes)
-            idx !== nothing && deleteat!(impl.pending_writes, idx)
+            _winsock_pending_write_remove!(impl, req)
+            if aws_err != OP_SUCCESS
+                if aws_err == ERROR_IO_SOCKET_CLOSED
+                    sock.state = SocketState.CLOSED
+                else
+                    sock.state = SocketState.ERROR
+                end
+            end
         end
 
         if aws_err != OP_SUCCESS
