@@ -6,7 +6,7 @@
     using LibAwsCal
 
     const _LIBC_EWOULDBLOCK = isdefined(Base.Libc, :EWOULDBLOCK) ? Base.Libc.EWOULDBLOCK : Base.Libc.EAGAIN
-    @inline function event_loop_thread_exit_s2n_cleanup!(::EpollEventLoop)::Nothing
+    @inline function event_loop_thread_exit_s2n_cleanup!(::Any)::Nothing
         return nothing
     end
 

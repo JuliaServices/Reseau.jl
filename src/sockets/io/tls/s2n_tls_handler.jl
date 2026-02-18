@@ -212,7 +212,7 @@ function _s2n_cleanup()
 end
 
 @static if Sys.islinux()
-function EventLoops.event_loop_thread_exit_s2n_cleanup!(::EventLoops.EpollEventLoop)::Nothing
+function EventLoops.event_loop_thread_exit_s2n_cleanup!(::EventLoops.EventLoop)::Nothing
     _s2n_cleanup_thread()
     return nothing
 end
