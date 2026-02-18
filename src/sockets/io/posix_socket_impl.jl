@@ -286,6 +286,11 @@ function _cancel_connect_pending_tasks!(
     connect_args::PosixSocketConnectArgs{S};
     skip_task::Union{ScheduledTask, Nothing} = nothing,
 ) where {S}
+    # Canceling scheduled tasks may invoke callbacks synchronously with
+    # `TaskStatus.CANCELED`; clear the shared socket pointer first so canceled
+    # timeout/poll callbacks become no-ops instead of racing error paths.
+    connect_args.socket = nothing
+
     event_loop = sock.event_loop
     can_cancel = event_loop !== nothing && (@atomic event_loop.running) &&
         event_loop_thread_is_callers_thread(event_loop)
