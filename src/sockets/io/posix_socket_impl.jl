@@ -1232,7 +1232,9 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
         sock = connect_args.socket::Socket
         socket_impl = _posix_impl(sock)
 
-        if connectable
+        # Match aws-c-io semantics: writable/readable only indicates successful
+        # completion when no error bits are present on the same event.
+        if connectable && !has_error
             _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
