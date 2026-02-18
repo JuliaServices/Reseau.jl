@@ -223,10 +223,10 @@ function TCPSocket(
     owns_resolver = false
     if elg === nothing
         elg = EventLoops.get_event_loop_group()
-        resolver = default_host_resolver()
+        resolver = get_host_resolver()
     else
         if resolver === nothing
-            resolver = HostResolver(elg)
+            resolver = HostResolver()
             owns_resolver = true
         end
     end
@@ -249,8 +249,6 @@ function TCPSocket(
     end
 
     bootstrap = ClientBootstrap(;
-        event_loop_group = elg,
-        host_resolver = resolver,
         host_resolution_config = host_resolution_config,
         socket_options = socket_options,
         tls_connection_options = tls_conn,
@@ -270,18 +268,21 @@ function TCPSocket(
     io.owns_event_loop_group = owns_elg
     io.owns_host_resolver = owns_resolver
 
-    connect_future = client_bootstrap_connect!(
-        bootstrap,
-        host,
-        port,
-        socket_options,
-        tls_conn,
-        bootstrap.on_protocol_negotiated,
-        enable_read_back_pressure,
-        nothing,
-        host_resolution_config,
-    )
-    channel = wait(connect_future)
+    channel = @with EventLoops.DEFAULT_EVENT_LOOP_GROUP => elg begin
+        @with DEFAULT_HOST_RESOLVER => resolver begin
+            client_bootstrap_connect!(
+                bootstrap,
+                host,
+                port,
+                socket_options,
+                tls_conn,
+                bootstrap.on_protocol_negotiated,
+                enable_read_back_pressure,
+                nothing,
+                host_resolution_config,
+            )
+        end
+    end
     _install_handler_for_connected_channel!(io, channel)
     io.tls_enabled = tls_conn !== nothing
     return io
@@ -635,7 +636,7 @@ function Base.close(io::TCPSocket)::Nothing
     channel = io.channel
     channel !== nothing && channel_shutdown!(channel, ERROR_IO_SOCKET_CLOSED)
     io.socket !== nothing && socket_close(io.socket)
-    io.owns_host_resolver && io.host_resolver !== nothing && host_resolver_shutdown!(io.host_resolver)
+    io.owns_host_resolver && io.host_resolver !== nothing && close(io.host_resolver)
     io.owns_event_loop_group && io.event_loop_group !== nothing && close(io.event_loop_group)
     return nothing
 end

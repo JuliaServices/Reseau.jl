@@ -25,9 +25,8 @@ using Reseau
 elg = Reseau.EventLoopGroup(Reseau.EventLoopGroupOptions(; loop_count = 1))
 resolver = Reseau.HostResolver(elg)
 
-Reseau.host_resolver_resolve!(resolver, "localhost") do addresses
-    @show addresses
-end
+addresses = Reseau.host_resolver_resolve!(resolver, "localhost")
+@show addresses
 ```
 
 ### Socket + channel (plain)

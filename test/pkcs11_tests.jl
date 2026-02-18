@@ -1058,7 +1058,7 @@ end
             @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
             elg = EventLoops.EventLoopGroup(; loop_count = 1)
-            resolver = Sockets.HostResolver(elg)
+            resolver = Sockets.HostResolver()
 
             server_tls_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
             maybe_apply_test_keychain!(server_tls_opts)
@@ -1109,11 +1109,8 @@ end
             @test client_ctx isa Sockets.TlsContext
 
             client_ready = Ref(false)
-            client_bootstrap = Sockets.ClientBootstrap(
-                event_loop_group = elg,
-                host_resolver = resolver,
-            )
-            connect_future = Sockets.client_bootstrap_connect!(
+            client_bootstrap = Sockets.ClientBootstrap()
+            client_channel = Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
                 port,
@@ -1124,7 +1121,6 @@ end
                 nothing,
                 nothing,
             )
-            client_channel = wait(connect_future)
             client_ready[] = true
             Sockets.channel_shutdown!(client_channel, Reseau.OP_SUCCESS)
 
@@ -1140,7 +1136,7 @@ end
             @test server_shutdown[]
 
             Sockets.server_bootstrap_shutdown!(server_bootstrap)
-            Sockets.host_resolver_shutdown!(resolver)
+            Sockets.close(resolver)
             close(elg)
         finally
             pkcs11_tester_cleanup!(tester)
@@ -1169,7 +1165,7 @@ end
             @test pkcs11_reload_hsm!(tester) isa Sockets.Pkcs11Lib
 
             elg = EventLoops.EventLoopGroup(; loop_count = 1)
-            resolver = Sockets.HostResolver(elg)
+            resolver = Sockets.HostResolver()
 
             server_tls_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
             maybe_apply_test_keychain!(server_tls_opts)
@@ -1220,11 +1216,8 @@ end
             @test client_ctx isa Sockets.TlsContext
 
             client_ready = Ref(false)
-            client_bootstrap = Sockets.ClientBootstrap(
-                event_loop_group = elg,
-                host_resolver = resolver,
-            )
-            connect_future = Sockets.client_bootstrap_connect!(
+            client_bootstrap = Sockets.ClientBootstrap()
+            client_channel = Sockets.client_bootstrap_connect!(
                 client_bootstrap,
                 "127.0.0.1",
                 port,
@@ -1235,7 +1228,6 @@ end
                 nothing,
                 nothing,
             )
-            client_channel = wait(connect_future)
             client_ready[] = true
             Sockets.channel_shutdown!(client_channel, Reseau.OP_SUCCESS)
 
@@ -1251,7 +1243,7 @@ end
             @test server_shutdown[]
 
             Sockets.server_bootstrap_shutdown!(server_bootstrap)
-            Sockets.host_resolver_shutdown!(resolver)
+            Sockets.close(resolver)
             close(elg)
         finally
             pkcs11_tester_cleanup!(tester)

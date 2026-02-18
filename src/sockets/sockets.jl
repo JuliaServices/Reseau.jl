@@ -6,6 +6,7 @@ module Sockets
 # under `src/io/*` (event-loops have moved to `Reseau.EventLoops`).
 
 using EnumX
+using ScopedValues: ScopedValue, @with
 import UUIDs
 using LibAwsCal
 using LibAwsCommon
@@ -73,6 +74,7 @@ function io_library_init()
     _io_library_initialized[] && return nothing
     _io_library_initialized[] = true
     _cal_init()
+    _host_resolver_init_cfunctions!()
     return nothing
 end
 
