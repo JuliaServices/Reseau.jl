@@ -70,6 +70,7 @@
         parameters_context::Union{NWParametersContext, Nothing}
         mode::NWSocketMode.T
         read_queue::Vector{ReadQueueNode}
+        read_queue_head::Int
         on_readable::Union{EventCallable, Nothing}
         on_connection_result::Union{EventCallable, Nothing}
         on_accept_started::Union{EventCallable, Nothing}
@@ -79,6 +80,7 @@
         event_loop::Union{EventLoop, Nothing}
         connection_setup::Bool
         timeout_task::Union{ScheduledTask, Nothing}
+        listener_port_poll_task::Union{ScheduledTask, Nothing}
         host_name::Union{String, Nothing}
         alpn_list::Union{String, Nothing}
         tls_ctx::Union{TlsContext, Nothing}
@@ -101,6 +103,7 @@
             nothing,
             NWSocketMode.CONNECTION,
             ReadQueueNode[],
+            1,
             nothing,
             nothing,
             nothing,
@@ -109,6 +112,7 @@
             false,
             nothing,
             false,
+            nothing,
             nothing,
             nothing,
             nothing,
