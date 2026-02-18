@@ -290,22 +290,28 @@
         lock(impl.task_pre_queue_mutex)
         try
             if task.scheduled
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                    "skipping cross-thread schedule for $(task.type_tag) because it is already scheduled"
-                end
+                logf(
+                    LogLevel.TRACE,
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "skipping cross-thread schedule for $(task.type_tag) because it is already scheduled",
+                )
                 return nothing
             end
 
             if findfirst(x -> x === task, impl.task_pre_queue) !== nothing
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                    "skipping duplicate cross-thread schedule for $(task.type_tag) currently queued"
-                end
+                logf(
+                    LogLevel.TRACE,
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "skipping duplicate cross-thread schedule for $(task.type_tag) currently queued",
+                )
                 return nothing
             end
 
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                "Scheduling $(task.type_tag) task cross-thread for timestamp $run_at_nanos"
-            end
+            logf(
+                LogLevel.TRACE,
+                LogSubject(LS_IO_EVENT_LOOP),
+                () -> "Scheduling $(task.type_tag) task cross-thread for timestamp $run_at_nanos",
+            )
 
             task.timestamp = run_at_nanos
             task.scheduled = true
@@ -392,16 +398,20 @@
 
         # If we're on the event thread, schedule directly
         if event_loop_thread_is_callers_thread(event_loop)
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                "scheduling $(task.type_tag) task in-thread for timestamp $run_at_nanos"
-            end
+            logf(
+                LogLevel.TRACE,
+                LogSubject(LS_IO_EVENT_LOOP),
+                () -> "scheduling $(task.type_tag) task in-thread for timestamp $run_at_nanos",
+            )
 
             lock(impl.task_pre_queue_mutex)
             try
                 if task.scheduled
-                    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                        "skipping task $(task.type_tag) schedule because it is already scheduled"
-                    end
+                    logf(
+                        LogLevel.TRACE,
+                        LogSubject(LS_IO_EVENT_LOOP),
+                        () -> "skipping task $(task.type_tag) schedule because it is already scheduled",
+                    )
                     return nothing
                 end
 
@@ -441,9 +451,11 @@
     function cancel_task!(event_loop::EventLoop, impl::EpollEventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-            "cancelling $(task.type_tag) task"
-        end
+        logf(
+            LogLevel.TRACE,
+            LogSubject(LS_IO_EVENT_LOOP),
+            () -> "cancelling $(task.type_tag) task",
+        )
         removed = false
         lock(impl.task_pre_queue_mutex)
         try
@@ -760,15 +772,19 @@
         # Schedule queued tasks in FIFO order without repeated vector shifting.
         for task in tasks_to_schedule
             if !task.scheduled
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                    "skipping queued task $(task.type_tag) because it is not currently scheduled"
-                end
+                logf(
+                    LogLevel.TRACE,
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "skipping queued task $(task.type_tag) because it is not currently scheduled",
+                )
                 continue
             end
 
-            logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                "task $(task.type_tag) pulled to event-loop, scheduling now"
-            end
+            logf(
+                LogLevel.TRACE,
+                LogSubject(LS_IO_EVENT_LOOP),
+                () -> "task $(task.type_tag) pulled to event-loop, scheduling now",
+            )
             if task.timestamp == 0
                 task_scheduler_schedule_now!(impl.scheduler, task)
             else
@@ -820,9 +836,11 @@
             )
 
             while impl.should_continue
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                    "waiting for a maximum of $timeout ms"
-                end
+                logf(
+                    LogLevel.TRACE,
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "waiting for a maximum of $timeout ms",
+                )
 
                 # Call epoll_wait
                 event_count = @ccall gc_safe = true epoll_wait(
@@ -850,9 +868,11 @@
 
                 register_tick_start!(event_loop)
 
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                    "wake up with $event_count events to process"
-                end
+                logf(
+                    LogLevel.TRACE,
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "wake up with $event_count events to process",
+                )
 
                 # Process events
                 for i in 1:event_count
@@ -978,9 +998,11 @@
                         timeout_ms = typemax(Cint)
                     end
 
-                    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP) do
-                        "detected more scheduled tasks with the next occurring at $timeout_ns ns, using timeout of $timeout_ms ms"
-                    end
+                    logf(
+                        LogLevel.TRACE,
+                        LogSubject(LS_IO_EVENT_LOOP),
+                        () -> "detected more scheduled tasks with the next occurring at $timeout_ns ns, using timeout of $timeout_ms ms",
+                    )
                     timeout = Cint(timeout_ms)
                 end
 
