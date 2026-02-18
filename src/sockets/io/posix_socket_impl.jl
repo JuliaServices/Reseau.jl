@@ -509,15 +509,15 @@ end
 
 # Copy SocketOptions
 function Base.copy(options::SocketOptions)
-    return SocketOptions(
-        options.type,
-        options.domain,
-        options.connect_timeout_ms,
-        options.keep_alive_interval_sec,
-        options.keep_alive_timeout_sec,
-        options.keep_alive_max_failed_probes,
-        options.keepalive,
-        options.network_interface_name,
+    return SocketOptions(;
+        type = options.type,
+        domain = options.domain,
+        connect_timeout_ms = options.connect_timeout_ms,
+        keep_alive_interval_sec = options.keep_alive_interval_sec,
+        keep_alive_timeout_sec = options.keep_alive_timeout_sec,
+        keep_alive_max_failed_probes = options.keep_alive_max_failed_probes,
+        keepalive = options.keepalive,
+        network_interface_name = options.network_interface_name,
     )
 end
 
@@ -542,30 +542,12 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
     )
 
     # Bind to network interface if requested
-    iface_len = 0
-    for i in 1:NETWORK_INTERFACE_NAME_MAX
-        if options.network_interface_name[i] == 0
-            break
-        end
-        iface_len = i
-    end
-
-    if iface_len >= NETWORK_INTERFACE_NAME_MAX
-        logf(
-            LogLevel.ERROR,
-            LS_IO_SOCKET,
-            "fd=$fd: network_interface_name max length must be <= $NETWORK_INTERFACE_NAME_MAX bytes including the null terminator",
-        )
-        throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
-    end
+    iface_name = get_network_interface_name(options)
+    iface_len = ncodeunits(iface_name)
 
     if iface_len != 0
         if SO_BINDTODEVICE != 0
-            iface_bytes = Memory{UInt8}(undef, iface_len)
-            for i in 1:iface_len
-                iface_bytes[i] = options.network_interface_name[i]
-            end
-            ret = GC.@preserve iface_bytes begin
+            ret = GC.@preserve iface_name begin
                 ccall(
                     :setsockopt,
                     Cint,
@@ -573,13 +555,12 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                     fd,
                     SOL_SOCKET,
                     SO_BINDTODEVICE,
-                    pointer(iface_bytes),
+                    pointer(iface_name),
                     Cuint(iface_len),
                 )
             end
             if ret != 0
                 errno_val = get_errno()
-                iface_name = String(Vector{UInt8}(iface_bytes))
                 logf(
                     LogLevel.ERROR,
                     LS_IO_SOCKET,
@@ -588,7 +569,6 @@ function set_posix_socket_options!(sock::Socket, options::SocketOptions)::Nothin
                 throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
             end
         elseif IP_BOUND_IF != 0
-            iface_name = get_network_interface_name(options)
             iface_index = ccall(:if_nametoindex, Cuint, (Cstring,), iface_name)
             if iface_index == 0
                 errno_val = get_errno()
@@ -1840,7 +1820,7 @@ function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, o
 end
 
 # POSIX impl - read
-function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
+function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Csize_t
     fd = sock.io_handle.fd
 
     if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
@@ -1856,7 +1836,7 @@ function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Tupl
     # Calculate remaining capacity
     remaining = buffer.capacity - buffer.len
     if remaining == 0
-        return (nothing, Csize_t(0))
+        return Csize_t(0)
     end
 
     # Read into buffer
@@ -1869,7 +1849,7 @@ function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Tupl
     if read_val > 0
         amount_read = Csize_t(read_val)
         setfield!(buffer, :len, buffer.len + amount_read)
-        return (nothing, amount_read)
+        return amount_read
     end
 
     # EOF
@@ -1878,7 +1858,7 @@ function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Tupl
         if remaining > 0
             throw_error(ERROR_IO_SOCKET_CLOSED)
         end
-        return (nothing, Csize_t(0))
+        return Csize_t(0)
     end
 
     # Error handling
@@ -2212,9 +2192,9 @@ function _socket_accept_event(sock, events::Int)
             # interface; on Linux, attempting to apply SO_BINDTODEVICE on an already-connected socket
             # can fail, so clear the interface name when cloning options for the accepted socket.
             accept_options = sock.options
-            if SO_BINDTODEVICE != 0 && accept_options.network_interface_name[1] != 0
+            if SO_BINDTODEVICE != 0 && !isempty(get_network_interface_name(accept_options))
                 accept_options = copy(accept_options)
-                accept_options.network_interface_name = ntuple(_ -> UInt8(0), NETWORK_INTERFACE_NAME_MAX)
+                accept_options.network_interface_name = ""
             end
             new_sock = try
                 socket_init_posix(accept_options; existing_fd = Cint(in_fd))

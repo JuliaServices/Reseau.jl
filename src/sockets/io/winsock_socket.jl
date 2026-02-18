@@ -1675,7 +1675,7 @@
         throw_error(ERROR_IO_READ_WOULD_BLOCK)
     end
 
-    function socket_read_impl(::WinsockSocket, sock::Socket, buffer::ByteBuffer)::Tuple{Nothing, Csize_t}
+    function socket_read_impl(::WinsockSocket, sock::Socket, buffer::ByteBuffer)::Csize_t
         if sock.event_loop !== nothing && !event_loop_thread_is_callers_thread(sock.event_loop)
             throw_error(ERROR_IO_EVENT_LOOP_THREAD_ONLY)
         end
@@ -1684,7 +1684,7 @@
         end
 
         remaining = buffer.capacity - buffer.len
-        remaining == 0 && return (nothing, Csize_t(0))
+        remaining == 0 && return Csize_t(0)
 
         if sock.options.domain == SocketDomain.LOCAL
             # Port of aws-c-io s_local_read(): PeekNamedPipe() then synchronous ReadFile(),
@@ -1766,7 +1766,7 @@
 
             amount = Csize_t(bytes_read[])
             setfield!(buffer, :len, buffer.len + amount)
-            return (nothing, amount)
+            return amount
         end
 
         bytes_to_read = remaining
@@ -1810,7 +1810,7 @@
         if read_val > 0
             amount = Csize_t(read_val)
             setfield!(buffer, :len, buffer.len + amount)
-            return (nothing, amount)
+            return amount
         end
 
         if read_val == 0
