@@ -11,16 +11,24 @@ mutable struct SocketWriteRequest
     node_prev::Union{SocketWriteRequest, Nothing}  # nullable
 end
 
+mutable struct SocketWriteRequestQueue
+    items::Vector{SocketWriteRequest}
+    head::Int
+end
+
+SocketWriteRequestQueue() = SocketWriteRequestQueue(SocketWriteRequest[], 1)
+
 # POSIX socket connect args
 mutable struct PosixSocketConnectArgs{S}
     task::Union{ScheduledTask, Nothing}
+    poll_retry_task::Union{ScheduledTask, Nothing}
     socket::Union{S, Nothing}
 end
 
 # POSIX socket implementation data
 mutable struct PosixSocket
-    write_queue::Vector{SocketWriteRequest}
-    written_queue::Vector{SocketWriteRequest}
+    write_queue::SocketWriteRequestQueue
+    written_queue::SocketWriteRequestQueue
     written_task::Union{ScheduledTask, Nothing}  # nullable
     connect_args::Union{PosixSocketConnectArgs, Nothing}  # nullable
     written_task_scheduled::Bool
@@ -35,8 +43,8 @@ end
 
 function PosixSocket()
     return PosixSocket(
-        SocketWriteRequest[],
-        SocketWriteRequest[],
+        SocketWriteRequestQueue(),
+        SocketWriteRequestQueue(),
         nothing,
         nothing,
         false,

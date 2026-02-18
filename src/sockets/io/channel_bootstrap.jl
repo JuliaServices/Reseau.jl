@@ -225,15 +225,55 @@ end
     return delay == 0 ? UInt64(0) : base_timestamp + delay
 end
 
-function _cancel_connection_attempts(request::SocketConnectionRequest)
-    event_loop = request.event_loop
-    event_loop === nothing && return nothing
+function _clear_connection_attempt_tasks!(request::SocketConnectionRequest)
+    for task in request.connection_attempt_tasks
+        task.scheduled = false
+    end
+    empty!(request.connection_attempt_tasks)
+    return nothing
+end
+
+function _cancel_connection_attempts_on_event_loop!(
+    request::SocketConnectionRequest,
+    event_loop::EventLoop,
+)
     for task in request.connection_attempt_tasks
         if task.scheduled
             cancel_task!(event_loop, task)
         end
     end
     empty!(request.connection_attempt_tasks)
+    return nothing
+end
+
+function _cancel_connection_attempts(request::SocketConnectionRequest)
+    event_loop = request.event_loop
+    event_loop === nothing && return nothing
+
+    if !(@atomic event_loop.running)
+        return _clear_connection_attempt_tasks!(request)
+    end
+
+    if event_loop_thread_is_callers_thread(event_loop)
+        return _cancel_connection_attempts_on_event_loop!(request, event_loop)
+    end
+
+    fut = Future{Nothing}()
+    schedule_task_now!(event_loop; type_tag = "client_bootstrap_cancel_attempts") do status
+        try
+            status = _coerce_task_status(status)
+            if status == TaskStatus.RUN_READY
+                _cancel_connection_attempts_on_event_loop!(request, event_loop)
+            else
+                _clear_connection_attempt_tasks!(request)
+            end
+            notify(fut, nothing)
+        catch e
+            notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
+        end
+        return nothing
+    end
+    wait(fut)
     return nothing
 end
 
