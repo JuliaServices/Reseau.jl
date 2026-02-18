@@ -1976,6 +1976,158 @@ end
         end
     end
 
+    @testset "Epoll exact-capacity wait still dispatches events" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            impl = el.impl
+            impl.event_wait_capacity = 1
+            run_res = EventLoops.run!(el)
+            @test run_res === nothing
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+                readable_ch = Channel{Int}(1)
+
+                callback = let fd = read_end.io_handle.fd
+                    EventLoops.EventCallable(function(events::Int)
+                        if (events & Int(EventLoops.IoEventType.READABLE)) == 0
+                            return nothing
+                        end
+                        read_buf = Ref{UInt8}(0)
+                        _ = @ccall read(
+                            fd::Cint,
+                            read_buf::Ptr{UInt8},
+                            sizeof(UInt8)::Csize_t,
+                        )::Cssize_t
+                        if !isready(readable_ch)
+                            put!(readable_ch, 1)
+                        end
+                        return nothing
+                    end)
+                end
+
+                EventLoops.subscribe_to_io_events!(
+                    el,
+                    read_end.io_handle,
+                    Int(EventLoops.IoEventType.READABLE),
+                    callback,
+                )
+
+                payload_byte = Ref{UInt8}(0x31)
+                write_res = @ccall write(
+                    write_end.io_handle.fd::Cint,
+                    payload_byte::Ptr{UInt8},
+                    sizeof(UInt8)::Csize_t,
+                )::Cssize_t
+                @test write_res == 1
+
+                @test _wait_for_channel(readable_ch; timeout_ns = 3_000_000_000)
+                if isready(readable_ch)
+                    @test take!(readable_ch) == 1
+                end
+                @test impl.event_wait_capacity >= 2
+            finally
+                close(el)
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
+    @testset "Epoll close releases remaining subscription payload roots" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.islinux() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
+            @test run_res === nothing
+
+            read_end = nothing
+            write_end = nothing
+            loop_closed = false
+            try
+                read_end, write_end = Sockets.pipe_create()
+
+                sub_task = _schedule_event_loop_task(
+                    el,
+                    () -> begin
+                        EventLoops.subscribe_to_io_events!(
+                            el,
+                            read_end.io_handle,
+                            Int(EventLoops.IoEventType.READABLE),
+                            EventLoops.EventCallable((events::Int) -> nothing),
+                        )
+                        return nothing
+                    end;
+                    type_tag = "epoll_close_releases_subscription_payload",
+                )
+
+                @test _wait_for_channel(sub_task)
+                ok, sub_res = take!(sub_task)
+                @test ok
+                @test sub_res === nothing
+                @test read_end.io_handle.additional_data != C_NULL
+                @test read_end.io_handle.additional_ref isa EventLoops.EpollEventHandleData
+
+                close(el)
+                loop_closed = true
+                @test read_end.io_handle.additional_data == C_NULL
+                @test read_end.io_handle.additional_ref === nothing
+            finally
+                !loop_closed && close(el)
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
+    @testset "Epoll subscribe rejects blocking descriptors" begin
+        if !Sys.islinux()
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            pipe_fds = Ref{NTuple{2, Int32}}((Int32(-1), Int32(-1)))
+            pipe_rc = @ccall pipe(pipe_fds::Ptr{Int32})::Cint
+            @test pipe_rc == 0
+            read_fd = pipe_fds[][1]
+            write_fd = pipe_fds[][2]
+            handle = EventLoops.IoHandle(read_fd)
+
+            try
+                status_flags = Reseau._fcntl(Cint(read_fd), Sockets.F_GETFL)
+                @test status_flags != -1
+                @test (status_flags & Sockets.O_NONBLOCK) == 0
+
+                err = nothing
+                try
+                    EventLoops.subscribe_to_io_events!(
+                        el,
+                        handle,
+                        Int(EventLoops.IoEventType.READABLE),
+                        EventLoops.EventCallable((events::Int) -> nothing),
+                    )
+                catch e
+                    err = e
+                end
+
+                @test err isa Reseau.ReseauError
+                if err isa Reseau.ReseauError
+                    @test err.code == EventLoops.ERROR_INVALID_ARGUMENT
+                end
+            finally
+                close(el)
+                read_fd >= 0 && (@ccall close(read_fd::Cint)::Cint)
+                write_fd >= 0 && (@ccall close(write_fd::Cint)::Cint)
+            end
+        end
+    end
+
     @testset "Kqueue cleanup task doesn't underflow connected handle count" begin
         if !Sys.isapple()
             @test true

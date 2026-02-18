@@ -274,19 +274,26 @@
     function schedule_task_cross_thread(event_loop::EventLoop, task::ScheduledTask, run_at_nanos::UInt64)
         impl = event_loop.impl
 
+        loop_inactive = !(@atomic event_loop.running) &&
+            impl.thread_state == EpollEventThreadState.READY_TO_RUN &&
+            impl.thread_created_on !== nothing
+        if loop_inactive || impl.epoll_fd < 0 || impl.write_task_handle.fd < 0
+            logf(
+                LogLevel.TRACE,
+                LS_IO_EVENT_LOOP,
+                "skipping cross-thread schedule because event-loop is shut down",
+            )
+            return nothing
+        end
+
         should_signal = false
         lock(impl.task_pre_queue_mutex)
         try
             if task.scheduled
                 logf(
                     LogLevel.TRACE,
-                    LS_IO_EVENT_LOOP,
-                    string(
-                        "skipping cross-thread schedule for %s because it is already scheduled",
-                        " ",
-                        task.type_tag,
-                        " ",
-                    ),
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "skipping cross-thread schedule for $(task.type_tag) because it is already scheduled",
                 )
                 return nothing
             end
@@ -294,28 +301,16 @@
             if findfirst(x -> x === task, impl.task_pre_queue) !== nothing
                 logf(
                     LogLevel.TRACE,
-                    LS_IO_EVENT_LOOP,
-                    string(
-                        "skipping duplicate cross-thread schedule for %s currently queued",
-                        " ",
-                        task.type_tag,
-                        " ",
-                    ),
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "skipping duplicate cross-thread schedule for $(task.type_tag) currently queued",
                 )
                 return nothing
             end
 
             logf(
                 LogLevel.TRACE,
-                LS_IO_EVENT_LOOP,
-                string(
-                    "Scheduling %s task cross-thread for timestamp %d",
-                    " ",
-                    task.type_tag,
-                    " ",
-                    run_at_nanos,
-                    " ",
-                ),
+                LogSubject(LS_IO_EVENT_LOOP),
+                () -> "Scheduling $(task.type_tag) task cross-thread for timestamp $run_at_nanos",
             )
 
             task.timestamp = run_at_nanos
@@ -333,44 +328,64 @@
             logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "Waking up event-loop thread")
             # Write to signal the event thread
             counter = Ref(UInt64(1))
-            write_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt64}, counter))
-            remaining = Csize_t(sizeof(UInt64))
+            remaining = Int(sizeof(UInt64))
+            offset = 0
             retries = 0
-            while remaining > 0
-                written = @ccall gc_safe = true write(
-                    impl.write_task_handle.fd::Cint,
-                    write_ptr::Ptr{UInt8},
-                    remaining::Csize_t,
-                )::Cssize_t
-                if written == -1
-                    errno = Base.Libc.errno()
-                    if errno == Libc.EINTR
-                        retries += 1
-                        if retries > EWOULDBLOCK_RETRY_LIMIT
+            GC.@preserve counter begin
+                base_ptr = Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt64}, counter))
+                while remaining > 0
+                    written = @ccall gc_safe = true write(
+                        impl.write_task_handle.fd::Cint,
+                        (base_ptr + offset)::Ptr{UInt8},
+                        Csize_t(remaining)::Csize_t,
+                    )::Cssize_t
+                    if written == -1
+                        errno = Base.Libc.errno()
+                        if errno == Libc.EINTR
+                            retries += 1
+                            if retries > EWOULDBLOCK_RETRY_LIMIT
+                                logf(
+                                    LogLevel.ERROR,
+                                    LS_IO_EVENT_LOOP,
+                                    "aborting cross-thread wakeup write after repeated EINTR",
+                                )
+                                break
+                            end
+                            continue
+                        end
+                        if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
                             logf(
-                                LogLevel.ERROR,
+                                LogLevel.TRACE,
                                 LS_IO_EVENT_LOOP,
-                                "aborting cross-thread wakeup write after repeated EINTR",
+                                "Ignoring cross-thread wakeup write backpressure when scheduling task queue",
                             )
                             break
                         end
-                        continue
+                        if errno in (Libc.EBADF, Libc.EPIPE) &&
+                            (
+                                impl.write_task_handle.fd < 0 ||
+                                impl.epoll_fd < 0 ||
+                                (
+                                    !(@atomic event_loop.running) &&
+                                    impl.thread_created_on !== nothing
+                                )
+                            )
+                            logf(
+                                LogLevel.DEBUG,
+                                LS_IO_EVENT_LOOP,
+                                "Ignoring cross-thread wakeup write after shutdown",
+                            )
+                            break
+                        end
+                        throw_error(ERROR_SYS_CALL_FAILURE)
                     end
-                    if errno in (Libc.EAGAIN, _LIBC_EWOULDBLOCK)
-                        logf(
-                            LogLevel.TRACE,
-                            LS_IO_EVENT_LOOP,
-                            "Ignoring cross-thread wakeup write backpressure when scheduling task queue",
-                        )
+                    if written <= 0
                         break
                     end
-                    throw_error(ERROR_SYS_CALL_FAILURE)
+                    advanced = Int(written)
+                    remaining -= advanced
+                    offset += advanced
                 end
-                if written <= 0
-                    break
-                end
-                remaining -= Csize_t(written)
-                write_ptr += Int(written)
             end
         end
 
@@ -385,20 +400,17 @@
         if event_loop_thread_is_callers_thread(event_loop)
             logf(
                 LogLevel.TRACE,
-                LS_IO_EVENT_LOOP,string("scheduling %s task in-thread for timestamp %d", " ", task.type_tag, " ", run_at_nanos, " ", ))
+                LogSubject(LS_IO_EVENT_LOOP),
+                () -> "scheduling $(task.type_tag) task in-thread for timestamp $run_at_nanos",
+            )
 
             lock(impl.task_pre_queue_mutex)
             try
                 if task.scheduled
                     logf(
                         LogLevel.TRACE,
-                        LS_IO_EVENT_LOOP,
-                        string(
-                            "skipping task %s schedule because it is already scheduled",
-                            " ",
-                            task.type_tag,
-                            " ",
-                        ),
+                        LogSubject(LS_IO_EVENT_LOOP),
+                        () -> "skipping task $(task.type_tag) schedule because it is already scheduled",
                     )
                     return nothing
                 end
@@ -439,7 +451,11 @@
     function cancel_task!(event_loop::EventLoop, impl::EpollEventLoop, task::ScheduledTask)
         debug_assert(event_loop_thread_is_callers_thread(event_loop))
         impl = event_loop.impl
-        logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling %s task", " ", task.type_tag))
+        logf(
+            LogLevel.TRACE,
+            LogSubject(LS_IO_EVENT_LOOP),
+            () -> "cancelling $(task.type_tag) task",
+        )
         removed = false
         lock(impl.task_pre_queue_mutex)
         try
@@ -487,6 +503,20 @@
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("subscribing to events on fd %d", " ", handle.fd))
         if handle.additional_data != C_NULL
             throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
+        end
+
+        # EPOLLET requires non-blocking descriptors to avoid missed notifications.
+        fd_flags = _fcntl(handle.fd, Cint(3))  # F_GETFL
+        if fd_flags == -1
+            throw_error(ERROR_SYS_CALL_FAILURE)
+        end
+        if (fd_flags & O_NONBLOCK) == 0
+            logf(
+                LogLevel.ERROR,
+                LS_IO_EVENT_LOOP,
+                "epoll edge-triggered subscriptions require non-blocking file descriptors",
+            )
+            throw_error(ERROR_INVALID_ARGUMENT)
         end
 
         epoll_event_data = EpollEventHandleData(handle, on_event)
@@ -739,28 +769,21 @@
             unlock(impl.task_pre_queue_mutex)
         end
 
-        # Schedule the tasks
-        while !isempty(tasks_to_schedule)
-            task = popfirst!(tasks_to_schedule)
-            task === nothing && break
+        # Schedule queued tasks in FIFO order without repeated vector shifting.
+        for task in tasks_to_schedule
             if !task.scheduled
                 logf(
                     LogLevel.TRACE,
-                    LS_IO_EVENT_LOOP,
-                    string(
-                        "skipping queued task %s because it is not currently scheduled",
-                        " ",
-                        task.type_tag,
-                        " ",
-                    ),
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "skipping queued task $(task.type_tag) because it is not currently scheduled",
                 )
                 continue
             end
 
             logf(
                 LogLevel.TRACE,
-                LS_IO_EVENT_LOOP,
-                string("task %s pulled to event-loop, scheduling now", " ", task.type_tag, " ", ),
+                LogSubject(LS_IO_EVENT_LOOP),
+                () -> "task $(task.type_tag) pulled to event-loop, scheduling now",
             )
             if task.timestamp == 0
                 task_scheduler_schedule_now!(impl.scheduler, task)
@@ -768,6 +791,7 @@
                 task_scheduler_schedule_future!(impl.scheduler, task, task.timestamp)
             end
         end
+        empty!(tasks_to_schedule)
 
         return nothing
     end
@@ -812,7 +836,11 @@
             )
 
             while impl.should_continue
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("waiting for a maximum of %d ms", " ", timeout))
+                logf(
+                    LogLevel.TRACE,
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "waiting for a maximum of $timeout ms",
+                )
 
                 # Call epoll_wait
                 event_count = @ccall gc_safe = true epoll_wait(
@@ -835,16 +863,16 @@
                     end
                 end
 
-                if event_count == event_wait_capacity && event_wait_capacity < MAX_EVENTS
-                    event_wait_capacity = min(event_wait_capacity << 1, MAX_EVENTS)
-                    impl.event_wait_capacity = event_wait_capacity
-                    events = Memory{EpollEvent}(undef, event_wait_capacity)
-                    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "expanded epoll event wait capacity to $event_wait_capacity")
-                end
+                should_expand_wait_capacity = event_count == event_wait_capacity &&
+                    event_wait_capacity < MAX_EVENTS
 
                 register_tick_start!(event_loop)
 
-                logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("wake up with %d events to process", " ", event_count))
+                logf(
+                    LogLevel.TRACE,
+                    LogSubject(LS_IO_EVENT_LOOP),
+                    () -> "wake up with $event_count events to process",
+                )
 
                 # Process events
                 for i in 1:event_count
@@ -919,6 +947,13 @@
                     end
                 end
 
+                if should_expand_wait_capacity
+                    event_wait_capacity = min(event_wait_capacity << 1, MAX_EVENTS)
+                    impl.event_wait_capacity = event_wait_capacity
+                    events = Memory{EpollEvent}(undef, event_wait_capacity)
+                    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "expanded epoll event wait capacity to $event_wait_capacity")
+                end
+
                 # Process cross-thread tasks
                 process_task_pre_queue(event_loop)
 
@@ -965,15 +1000,8 @@
 
                     logf(
                         LogLevel.TRACE,
-                        LS_IO_EVENT_LOOP,
-                        string(
-                            "detected more scheduled tasks with the next occurring at %d ns, using timeout of %d ms",
-                            " ",
-                            timeout_ns,
-                            " ",
-                            timeout_ms,
-                            " ",
-                        ),
+                        LogSubject(LS_IO_EVENT_LOOP),
+                        () -> "detected more scheduled tasks with the next occurring at $timeout_ns ns, using timeout of $timeout_ms ms",
                     )
                     timeout = Cint(timeout_ms)
                 end
@@ -1056,12 +1084,24 @@
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "epoll event-loop destroy failed: $e")
             destroy_error = destroy_error === nothing ? e : destroy_error
         finally
+            remaining_handle_data = EpollEventHandleData[]
+
             # Close file descriptors
             lock(impl.subscribed_handle_data_mutex)
             try
+                append!(remaining_handle_data, values(impl.subscribed_handle_data))
                 empty!(impl.subscribed_handle_data)
             finally
                 unlock(impl.subscribed_handle_data_mutex)
+            end
+            for event_data in remaining_handle_data
+                try
+                    event_data.is_subscribed = false
+                    event_data.cleanup_task = nothing
+                    epoll_release_handle_data!(event_data.handle)
+                catch e
+                    destroy_error = destroy_error === nothing ? e : destroy_error
+                end
             end
             if impl.use_eventfd
                 read_task_fd = impl.read_task_handle.fd
