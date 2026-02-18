@@ -350,7 +350,7 @@
     function socket_init_winsock(options::SocketOptions)::Socket
         winsock_check_and_init!()
 
-        impl = WinsockSocket{Socket}()
+        impl = WinsockSocket()
         sock = Socket(
             SocketEndpoint(),
             SocketEndpoint(),
