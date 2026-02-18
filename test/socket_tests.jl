@@ -1023,6 +1023,7 @@ end
 
     port_ref = Ref{Int}(0)
     accept_started = Threads.Atomic{Bool}(false)
+    accept_start_on_loop_thread = Threads.Atomic{Bool}(false)
 
     try
         if server_socket === nothing
@@ -1035,6 +1036,7 @@ end
 
         on_accept_started = Reseau.EventCallable(err -> begin
             accept_started[] = true
+            accept_start_on_loop_thread[] = EventLoops.event_loop_thread_is_callers_thread(el_val)
             if err == Reseau.OP_SUCCESS && server_socket !== nothing
                 bound = Sockets.socket_get_bound_address(server_socket)
                 if bound isa Sockets.SocketEndpoint
@@ -1094,6 +1096,7 @@ end
         @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
 
         @test wait_for_flag(accept_started)
+        @test accept_start_on_loop_thread[]
         @test port_ref[] != 0
 
         client = Sockets.socket_init(opts)

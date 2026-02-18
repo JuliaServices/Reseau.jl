@@ -61,6 +61,7 @@ const O_CLOEXEC = @static Sys.isapple() ? Cint(0x01000000) : Cint(0o2000000)
 # Connect errno values
 const EINPROGRESS = @static Sys.isapple() ? 36 : 115
 const EALREADY = @static Sys.isapple() ? 37 : 114
+const EINTR = 4
 const EAGAIN = @static Sys.isapple() ? 35 : 11
 const EWOULDBLOCK = EAGAIN
 const ECONNREFUSED = @static Sys.isapple() ? 61 : 111
@@ -196,6 +197,52 @@ const _SOCKET_CONNECT_RETRY_DELAY_NS = UInt64(1_000_000)  # 1ms
 const _SOCKET_ACCEPT_RETRY_DELAY_NS = _SOCKET_CONNECT_RETRY_DELAY_NS
 const _SOCKET_READABLE_RETRY_DELAY_NS = UInt64(5_000_000) # 5ms
 const _SOCKET_READABLE_RETRY_COUNT = 1000
+const _SOCKET_WRITE_QUEUE_COMPACT_HEAD_THRESHOLD = 64
+
+@inline function _write_request_queue_isempty(queue::SocketWriteRequestQueue)::Bool
+    return queue.head > length(queue.items)
+end
+
+@inline function _write_request_queue_length(queue::SocketWriteRequestQueue)::Int
+    remaining = length(queue.items) - queue.head + 1
+    return remaining > 0 ? remaining : 0
+end
+
+@inline function _write_request_queue_front(queue::SocketWriteRequestQueue)::SocketWriteRequest
+    return queue.items[queue.head]
+end
+
+@inline function _write_request_queue_push_back!(
+    queue::SocketWriteRequestQueue,
+    write_request::SocketWriteRequest,
+)::Nothing
+    push!(queue.items, write_request)
+    return nothing
+end
+
+@inline function _write_request_queue_maybe_compact!(queue::SocketWriteRequestQueue)::Nothing
+    if queue.head > length(queue.items)
+        empty!(queue.items)
+        queue.head = 1
+        return nothing
+    end
+
+    consumed = queue.head - 1
+    if consumed >= _SOCKET_WRITE_QUEUE_COMPACT_HEAD_THRESHOLD && consumed * 2 >= length(queue.items)
+        deleteat!(queue.items, 1:consumed)
+        queue.head = 1
+    end
+    return nothing
+end
+
+@inline function _write_request_queue_pop_front!(
+    queue::SocketWriteRequestQueue,
+)::SocketWriteRequest
+    write_request = queue.items[queue.head]
+    queue.head += 1
+    _write_request_queue_maybe_compact!(queue)
+    return write_request
+end
 
 function _parse_vsock_cid(address::AbstractString)::UInt32
     @static if Sys.islinux()
@@ -233,6 +280,32 @@ function _cancel_accept_retry_task_if_needed!(socket_impl::PosixSocket, event_lo
     return nothing
 end
 
+function _cancel_connect_pending_tasks!(
+    sock::Socket,
+    connect_args::PosixSocketConnectArgs{S};
+    skip_task::Union{ScheduledTask, Nothing} = nothing,
+) where {S}
+    event_loop = sock.event_loop
+    can_cancel = event_loop !== nothing && (@atomic event_loop.running) &&
+        event_loop_thread_is_callers_thread(event_loop)
+
+    if can_cancel
+        timeout_task = connect_args.task
+        if timeout_task !== nothing && timeout_task !== skip_task && timeout_task.scheduled
+            cancel_task!(event_loop, timeout_task)
+        end
+
+        retry_task = connect_args.poll_retry_task
+        if retry_task !== nothing && retry_task !== skip_task && retry_task.scheduled
+            cancel_task!(event_loop, retry_task)
+        end
+    end
+
+    connect_args.task = nothing
+    connect_args.poll_retry_task = nothing
+    return nothing
+end
+
 function _schedule_connect_poll_retry_task!(sock::Socket, connect_args::PosixSocketConnectArgs{S}) where {S}
     if sock.impl === nothing
         return nothing
@@ -249,11 +322,12 @@ function _schedule_connect_poll_retry_task!(sock::Socket, connect_args::PosixSoc
         return nothing
     end
 
-    schedule_task_future!(
-        connect_loop,
-        clock_now_ns() + _SOCKET_CONNECT_RETRY_DELAY_NS;
-        type_tag = "posix_connect_poll_retry",
-    ) do status
+    if connect_args.poll_retry_task !== nothing && connect_args.poll_retry_task.scheduled
+        return nothing
+    end
+
+    retry_task = ScheduledTask(; type_tag = "posix_connect_poll_retry") do status
+        connect_args.poll_retry_task = nothing
         status = _coerce_task_status(status)
         if sock.impl === nothing || status != TaskStatus.RUN_READY
             return nothing
@@ -266,6 +340,12 @@ function _schedule_connect_poll_retry_task!(sock::Socket, connect_args::PosixSoc
         _run_connect_poll(connect_args, status)
         return nothing
     end
+    connect_args.poll_retry_task = retry_task
+    schedule_task_future!(
+        connect_loop,
+        retry_task,
+        clock_now_ns() + _SOCKET_CONNECT_RETRY_DELAY_NS,
+    )
 
     return nothing
 end
@@ -709,6 +789,12 @@ function socket_cleanup_impl(::PosixSocket, sock::Socket)
     end
 
     on_cleanup_complete = socket_impl.on_cleanup_complete
+    socket_impl.on_cleanup_complete = nothing
+    socket_impl.on_close_complete = nothing
+
+    sock.readable_fn = nothing
+    sock.connection_result_fn = nothing
+    sock.accept_result_fn = nothing
 
     # Reset socket fields
     sock.io_handle = IoHandle()
@@ -831,7 +917,7 @@ function socket_connect_impl(
     socket_impl = _posix_impl(sock)
 
     # Create connect args
-    connect_args = PosixSocketConnectArgs(nothing, sock)
+    connect_args = PosixSocketConnectArgs(nothing, nothing, sock)
     socket_impl.connect_args = connect_args
 
     # Attempt to connect
@@ -860,7 +946,7 @@ function socket_connect_impl(
         return nothing
     end
 
-    if errno_val == EINPROGRESS || errno_val == EALREADY
+    if errno_val == EINPROGRESS || errno_val == EALREADY || errno_val == EINTR
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: connection pending")
 
         # Create timeout task
@@ -1147,6 +1233,7 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
         socket_impl = _posix_impl(sock)
 
         if connectable
+            _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
             _on_connection_success(sock)
@@ -1167,6 +1254,7 @@ function _socket_connect_event(connect_args::PosixSocketConnectArgs{S}, events::
                 catch e
                 end
             end
+            _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
             raise_error(aws_error)
@@ -1185,6 +1273,7 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs{S}, status:
     logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket timeout task triggered")
 
     if connect_args.socket !== nothing
+        current_task = connect_args.task
         sock = connect_args.socket::Socket
         fd = sock.io_handle.fd
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: timed out, shutting down")
@@ -1195,6 +1284,7 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs{S}, status:
 
         if status == TaskStatus.RUN_READY
             if _is_socket_connect_ready_for_completion(fd) || _is_socket_connect_connected(fd)
+                _cancel_connect_pending_tasks!(sock, connect_args; skip_task = current_task)
                 connect_args.socket = nothing
                 socket_impl.connect_args = nothing
                 sock.state = SocketState.CONNECTING
@@ -1212,6 +1302,7 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs{S}, status:
         raise_error(error_code)
 
         # Close socket and notify error
+        _cancel_connect_pending_tasks!(sock, connect_args; skip_task = current_task)
         connect_args.socket = nothing
         socket_impl.connect_args = nothing
         socket_close(sock)
@@ -1225,13 +1316,18 @@ end
 function _run_connect_success(connect_args::PosixSocketConnectArgs{S}, status::TaskStatus.T) where {S}
 
     if connect_args.socket !== nothing
+        current_task = connect_args.task
         sock = connect_args.socket::Socket
         socket_impl = _posix_impl(sock)
 
         if status == TaskStatus.RUN_READY
+            _cancel_connect_pending_tasks!(sock, connect_args; skip_task = current_task)
+            connect_args.socket = nothing
             _on_connection_success(sock)
         else
             raise_error(ERROR_IO_SOCKET_CONNECT_ABORTED)
+            _cancel_connect_pending_tasks!(sock, connect_args; skip_task = current_task)
+            connect_args.socket = nothing
             sock.event_loop = nothing
             _on_connection_error(sock, ERROR_IO_SOCKET_CONNECT_ABORTED)
         end
@@ -1256,6 +1352,7 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
 
     if aws_error == OP_SUCCESS
         if _is_socket_connect_ready_for_completion(fd)
+            _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
             _on_connection_success(sock)
@@ -1263,6 +1360,7 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
         end
 
         if _is_socket_connect_connected(fd)
+            _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
             _on_connection_success(sock)
@@ -1286,6 +1384,7 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
         socket_impl.currently_subscribed = false
     end
 
+    _cancel_connect_pending_tasks!(sock, connect_args)
     connect_args.socket = nothing
     socket_impl.connect_args = nothing
     raise_error(aws_error)
@@ -1525,9 +1624,15 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
 
     connect_args = socket_impl.connect_args
     if connect_args !== nothing
+        _cancel_connect_pending_tasks!(sock, connect_args)
         (connect_args::PosixSocketConnectArgs{Socket}).socket = nothing
         socket_impl.connect_args = nothing
     end
+
+    # Prevent user callbacks from firing after the socket closes.
+    sock.readable_fn = nothing
+    sock.connection_result_fn = nothing
+    sock.accept_result_fn = nothing
 
     if socket_is_open(sock)
         ccall(:close, Cint, (Cint,), fd)
@@ -1540,16 +1645,16 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
         end
 
         # Complete pending writes with error
-        while !isempty(socket_impl.written_queue)
-            write_request = popfirst!(socket_impl.written_queue)
+        while !_write_request_queue_isempty(socket_impl.written_queue)
+            write_request = _write_request_queue_pop_front!(socket_impl.written_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
                 write_request.written_fn(write_request.error_code, bytes_written)
             end
         end
 
-        while !isempty(socket_impl.write_queue)
-            write_request = popfirst!(socket_impl.write_queue)
+        while !_write_request_queue_isempty(socket_impl.write_queue)
+            write_request = _write_request_queue_pop_front!(socket_impl.write_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
                 write_request.written_fn(ERROR_IO_SOCKET_CLOSED, bytes_written)
@@ -1557,8 +1662,10 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
         end
     end
 
-    if socket_impl.on_close_complete !== nothing
-        socket_impl.on_close_complete(UInt8(0))
+    on_close_complete = socket_impl.on_close_complete
+    socket_impl.on_close_complete = nothing
+    if on_close_complete !== nothing
+        on_close_complete(UInt8(0))
     end
 
     return nothing
@@ -1629,6 +1736,7 @@ function socket_assign_to_event_loop_impl(::PosixSocket, sock::Socket, event_loo
         try
             status = _coerce_task_status(status)
             status == TaskStatus.CANCELED && return nothing
+            sock.impl === nothing && return nothing
             _on_socket_io_event(sock, Int(IoEventType.READABLE) | Int(IoEventType.WRITABLE))
         catch e
             Core.println("socket assign immediate io poll task errored")
@@ -1641,7 +1749,10 @@ end
 
 # Socket IO event handler
 function _on_socket_io_event(sock, events::Int)
-    socket_impl = _posix_impl(sock)
+    sock_impl = sock.impl
+    sock_impl === nothing && return nothing
+
+    socket_impl = sock_impl::PosixSocket
     fd = sock.io_handle.fd
 
     # Handle readable events first
@@ -1710,6 +1821,7 @@ function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, o
             try
                 status = _coerce_task_status(status)
                 status == TaskStatus.CANCELED && return nothing
+                sock.impl === nothing && return nothing
                 _on_socket_io_event(sock, Int(IoEventType.READABLE))
             catch e
                 Core.println("socket pending readable dispatch task errored")
@@ -1771,7 +1883,7 @@ function socket_read_impl(::PosixSocket, sock::Socket, buffer::ByteBuffer)::Tupl
     end
 
     # Error handling
-    if errno_val == EAGAIN || errno_val == EWOULDBLOCK
+    if errno_val == EAGAIN || errno_val == EWOULDBLOCK || errno_val == EINTR
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: read would block")
         throw_error(ERROR_IO_READ_WOULD_BLOCK)
     end
@@ -1801,8 +1913,8 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
     parent_request_failed = false
     pushed_to_written_queue = false
 
-    while !isempty(socket_impl.write_queue)
-        write_request = first(socket_impl.write_queue)
+    while !_write_request_queue_isempty(socket_impl.write_queue)
+        write_request = _write_request_queue_front(socket_impl.write_queue)
 
         logf(
             LogLevel.TRACE, LS_IO_SOCKET,
@@ -1811,12 +1923,31 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
 
         # Send data
         cursor = write_request.cursor
-        cursor_raw = cursor.len > 0 ? Ptr{UInt8}(pointer(cursor.ptr)) : Ptr{UInt8}(0)
-        written = ccall(
-            :send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
-            fd, cursor_raw, cursor.len, NO_SIGNAL_SEND
-        )
-        errno_val = get_errno()
+        written = Cssize_t(-1)
+        errno_val = Cint(0)
+        while true
+            written = if cursor.len > 0
+                cursor_ptr = cursor.ptr
+                GC.@preserve cursor_ptr ccall(
+                    :send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
+                    fd, Ptr{UInt8}(pointer(cursor_ptr)), cursor.len, NO_SIGNAL_SEND
+                )
+            else
+                ccall(
+                    :send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
+                    fd, Ptr{UInt8}(0), cursor.len, NO_SIGNAL_SEND
+                )
+            end
+
+            if written >= 0
+                errno_val = Cint(0)
+                break
+            end
+
+            errno_val = get_errno()
+            errno_val == EINTR && continue
+            break
+        end
 
         logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: send returned $written")
 
@@ -1851,21 +1982,21 @@ function _process_socket_write_requests(sock::Socket, parent_request::Union{Sock
         if Csize_t(written) == remaining
             # Write complete
             logf(LogLevel.TRACE, LS_IO_SOCKET, "Socket fd=$fd: write request completed")
-            popfirst!(socket_impl.write_queue)
+            _write_request_queue_pop_front!(socket_impl.write_queue)
             write_request.error_code = OP_SUCCESS
-            push!(socket_impl.written_queue, write_request)
+            _write_request_queue_push_back!(socket_impl.written_queue, write_request)
             pushed_to_written_queue = true
         end
     end
 
     if purge
-        while !isempty(socket_impl.write_queue)
-            write_request = popfirst!(socket_impl.write_queue)
+        while !_write_request_queue_isempty(socket_impl.write_queue)
+            write_request = _write_request_queue_pop_front!(socket_impl.write_queue)
             if write_request === parent_request
                 parent_request_failed = true
             else
                 write_request.error_code = aws_error
-                push!(socket_impl.written_queue, write_request)
+                _write_request_queue_push_back!(socket_impl.written_queue, write_request)
                 pushed_to_written_queue = true
             end
         end
@@ -1895,14 +2026,14 @@ function _written_task_fn(sock::Socket, status::TaskStatus.T)
     socket_impl.written_task_scheduled = false
 
     # Process completed writes
-    if !isempty(socket_impl.written_queue)
+    if !_write_request_queue_isempty(socket_impl.written_queue)
         # Only process initial contents
-        count = length(socket_impl.written_queue)
+        count = _write_request_queue_length(socket_impl.written_queue)
         for _ in 1:count
-            if isempty(socket_impl.written_queue)
+            if _write_request_queue_isempty(socket_impl.written_queue)
                 break
             end
-            write_request = popfirst!(socket_impl.written_queue)
+            write_request = _write_request_queue_pop_front!(socket_impl.written_queue)
             bytes_written = write_request.original_len - write_request.cursor.len
             if write_request.written_fn !== nothing
                 write_request.written_fn(write_request.error_code, bytes_written)
@@ -1938,7 +2069,7 @@ function socket_write_impl(::PosixSocket, sock::Socket, cursor::ByteCursor, writ
         nothing,
     )
 
-    push!(socket_impl.write_queue, write_request)
+    _write_request_queue_push_back!(socket_impl.write_queue, write_request)
 
     if !_process_socket_write_requests(sock, write_request)
         throw(ReseauError(last_error()))
@@ -2029,9 +2160,14 @@ function socket_start_accept_impl(
         rethrow()
     end
 
-    # Invoke on_accept_start callback if provided
+    # Invoke on_accept_start callback on the accept loop thread.
     if on_accept_start !== nothing
-        on_accept_start(OP_SUCCESS)
+        schedule_task_now!(accept_loop; type_tag = "posix_socket_on_accept_start") do status
+            if _coerce_task_status(status) == TaskStatus.RUN_READY
+                on_accept_start(OP_SUCCESS)
+            end
+            return nothing
+        end
     end
 
     return nothing
@@ -2061,6 +2197,9 @@ function _socket_accept_event(sock, events::Int)
                 if errno_val == EAGAIN || errno_val == EWOULDBLOCK
                     _schedule_accept_retry_task!(sock)
                     break
+                end
+                if errno_val == EINTR
+                    continue
                 end
                 aws_error = socket_get_error(sock)
                 raise_error(aws_error)
@@ -2153,6 +2292,23 @@ function _socket_accept_event(sock, events::Int)
 end
 
 # POSIX impl - stop accept
+function _socket_stop_accept_on_event_loop!(sock::Socket, socket_impl::PosixSocket)::Nothing
+    socket_impl.continue_accept = false
+
+    if !socket_impl.currently_subscribed
+        return nothing
+    end
+
+    event_loop = sock.event_loop
+    _cancel_accept_retry_task_if_needed!(socket_impl, event_loop)
+    if event_loop !== nothing
+        unsubscribe_from_io_events!(event_loop, sock.io_handle)
+    end
+    socket_impl.currently_subscribed = false
+    sock.event_loop = nothing
+    return nothing
+end
+
 function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Nothing
     fd = sock.io_handle.fd
 
@@ -2164,13 +2320,25 @@ function socket_stop_accept_impl(::PosixSocket, sock::Socket)::Nothing
     logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: stopping accepting new connections")
 
     socket_impl = _posix_impl(sock)
-    if socket_impl.currently_subscribed
-        _cancel_accept_retry_task_if_needed!(socket_impl, sock.event_loop)
-        unsubscribe_from_io_events!(sock.event_loop, sock.io_handle)
-        socket_impl.currently_subscribed = false
-        socket_impl.continue_accept = false
-        sock.event_loop = nothing
+    event_loop = sock.event_loop
+    if event_loop === nothing || !(@atomic event_loop.running) || event_loop_thread_is_callers_thread(event_loop)
+        _socket_stop_accept_on_event_loop!(sock, socket_impl)
+        return nothing
     end
+
+    fut = Future{Nothing}()
+    schedule_task_now!(event_loop; type_tag = "posix_socket_stop_accept_on_event_loop") do _
+        try
+            if sock.impl !== nothing
+                _socket_stop_accept_on_event_loop!(sock, _posix_impl(sock))
+            end
+            notify(fut, nothing)
+        catch e
+            notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
+        end
+        return nothing
+    end
+    wait(fut)
 
     return nothing
 end
