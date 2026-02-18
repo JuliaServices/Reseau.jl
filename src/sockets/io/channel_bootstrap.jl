@@ -50,9 +50,7 @@ function ClientBootstrap(;
         on_protocol_negotiated_cb,
         false,
     )
-
     logf(LogLevel.DEBUG, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: created")
-
     return bootstrap
 end
 
@@ -127,21 +125,18 @@ function client_bootstrap_connect!(
     if @atomic bootstrap.shutdown
         throw(ReseauError(ERROR_IO_EVENT_LOOP_SHUTDOWN))
     end
-
     host_str = String(host)
     logf(
         LogLevel.DEBUG,
         LS_IO_CHANNEL_BOOTSTRAP,
         "ClientBootstrap: initiating connection to $host_str:$port",
     )
-
     event_loop_group = EventLoops.get_event_loop_group()
     host_resolver = get_host_resolver()
     request_resolution_config = _normalize_resolution_config(
         host_resolver,
         host_resolution_config,
     )
-
     request = SocketConnectionRequest(
         bootstrap,
         host_str,
@@ -162,14 +157,15 @@ function client_bootstrap_connect!(
         false,
         Future{Socket}(),
     )
-
     try
         addresses = host_resolver_resolve!(
             request.host_resolver,
             request.host,
             request.host_resolution_config,
         )
-        socket = _start_connection_attempts(request, addresses)
+        event_loop = _get_connection_event_loop(request)
+        event_loop === nothing && throw(ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
+        socket = wait(_schedule_connection_attempts(request, addresses, event_loop))
         return _setup_client_channel(request, socket)
     catch
         _cancel_connection_attempts(request)
@@ -225,15 +221,55 @@ end
     return delay == 0 ? UInt64(0) : base_timestamp + delay
 end
 
-function _cancel_connection_attempts(request::SocketConnectionRequest)
-    event_loop = request.event_loop
-    event_loop === nothing && return nothing
+function _clear_connection_attempt_tasks!(request::SocketConnectionRequest)
+    for task in request.connection_attempt_tasks
+        task.scheduled = false
+    end
+    empty!(request.connection_attempt_tasks)
+    return nothing
+end
+
+function _cancel_connection_attempts_on_event_loop!(
+    request::SocketConnectionRequest,
+    event_loop::EventLoop,
+)
     for task in request.connection_attempt_tasks
         if task.scheduled
             cancel_task!(event_loop, task)
         end
     end
     empty!(request.connection_attempt_tasks)
+    return nothing
+end
+
+function _cancel_connection_attempts(request::SocketConnectionRequest)
+    event_loop = request.event_loop
+    event_loop === nothing && return nothing
+
+    if !(@atomic event_loop.running)
+        return _clear_connection_attempt_tasks!(request)
+    end
+
+    if event_loop_thread_is_callers_thread(event_loop)
+        return _cancel_connection_attempts_on_event_loop!(request, event_loop)
+    end
+
+    fut = Future{Nothing}()
+    schedule_task_now!(event_loop; type_tag = "client_bootstrap_cancel_attempts") do status
+        try
+            status = _coerce_task_status(status)
+            if status == TaskStatus.RUN_READY
+                _cancel_connection_attempts_on_event_loop!(request, event_loop)
+            else
+                _clear_connection_attempt_tasks!(request)
+            end
+            notify(fut, nothing)
+        catch e
+            notify(fut, e isa ReseauError ? e : ReseauError(ERROR_UNKNOWN))
+        end
+        return nothing
+    end
+    wait(fut)
     return nothing
 end
 
@@ -254,32 +290,12 @@ function _start_connection_attempt(
         return nothing
     end
     push!(request.connection_attempt_tasks, task)
-
     if run_at_timestamp == 0
         schedule_task_now!(event_loop, task)
     else
         schedule_task_future!(event_loop, task, run_at_timestamp)
     end
     return nothing
-end
-
-function _start_connection_attempts(
-        request::SocketConnectionRequest,
-        addresses::Vector{HostAddress},
-    )::Socket
-    event_loop = _get_connection_event_loop(request)
-    if event_loop === nothing
-        throw(ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
-    end
-    return _start_connection_attempts(request, addresses, event_loop)
-end
-
-function _start_connection_attempts(
-        request::SocketConnectionRequest,
-        addresses::Vector{HostAddress},
-        event_loop::EventLoop,
-    )::Socket
-    return wait(_schedule_connection_attempts(request, addresses, event_loop))
 end
 
 function _schedule_connection_attempts(
@@ -300,7 +316,6 @@ function _schedule_connection_attempts(
         _notify_future_error!(request.connect_future, ReseauError(ERROR_IO_DNS_NO_ADDRESS_FOR_HOST))
         return request.connect_future
     end
-
     now = clock_now_ns()
     for (idx, address) in enumerate(addresses)
         run_at_timestamp = _attempt_schedule_run_at(request, now, idx - 1)
@@ -311,7 +326,6 @@ function _schedule_connection_attempts(
         )
         _start_connection_attempt(request, address, run_at_timestamp, event_loop)
     end
-
     return request.connect_future
 end
 
@@ -345,12 +359,10 @@ end
 
 function _initiate_socket_connect(request::SocketConnectionRequest, address::HostAddress)
     event_loop = request.event_loop
-
     options = copy(request.socket_options)
     if options.domain != SocketDomain.LOCAL && options.domain != SocketDomain.VSOCK
         options.domain = address.address_type == HostAddressType.AAAA ? SocketDomain.IPV6 : SocketDomain.IPV4
     end
-
     local socket
     try
         socket = socket_init(options)
@@ -359,23 +371,20 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Hos
         _note_connection_attempt_failure(request, e isa ReseauError ? e.code : ERROR_UNKNOWN)
         return nothing
     end
-
     remote_endpoint = SocketEndpoint()
     set_address!(remote_endpoint, address.address)
     remote_endpoint.port = request.port
-
     if event_loop === nothing
         logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: no event loop available")
         socket_close(socket)
         _notify_future_error!(request.connect_future, ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
         return nothing
     end
-
     try
         socket_connect(
-            socket,
-            remote_endpoint;
-            event_loop = event_loop,
+            socket;
+            remote_endpoint,
+            event_loop,
             event_loop_group = request.event_loop_group,
             on_connection_result = EventCallable(err -> _on_socket_connect_complete(socket, err, request, address)),
             tls_connection_options = request.tls_connection_options,
@@ -387,7 +396,6 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Hos
         _note_connection_attempt_failure(request, e isa ReseauError ? e.code : ERROR_UNKNOWN)
         return nothing
     end
-
     return nothing
 end
 
@@ -420,12 +428,10 @@ function _on_socket_connect_complete(
         _note_connection_attempt_failure(request, error_code)
         return nothing
     end
-
     if request.connection_chosen
         socket_close(socket)
         return nothing
     end
-
     logf(
         LogLevel.DEBUG,
         LS_IO_CHANNEL_BOOTSTRAP,
@@ -773,9 +779,9 @@ function ServerBootstrap(options::ServerBootstrapOptions)
         local_endpoint.port = options.port
 
         if _socket_uses_network_framework_tls(listener, options.tls_connection_options)
-            socket_bind(listener, local_endpoint; tls_connection_options = options.tls_connection_options)
+            socket_bind(listener; local_endpoint, tls_connection_options = options.tls_connection_options)
         else
-            socket_bind(listener, local_endpoint)
+            socket_bind(listener; local_endpoint)
         end
 
         # Start listening
@@ -1158,7 +1164,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
     end
 
     try
-        socket_assign_to_event_loop(socket, event_loop, bootstrap.event_loop_group)
+        socket_assign_to_event_loop(socket, event_loop)
     catch e
         logf(
             LogLevel.ERROR,
