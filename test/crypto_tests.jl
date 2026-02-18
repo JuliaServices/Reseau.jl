@@ -104,7 +104,7 @@ end
     old_server_setup = Sockets._tls_byo_server_setup[]
     try
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     incoming_rw_args = ByoCryptoRwArgs(ReentrantLock(), Reseau.ByteBuffer(128), false, nothing)
     outgoing_rw_args = ByoCryptoRwArgs(ReentrantLock(), Reseau.ByteBuffer(128), false, nothing)
@@ -241,14 +241,11 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
     resolution_config = Sockets.HostResolutionConfig()
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    outgoing_channel = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
@@ -259,7 +256,6 @@ end
         nothing,
         resolution_config,
     )
-    outgoing_channel = wait(connect_future)
     lock(outgoing_args.lock) do
         outgoing_args.channel = outgoing_channel
         outgoing_args.setup_completed = true
@@ -290,7 +286,7 @@ end
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     @test wait_for_pred(() -> incoming_args.listener_destroyed)
 
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
     finally
         Sockets._tls_byo_client_setup[] = old_client_setup

@@ -150,7 +150,7 @@ function _tls_network_connect(
         ctx_options_override::Union{Function, Nothing} = nothing,
     )
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     ctx_opts = Sockets.tls_ctx_options_init_default_client()
     if ctx_options_override !== nothing
@@ -160,7 +160,7 @@ function _tls_network_connect(
     try
         ctx = Sockets.tls_context_new(ctx_opts)
     catch e
-        Sockets.host_resolver_shutdown!(resolver)
+        Sockets.close(resolver)
         close(elg)
         return e isa Reseau.ReseauError ? e.code : rethrow()
     end
@@ -178,13 +178,10 @@ function _tls_network_connect(
         end,
     )
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
     try
-        channel_ref[] = wait(Sockets.client_bootstrap_connect!(
+        channel_ref[] = Sockets.client_bootstrap_connect!(
             client_bootstrap,
             host,
             port,
@@ -194,7 +191,7 @@ function _tls_network_connect(
             false,
             nothing,
             nothing,
-        ))
+        )
         setup_err[] = Reseau.OP_SUCCESS
     catch e
         setup_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
@@ -204,7 +201,7 @@ function _tls_network_connect(
         Sockets.channel_shutdown!(channel_ref[], 0)
     end
 
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 
     return setup_err[]
@@ -1734,7 +1731,7 @@ end
 
 function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T)
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     server_opts = Sockets.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
@@ -1746,7 +1743,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     try
         server_ctx = Sockets.tls_context_new(server_opts)
     catch e
-        Sockets.host_resolver_shutdown!(resolver)
+        Sockets.close(resolver)
         close(elg)
         return
     end
@@ -1762,7 +1759,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     try
         client_ctx = Sockets.tls_context_new(client_opts)
     catch e
-        Sockets.host_resolver_shutdown!(resolver)
+        Sockets.close(resolver)
         close(elg)
         return
     end
@@ -1814,10 +1811,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
     client_setup_called = Ref(false)
     client_setup_err = Ref(Reseau.OP_SUCCESS)
@@ -1825,7 +1819,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     client_negotiated_err = Ref(Reseau.OP_SUCCESS)
     client_channel = Ref{Any}(nothing)
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    client_channel[] = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
@@ -1844,7 +1838,6 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
         nothing,
         nothing,
     )
-    client_channel[] = wait(connect_future)
     client_setup_called[] = true
     client_setup_err[] = Reseau.OP_SUCCESS
 
@@ -1867,7 +1860,7 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     @test wait_for_flag_tls(server_shutdown)
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
     return nothing
 end
@@ -1890,7 +1883,7 @@ end
 
 @testset "TLS server multiple connections" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     server_opts = Sockets.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
@@ -1949,10 +1942,7 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
     function connect_once!()
         server_setup_called[] = false
@@ -1968,7 +1958,7 @@ end
         client_negotiated_err = Ref(Reseau.OP_SUCCESS)
         client_channel = Ref{Any}(nothing)
 
-        connect_future = Sockets.client_bootstrap_connect!(
+        client_channel[] = Sockets.client_bootstrap_connect!(
             client_bootstrap,
             "127.0.0.1",
             port,
@@ -1987,7 +1977,6 @@ end
             nothing,
             nothing,
         )
-        client_channel[] = wait(connect_future)
         client_setup_called[] = true
         client_setup_err[] = Reseau.OP_SUCCESS
 
@@ -2011,13 +2000,13 @@ end
     connect_once!()
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 
 @testset "TLS server hangup during negotiation" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     server_opts = Sockets.tls_ctx_options_init_default_server(
         Reseau.ByteCursor(TEST_PEM_CERT),
@@ -2089,7 +2078,7 @@ end
     @test wait_for_flag_tls(listener_destroyed)
 
     Sockets.socket_close(client_socket)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 
@@ -2102,7 +2091,7 @@ end
     end
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     server_opts = if Sys.isapple()
         Sockets.tls_ctx_options_init_server_pkcs12_from_path(_resource_path("unittests.p12"), "1234")
@@ -2159,12 +2148,9 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    client_channel[] = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
@@ -2182,7 +2168,6 @@ end
         nothing,
         nothing,
     )
-    client_channel[] = wait(connect_future)
     client_setup[] = true
 
     @test wait_for_flag_tls(server_setup)
@@ -2198,7 +2183,7 @@ end
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 
     Reseau.byte_buf_clean_up(Ref(cert_buf))
@@ -2269,14 +2254,14 @@ end
     Sockets.g_aws_channel_max_fragment_size[] = 4096
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     server_ctx = _test_server_ctx()
     client_ctx = Sockets.tls_context_new_client(; verify_peer = false)
     @test server_ctx isa Sockets.TlsContext
     @test client_ctx isa Sockets.TlsContext
     if !(server_ctx isa Sockets.TlsContext) || !(client_ctx isa Sockets.TlsContext)
-        Sockets.host_resolver_shutdown!(resolver)
+        Sockets.close(resolver)
         close(elg)
         return
     end
@@ -2339,17 +2324,14 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
     client_tls_opts = Sockets.TlsConnectionOptions(
         client_ctx;
         server_name = "localhost",
     )
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    client_channel = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "127.0.0.1",
         port,
@@ -2360,7 +2342,6 @@ end
         nothing,
         nothing,
     )
-    client_channel = wait(connect_future)
     handler = rw_handler_new(
         tls_test_handle_read,
         tls_test_handle_write,
@@ -2407,7 +2388,7 @@ end
     @test _buf_to_string(client_rw_args.received_message) == _buf_to_string(read_tag)
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
     Sockets.g_aws_channel_max_fragment_size[] = prev_max
 end
@@ -2423,14 +2404,14 @@ end
         Sockets.g_aws_channel_max_fragment_size[] = 4096
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
-        resolver = Sockets.HostResolver(elg)
+        resolver = Sockets.HostResolver()
 
         server_ctx = _test_server_ctx()
         client_ctx = Sockets.tls_context_new_client(; verify_peer = false)
         @test server_ctx isa Sockets.TlsContext
         @test client_ctx isa Sockets.TlsContext
         if !(server_ctx isa Sockets.TlsContext) || !(client_ctx isa Sockets.TlsContext)
-            Sockets.host_resolver_shutdown!(resolver)
+            Sockets.close(resolver)
             close(elg)
             Sockets.g_aws_channel_max_fragment_size[] = prev_max
             continue
@@ -2524,17 +2505,14 @@ end
         port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
 
-        client_bootstrap = Sockets.ClientBootstrap(
-            event_loop_group = elg,
-            host_resolver = resolver,
-        )
+        client_bootstrap = Sockets.ClientBootstrap()
 
         client_tls_opts = Sockets.TlsConnectionOptions(
             client_ctx;
             server_name = "localhost",
         )
 
-        connect_future = Sockets.client_bootstrap_connect!(
+        client_channel_ref[] = Sockets.client_bootstrap_connect!(
             client_bootstrap,
             "127.0.0.1",
             port,
@@ -2545,7 +2523,6 @@ end
             nothing,
             nothing,
         )
-        client_channel_ref[] = wait(connect_future)
         handler = rw_handler_new(
             client_on_read,
             tls_test_handle_write,
@@ -2577,7 +2554,7 @@ end
         @test _buf_to_string(client_rw_args.received_message) == _buf_to_string(read_tag)
 
         Sockets.server_bootstrap_shutdown!(server_bootstrap)
-        Sockets.host_resolver_shutdown!(resolver)
+        Sockets.close(resolver)
         close(elg)
         Sockets.g_aws_channel_max_fragment_size[] = prev_max
     end

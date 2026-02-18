@@ -23,7 +23,6 @@ include("common/clock.jl")
 include("common/log_formatter.jl")
 include("common/logging.jl")
 include("common/statistics.jl")
-include("common/condition_variable.jl")
 
 # --- public submodules (native implementations) ---
 include("foreign_threads.jl")

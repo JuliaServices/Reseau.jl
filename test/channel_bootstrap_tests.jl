@@ -31,7 +31,7 @@ end
 
 @testset "client/server bootstrap callbacks" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     server_setup_called = Ref(false)
     server_setup_error = Ref{Int}(-1)
@@ -65,17 +65,14 @@ end
         port = 0
     end
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
     setup_called = Ref(false)
     setup_error = Ref{Int}(-1)
     setup_channel = Ref{Any}(nothing)
     setup_has_pool = Ref(false)
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    setup_channel[] = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
@@ -86,7 +83,6 @@ end
         nothing,
         cfg.resolution_config,
     )
-    setup_channel[] = wait(connect_future)
     setup_called[] = true
     setup_error[] = Reseau.OP_SUCCESS
     setup_has_pool[] = setup_channel[] !== nothing && setup_channel[].message_pool !== nothing
@@ -110,13 +106,13 @@ end
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 
 @testset "client bootstrap attempts multiple resolved addresses" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
     cfg = _bootstrap_test_config()
 
     server_setup_called = Ref(false)
@@ -145,10 +141,7 @@ end
         port = 0
     end
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
     setup_called = Ref(false)
     setup_error = Ref{Int}(-1)
@@ -160,7 +153,7 @@ end
         Sockets.HostResolutionConfig()
     end
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    setup_channel[] = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
@@ -171,7 +164,6 @@ end
         nothing,
         resolution_config,
     )
-    setup_channel[] = wait(connect_future)
     setup_called[] = true
     setup_error[] = Reseau.OP_SUCCESS
 
@@ -189,20 +181,17 @@ end
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 
 @testset "client bootstrap requested event loop mismatch" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    resolver = Sockets.HostResolver()
+    client_bootstrap = Sockets.ClientBootstrap()
 
     bad_loop = EventLoops.EventLoop()
-    fut = Sockets.client_bootstrap_connect!(
+    @test_throws Reseau.ReseauError Sockets.client_bootstrap_connect!(
         client_bootstrap,
         "localhost",
         80,
@@ -213,20 +202,16 @@ end
         bad_loop,
         nothing,
     )
-    @test_throws Reseau.ReseauError wait(fut)
     close(bad_loop)
 
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 
 @testset "client bootstrap staggered connection scheduling" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    resolver = Sockets.HostResolver()
+    client_bootstrap = Sockets.ClientBootstrap()
     el = elg.event_loops[1]
     @test el !== nothing
     event_loop = el isa EventLoops.EventLoop ? el : nothing
@@ -245,6 +230,8 @@ end
         nothing,
         false,
         nothing,
+        elg,
+        resolver,
         nothing,
         Sockets.HostResolutionConfig(;
             connection_attempt_delay_ns = 75_000_000,
@@ -257,7 +244,6 @@ end
         Sockets.ScheduledTask[],
         false,
         Sockets.Future{Sockets.Socket}(),
-        Sockets.Future{Sockets.Channel}(),
     )
 
     addresses = [
@@ -265,7 +251,7 @@ end
         Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, "example.com", 0),
     ]
 
-    Sockets._start_connection_attempts(request, addresses, event_loop)
+    Sockets._schedule_connection_attempts(request, addresses, event_loop)
     @test length(request.connection_attempt_tasks) == 2
 
     first_task = request.connection_attempt_tasks[1]
@@ -287,6 +273,8 @@ end
         nothing,
         false,
         nothing,
+        elg,
+        resolver,
         nothing,
         Sockets.HostResolutionConfig(;
             connection_attempt_delay_ns = 30_000_000,
@@ -299,13 +287,12 @@ end
         Sockets.ScheduledTask[],
         false,
         Sockets.Future{Sockets.Socket}(),
-        Sockets.Future{Sockets.Channel}(),
     )
     single_family_addresses = [
         Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, "example.com", 0),
         Sockets.HostAddress("192.0.2.10", Sockets.HostAddressType.A, "example.com", 0),
     ]
-    Sockets._start_connection_attempts(request, single_family_addresses, event_loop)
+    Sockets._schedule_connection_attempts(request, single_family_addresses, event_loop)
     @test length(request.connection_attempt_tasks) == 2
 
     first_task = request.connection_attempt_tasks[1]
@@ -318,14 +305,14 @@ end
     @test isempty(request.connection_attempt_tasks)
     @test all(!task.scheduled for task in single_family_attempts)
 
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 
 if tls_tests_enabled()
 @testset "bootstrap tls negotiation" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
 
     cert_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.crt")
     key_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.key")
@@ -387,12 +374,9 @@ if tls_tests_enabled()
         end,
     )
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    client_channel[] = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
@@ -403,7 +387,6 @@ if tls_tests_enabled()
         nothing,
         cfg.resolution_config,
     )
-    client_channel[] = wait(connect_future)
     client_setup[] = true
 
     @test wait_for_pred(() -> server_setup[])
@@ -419,7 +402,7 @@ if tls_tests_enabled()
     end
 
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 else
@@ -428,7 +411,7 @@ end
 
 @testset "server bootstrap destroy callback waits for channels" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
     cfg = _bootstrap_test_config()
 
     destroy_called = Ref(false)
@@ -473,12 +456,9 @@ end
         port = 0
     end
 
-    client_bootstrap = Sockets.ClientBootstrap(
-        event_loop_group = elg,
-        host_resolver = resolver,
-    )
+    client_bootstrap = Sockets.ClientBootstrap()
 
-    connect_future = Sockets.client_bootstrap_connect!(
+    client_channel[] = Sockets.client_bootstrap_connect!(
         client_bootstrap,
         cfg.host,
         port,
@@ -489,7 +469,6 @@ end
         nothing,
         cfg.resolution_config,
     )
-    client_channel[] = wait(connect_future)
 
     @test wait_for_pred(() -> server_setup[])
 
@@ -507,13 +486,13 @@ end
     @test wait_for_pred(() -> server_shutdown[])
     @test wait_for_pred(() -> destroy_called[])
 
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
 
 @testset "server bootstrap destroy callback without channels" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
-    resolver = Sockets.HostResolver(elg)
+    resolver = Sockets.HostResolver()
     cfg = _bootstrap_test_config()
 
     destroy_called = Ref(false)
@@ -531,6 +510,6 @@ end
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     @test wait_for_pred(() -> destroy_called[])
 
-    Sockets.host_resolver_shutdown!(resolver)
+    Sockets.close(resolver)
     close(elg)
 end
