@@ -2,28 +2,8 @@
 # Extracted for include-order: types must exist before Socket struct is defined.
 
 @static if Sys.iswindows()
-    # Track the one-in-flight overlapped operation used for connect/accept/readable monitoring.
-    mutable struct WinsockIoOperationData{S}
-        socket::Union{Nothing, S}
-        signal::IocpOverlapped
-        in_use::Bool
-        sequential_task::Union{Nothing, ScheduledTask}
-    end
-
-    function WinsockIoOperationData{S}() where {S}
-        return WinsockIoOperationData{S}(nothing, IocpOverlapped(), false, nothing)
-    end
-
-    # Connection args for stream connect timeout bookkeeping.
-    mutable struct WinsockSocketConnectArgs{S}
-        socket::Union{Nothing, S}
-        timeout_task::Union{Nothing, ScheduledTask}
-        io_data::WinsockIoOperationData{S}
-    end
-
     # Pending write request (WriteFile() overlapped).
-    mutable struct WinsockSocketWriteRequest{S}
-        socket::Union{Nothing, S}
+    mutable struct WinsockSocketWriteRequest
         detached::Bool
         cursor::ByteCursor
         original_len::Csize_t
@@ -32,13 +12,17 @@
     end
 
     # Windows socket implementation state (Port of aws-c-io's iocp_socket)
-    mutable struct WinsockSocket{S}
-        read_io_data::WinsockIoOperationData{S}
-        incoming_socket::Union{Nothing, S}
+    mutable struct WinsockSocket
+        read_signal::IocpOverlapped
+        read_in_use::Bool
+        read_sequential_task::Union{Nothing, ScheduledTask}
+        connect_timeout_task::Union{Nothing, ScheduledTask}
+        connect_generation::UInt64
+        connect_active::Bool
+        incoming_accept_handle::Ptr{Cvoid}
         accept_buffer::Memory{UInt8}
-        connect_args::Union{WinsockSocketConnectArgs{S}, Nothing}
-        pending_writes::Vector{WinsockSocketWriteRequest{S}}
-        pending_write_indices::IdDict{WinsockSocketWriteRequest{S}, Int}
+        pending_writes::Vector{WinsockSocketWriteRequest}
+        pending_write_indices::IdDict{WinsockSocketWriteRequest, Int}
         stop_accept::Bool
         waiting_on_readable::Bool
         on_close_complete::Union{TaskFn, Nothing}
@@ -46,15 +30,19 @@
         cleaned_up::Bool
     end
 
-    function WinsockSocket{S}() where {S}
+    function WinsockSocket()
         buf = Memory{UInt8}(undef, 288) # 2 * (sizeof(sockaddr_storage)+16) in aws-c-io
-        return WinsockSocket{S}(
-            WinsockIoOperationData{S}(),
+        return WinsockSocket(
+            IocpOverlapped(),
+            false,
             nothing,
+            nothing,
+            UInt64(0),
+            false,
+            C_NULL,
             buf,
-            nothing,
-            WinsockSocketWriteRequest{S}[],
-            IdDict{WinsockSocketWriteRequest{S}, Int}(),
+            WinsockSocketWriteRequest[],
+            IdDict{WinsockSocketWriteRequest, Int}(),
             false,
             false,
             nothing,
@@ -62,9 +50,6 @@
             false,
         )
     end
-
-    WinsockIoOperationData() = WinsockIoOperationData{Any}()
-    WinsockSocket() = WinsockSocket{Any}()
 else
     # Non-Windows builds keep a stub type so dispatch compiles.
     struct WinsockSocket end
