@@ -2202,8 +2202,8 @@ end
     ctx = _test_client_ctx()
     @test ctx isa Sockets.TlsContext
 
-    prev_max = Sockets.g_aws_channel_max_fragment_size[]
-    Sockets.g_aws_channel_max_fragment_size[] = Csize_t(4096)
+    prev_max = Sockets.g_channel_max_fragment_size[]
+    Sockets.g_channel_max_fragment_size[] = Csize_t(4096)
 
     channel = Sockets.Channel(event_loop, nothing)
     tls_slot = Sockets.channel_slot_new!(channel)
@@ -2232,7 +2232,7 @@ end
     EventLoops.schedule_task_now!(event_loop, task)
 
     cap = take!(results)
-    expected = Int(Sockets.g_aws_channel_max_fragment_size[] - Csize_t(Sockets.TLS_EST_RECORD_OVERHEAD))
+    expected = Int(Sockets.g_channel_max_fragment_size[] - Csize_t(Sockets.TLS_EST_RECORD_OVERHEAD))
     @test cap == expected
 
     if handler isa Sockets.TlsChannelHandler
@@ -2240,7 +2240,7 @@ end
         @test Sockets.handler_initial_window_size(handler) == Csize_t(Sockets.TLS_EST_HANDSHAKE_SIZE)
     end
 
-    Sockets.g_aws_channel_max_fragment_size[] = prev_max
+    Sockets.g_channel_max_fragment_size[] = prev_max
     close(elg)
 end
 
@@ -2250,8 +2250,8 @@ end
         return
     end
 
-    prev_max = Sockets.g_aws_channel_max_fragment_size[]
-    Sockets.g_aws_channel_max_fragment_size[] = 4096
+    prev_max = Sockets.g_channel_max_fragment_size[]
+    Sockets.g_channel_max_fragment_size[] = 4096
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     resolver = Sockets.HostResolver()
@@ -2390,7 +2390,7 @@ end
     Sockets.server_bootstrap_shutdown!(server_bootstrap)
     Sockets.close(resolver)
     close(elg)
-    Sockets.g_aws_channel_max_fragment_size[] = prev_max
+    Sockets.g_channel_max_fragment_size[] = prev_max
 end
 
 @testset "TLS shutdown with cached data" begin
@@ -2400,8 +2400,8 @@ end
     end
 
     for window_update_after_shutdown in (false, true)
-        prev_max = Sockets.g_aws_channel_max_fragment_size[]
-        Sockets.g_aws_channel_max_fragment_size[] = 4096
+        prev_max = Sockets.g_channel_max_fragment_size[]
+        Sockets.g_channel_max_fragment_size[] = 4096
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
         resolver = Sockets.HostResolver()
@@ -2413,7 +2413,7 @@ end
         if !(server_ctx isa Sockets.TlsContext) || !(client_ctx isa Sockets.TlsContext)
             Sockets.close(resolver)
             close(elg)
-            Sockets.g_aws_channel_max_fragment_size[] = prev_max
+            Sockets.g_channel_max_fragment_size[] = prev_max
             continue
         end
 
@@ -2556,7 +2556,7 @@ end
         Sockets.server_bootstrap_shutdown!(server_bootstrap)
         Sockets.close(resolver)
         close(elg)
-        Sockets.g_aws_channel_max_fragment_size[] = prev_max
+        Sockets.g_channel_max_fragment_size[] = prev_max
     end
 end
 

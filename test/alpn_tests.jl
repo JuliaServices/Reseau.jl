@@ -16,7 +16,7 @@ end
 
 mutable struct AlpnNegotiationArgs
     new_slot::Union{Sockets.ChannelSlot, Nothing}
-    new_handler::Any
+    new_handler::Union{Sockets.PassthroughHandler, Nothing}
     protocol::Union{Reseau.ByteBuffer, Nothing}
 end
 

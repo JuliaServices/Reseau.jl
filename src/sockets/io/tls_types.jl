@@ -138,7 +138,7 @@ function TlsContextOptions(;
         pkcs12_password_set::Union{Bool, Nothing} = nothing,
         secitem_options::Union{SecItemOptions, Nothing} = nothing,
         keychain_path::Union{String, Nothing} = nothing,
-        max_fragment_size::Integer = g_aws_channel_max_fragment_size[],
+        max_fragment_size::Integer = g_channel_max_fragment_size[],
         verify_peer::Union{Bool, Nothing} = nothing,
         ctx_options_extension = nothing,
         custom_key_op_handler = nothing,

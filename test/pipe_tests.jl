@@ -58,7 +58,7 @@ mutable struct PipeState
     results::PipeResults
     buffers::PipeBuffers
     readable_events::PipeReadableEvents
-    test_data::Any
+    test_data::Union{Base.RefValue{Int}, Nothing}
 end
 
 function PipeState(loop_setup::PipeLoopSetup, buffer_size::Integer)

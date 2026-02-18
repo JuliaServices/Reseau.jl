@@ -94,13 +94,13 @@
 
     function _iocp_pipe_raise_last_error()
         win_err = _iocp_pipe_get_last_error()
-        aws_err = _iocp_pipe_translate_windows_error(win_err)
-        throw_error(aws_err)
+        socket_err = _iocp_pipe_translate_windows_error(win_err)
+        throw_error(socket_err)
     end
 
     function _iocp_pipe_unique_name()::String
         uuid_str = string(UUIDs.uuid4())
-        return "\\\\.\\pipe\\aws_pipe_$(uuid_str)"
+        return "\\\\.\\pipe\\reseau_pipe_$(uuid_str)"
     end
 
     function pipe_create_iocp()::Tuple{PipeReadEnd, PipeWriteEnd}

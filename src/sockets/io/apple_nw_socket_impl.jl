@@ -684,13 +684,13 @@
             )
         end
 
-        if g_aws_channel_max_fragment_size[] < KB_16
+        if g_channel_max_fragment_size[] < KB_16
             ccall(
                 (:nw_tcp_options_set_maximum_segment_size, _NW_NETWORK_LIB),
                 Cvoid,
                 (nw_protocol_options_t, UInt32),
                 tcp_options,
-                UInt32(g_aws_channel_max_fragment_size[]),
+                UInt32(g_channel_max_fragment_size[]),
             )
         end
         return nothing

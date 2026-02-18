@@ -62,8 +62,8 @@ end
     return LibAwsCal.AWS_CAL_RSA_SIGNATURE_PSS_SHA256
 end
 
-@inline _aws_byte_cursor_from_key(key::AbstractVector{UInt8}) = _aws_byte_cursor_from_vec(key)
-@inline _aws_byte_cursor_from_key(key::ByteBuffer) = _aws_byte_cursor_from_buf(key)
+@inline _byte_cursor_from_key(key::AbstractVector{UInt8}) = _byte_cursor_from_vec(key)
+@inline _byte_cursor_from_key(key::ByteBuffer) = _byte_cursor_from_buf(key)
 
 function hkdf_derive(
         hmac_type::HkdfHmacType.T,
@@ -78,11 +78,11 @@ function hkdf_derive(
     end
     allocator = LibAwsCommon.default_aws_allocator()
 
-    ikm_cur = _aws_byte_cursor_from_vec(ikm)
-    salt_cur = _aws_byte_cursor_from_vec(salt)
-    info_cur = _aws_byte_cursor_from_vec(info)
+    ikm_cur = _byte_cursor_from_vec(ikm)
+    salt_cur = _byte_cursor_from_vec(salt)
+    info_cur = _byte_cursor_from_vec(info)
     out = ByteBuffer(length)
-    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
+    out_buf_ref = Ref(_byte_buf_from_vec(out.mem))
 
     cal_hmac = LibAwsCal.HKDF_HMAC_SHA512
     GC.@preserve ikm salt info out begin
@@ -121,8 +121,8 @@ function ecc_sign(
     _cal_init()
     sig_len = LibAwsCal.aws_ecc_key_pair_signature_length(pair.handle)
     sig = Memory{UInt8}(undef, Int(sig_len))
-    sig_buf_ref = Ref(_aws_byte_buf_from_vec(sig))
-    msg_cur = _aws_byte_cursor_from_vec(message)
+    sig_buf_ref = Ref(_byte_buf_from_vec(sig))
+    msg_cur = _byte_cursor_from_vec(message)
 
     GC.@preserve message sig begin
         if LibAwsCal.aws_ecc_key_pair_sign_message(pair.handle, Ref(msg_cur), sig_buf_ref) != 0
@@ -140,8 +140,8 @@ function ecc_verify(
         signature::ByteBuffer,
     )::Bool
     _cal_init()
-    msg_cur = _aws_byte_cursor_from_vec(message)
-    sig_cur = _aws_byte_cursor_from_buf(signature)
+    msg_cur = _byte_cursor_from_vec(message)
+    sig_cur = _byte_cursor_from_buf(signature)
     GC.@preserve message signature begin
         rv = LibAwsCal.aws_ecc_key_pair_verify_signature(pair.handle, Ref(msg_cur), Ref(sig_cur))
         rv == 0 && return true
@@ -154,7 +154,7 @@ function rsa_key_pair_new_from_public_key_pkcs1(
     )::RsaKeyPair
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
-    key_cur = _aws_byte_cursor_from_key(key)
+    key_cur = _byte_cursor_from_key(key)
     handle = LibAwsCal.aws_rsa_key_pair_new_from_public_key_pkcs1(allocator, key_cur)
     handle == C_NULL && return _crypto_last_error()
     pair = RsaKeyPair(handle)
@@ -169,7 +169,7 @@ function rsa_key_pair_new_from_private_key_pkcs1(
     )::RsaKeyPair
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
-    key_cur = _aws_byte_cursor_from_key(key)
+    key_cur = _byte_cursor_from_key(key)
     handle = LibAwsCal.aws_rsa_key_pair_new_from_private_key_pkcs1(allocator, key_cur)
     handle == C_NULL && return _crypto_last_error()
     pair = RsaKeyPair(handle)
@@ -184,7 +184,7 @@ function rsa_key_pair_new_from_private_key_pkcs8(
     )::RsaKeyPair
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
-    key_cur = _aws_byte_cursor_from_key(key)
+    key_cur = _byte_cursor_from_key(key)
     handle = LibAwsCal.aws_rsa_key_pair_new_from_private_key_pkcs8(allocator, key_cur)
     handle == C_NULL && return _crypto_last_error()
     pair = RsaKeyPair(handle)
@@ -276,8 +276,8 @@ function rsa_key_pair_encrypt(
     )::ByteBuffer
     _cal_init()
     out = ByteBuffer(Int(rsa_key_pair_block_length(pair)))
-    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
-    pt_cur = _aws_byte_cursor_from_vec(plaintext)
+    out_buf_ref = Ref(_byte_buf_from_vec(out.mem))
+    pt_cur = _byte_cursor_from_vec(plaintext)
     rv = LibAwsCal.aws_rsa_key_pair_encrypt(pair.handle, _rsa_encryption_native(algorithm), pt_cur, out_buf_ref)
     rv == 0 || return _crypto_last_error()
     out_buf = out_buf_ref[]
@@ -291,8 +291,8 @@ function rsa_key_pair_decrypt(
     )::ByteBuffer
     _cal_init()
     out = ByteBuffer(Int(rsa_key_pair_block_length(pair)))
-    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
-    ct_cur = _aws_byte_cursor_from_vec(ciphertext)
+    out_buf_ref = Ref(_byte_buf_from_vec(out.mem))
+    ct_cur = _byte_cursor_from_vec(ciphertext)
     rv = LibAwsCal.aws_rsa_key_pair_decrypt(pair.handle, _rsa_encryption_native(algorithm), ct_cur, out_buf_ref)
     rv == 0 || return _crypto_last_error()
     out_buf = out_buf_ref[]
@@ -306,8 +306,8 @@ function rsa_key_pair_sign_message(
     )::ByteBuffer
     _cal_init()
     out = ByteBuffer(Int(rsa_key_pair_signature_length(pair)))
-    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
-    dig_cur = _aws_byte_cursor_from_vec(digest)
+    out_buf_ref = Ref(_byte_buf_from_vec(out.mem))
+    dig_cur = _byte_cursor_from_vec(digest)
     rv = LibAwsCal.aws_rsa_key_pair_sign_message(pair.handle, _rsa_signature_native(algorithm), dig_cur, out_buf_ref)
     rv == 0 || return _crypto_last_error()
     out_buf = out_buf_ref[]
@@ -321,8 +321,8 @@ function rsa_key_pair_verify_signature(
         signature::AbstractVector{UInt8},
     )::Bool
     _cal_init()
-    dig_cur = _aws_byte_cursor_from_vec(digest)
-    sig_cur = _aws_byte_cursor_from_vec(signature)
+    dig_cur = _byte_cursor_from_vec(digest)
+    sig_cur = _byte_cursor_from_vec(signature)
     rv = LibAwsCal.aws_rsa_key_pair_verify_signature(pair.handle, _rsa_signature_native(algorithm), dig_cur, sig_cur)
     rv == 0 && return true
     _crypto_last_error()
@@ -336,15 +336,15 @@ function aes_gcm_256_encrypt(
     )::NamedTuple{(:ciphertext, :tag), Tuple{ByteBuffer, ByteBuffer}}
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
-    key_cur = _aws_byte_cursor_from_vec(key)
-    iv_cur = _aws_byte_cursor_from_vec(iv)
-    aad_cur = _aws_byte_cursor_from_vec(aad)
+    key_cur = _byte_cursor_from_vec(key)
+    iv_cur = _byte_cursor_from_vec(iv)
+    aad_cur = _byte_cursor_from_vec(aad)
     cipher = LibAwsCal.aws_aes_gcm_256_new(allocator, Ref(key_cur), Ref(iv_cur), Ref(aad_cur))
     cipher == C_NULL && return _crypto_last_error()
 
     out = ByteBuffer(length(plaintext) + 16)
-    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
-    plain_cur = _aws_byte_cursor_from_vec(plaintext)
+    out_buf_ref = Ref(_byte_buf_from_vec(out.mem))
+    plain_cur = _byte_cursor_from_vec(plaintext)
     tag_buf = ByteBuffer(16)
 
     try
@@ -384,16 +384,16 @@ function aes_gcm_256_decrypt(
     )::ByteBuffer
     _cal_init()
     allocator = LibAwsCommon.default_aws_allocator()
-    key_cur = _aws_byte_cursor_from_vec(key)
-    iv_cur = _aws_byte_cursor_from_vec(iv)
-    aad_cur = _aws_byte_cursor_from_vec(aad)
+    key_cur = _byte_cursor_from_vec(key)
+    iv_cur = _byte_cursor_from_vec(iv)
+    aad_cur = _byte_cursor_from_vec(aad)
     cipher = LibAwsCal.aws_aes_gcm_256_new(allocator, Ref(key_cur), Ref(iv_cur), Ref(aad_cur))
     cipher == C_NULL && return _crypto_last_error()
 
     out = ByteBuffer(length(ciphertext) + 16)
-    out_buf_ref = Ref(_aws_byte_buf_from_vec(out.mem))
-    ct_cur = _aws_byte_cursor_from_vec(ciphertext)
-    tag_cur = _aws_byte_cursor_from_vec(tag)
+    out_buf_ref = Ref(_byte_buf_from_vec(out.mem))
+    ct_cur = _byte_cursor_from_vec(ciphertext)
+    tag_cur = _byte_cursor_from_vec(tag)
 
     try
         GC.@preserve key iv aad ciphertext out tag begin
