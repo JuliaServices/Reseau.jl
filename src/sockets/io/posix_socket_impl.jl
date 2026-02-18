@@ -87,6 +87,7 @@ const EPIPE = @static Sys.isapple() ? 32 : 32
 const _POLLIN = Cshort(0x0001)
 const _POLLOUT = Cshort(0x0004)
 const _POLLERR = Cshort(0x0008)
+const _POLLHUP = Cshort(0x0010)
 const _POLLNVAL = Cshort(0x0020)
 const MSG_PEEK = Cint(2)
 
@@ -1012,7 +1013,8 @@ function _is_socket_connect_ready_for_completion(fd::Integer)::Bool
 
     revents = pollfd_ref[].revents
     ready = (revents & _POLLOUT) != 0 && (revents & _POLLNVAL) == 0 &&
-        (revents & _POLLERR) == 0
+        (revents & _POLLERR) == 0 &&
+        (revents & _POLLHUP) == 0
     if !ready
     end
     return ready
@@ -1283,7 +1285,7 @@ function _handle_socket_timeout(connect_args::PosixSocketConnectArgs{S}, status:
         socket_impl = _posix_impl(sock)
 
         if status == TaskStatus.RUN_READY
-            if _is_socket_connect_ready_for_completion(fd) || _is_socket_connect_connected(fd)
+            if _is_socket_connect_ready_for_completion(fd)
                 _cancel_connect_pending_tasks!(sock, connect_args; skip_task = current_task)
                 connect_args.socket = nothing
                 socket_impl.connect_args = nothing
@@ -1352,14 +1354,6 @@ function _run_connect_poll(connect_args::PosixSocketConnectArgs{S}, status::Task
 
     if aws_error == OP_SUCCESS
         if _is_socket_connect_ready_for_completion(fd)
-            _cancel_connect_pending_tasks!(sock, connect_args)
-            connect_args.socket = nothing
-            socket_impl.connect_args = nothing
-            _on_connection_success(sock)
-            return nothing
-        end
-
-        if _is_socket_connect_connected(fd)
             _cancel_connect_pending_tasks!(sock, connect_args)
             connect_args.socket = nothing
             socket_impl.connect_args = nothing
