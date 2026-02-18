@@ -2168,6 +2168,147 @@ end
         end
     end
 
+    @testset "IOCP OVERLAPPED_ENTRY layout" begin
+        if !Sys.iswindows()
+            @test true
+        else
+            expected_size = Sys.WORD_SIZE == 64 ? 32 : 16
+            @test sizeof(EventLoops.OverlappedEntry) == expected_size
+            @test fieldoffset(EventLoops.OverlappedEntry, 4) == 3 * sizeof(UInt)
+        end
+    end
+
+    @testset "IOCP rerun clears stop state" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.iswindows() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            try
+                @test EventLoops.run!(el) === nothing
+
+                ran_first = Channel{Bool}(1)
+                first_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    put!(ran_first, Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY)
+                    return nothing
+                end); type_tag = "iocp_rerun_first")
+                EventLoops.schedule_task_now!(el, first_task)
+                @test _wait_for_channel(ran_first)
+                if isready(ran_first)
+                    @test take!(ran_first)
+                end
+
+                EventLoops.stop!(el)
+                @test _wait_for_loop_stop(el)
+                @test !(@atomic el.running)
+                @test !(@atomic el.should_stop)
+                @test el.impl.synced_data.state == EventLoops.IocpEventThreadState.READY_TO_RUN
+                @test el.impl.thread_data.state == EventLoops.IocpEventThreadState.READY_TO_RUN
+
+                @test EventLoops.run!(el) === nothing
+
+                ran_second = Channel{Bool}(1)
+                second_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    put!(ran_second, Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY)
+                    return nothing
+                end); type_tag = "iocp_rerun_second")
+                EventLoops.schedule_task_now!(el, second_task)
+                @test _wait_for_channel(ran_second)
+                if isready(ran_second)
+                    @test take!(ran_second)
+                end
+            finally
+                close(el)
+            end
+        end
+    end
+
+    @testset "IOCP wake failure rolls back stop signal latch" begin
+        if !Sys.iswindows()
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            impl = el.impl
+            original_handle = impl.iocp_handle
+            try
+                lock(impl.synced_data.mutex)
+                try
+                    impl.synced_data.state = EventLoops.IocpEventThreadState.RUNNING
+                    impl.synced_data.thread_signaled = false
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+
+                impl.iocp_handle = C_NULL
+                EventLoops.stop!(el)
+
+                lock(impl.synced_data.mutex)
+                try
+                    @test impl.synced_data.state == EventLoops.IocpEventThreadState.STOPPING
+                    @test !impl.synced_data.thread_signaled
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+            finally
+                impl.iocp_handle = original_handle
+                lock(impl.synced_data.mutex)
+                try
+                    impl.synced_data.state = EventLoops.IocpEventThreadState.READY_TO_RUN
+                    impl.synced_data.thread_signaled = false
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+                impl.thread_data.state = EventLoops.IocpEventThreadState.READY_TO_RUN
+                @atomic el.should_stop = false
+                close(el)
+            end
+        end
+    end
+
+    @testset "IOCP wake failure rolls back schedule signal latch" begin
+        if !Sys.iswindows()
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            impl = el.impl
+            original_handle = impl.iocp_handle
+            try
+                lock(impl.synced_data.mutex)
+                try
+                    impl.synced_data.state = EventLoops.IocpEventThreadState.RUNNING
+                    impl.synced_data.thread_signaled = false
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+
+                impl.iocp_handle = C_NULL
+                task = Reseau.ScheduledTask(Reseau.TaskFn(_ -> nothing); type_tag = "iocp_failed_signal_schedule")
+                EventLoops.schedule_task_now_serialized!(el, task)
+
+                lock(impl.synced_data.mutex)
+                try
+                    @test !impl.synced_data.thread_signaled
+                    @test any(x -> x === task, impl.synced_data.tasks_to_schedule)
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+            finally
+                impl.iocp_handle = original_handle
+                lock(impl.synced_data.mutex)
+                try
+                    impl.synced_data.state = EventLoops.IocpEventThreadState.READY_TO_RUN
+                    impl.synced_data.thread_signaled = false
+                    empty!(impl.synced_data.tasks_to_schedule)
+                    empty!(impl.synced_data.tasks_to_schedule_spare)
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+                impl.thread_data.state = EventLoops.IocpEventThreadState.READY_TO_RUN
+                close(el)
+            end
+        end
+    end
+
     @testset "Kqueue completion port for NW sockets" begin
         if !Sys.isapple()
             @test true

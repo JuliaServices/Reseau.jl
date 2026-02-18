@@ -14,6 +14,7 @@
         mutex::ReentrantLock
         thread_signaled::Bool
         tasks_to_schedule::Vector{ScheduledTask}
+        tasks_to_schedule_spare::Vector{ScheduledTask}
         state::IocpEventThreadState.T
     end
 
@@ -21,6 +22,7 @@
         return IocpSyncedData(
             ReentrantLock(),
             false,
+            ScheduledTask[],
             ScheduledTask[],
             IocpEventThreadState.READY_TO_RUN,
         )

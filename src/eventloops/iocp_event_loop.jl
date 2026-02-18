@@ -6,12 +6,18 @@
     using LibAwsCal
 
     @wrap_thread_fn function _iocp_event_loop_thread_entry(event_loop::EventLoop)
+        impl = event_loop.impl
         try
             _iocp_event_loop_thread(event_loop)
         catch e
             Core.println("iocp event loop thread errored")
+            # Ensure `run!` can observe startup failure even if the thread exits early.
+            @atomic impl.startup_error = e isa ReseauError ? e.code : ERROR_SYS_CALL_FAILURE
         finally
-            impl = event_loop.impl
+            @atomic impl.running_thread_id = UInt64(0)
+            LibAwsCal.aws_cal_thread_clean_up()
+            # Always release startup waiters to avoid startup deadlock on early failure.
+            notify(impl.startup_event)
             notify(impl.completion_event)
         end
     end
@@ -37,10 +43,17 @@
 
     const ERROR_IO_PENDING = UInt32(997)
     const ERROR_INVALID_PARAMETER = UInt32(87)
+    const ERROR_ABANDONED_WAIT_0 = UInt32(735)
     const WAIT_TIMEOUT = UInt32(0x00000102)
 
     const DEFAULT_TIMEOUT_MS = UInt32(100000)
     const MAX_COMPLETION_PACKETS_PER_LOOP = UInt32(100)
+
+    @inline function _iocp_normalize_status_code(raw::UInt)::Int
+        # `OVERLAPPED.Internal` is an NTSTATUS (32-bit). Normalize to low 32 bits so
+        # status comparisons are consistent across pointer widths.
+        return Int(UInt32(raw & UInt(typemax(UInt32))))
+    end
 
     # Layout-compatible with Windows OVERLAPPED (see aws_win32_OVERLAPPED in aws-c-io)
     struct Win32OVERLAPPED
@@ -61,13 +74,20 @@
     end
 
     # OVERLAPPED_ENTRY returned by GetQueuedCompletionStatusEx().
+    # Layout per minwinbase.h:
+    # ULONG_PTR lpCompletionKey; LPOVERLAPPED lpOverlapped; ULONG_PTR Internal; DWORD dwNumberOfBytesTransferred;
+    # Note there is no explicit trailing field; 64-bit ABI alignment pads the struct to 32 bytes.
     struct OverlappedEntry
         lpCompletionKey::UInt
         lpOverlapped::Ptr{Cvoid}
         Internal::UInt
         dwNumberOfBytesTransferred::UInt32
-        _pad::UInt32
     end
+
+    const _OVERLAPPED_ENTRY_EXPECTED_SIZE = Sys.WORD_SIZE == 64 ? 32 : 16
+    const _OVERLAPPED_ENTRY_BYTES_OFFSET = 3 * sizeof(UInt)
+    @assert sizeof(OverlappedEntry) == _OVERLAPPED_ENTRY_EXPECTED_SIZE
+    @assert fieldoffset(OverlappedEntry, 4) == _OVERLAPPED_ENTRY_BYTES_OFFSET
 
     const IocpOnCompletionFn = Function
 
@@ -194,7 +214,7 @@
         throw_error(ERROR_SYS_CALL_FAILURE)
     end
 
-    function _iocp_signal_synced_data_changed(event_loop::EventLoop)
+    function _iocp_signal_synced_data_changed(event_loop::EventLoop)::Bool
         impl = event_loop.impl
         completion_key = UInt(impl.iocp_handle)
         ok = _win_post_queued_completion_status(impl.iocp_handle, UInt32(0), completion_key, C_NULL)
@@ -202,8 +222,9 @@
             logf(
                 LogLevel.ERROR,
                 LS_IO_EVENT_LOOP,string("PostQueuedCompletionStatus() failed with error %d", " ", _win_get_last_error(), " ", ))
+            return false
         end
-        return nothing
+        return true
     end
 
     function event_loop_new_with_iocp()::EventLoop
@@ -230,22 +251,21 @@
     end
 
     function _iocp_process_tasks_to_schedule(impl::IocpEventLoop, tasks::Vector{ScheduledTask})
-        while !isempty(tasks)
-            task = popfirst!(tasks)
-            task === nothing && break
+        for task in tasks
             if task.timestamp == 0
                 task_scheduler_schedule_now!(impl.thread_data.scheduler, task)
             else
                 task_scheduler_schedule_future!(impl.thread_data.scheduler, task, task.timestamp)
             end
         end
+        empty!(tasks)
         return nothing
     end
 
     function _iocp_process_synced_data(event_loop::EventLoop)
         impl = event_loop.impl
 
-        tasks_to_schedule = ScheduledTask[]
+        tasks_to_schedule = impl.synced_data.tasks_to_schedule_spare
         lock(impl.synced_data.mutex)
         try
             impl.synced_data.thread_signaled = false
@@ -256,9 +276,12 @@
                 impl.thread_data.state = IocpEventThreadState.STOPPING
             end
 
-            # Swap queue contents.
-            tasks_to_schedule = impl.synced_data.tasks_to_schedule
-            impl.synced_data.tasks_to_schedule = ScheduledTask[]
+            pending = impl.synced_data.tasks_to_schedule
+            spare = impl.synced_data.tasks_to_schedule_spare
+            empty!(spare)
+            impl.synced_data.tasks_to_schedule = spare
+            impl.synced_data.tasks_to_schedule_spare = pending
+            tasks_to_schedule = pending
         finally
             unlock(impl.synced_data.mutex)
         end
@@ -314,8 +337,8 @@
                     cb = op.on_completion
                     cb === nothing && continue
 
-                    # Note: Internal is an NTSTATUS-style status code (0 on success).
-                    status_code = Int(entry.Internal)
+                    # `Internal` carries an NTSTATUS-style status code (0 on success).
+                    status_code = _iocp_normalize_status_code(entry.Internal)
                     bytes = Csize_t(entry.dwNumberOfBytesTransferred)
                     try
                         cb(event_loop, op, status_code, bytes)
@@ -332,9 +355,19 @@
                     end
                 end
             else
-                # Timeout is a normal condition.
-                # If this isn't a timeout, just keep looping; operations will surface as failures elsewhere.
-                _ = _win_get_last_error()
+                win_err = _win_get_last_error()
+                if win_err == WAIT_TIMEOUT
+                    # Timeout is a normal condition.
+                elseif win_err == ERROR_ABANDONED_WAIT_0
+                    logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "GetQueuedCompletionStatusEx() abandoned; completion port is closed")
+                    impl.thread_data.state = IocpEventThreadState.STOPPING
+                    register_tick_end!(event_loop)
+                    break
+                else
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_EVENT_LOOP,string("GetQueuedCompletionStatusEx() failed with error %d", " ", win_err, " ", ))
+                end
             end
 
             if should_process_synced_data
@@ -381,8 +414,6 @@
         end
 
         logf(LogLevel.DEBUG, LS_IO_EVENT_LOOP, "exiting main loop")
-        @atomic impl.running_thread_id = UInt64(0)
-        LibAwsCal.aws_cal_thread_clean_up()
         return nothing
     end
 
@@ -404,6 +435,7 @@
             throw_error(ERROR_INVALID_STATE)
         end
 
+        @atomic event_loop.should_stop = false
         impl.synced_data.state = IocpEventThreadState.RUNNING
 
         # Launch the event loop thread via ForeignThread
@@ -426,6 +458,13 @@
         wait(impl.startup_event)
         startup_error = @atomic impl.startup_error
         if startup_error != 0 || (@atomic impl.running_thread_id) == 0
+            if impl.thread_created_on !== nothing
+                wait(impl.completion_event)
+            end
+            impl.synced_data.state = IocpEventThreadState.READY_TO_RUN
+            impl.thread_data.state = IocpEventThreadState.READY_TO_RUN
+            @atomic event_loop.running = false
+            @atomic event_loop.should_stop = false
             throw_error(startup_error != 0 ? startup_error : ERROR_IO_EVENT_LOOP_SHUTDOWN)
         end
 
@@ -458,7 +497,15 @@
         end
 
         if signal_thread
-            _iocp_signal_synced_data_changed(event_loop)
+            signaled = _iocp_signal_synced_data_changed(event_loop)
+            if !signaled
+                lock(impl.synced_data.mutex)
+                try
+                    impl.synced_data.thread_signaled = false
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+            end
         end
 
         return nothing
@@ -474,6 +521,7 @@
         impl.synced_data.state = IocpEventThreadState.READY_TO_RUN
         impl.thread_data.state = IocpEventThreadState.READY_TO_RUN
         @atomic event_loop.running = false
+        @atomic event_loop.should_stop = false
         return nothing
     end
 
@@ -525,7 +573,15 @@
         end
 
         if should_signal
-            _iocp_signal_synced_data_changed(event_loop)
+            signaled = _iocp_signal_synced_data_changed(event_loop)
+            if !signaled
+                lock(impl.synced_data.mutex)
+                try
+                    impl.synced_data.thread_signaled = false
+                finally
+                    unlock(impl.synced_data.mutex)
+                end
+            end
         end
 
         return nothing
@@ -639,29 +695,49 @@
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "destroying event_loop")
         impl = event_loop.impl
 
-        stop!(event_loop)
-        wait_for_stop_completion(event_loop)
+        destroy_error = nothing
 
-        # Make cancellation callbacks that check `event_loop_thread_is_callers_thread` behave.
-        impl.thread_joined_to = UInt64(Base.Threads.threadid())
-        @atomic impl.running_thread_id = impl.thread_joined_to
+        try
+            stop!(event_loop)
+            wait_for_stop_completion(event_loop)
 
-        task_scheduler_clean_up!(impl.thread_data.scheduler)
+            # Make cancellation callbacks that check `event_loop_thread_is_callers_thread` behave.
+            impl.thread_joined_to = UInt64(Base.Threads.threadid())
+            @atomic impl.running_thread_id = impl.thread_joined_to
 
-        lock(impl.synced_data.mutex)
-        tasks = impl.synced_data.tasks_to_schedule
-        impl.synced_data.tasks_to_schedule = ScheduledTask[]
-        unlock(impl.synced_data.mutex)
+            try
+                task_scheduler_clean_up!(impl.thread_data.scheduler)
+            catch e
+                logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "task scheduler cleanup errored during destroy: $e")
+                destroy_error = destroy_error === nothing ? e : destroy_error
+            end
 
-        while !isempty(tasks)
-            task = popfirst!(tasks)
-            task === nothing && break
-            task_run!(task, TaskStatus.CANCELED)
+            lock(impl.synced_data.mutex)
+            tasks = impl.synced_data.tasks_to_schedule
+            impl.synced_data.tasks_to_schedule = ScheduledTask[]
+            unlock(impl.synced_data.mutex)
+
+            for task in tasks
+                try
+                    task_run!(task, TaskStatus.CANCELED)
+                catch e
+                    logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "task cancellation callback errored during destroy: $e")
+                    destroy_error = destroy_error === nothing ? e : destroy_error
+                end
+            end
+            empty!(tasks)
+        catch e
+            logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "iocp event-loop destroy failed: $e")
+            destroy_error = destroy_error === nothing ? e : destroy_error
+        finally
+            if impl.iocp_handle != C_NULL
+                _ = _win_close_handle(impl.iocp_handle)
+                impl.iocp_handle = C_NULL
+            end
         end
 
-        if impl.iocp_handle != C_NULL
-            _ = _win_close_handle(impl.iocp_handle)
-            impl.iocp_handle = C_NULL
+        if destroy_error !== nothing
+            throw(destroy_error)
         end
         return nothing
     end
