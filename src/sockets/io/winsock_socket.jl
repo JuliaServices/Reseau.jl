@@ -1465,7 +1465,10 @@
         end
 
         if impl.connect_args !== nothing
-            timeout_task = impl.connect_args.timeout_task
+            connect_args = impl.connect_args
+            connect_args.socket = nothing
+            timeout_task = connect_args.timeout_task
+            connect_args.timeout_task = nothing
             if timeout_task !== nothing && sock.event_loop !== nothing
                 try
                     cancel_task!(sock.event_loop, timeout_task)
@@ -1473,8 +1476,6 @@
                     e isa ReseauError || rethrow()
                 end
             end
-            impl.connect_args.timeout_task = nothing
-            impl.connect_args.socket = nothing
             impl.connect_args = nothing
         end
 
