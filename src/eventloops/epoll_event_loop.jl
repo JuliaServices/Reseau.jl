@@ -6,6 +6,10 @@
     using LibAwsCal
 
     const _LIBC_EWOULDBLOCK = isdefined(Base.Libc, :EWOULDBLOCK) ? Base.Libc.EWOULDBLOCK : Base.Libc.EAGAIN
+    @inline function event_loop_thread_exit_s2n_cleanup!(::EpollEventLoop)::Nothing
+        return nothing
+    end
+
     @inline function _epoll_handle_data_key(handle_data::EpollEventHandleData)::UInt64
         return UInt64(objectid(handle_data))
     end
