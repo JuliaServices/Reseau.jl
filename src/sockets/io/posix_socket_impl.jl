@@ -1629,10 +1629,9 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
         socket_impl.connect_args = nothing
     end
 
-    # Prevent user callbacks from firing after the socket closes.
+    # Prevent readable callbacks from firing after close. Connection/accept
+    # callbacks may still be needed by in-flight error paths before cleanup.
     sock.readable_fn = nothing
-    sock.connection_result_fn = nothing
-    sock.accept_result_fn = nothing
 
     if socket_is_open(sock)
         ccall(:close, Cint, (Cint,), fd)
