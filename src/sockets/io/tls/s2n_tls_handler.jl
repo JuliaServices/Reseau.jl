@@ -349,12 +349,14 @@ function _s2n_generic_read(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
 end
 
 function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UInt32)::Cint
-    channel = handler.slot === nothing ? nothing : handler.slot.channel
-    channel === nothing && return Cint(-1)
+    slot = handler.slot
+    slot === nothing && return Cint(-1)
+    channel_slot_is_attached(slot) || return Cint(-1)
+    channel = slot.channel
     processed = 0
 
     while processed < len
-        overhead = channel_slot_upstream_message_overhead(handler.slot)
+        overhead = channel_slot_upstream_message_overhead(slot)
         message_size_hint = Csize_t(len - processed) + overhead
         message = channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, message_size_hint)
         message === nothing && return Cint(-1)
@@ -384,7 +386,7 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
         end
 
         try
-            channel_slot_send_message(handler.slot, message, ChannelDirection.WRITE)
+            channel_slot_send_message(slot, message, ChannelDirection.WRITE)
         catch e
             e isa ReseauError || rethrow()
             channel_release_message_to_pool!(channel, message)
@@ -425,11 +427,11 @@ end
 function _s2n_send_alpn_message(handler::S2nTlsHandler)
     slot = handler.slot
     slot === nothing && return nothing
+    channel_slot_is_attached(slot) || return nothing
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
     handler.protocol.len == 0 && return nothing
     channel = slot.channel
-    channel === nothing && return nothing
 
     message = channel_acquire_message_from_pool(
         channel,

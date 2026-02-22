@@ -884,7 +884,7 @@ function SinkHandler()
 end
 
 function Sockets.handler_process_read_message(handler::SinkHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
-    if slot.channel !== nothing
+    if Sockets.channel_slot_is_attached(slot)
         Sockets.channel_release_message_to_pool!(slot.channel, message)
     end
     return nothing
@@ -892,7 +892,7 @@ end
 
 function Sockets.handler_process_write_message(handler::SinkHandler, slot::Sockets.ChannelSlot, message::Sockets.IoMessage)
     handler.writes[] += 1
-    if slot.channel !== nothing
+    if Sockets.channel_slot_is_attached(slot)
         Sockets.channel_release_message_to_pool!(slot.channel, message)
     end
     return nothing
@@ -1571,7 +1571,7 @@ end
                 try
                     Sockets.handler_process_write_message(send_args.handler, send_args.slot, send_args.message)
                 catch e
-                    if send_args.slot.channel !== nothing
+                    if Sockets.channel_slot_is_attached(send_args.slot)
                         Sockets.channel_release_message_to_pool!(send_args.slot.channel, send_args.message)
                     end
                 end

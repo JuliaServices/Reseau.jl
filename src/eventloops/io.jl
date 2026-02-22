@@ -216,19 +216,32 @@ for info in _io_log_subject_infos
 end
 
 const _cal_library_initialized = Ref(false)
+const _cal_library_init_pid = Ref{Int}(0)
 
 function _cal_init()
-    _cal_library_initialized[] && return nothing
-    _cal_library_initialized[] = true
+    pid = Base.getpid()
+    if _cal_library_initialized[] && _cal_library_init_pid[] == pid
+        return nothing
+    end
     allocator = LibAwsCommon.default_aws_allocator()
     LibAwsCommon.aws_common_library_init(allocator)
     LibAwsCal.aws_cal_library_init(allocator)
+    _cal_library_initialized[] = true
+    _cal_library_init_pid[] = pid
     return nothing
 end
 
 function _cal_cleanup()
     !_cal_library_initialized[] && return nothing
+    pid = Base.getpid()
+    if _cal_library_init_pid[] != 0 && _cal_library_init_pid[] != pid
+        # Serialized precompile state can mark this as initialized from another process.
+        _cal_library_initialized[] = false
+        _cal_library_init_pid[] = 0
+        return nothing
+    end
     _cal_library_initialized[] = false
+    _cal_library_init_pid[] = 0
     LibAwsCal.aws_cal_library_clean_up()
     LibAwsCommon.aws_common_library_clean_up()
     return nothing

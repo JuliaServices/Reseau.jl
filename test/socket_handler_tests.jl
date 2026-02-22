@@ -36,7 +36,7 @@ function Sockets.handler_process_read_message(handler::TestReadHandler, slot::So
         Sockets.channel_slot_increment_read_window!(slot, message.message_data.len)
     end
 
-    if slot.channel !== nothing
+    if Sockets.channel_slot_is_attached(slot)
         Sockets.channel_release_message_to_pool!(slot.channel, message)
     end
     return nothing

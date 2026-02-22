@@ -616,7 +616,6 @@
         end
 
         handle_data = unsafe_pointer_to_objref(handle.additional_data)::KqueueHandleData{KqueueEventLoop}
-        impl = event_loop.impl::KqueueEventLoop
 
         if @atomic event_loop.running
             if event_loop_thread_is_callers_thread(event_loop)

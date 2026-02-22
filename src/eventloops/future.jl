@@ -65,6 +65,20 @@ function Base.notify(f::Future{T}, x) where {T}
     return nothing
 end
 
+@inline function notify_exception!(f::Future, err::Exception)::Nothing
+    lock(f.cond)
+    try
+        if (@atomic f.set) == Int8(0)
+            f.result = err
+            @atomic :release f.set = Int8(2)
+            notify(f.cond)
+        end
+    finally
+        unlock(f.cond)
+    end
+    return nothing
+end
+
 function cancel!(f::Future)
     notify(f, ReseauError(ERROR_IO_OPERATION_CANCELLED))
 end

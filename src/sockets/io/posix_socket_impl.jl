@@ -283,9 +283,9 @@ end
 
 function _cancel_connect_pending_tasks!(
     sock::Socket,
-    connect_args::PosixSocketConnectArgs{S};
+    connect_args::PosixSocketConnectArgs;
     skip_task::Union{ScheduledTask, Nothing} = nothing,
-) where {S}
+)::Nothing
     # Canceling scheduled tasks may invoke callbacks synchronously with
     # `TaskStatus.CANCELED`; clear the shared socket pointer first so canceled
     # timeout/poll callbacks become no-ops instead of racing error paths.
@@ -1604,8 +1604,9 @@ function socket_close_impl(socket_impl::PosixSocket, sock::Socket)::Nothing
 
     connect_args = socket_impl.connect_args
     if connect_args !== nothing
-        _cancel_connect_pending_tasks!(sock, connect_args)
-        (connect_args::PosixSocketConnectArgs{Socket}).socket = nothing
+        connect_args_typed = connect_args::PosixSocketConnectArgs{Socket}
+        _cancel_connect_pending_tasks!(sock, connect_args_typed)
+        connect_args_typed.socket = nothing
         socket_impl.connect_args = nothing
     end
 

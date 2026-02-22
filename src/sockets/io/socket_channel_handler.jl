@@ -9,7 +9,7 @@
 # Socket channel handler structure
 mutable struct SocketChannelHandler
     socket::Socket
-    slot::Union{ChannelSlot, Nothing}
+    slot::Union{ChannelSlot{Channel}, Nothing}
     max_rw_size::Csize_t
     read_task_storage::ChannelTask
     shutdown_task_storage::ChannelTask
@@ -39,7 +39,101 @@ function SocketChannelHandler(
 end
 
 function setchannelslot!(handler::SocketChannelHandler, slot::ChannelSlot)::Nothing
-    handler.slot = slot
+    handler.slot = slot::ChannelSlot{Channel}
+    return nothing
+end
+
+@inline function (::_ChannelSlotReadCallWrapper)(
+        f::_ChannelHandlerReadDispatch{SocketChannelHandler},
+        slot_ptr::Ptr{Cvoid},
+        message_ptr::Ptr{Cvoid},
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    message = _callback_ptr_to_obj(message_ptr)::IoMessage
+    _socket_channel_handler_process_read_message_impl(f.handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotWriteCallWrapper)(
+        f::_ChannelHandlerWriteDispatch{SocketChannelHandler},
+        slot_ptr::Ptr{Cvoid},
+        message_ptr::Ptr{Cvoid},
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    message = _callback_ptr_to_obj(message_ptr)::IoMessage
+    _socket_channel_handler_process_write_message_impl(f.handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotIncrementWindowCallWrapper)(
+        f::_ChannelHandlerIncrementWindowDispatch{SocketChannelHandler},
+        slot_ptr::Ptr{Cvoid},
+        size::Csize_t,
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    _socket_channel_handler_increment_read_window_impl(f.handler, slot, size)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotShutdownCallWrapper)(
+        f::_ChannelHandlerShutdownDispatch{SocketChannelHandler},
+        slot_ptr::Ptr{Cvoid},
+        direction::UInt8,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    _socket_channel_handler_shutdown_impl(
+        f.handler,
+        slot,
+        ChannelDirection.T(direction),
+        error_code,
+        free_scarce_resources_immediately,
+    )::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_read_dispatch(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _socket_channel_handler_process_read_message_impl(handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_write_dispatch(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _socket_channel_handler_process_write_message_impl(handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_increment_window_dispatch(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        size::Csize_t,
+    )::Nothing
+    _socket_channel_handler_increment_read_window_impl(handler, slot, size)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_shutdown_dispatch(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    _socket_channel_handler_shutdown_impl(
+        handler,
+        slot,
+        direction,
+        error_code,
+        free_scarce_resources_immediately,
+    )::Nothing
     return nothing
 end
 
@@ -57,10 +151,8 @@ function handler_destroy(handler::SocketChannelHandler)::Nothing
     logf(LogLevel.TRACE, LS_IO_SOCKET_HANDLER, "Socket handler: destroying")
     slot = handler.slot
     if slot !== nothing
-        channel = slot.channel
-        if channel isa Channel && channel.socket === handler.socket
-            channel.socket = nothing
-        end
+        channel = (slot::ChannelSlot{Channel}).channel
+        channel.socket === handler.socket && (channel.socket = nothing)
     end
     handler.slot = nothing
     crt_statistics_socket_cleanup!(handler.stats)
@@ -77,7 +169,11 @@ function handler_gather_statistics(handler::SocketChannelHandler)::SocketHandler
 end
 
 # Process read message - socket handler is at the socket end, shouldn't receive read messages
-function handler_process_read_message(handler::SocketChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+function _socket_channel_handler_process_read_message_impl(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
     _ = handler
     _ = slot
     _ = message
@@ -87,7 +183,11 @@ function handler_process_read_message(handler::SocketChannelHandler, slot::Chann
 end
 
 # Process write message - send data out the socket
-function handler_process_write_message(handler::SocketChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+function _socket_channel_handler_process_write_message_impl(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
     socket = handler.socket
     _ = slot
 
@@ -155,7 +255,11 @@ function _on_socket_write_complete(handler::SocketChannelHandler, message, error
 end
 
 # Increment read window - handler can now read more data
-function handler_increment_read_window(handler::SocketChannelHandler, slot::ChannelSlot, size::Csize_t)::Nothing
+function _socket_channel_handler_increment_read_window_impl(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        size::Csize_t,
+    )::Nothing
     _ = size
 
     if handler.shutdown_in_progress
@@ -174,10 +278,28 @@ end
 struct SocketHandlerShutdownArgs
     handler::SocketChannelHandler
     channel::Channel
-    slot::ChannelSlot
+    slot::ChannelSlot{Channel}
     error_code::Int
     direction::ChannelDirection.T
     free_scarce_resources_immediately::Bool
+end
+
+struct _SocketHandlerShutdownComplete <: Function
+    args::SocketHandlerShutdownArgs
+end
+
+@inline function (cb::_SocketHandlerShutdownComplete)(_)::Nothing
+    _socket_handler_shutdown_complete_fn(cb.args)
+    return nothing
+end
+
+struct _SocketHandlerShutdownReadComplete <: Function
+    args::SocketHandlerShutdownArgs
+end
+
+@inline function (cb::_SocketHandlerShutdownReadComplete)(_)::Nothing
+    _socket_handler_shutdown_read_complete_fn(cb.args)
+    return nothing
 end
 
 function _socket_handler_close_task(handler::SocketChannelHandler)
@@ -205,11 +327,11 @@ function _socket_handler_shutdown_read_complete_fn(user_data)
         args.direction,
         args.error_code,
         args.free_scarce_resources_immediately,
-    )
+    )::Nothing
     return nothing
 end
 
-function handler_shutdown(
+function _socket_channel_handler_shutdown_impl(
         handler::SocketChannelHandler,
         slot::ChannelSlot,
         direction::ChannelDirection.T,
@@ -217,6 +339,7 @@ function handler_shutdown(
         free_scarce_resources_immediately::Bool,
     )::Nothing
     socket = handler.socket
+    channel_slot_is_attached(slot) || return nothing
     channel = slot.channel
 
     logf(
@@ -233,9 +356,8 @@ function handler_shutdown(
             "Socket handler: shutting down read direction with error_code $error_code"
         )
         if free_scarce_resources_immediately && socket_is_open(socket)
-            channel === nothing && return nothing
             args = SocketHandlerShutdownArgs(handler, channel, slot, error_code, direction, free_scarce_resources_immediately)
-            socket_set_close_complete_callback(socket, TaskFn(_ -> _socket_handler_shutdown_read_complete_fn(args)))
+            socket_set_close_complete_callback(socket, TaskFn(_SocketHandlerShutdownReadComplete(args)))
             socket_close(socket)
             return nothing
         end
@@ -249,18 +371,44 @@ function handler_shutdown(
         "Socket handler: shutting down write direction with error_code $error_code"
     )
     if socket_is_open(socket)
-        channel === nothing && return nothing
         args = SocketHandlerShutdownArgs(handler, channel, slot, error_code, direction, free_scarce_resources_immediately)
-        socket_set_close_complete_callback(socket, TaskFn(_ -> _socket_handler_shutdown_complete_fn(args)))
+        socket_set_close_complete_callback(socket, TaskFn(_SocketHandlerShutdownComplete(args)))
         socket_close(socket)
     else
-        channel === nothing && return nothing
         channel_task_init!(handler.shutdown_task_storage, EventCallable(_ -> _socket_handler_close_task(handler)), "socket_handler_close")
         handler.shutdown_error_code = error_code
         channel_schedule_task_now!(channel, handler.shutdown_task_storage)
     end
 
     return nothing
+end
+
+function handler_process_read_message(handler::SocketChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+    return _socket_channel_handler_process_read_message_impl(handler, slot, message)
+end
+
+function handler_process_write_message(handler::SocketChannelHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+    return _socket_channel_handler_process_write_message_impl(handler, slot, message)
+end
+
+function handler_increment_read_window(handler::SocketChannelHandler, slot::ChannelSlot, size::Csize_t)::Nothing
+    return _socket_channel_handler_increment_read_window_impl(handler, slot, size)
+end
+
+function handler_shutdown(
+        handler::SocketChannelHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    return _socket_channel_handler_shutdown_impl(
+        handler,
+        slot,
+        direction,
+        error_code,
+        free_scarce_resources_immediately,
+    )
 end
 
 # Trigger handler to process pending writes
@@ -284,16 +432,14 @@ function _socket_handler_trigger_read(handler::SocketChannelHandler)::Nothing
     if slot === nothing
         return nothing
     end
+    slot = slot::ChannelSlot{Channel}
     if slot.adj_right === nothing || slot.adj_right.handler_read === nothing
         handler.pending_read = true
         return nothing
     end
 
-    channel_any = slot.channel
-    if !(channel_any isa Channel)
-        return nothing
-    end
-    channel = channel_any::Channel
+    channel_slot_is_attached(slot) || return nothing
+    channel = slot.channel::Channel
 
     sock = handler.socket
     event_loop = sock.event_loop
@@ -344,17 +490,15 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
         return nothing
     end
 
-    channel = handler.slot.channel
-    if channel === nothing
+    slot = handler.slot
+    slot = slot::ChannelSlot{Channel}
+    channel_slot_is_attached(slot) || return nothing
+    channel = slot.channel::Channel
+    if handler.shutdown_in_progress
         return nothing
     end
 
     socket = handler.socket
-    slot = handler.slot
-
-    if handler.shutdown_in_progress
-        return nothing
-    end
 
     downstream_window = channel_slot_downstream_read_window(slot)
     max_to_read = downstream_window > handler.max_rw_size ? handler.max_rw_size : downstream_window
