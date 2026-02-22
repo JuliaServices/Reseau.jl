@@ -7,11 +7,6 @@
 @static if Sys.isapple()
     const _NW_PRECOMPILE_PARK_SWEEP = 4
 
-    @inline function _nw_pc_trace(msg::AbstractString)::Nothing
-        _ = msg
-        return nothing
-    end
-
     # Network.framework exports some "constants" (e.g. NW_PARAMETERS_DISABLE_PROTOCOL) as
     # globals whose value is already a pointer type. We must load the pointer value from
     # the global's storage (i.e. dereference `cglobal`).
@@ -147,9 +142,6 @@
         _nw_ensure_callbacks!()
         global_queue = _nw_dispatch_global_queue()
         global_queue == C_NULL && return nothing
-        _nw_pc_trace(
-            "schedule_precompile_park_sweep reason=$reason count=$(_NW_PRECOMPILE_PARK_SWEEP)"
-        )
         for _ in 1:_NW_PRECOMPILE_PARK_SWEEP
             _nw_dispatch_async_f(global_queue, C_NULL, _nw_precompile_park_cb[])
         end
@@ -163,7 +155,6 @@
         _nw_registry_is_empty() || return nothing
         _nw_ensure_callbacks!()
         if queue != C_NULL
-            _nw_pc_trace("schedule_precompile_park reason=$reason queue=$(repr(UInt(queue)))")
             _nw_dispatch_async_f(queue, C_NULL, _nw_precompile_park_cb[])
         end
         _nw_schedule_precompile_park_sweep!(reason)
@@ -233,9 +224,6 @@
         Base.acquire(event_loop)
         socket.event_loop = event_loop
         nw_socket.event_loop = event_loop
-        _nw_pc_trace(
-            "set_event_loop socket=$(repr(UInt(pointer_from_objref(nw_socket)))) loop=$(repr(UInt(pointer_from_objref(event_loop))))"
-        )
         return nothing
     end
 
@@ -248,9 +236,6 @@
             end
             Base.release(event_loop)
             nw_socket.event_loop = nothing
-            _nw_pc_trace(
-                "release_event_loop socket=$(repr(UInt(pointer_from_objref(nw_socket)))) loop=$(repr(UInt(pointer_from_objref(event_loop))))"
-            )
         end
         return nothing
     end
@@ -1391,24 +1376,17 @@
         if nw_socket.event_loop === nothing
             return nothing
         end
-        _nw_pc_trace(
-            "conn_state enqueue socket=$(repr(UInt(pointer_from_objref(nw_socket)))) state=$state err=$err_code"
-        )
 
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
         schedule_task_now!(nw_socket.event_loop; type_tag="nw_conn_state") do status
-            _nw_pc_trace(
-                "conn_state task socket=$(repr(UInt(pointer_from_objref(nw_socket)))) state=$state task_status=$(Int(_coerce_task_status(status)))"
-            )
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     return nothing
                 end
 
                 if state == 5 # nw_connection_state_cancelled
-                    _nw_pc_trace("conn_state cancelled socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
                     dispatch_queue = _nw_dispatch_queue(nw_socket.event_loop)
                     _nw_lock_synced(nw_socket)
                     _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
@@ -1469,17 +1447,11 @@
     function _nw_handle_listener_state_changed(nw_socket::NWSocket, state::Cint, error::nw_error_t)
         err_code = _nw_convert_nw_error(error)
         nw_socket.event_loop === nothing && return nothing
-        _nw_pc_trace(
-            "listener_state enqueue socket=$(repr(UInt(pointer_from_objref(nw_socket)))) state=$state err=$err_code"
-        )
 
         raw_code = error == C_NULL ? 0 : ccall((:nw_error_get_error_code, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
         raw_domain = error == C_NULL ? 0 : ccall((:nw_error_get_error_domain, _NW_NETWORK_LIB), Cint, (nw_error_t,), error)
 
         schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_state") do status
-            _nw_pc_trace(
-                "listener_state task socket=$(repr(UInt(pointer_from_objref(nw_socket)))) state=$state task_status=$(Int(_coerce_task_status(status)))"
-            )
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
                     return nothing
@@ -1512,7 +1484,6 @@
                     end
                     accept_started_cb !== nothing && accept_started_cb(err_code)
                 elseif state == 4 # nw_listener_state_cancelled
-                    _nw_pc_trace("listener_state cancelled socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
                     dispatch_queue = _nw_dispatch_queue(nw_socket.event_loop)
                     _nw_listener_stop_port_poll!(nw_socket)
                     _nw_lock_synced(nw_socket)
@@ -1596,9 +1567,6 @@
         task = nw_socket.listener_port_poll_task
         nw_socket.listener_port_poll_task = nothing
         event_loop = nw_socket.event_loop
-        _nw_pc_trace(
-            "listener_stop_port_poll socket=$(repr(UInt(pointer_from_objref(nw_socket)))) has_task=$(task !== nothing) has_loop=$(event_loop !== nothing)"
-        )
         if task !== nothing && event_loop !== nothing
             cancel_task!(event_loop, task)
         end
@@ -1658,12 +1626,10 @@
     function _nw_listener_poll_port_until_ready!(nw_socket::NWSocket)::Nothing
         event_loop = nw_socket.event_loop
         event_loop === nothing && return nothing
-        _nw_pc_trace("listener_poll_start socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
 
         _nw_listener_stop_port_poll!(nw_socket)
 
         if _nw_listener_try_finish_port_ready!(nw_socket)
-            _nw_pc_trace("listener_poll_ready_immediate socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
             return nothing
         end
 
@@ -1678,7 +1644,6 @@
         nw_socket.listener_port_poll_task = task
         run_at = clock_now_ns() + 1_000_000
         schedule_task_future!(event_loop, task, run_at)
-        _nw_pc_trace("listener_poll_scheduled socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
         return nothing
     end
 
@@ -1796,7 +1761,6 @@
     end
 
     @inline function _nw_invoke_close_complete!(nw_socket::NWSocket)::Nothing
-        _nw_pc_trace("invoke_close_complete socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
         close_fn = nw_socket.on_close_complete
         nw_socket.on_close_complete = nothing
         if close_fn !== nothing
@@ -1810,7 +1774,6 @@
     end
 
     @inline function _nw_invoke_cleanup_complete!(nw_socket::NWSocket)::Nothing
-        _nw_pc_trace("invoke_cleanup_complete socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
         cleanup_fn = nw_socket.on_cleanup_complete
         nw_socket.on_cleanup_complete = nothing
         if cleanup_fn !== nothing
@@ -1824,9 +1787,6 @@
     end
 
     function _nw_cancel_socket!(nw_socket::NWSocket)
-        _nw_pc_trace(
-            "cancel_socket socket=$(repr(UInt(pointer_from_objref(nw_socket)))) mode=$(Int(nw_socket.mode)) has_loop=$(nw_socket.event_loop !== nothing)"
-        )
         if nw_socket.event_loop === nothing
             try
                 if nw_socket.mode == NWSocketMode.LISTENER && nw_socket.listener != C_NULL
@@ -1863,7 +1823,6 @@
         end
 
         schedule_task_now!(nw_socket.event_loop; type_tag="nw_cancel") do _
-            _nw_pc_trace("cancel_socket task_run socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
             try
                 if nw_socket.mode == NWSocketMode.CONNECTION && nw_socket.timeout_task !== nothing && !nw_socket.connection_setup
                     cancel_task!(nw_socket.event_loop, nw_socket.timeout_task)
@@ -1882,7 +1841,6 @@
     end
 
     function _nw_destroy_socket!(nw_socket::NWSocket)
-        _nw_pc_trace("destroy_socket socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
         while !_nw_read_queue_is_empty(nw_socket)
             node = nw_socket.read_queue[nw_socket.read_queue_head]
             nw_socket.read_queue_head += 1
@@ -1964,9 +1922,6 @@
     function socket_cleanup_impl(::NWSocket, socket::Socket)
         nw_socket = _nw_impl(socket)
         nw_socket === nothing && return nothing
-        _nw_pc_trace(
-            "cleanup_impl socket=$(repr(UInt(pointer_from_objref(nw_socket)))) open=$(socket_is_open(socket)) has_loop=$(socket.event_loop !== nothing) conn=$(nw_socket.connection != C_NULL) listener=$(nw_socket.listener != C_NULL)"
-        )
 
         if socket_is_open(socket)
             socket_close(socket)
@@ -1982,7 +1937,6 @@
 
         nw_socket.cleanup_requested = true
         if nw_socket.connection == C_NULL && nw_socket.listener == C_NULL
-            _nw_pc_trace("cleanup_impl immediate_destroy socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
             _nw_unregister_socket!(nw_socket)
             _nw_destroy_socket!(nw_socket)
         end
@@ -2204,9 +2158,6 @@
         event_loop_group::Union{EventLoopGroup,Nothing},
     )::Nothing
         nw_socket = _nw_impl(socket)
-        _nw_pc_trace(
-            "start_accept socket=$(repr(UInt(pointer_from_objref(nw_socket)))) loop=$(repr(UInt(pointer_from_objref(accept_loop)))) listener=$(nw_socket.listener != C_NULL)"
-        )
         _nw_lock_synced(nw_socket)
         try
             if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
@@ -2245,7 +2196,6 @@
             end
 
             ccall((:nw_listener_start, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
-            _nw_pc_trace("start_accept listener_start socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
         finally
             _nw_unlock_synced(nw_socket)
         end
@@ -2254,7 +2204,6 @@
 
     function socket_stop_accept_impl(::NWSocket, socket::Socket)::Nothing
         nw_socket = _nw_impl(socket)
-        _nw_pc_trace("stop_accept socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
         _nw_lock_synced(nw_socket)
         try
             if nw_socket.state != _nw_state_mask(NWSocketState.LISTENING)
@@ -2262,7 +2211,6 @@
             end
             ccall((:nw_listener_cancel, _NW_NETWORK_LIB), Cvoid, (nw_listener_t,), nw_socket.listener)
             _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.STOPPED)))
-            _nw_pc_trace("stop_accept listener_cancel socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
         finally
             _nw_unlock_synced(nw_socket)
         end
@@ -2272,14 +2220,10 @@
     function socket_close_impl(::NWSocket, socket::Socket)::Nothing
         nw_socket = _nw_impl(socket)
         _nw_lock_synced(nw_socket)
-        _nw_pc_trace(
-            "close_impl socket=$(repr(UInt(pointer_from_objref(nw_socket)))) state=$(_nw_state_string(nw_socket.state)) pending_writes=$(nw_socket.pending_writes)"
-        )
         if nw_socket.state < _nw_state_mask(NWSocketState.CLOSING)
             _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSING)) | Int(_nw_state_mask(NWSocketState.CONNECTED_READ)))
             if nw_socket.pending_writes == 0
                 _nw_unlock_synced(nw_socket)
-                _nw_pc_trace("close_impl triggering_cancel socket=$(repr(UInt(pointer_from_objref(nw_socket))))")
                 _nw_cancel_socket!(nw_socket)
                 return nothing
             end
