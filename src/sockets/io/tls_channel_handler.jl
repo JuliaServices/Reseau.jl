@@ -38,66 +38,6 @@ function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
     return true
 end
 
-mutable struct TlsByoCryptoSetupOptions{UD}
-    new_handler_fn::Union{Function, Nothing}
-    start_negotiation_fn::Union{Function, Nothing}
-    user_data::UD
-end
-
-function TlsByoCryptoSetupOptions(;
-        new_handler_fn,
-        start_negotiation_fn = nothing,
-        user_data = nothing,
-    )
-    return TlsByoCryptoSetupOptions(new_handler_fn, start_negotiation_fn, user_data)
-end
-
-const _tls_byo_client_setup = Ref{Union{TlsByoCryptoSetupOptions, Nothing}}(nothing)
-const _tls_byo_server_setup = Ref{Union{TlsByoCryptoSetupOptions, Nothing}}(nothing)
-
-function _tls_byo_new_handler(
-        setup::TlsByoCryptoSetupOptions,
-        options,
-        slot::ChannelSlot,
-    )
-    handler = setup.new_handler_fn(options, slot, setup.user_data)
-    if handler === nothing
-        throw_error(ERROR_INVALID_STATE)
-    end
-    channel_slot_set_handler!(slot, handler)
-    return handler
-end
-
-function _tls_byo_start_negotiation(
-        setup::TlsByoCryptoSetupOptions,
-        handler,
-    )::Nothing
-    if setup.start_negotiation_fn === nothing
-        throw_error(ERROR_INVALID_STATE)
-    end
-    res = setup.start_negotiation_fn(handler, setup.user_data)
-    if res isa Integer && res != OP_SUCCESS
-        throw_error(Int(res))
-    end
-    return nothing
-end
-
-function tls_byo_crypto_set_client_setup_options(options::TlsByoCryptoSetupOptions)::Nothing
-    if options.new_handler_fn === nothing || options.start_negotiation_fn === nothing
-        throw_error(ERROR_INVALID_ARGUMENT)
-    end
-    _tls_byo_client_setup[] = options
-    return nothing
-end
-
-function tls_byo_crypto_set_server_setup_options(options::TlsByoCryptoSetupOptions)::Nothing
-    if options.new_handler_fn === nothing
-        throw_error(ERROR_INVALID_ARGUMENT)
-    end
-    _tls_byo_server_setup[] = options
-    return nothing
-end
-
 struct TlsCtxPkcs11Options{PL}
     pkcs11_lib::PL
     user_pin::ByteCursor
@@ -1365,11 +1305,6 @@ function tls_client_handler_new(
         throw_error(ERROR_INVALID_ARGUMENT)
     end
 
-    client_setup = _tls_byo_client_setup[]
-    if client_setup !== nothing
-        return _tls_byo_new_handler(client_setup::TlsByoCryptoSetupOptions, options, slot)
-    end
-
     @static if Sys.islinux()
         return _s2n_handler_new(options, slot, S2N_CLIENT)
     elseif Sys.isapple()
@@ -1387,11 +1322,6 @@ function tls_server_handler_new(
         throw_error(ERROR_INVALID_ARGUMENT)
     end
 
-    server_setup = _tls_byo_server_setup[]
-    if server_setup !== nothing
-        return _tls_byo_new_handler(server_setup::TlsByoCryptoSetupOptions, options, slot)
-    end
-
     @static if Sys.islinux()
         return _s2n_handler_new(options, slot, S2N_SERVER)
     elseif Sys.isapple()
@@ -1402,12 +1332,6 @@ function tls_server_handler_new(
 end
 
 function tls_client_handler_start_negotiation(handler)::Nothing
-    client_setup = _tls_byo_client_setup[]
-    if client_setup !== nothing
-        _tls_byo_start_negotiation(client_setup::TlsByoCryptoSetupOptions, handler)
-        return nothing
-    end
-
     @static if Sys.islinux()
         if !(handler isa S2nTlsHandler)
             throw_error(ERROR_INVALID_STATE)
