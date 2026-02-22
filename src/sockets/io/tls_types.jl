@@ -243,4 +243,21 @@ function TlsConnectionOptions(
     )
 end
 
+@inline function _tls_connection_options_with_negotiation(
+        options::TlsConnectionOptions,
+        advertise_alpn_message::Bool,
+        on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing},
+    )::TlsConnectionOptions
+    return TlsConnectionOptions(
+        options.ctx,
+        options.server_name,
+        options.alpn_list,
+        options.advertise_alpn_message || advertise_alpn_message,
+        on_negotiation_result,
+        options.on_data_read,
+        options.on_error,
+        options.timeout_ms,
+    )
+end
+
 const MaybeTlsConnectionOptions = Union{TlsConnectionOptions, Nothing}

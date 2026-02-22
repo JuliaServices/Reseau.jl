@@ -1597,8 +1597,8 @@ end
                 return nothing
             end)
 
-            ch1 = Sockets.channel_new(Sockets.ChannelOptions(; event_loop = el, on_setup_completed = on_setup))
-            ch2 = Sockets.channel_new(Sockets.ChannelOptions(; event_loop = el, on_setup_completed = on_setup))
+            ch1 = Sockets.channel_new(; event_loop = el, on_setup_completed = on_setup)
+            ch2 = Sockets.channel_new(; event_loop = el, on_setup_completed = on_setup)
 
             @test _wait_for_channel(setup_ch)
             @test _wait_for_channel(setup_ch)

@@ -81,13 +81,13 @@ function _install_protocol_handler_from_socket(
 end
 
 # Connection request tracking
-mutable struct SocketConnectionRequest
+mutable struct SocketConnectionRequest{TO, PN}
     bootstrap::ClientBootstrap
     host::String
     port::UInt32
     socket_options::SocketOptions
-    tls_connection_options::MaybeTlsConnectionOptions
-    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
+    tls_connection_options::TO
+    on_protocol_negotiated::PN
     enable_read_back_pressure::Bool
     requested_event_loop::Union{EventLoop, Nothing}
     event_loop_group::EventLoopGroup
@@ -121,6 +121,8 @@ function client_bootstrap_connect!(
         enable_read_back_pressure::Bool,
         requested_event_loop::Union{EventLoop, Nothing},
         host_resolution_config::Union{HostResolutionConfig, Nothing},
+        event_loop_group_override::Union{EventLoopGroup, Nothing} = nothing,
+        host_resolver_override::Union{HostResolver, Nothing} = nothing,
     )::Channel
     if @atomic bootstrap.shutdown
         throw(ReseauError(ERROR_IO_EVENT_LOOP_SHUTDOWN))
@@ -131,8 +133,12 @@ function client_bootstrap_connect!(
         LS_IO_CHANNEL_BOOTSTRAP,
         "ClientBootstrap: initiating connection to $host_str:$port",
     )
-    event_loop_group = EventLoops.get_event_loop_group()
-    host_resolver = get_host_resolver()
+    event_loop_group = event_loop_group_override === nothing ?
+        EventLoops.get_event_loop_group() :
+        event_loop_group_override
+    host_resolver = host_resolver_override === nothing ?
+        get_host_resolver() :
+        host_resolver_override
     request_resolution_config = _normalize_resolution_config(
         host_resolver,
         host_resolution_config,
@@ -175,19 +181,16 @@ end
 
 function _get_connection_event_loop(request::SocketConnectionRequest)::Union{EventLoop, Nothing}
     request.event_loop !== nothing && return request.event_loop
-
     if request.requested_event_loop === nothing
         request.event_loop = get_next_event_loop(request.event_loop_group)
         return request.event_loop
     end
-
     for loop in request.event_loop_group.event_loops
         if loop === request.requested_event_loop
             request.event_loop = request.requested_event_loop
             return request.event_loop
         end
     end
-
     request.event_loop = nothing
     return request.event_loop
 end
@@ -245,15 +248,12 @@ end
 function _cancel_connection_attempts(request::SocketConnectionRequest)
     event_loop = request.event_loop
     event_loop === nothing && return nothing
-
     if !(@atomic event_loop.running)
         return _clear_connection_attempt_tasks!(request)
     end
-
     if event_loop_thread_is_callers_thread(event_loop)
         return _cancel_connection_attempts_on_event_loop!(request, event_loop)
     end
-
     fut = Future{Nothing}()
     schedule_task_now!(event_loop; type_tag = "client_bootstrap_cancel_attempts") do status
         try
@@ -311,7 +311,6 @@ function _schedule_connection_attempts(
     _cancel_connection_attempts(request)
     request.connection_attempt_tasks = ScheduledTask[]
     request.connect_future = Future{Socket}()
-
     if request.addresses_count == 0
         _notify_future_error!(request.connect_future, ReseauError(ERROR_IO_DNS_NO_ADDRESS_FOR_HOST))
         return request.connect_future
@@ -443,8 +442,8 @@ function _on_socket_connect_complete(
     return nothing
 end
 
-mutable struct _ClientChannelSetupCtx
-    request::SocketConnectionRequest
+mutable struct _ClientChannelSetupCtx{R <: SocketConnectionRequest}
+    request::R
     socket::Socket
     channel::Union{Channel, Nothing}
     result_future::Future{Channel}
@@ -452,6 +451,27 @@ end
 
 struct _ClientChannelOnSetup{C <: _ClientChannelSetupCtx}
     ctx::C
+end
+
+struct _ClientTlsOnNegotiationResult
+    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
+    channel::Channel
+    socket::Socket
+    result_future::Future{Channel}
+end
+
+function (cb::_ClientTlsOnNegotiationResult)(handler, slot, error_code::Int)::Nothing
+    if cb.on_negotiation_result !== nothing
+        cb.on_negotiation_result(handler, slot, error_code)
+    end
+    if error_code == OP_SUCCESS
+        notify(cb.result_future, cb.channel)
+    else
+        channel_shutdown!(cb.channel, error_code)
+        socket_close(cb.socket)
+        _notify_future_error!(cb.result_future, ReseauError(error_code))
+    end
+    return nothing
 end
 
 function _notify_channel_setup_error!(ctx::_ClientChannelSetupCtx, error_code::Int)::Nothing
@@ -546,28 +566,16 @@ function (cb::_ClientChannelOnSetup)(error_code::Int)::Nothing
     elseif request.tls_connection_options !== nothing
         tls_options = request.tls_connection_options::TlsConnectionOptions
         advertise_alpn = request.on_protocol_negotiated !== nothing && tls_is_alpn_available()
-        on_negotiation = (handler, slot, err) -> begin
-            if tls_options.on_negotiation_result !== nothing
-                tls_options.on_negotiation_result(handler, slot, err)
-            end
-            if err == OP_SUCCESS
-                notify(ctx.result_future, channel)
-            else
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                _notify_future_error!(ctx.result_future, ReseauError(err))
-            end
-            return nothing
-        end
-        wrapped = TlsConnectionOptions(
-            tls_options.ctx;
-            server_name = tls_options.server_name,
-            alpn_list = tls_options.alpn_list,
-            advertise_alpn_message = tls_options.advertise_alpn_message || advertise_alpn,
-            on_negotiation_result = on_negotiation,
-            on_data_read = tls_options.on_data_read,
-            on_error = tls_options.on_error,
-            timeout_ms = tls_options.timeout_ms,
+        on_negotiation = TlsNegotiationResultCallback(_ClientTlsOnNegotiationResult(
+            tls_options.on_negotiation_result,
+            channel,
+            socket,
+            ctx.result_future,
+        ))
+        wrapped = _tls_connection_options_with_negotiation(
+            tls_options,
+            advertise_alpn,
+            on_negotiation,
         )
         local tls_handler
         try
@@ -621,17 +629,15 @@ function _setup_client_channel(
 
     ctx = _ClientChannelSetupCtx(request, socket, nothing, result_future)
     on_setup = EventCallable(_ClientChannelOnSetup(ctx))
-    options = ChannelOptions(
-        event_loop = event_loop,
-        event_loop_group = request.event_loop_group,
-        on_setup_completed = on_setup,
-        on_shutdown_completed = nothing,
-        enable_read_back_pressure = request.enable_read_back_pressure,
-    )
-
     local channel
     try
-        channel = channel_new(options)
+        channel = channel_new(
+            event_loop = event_loop,
+            event_loop_group = request.event_loop_group,
+            on_setup_completed = on_setup,
+            on_shutdown_completed = nothing,
+            enable_read_back_pressure = request.enable_read_back_pressure,
+        )
     catch e
         logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "ClientBootstrap: failed to create channel")
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
@@ -912,15 +918,55 @@ function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
     return nothing
 end
 
-function _server_bootstrap_listener_destroy_task(bootstrap::ServerBootstrap, status::TaskStatus.T)
-    listener = bootstrap.listener_socket
-    if listener !== nothing
-        socket_stop_accept(listener)
-        socket_close(listener)
-        bootstrap.listener_socket = nothing
-    end
+@inline function _server_bootstrap_listener_closed!(bootstrap::ServerBootstrap)::Nothing
     @atomic bootstrap.listener_closed = true
     _server_bootstrap_maybe_destroy(bootstrap)
+    return nothing
+end
+
+struct _ServerOnListenerClose{B <: ServerBootstrap}
+    bootstrap::B
+end
+
+@inline function (cb::_ServerOnListenerClose)(_user_data)::Nothing
+    _server_bootstrap_listener_closed!(cb.bootstrap)
+    return nothing
+end
+
+function _server_bootstrap_listener_destroy_task(bootstrap::ServerBootstrap, status::TaskStatus.T)
+    _ = status
+    listener = bootstrap.listener_socket
+    bootstrap.listener_socket = nothing
+
+    listener === nothing && return _server_bootstrap_listener_closed!(bootstrap)
+
+    close_callback_installed = false
+    close_started = false
+
+    if listener !== nothing
+        try
+            socket_set_close_complete_callback(listener, TaskFn(_ServerOnListenerClose(bootstrap)))
+            close_callback_installed = true
+        catch
+        end
+        try
+            socket_stop_accept(listener)
+        catch
+        end
+        try
+            socket_close(listener)
+            close_started = true
+        catch
+        end
+        try
+            socket_cleanup!(listener)
+        catch
+        end
+    end
+
+    if !(close_callback_installed && close_started)
+        _server_bootstrap_listener_closed!(bootstrap)
+    end
     return nothing
 end
 
@@ -1180,17 +1226,15 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
 
     on_shutdown = EventCallable(_IncomingChannelOnShutdown(ctx))
     on_setup = EventCallable(_IncomingChannelOnSetup(ctx))
-    options = ChannelOptions(
-        event_loop = event_loop,
-        event_loop_group = bootstrap.event_loop_group,
-        on_setup_completed = on_setup,
-        on_shutdown_completed = on_shutdown,
-        enable_read_back_pressure = bootstrap.enable_read_back_pressure,
-    )
-
     local channel
     try
-        channel = channel_new(options)
+        channel = channel_new(
+            event_loop = event_loop,
+            event_loop_group = bootstrap.event_loop_group,
+            on_setup_completed = on_setup,
+            on_shutdown_completed = on_shutdown,
+            enable_read_back_pressure = bootstrap.enable_read_back_pressure,
+        )
     catch e
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP,

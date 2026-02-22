@@ -27,13 +27,11 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
             end)
         ) : nothing
 
-    channel_opts = Sockets.ChannelOptions(
+    channel = Sockets.channel_new(
         event_loop = el,
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
     )
-
-    channel = Sockets.channel_new(channel_opts)
 
     @test _wait_ready_channel(setup_ch)
     if isready(setup_ch)
@@ -91,13 +89,11 @@ end
                 return nothing
             end)
 
-            channel_opts = Sockets.ChannelOptions(
+            channel = Sockets.channel_new(
                 event_loop = el,
                 on_setup_completed = on_setup,
                 on_shutdown_completed = nothing,
             )
-
-            channel = Sockets.channel_new(channel_opts)
 
             Sockets.channel_destroy!(channel)
             @test EventLoops.run!(el) === nothing

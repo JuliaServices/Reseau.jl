@@ -72,7 +72,7 @@ function Sockets.handler_process_read_message(
     )::Nothing
     next_data = handler.on_read(handler, slot, message.message_data, handler.ctx)
 
-    if slot.channel !== nothing
+    if Sockets.channel_slot_is_attached(slot)
         Sockets.channel_release_message_to_pool!(slot.channel, message)
     end
 
@@ -101,7 +101,7 @@ function Sockets.handler_process_write_message(
     )::Nothing
     next_data = handler.on_write(handler, slot, message.message_data, handler.ctx)
 
-    if slot.channel !== nothing
+    if Sockets.channel_slot_is_attached(slot)
         Sockets.channel_release_message_to_pool!(slot.channel, message)
     end
 

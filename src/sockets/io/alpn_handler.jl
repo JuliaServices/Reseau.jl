@@ -25,6 +25,100 @@ function setchannelslot!(handler::AlpnHandler, slot::ChannelSlot)::Nothing
     return nothing
 end
 
+@inline function (::_ChannelSlotReadCallWrapper)(
+        f::_ChannelHandlerReadDispatch{AlpnHandler},
+        slot_ptr::Ptr{Cvoid},
+        message_ptr::Ptr{Cvoid},
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    message = _callback_ptr_to_obj(message_ptr)::IoMessage
+    _alpn_handler_process_read_message_impl(f.handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotWriteCallWrapper)(
+        f::_ChannelHandlerWriteDispatch{AlpnHandler},
+        slot_ptr::Ptr{Cvoid},
+        message_ptr::Ptr{Cvoid},
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    message = _callback_ptr_to_obj(message_ptr)::IoMessage
+    _alpn_handler_process_write_message_impl(f.handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotIncrementWindowCallWrapper)(
+        f::_ChannelHandlerIncrementWindowDispatch{AlpnHandler},
+        slot_ptr::Ptr{Cvoid},
+        size::Csize_t,
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    _alpn_handler_increment_read_window_impl(f.handler, slot, size)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotShutdownCallWrapper)(
+        f::_ChannelHandlerShutdownDispatch{AlpnHandler},
+        slot_ptr::Ptr{Cvoid},
+        direction::UInt8,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    _alpn_handler_shutdown_impl(
+        f.handler,
+        slot,
+        ChannelDirection.T(direction),
+        error_code,
+        free_scarce_resources_immediately,
+    )::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_read_dispatch(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _alpn_handler_process_read_message_impl(handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_write_dispatch(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _alpn_handler_process_write_message_impl(handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_increment_window_dispatch(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        size::Csize_t,
+    )::Nothing
+    _alpn_handler_increment_read_window_impl(handler, slot, size)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_shutdown_dispatch(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    _alpn_handler_shutdown_impl(
+        handler,
+        slot,
+        direction,
+        error_code,
+        free_scarce_resources_immediately,
+    )::Nothing
+    return nothing
+end
+
 function _alpn_extract_protocol(message::IoMessage)::Union{ByteBuffer, Nothing}
     if message.user_data isa TlsNegotiatedProtocolMessage
         return (message.user_data::TlsNegotiatedProtocolMessage).protocol
@@ -32,7 +126,11 @@ function _alpn_extract_protocol(message::IoMessage)::Union{ByteBuffer, Nothing}
     return nothing
 end
 
-function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+function _alpn_handler_process_read_message_impl(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
     if message.message_tag != TLS_NEGOTIATED_PROTOCOL_MESSAGE
         throw_error(ERROR_IO_MISSING_ALPN_MESSAGE)
     end
@@ -42,16 +140,15 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
         throw_error(ERROR_IO_MISSING_ALPN_MESSAGE)
     end
     protocol_str = byte_buffer_as_string(protocol)
-    chan = slot.channel
-    chan_id = chan === nothing ? -1 : chan.channel_id
+    chan_id = channel_slot_is_attached(slot) ? slot.channel.channel_id : -1
     logf(
         LogLevel.DEBUG,
         LS_IO_ALPN,string("ALPN negotiated protocol: %s (channel %d)", " ", string(isempty(protocol_str) ? "<empty>" : protocol_str), " ", string(chan_id), " ", ))
 
-    channel = slot.channel
-    if channel === nothing
+    if !channel_slot_is_attached(slot)
         throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
     end
+    channel = slot.channel
 
     new_slot = channel_slot_new!(channel)
     callback = handler.on_protocol_negotiated
@@ -70,14 +167,45 @@ function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, m
     return nothing
 end
 
-function handler_process_write_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+function _alpn_handler_process_write_message_impl(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
     logf(LogLevel.ERROR, LS_IO_ALPN, "ALPN handler received unexpected write message")
     throw_error(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
 end
 
-function handler_increment_read_window(handler::AlpnHandler, slot::ChannelSlot, size::Csize_t)::Nothing
+function _alpn_handler_increment_read_window_impl(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        size::Csize_t,
+    )::Nothing
     logf(LogLevel.ERROR, LS_IO_ALPN, "ALPN handler does not accept window increments")
     throw_error(ERROR_IO_CHANNEL_UNKNOWN_MESSAGE_TYPE)
+end
+
+function _alpn_handler_shutdown_impl(
+        handler::AlpnHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
+    return nothing
+end
+
+function handler_process_read_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+    return _alpn_handler_process_read_message_impl(handler, slot, message)
+end
+
+function handler_process_write_message(handler::AlpnHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+    return _alpn_handler_process_write_message_impl(handler, slot, message)
+end
+
+function handler_increment_read_window(handler::AlpnHandler, slot::ChannelSlot, size::Csize_t)::Nothing
+    return _alpn_handler_increment_read_window_impl(handler, slot, size)
 end
 
 function handler_shutdown(
@@ -87,8 +215,7 @@ function handler_shutdown(
         error_code::Int,
         free_scarce_resources_immediately::Bool,
     )::Nothing
-    channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
-    return nothing
+    return _alpn_handler_shutdown_impl(handler, slot, direction, error_code, free_scarce_resources_immediately)
 end
 
 function handler_initial_window_size(handler::AlpnHandler)::Csize_t

@@ -11,7 +11,7 @@ export
 
 mutable struct TCPSocket <: IO
     channel::Union{Channel, Nothing}
-    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
+    slot::Union{ChannelSlot{Channel}, Nothing}
     socket::Union{Socket, Nothing}
     host::String
     port::Int
@@ -35,7 +35,7 @@ mutable struct TCPSocket <: IO
 end
 
 mutable struct _TCPSocketHandler
-    slot::Union{ChannelSlot{Union{Channel, Nothing}}, Nothing}
+    slot::Union{ChannelSlot{Channel}, Nothing}
     io::TCPSocket
 end
 
@@ -145,7 +145,11 @@ function _install_handler_for_connected_channel!(io::TCPSocket, channel::Channel
                 _install_handler!(io, channel)
                 notify(install_future, nothing)
             catch e
-                notify(install_future, e isa Exception ? e : ReseauError(ERROR_UNKNOWN))
+                if e isa Exception
+                    @inline notify_exception!(install_future, e)
+                else
+                    @inline notify_exception!(install_future, ReseauError(ERROR_UNKNOWN))
+                end
             end
             return nothing
         end),
@@ -268,21 +272,19 @@ function TCPSocket(
     io.owns_event_loop_group = owns_elg
     io.owns_host_resolver = owns_resolver
 
-    channel = @with EventLoops.DEFAULT_EVENT_LOOP_GROUP => elg begin
-        @with DEFAULT_HOST_RESOLVER => resolver begin
-            client_bootstrap_connect!(
-                bootstrap,
-                host,
-                port,
-                socket_options,
-                tls_conn,
-                bootstrap.on_protocol_negotiated,
-                enable_read_back_pressure,
-                nothing,
-                host_resolution_config,
-            )
-        end
-    end
+    channel = client_bootstrap_connect!(
+        bootstrap,
+        host,
+        port,
+        socket_options,
+        tls_conn,
+        bootstrap.on_protocol_negotiated,
+        enable_read_back_pressure,
+        nothing,
+        host_resolution_config,
+        elg::EventLoopGroup,
+        resolver::HostResolver,
+    )
     _install_handler_for_connected_channel!(io, channel)
     io.tls_enabled = tls_conn !== nothing
     return io
@@ -324,6 +326,7 @@ mutable struct _TCPServerState
     closed::Bool
     close_error::Int
     listen_event::Base.Threads.Event
+    close_event::Base.Threads.Event
     listen_error::Int
     read_buffer_capacity::Int
     enable_read_back_pressure::Bool
@@ -351,6 +354,11 @@ function Base.close(server::TCPServer)::Nothing
         unlock(server.state.cond)
     end
     server_bootstrap_shutdown!(server.bootstrap)
+    listener_loop = server.bootstrap.listener_event_loop
+    if listener_loop !== nothing && event_loop_thread_is_callers_thread(listener_loop)
+        return nothing
+    end
+    wait(server.state.close_event)
     return nothing
 end
 
@@ -428,6 +436,17 @@ end
     return nothing
 end
 
+struct _TCPServerOnListenerDestroy
+    state::_TCPServerState
+end
+
+@inline function (cb::_TCPServerOnListenerDestroy)(_bootstrap, _user_data)::Nothing
+    st = cb.state
+    st.close_error = OP_SUCCESS
+    notify(st.close_event)
+    return nothing
+end
+
 function listen(host::AbstractString, port::Integer;
         backlog::Integer = 511,
         tls::Bool = false,
@@ -455,6 +474,7 @@ function listen(host::AbstractString, port::Integer;
         false,
         OP_SUCCESS,
         Base.Threads.Event(),
+        Base.Threads.Event(),
         OP_SUCCESS,
         Int(read_buffer_capacity),
         enable_read_back_pressure,
@@ -471,6 +491,7 @@ function listen(host::AbstractString, port::Integer;
         tls_connection_options = tls_conn,
         on_listener_setup = _TCPServerOnListenerSetup(state),
         on_incoming_channel_setup = _TCPServerOnIncomingSetup(state),
+        on_listener_destroy = _TCPServerOnListenerDestroy(state),
         user_data = state,
         enable_read_back_pressure = enable_read_back_pressure,
     )
@@ -589,7 +610,7 @@ function tlsupgrade!(
         _ = handler
         _ = ud
         negotiation_error[] = err
-        if err == OP_SUCCESS && slot !== nothing && slot.channel !== nothing
+        if err == OP_SUCCESS && slot !== nothing && channel_slot_is_attached(slot)
             channel_trigger_read(slot.channel)
         end
         notify(negotiation_event)
@@ -932,7 +953,105 @@ function setchannelslot!(handler::_TCPSocketHandler, slot::ChannelSlot)::Nothing
     return nothing
 end
 
-function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+@inline function (::_ChannelSlotReadCallWrapper)(
+        f::_ChannelHandlerReadDispatch{_TCPSocketHandler},
+        slot_ptr::Ptr{Cvoid},
+        message_ptr::Ptr{Cvoid},
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    message = _callback_ptr_to_obj(message_ptr)::IoMessage
+    _tcpsocket_handler_process_read_message_impl(f.handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotWriteCallWrapper)(
+        f::_ChannelHandlerWriteDispatch{_TCPSocketHandler},
+        slot_ptr::Ptr{Cvoid},
+        message_ptr::Ptr{Cvoid},
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    message = _callback_ptr_to_obj(message_ptr)::IoMessage
+    _tcpsocket_handler_process_write_message_impl(f.handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotIncrementWindowCallWrapper)(
+        f::_ChannelHandlerIncrementWindowDispatch{_TCPSocketHandler},
+        slot_ptr::Ptr{Cvoid},
+        size::Csize_t,
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    _tcpsocket_handler_increment_read_window_impl(f.handler, slot, size)::Nothing
+    return nothing
+end
+
+@inline function (::_ChannelSlotShutdownCallWrapper)(
+        f::_ChannelHandlerShutdownDispatch{_TCPSocketHandler},
+        slot_ptr::Ptr{Cvoid},
+        direction::UInt8,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    _tcpsocket_handler_shutdown_impl(
+        f.handler,
+        slot,
+        ChannelDirection.T(direction),
+        error_code,
+        free_scarce_resources_immediately,
+    )::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_read_dispatch(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _tcpsocket_handler_process_read_message_impl(handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_write_dispatch(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
+    _tcpsocket_handler_process_write_message_impl(handler, slot, message)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_increment_window_dispatch(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        size::Csize_t,
+    )::Nothing
+    _tcpsocket_handler_increment_read_window_impl(handler, slot, size)::Nothing
+    return nothing
+end
+
+@inline function _channel_handler_shutdown_dispatch(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    _tcpsocket_handler_shutdown_impl(
+        handler,
+        slot,
+        direction,
+        error_code,
+        free_scarce_resources_immediately,
+    )::Nothing
+    return nothing
+end
+
+function _tcpsocket_handler_process_read_message_impl(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
     io = handler.io
     data_len = Int(message.message_data.len)
     if data_len > 0
@@ -946,27 +1065,57 @@ function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelS
             unlock(io.cond)
         end
     end
-    slot.channel !== nothing && channel_release_message_to_pool!(slot.channel, message)
+    channel_slot_is_attached(slot) && channel_release_message_to_pool!(slot.channel, message)
     return nothing
 end
 
-function handler_process_write_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+function _tcpsocket_handler_process_write_message_impl(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        message::IoMessage,
+    )::Nothing
     _ = handler
     _ = slot
     _ = message
     throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
 end
 
-function handler_increment_read_window(handler::_TCPSocketHandler, slot::ChannelSlot, size::Csize_t)::Nothing
+function _tcpsocket_handler_increment_read_window_impl(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        size::Csize_t,
+    )::Nothing
     _ = handler
     channel_slot_increment_read_window!(slot, size)
     return nothing
 end
 
-function handler_shutdown(handler::_TCPSocketHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Nothing
+function _tcpsocket_handler_shutdown_impl(
+        handler::_TCPSocketHandler,
+        slot::ChannelSlot,
+        direction::ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
     _mark_closed!(handler.io, error_code)
     channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
+end
+
+function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+    return _tcpsocket_handler_process_read_message_impl(handler, slot, message)
+end
+
+function handler_process_write_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
+    return _tcpsocket_handler_process_write_message_impl(handler, slot, message)
+end
+
+function handler_increment_read_window(handler::_TCPSocketHandler, slot::ChannelSlot, size::Csize_t)::Nothing
+    return _tcpsocket_handler_increment_read_window_impl(handler, slot, size)
+end
+
+function handler_shutdown(handler::_TCPSocketHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Nothing
+    return _tcpsocket_handler_shutdown_impl(handler, slot, direction, error_code, free_scarce_resources_immediately)
 end
 
 function handler_initial_window_size(handler::_TCPSocketHandler)::Csize_t

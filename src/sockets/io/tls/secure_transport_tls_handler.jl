@@ -347,11 +347,11 @@ end
 function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     slot = handler.slot
     slot === nothing && return nothing
+    channel_slot_is_attached(slot) || return nothing
     slot.adj_right === nothing && return nothing
     handler.advertise_alpn_message || return nothing
     handler.protocol.len == 0 && return nothing
     channel = slot.channel
-    channel === nothing && return nothing
 
     message = channel_acquire_message_from_pool(
         channel,
@@ -553,9 +553,9 @@ function _secure_transport_write_cb(conn::SSLConnectionRef, data::Ptr{UInt8}, le
     requested = unsafe_load(len_ptr)
     slot_any = handler.slot
     slot_any === nothing && return _errSSLClosedNoNotify
-    slot = slot_any::ChannelSlot{Union{Channel, Nothing}}
+    slot = slot_any::ChannelSlot{Channel}
+    channel_slot_is_attached(slot) || return _errSSLClosedNoNotify
     channel = slot.channel
-    channel isa Channel || return _errSSLClosedNoNotify
 
     processed = Csize_t(0)
     while processed < requested
@@ -1007,8 +1007,9 @@ function _secure_transport_handler_new(
     end
 
     ctx = options.ctx
-    st_ctx = ctx.impl isa SecureTransportCtx ? ctx.impl : nothing
+    st_ctx = ctx.impl isa SecureTransportCtx ? (ctx.impl::SecureTransportCtx) : nothing
     st_ctx === nothing && throw_error(ERROR_IO_TLS_CTX_ERROR)
+    st_ctx = st_ctx::SecureTransportCtx
 
     handler = SecureTransportTlsHandler(
         slot,

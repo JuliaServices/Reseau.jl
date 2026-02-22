@@ -115,13 +115,11 @@ function _setup_channel(; enable_read_back_pressure::Bool = false)
         return nothing
     end)
 
-    channel_opts = Sockets.ChannelOptions(
+    channel = Sockets.channel_new(
         event_loop = el,
         on_setup_completed = on_setup,
         enable_read_back_pressure = enable_read_back_pressure,
     )
-
-    channel = Sockets.channel_new(channel_opts)
 
     @test _wait_ready_channel(setup_ch)
     if isready(setup_ch)

@@ -7,6 +7,7 @@
 
     const _winsock_init_lock = ReentrantLock()
     const _winsock_initialized = Ref{Bool}(false)
+    const _winsock_init_pid = Ref{Int}(0)
     const _connectex_fn = Ref{Ptr{Cvoid}}(C_NULL)
     const _acceptex_fn = Ref{Ptr{Cvoid}}(C_NULL)
 
@@ -49,14 +50,23 @@
     end
 
     function winsock_check_and_init!()::Nothing
-        if _winsock_initialized[]
+        pid = Base.getpid()
+        if _winsock_initialized[] && _winsock_init_pid[] == pid
             return nothing
         end
 
         lock(_winsock_init_lock)
         try
-            if _winsock_initialized[]
+            if _winsock_initialized[] && _winsock_init_pid[] == pid
                 return nothing
+            end
+
+            # Precompile can serialize the initialized flag while native function
+            # pointers are process-local and must be reacquired in a new process.
+            if _winsock_initialized[] && _winsock_init_pid[] != pid
+                _winsock_initialized[] = false
+                _connectex_fn[] = C_NULL
+                _acceptex_fn[] = C_NULL
             end
 
             logf(LogLevel.INFO, LS_IO_SOCKET, "static: initializing WinSock")
@@ -131,6 +141,7 @@
             end
 
             _winsock_initialized[] = true
+            _winsock_init_pid[] = pid
             return nothing
         finally
             unlock(_winsock_init_lock)

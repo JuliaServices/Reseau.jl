@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "5161651ccad8168f11dafa414897e86ec255adbd"
+project_hash = "ba135afc97a360bc968a31a17132cd5334ef8a36"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -58,6 +58,12 @@ version = "1.11.0"
 uuid = "56ddb016-857b-54e1-b83d-db4d58db5568"
 version = "1.11.0"
 
+[[deps.PrecompileTools]]
+deps = ["Preferences"]
+git-tree-sha1 = "07a921781cab75691315adc645096ed5e370cb77"
+uuid = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+version = "1.3.3"
+
 [[deps.Preferences]]
 deps = ["TOML"]
 git-tree-sha1 = "522f093a29b31a93e34eaea17ba055d850edea28"
@@ -75,7 +81,7 @@ uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 version = "1.11.0"
 
 [[deps.Reseau]]
-deps = ["Base64", "Dates", "EnumX", "LibAwsCal", "LibAwsCommon", "Libdl", "Printf", "ScopedValues", "UUIDs"]
+deps = ["Base64", "Dates", "EnumX", "LibAwsCal", "LibAwsCommon", "Libdl", "PrecompileTools", "Printf", "ScopedValues", "UUIDs"]
 path = "."
 uuid = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 version = "1.1.1"

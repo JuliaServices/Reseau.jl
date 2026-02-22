@@ -49,6 +49,8 @@ end
 
 const _managed_count = ManagedThreadCount(0)
 const _managed_done = Base.Threads.Event()
+const _PRECOMPILE_PARK_FOREIGN_THREADS =
+    get(ENV, "RESEAU_PRECOMPILE_PARK_FOREIGN_THREADS", "1") == "1"
 
 function managed_thread_started!()
     @atomic _managed_count.count += 1
@@ -68,6 +70,27 @@ function join_all_managed()
         wait(_managed_done)
         reset(_managed_done)
     end
+    return nothing
+end
+
+@inline function _is_generating_output()::Bool
+    return ccall(:jl_generating_output, Cint, ()) == 1
+end
+
+function _maybe_precompile_park_foreign_thread(reason::AbstractString = "")::Nothing
+    _ = reason
+    _PRECOMPILE_PARK_FOREIGN_THREADS || return nothing
+    _is_generating_output() || return nothing
+    Base.Threads.threadpool() == :foreign || return nothing
+    wait(Base.Threads.Event())
+    return nothing
+end
+
+function _maybe_precompile_yield_foreign_thread()::Nothing
+    _PRECOMPILE_PARK_FOREIGN_THREADS || return nothing
+    _is_generating_output() || return nothing
+    Base.Threads.threadpool() == :foreign || return nothing
+    yield()
     return nothing
 end
 

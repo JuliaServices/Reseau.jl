@@ -652,7 +652,11 @@ function _host_resolver_resolve_async!(
                 )
             catch e
                 delete!(resolver.cache, host)
-                notify(result, e isa Exception ? e : ReseauError(ERROR_UNKNOWN))
+                if e isa Exception
+                    @inline notify_exception!(result, e)
+                else
+                    @inline notify_exception!(result, ReseauError(ERROR_UNKNOWN))
+                end
             end
             return result
         end

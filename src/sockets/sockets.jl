@@ -69,18 +69,31 @@ for name in names(_EVENT_LOOPS; all = true, imported = false)
 end
 
 const _io_library_initialized = Ref{Bool}(false)
+const _io_library_init_pid = Ref{Int}(0)
 
 function io_library_init()
-    _io_library_initialized[] && return nothing
-    _io_library_initialized[] = true
-    _cal_init()
+    # Always refresh C callbacks; precompile can serialize C_NULL pointers.
     _host_resolver_init_cfunctions!()
+    pid = Base.getpid()
+    if _io_library_initialized[] && _io_library_init_pid[] == pid
+        return nothing
+    end
+    _cal_init()
+    _io_library_initialized[] = true
+    _io_library_init_pid[] = pid
     return nothing
 end
 
 function io_library_clean_up()
     !_io_library_initialized[] && return nothing
+    pid = Base.getpid()
+    if _io_library_init_pid[] != 0 && _io_library_init_pid[] != pid
+        _io_library_initialized[] = false
+        _io_library_init_pid[] = 0
+        return nothing
+    end
     _io_library_initialized[] = false
+    _io_library_init_pid[] = 0
     tls_clean_up_static_state()
     join_all_managed()
     return nothing

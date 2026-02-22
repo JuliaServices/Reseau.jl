@@ -1,6 +1,7 @@
 module Reseau
 
 using EnumX
+using PrecompileTools: @compile_workload, @setup_workload
 using ScopedValues
 import UUIDs
 
@@ -29,6 +30,7 @@ include("foreign_threads.jl")
 include("task_scheduler.jl")
 include("eventloops/eventloops.jl")
 include("sockets/sockets.jl")
+include("precompile_workload.jl")
 
 function __init__()
     ForeignThreads.__init__()

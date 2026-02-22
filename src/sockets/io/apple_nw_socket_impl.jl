@@ -5,6 +5,8 @@
 # are in apple_nw_socket_types.jl — included before socket.jl for type ordering.
 
 @static if Sys.isapple()
+    const _NW_PRECOMPILE_PARK_SWEEP = 4
+
     # Network.framework exports some "constants" (e.g. NW_PARAMETERS_DISABLE_PROTOCOL) as
     # globals whose value is already a pointer type. We must load the pointer value from
     # the global's storage (i.e. dereference `cglobal`).
@@ -82,6 +84,80 @@
             unlock(_nw_socket_registry_lock)
             sock.registry_key = C_NULL
         end
+        return nothing
+    end
+
+    @inline function _nw_registry_is_empty()::Bool
+        lock(_nw_socket_registry_lock)
+        is_empty = isempty(_nw_socket_registry)
+        unlock(_nw_socket_registry_lock)
+        return is_empty
+    end
+
+    @inline function _nw_dispatch_queue(event_loop::Union{EventLoop,Nothing})::Ptr{Cvoid}
+        event_loop === nothing && return C_NULL
+        return event_loop.impl.nw_queue
+    end
+
+    @inline function _nw_dispatch_async_f(
+        queue::Ptr{Cvoid},
+        context::Ptr{Cvoid},
+        work::Ptr{Cvoid},
+    )::Nothing
+        ccall(
+            (:dispatch_async_f, _NW_DISPATCH_LIB),
+            Cvoid,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+            queue,
+            context,
+            work,
+        )
+        return nothing
+    end
+
+    @inline function _nw_dispatch_global_queue()::Ptr{Cvoid}
+        return ccall(
+            (:dispatch_get_global_queue, _NW_DISPATCH_LIB),
+            Ptr{Cvoid},
+            (Clong, Culong),
+            Clong(0),
+            Culong(0),
+        )
+    end
+
+    function _nw_precompile_park_invoke(context::Ptr{Cvoid})::Cvoid
+        _ = context
+        try
+            _maybe_precompile_park_foreign_thread("nw_dispatch_queue_registry_empty")
+        catch
+            try
+                Core.println("Fatal error in nw precompile park callback")
+            catch
+            end
+        end
+        return
+    end
+
+    @inline function _nw_schedule_precompile_park_sweep!(reason::AbstractString)::Nothing
+        _nw_ensure_callbacks!()
+        global_queue = _nw_dispatch_global_queue()
+        global_queue == C_NULL && return nothing
+        for _ in 1:_NW_PRECOMPILE_PARK_SWEEP
+            _nw_dispatch_async_f(global_queue, C_NULL, _nw_precompile_park_cb[])
+        end
+        return nothing
+    end
+
+    @inline function _nw_maybe_precompile_park_if_registry_empty(
+        queue::Ptr{Cvoid},
+        reason::AbstractString,
+    )::Nothing
+        _nw_registry_is_empty() || return nothing
+        _nw_ensure_callbacks!()
+        if queue != C_NULL
+            _nw_dispatch_async_f(queue, C_NULL, _nw_precompile_park_cb[])
+        end
+        _nw_schedule_precompile_park_sweep!(reason)
         return nothing
     end
 
@@ -883,6 +959,8 @@
                 Core.println("Fatal error in nw_connection state handler")
             catch
             end
+        finally
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -896,6 +974,8 @@
                 Core.println("Fatal error in nw_listener state handler")
             catch
             end
+        finally
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -909,6 +989,8 @@
                 Core.println("Fatal error in nw_listener new connection handler")
             catch
             end
+        finally
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -928,6 +1010,8 @@
                 Core.println("Fatal error in nw_connection receive completion")
             catch
             end
+        finally
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -946,6 +1030,7 @@
             end
         finally
             ctx_mem != C_NULL && Base.Libc.free(ctx_mem)
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -976,6 +1061,8 @@
                 Core.println("Fatal error calling sec_protocol verify completion block")
             catch
             end
+        finally
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -989,6 +1076,8 @@
                 Core.println("Fatal error in nw_parameters TLS options block")
             catch
             end
+        finally
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -1002,6 +1091,8 @@
                 Core.println("Fatal error in nw_parameters TCP/UDP options block")
             catch
             end
+        finally
+            _maybe_precompile_yield_foreign_thread()
         end
         return
     end
@@ -1026,6 +1117,7 @@
     const _nw_tls_verify_cb = Ref{Ptr{Cvoid}}(C_NULL)
     const _nw_tls_options_cb = Ref{Ptr{Cvoid}}(C_NULL)
     const _nw_tcp_options_cb = Ref{Ptr{Cvoid}}(C_NULL)
+    const _nw_precompile_park_cb = Ref{Ptr{Cvoid}}(C_NULL)
     const _nw_client_set_queue_c = Ref{Ptr{Cvoid}}(C_NULL)
     const _nw_listener_set_queue_c = Ref{Ptr{Cvoid}}(C_NULL)
     const _NW_CALLBACKS_INIT_LOCK = ReentrantLock()
@@ -1043,6 +1135,7 @@
             _nw_tls_verify_cb[] = @cfunction(_nw_tls_verify_invoke, Cvoid, (Ptr{Cvoid}, sec_protocol_metadata_t, sec_trust_t, Ptr{Cvoid}))
             _nw_tls_options_cb[] = @cfunction(_nw_tls_options_invoke, Cvoid, (Ptr{Cvoid}, nw_protocol_options_t))
             _nw_tcp_options_cb[] = @cfunction(_nw_tcp_options_invoke, Cvoid, (Ptr{Cvoid}, nw_protocol_options_t))
+            _nw_precompile_park_cb[] = @cfunction(_nw_precompile_park_invoke, Cvoid, (Ptr{Cvoid},))
             _nw_client_set_queue_c[] = @cfunction(_nw_client_set_queue, Cvoid, (Ptr{IoHandle}, Ptr{Cvoid}))
             _nw_listener_set_queue_c[] = @cfunction(_nw_listener_set_queue, Cvoid, (Ptr{IoHandle}, Ptr{Cvoid}))
         finally
@@ -1294,6 +1387,7 @@
                 end
 
                 if state == 5 # nw_connection_state_cancelled
+                    dispatch_queue = _nw_dispatch_queue(nw_socket.event_loop)
                     _nw_lock_synced(nw_socket)
                     _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
                     _nw_unlock_synced(nw_socket)
@@ -1307,6 +1401,7 @@
                     if nw_socket.cleanup_requested
                         _nw_destroy_socket!(nw_socket)
                     end
+                    _nw_maybe_precompile_park_if_registry_empty(dispatch_queue, "nw_connection_cancelled_last_socket")
                 elseif state == 3 # nw_connection_state_ready
                     _nw_connection_ready!(nw_socket, nw_socket.connection)
                 end
@@ -1389,6 +1484,7 @@
                     end
                     accept_started_cb !== nothing && accept_started_cb(err_code)
                 elseif state == 4 # nw_listener_state_cancelled
+                    dispatch_queue = _nw_dispatch_queue(nw_socket.event_loop)
                     _nw_listener_stop_port_poll!(nw_socket)
                     _nw_lock_synced(nw_socket)
                     _nw_set_socket_state!(nw_socket, Int(_nw_state_mask(NWSocketState.CLOSED)))
@@ -1406,6 +1502,7 @@
                     if nw_socket.cleanup_requested
                         _nw_destroy_socket!(nw_socket)
                     end
+                    _nw_maybe_precompile_park_if_registry_empty(dispatch_queue, "nw_listener_cancelled_last_socket")
                 end
             catch e
                 Core.println("nw_listener_state task errored")
@@ -1532,7 +1629,9 @@
 
         _nw_listener_stop_port_poll!(nw_socket)
 
-        _nw_listener_try_finish_port_ready!(nw_socket) && return nothing
+        if _nw_listener_try_finish_port_ready!(nw_socket)
+            return nothing
+        end
 
         task_ref = Ref{Union{ScheduledTask,Nothing}}(nothing)
         state = _NwListenerPortPollState(
