@@ -164,15 +164,12 @@
         return nothing
     end
 
-    @inline _iocp_on_completion_callable(on_completion::IocpOnCompletionFn) = on_completion
-    @inline _iocp_on_completion_callable(on_completion) = IocpOnCompletionFn(on_completion)
-
     function iocp_overlapped_init!(
             op::IocpOverlapped,
-            on_completion,
+            on_completion::IocpOnCompletionFn,
             user_data,
         )::IocpOverlapped
-        op.on_completion = _iocp_on_completion_callable(on_completion)
+        op.on_completion = on_completion
         op.user_data = user_data
         op.user_data_aux = nothing
         op.active = false
@@ -184,14 +181,31 @@
             op::IocpOverlapped,
             on_completion,
             user_data,
+        )::IocpOverlapped
+        return iocp_overlapped_init!(op, IocpOnCompletionFn(on_completion), user_data)
+    end
+
+    function iocp_overlapped_init!(
+            op::IocpOverlapped,
+            on_completion::IocpOnCompletionFn,
+            user_data,
             user_data_aux,
         )::IocpOverlapped
-        op.on_completion = _iocp_on_completion_callable(on_completion)
+        op.on_completion = on_completion
         op.user_data = user_data
         op.user_data_aux = user_data_aux
         op.active = false
         op.storage[] = IocpOverlappedHeader(_ZERO_OVERLAPPED, pointer_from_objref(op))
         return op
+    end
+
+    function iocp_overlapped_init!(
+            op::IocpOverlapped,
+            on_completion,
+            user_data,
+            user_data_aux,
+        )::IocpOverlapped
+        return iocp_overlapped_init!(op, IocpOnCompletionFn(on_completion), user_data, user_data_aux)
     end
 
     function iocp_overlapped_reset!(op::IocpOverlapped)
