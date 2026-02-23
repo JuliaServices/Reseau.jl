@@ -177,36 +177,52 @@ end
     return nothing
 end
 
-# ── ProtocolNegotiatedCallable: trim-safe (Any, Any) -> Any ──
+# ── ProtocolNegotiatedCallable: trim-safe (slot, protocol) -> handler_or_nothing ──
 # Covers: ALPN protocol callback (slot, protocol) -> new_handler_or_nothing.
+# Returns Ptr{Cvoid} through the cfunction boundary to avoid Any.
+# The returned object survives because there is no GC safepoint between the
+# cfunction return and the caller's unsafe_pointer_to_objref.
 
 struct _ProtocolNegotiatedCallWrapper <: Function end
 
-function (::_ProtocolNegotiatedCallWrapper)(f::F, slot, protocol) where {F}
-    return f(slot, protocol)
+function (::_ProtocolNegotiatedCallWrapper)(f::F, slot_ptr::Ptr{Cvoid}, protocol_ptr::Ptr{Cvoid}) where {F}
+    slot = _callback_ptr_to_obj(slot_ptr)
+    protocol = _callback_ptr_to_obj(protocol_ptr)
+    result = f(slot, protocol)
+    result === nothing && return C_NULL
+    ptr, root = _callback_obj_to_ptr_and_root(result)
+    return GC.@preserve root ptr
 end
 
 @generated function _protocol_negotiated_gen_fptr(::Type{F}) where F
     quote
-        @cfunction($(_ProtocolNegotiatedCallWrapper()), Any, (Ref{$F}, Any, Any))
+        @cfunction($(_ProtocolNegotiatedCallWrapper()), Ptr{Cvoid}, (Ref{$F}, Ptr{Cvoid}, Ptr{Cvoid}))
     end
 end
 
-struct ProtocolNegotiatedCallable
+struct ProtocolNegotiatedCallable{H}
     ptr::Ptr{Cvoid}
     objptr::Ptr{Cvoid}
     _root::Any
 end
 
-function ProtocolNegotiatedCallable(callable::F) where F
+function ProtocolNegotiatedCallable{H}(callable::F) where {H, F}
     ptr = _protocol_negotiated_gen_fptr(F)
     objref = Base.cconvert(Ref{F}, callable)
     objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
-    return ProtocolNegotiatedCallable(ptr, objptr, objref)
+    return ProtocolNegotiatedCallable{H}(ptr, objptr, objref)
 end
 
-@inline function (f::ProtocolNegotiatedCallable)(slot, protocol)
-    return ccall(f.ptr, Any, (Ptr{Cvoid}, Any, Any), f.objptr, slot, protocol)
+ProtocolNegotiatedCallable(callable::F) where {F} = ProtocolNegotiatedCallable{Any}(callable)
+
+@inline function (f::ProtocolNegotiatedCallable{H})(slot, protocol)::Union{H, Nothing} where {H}
+    slot_ptr, slot_root = _callback_obj_to_ptr_and_root(slot)
+    protocol_ptr, protocol_root = _callback_obj_to_ptr_and_root(protocol)
+    result_ptr = GC.@preserve slot_root protocol_root begin
+        ccall(f.ptr, Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), f.objptr, slot_ptr, protocol_ptr)
+    end
+    result_ptr == C_NULL && return nothing
+    return _callback_ptr_to_obj(result_ptr)::H
 end
 
 # Host resolution hooks are represented as plain Julia callables (no cfunction wrapper needed).
@@ -216,14 +232,16 @@ end
 
 struct _TlsNegotiationResultCallbackWrapper <: Function end
 
-function (::_TlsNegotiationResultCallbackWrapper)(f::F, handler, slot, error_code::Int) where {F}
+function (::_TlsNegotiationResultCallbackWrapper)(f::F, handler_ptr::Ptr{Cvoid}, slot_ptr::Ptr{Cvoid}, error_code::Int) where {F}
+    handler = _callback_ptr_to_obj(handler_ptr)
+    slot = _callback_ptr_to_obj(slot_ptr)
     f(handler, slot, error_code)
     return nothing
 end
 
 @generated function _tls_negotiation_result_callback_gen_fptr(::Type{F}) where F
     quote
-        @cfunction($(_TlsNegotiationResultCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Int))
+        @cfunction($(_TlsNegotiationResultCallbackWrapper()), Cvoid, (Ref{$F}, Ptr{Cvoid}, Ptr{Cvoid}, Int))
     end
 end
 
@@ -241,20 +259,27 @@ function TlsNegotiationResultCallback(callable::F) where F
 end
 
 @inline function (f::TlsNegotiationResultCallback)(handler, slot, error_code::Int)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int), f.objptr, handler, slot, error_code)
+    handler_ptr, handler_root = _callback_obj_to_ptr_and_root(handler)
+    slot_ptr, slot_root = _callback_obj_to_ptr_and_root(slot)
+    GC.@preserve handler_root slot_root begin
+        ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Int), f.objptr, handler_ptr, slot_ptr, error_code)
+    end
     return nothing
 end
 
 struct _TlsDataReadCallbackWrapper <: Function end
 
-function (::_TlsDataReadCallbackWrapper)(f::F, handler, slot, buffer) where {F}
+function (::_TlsDataReadCallbackWrapper)(f::F, handler_ptr::Ptr{Cvoid}, slot_ptr::Ptr{Cvoid}, buffer_ptr::Ptr{Cvoid}) where {F}
+    handler = _callback_ptr_to_obj(handler_ptr)
+    slot = _callback_ptr_to_obj(slot_ptr)
+    buffer = _callback_ptr_to_obj(buffer_ptr)
     f(handler, slot, buffer)
     return nothing
 end
 
 @generated function _tls_data_read_callback_gen_fptr(::Type{F}) where F
     quote
-        @cfunction($(_TlsDataReadCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Any))
+        @cfunction($(_TlsDataReadCallbackWrapper()), Cvoid, (Ref{$F}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}))
     end
 end
 
@@ -272,20 +297,28 @@ function TlsDataReadCallback(callable::F) where F
 end
 
 @inline function (f::TlsDataReadCallback)(handler, slot, buffer)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Any), f.objptr, handler, slot, buffer)
+    handler_ptr, handler_root = _callback_obj_to_ptr_and_root(handler)
+    slot_ptr, slot_root = _callback_obj_to_ptr_and_root(slot)
+    buffer_ptr, buffer_root = _callback_obj_to_ptr_and_root(buffer)
+    GC.@preserve handler_root slot_root buffer_root begin
+        ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), f.objptr, handler_ptr, slot_ptr, buffer_ptr)
+    end
     return nothing
 end
 
 struct _TlsErrorCallbackWrapper <: Function end
 
-function (::_TlsErrorCallbackWrapper)(f::F, handler, slot, error_code::Int, message) where {F}
+function (::_TlsErrorCallbackWrapper)(f::F, handler_ptr::Ptr{Cvoid}, slot_ptr::Ptr{Cvoid}, error_code::Int, message_ptr::Ptr{Cvoid}) where {F}
+    handler = _callback_ptr_to_obj(handler_ptr)
+    slot = _callback_ptr_to_obj(slot_ptr)
+    message = _callback_ptr_to_obj(message_ptr)
     f(handler, slot, error_code, message)
     return nothing
 end
 
 @generated function _tls_error_callback_gen_fptr(::Type{F}) where F
     quote
-        @cfunction($(_TlsErrorCallbackWrapper()), Cvoid, (Ref{$F}, Any, Any, Int, Any))
+        @cfunction($(_TlsErrorCallbackWrapper()), Cvoid, (Ref{$F}, Ptr{Cvoid}, Ptr{Cvoid}, Int, Ptr{Cvoid}))
     end
 end
 
@@ -303,7 +336,12 @@ function TlsErrorCallback(callable::F) where F
 end
 
 @inline function (f::TlsErrorCallback)(handler, slot, error_code::Int, message)::Nothing
-    ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Any, Any, Int, Any), f.objptr, handler, slot, error_code, message)
+    handler_ptr, handler_root = _callback_obj_to_ptr_and_root(handler)
+    slot_ptr, slot_root = _callback_obj_to_ptr_and_root(slot)
+    message_ptr, message_root = _callback_obj_to_ptr_and_root(message)
+    GC.@preserve handler_root slot_root message_root begin
+        ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Int, Ptr{Cvoid}), f.objptr, handler_ptr, slot_ptr, error_code, message_ptr)
+    end
     return nothing
 end
 

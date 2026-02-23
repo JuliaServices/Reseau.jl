@@ -23,12 +23,32 @@ end
 @inline _bootstrap_listener_destroy_callback(callback) =
     BootstrapEventCallback(_BootstrapListenerDestroyAdapter(callback))
 
+@inline function _protocol_negotiated_handler_type(callback)::Type
+    rt = Core.Compiler.return_type(callback, Tuple{ChannelSlot{Channel}, ByteBuffer})
+    rt === Union{} && return Any
+    rt === Nothing && return Any
+    rt isa UnionAll && return Any
+    if rt isa Union
+        members = Base.uniontypes(rt)
+        filtered = filter(t -> t !== Nothing, members)
+        isempty(filtered) && return Any
+        return Base.typejoin(filtered...)
+    end
+    return rt
+end
+
+@inline _protocol_negotiated_callback(::Nothing) = nothing
+@inline _protocol_negotiated_callback(callback::ProtocolNegotiatedCallable) = callback
+@inline function _protocol_negotiated_callback(callback)
+    return ProtocolNegotiatedCallable{_protocol_negotiated_handler_type(callback)}(callback)
+end
+
 # Client bootstrap - for creating outgoing connections
-mutable struct ClientBootstrap
+mutable struct ClientBootstrap{PN}
     host_resolution_config::Union{HostResolutionConfig, Nothing}
     socket_options::SocketOptions
     tls_connection_options::MaybeTlsConnectionOptions
-    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
+    on_protocol_negotiated::PN
     @atomic shutdown::Bool
 end
 
@@ -38,11 +58,7 @@ function ClientBootstrap(;
         tls_connection_options::MaybeTlsConnectionOptions = nothing,
         on_protocol_negotiated = nothing,
     )
-    on_protocol_negotiated_cb = on_protocol_negotiated === nothing ?
-        nothing :
-            on_protocol_negotiated isa ProtocolNegotiatedCallable ?
-            on_protocol_negotiated :
-            ProtocolNegotiatedCallable(on_protocol_negotiated)
+    on_protocol_negotiated_cb = _protocol_negotiated_callback(on_protocol_negotiated)
     bootstrap = ClientBootstrap(
         host_resolution_config,
         socket_options,
@@ -67,8 +83,8 @@ end
 function _install_protocol_handler_from_socket(
         channel::Channel,
         socket::Socket,
-        on_protocol_negotiated::ProtocolNegotiatedCallable,
-    )::Nothing
+        on_protocol_negotiated::ProtocolNegotiatedCallable{H},
+    )::Nothing where {H}
     protocol = socket_get_protocol(socket)
     new_slot = channel_slot_new!(channel)
     channel_slot_insert_end!(channel, new_slot)
@@ -76,7 +92,7 @@ function _install_protocol_handler_from_socket(
     if handler === nothing
         throw_error(ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE)
     end
-    channel_slot_set_handler!(new_slot, handler)
+    channel_slot_set_handler!(new_slot, handler::H)
     return nothing
 end
 
@@ -117,13 +133,13 @@ function client_bootstrap_connect!(
         port::Integer,
         socket_options::SocketOptions,
         tls_connection_options::MaybeTlsConnectionOptions,
-        on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing},
+        on_protocol_negotiated::OPN,
         enable_read_back_pressure::Bool,
         requested_event_loop::Union{EventLoop, Nothing},
         host_resolution_config::Union{HostResolutionConfig, Nothing},
         event_loop_group_override::Union{EventLoopGroup, Nothing} = nothing,
         host_resolver_override::Union{HostResolver, Nothing} = nothing,
-    )::Channel
+    )::Channel where {OPN <: Union{ProtocolNegotiatedCallable, Nothing}}
     if @atomic bootstrap.shutdown
         throw(ReseauError(ERROR_IO_EVENT_LOOP_SHUTDOWN))
     end
@@ -460,7 +476,24 @@ struct _ClientTlsOnNegotiationResult
     result_future::Future{Channel}
 end
 
-function (cb::_ClientTlsOnNegotiationResult)(handler, slot, error_code::Int)::Nothing
+@inline function (::_TlsNegotiationResultCallbackWrapper)(
+        f::_ClientTlsOnNegotiationResult,
+        handler_ptr::Ptr{Cvoid},
+        slot_ptr::Ptr{Cvoid},
+        error_code::Int,
+    )::Nothing
+    handler = _callback_ptr_to_obj(handler_ptr)::TlsChannelHandler
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
+    _client_tls_on_negotiation_result_impl!(f, handler, slot, error_code)
+    return nothing
+end
+
+@inline function _client_tls_on_negotiation_result_impl!(
+        cb::_ClientTlsOnNegotiationResult,
+        handler::TlsChannelHandler,
+        slot::ChannelSlot{Channel},
+        error_code::Int,
+    )::Nothing
     if cb.on_negotiation_result !== nothing
         cb.on_negotiation_result(handler, slot, error_code)
     end
@@ -472,6 +505,14 @@ function (cb::_ClientTlsOnNegotiationResult)(handler, slot, error_code::Int)::No
         _notify_future_error!(cb.result_future, ReseauError(error_code))
     end
     return nothing
+end
+
+function (cb::_ClientTlsOnNegotiationResult)(
+        handler::TlsChannelHandler,
+        slot::ChannelSlot{Channel},
+        error_code::Int,
+    )::Nothing
+    return _client_tls_on_negotiation_result_impl!(cb, handler, slot, error_code)
 end
 
 function _notify_channel_setup_error!(ctx::_ClientChannelSetupCtx, error_code::Int)::Nothing
@@ -689,11 +730,7 @@ function ServerBootstrapOptions(;
         user_data = nothing,
         enable_read_back_pressure::Bool = false,
     )
-    on_protocol_negotiated_cb = on_protocol_negotiated === nothing ?
-        nothing :
-        on_protocol_negotiated isa ProtocolNegotiatedCallable ?
-            on_protocol_negotiated :
-            ProtocolNegotiatedCallable(on_protocol_negotiated)
+    on_protocol_negotiated_cb = _protocol_negotiated_callback(on_protocol_negotiated)
     return ServerBootstrapOptions(
         event_loop_group,
         socket_options,

@@ -101,7 +101,7 @@ mutable struct SecureTransportCtx
 end
 
 mutable struct SecureTransportTlsHandler <: TlsChannelHandler
-    slot::Union{ChannelSlot, Nothing}
+    slot::Union{ChannelSlot{Channel}, Nothing}
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
     timeout_task::ChannelTask
@@ -126,7 +126,7 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     negotiation_task::ChannelTask
 end
 
-function setchannelslot!(handler::SecureTransportTlsHandler, slot::ChannelSlot)::Nothing
+function setchannelslot!(handler::SecureTransportTlsHandler, slot::ChannelSlot{Channel})::Nothing
     handler.slot = slot
     return nothing
 end

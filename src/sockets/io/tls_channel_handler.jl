@@ -1181,9 +1181,6 @@ struct TlsNegotiatedProtocolMessage
     protocol::ByteBuffer
 end
 
-# TLS handler base type
-abstract type TlsChannelHandler end
-
 function _tls_timeout_task(handler, status::TaskStatus.T)
     status == TaskStatus.RUN_READY || return nothing
     handler isa TlsChannelHandler || return nothing

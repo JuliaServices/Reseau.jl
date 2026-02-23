@@ -261,7 +261,7 @@ end
 S2nTlsCtx() = S2nTlsCtx(C_NULL, C_NULL, nothing)
 
 mutable struct S2nTlsHandler <: TlsChannelHandler
-    slot::Union{ChannelSlot, Nothing}
+    slot::Union{ChannelSlot{Channel}, Nothing}
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
     timeout_task::ChannelTask
@@ -285,7 +285,7 @@ mutable struct S2nTlsHandler <: TlsChannelHandler
     negotiation_task::ChannelTask
 end
 
-function setchannelslot!(handler::S2nTlsHandler, slot::ChannelSlot)::Nothing
+function setchannelslot!(handler::S2nTlsHandler, slot::ChannelSlot{Channel})::Nothing
     handler.slot = slot
     return nothing
 end
