@@ -5,7 +5,7 @@ const _TRIM_SAFE_ERROR_BUDGET = @static if Sys.isapple()
 elseif Sys.iswindows()
     0
 elseif Sys.islinux()
-    42
+    0
 else
     typemax(Int)
 end
