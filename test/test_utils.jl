@@ -10,6 +10,46 @@ const _TEST_KEYCHAIN_DIR = Ref{Union{String, Nothing}}(nothing)
 const _TEST_KEYCHAIN_REF = Ref{Ptr{Cvoid}}(C_NULL)
 const _SECURITY_LIB = "/System/Library/Frameworks/Security.framework/Security"
 const _errSecSuccess = Int32(0)
+const _TEMP_CLEANUP_RETRY_DELAY_SEC = 0.05
+const _TEMP_CLEANUP_MAX_RETRIES = Sys.iswindows() ? 120 : 1
+
+function _is_retryable_temp_cleanup_error(err)::Bool
+    if err isa Base.IOError
+        return err.code == Base.UV_EBUSY || err.code == Base.UV_EACCES || err.code == Base.UV_EPERM
+    end
+    return false
+end
+
+function cleanup_temp_path!(path::AbstractString)::Nothing
+    if !ispath(path)
+        return nothing
+    end
+
+    for attempt in 1:_TEMP_CLEANUP_MAX_RETRIES
+        try
+            rm(path; recursive = true, force = true)
+            return nothing
+        catch err
+            if !(Sys.iswindows() && _is_retryable_temp_cleanup_error(err) && attempt < _TEMP_CLEANUP_MAX_RETRIES)
+                rethrow()
+            end
+            # Windows can keep transient handles open briefly after process/file teardown.
+            GC.gc(false)
+            yield()
+            sleep(_TEMP_CLEANUP_RETRY_DELAY_SEC)
+        end
+    end
+    return nothing
+end
+
+function with_tempdir(f::F) where {F <: Function}
+    temp_dir = mktempdir(; cleanup = false)
+    try
+        return f(temp_dir)
+    finally
+        cleanup_temp_path!(temp_dir)
+    end
+end
 
 function _create_test_keychain!(path::AbstractString)::Bool
     if !Sys.isapple()

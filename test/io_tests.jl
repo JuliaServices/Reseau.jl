@@ -256,11 +256,12 @@ end
 end
 
 @testset "PKCS11 lib stubs" begin
-    temp_dir = mktempdir()
-    missing_path = joinpath(temp_dir, "missing_pkcs11_lib")
-    opts = Sockets.Pkcs11LibOptions(; filename = missing_path)
-    err = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_new(opts)
-    @test err.value.code == EventLoops.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
+    with_tempdir() do temp_dir
+        missing_path = joinpath(temp_dir, "missing_pkcs11_lib")
+        opts = Sockets.Pkcs11LibOptions(; filename = missing_path)
+        err = @test_throws Reseau.ReseauError Sockets.pkcs11_lib_new(opts)
+        @test err.value.code == EventLoops.ERROR_IO_SHARED_LIBRARY_LOAD_FAILURE
+    end
 end
 
 @testset "PKCS11 CKR mapping" begin
