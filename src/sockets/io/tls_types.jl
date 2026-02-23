@@ -62,24 +62,22 @@ abstract type TlsChannelHandler end
 
 abstract type AbstractPkcs11KeyOpState end
 
-mutable struct CustomKeyOpHandler
+mutable struct CustomKeyOpHandler{S <: Union{AbstractPkcs11KeyOpState, Nothing}}
     on_key_operation::Union{Function, Nothing}
-    pkcs11_state::Union{AbstractPkcs11KeyOpState, Nothing}
+    pkcs11_state::S
 end
 
 function CustomKeyOpHandler(
         on_key_operation;
         pkcs11_state::Union{AbstractPkcs11KeyOpState, Nothing} = nothing,
     )
-    return CustomKeyOpHandler(on_key_operation, pkcs11_state)
+    return CustomKeyOpHandler{typeof(pkcs11_state)}(on_key_operation, pkcs11_state)
 end
 
 custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
-function custom_key_op_handler_release(handler::CustomKeyOpHandler)
-    state = handler.pkcs11_state
-    if state !== nothing
-        _pkcs11_key_op_state_close!(state)
-    end
+custom_key_op_handler_release(::CustomKeyOpHandler{Nothing}) = nothing
+function custom_key_op_handler_release(handler::CustomKeyOpHandler{S}) where {S <: AbstractPkcs11KeyOpState}
+    _pkcs11_key_op_state_close!(handler.pkcs11_state)
     return nothing
 end
 custom_key_op_handler_release(::Nothing) = nothing
