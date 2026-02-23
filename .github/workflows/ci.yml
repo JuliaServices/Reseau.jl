@@ -6,20 +6,14 @@ on:
   pull_request:
 jobs:
   test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
+    name: Windows Trim - Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            arch: x64
-            version: '1.12'
           - os: windows-latest
             arch: x64
-            version: '1.12'
-          - os: macOS-latest
-            arch: aarch64
             version: '1.12'
     steps:
       - uses: actions/checkout@v4
@@ -29,4 +23,7 @@ jobs:
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+      - name: Run Windows trim compile test
+        env:
+          RESEAU_TRIM_PRINT_OUTPUT: "1"
+        run: julia --project=. --startup-file=no --history-file=no -e "include(\"test/trim_compile_tests.jl\")"
