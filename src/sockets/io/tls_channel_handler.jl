@@ -48,7 +48,7 @@ struct TlsCtxPkcs11Options{PL}
     cert_file_contents::ByteCursor
 end
 
-mutable struct Pkcs11KeyOpState{PL}
+mutable struct Pkcs11KeyOpState{PL} <: AbstractPkcs11KeyOpState
     pkcs11_lib::PL
     user_pin::ByteCursor
     slot_id::UInt64

@@ -60,12 +60,17 @@ end
 # TLS handler base type (implemented by backend-specific handlers)
 abstract type TlsChannelHandler end
 
+abstract type AbstractPkcs11KeyOpState end
+
 mutable struct CustomKeyOpHandler
     on_key_operation::Union{Function, Nothing}
-    pkcs11_state::Any  # Union{Pkcs11KeyOpState, Nothing} — can't forward-ref
+    pkcs11_state::Union{AbstractPkcs11KeyOpState, Nothing}
 end
 
-function CustomKeyOpHandler(on_key_operation; pkcs11_state = nothing)
+function CustomKeyOpHandler(
+        on_key_operation;
+        pkcs11_state::Union{AbstractPkcs11KeyOpState, Nothing} = nothing,
+    )
     return CustomKeyOpHandler(on_key_operation, pkcs11_state)
 end
 

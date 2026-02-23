@@ -27,10 +27,8 @@
     @wrap_thread_fn function _epoll_event_loop_thread_entry(event_loop::EventLoop)
         try
             epoll_event_loop_thread(event_loop)
-        catch e
-            Core.print("epoll event loop thread errored: ")
-            Base.showerror(Core.stdout, e, catch_backtrace())
-            Core.println()
+        catch
+            Core.println("epoll event loop thread errored")
         finally
             impl = event_loop.impl
             notify(impl.completion_event)
@@ -829,58 +827,60 @@
             end
             notify(impl.startup_event)
 
-            timeout = DEFAULT_TIMEOUT_MS
-            event_wait_capacity = impl.event_wait_capacity
-            events = Memory{EpollEvent}(undef, event_wait_capacity)
+            timeout::Cint = Cint(DEFAULT_TIMEOUT_MS)
+            event_wait_capacity::Cint = Cint(impl.event_wait_capacity)
+            events = Memory{EpollEvent}(undef, Int(event_wait_capacity))
 
             logf(
                 LogLevel.INFO,
                 LS_IO_EVENT_LOOP,
-                "default timeout $timeout ms, and max events to process per tick $event_wait_capacity",
+                "default timeout $(Int(timeout)) ms, and max events to process per tick $(Int(event_wait_capacity))",
             )
 
             while impl.should_continue
                 logf(
                     LogLevel.TRACE,
                     LogSubject(LS_IO_EVENT_LOOP),
-                    () -> "waiting for a maximum of $timeout ms",
+                    "waiting for a maximum of $(Int(timeout)) ms",
                 )
 
                 # Call epoll_wait
-                event_count = @ccall gc_safe = true epoll_wait(
+                event_count::Cint = @ccall gc_safe = true epoll_wait(
                     impl.epoll_fd::Cint,
                     events::Ptr{EpollEvent},
                     event_wait_capacity::Cint,
                     timeout::Cint,
                 )::Cint
-                if event_count == -1
+                if event_count == Cint(-1)
                     err = Base.Libc.errno()
                     if err == Libc.EINTR
-                        event_count = 0
+                        event_count = Cint(0)
                     else
                         logf(
                             LogLevel.ERROR,
                             LS_IO_EVENT_LOOP,
                             "epoll_wait failed while waiting for events: errno $err",
                         )
-                        event_count = 0
+                        event_count = Cint(0)
                     end
                 end
 
                 should_expand_wait_capacity = event_count == event_wait_capacity &&
-                    event_wait_capacity < MAX_EVENTS
+                    event_wait_capacity < Cint(MAX_EVENTS)
 
                 register_tick_start!(event_loop)
 
                 logf(
                     LogLevel.TRACE,
                     LogSubject(LS_IO_EVENT_LOOP),
-                    () -> "wake up with $event_count events to process",
+                    "wake up with $(Int(event_count)) events to process",
                 )
 
                 # Process events
-                for i in 1:event_count
+                event_count_int = Int(event_count)
+                for i in 1:event_count_int
                     ev = events[i]
+                    ev_events = ev.events
                     event_data_key = UInt64(UInt(_epoll_event_data_ptr(ev)))
                     event_data = nothing
 
@@ -904,25 +904,25 @@
                     end
 
                     # Convert epoll events to our event mask
-                    event_mask = 0
+                    event_mask::Int = 0
 
-                    if (ev.events & EPOLLIN) != 0
+                    if (ev_events & EPOLLIN) != 0
                         event_mask |= Int(IoEventType.READABLE)
                     end
 
-                    if (ev.events & EPOLLOUT) != 0
+                    if (ev_events & EPOLLOUT) != 0
                         event_mask |= Int(IoEventType.WRITABLE)
                     end
 
-                    if (ev.events & EPOLLRDHUP) != 0
+                    if (ev_events & EPOLLRDHUP) != 0
                         event_mask |= Int(IoEventType.REMOTE_HANG_UP)
                     end
 
-                    if (ev.events & EPOLLHUP) != 0
+                    if (ev_events & EPOLLHUP) != 0
                         event_mask |= Int(IoEventType.CLOSED)
                     end
 
-                    if (ev.events & EPOLLERR) != 0
+                    if (ev_events & EPOLLERR) != 0
                         event_mask |= Int(IoEventType.ERROR)
                     end
 
@@ -945,17 +945,18 @@
                                     "ignoring non-fatal IO callback error during event dispatch: $(e.code)",
                                 )
                             else
-                                logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "unhandled IO callback exception during event dispatch: $e")
+                                logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "unhandled IO callback exception during event dispatch")
                             end
                         end
                     end
                 end
 
                 if should_expand_wait_capacity
-                    event_wait_capacity = min(event_wait_capacity << 1, MAX_EVENTS)
-                    impl.event_wait_capacity = event_wait_capacity
-                    events = Memory{EpollEvent}(undef, event_wait_capacity)
-                    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "expanded epoll event wait capacity to $event_wait_capacity")
+                    new_event_wait_capacity = min(event_wait_capacity << 1, Cint(MAX_EVENTS))
+                    event_wait_capacity = new_event_wait_capacity
+                    impl.event_wait_capacity = Int(new_event_wait_capacity)
+                    events = Memory{EpollEvent}(undef, Int(new_event_wait_capacity))
+                    logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "expanded epoll event wait capacity to $(Int(new_event_wait_capacity))")
                 end
 
                 # Process cross-thread tasks
@@ -992,22 +993,19 @@
 
                 if use_default_timeout
                     logf(LogLevel.TRACE, LS_IO_EVENT_LOOP, "no more scheduled tasks using default timeout")
-                    timeout = DEFAULT_TIMEOUT_MS
+                    timeout = Cint(DEFAULT_TIMEOUT_MS)
                 else
                     # Translate timestamp (in nanoseconds) to timeout (in milliseconds)
                     timeout_ns = next_run_time > now_ns ? next_run_time - now_ns : UInt64(0)
-                    timeout_ms = timeout_ns ÷ 1_000_000
-
-                    if timeout_ms > typemax(Cint)
-                        timeout_ms = typemax(Cint)
-                    end
+                    timeout_ms = timeout_ns ÷ UInt64(1_000_000)
+                    timeout_ms_c = timeout_ms > UInt64(typemax(Cint)) ? typemax(Cint) : Cint(timeout_ms)
 
                     logf(
                         LogLevel.TRACE,
                         LogSubject(LS_IO_EVENT_LOOP),
-                        () -> "detected more scheduled tasks with the next occurring at $timeout_ns ns, using timeout of $timeout_ms ms",
+                        "detected more scheduled tasks with the next occurring at $timeout_ns ns, using timeout of $(Int(timeout_ms_c)) ms",
                     )
-                    timeout = Cint(timeout_ms)
+                    timeout = timeout_ms_c
                 end
 
                 register_tick_end!(event_loop)
@@ -1018,11 +1016,11 @@
             if subscribed_for_task_notifications
                 try
                     unsubscribe_from_io_events!(event_loop, impl.read_task_handle)
-                catch e
+                catch
                     logf(
                         LogLevel.ERROR,
                         LS_IO_EVENT_LOOP,
-                        "failed to unsubscribe task notification fd during epoll thread exit: $e",
+                        "failed to unsubscribe task notification fd during epoll thread exit",
                     )
                 end
             end

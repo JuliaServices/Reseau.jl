@@ -375,7 +375,6 @@ function _schedule_accept_retry_task!(sock::Socket)
         return nothing
     end
 
-    fd = sock.io_handle.fd
     retry_task = ScheduledTask(; type_tag = "posix_socket_start_accept_retry") do status
         status = _coerce_task_status(status)
         if sock.impl === nothing || status != TaskStatus.RUN_READY
@@ -385,12 +384,12 @@ function _schedule_accept_retry_task!(sock::Socket)
             return nothing
         end
 
-        socket_impl = _posix_impl(sock)
-        socket_impl.accept_retry_task = nothing
+        impl_now = _posix_impl(sock)
+        impl_now.accept_retry_task = nothing
 
         if sock.event_loop !== accept_loop ||
-            !socket_impl.continue_accept ||
-            !socket_impl.currently_subscribed
+            !impl_now.continue_accept ||
+            !impl_now.currently_subscribed
             return nothing
         end
 
