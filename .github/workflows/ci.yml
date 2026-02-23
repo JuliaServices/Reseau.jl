@@ -26,4 +26,4 @@ jobs:
       - name: Run Windows trim compile test
         env:
           RESEAU_TRIM_PRINT_OUTPUT: "1"
-        run: julia --project=. --startup-file=no --history-file=no -e "include(\"test/trim_compile_tests.jl\")"
+        run: julia --project=. --startup-file=no --history-file=no -e 'include("test/trim_compile_tests.jl")'
