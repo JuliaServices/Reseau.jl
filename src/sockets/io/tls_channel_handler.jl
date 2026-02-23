@@ -72,6 +72,11 @@ function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)
     return nothing
 end
 
+@inline function custom_key_op_handler_release(handler::CustomKeyOpHandler{S})::Nothing where {S <: Pkcs11KeyOpState}
+    _pkcs11_key_op_state_close!(handler.pkcs11_state)
+    return nothing
+end
+
 function _tls_pkcs11_cursor(value)::ByteCursor
     if value === nothing
         return null_cursor()

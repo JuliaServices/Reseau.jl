@@ -74,19 +74,9 @@ function CustomKeyOpHandler(
     return CustomKeyOpHandler{typeof(pkcs11_state)}(on_key_operation, pkcs11_state)
 end
 
-@inline _pkcs11_key_op_state_close!(::AbstractPkcs11KeyOpState)::Nothing = nothing
-
 custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
-@inline function custom_key_op_handler_release(handler::Union{Nothing, CustomKeyOpHandler})::Nothing
-    if handler === nothing
-        return nothing
-    end
-    state = handler.pkcs11_state
-    if state !== nothing
-        _pkcs11_key_op_state_close!(state)
-    end
-    return nothing
-end
+custom_key_op_handler_release(::Nothing)::Nothing = nothing
+custom_key_op_handler_release(::CustomKeyOpHandler)::Nothing = nothing
 
 function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)
     if handler.on_key_operation !== nothing
