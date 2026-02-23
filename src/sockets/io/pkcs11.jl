@@ -352,8 +352,12 @@ function _pkcs11_load_ckr_map!()
         name in names || continue
         val_str = m.captures[2]
         value = startswith(val_str, "0x") ? parse(UInt64, val_str) : parse(UInt64, val_str)
-        code = getfield(@__MODULE__, Symbol("ERROR_IO_PKCS11_CKR_", name))
-        _pkcs11_ckr_map[][value] = code
+        code_sym = Symbol("ERROR_IO_PKCS11_CKR_", name)
+        isdefined(@__MODULE__, code_sym) || continue
+        code = getfield(@__MODULE__, code_sym)
+        if code isa Int
+            _pkcs11_ckr_map[][value] = code
+        end
     end
     return nothing
 end
