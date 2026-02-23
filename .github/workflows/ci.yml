@@ -21,7 +21,6 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run Windows trim compile test
         env:
