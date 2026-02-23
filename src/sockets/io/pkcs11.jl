@@ -311,6 +311,16 @@ Pkcs11Lib(options::Pkcs11LibOptions) = Pkcs11Lib(options, C_NULL, false, C_NULL,
 
 const _pkcs11_ckr_map = Ref{Dict{UInt64, Int}}(Dict{UInt64, Int}())
 const _pkcs11_ckr_loaded = Ref(false)
+const _pkcs11_ckr_code_by_name = let
+    d = Dict{Symbol, Int}()
+    start_code = ERROR_IO_PKCS11_CKR_CANCEL
+    expected_len = ERROR_IO_PKCS11_CKR_FUNCTION_REJECTED - ERROR_IO_PKCS11_CKR_CANCEL + 1
+    length(_pkcs11_ckr_names) == expected_len || error("PKCS#11 CKR name table is out of sync with error code range")
+    for (idx, name) in pairs(_pkcs11_ckr_names)
+        d[Symbol(name)] = start_code + idx - 1
+    end
+    d
+end
 
 const _SHA1_PREFIX_TO_RSA_SIG = Memory{UInt8}([
     0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
@@ -343,16 +353,15 @@ function _pkcs11_load_ckr_map!()
     header_path = joinpath(root, "aws-c-io", "source", "pkcs11", "v2.40", "pkcs11.h")
     isfile(header_path) || return nothing
 
-    names = Set(_pkcs11_ckr_names)
     rx = r"^#define\s+CKR_([A-Z0-9_]+)\s+(0x[0-9A-Fa-f]+|[0-9]+)[uUlL]*"
     for line in eachline(header_path)
         m = match(rx, strip(line))
         m === nothing && continue
-        name = m.captures[1]
-        name in names || continue
+        name = Symbol(m.captures[1])
+        code = get(_pkcs11_ckr_code_by_name, name, 0)
+        code == 0 && continue
         val_str = m.captures[2]
         value = startswith(val_str, "0x") ? parse(UInt64, val_str) : parse(UInt64, val_str)
-        code = getfield(@__MODULE__, Symbol("ERROR_IO_PKCS11_CKR_", name))
         _pkcs11_ckr_map[][value] = code
     end
     return nothing

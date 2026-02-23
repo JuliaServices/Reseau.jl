@@ -5,7 +5,7 @@ const _TRIM_SAFE_ERROR_BUDGET = @static if Sys.isapple()
 elseif Sys.iswindows()
     0
 elseif Sys.islinux()
-    42
+    0
 else
     typemax(Int)
 end
@@ -29,7 +29,7 @@ end
     script_path = joinpath(project_path, "trim", "echo_trim_safe.jl")
     @test isfile(script_path)
 
-    mktempdir() do tmpdir
+    with_tempdir() do tmpdir
         cd(tmpdir) do
             output_name = "echo_trim_safe"
             exit_code, output = _run_trim_compile(project_path, script_path, output_name)

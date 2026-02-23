@@ -60,24 +60,23 @@ end
 # TLS handler base type (implemented by backend-specific handlers)
 abstract type TlsChannelHandler end
 
-mutable struct CustomKeyOpHandler
+abstract type AbstractPkcs11KeyOpState end
+
+mutable struct CustomKeyOpHandler{S <: Union{AbstractPkcs11KeyOpState, Nothing}}
     on_key_operation::Union{Function, Nothing}
-    pkcs11_state::Any  # Union{Pkcs11KeyOpState, Nothing} — can't forward-ref
+    pkcs11_state::S
 end
 
-function CustomKeyOpHandler(on_key_operation; pkcs11_state = nothing)
-    return CustomKeyOpHandler(on_key_operation, pkcs11_state)
+function CustomKeyOpHandler(
+        on_key_operation;
+        pkcs11_state::Union{AbstractPkcs11KeyOpState, Nothing} = nothing,
+    )
+    return CustomKeyOpHandler{typeof(pkcs11_state)}(on_key_operation, pkcs11_state)
 end
 
 custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
-function custom_key_op_handler_release(handler::CustomKeyOpHandler)
-    state = handler.pkcs11_state
-    if state !== nothing
-        _pkcs11_key_op_state_close!(state)
-    end
-    return nothing
-end
-custom_key_op_handler_release(::Nothing) = nothing
+custom_key_op_handler_release(::Nothing)::Nothing = nothing
+custom_key_op_handler_release(::CustomKeyOpHandler)::Nothing = nothing
 
 function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)
     if handler.on_key_operation !== nothing

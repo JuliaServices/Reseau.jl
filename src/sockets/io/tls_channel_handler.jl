@@ -38,8 +38,8 @@ function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
     return true
 end
 
-struct TlsCtxPkcs11Options{PL}
-    pkcs11_lib::PL
+struct TlsCtxPkcs11Options
+    pkcs11_lib::Pkcs11Lib
     user_pin::ByteCursor
     slot_id::Union{UInt64, Nothing}
     token_label::ByteCursor
@@ -48,8 +48,8 @@ struct TlsCtxPkcs11Options{PL}
     cert_file_contents::ByteCursor
 end
 
-mutable struct Pkcs11KeyOpState{PL}
-    pkcs11_lib::PL
+mutable struct Pkcs11KeyOpState <: AbstractPkcs11KeyOpState
+    pkcs11_lib::Pkcs11Lib
     user_pin::ByteCursor
     slot_id::UInt64
     token_label::ByteCursor
@@ -61,7 +61,7 @@ mutable struct Pkcs11KeyOpState{PL}
     closed::Bool
 end
 
-function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)
+function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)::Nothing
     state.closed && return nothing
     state.closed = true
     if state.session_handle != CK_SESSION_HANDLE(0)
@@ -69,6 +69,11 @@ function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)
     end
     pkcs11_lib_release(state.pkcs11_lib)
     state.session_handle = CK_SESSION_HANDLE(0)
+    return nothing
+end
+
+@inline function custom_key_op_handler_release(handler::CustomKeyOpHandler{Pkcs11KeyOpState})::Nothing
+    _pkcs11_key_op_state_close!(handler.pkcs11_state)
     return nothing
 end
 

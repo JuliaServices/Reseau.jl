@@ -8,3 +8,5 @@
 /aws-c-io
 /deps/usr/
 /deps/deps.jl
+/echo_trim_safe
+/echo_trim_safe.exe
