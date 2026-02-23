@@ -3,7 +3,7 @@ using Test
 const _TRIM_SAFE_ERROR_BUDGET = @static if Sys.isapple()
     0
 elseif Sys.iswindows()
-    13
+    0
 elseif Sys.islinux()
     42
 else
@@ -39,6 +39,12 @@ end
                 exit_code == 0 ? (0, 0) : error("failed to parse trim verifier summary:\n$output")
             else
                 totals
+            end
+
+            if get(ENV, "RESEAU_TRIM_PRINT_OUTPUT", "0") == "1" || trim_errors > 0
+                println("---- trim compile output ----")
+                println(output)
+                println("---- end trim compile output ----")
             end
 
             @test trim_errors <= _TRIM_SAFE_ERROR_BUDGET
