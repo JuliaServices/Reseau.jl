@@ -89,7 +89,58 @@
     @assert sizeof(OverlappedEntry) == _OVERLAPPED_ENTRY_EXPECTED_SIZE
     @assert fieldoffset(OverlappedEntry, 4) == _OVERLAPPED_ENTRY_BYTES_OFFSET
 
-    const IocpOnCompletionFn = Function
+    struct _IocpOnCompletionCallWrapper <: Function end
+
+    function (::_IocpOnCompletionCallWrapper)(
+            f::F,
+            event_loop::EventLoop,
+            op,
+            status_code::Int,
+            num_bytes_transferred::Csize_t,
+        ) where {F}
+        f(event_loop, op, status_code, num_bytes_transferred)
+        return nothing
+    end
+
+    @generated function _iocp_on_completion_gen_fptr(::Type{F}) where {F}
+        quote
+            @cfunction($(_IocpOnCompletionCallWrapper()), Cvoid, (Ref{$F}, EventLoop, Any, Int, Csize_t))
+        end
+    end
+
+    struct IocpOnCompletionCallable
+        ptr::Ptr{Cvoid}
+        objptr::Ptr{Cvoid}
+        _root::Any
+    end
+
+    function IocpOnCompletionCallable(callable::F) where {F}
+        ptr = _iocp_on_completion_gen_fptr(F)
+        objref = Base.cconvert(Ref{F}, callable)
+        objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+        return IocpOnCompletionCallable(ptr, objptr, objref)
+    end
+
+    @inline function (f::IocpOnCompletionCallable)(
+            event_loop::EventLoop,
+            op,
+            status_code::Int,
+            num_bytes_transferred::Csize_t,
+        )::Nothing
+        ccall(
+            f.ptr,
+            Cvoid,
+            (Ptr{Cvoid}, EventLoop, Any, Int, Csize_t),
+            f.objptr,
+            event_loop,
+            op,
+            status_code,
+            num_bytes_transferred,
+        )
+        return nothing
+    end
+
+    const IocpOnCompletionFn = IocpOnCompletionCallable
 
     mutable struct IocpOverlapped
         storage::Base.RefValue{IocpOverlappedHeader}
@@ -111,12 +162,15 @@
         return op
     end
 
+    @inline _iocp_on_completion_callable(on_completion::IocpOnCompletionFn) = on_completion
+    @inline _iocp_on_completion_callable(on_completion) = IocpOnCompletionFn(on_completion)
+
     function iocp_overlapped_init!(
             op::IocpOverlapped,
-            on_completion::IocpOnCompletionFn,
+            on_completion,
             user_data,
         )::IocpOverlapped
-        op.on_completion = on_completion
+        op.on_completion = _iocp_on_completion_callable(on_completion)
         op.user_data = user_data
         op.user_data_aux = nothing
         op.active = false
@@ -126,11 +180,11 @@
 
     function iocp_overlapped_init!(
             op::IocpOverlapped,
-            on_completion::IocpOnCompletionFn,
+            on_completion,
             user_data,
             user_data_aux,
         )::IocpOverlapped
-        op.on_completion = on_completion
+        op.on_completion = _iocp_on_completion_callable(on_completion)
         op.user_data = user_data
         op.user_data_aux = user_data_aux
         op.active = false
