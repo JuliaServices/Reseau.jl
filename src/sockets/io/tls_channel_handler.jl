@@ -61,7 +61,7 @@ mutable struct Pkcs11KeyOpState{PL} <: AbstractPkcs11KeyOpState
     closed::Bool
 end
 
-function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)
+function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)::Nothing
     state.closed && return nothing
     state.closed = true
     if state.session_handle != CK_SESSION_HANDLE(0)
