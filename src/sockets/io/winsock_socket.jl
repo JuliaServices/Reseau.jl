@@ -88,6 +88,8 @@
     end
 
     const MSG_PEEK = UInt32(0x2)
+    const _WINSOCK_SOCKADDR_IN_PADDING_ZEROS = ntuple(_ -> UInt8(0), Val(8))
+    const _WINSOCK_SOCKADDR_IN6_ADDR_ZEROS = ntuple(_ -> UInt8(0), Val(16))
 
     # Named pipe constants (subset)
     const PIPE_BUFFER_SIZE = UInt32(512)
@@ -180,12 +182,19 @@
     end
 
     function _winsock_inet_pton_ipv6(address::AbstractString)::NTuple{16, UInt8}
-        mem = Memory{UInt8}(undef, 16)
-        rc = GC.@preserve mem ccall((:inet_pton, _WS2_32), Cint, (Cint, Cstring, Ptr{UInt8}), WS_AF_INET6, address, pointer(mem))
+        addr_ref = Ref{NTuple{16, UInt8}}(_WINSOCK_SOCKADDR_IN6_ADDR_ZEROS)
+        rc = GC.@preserve addr_ref ccall(
+            (:inet_pton, _WS2_32),
+            Cint,
+            (Cint, Cstring, Ptr{UInt8}),
+            WS_AF_INET6,
+            address,
+            Ptr{UInt8}(Base.unsafe_convert(Ptr{NTuple{16, UInt8}}, addr_ref)),
+        )
         if rc != 1
             throw_error(ERROR_IO_SOCKET_INVALID_ADDRESS)
         end
-        return Tuple(mem)
+        return addr_ref[]
     end
 
     @inline function _winsock_inet_ntop_ipv4(addr_ptr::Ptr{UInt8})::String
@@ -784,7 +793,14 @@
             address = get_address(remote_endpoint)
             if sock.options.domain == SocketDomain.IPV4
                 addr = _winsock_inet_pton_ipv4(address)
-                sin = Ref(SockaddrIn(Cshort(WS_AF_INET), htons(remote_endpoint.port), addr, ntuple(_ -> UInt8(0), 8)))
+                sin = Ref(
+                    SockaddrIn(
+                        Cshort(WS_AF_INET),
+                        htons(remote_endpoint.port),
+                        addr,
+                        _WINSOCK_SOCKADDR_IN_PADDING_ZEROS,
+                    ),
+                )
                 rc = GC.@preserve sin ccall(
                     (:connect, _WS2_32),
                     Cint,
@@ -846,8 +862,22 @@
         address = get_address(remote_endpoint)
         if sock.options.domain == SocketDomain.IPV4
             addr = _winsock_inet_pton_ipv4(address)
-            remote = Ref(SockaddrIn(Cshort(WS_AF_INET), htons(remote_endpoint.port), addr, ntuple(_ -> UInt8(0), 8)))
-            bind_addr = Ref(SockaddrIn(Cshort(WS_AF_INET), Cushort(0), UInt32(0), ntuple(_ -> UInt8(0), 8)))
+            remote = Ref(
+                SockaddrIn(
+                    Cshort(WS_AF_INET),
+                    htons(remote_endpoint.port),
+                    addr,
+                    _WINSOCK_SOCKADDR_IN_PADDING_ZEROS,
+                ),
+            )
+            bind_addr = Ref(
+                SockaddrIn(
+                    Cshort(WS_AF_INET),
+                    Cushort(0),
+                    UInt32(0),
+                    _WINSOCK_SOCKADDR_IN_PADDING_ZEROS,
+                ),
+            )
             return GC.@preserve remote bind_addr _winsock_tcp_connect(
                 sock,
                 remote_endpoint,
@@ -859,7 +889,15 @@
         else
             addr6 = _winsock_inet_pton_ipv6(address)
             remote6 = Ref(SockaddrIn6(Cushort(WS_AF_INET6), htons(remote_endpoint.port), Cuint(0), addr6, Cuint(0)))
-            bind6 = Ref(SockaddrIn6(Cushort(WS_AF_INET6), Cushort(0), Cuint(0), ntuple(_ -> UInt8(0), 16), Cuint(0)))
+            bind6 = Ref(
+                SockaddrIn6(
+                    Cushort(WS_AF_INET6),
+                    Cushort(0),
+                    Cuint(0),
+                    _WINSOCK_SOCKADDR_IN6_ADDR_ZEROS,
+                    Cuint(0),
+                ),
+            )
             return GC.@preserve remote6 bind6 _winsock_tcp_connect(
                 sock,
                 remote_endpoint,
@@ -969,7 +1007,14 @@
         address = get_address(local_endpoint)
         if sock.options.domain == SocketDomain.IPV4
             addr = _winsock_inet_pton_ipv4(address)
-            sin = Ref(SockaddrIn(Cshort(WS_AF_INET), htons(local_endpoint.port), addr, ntuple(_ -> UInt8(0), 8)))
+            sin = Ref(
+                SockaddrIn(
+                    Cshort(WS_AF_INET),
+                    htons(local_endpoint.port),
+                    addr,
+                    _WINSOCK_SOCKADDR_IN_PADDING_ZEROS,
+                ),
+            )
             return GC.@preserve sin begin
                 if sock.options.type == SocketType.STREAM
                     _winsock_tcp_bind(sock, Ptr{Cvoid}(Base.unsafe_convert(Ptr{SockaddrIn}, sin)), Cint(sizeof(SockaddrIn)))

@@ -49,6 +49,9 @@
         lpVendorInfo::Ptr{UInt8}
     end
 
+    const _WSADATA_DESCRIPTION_ZEROS = ntuple(_ -> UInt8(0), Val(257))
+    const _WSADATA_SYSTEM_STATUS_ZEROS = ntuple(_ -> UInt8(0), Val(129))
+
     function winsock_check_and_init!()::Nothing
         pid = Base.getpid()
         if _winsock_initialized[] && _winsock_init_pid[] == pid
@@ -72,7 +75,17 @@
             logf(LogLevel.INFO, LS_IO_SOCKET, "static: initializing WinSock")
 
             requested_version = UInt16(0x0202) # MAKEWORD(2, 2)
-            wsa_data = Ref(WSADATA(0x0, 0x0, ntuple(_ -> UInt8(0), 257), ntuple(_ -> UInt8(0), 129), 0x0, 0x0, C_NULL))
+            wsa_data = Ref(
+                WSADATA(
+                    0x0,
+                    0x0,
+                    _WSADATA_DESCRIPTION_ZEROS,
+                    _WSADATA_SYSTEM_STATUS_ZEROS,
+                    0x0,
+                    0x0,
+                    C_NULL,
+                ),
+            )
             rc = ccall((:WSAStartup, _WS2_32), Cint, (UInt16, Ptr{WSADATA}), requested_version, wsa_data)
             if rc != 0
                 logf(LogLevel.ERROR, LS_IO_SOCKET,string("static: WinSock initialization failed with error %d", " ", string(rc)))
