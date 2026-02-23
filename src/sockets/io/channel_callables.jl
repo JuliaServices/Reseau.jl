@@ -6,7 +6,7 @@ struct _ChannelSlotReadCallWrapper <: Function end
         slot_ptr::Ptr{Cvoid},
         message_ptr::Ptr{Cvoid},
     ) where {F <: Function}
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
     message = _callback_ptr_to_obj(message_ptr)::IoMessage
     f(slot, message)
     return nothing
@@ -50,7 +50,7 @@ struct _ChannelSlotWriteCallWrapper <: Function end
         slot_ptr::Ptr{Cvoid},
         message_ptr::Ptr{Cvoid},
     ) where {F <: Function}
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
     message = _callback_ptr_to_obj(message_ptr)::IoMessage
     f(slot, message)
     return nothing
@@ -94,7 +94,7 @@ struct _ChannelSlotIncrementWindowCallWrapper <: Function end
         slot_ptr::Ptr{Cvoid},
         size::Csize_t,
     ) where {F <: Function}
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
     f(slot, size)
     return nothing
 end
@@ -138,7 +138,7 @@ struct _ChannelSlotShutdownCallWrapper <: Function end
         error_code::Int,
         free_scarce_resources_immediately::Bool,
     ) where {F <: Function}
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot
+    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
     f(
         slot,
         ChannelDirection.T(direction),

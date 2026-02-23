@@ -57,6 +57,9 @@ end
     SHUT_DOWN_COMPLETE = 2
 end
 
+# TLS handler base type (implemented by backend-specific handlers)
+abstract type TlsChannelHandler end
+
 mutable struct CustomKeyOpHandler
     on_key_operation::Union{Function, Nothing}
     pkcs11_state::Any  # Union{Pkcs11KeyOpState, Nothing} — can't forward-ref

@@ -1,14 +1,14 @@
 # AWS IO Library - ALPN Handler
 # Port of aws-c-io/source/alpn_handler.c
 
-mutable struct AlpnHandler
+mutable struct AlpnHandler{PN}
     slot::Union{ChannelSlot, Nothing}
-    on_protocol_negotiated::Union{ProtocolNegotiatedCallable, Nothing}
+    on_protocol_negotiated::PN
 end
 
 @inline _alpn_protocol_negotiated_callback(::Nothing) = nothing
 @inline _alpn_protocol_negotiated_callback(callback::ProtocolNegotiatedCallable) = callback
-@inline _alpn_protocol_negotiated_callback(callback) = ProtocolNegotiatedCallable(callback)
+@inline _alpn_protocol_negotiated_callback(callback) = _protocol_negotiated_callback(callback)
 
 function _alpn_protocol_negotiated_callback_or_throw(callback)
     callback === nothing && throw_error(ERROR_INVALID_ARGUMENT)
