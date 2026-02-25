@@ -596,34 +596,30 @@ function tlsupgrade!(
         ssl_insecure = ssl_insecure,
     )
 
-    negotiation_error = Ref(OP_SUCCESS)
-    negotiation_event = Base.Threads.Event()
-    on_negotiation = (handler, slot, err, ud) -> begin
-        _ = handler
-        _ = ud
-        negotiation_error[] = err
-        if err == OP_SUCCESS && slot !== nothing && channel_slot_is_attached(slot)
-            channel_trigger_read(slot.channel)
-        end
-        notify(negotiation_event)
-        return nothing
-    end
-
     tls_options = TlsConnectionOptions(
         ctx;
         server_name = server_name,
-        on_negotiation_result = on_negotiation,
         timeout_ms = timeout_ms,
     )
+    negotiation_result = tls_options.tls_negotiation_result
 
-    setup_result = Ref{Any}(nothing)
     if channel_thread_is_callers_thread(channel)
-        setup_result[] = channel_setup_client_tls(socket_slot, tls_options)
+        try
+            channel_setup_client_tls(socket_slot, tls_options)
+        catch e
+            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            notify(negotiation_result, Cint(err))
+        end
     else
         task = ChannelTask(
             EventCallable(s -> begin
                 _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
-                setup_result[] = channel_setup_client_tls(socket_slot, tls_options)
+                try
+                    channel_setup_client_tls(socket_slot, tls_options)
+                catch e
+                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                    notify(negotiation_result, Cint(err))
+                end
                 return nothing
             end),
             "tcpsocket_tls_setup",
@@ -631,8 +627,33 @@ function tlsupgrade!(
         channel_schedule_task_now!(channel, task)
     end
 
-    wait(negotiation_event)
-    negotiation_error[] == OP_SUCCESS || error("TLS negotiation failed: $(negotiation_error[])")
+    negotiation_error = Int(wait(negotiation_result))
+    negotiation_error == OP_SUCCESS || error("TLS negotiation failed: $negotiation_error")
+    if channel_slot_is_attached(socket_slot)
+        if channel_thread_is_callers_thread(channel)
+            channel_trigger_read(channel)
+        else
+            trigger_fut = Future{Nothing}()
+            trigger_task = ChannelTask(
+                EventCallable(s -> begin
+                    if _coerce_task_status(s) != TaskStatus.RUN_READY
+                        notify(trigger_fut, nothing)
+                        return nothing
+                    end
+                    try
+                        channel_trigger_read(channel)
+                        notify(trigger_fut, nothing)
+                    catch e
+                        notify_exception!(trigger_fut, e isa Exception ? e : ReseauError(ERROR_UNKNOWN))
+                    end
+                    return nothing
+                end),
+                "tcpsocket_tls_trigger_read",
+            )
+            channel_schedule_task_now!(channel, trigger_task)
+            wait(trigger_fut)
+        end
+    end
     io.tls_enabled = true
     return nothing
 end

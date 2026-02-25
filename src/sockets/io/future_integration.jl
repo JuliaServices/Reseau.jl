@@ -9,12 +9,11 @@ function future_on_event_loop!(
         future::Future,
         event_loop::EventLoop,
         callback::OnFutureCompleteFn,
-        user_data = nothing,
     )
     schedule_callback = () -> begin
         schedule_task_now!(event_loop; type_tag = "future_event_loop_callback") do _
             try
-                callback(future, user_data)
+                callback(future)
             catch e
                 Core.println("future_event_loop_callback task errored")
             end
@@ -35,12 +34,11 @@ function future_on_channel!(
         future::Future,
         channel::Channel,
         callback::OnFutureCompleteFn,
-        user_data = nothing,
     )
     schedule_callback = () -> begin
         schedule_task_now!(channel.event_loop; type_tag = "future_channel_callback") do _
             try
-                callback(future, user_data)
+                callback(future)
             catch e
                 Core.println("future_channel_callback task errored")
             end

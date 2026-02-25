@@ -311,8 +311,7 @@ function _socket_handler_close_task(handler::SocketChannelHandler)
     return nothing
 end
 
-function _socket_handler_shutdown_complete_fn(user_data)
-    args = user_data
+function _socket_handler_shutdown_complete_fn(args::SocketHandlerShutdownArgs)
     handler = args.handler
     channel_task_init!(handler.shutdown_task_storage, EventCallable(_ -> _socket_handler_close_task(handler)), "socket_handler_close")
     handler.shutdown_error_code = args.error_code
@@ -320,8 +319,7 @@ function _socket_handler_shutdown_complete_fn(user_data)
     return nothing
 end
 
-function _socket_handler_shutdown_read_complete_fn(user_data)
-    args = user_data
+function _socket_handler_shutdown_read_complete_fn(args::SocketHandlerShutdownArgs)
     channel_slot_on_handler_shutdown_complete!(
         args.slot,
         args.direction,

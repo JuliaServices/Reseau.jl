@@ -38,7 +38,7 @@ function Sockets.handler_process_write_message(
     )
     push!(handler.messages, message)
     if handler.complete_write_immediately && message.on_completion !== nothing && slot.adj_left === nothing
-        Base.invokelatest(message.on_completion, slot.channel, message, handler.complete_write_error_code, message.user_data)
+        Base.invokelatest(message.on_completion, handler.complete_write_error_code)
         message.on_completion = nothing
     end
     return nothing
@@ -110,15 +110,17 @@ function _setup_channel(; enable_read_back_pressure::Bool = false)
 
     setup_ch = Channel{Int}(1)
 
-    on_setup = Reseau.EventCallable(err -> begin
+    on_setup = Reseau.ChannelCallable((err, _channel) -> begin
         put!(setup_ch, err)
         return nothing
     end)
 
-    channel = Sockets.channel_new(
-        event_loop = el,
+    channel = Sockets.Channel(
+        el,
+        nothing;
         on_setup_completed = on_setup,
         enable_read_back_pressure = enable_read_back_pressure,
+        auto_setup = true,
     )
 
     @test _wait_ready_channel(setup_ch)

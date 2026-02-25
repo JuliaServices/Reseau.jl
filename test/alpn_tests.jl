@@ -57,7 +57,7 @@ end
 
     message = EventLoops.IoMessage(sizeof(Sockets.TlsNegotiatedProtocolMessage))
     message.message_tag = EventLoops.TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = Sockets.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
+    message.negotiated_protocol = "h2"
     message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
     @test Sockets.handler_process_read_message(handler, slot, message) === nothing
@@ -144,8 +144,7 @@ end
         nothing,
         nothing,
         C_NULL,
-        nothing,
-        nothing,
+        EventLoops.Future{Cint}(),
         nothing,
         true,
         false,
@@ -182,8 +181,7 @@ end
         "h2",
         nothing,
         C_NULL,
-        nothing,
-        nothing,
+        EventLoops.Future{Cint}(),
         nothing,
         true,
         false,
@@ -216,8 +214,7 @@ end
         nothing,
         nothing,
         C_NULL,
-        nothing,
-        nothing,
+        EventLoops.Future{Cint}(),
         nothing,
         true,
         false,
@@ -253,7 +250,7 @@ end
 
     message = EventLoops.IoMessage(sizeof(Sockets.TlsNegotiatedProtocolMessage))
     message.message_tag = EventLoops.TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = nothing
+    message.negotiated_protocol = nothing
     message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
     try

@@ -1592,13 +1592,13 @@ end
             @test run_res === nothing
 
             setup_ch = Channel{Int}(2)
-            on_setup = Reseau.EventCallable(err -> begin
+            on_setup = Reseau.ChannelCallable((err, _channel) -> begin
                 put!(setup_ch, err)
                 return nothing
             end)
 
-            ch1 = Sockets.channel_new(; event_loop = el, on_setup_completed = on_setup)
-            ch2 = Sockets.channel_new(; event_loop = el, on_setup_completed = on_setup)
+            ch1 = Sockets.Channel(el, nothing; on_setup_completed = on_setup, auto_setup = true)
+            ch2 = Sockets.Channel(el, nothing; on_setup_completed = on_setup, auto_setup = true)
 
             @test _wait_for_channel(setup_ch)
             @test _wait_for_channel(setup_ch)

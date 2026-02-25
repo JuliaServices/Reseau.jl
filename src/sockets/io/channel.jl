@@ -539,6 +539,12 @@ function _complete_setup!(error_code::Int, channel::Channel)::Nothing
     destroy_after_setup = channel.destroy_pending
     channel.destroy_pending = false
     if error_code != OP_SUCCESS
+        if channel.on_setup_completed !== nothing
+            try
+                channel.on_setup_completed(error_code, nothing)
+            catch
+            end
+        end
         channel_shutdown!(channel, error_code)
         if channel.socket !== nothing
             socket_close(channel.socket)
@@ -572,6 +578,20 @@ function _complete_setup!(error_code::Int, channel::Channel)::Nothing
     return nothing
 end
 
+@inline function _channel_fail_setup_or_shutdown!(
+        channel::Channel,
+        socket::Socket,
+        error_code::Int,
+    )::Nothing
+    if channel.setup_pending
+        _complete_setup!(error_code, channel)
+        return nothing
+    end
+    channel_shutdown!(channel, error_code)
+    socket_close(socket)
+    return nothing
+end
+
 function Channel(
     event_loop::EventLoop,
     socket::Union{Socket, Nothing} = nothing;
@@ -579,6 +599,8 @@ function Channel(
     on_shutdown_completed::Union{EventCallable, Nothing} = nothing,
     enable_read_back_pressure::Bool = false,
     tls_connection_options::MaybeTlsConnectionOptions = nothing,
+    wait_for_setup::Bool = true,
+    auto_setup::Bool = socket !== nothing,
 )
     channel = Channel(
         event_loop,
@@ -630,9 +652,9 @@ function Channel(
     acquired = true
     try
         channel.has_event_loop_lease = true
-        channel.setup_pending = true
+        channel.setup_pending = auto_setup
         channel.destroy_pending = false
-        if socket === nothing
+        if !auto_setup
             acquired = false
             return channel
         end
@@ -640,14 +662,16 @@ function Channel(
         setup_fn = function (status::TaskStatus.T)
             try
                 if status != TaskStatus.RUN_READY
-                    notify_exception!(channel.setup_future, ReseauError(ERROR_SYS_CALL_FAILURE))
-                    channel.destroy_pending = false
-                    channel_destroy!(channel)
+                    _complete_setup!(ERROR_SYS_CALL_FAILURE, channel)
                     return nothing
                 end
                 pool = _channel_get_or_create_message_pool(channel)
                 channel.message_pool = pool
                 channel.channel_state = ChannelState.ACTIVE
+                if socket === nothing
+                    _complete_setup!(OP_SUCCESS, channel)
+                    return nothing
+                end
                 socket_obj = socket::Socket
                 # install socket handler
                 local handler_result
@@ -660,9 +684,7 @@ function Channel(
                         LS_IO_CHANNEL_BOOTSTRAP,
                         "ClientBootstrap: failed to create socket channel handler",
                     )
-                    channel_shutdown!(channel, err)
-                    socket_close(socket_obj)
-                    notify_exception!(channel.setup_future, ReseauError(err))
+                    _complete_setup!(err, channel)
                     return nothing
                 end
                 # install TLS handler (if applicable)
@@ -679,19 +701,17 @@ function Channel(
                         tls_handler = tls_channel_handler_new!(channel, tls_options)
                     catch e
                         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        channel_shutdown!(channel, err)
-                        socket_close(socket_obj)
-                        notify_exception!(channel.setup_future, ReseauError(err))
+                        _complete_setup!(err, channel)
                         return nothing
                     end
-                    try
-                        tls_client_handler_start_negotiation(tls_handler)
-                    catch e
-                        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                        channel_shutdown!(channel, err)
-                        socket_close(socket_obj)
-                        notify_exception!(channel.setup_future, ReseauError(err))
-                        return nothing
+                    if !tls_options.ctx.options.is_server
+                        try
+                            tls_client_handler_start_negotiation(tls_handler)
+                        catch e
+                            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                            _complete_setup!(err, channel)
+                            return nothing
+                        end
                     end
                     _schedule_trigger_read(channel, socket_obj)
                 else
@@ -702,7 +722,9 @@ function Channel(
                 end
             catch e
                 err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                notify_exception!(channel.setup_future, ReseauError(err))
+                if channel.setup_pending
+                    _complete_setup!(err, channel)
+                end
             end
             return nothing
         end
@@ -722,7 +744,9 @@ function Channel(
     finally
         acquired && Base.release(event_loop)
     end
-    wait(channel.setup_future)
+    if wait_for_setup
+        wait(channel.setup_future)
+    end
     return channel
 end
 
@@ -732,9 +756,7 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
             channel_trigger_read(channel)
         catch e
             err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-            channel_shutdown!(channel, err)
-            socket_close(socket)
-            notify_exception!(channel.setup_future, ReseauError(err))
+            _channel_fail_setup_or_shutdown!(channel, socket, err)
         end
         _channel_schedule_setup_read_retry!(channel, socket, 200)
         return nothing
@@ -746,9 +768,7 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
                 channel_trigger_read(channel)
             catch e
                 err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-                channel_shutdown!(channel, err)
-                socket_close(socket)
-                notify_exception!(channel.setup_future, ReseauError(err))
+                _channel_fail_setup_or_shutdown!(channel, socket, err)
                 return nothing
             end
             _channel_schedule_setup_read_retry!(channel, socket, 200)
@@ -783,9 +803,7 @@ function _channel_setup_read_retry_task(cb::_SetupReadRetryCallback, status::Tas
         channel_trigger_read(channel)
     catch e
         err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-        channel_shutdown!(channel, err)
-        socket_close(cb.socket)
-        notify_exception!(channel.setup_future, ReseauError(err))
+        _channel_fail_setup_or_shutdown!(channel, cb.socket, err)
         return nothing
     end
 

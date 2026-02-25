@@ -181,7 +181,6 @@ mutable struct RwWriteTaskArgs
     slot::Sockets.ChannelSlot
     buffer::Reseau.ByteBuffer
     on_completion::Union{Reseau.EventCallable, Nothing}
-    user_data::Any
 end
 
 @inline function _rw_task_status(status)
@@ -192,7 +191,6 @@ function _rw_handler_write_now(
         slot::Sockets.ChannelSlot,
         buffer::Reseau.ByteBuffer,
         on_completion,
-        user_data,
     )
     remaining = Int(buffer.len)
     cursor_ref = Ref(Reseau.byte_cursor_from_buf(buffer))
@@ -206,7 +204,6 @@ function _rw_handler_write_now(
 
         chunk_size = min(remaining, Int(Reseau.capacity(msg.message_data) - msg.message_data.len))
         msg.on_completion = on_completion
-        msg.user_data = user_data
 
         chunk_cursor = Reseau.byte_cursor_advance(cursor_ref, chunk_size)
         msg_ref = Ref(msg.message_data)
@@ -220,7 +217,7 @@ function _rw_handler_write_now(
 end
 
 function rw_handler_write(handler::ReadWriteTestHandler, slot::Sockets.ChannelSlot, buffer::Reseau.ByteBuffer)
-    return rw_handler_write_with_callback(handler, slot, buffer, nothing, nothing)
+    return rw_handler_write_with_callback(handler, slot, buffer, nothing)
 end
 
 function rw_handler_write_with_callback(
@@ -228,17 +225,16 @@ function rw_handler_write_with_callback(
         slot::Sockets.ChannelSlot,
         buffer::Reseau.ByteBuffer,
         on_completion,
-        user_data,
     )
     if !handler.event_loop_driven || Sockets.channel_thread_is_callers_thread(slot.channel)
-        return _rw_handler_write_now(slot, buffer, on_completion, user_data)
+        return _rw_handler_write_now(slot, buffer, on_completion)
     end
 
-    args = RwWriteTaskArgs(handler, slot, buffer, on_completion, user_data)
+    args = RwWriteTaskArgs(handler, slot, buffer, on_completion)
     task = Sockets.ChannelTask()
     Sockets.channel_task_init!(task, Reseau.EventCallable(status -> begin
         if _rw_task_status(status) == Reseau.TaskStatus.RUN_READY
-            _rw_handler_write_now(args.slot, args.buffer, args.on_completion, args.user_data)
+            _rw_handler_write_now(args.slot, args.buffer, args.on_completion)
         end
         nothing
     end), "rw_handler_write")

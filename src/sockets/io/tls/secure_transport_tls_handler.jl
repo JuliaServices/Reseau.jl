@@ -113,9 +113,8 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     alpn_list::Union{String, Nothing}
     latest_message_on_completion::Union{EventCallable, Nothing}
     ca_certs::CFArrayRef
-    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
+    tls_negotiation_result::Future{Cint}
     on_data_read::Union{TlsDataReadCallback, Nothing}
-    on_error::Union{TlsErrorCallback, Nothing}
     advertise_alpn_message::Bool
     negotiation_finished::Bool
     verify_peer::Bool
@@ -336,7 +335,7 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
     return buf
 end
 
-function _secure_transport_on_negotiation_result(handler::SecureTransportTlsHandler, error_code::Int)
+function _secure_transport_finish_negotiation(handler::SecureTransportTlsHandler, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
     _complete_setup!(error_code, handler.slot.channel)
     return nothing
@@ -350,7 +349,7 @@ end
     if status == TlsNegotiationStatus.ONGOING || status == TlsNegotiationStatus.NONE
         handler.negotiation_finished = false
         err = error_code == OP_SUCCESS ? ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE : error_code
-        _secure_transport_on_negotiation_result(handler, err)
+        _secure_transport_finish_negotiation(handler, err)
     end
     return nothing
 end
@@ -371,7 +370,7 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     )
     message === nothing && return nothing
     message.message_tag = TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = TlsNegotiatedProtocolMessage(handler.protocol)
+    message.negotiated_protocol = byte_buffer_as_string(handler.protocol)
     setfield!(message.message_data, :len, Csize_t(sizeof(TlsNegotiatedProtocolMessage)))
     try
         channel_slot_send_message(slot, message, ChannelDirection.READ)
@@ -410,7 +409,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             logf(LogLevel.DEBUG, LS_IO_TLS, "negotiated protocol: $(String(byte_cursor_from_buf(handler.protocol)))")
         end
         _secure_transport_send_alpn_message(handler)
-        _secure_transport_on_negotiation_result(handler, OP_SUCCESS)
+        _secure_transport_finish_negotiation(handler, OP_SUCCESS)
         return nothing
     elseif status == _errSSLPeerAuthCompleted
         logf(
@@ -1032,9 +1031,8 @@ function _secure_transport_handler_new(
         options.alpn_list === nothing ? st_ctx.alpn_list : options.alpn_list,
         nothing,
         C_NULL,
-        options.on_negotiation_result,
+        options.tls_negotiation_result,
         options.on_data_read,
-        options.on_error,
         options.advertise_alpn_message,
         false,
         options.ctx.options.verify_peer,

@@ -590,11 +590,20 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
     end
 
     channel_ref = Ref{Union{Channel, Nothing}}(nothing)
-
-    on_setup = bootstrap.on_incoming_channel_setup
+    setup_succeeded = Ref(false)
+    incoming_setup_cb = bootstrap.on_incoming_channel_setup
+    on_setup = ChannelCallable((err, channel_obj) -> begin
+        if incoming_setup_cb !== nothing
+            incoming_setup_cb(err, channel_obj)
+        end
+        if err == OP_SUCCESS && channel_obj isa Channel
+            setup_succeeded[] = true
+        end
+        return nothing
+    end)
     on_shutdown = EventCallable(err -> begin
         ch = channel_ref[]
-        if ch !== nothing && bootstrap.on_incoming_channel_shutdown !== nothing
+        if setup_succeeded[] && ch !== nothing && bootstrap.on_incoming_channel_shutdown !== nothing
             (bootstrap.on_incoming_channel_shutdown::ChannelCallable)(err, ch)
         end
         _finish_incoming_once!(bootstrap, lifecycle)
@@ -609,6 +618,7 @@ function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::No
             on_shutdown_completed = on_shutdown,
             enable_read_back_pressure = bootstrap.enable_read_back_pressure,
             tls_connection_options = bootstrap.tls_connection_options,
+            wait_for_setup = false,
         )
         channel_ref[] = channel
     catch e

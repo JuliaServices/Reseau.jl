@@ -167,20 +167,12 @@ if tls_tests_enabled()
         client_ctx = Sockets.tls_context_new_client(; verify_peer = false)
         @test client_ctx isa Sockets.TlsContext
 
-        server_negotiated = Ref(false)
-        client_negotiated = Ref(false)
         server_setup = Ref(false)
         client_setup = Ref(false)
         server_channel = Ref{Any}(nothing)
         client_channel = Ref{Any}(nothing)
 
-        server_tls_opts = Sockets.TlsConnectionOptions(
-            server_ctx;
-            on_negotiation_result = (_handler, _slot, _err) -> begin
-                server_negotiated[] = true
-                return nothing
-            end,
-        )
+        server_tls_opts = Sockets.TlsConnectionOptions(server_ctx)
 
         cfg = _bootstrap_test_config()
 
@@ -204,10 +196,6 @@ if tls_tests_enabled()
         client_tls_opts = Sockets.TlsConnectionOptions(
             client_ctx;
             server_name = "localhost",
-            on_negotiation_result = (_handler, _slot, _err) -> begin
-                client_negotiated[] = true
-                return nothing
-            end,
         )
 
         client_channel[] = Sockets.client_bootstrap_connect!(
@@ -227,8 +215,8 @@ if tls_tests_enabled()
 
         @test wait_for_pred(() -> server_setup[])
         @test wait_for_pred(() -> client_setup[])
-        @test wait_for_pred(() -> server_negotiated[])
-        @test wait_for_pred(() -> client_negotiated[])
+        @test wait(server_tls_opts.tls_negotiation_result) == Reseau.OP_SUCCESS
+        @test wait(client_tls_opts.tls_negotiation_result) == Reseau.OP_SUCCESS
 
         if client_channel[] !== nothing
             Sockets.channel_shutdown!(client_channel[], 0)

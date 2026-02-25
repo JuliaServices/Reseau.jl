@@ -15,7 +15,7 @@ end
 
     strategy = Sockets.NoRetryStrategy()
     err = try
-        Sockets.retry_strategy_acquire_token!(strategy, (token, code, ud) -> nothing, nothing)
+        Sockets.retry_strategy_acquire_token!(strategy, (token, code) -> nothing)
         nothing
     catch e
         e
@@ -49,12 +49,12 @@ end
                 retry_count = Ref(0)
                 done_ch = Channel{Int}(1)
 
-                on_ready = function (token, code, ud)
+                on_ready = function (token, code)
                     lock(mtx) do
                         retry_count[] += 1
                     end
                     try
-                        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
                     catch e
                         e isa Reseau.ReseauError || rethrow()
                         put!(done_ch, e.code)
@@ -63,9 +63,9 @@ end
                     return nothing
                 end
 
-                on_acquired = function (token, code, ud)
+                on_acquired = function (token, code)
                     try
-                        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
                     catch e
                         e isa Reseau.ReseauError || rethrow()
                         put!(done_ch, e.code)
@@ -74,7 +74,7 @@ end
                     return nothing
                 end
 
-                _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+                _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired)
 
                 deadline = Base.time_ns() + 5_000_000_000
                 while !isready(done_ch) && Base.time_ns() < deadline
@@ -120,7 +120,7 @@ end
         client_errors = Ref(2)
         done_ch = Channel{Int}(1)
 
-        on_ready = function (token, code, ud)
+        on_ready = function (token, code)
             lock(mtx) do
                 retry_count[] += 1
             end
@@ -132,7 +132,7 @@ end
                 end
             end
             try
-                Sockets.retry_token_schedule_retry(token, err_type, on_ready, ud)
+                Sockets.retry_token_schedule_retry(token, err_type, on_ready)
             catch e
                 e isa Reseau.ReseauError || rethrow()
                 put!(done_ch, e.code)
@@ -141,9 +141,9 @@ end
             return nothing
         end
 
-        on_acquired = function (token, code, ud)
+        on_acquired = function (token, code)
             try
-                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
             catch e
                 e isa Reseau.ReseauError || rethrow()
                 put!(done_ch, e.code)
@@ -152,7 +152,7 @@ end
             return nothing
         end
 
-        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired)
 
         deadline = Base.time_ns() + 5_000_000_000
         while !isready(done_ch) && Base.time_ns() < deadline
@@ -195,12 +195,12 @@ end
         retry_count = Ref(0)
         done_ch = Channel{Int}(1)
 
-        on_ready = function (token, code, ud)
+        on_ready = function (token, code)
             lock(mtx) do
                 retry_count[] += 1
             end
             try
-                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
             catch e
                 e isa Reseau.ReseauError || rethrow()
                 put!(done_ch, e.code)
@@ -209,9 +209,9 @@ end
             return nothing
         end
 
-        on_acquired = function (token, code, ud)
+        on_acquired = function (token, code)
             try
-                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
             catch e
                 e isa Reseau.ReseauError || rethrow()
                 put!(done_ch, e.code)
@@ -223,7 +223,7 @@ end
         before = Ref{UInt64}()
         @test Reseau.high_res_clock_get_ticks(before) == Reseau.OP_SUCCESS
 
-        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired)
 
         deadline = Base.time_ns() + 10_000_000_000
         while !isready(done_ch) && Base.time_ns() < deadline
@@ -273,12 +273,12 @@ end
         retry_count = Ref(0)
         done_ch = Channel{Int}(1)
 
-        on_ready = function (token, code, ud)
+        on_ready = function (token, code)
             lock(mtx) do
                 retry_count[] += 1
             end
             try
-                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
             catch e
                 e isa Reseau.ReseauError || rethrow()
                 put!(done_ch, e.code)
@@ -287,9 +287,9 @@ end
             return nothing
         end
 
-        on_acquired = function (token, code, ud)
+        on_acquired = function (token, code)
             try
-                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, ud)
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
             catch e
                 e isa Reseau.ReseauError || rethrow()
                 put!(done_ch, e.code)
@@ -301,7 +301,7 @@ end
         before = Ref{UInt64}()
         @test Reseau.high_res_clock_get_ticks(before) == Reseau.OP_SUCCESS
 
-        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired, nothing)
+        _ = Sockets.retry_strategy_acquire_token!(strategy, on_acquired)
 
         deadline = Base.time_ns() + 15_000_000_000
         while !isready(done_ch) && Base.time_ns() < deadline
@@ -379,30 +379,30 @@ end
         partition = "us-east-1:super-badly-named-aws-service"
 
         acquired_ch = Channel{Tuple{Any, Int}}(1)
-        on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        on_acquired = (token, code) -> put!(acquired_ch, (token, code))
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, 0)
         @test _wait_ready(acquired_ch)
         token1, code1 = take!(acquired_ch)
         @test code1 == Reseau.OP_SUCCESS
 
         acquired_ch2 = Channel{Tuple{Any, Int}}(1)
-        on_acquired2 = (token, code, ud) -> put!(acquired_ch2, (token, code))
-        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired2, nothing, 0)
+        on_acquired2 = (token, code) -> put!(acquired_ch2, (token, code))
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired2, 0)
         @test _wait_ready(acquired_ch2)
         token2, code2 = take!(acquired_ch2)
         @test code2 == Reseau.OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
-        on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        Sockets.retry_token_schedule_retry(token1, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
+        on_ready = (token, code) -> put!(ready_ch, (token, code))
+        Sockets.retry_token_schedule_retry(token1, Sockets.RetryErrorType.TRANSIENT, on_ready)
         @test _wait_ready(ready_ch)
         ready_token, ready_code = take!(ready_ch)
         @test ready_token === token1
         @test ready_code == Reseau.OP_SUCCESS
 
         ready_ch2 = Channel{Tuple{Any, Int}}(1)
-        on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
-        Sockets.retry_token_schedule_retry(token2, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
+        on_ready2 = (token, code) -> put!(ready_ch2, (token, code))
+        Sockets.retry_token_schedule_retry(token2, Sockets.RetryErrorType.SERVER_ERROR, on_ready2)
         @test _wait_ready(ready_ch2)
         ready_token2, ready_code2 = take!(ready_ch2)
         @test ready_token2 === token2
@@ -413,7 +413,6 @@ end
                 token1,
                 Sockets.RetryErrorType.SERVER_ERROR,
                 on_ready,
-                nothing,
             )
             nothing
         catch e
@@ -427,7 +426,6 @@ end
                 token2,
                 Sockets.RetryErrorType.SERVER_ERROR,
                 on_ready2,
-                nothing,
             )
             nothing
         catch e
@@ -440,15 +438,15 @@ end
         Sockets.retry_token_release!(token2)
 
         acquired_ch3 = Channel{Tuple{Any, Int}}(1)
-        on_acquired3 = (token, code, ud) -> put!(acquired_ch3, (token, code))
-        _ = Sockets.retry_strategy_acquire_token!(strategy, nothing, on_acquired3, nothing, 0)
+        on_acquired3 = (token, code) -> put!(acquired_ch3, (token, code))
+        _ = Sockets.retry_strategy_acquire_token!(strategy, nothing, on_acquired3, 0)
         @test _wait_ready(acquired_ch3)
         token3, code3 = take!(acquired_ch3)
         @test code3 == Reseau.OP_SUCCESS
 
         ready_ch3 = Channel{Tuple{Any, Int}}(1)
-        on_ready3 = (token, code, ud) -> put!(ready_ch3, (token, code))
-        Sockets.retry_token_schedule_retry(token3, Sockets.RetryErrorType.SERVER_ERROR, on_ready3, nothing)
+        on_ready3 = (token, code) -> put!(ready_ch3, (token, code))
+        Sockets.retry_token_schedule_retry(token3, Sockets.RetryErrorType.SERVER_ERROR, on_ready3)
         @test _wait_ready(ready_ch3)
         ready_token3, ready_code3 = take!(ready_ch3)
         @test ready_token3 === token3
@@ -485,26 +483,26 @@ end
         partition = "us-west-2:elastic-something-something-manager-manager"
 
         acquired_ch = Channel{Tuple{Any, Int}}(1)
-        on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        on_acquired = (token, code) -> put!(acquired_ch, (token, code))
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, 0)
         @test _wait_ready(acquired_ch)
         token, code = take!(acquired_ch)
         @test code == Reseau.OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
-        on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.TRANSIENT, on_ready, nothing)
+        on_ready = (token, code) -> put!(ready_ch, (token, code))
+        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.TRANSIENT, on_ready)
         @test _wait_ready(ready_ch)
         _ = take!(ready_ch)
 
         ready_ch2 = Channel{Tuple{Any, Int}}(1)
-        on_ready2 = (token, code, ud) -> put!(ready_ch2, (token, code))
-        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready2, nothing)
+        on_ready2 = (token, code) -> put!(ready_ch2, (token, code))
+        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready2)
         @test _wait_ready(ready_ch2)
         _ = take!(ready_ch2)
 
         err = try
-            Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+            Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
             nothing
         catch e
             e
@@ -516,8 +514,8 @@ end
 
         for _ in 1:5
             acquired_ch = Channel{Tuple{Any, Int}}(1)
-            on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-            _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+            on_acquired = (token, code) -> put!(acquired_ch, (token, code))
+            _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, 0)
             @test _wait_ready(acquired_ch)
             token, code = take!(acquired_ch)
             @test code == Reseau.OP_SUCCESS
@@ -526,20 +524,20 @@ end
         end
 
         acquired_ch = Channel{Tuple{Any, Int}}(1)
-        on_acquired = (token, code, ud) -> put!(acquired_ch, (token, code))
-        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, nothing, 0)
+        on_acquired = (token, code) -> put!(acquired_ch, (token, code))
+        _ = Sockets.retry_strategy_acquire_token!(strategy, partition, on_acquired, 0)
         @test _wait_ready(acquired_ch)
         token, code = take!(acquired_ch)
         @test code == Reseau.OP_SUCCESS
 
         ready_ch = Channel{Tuple{Any, Int}}(1)
-        on_ready = (token, code, ud) -> put!(ready_ch, (token, code))
-        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+        on_ready = (token, code) -> put!(ready_ch, (token, code))
+        Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
         @test _wait_ready(ready_ch)
         _ = take!(ready_ch)
 
         err2 = try
-            Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready, nothing)
+            Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
             nothing
         catch e
             e
