@@ -37,13 +37,13 @@ end
 
                 elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-                config = Sockets.ExponentialBackoffConfig(;
+                config = (;
                     backoff_scale_factor_ms = 1,
                     max_backoff_secs = 1,
                     max_retries = 3,
                     jitter_mode = jitter_mode,
                 )
-                strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
+                strategy = Sockets.ExponentialBackoffRetryStrategy(elg; config...)
 
                 mtx = ReentrantLock()
                 retry_count = Ref(0)
@@ -107,13 +107,13 @@ end
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-        config = Sockets.ExponentialBackoffConfig(;
+        config = (;
             backoff_scale_factor_ms = 1,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
+        strategy = Sockets.ExponentialBackoffRetryStrategy(elg; config...)
 
         mtx = ReentrantLock()
         retry_count = Ref(0)
@@ -183,13 +183,13 @@ end
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-        config = Sockets.ExponentialBackoffConfig(;
+        config = (;
             backoff_scale_factor_ms = 5,
             max_backoff_secs = 10,
             max_retries = 3,
             jitter_mode = :none,
         )
-        strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
+        strategy = Sockets.ExponentialBackoffRetryStrategy(elg; config...)
 
         mtx = ReentrantLock()
         retry_count = Ref(0)
@@ -261,13 +261,13 @@ end
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-        config = Sockets.ExponentialBackoffConfig(;
+        config = (;
             backoff_scale_factor_ms = 400,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        strategy = Sockets.ExponentialBackoffRetryStrategy(elg, config)
+        strategy = Sockets.ExponentialBackoffRetryStrategy(elg; config...)
 
         mtx = ReentrantLock()
         retry_count = Ref(0)
@@ -340,11 +340,11 @@ end
 
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-    config = Sockets.ExponentialBackoffConfig(;
+    config = (;
         max_retries = 64,
     )
     err = try
-        Sockets.ExponentialBackoffRetryStrategy(elg, config)
+        Sockets.ExponentialBackoffRetryStrategy(elg; config...)
         nothing
     catch e
         e
@@ -364,17 +364,14 @@ end
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-        backoff_config = Sockets.ExponentialBackoffConfig(;
+        config = (;
+            initial_bucket_capacity = 15,
             backoff_scale_factor_ms = 1,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        config = Sockets.StandardRetryConfig(;
-            initial_bucket_capacity = 15,
-            backoff_config = backoff_config,
-        )
-        strategy = Sockets.StandardRetryStrategy(elg, config)
+        strategy = Sockets.StandardRetryStrategy(elg; config...)
 
         partition = "us-east-1:super-badly-named-aws-service"
 
@@ -468,17 +465,14 @@ end
 
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
-        backoff_config = Sockets.ExponentialBackoffConfig(;
+        config = (;
+            initial_bucket_capacity = 15,
             backoff_scale_factor_ms = 1,
             max_backoff_secs = 1,
             max_retries = 3,
             jitter_mode = :none,
         )
-        config = Sockets.StandardRetryConfig(;
-            initial_bucket_capacity = 15,
-            backoff_config = backoff_config,
-        )
-        strategy = Sockets.StandardRetryStrategy(elg, config)
+        strategy = Sockets.StandardRetryStrategy(elg; config...)
 
         partition = "us-west-2:elastic-something-something-manager-manager"
 
