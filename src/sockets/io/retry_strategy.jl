@@ -373,7 +373,7 @@ function _exponential_backoff_retry_task(
 
     logf(
         LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-        "Exponential backoff: retry task executing, status=$status"
+        "Exponential backoff: retry task executing"
     )
 
     if status == TaskStatus.CANCELED
