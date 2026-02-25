@@ -60,7 +60,7 @@ mutable struct IoMessage
     copy_mark::Csize_t
     owning_channel::Any  # Channel or nothing
     on_completion::Union{EventCallable, Nothing}
-    user_data::Any
+    negotiated_protocol::Union{String, Nothing}
     # Intrusive list node for queueing
     queueing_handle_next::Union{IoMessage, Nothing}  # nullable
     queueing_handle_prev::Union{IoMessage, Nothing}  # nullable

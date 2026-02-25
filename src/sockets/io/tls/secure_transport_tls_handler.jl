@@ -113,9 +113,8 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     alpn_list::Union{String, Nothing}
     latest_message_on_completion::Union{EventCallable, Nothing}
     ca_certs::CFArrayRef
-    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
+    tls_negotiation_result::Future{Cint}
     on_data_read::Union{TlsDataReadCallback, Nothing}
-    on_error::Union{TlsErrorCallback, Nothing}
     advertise_alpn_message::Bool
     negotiation_finished::Bool
     verify_peer::Bool
@@ -336,10 +335,21 @@ function _secure_transport_get_protocol(handler::SecureTransportTlsHandler)::Byt
     return buf
 end
 
-function _secure_transport_on_negotiation_result(handler::SecureTransportTlsHandler, error_code::Int)
+function _secure_transport_finish_negotiation(handler::SecureTransportTlsHandler, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
-    if handler.on_negotiation_result !== nothing && handler.slot !== nothing
-        handler.on_negotiation_result(handler, handler.slot, error_code)
+    _complete_setup!(error_code, handler.slot.channel)
+    return nothing
+end
+
+@inline function _secure_transport_fail_pending_negotiation!(
+        handler::SecureTransportTlsHandler,
+        error_code::Int,
+    )::Nothing
+    status = handler.stats.handshake_status
+    if status == TlsNegotiationStatus.ONGOING || status == TlsNegotiationStatus.NONE
+        handler.negotiation_finished = false
+        err = error_code == OP_SUCCESS ? ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE : error_code
+        _secure_transport_finish_negotiation(handler, err)
     end
     return nothing
 end
@@ -360,7 +370,7 @@ function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     )
     message === nothing && return nothing
     message.message_tag = TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = TlsNegotiatedProtocolMessage(handler.protocol)
+    message.negotiated_protocol = byte_buffer_as_string(handler.protocol)
     setfield!(message.message_data, :len, Csize_t(sizeof(TlsNegotiatedProtocolMessage)))
     try
         channel_slot_send_message(slot, message, ChannelDirection.READ)
@@ -399,7 +409,7 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             logf(LogLevel.DEBUG, LS_IO_TLS, "negotiated protocol: $(String(byte_cursor_from_buf(handler.protocol)))")
         end
         _secure_transport_send_alpn_message(handler)
-        _secure_transport_on_negotiation_result(handler, OP_SUCCESS)
+        _secure_transport_finish_negotiation(handler, OP_SUCCESS)
         return nothing
     elseif status == _errSSLPeerAuthCompleted
         logf(
@@ -407,13 +417,11 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             LS_IO_TLS,string("SecureTransport SSLHandshake peer auth completed", " ", ))
         if handler.verify_peer
             if handler.ca_certs == C_NULL
-                _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             end
             trust_ref = Ref{SecTrustRef}(C_NULL)
             if ccall((:SSLCopyPeerTrust, _SECURITY_LIB), OSStatus, (SSLContextRef, Ref{SecTrustRef}), handler.ctx, trust_ref) !=
                     _errSecSuccess
-                _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             end
 
@@ -432,7 +440,6 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                     _errSecSuccess
                 _cf_release(policy)
                 _cf_release(trust_ref[])
-                _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             end
             _cf_release(policy)
@@ -446,7 +453,6 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                         handler.ca_certs,
                     ) != _errSecSuccess
                     _cf_release(trust_ref[])
-                    _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                     throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 end
 
@@ -458,7 +464,6 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                         1,
                     ) != _errSecSuccess
                     _cf_release(trust_ref[])
-                    _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                     throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 end
             end
@@ -476,7 +481,6 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                 LogLevel.WARN,
                 LS_IO_TLS,string("SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])", " ", ))
             handler.negotiation_finished = false
-            _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 
@@ -489,7 +493,6 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
             LogLevel.WARN,
             LS_IO_TLS,string("SecureTransport SSLHandshake failed with OSStatus $status", " ", ))
         handler.negotiation_finished = false
-        _secure_transport_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
     end
 end
@@ -499,7 +502,7 @@ function _secure_transport_negotiation_task(handler::SecureTransportTlsHandler, 
     try
         _secure_transport_drive_negotiation(handler)
     catch
-        # negotiation result callback already fired inside _secure_transport_drive_negotiation
+        _secure_transport_fail_pending_negotiation!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
     end
     return nothing
 end
@@ -715,6 +718,7 @@ function handler_process_read_message(
                 negotiation_failed = true
             end
             if negotiation_failed
+                _secure_transport_fail_pending_negotiation!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 return nothing
             end
@@ -869,6 +873,9 @@ function handler_shutdown(
     abort_immediately = free_scarce_resources_immediately
 
     if direction == ChannelDirection.READ
+        if !handler.negotiation_finished
+            _secure_transport_fail_pending_negotiation!(handler, error_code)
+        end
         if !abort_immediately &&
                 handler.negotiation_finished &&
                 !isempty(handler.input_queue) &&
@@ -1024,9 +1031,8 @@ function _secure_transport_handler_new(
         options.alpn_list === nothing ? st_ctx.alpn_list : options.alpn_list,
         nothing,
         C_NULL,
-        options.on_negotiation_result,
+        options.tls_negotiation_result,
         options.on_data_read,
-        options.on_error,
         options.advertise_alpn_message,
         false,
         options.ctx.options.verify_peer,

@@ -5,9 +5,7 @@ using LibAwsCommon
 using Libdl
 
 # TLS callback types — closures capture context for trim-safe dispatch
-# on_negotiation_result: (handler, slot, error_code) -> nothing
 # on_data_read: (handler, slot, buffer) -> nothing
-# on_error: (handler, slot, error_code, message) -> nothing
 
 const TLS_DEFAULT_TIMEOUT_MS = 10_000
 const TLS_MAX_RECORD_SIZE = 16 * 1024
@@ -39,7 +37,7 @@ function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
 end
 
 struct TlsCtxPkcs11Options
-    pkcs11_lib::Pkcs11Lib
+    pkcs11_lib
     user_pin::ByteCursor
     slot_id::Union{UInt64, Nothing}
     token_label::ByteCursor
@@ -465,14 +463,13 @@ function tls_key_operation_type_str(op::TlsKeyOperationType.T)::String
         "UNKNOWN"
 end
 
-mutable struct TlsKeyOperation{F, UD, Handler}
+mutable struct TlsKeyOperation{F, Handler}
     input::ByteCursor
     input_buf::Union{ByteBuffer, Nothing}
     operation_type::TlsKeyOperationType.T
     signature_algorithm::TlsSignatureAlgorithm.T
     digest_algorithm::TlsHashAlgorithm.T
     on_complete::F
-    user_data::UD
     completed::Bool
     error_code::Int
     output::ByteBuffer
@@ -489,16 +486,14 @@ function TlsKeyOperation(
         signature_algorithm::TlsSignatureAlgorithm.T = TlsSignatureAlgorithm.UNKNOWN,
         digest_algorithm::TlsHashAlgorithm.T = TlsHashAlgorithm.UNKNOWN,
         on_complete = nothing,
-        user_data = nothing,
     )
-    return TlsKeyOperation{typeof(on_complete), typeof(user_data), typeof(nothing)}(
+    return TlsKeyOperation{typeof(on_complete), typeof(nothing)}(
         input,
         nothing,
         operation_type,
         signature_algorithm,
         digest_algorithm,
         on_complete,
-        user_data,
         false,
         0,
         null_buffer(),
@@ -629,9 +624,7 @@ function _tls_key_operation_complete_common(
         end
     end
 
-    if operation.on_complete !== nothing
-        operation.on_complete(operation, error_code, operation.user_data)
-    end
+    operation.on_complete !== nothing && operation.on_complete(operation, error_code)
 
     return nothing
 end
@@ -1119,23 +1112,32 @@ function tls_connection_options_copy(options::TlsConnectionOptions)
         server_name = options.server_name,
         alpn_list = options.alpn_list,
         advertise_alpn_message = options.advertise_alpn_message,
-        on_negotiation_result = options.on_negotiation_result,
+        tls_negotiation_result = options.tls_negotiation_result,
         on_data_read = options.on_data_read,
-        on_error = options.on_error,
         timeout_ms = options.timeout_ms,
     )
 end
 
 function tls_connection_options_set_callbacks!(
         options::TlsConnectionOptions,
-        on_negotiation_result = nothing,
         on_data_read = nothing,
-        on_error = nothing,
     )
-    options.on_negotiation_result = _tls_negotiation_result_callback(on_negotiation_result)
     options.on_data_read = _tls_data_read_callback(on_data_read)
-    options.on_error = _tls_error_callback(on_error)
     return nothing
+end
+
+function tls_connection_options_set_negotiation_result_future!(
+        options::TlsConnectionOptions,
+        tls_negotiation_result::Future{Cint},
+    )
+    options.tls_negotiation_result = tls_negotiation_result
+    return nothing
+end
+
+function tls_connection_options_reset_negotiation_result!(options::TlsConnectionOptions)::Future{Cint}
+    fut = Future{Cint}()
+    options.tls_negotiation_result = fut
+    return fut
 end
 
 function tls_connection_options_set_server_name!(options::TlsConnectionOptions, server_name::Union{String, Nothing})
@@ -1162,17 +1164,20 @@ tls_connection_options_init_from_ctx(ctx::TlsContext) = TlsConnectionOptions(ctx
 tls_connection_options_clean_up(options::TlsConnectionOptions) = tls_connection_options_clean_up!(options)
 function tls_connection_options_set_callbacks(
         options::TlsConnectionOptions,
-        on_negotiation_result = nothing,
         on_data_read = nothing,
-        on_error = nothing,
     )
     return tls_connection_options_set_callbacks!(
         options,
-        on_negotiation_result,
         on_data_read,
-        on_error,
     )
 end
+tls_connection_options_set_negotiation_result_future(
+    options::TlsConnectionOptions,
+    tls_negotiation_result::Future{Cint},
+) = tls_connection_options_set_negotiation_result_future!(options, tls_negotiation_result)
+tls_connection_options_reset_negotiation_result(options::TlsConnectionOptions) =
+    tls_connection_options_reset_negotiation_result!(options)
+tls_connection_options_get_negotiation_result(options::TlsConnectionOptions) = options.tls_negotiation_result
 tls_connection_options_set_server_name(options::TlsConnectionOptions, server_name::Union{String, Nothing}) =
     tls_connection_options_set_server_name!(options, server_name)
 tls_connection_options_set_alpn_list(options::TlsConnectionOptions, alpn_list::Union{String, Nothing}) =
@@ -1219,9 +1224,18 @@ end
 function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::Int)
     handler.stats.handshake_status =
         error_code == OP_SUCCESS ? TlsNegotiationStatus.SUCCESS : TlsNegotiationStatus.FAILURE
+    notify(handler.tls_negotiation_result, Cint(error_code))
     slot = handler.slot
     slot === nothing && return nothing
     channel_slot_is_attached(slot) || return nothing
+    if error_code == OP_SUCCESS
+        protocol = tls_handler_protocol(handler)
+        if protocol.len > 0
+            slot.channel.negotiated_protocol = byte_buffer_as_string(protocol)
+        else
+            slot.channel.negotiated_protocol = nothing
+        end
+    end
     channel = slot.channel
     now = channel_current_clock_time(channel)
     handler.stats.handshake_end_ns = now

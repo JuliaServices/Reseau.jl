@@ -718,11 +718,9 @@
             sock::Socket,
             remote_endpoint::SocketEndpoint,
             connect_loop::Union{EventLoop, Nothing},
-            event_loop_group::Union{EventLoopGroup, Nothing},
             on_connection_result::Union{EventCallable, Nothing},
             tls_connection_options::MaybeTlsConnectionOptions,
         )::Nothing
-        _ = event_loop_group
         _ = tls_connection_options
 
         if sock.options.type != SocketType.DGRAM

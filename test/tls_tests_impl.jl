@@ -101,10 +101,10 @@ function tls_wait_for_read(args::TlsTestRwArgs; timeout_s::Float64 = 5.0)
     end
 end
 
-function tls_test_handle_read(handler, slot, data_read, user_data)
+function tls_test_handle_read(handler, slot, data_read, ctx)
     _ = handler
     _ = slot
-    args = user_data::TlsTestRwArgs
+    args = ctx::TlsTestRwArgs
     lock(args.lock) do
         if data_read !== nothing
             buf_ref = Ref(args.received_message)
@@ -117,11 +117,11 @@ function tls_test_handle_read(handler, slot, data_read, user_data)
     return args.received_message
 end
 
-function tls_test_handle_write(handler, slot, data_read, user_data)
+function tls_test_handle_write(handler, slot, data_read, ctx)
     _ = handler
     _ = slot
     _ = data_read
-    _ = user_data
+    _ = ctx
     return Reseau.null_buffer()
 end
 
@@ -171,26 +171,20 @@ function _tls_network_connect(
     tls_conn_opts = Sockets.TlsConnectionOptions(
         ctx;
         server_name = host,
-        on_negotiation_result = (handler, slot, err) -> begin
-            _ = handler
-            _ = slot
-            return nothing
-        end,
     )
-
-    client_bootstrap = Sockets.ClientBootstrap()
 
     try
         channel_ref[] = Sockets.client_bootstrap_connect!(
-            client_bootstrap,
+            (_err, _channel) -> nothing,
             host,
-            port,
-            client_bootstrap.socket_options,
-            tls_conn_opts,
-            client_bootstrap.on_protocol_negotiated,
-            false,
-            nothing,
-            nothing,
+            port;
+            socket_options = Sockets.SocketOptions(),
+            tls_connection_options = tls_conn_opts,
+            enable_read_back_pressure = false,
+            requested_event_loop = nothing,
+            host_resolution_config = nothing,
+            event_loop_group = elg,
+            host_resolver = resolver,
         )
         setup_err[] = Reseau.OP_SUCCESS
     catch e
@@ -277,18 +271,15 @@ end
     Sockets.tls_connection_options_set_timeout_ms(conn, 250)
     Sockets.tls_connection_options_set_advertise_alpn_message(conn, true)
 
-    cb1 = (handler, slot, err) -> nothing
-    cb2 = (handler, slot, buf) -> nothing
-    cb3 = (handler, slot, err, msg) -> nothing
-    Sockets.tls_connection_options_set_callbacks(conn, cb1, cb2, cb3)
+    cb_read = (handler, slot, buf) -> nothing
+    Sockets.tls_connection_options_set_callbacks(conn, cb_read)
 
     @test conn.server_name == "example.com"
     @test conn.alpn_list == "h2"
     @test conn.timeout_ms == 0x000000fa
     @test conn.advertise_alpn_message
-    @test conn.on_negotiation_result isa Reseau.TlsNegotiationResultCallback
+    @test conn.tls_negotiation_result isa EventLoops.Future{Cint}
     @test conn.on_data_read isa Reseau.TlsDataReadCallback
-    @test conn.on_error isa Reseau.TlsErrorCallback
 
     conn_copy = Sockets.tls_connection_options_copy(conn)
     @test conn_copy.server_name == conn.server_name
@@ -697,13 +688,15 @@ end
 
     cb_called = Ref(false)
     cb_err = Ref(0)
-    cb_ud = Ref(0)
+    cb_marker = Ref(0)
     cb_op = Ref{Any}(nothing)
-    on_complete = (operation, err, user_data) -> begin
+    on_complete = let marker = 99
+        (operation, err) -> begin
         cb_called[] = true
         cb_err[] = err
-        cb_ud[] = user_data
+        cb_marker[] = marker
         cb_op[] = operation
+        end
     end
 
     operation = Sockets.TlsKeyOperation(
@@ -712,7 +705,6 @@ end
         signature_algorithm = Sockets.TlsSignatureAlgorithm.RSA,
         digest_algorithm = Sockets.TlsHashAlgorithm.SHA256,
         on_complete = on_complete,
-        user_data = 99,
     )
 
     @test Sockets.tls_key_operation_get_type(operation) == Sockets.TlsKeyOperationType.SIGN
@@ -726,15 +718,22 @@ end
     @test operation.error_code == Reseau.OP_SUCCESS
     @test cb_called[]
     @test cb_err[] == Reseau.OP_SUCCESS
-    @test cb_ud[] == 99
+    @test cb_marker[] == 99
     @test cb_op[] === operation
     @test Reseau.byte_cursor_eq(Reseau.byte_cursor_from_buf(operation.output), output_cursor)
 
     cb_called[] = false
+    on_complete_err = let marker = 123
+        (operation, err) -> begin
+            cb_called[] = true
+            cb_err[] = err
+            cb_marker[] = marker
+            cb_op[] = operation
+        end
+    end
     err_operation = Sockets.TlsKeyOperation(
         input_cursor;
-        on_complete = on_complete,
-        user_data = 123,
+        on_complete = on_complete_err,
     )
     @test Sockets.tls_key_operation_complete_with_error!(
         err_operation,
@@ -744,7 +743,7 @@ end
     @test err_operation.error_code == EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
     @test cb_called[]
     @test cb_err[] == EventLoops.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
-    @test cb_ud[] == 123
+    @test cb_marker[] == 123
 
     @test Sockets.tls_hash_algorithm_str(Sockets.TlsHashAlgorithm.SHA384) == "SHA384"
     @test Sockets.tls_hash_algorithm_str(Sockets.TlsHashAlgorithm.UNKNOWN) == "UNKNOWN"
@@ -1313,19 +1312,11 @@ end
 
     server_ready = Ref(false)
     accept_started = Ref(false)
-    server_negotiated = Ref(false)
+    server_negotiation_future = Ref{Any}(nothing)
     server_received = Ref(false)
 
     server_ctx = _test_server_ctx()
     @test server_ctx isa Sockets.TlsContext
-
-    on_server_negotiation = (handler, slot, err) -> begin
-        _ = handler
-        _ = slot
-        _ = err
-        server_negotiated[] = true
-        return nothing
-    end
 
     on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
         if err != Reseau.OP_SUCCESS
@@ -1335,7 +1326,8 @@ end
         channel = Sockets.Channel(event_loop, nothing)
         Sockets.socket_channel_handler_new!(channel, new_sock)
 
-        tls_opts = Sockets.TlsConnectionOptions(server_ctx; on_negotiation_result = on_server_negotiation)
+        tls_opts = Sockets.TlsConnectionOptions(server_ctx)
+        server_negotiation_future[] = tls_opts.tls_negotiation_result
         Sockets.tls_channel_handler_new!(channel, tls_opts)
 
         echo = EchoHandler(server_received)
@@ -1371,18 +1363,13 @@ end
     client_sock = Sockets.socket_init(client_opts)
     @test client_sock isa Sockets.Socket
 
-    negotiated = Ref(false)
+    client_negotiation_future = Ref{Any}(nothing)
     read_done = Ref(false)
     read_payload = Ref("")
 
     on_data_read = (handler, slot, buf) -> begin
         read_payload[] = String(Reseau.byte_cursor_from_buf(buf))
         read_done[] = true
-        return nothing
-    end
-
-    on_negotiation = (handler, slot, err) -> begin
-        negotiated[] = true
         return nothing
     end
 
@@ -1395,7 +1382,9 @@ end
     connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = event_loop,
         on_connection_result = Reseau.EventCallable(err -> begin
             if err != Reseau.OP_SUCCESS
-                negotiated[] = true
+                fut = EventLoops.Future{Cint}()
+                notify(fut, Cint(err))
+                client_negotiation_future[] = fut
                 return nothing
             end
             channel = Sockets.Channel(event_loop, nothing)
@@ -1403,13 +1392,13 @@ end
             tls_opts = Sockets.TlsConnectionOptions(
                 client_ctx;
                 server_name = "localhost",
-                on_negotiation_result = on_negotiation,
                 on_data_read = on_data_read,
             )
             tls_handler = Sockets.tls_channel_handler_new!(channel, tls_opts)
             if tls_handler isa Sockets.TlsChannelHandler
                 client_channel_ref[] = channel
                 client_tls_ref[] = tls_handler
+                client_negotiation_future[] = tls_opts.tls_negotiation_result
                 Sockets.tls_client_handler_start_negotiation(tls_handler)
             end
             Sockets.channel_setup_complete!(channel)
@@ -1420,8 +1409,10 @@ end
     @test Sockets.socket_connect(client_sock; connect_opts...) === nothing
 
     @test wait_for_flag_tls(server_ready)
-    @test wait_for_flag_tls(negotiated)
-    @test wait_for_flag_tls(server_negotiated)
+    @test wait_for_pred(() -> server_negotiation_future[] !== nothing)
+    @test wait_for_pred(() -> client_negotiation_future[] !== nothing)
+    @test wait(server_negotiation_future[]) == Reseau.OP_SUCCESS
+    @test wait(client_negotiation_future[]) == Reseau.OP_SUCCESS
 
     client_channel = client_channel_ref[]
     client_tls = client_tls_ref[]
@@ -1480,7 +1471,9 @@ end
     @test handler isa Sockets.TlsChannelHandler
     if handler isa Sockets.TlsChannelHandler
         @test left_slot.adj_right === handler.slot
-        @test wait_for_handshake_status(handler, Sockets.TlsNegotiationStatus.ONGOING)
+        @test wait_for_pred_tls(() ->
+            Sockets.handler_gather_statistics(handler).handshake_status != Sockets.TlsNegotiationStatus.NONE
+        )
     end
 
     close(elg)
@@ -1636,39 +1629,31 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     server_setup_err = Ref(Reseau.OP_SUCCESS)
     server_shutdown = Ref(false)
     server_channel = Ref{Any}(nothing)
-    server_negotiated_called = Ref(false)
-    server_negotiated_err = Ref(Reseau.OP_SUCCESS)
     listener_setup_called = Ref(false)
     listener_setup_err = Ref(Reseau.OP_SUCCESS)
+    server_tls_opts = Sockets.TlsConnectionOptions(server_ctx)
 
-    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(
         event_loop_group = elg,
         host = "127.0.0.1",
         port = 0,
-        tls_connection_options = Sockets.TlsConnectionOptions(
-            server_ctx;
-            on_negotiation_result = (handler, slot, err) -> begin
-                server_negotiated_called[] = true
-                server_negotiated_err[] = err
-                return nothing
-            end,
-        ),
-        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+        tls_connection_options = server_tls_opts,
+        on_incoming_channel_setup = (err, channel) -> begin
             server_setup_called[] = true
             server_setup_err[] = err
             server_channel[] = channel
             return nothing
         end,
-        on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
+        on_incoming_channel_shutdown = (_err, _channel) -> begin
             server_shutdown[] = true
             return nothing
         end,
-        on_listener_setup = (bs, err, ud) -> begin
+        on_listener_setup = (err) -> begin
             listener_setup_called[] = true
             listener_setup_err[] = err
             return nothing
         end,
-    ))
+    )
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
@@ -1678,44 +1663,37 @@ function _tls_local_handshake_with_min_version(min_version::Sockets.TlsVersion.T
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap()
-
     client_setup_called = Ref(false)
     client_setup_err = Ref(Reseau.OP_SUCCESS)
-    client_negotiated_called = Ref(false)
-    client_negotiated_err = Ref(Reseau.OP_SUCCESS)
     client_channel = Ref{Any}(nothing)
+    client_tls_opts = Sockets.TlsConnectionOptions(
+        client_ctx;
+        server_name = "localhost",
+    )
 
     client_channel[] = Sockets.client_bootstrap_connect!(
-        client_bootstrap,
+        (err, _channel) -> begin
+            client_setup_called[] = true
+            client_setup_err[] = err
+            return nothing
+        end,
         "127.0.0.1",
-        port,
-        client_bootstrap.socket_options,
-        Sockets.TlsConnectionOptions(
-            client_ctx;
-            server_name = "localhost",
-            on_negotiation_result = (handler, slot, err) -> begin
-                client_negotiated_called[] = true
-                client_negotiated_err[] = err
-                return nothing
-            end,
-        ),
-        client_bootstrap.on_protocol_negotiated,
-        false,
-        nothing,
-        nothing,
+        port;
+        socket_options = Sockets.SocketOptions(),
+        tls_connection_options = client_tls_opts,
+        enable_read_back_pressure = false,
+        requested_event_loop = nothing,
+        host_resolution_config = nothing,
+        event_loop_group = elg,
+        host_resolver = resolver,
     )
-    client_setup_called[] = true
-    client_setup_err[] = Reseau.OP_SUCCESS
 
     @test wait_for_flag_tls(server_setup_called)
     @test server_setup_err[] == Reseau.OP_SUCCESS
     @test wait_for_flag_tls(client_setup_called)
     @test client_setup_err[] == Reseau.OP_SUCCESS
-    @test wait_for_flag_tls(server_negotiated_called)
-    @test server_negotiated_err[] == Reseau.OP_SUCCESS
-    @test wait_for_flag_tls(client_negotiated_called)
-    @test client_negotiated_err[] == Reseau.OP_SUCCESS
+    @test wait(server_tls_opts.tls_negotiation_result) == Reseau.OP_SUCCESS
+    @test wait(client_tls_opts.tls_negotiation_result) == Reseau.OP_SUCCESS
 
     if server_channel[] !== nothing
         Sockets.channel_shutdown!(server_channel[], Reseau.OP_SUCCESS)
@@ -1767,39 +1745,31 @@ end
     server_setup_err = Ref(Reseau.OP_SUCCESS)
     server_shutdown = Ref(false)
     server_channel = Ref{Any}(nothing)
-    server_negotiated_called = Ref(false)
-    server_negotiated_err = Ref(Reseau.OP_SUCCESS)
     listener_setup_called = Ref(false)
     listener_setup_err = Ref(Reseau.OP_SUCCESS)
+    server_tls_opts = Sockets.TlsConnectionOptions(server_ctx)
 
-    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(
         event_loop_group = elg,
         host = "127.0.0.1",
         port = 0,
-        tls_connection_options = Sockets.TlsConnectionOptions(
-            server_ctx;
-            on_negotiation_result = (handler, slot, err) -> begin
-                server_negotiated_called[] = true
-                server_negotiated_err[] = err
-                return nothing
-            end,
-        ),
-        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+        tls_connection_options = server_tls_opts,
+        on_incoming_channel_setup = (err, channel) -> begin
             server_setup_called[] = true
             server_setup_err[] = err
             server_channel[] = channel
             return nothing
         end,
-        on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
+        on_incoming_channel_shutdown = (_err, _channel) -> begin
             server_shutdown[] = true
             return nothing
         end,
-        on_listener_setup = (bs, err, ud) -> begin
+        on_listener_setup = (err) -> begin
             listener_setup_called[] = true
             listener_setup_err[] = err
             return nothing
         end,
-    ))
+    )
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
@@ -1809,52 +1779,41 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap()
-
     function connect_once!()
         server_setup_called[] = false
         server_setup_err[] = Reseau.OP_SUCCESS
         server_shutdown[] = false
         server_channel[] = nothing
-        server_negotiated_called[] = false
-        server_negotiated_err[] = Reseau.OP_SUCCESS
+        server_tls_future = Sockets.tls_connection_options_reset_negotiation_result(server_tls_opts)
 
         client_setup_called = Ref(false)
         client_setup_err = Ref(Reseau.OP_SUCCESS)
-        client_negotiated_called = Ref(false)
-        client_negotiated_err = Ref(Reseau.OP_SUCCESS)
         client_channel = Ref{Any}(nothing)
+        client_tls_opts = Sockets.TlsConnectionOptions(client_ctx; server_name = "localhost")
 
         client_channel[] = Sockets.client_bootstrap_connect!(
-            client_bootstrap,
+            (err, _channel) -> begin
+                client_setup_called[] = true
+                client_setup_err[] = err
+                return nothing
+            end,
             "127.0.0.1",
-            port,
-            client_bootstrap.socket_options,
-            Sockets.TlsConnectionOptions(
-                client_ctx;
-                server_name = "localhost",
-                on_negotiation_result = (handler, slot, err) -> begin
-                    client_negotiated_called[] = true
-                    client_negotiated_err[] = err
-                    return nothing
-                end,
-            ),
-            client_bootstrap.on_protocol_negotiated,
-            false,
-            nothing,
-            nothing,
+            port;
+            socket_options = Sockets.SocketOptions(),
+            tls_connection_options = client_tls_opts,
+            enable_read_back_pressure = false,
+            requested_event_loop = nothing,
+            host_resolution_config = nothing,
+            event_loop_group = elg,
+            host_resolver = resolver,
         )
-        client_setup_called[] = true
-        client_setup_err[] = Reseau.OP_SUCCESS
 
         @test wait_for_flag_tls(server_setup_called)
         @test server_setup_err[] == Reseau.OP_SUCCESS
         @test wait_for_flag_tls(client_setup_called)
         @test client_setup_err[] == Reseau.OP_SUCCESS
-        @test wait_for_flag_tls(server_negotiated_called)
-        @test server_negotiated_err[] == Reseau.OP_SUCCESS
-        @test wait_for_flag_tls(client_negotiated_called)
-        @test client_negotiated_err[] == Reseau.OP_SUCCESS
+        @test wait(server_tls_future) == Reseau.OP_SUCCESS
+        @test wait(client_tls_opts.tls_negotiation_result) == Reseau.OP_SUCCESS
 
         if server_channel[] !== nothing
             Sockets.channel_shutdown!(server_channel[], Reseau.OP_SUCCESS)
@@ -1886,21 +1845,21 @@ end
     listener_destroyed = Ref(false)
     listener_setup_called = Ref(false)
     listener_setup_err = Ref(Reseau.OP_SUCCESS)
-    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(
         event_loop_group = elg,
         host = "127.0.0.1",
         port = 0,
         tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
-        on_listener_destroy = (bs, ud) -> begin
+        on_listener_destroy = (_err) -> begin
             listener_destroyed[] = true
             return nothing
         end,
-        on_listener_setup = (bs, err, ud) -> begin
+        on_listener_setup = (err) -> begin
             listener_setup_called[] = true
             listener_setup_err[] = err
             return nothing
         end,
-    ))
+    )
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
@@ -1977,35 +1936,28 @@ end
 
     server_setup = Ref(false)
     client_setup = Ref(false)
-    server_negotiated = Ref(false)
-    client_negotiated = Ref(false)
     server_channel = Ref{Any}(nothing)
     client_channel = Ref{Any}(nothing)
     listener_setup_called = Ref(false)
     listener_setup_err = Ref(Reseau.OP_SUCCESS)
+    server_tls_opts = Sockets.TlsConnectionOptions(server_ctx)
 
-    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(
         event_loop_group = elg,
         host = "127.0.0.1",
         port = 0,
-        tls_connection_options = Sockets.TlsConnectionOptions(
-            server_ctx;
-            on_negotiation_result = (handler, slot, err) -> begin
-                server_negotiated[] = err == Reseau.OP_SUCCESS
-                return nothing
-            end,
-        ),
-        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+        tls_connection_options = server_tls_opts,
+        on_incoming_channel_setup = (err, channel) -> begin
             server_setup[] = err == Reseau.OP_SUCCESS
             server_channel[] = channel
             return nothing
         end,
-        on_listener_setup = (bs, err, ud) -> begin
+        on_listener_setup = (err) -> begin
             listener_setup_called[] = true
             listener_setup_err[] = err
             return nothing
         end,
-    ))
+    )
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
@@ -2015,32 +1967,31 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap()
+    client_tls_opts = Sockets.TlsConnectionOptions(
+        client_ctx;
+        server_name = "localhost",
+    )
 
     client_channel[] = Sockets.client_bootstrap_connect!(
-        client_bootstrap,
+        (err, _channel) -> begin
+            client_setup[] = err == Reseau.OP_SUCCESS
+            return nothing
+        end,
         "127.0.0.1",
-        port,
-        client_bootstrap.socket_options,
-        Sockets.TlsConnectionOptions(
-            client_ctx;
-            server_name = "localhost",
-            on_negotiation_result = (handler, slot, err) -> begin
-                client_negotiated[] = err == Reseau.OP_SUCCESS
-                return nothing
-            end,
-        ),
-        client_bootstrap.on_protocol_negotiated,
-        false,
-        nothing,
-        nothing,
+        port;
+        socket_options = Sockets.SocketOptions(),
+        tls_connection_options = client_tls_opts,
+        enable_read_back_pressure = false,
+        requested_event_loop = nothing,
+        host_resolution_config = nothing,
+        event_loop_group = elg,
+        host_resolver = resolver,
     )
-    client_setup[] = true
 
     @test wait_for_flag_tls(server_setup)
     @test wait_for_flag_tls(client_setup)
-    @test wait_for_flag_tls(server_negotiated)
-    @test wait_for_flag_tls(client_negotiated)
+    @test wait(server_tls_opts.tls_negotiation_result) == Reseau.OP_SUCCESS
+    @test wait(client_tls_opts.tls_negotiation_result) == Reseau.OP_SUCCESS
 
     if server_channel[] !== nothing
         Sockets.channel_shutdown!(server_channel[], Reseau.OP_SUCCESS)
@@ -2149,13 +2100,13 @@ end
     listener_setup_called = Ref(false)
     listener_setup_err = Ref(Reseau.OP_SUCCESS)
 
-    server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
+    server_bootstrap = Sockets.ServerBootstrap(
         event_loop_group = elg,
         host = "127.0.0.1",
         port = 0,
         enable_read_back_pressure = true,
         tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
-        on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+        on_incoming_channel_setup = (err, channel) -> begin
             if err == Reseau.OP_SUCCESS
                 handler = rw_handler_new(
                     tls_test_handle_read,
@@ -2175,12 +2126,12 @@ end
             server_ready[] = true
             return nothing
         end,
-        on_listener_setup = (bs, err, ud) -> begin
+        on_listener_setup = (err) -> begin
             listener_setup_called[] = true
             listener_setup_err[] = err
             return nothing
         end,
-    ))
+    )
 
     listener = server_bootstrap.listener_socket
     @test listener !== nothing
@@ -2191,23 +2142,22 @@ end
     port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
     @test port != 0
 
-    client_bootstrap = Sockets.ClientBootstrap()
-
     client_tls_opts = Sockets.TlsConnectionOptions(
         client_ctx;
         server_name = "localhost",
     )
 
     client_channel = Sockets.client_bootstrap_connect!(
-        client_bootstrap,
+        (_err, _channel) -> nothing,
         "127.0.0.1",
-        port,
-        client_bootstrap.socket_options,
-        client_tls_opts,
-        client_bootstrap.on_protocol_negotiated,
-        true,
-        nothing,
-        nothing,
+        port;
+        socket_options = Sockets.SocketOptions(),
+        tls_connection_options = client_tls_opts,
+        enable_read_back_pressure = true,
+        requested_event_loop = nothing,
+        host_resolution_config = nothing,
+        event_loop_group = elg,
+        host_resolver = resolver,
     )
     handler = rw_handler_new(
         tls_test_handle_read,
@@ -2303,8 +2253,8 @@ end
         listener_setup_called = Ref(false)
         listener_setup_err = Ref(Reseau.OP_SUCCESS)
 
-        function client_on_read(handler, slot, data_read, user_data)
-            args = user_data::TlsTestRwArgs
+        function client_on_read(handler, slot, data_read, ctx)
+            args = ctx::TlsTestRwArgs
             if !shutdown_invoked[]
                 shutdown_invoked[] = true
                 if !window_update_after_shutdown
@@ -2326,13 +2276,13 @@ end
             return args.received_message
         end
 
-        server_bootstrap = Sockets.ServerBootstrap(Sockets.ServerBootstrapOptions(
+        server_bootstrap = Sockets.ServerBootstrap(
             event_loop_group = elg,
             host = "127.0.0.1",
             port = 0,
             enable_read_back_pressure = true,
             tls_connection_options = Sockets.TlsConnectionOptions(server_ctx),
-            on_incoming_channel_setup = (bs, err, channel, ud) -> begin
+            on_incoming_channel_setup = (err, channel) -> begin
                 if err == Reseau.OP_SUCCESS
                     server_channel_ref[] = channel
                     handler = rw_handler_new(
@@ -2353,16 +2303,16 @@ end
                 server_ready[] = true
                 return nothing
             end,
-            on_incoming_channel_shutdown = (bs, err, channel, ud) -> begin
+            on_incoming_channel_shutdown = (_err, _channel) -> begin
                 server_shutdown[] = true
                 return nothing
             end,
-            on_listener_setup = (bs, err, ud) -> begin
+            on_listener_setup = (err) -> begin
                 listener_setup_called[] = true
                 listener_setup_err[] = err
                 return nothing
             end,
-        ))
+        )
 
         listener = server_bootstrap.listener_socket
         @test listener !== nothing
@@ -2372,23 +2322,22 @@ end
         port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
         @test port != 0
 
-        client_bootstrap = Sockets.ClientBootstrap()
-
         client_tls_opts = Sockets.TlsConnectionOptions(
             client_ctx;
             server_name = "localhost",
         )
 
         client_channel_ref[] = Sockets.client_bootstrap_connect!(
-            client_bootstrap,
+            (_err, _channel) -> nothing,
             "127.0.0.1",
-            port,
-            client_bootstrap.socket_options,
-            client_tls_opts,
-            client_bootstrap.on_protocol_negotiated,
-            true,
-            nothing,
-            nothing,
+            port;
+            socket_options = Sockets.SocketOptions(),
+            tls_connection_options = client_tls_opts,
+            enable_read_back_pressure = true,
+            requested_event_loop = nothing,
+            host_resolution_config = nothing,
+            event_loop_group = elg,
+            host_resolver = resolver,
         )
         handler = rw_handler_new(
             client_on_read,

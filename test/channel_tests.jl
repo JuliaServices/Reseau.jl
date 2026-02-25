@@ -16,7 +16,7 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
     setup_ch = Channel{Int}(1)
     shutdown_ch = Channel{Int}(1)
 
-    on_setup = Reseau.EventCallable(err -> begin
+    on_setup = Reseau.ChannelCallable((err, _channel) -> begin
         put!(setup_ch, err)
         return nothing
     end)
@@ -27,10 +27,12 @@ function _setup_channel(; with_shutdown_cb::Bool = false)
             end)
         ) : nothing
 
-    channel = Sockets.channel_new(
-        event_loop = el,
+    channel = Sockets.Channel(
+        el,
+        nothing;
         on_setup_completed = on_setup,
         on_shutdown_completed = on_shutdown,
+        auto_setup = true,
     )
 
     @test _wait_ready_channel(setup_ch)
@@ -84,15 +86,17 @@ end
             el = EventLoops.EventLoop()
 
             setup_ch = Channel{Int}(1)
-            on_setup = Reseau.EventCallable(err -> begin
+            on_setup = Reseau.ChannelCallable((err, _channel) -> begin
                 put!(setup_ch, err)
                 return nothing
             end)
 
-            channel = Sockets.channel_new(
-                event_loop = el,
+            channel = Sockets.Channel(
+                el,
+                nothing;
                 on_setup_completed = on_setup,
                 on_shutdown_completed = nothing,
+                auto_setup = true,
             )
 
             Sockets.channel_destroy!(channel)

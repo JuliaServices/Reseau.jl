@@ -201,9 +201,8 @@ mutable struct TlsConnectionOptions
     server_name::Union{String, Nothing}
     alpn_list::Union{String, Nothing}
     advertise_alpn_message::Bool
-    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
+    tls_negotiation_result::Future{Cint}
     on_data_read::Union{TlsDataReadCallback, Nothing}
-    on_error::Union{TlsErrorCallback, Nothing}
     timeout_ms::UInt32
 end
 
@@ -211,26 +210,20 @@ end
 @inline tls_connection_options_alpn_list(options::TlsConnectionOptions)::Union{String, Nothing} = options.alpn_list
 @inline tls_connection_options_context(options::TlsConnectionOptions)::Union{TlsContext, Nothing} = options.ctx
 
-@inline _tls_negotiation_result_callback(::Nothing) = nothing
-@inline _tls_negotiation_result_callback(callback::TlsNegotiationResultCallback) = callback
-@inline _tls_negotiation_result_callback(callback) = TlsNegotiationResultCallback(callback)
+@inline _tls_negotiation_result_future(::Nothing) = Future{Cint}()
+@inline _tls_negotiation_result_future(fut::Future{Cint}) = fut
 
 @inline _tls_data_read_callback(::Nothing) = nothing
 @inline _tls_data_read_callback(callback::TlsDataReadCallback) = callback
 @inline _tls_data_read_callback(callback) = TlsDataReadCallback(callback)
-
-@inline _tls_error_callback(::Nothing) = nothing
-@inline _tls_error_callback(callback::TlsErrorCallback) = callback
-@inline _tls_error_callback(callback) = TlsErrorCallback(callback)
 
 function TlsConnectionOptions(
         ctx::TlsContext;
         server_name::Union{String, Nothing} = nothing,
         alpn_list::Union{String, Nothing} = ctx.options.alpn_list,
         advertise_alpn_message::Bool = false,
-        on_negotiation_result = nothing,
+        tls_negotiation_result::Union{Future{Cint}, Nothing} = nothing,
         on_data_read = nothing,
-        on_error = nothing,
         timeout_ms::Integer = 10_000,
     )
     return TlsConnectionOptions(
@@ -238,9 +231,8 @@ function TlsConnectionOptions(
         server_name,
         alpn_list,
         advertise_alpn_message,
-        _tls_negotiation_result_callback(on_negotiation_result),
+        _tls_negotiation_result_future(tls_negotiation_result),
         _tls_data_read_callback(on_data_read),
-        _tls_error_callback(on_error),
         UInt32(timeout_ms),
     )
 end
@@ -248,16 +240,15 @@ end
 @inline function _tls_connection_options_with_negotiation(
         options::TlsConnectionOptions,
         advertise_alpn_message::Bool,
-        on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing},
+        tls_negotiation_result::Union{Future{Cint}, Nothing} = nothing,
     )::TlsConnectionOptions
     return TlsConnectionOptions(
         options.ctx,
         options.server_name,
         options.alpn_list,
         options.advertise_alpn_message || advertise_alpn_message,
-        on_negotiation_result,
+        tls_negotiation_result === nothing ? options.tls_negotiation_result : tls_negotiation_result,
         options.on_data_read,
-        options.on_error,
         options.timeout_ms,
     )
 end

@@ -94,25 +94,51 @@ using Reseau.Sockets
             resource_root = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources")
             cert_path = joinpath(resource_root, "unittests.crt")
             key_path = joinpath(resource_root, "unittests.key")
-
-            port, server = listenany(0; tls = true, ssl_cert = cert_path, ssl_key = key_path)
+            event_loop_group = Reseau.EventLoops.EventLoopGroup(; loop_count = 1)
+            host_resolver = Sockets.HostResolver()
             msg = Vector{UInt8}(codeunits("tls"))
 
-            server_task = @async begin
-                client = accept(server)
-                data = read(client, length(msg))
-                write(client, data)
-                flush(client)
-                close(client)
-            end
+            server = nothing
+            sock = nothing
+            server_task = nothing
 
-            sock = connect("127.0.0.1", port; tls = true, ssl_cacert = cert_path, server_name = "localhost")
-            write(sock, msg)
-            resp = read(sock, length(msg))
-            @test resp == msg
-            close(sock)
-            close(server)
-            wait(server_task)
+            try
+                port, server_val = listenany(
+                    0;
+                    tls = true,
+                    ssl_cert = cert_path,
+                    ssl_key = key_path,
+                    event_loop_group = event_loop_group,
+                )
+                server = server_val
+
+                server_task = @async begin
+                    client = accept(server_val)
+                    data = read(client, length(msg))
+                    write(client, data)
+                    flush(client)
+                    close(client)
+                end
+
+                sock = connect(
+                    "127.0.0.1",
+                    port;
+                    tls = true,
+                    ssl_cacert = cert_path,
+                    server_name = "localhost",
+                    event_loop_group = event_loop_group,
+                    host_resolver = host_resolver,
+                )
+                write(sock, msg)
+                resp = read(sock, length(msg))
+                @test resp == msg
+            finally
+                sock !== nothing && close(sock)
+                server !== nothing && close(server)
+                server_task !== nothing && wait(server_task)
+                close(host_resolver)
+                close(event_loop_group)
+            end
         end
     end
 end

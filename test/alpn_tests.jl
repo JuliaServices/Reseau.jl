@@ -14,16 +14,6 @@ function wait_for_flag_alpn(flag::Base.RefValue{Bool}; timeout_s::Float64 = 2.0)
     return false
 end
 
-mutable struct AlpnNegotiationArgs
-    new_slot::Union{Sockets.ChannelSlot, Nothing}
-    new_handler::Union{Sockets.PassthroughHandler, Nothing}
-    protocol::Union{Reseau.ByteBuffer, Nothing}
-end
-
-function AlpnNegotiationArgs()
-    return AlpnNegotiationArgs(nothing, nothing, nothing)
-end
-
 @testset "alpn handler" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.get_next_event_loop()
@@ -39,7 +29,7 @@ end
 
     Sockets.channel_set_setup_callback!(
         channel,
-        Reseau.EventCallable(err -> begin
+        Reseau.ChannelCallable((err, _channel) -> begin
             setup_done[] = true
             return nothing
         end),
@@ -58,16 +48,7 @@ end
         Sockets.channel_slot_insert_front!(channel, slot)
     end
 
-    args = AlpnNegotiationArgs()
-    on_protocol = (new_slot, protocol) -> begin
-        args.new_slot = new_slot
-        args.protocol = protocol
-        handler = Sockets.PassthroughHandler()
-        args.new_handler = handler
-        return handler
-    end
-
-    handler = Sockets.tls_alpn_handler_new(on_protocol)
+    handler = Sockets.tls_alpn_handler_new()
     Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
@@ -76,16 +57,13 @@ end
 
     message = EventLoops.IoMessage(sizeof(Sockets.TlsNegotiatedProtocolMessage))
     message.message_tag = EventLoops.TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = Sockets.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
+    message.negotiated_protocol = "h2"
     message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
     @test Sockets.handler_process_read_message(handler, slot, message) === nothing
-    @test args.protocol !== nothing
-    @test String(Reseau.byte_cursor_from_buf(args.protocol)) == "h2"
-    @test args.new_slot !== nothing
-    @test channel.first === args.new_slot
-    @test channel.last === args.new_slot
-    @test args.new_handler !== nothing
+    @test Sockets.negotiated_protocol(channel) == "h2"
+    @test channel.first === slot
+    @test channel.last === slot
 
     Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
     @test wait_for_flag_alpn(shutdown_done)
@@ -107,8 +85,7 @@ end
         Sockets.channel_slot_insert_front!(channel, slot)
     end
 
-    args = AlpnNegotiationArgs()
-    handler = Sockets.tls_alpn_handler_new((new_slot, protocol) -> Sockets.PassthroughHandler())
+    handler = Sockets.tls_alpn_handler_new()
     Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
@@ -167,8 +144,7 @@ end
         nothing,
         nothing,
         C_NULL,
-        nothing,
-        nothing,
+        EventLoops.Future{Cint}(),
         nothing,
         true,
         false,
@@ -205,8 +181,7 @@ end
         "h2",
         nothing,
         C_NULL,
-        nothing,
-        nothing,
+        EventLoops.Future{Cint}(),
         nothing,
         true,
         false,
@@ -239,8 +214,7 @@ end
         nothing,
         nothing,
         C_NULL,
-        nothing,
-        nothing,
+        EventLoops.Future{Cint}(),
         nothing,
         true,
         false,
@@ -255,7 +229,7 @@ end
     @test handler.negotiation_finished == false
 end
 
-@testset "alpn error creating handler" begin
+@testset "alpn missing protocol payload" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.get_next_event_loop()
     @test event_loop !== nothing
@@ -270,13 +244,13 @@ end
         Sockets.channel_slot_insert_front!(channel, slot)
     end
 
-    handler = Sockets.tls_alpn_handler_new((new_slot, protocol) -> nothing)
+    handler = Sockets.tls_alpn_handler_new()
     Sockets.channel_slot_set_handler!(slot, handler)
     handler.slot = slot
 
     message = EventLoops.IoMessage(sizeof(Sockets.TlsNegotiatedProtocolMessage))
     message.message_tag = EventLoops.TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = Sockets.TlsNegotiatedProtocolMessage(Reseau.byte_buf_from_c_str("h2"))
+    message.negotiated_protocol = nothing
     message.message_data.len = Csize_t(sizeof(Sockets.TlsNegotiatedProtocolMessage))
 
     try
@@ -284,7 +258,7 @@ end
         @test false
     catch e
         @test e isa Reseau.ReseauError
-        @test e.code == EventLoops.ERROR_IO_UNHANDLED_ALPN_PROTOCOL_MESSAGE
+        @test e.code == EventLoops.ERROR_IO_MISSING_ALPN_MESSAGE
     end
 
     Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)

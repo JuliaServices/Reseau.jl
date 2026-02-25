@@ -194,7 +194,6 @@ function socket_connect(
         socket::Socket;
         remote_endpoint::SocketEndpoint,
         event_loop::Union{EventLoop, Nothing} = nothing,
-        event_loop_group::Union{EventLoopGroup, Nothing} = nothing,
         on_connection_result::Union{EventCallable, Nothing} = nothing,
         tls_connection_options::MaybeTlsConnectionOptions = nothing,
     )::Nothing
@@ -203,7 +202,6 @@ function socket_connect(
         socket,
         remote_endpoint,
         event_loop,
-        event_loop_group,
         on_connection_result,
         tls_connection_options,
     )

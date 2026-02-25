@@ -33,8 +33,8 @@ function retry_error_type_from_io_error(error_code::Int)::RetryErrorType.T
 end
 
 # Callback types
-const OnRetryTokenAcquiredFn = Function  # (retry_token, error_code, user_data) -> nothing
-const OnRetryReadyFn = Function  # (retry_token, error_code, user_data) -> nothing
+const OnRetryTokenAcquiredFn = Function  # (retry_token, error_code) -> nothing
+const OnRetryReadyFn = Function  # (retry_token, error_code) -> nothing
 
 # Abstract retry strategy interface
 abstract type AbstractRetryStrategy end
@@ -52,7 +52,6 @@ mutable struct RetryToken
     # For scheduled retry
     scheduled_retry_task::Union{ScheduledTask, Nothing}  # nullable
     on_retry_ready::Union{OnRetryReadyFn, Nothing}  # nullable
-    user_data::Any
 end
 
 # =============================================================================
@@ -74,13 +73,11 @@ function retry_strategy_acquire_token!(
         strategy::NoRetryStrategy,
         partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
-        user_data,
         timeout_ms::Integer = 0,
     )::Nothing
     _ = partition_id
     _ = timeout_ms
     _ = on_acquired
-    _ = user_data
     if @atomic strategy.shutdown
         throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
@@ -90,9 +87,8 @@ end
 function retry_strategy_acquire_token!(
         strategy::NoRetryStrategy,
         on_acquired::OnRetryTokenAcquiredFn,
-        user_data,
     )::Nothing
-    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
+    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, 0)
 end
 
 function retry_strategy_shutdown!(strategy::NoRetryStrategy)
@@ -108,17 +104,16 @@ end
 # =============================================================================
 
 # Exponential backoff configuration (matches aws-c-io options)
-struct ExponentialBackoffConfig{UD}
+struct ExponentialBackoffConfig
     backoff_scale_factor_ms::UInt64
     max_backoff_secs::UInt64
     max_retries::UInt32
     jitter_mode::Symbol  # :default, :none, :full, :decorrelated
     generate_random::Union{Nothing, Function}
     generate_random_impl::Union{Nothing, Function}
-    generate_random_user_data::UD
 end
 
-function _default_generate_random(_user_data)
+function _default_generate_random()
     return rand(UInt64)
 end
 
@@ -129,7 +124,6 @@ function ExponentialBackoffConfig(;
         jitter_mode::Symbol = :default,
         generate_random::Union{Nothing, Function} = nothing,
         generate_random_impl::Union{Nothing, Function} = nothing,
-        generate_random_user_data = nothing,
     )
     if backoff_scale_factor_ms == 0
         backoff_scale_factor_ms = 500
@@ -150,7 +144,6 @@ function ExponentialBackoffConfig(;
         jitter_mode,
         generate_random,
         generate_random_impl,
-        generate_random_user_data,
     )
 end
 
@@ -184,7 +177,6 @@ function retry_strategy_acquire_token!(
         strategy::ExponentialBackoffRetryStrategy,
         partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
-        user_data,
         timeout_ms::Integer = 0,
     )::Nothing
     _ = partition_id
@@ -213,7 +205,6 @@ function retry_strategy_acquire_token!(
         ReentrantLock(),
         nothing,
         nothing,
-        nothing,
     )
 
     logf(
@@ -224,7 +215,7 @@ function retry_strategy_acquire_token!(
     # Schedule callback
     schedule_task_now!(event_loop; type_tag = "retry_token_acquired") do _
         try
-            on_acquired(token, OP_SUCCESS, user_data)
+            on_acquired(token, OP_SUCCESS)
         catch e
             Core.println("retry_token_acquired task errored")
         end
@@ -237,9 +228,8 @@ end
 function retry_strategy_acquire_token!(
         strategy::ExponentialBackoffRetryStrategy,
         on_acquired::OnRetryTokenAcquiredFn,
-        user_data,
     )::Nothing
-    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
+    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, 0)
 end
 
 @inline function _saturating_mul(a::UInt64, b::UInt64)::UInt64
@@ -262,7 +252,7 @@ end
 
 @inline function _rand_u64(config::ExponentialBackoffConfig)::UInt64
     if config.generate_random_impl !== nothing
-        return UInt64(config.generate_random_impl(config.generate_random_user_data))
+        return UInt64(config.generate_random_impl())
     end
     if config.generate_random !== nothing
         return UInt64(config.generate_random())
@@ -331,9 +321,8 @@ end
 function retry_token_schedule_retry(
         token::RetryToken,
         on_retry_ready::OnRetryReadyFn,
-        user_data,
     )::Nothing
-    return retry_token_schedule_retry(token, token.error_type, on_retry_ready, user_data)
+    return retry_token_schedule_retry(token, token.error_type, on_retry_ready)
 end
 
 # Schedule retry for exponential backoff token
@@ -341,7 +330,6 @@ function retry_token_schedule_retry(
         token::RetryToken,
         error_type::RetryErrorType.T,
         on_retry_ready::OnRetryReadyFn,
-        user_data,
     )::Nothing
     strategy = token.strategy::ExponentialBackoffRetryStrategy
     config = strategy.config
@@ -391,7 +379,6 @@ function retry_token_schedule_retry(
             already_scheduled = true
         else
             token.on_retry_ready = on_retry_ready
-            token.user_data = user_data
             token.scheduled_retry_task = task
         end
     end
@@ -415,13 +402,10 @@ end
 function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T)
     # Task is executing (or canceled). Clear scheduling state before callbacks.
     local on_retry_ready
-    local user_data
     lock(token.lock) do
         token.scheduled_retry_task = nothing
         on_retry_ready = token.on_retry_ready
-        user_data = token.user_data
         token.on_retry_ready = nothing
-        token.user_data = nothing
     end
 
     logf(
@@ -431,13 +415,13 @@ function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T
 
     if status == TaskStatus.CANCELED
         if on_retry_ready !== nothing
-            on_retry_ready(token, ERROR_IO_OPERATION_CANCELLED, user_data)
+            on_retry_ready(token, ERROR_IO_OPERATION_CANCELLED)
         end
         return nothing
     end
 
     if on_retry_ready !== nothing
-        on_retry_ready(token, OP_SUCCESS, user_data)
+        on_retry_ready(token, OP_SUCCESS)
     end
 
     return nothing
@@ -539,9 +523,7 @@ mutable struct StandardRetryToken
     exp_token::Union{Nothing, RetryToken}
     last_retry_cost::UInt64
     on_acquired::Union{OnRetryTokenAcquiredFn, Nothing}
-    acquired_user_data::Any
     on_ready::Union{OnRetryReadyFn, Nothing}
-    ready_user_data::Any
     lock::ReentrantLock
 end
 
@@ -572,7 +554,6 @@ function retry_strategy_acquire_token!(
         strategy::StandardRetryStrategy,
         partition_id,
         on_acquired::OnRetryTokenAcquiredFn,
-        user_data,
         timeout_ms::Integer = 0,
     )::Nothing
     if @atomic strategy.shutdown
@@ -591,26 +572,22 @@ function retry_strategy_acquire_token!(
         nothing,
         _STANDARD_NO_RETRY_COST,
         on_acquired,
-        user_data,
-        nothing,
         nothing,
         ReentrantLock(),
     )
 
-    on_backoff_acquired = function (exp_token, code, token_ud)
+    on_backoff_acquired = function (exp_token, code)
         local cb
-        local cb_user_data
         lock(token.lock) do
             cb = token.on_acquired
-            cb_user_data = token.acquired_user_data
             token.on_acquired = nothing
         end
         if code != OP_SUCCESS || exp_token === nothing
-            cb !== nothing && cb(nothing, code, cb_user_data)
+            cb !== nothing && cb(nothing, code)
             return nothing
         end
         token.exp_token = exp_token
-        cb !== nothing && cb(token, OP_SUCCESS, cb_user_data)
+        cb !== nothing && cb(token, OP_SUCCESS)
         return nothing
     end
 
@@ -618,7 +595,6 @@ function retry_strategy_acquire_token!(
         strategy.backoff_strategy,
         partition_id,
         on_backoff_acquired,
-        token,
         timeout_ms,
     )
     return nothing
@@ -627,21 +603,17 @@ end
 function retry_strategy_acquire_token!(
         strategy::StandardRetryStrategy,
         on_acquired::OnRetryTokenAcquiredFn,
-        user_data,
     )::Nothing
-    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, user_data, 0)
+    return retry_strategy_acquire_token!(strategy, nothing, on_acquired, 0)
 end
 
-function _standard_on_retry_ready(_exp_token, code, token::StandardRetryToken)
+function _standard_on_retry_ready(token::StandardRetryToken, code::Int)
     local cb
-    local cb_user_data
     lock(token.lock) do
         cb = token.on_ready
-        cb_user_data = token.ready_user_data
         token.on_ready = nothing
-        token.ready_user_data = nothing
     end
-    cb !== nothing && cb(token, code, cb_user_data)
+    cb !== nothing && cb(token, code)
     return nothing
 end
 
@@ -649,9 +621,8 @@ end
 function retry_token_schedule_retry(
         token::StandardRetryToken,
         on_retry_ready::OnRetryReadyFn,
-        user_data,
     )
-    return retry_token_schedule_retry(token, RetryErrorType.TRANSIENT, on_retry_ready, user_data)
+    return retry_token_schedule_retry(token, RetryErrorType.TRANSIENT, on_retry_ready)
 end
 
 # Schedule retry for standard token
@@ -659,7 +630,6 @@ function retry_token_schedule_retry(
         token::StandardRetryToken,
         error_type::RetryErrorType.T,
         on_retry_ready::OnRetryReadyFn,
-        user_data,
     )::Nothing
     if error_type == RetryErrorType.CLIENT_ERROR
         throw_error(ERROR_IO_RETRY_PERMISSION_DENIED)
@@ -690,7 +660,6 @@ function retry_token_schedule_retry(
 
     lock(token.lock) do
         token.on_ready = on_retry_ready
-        token.ready_user_data = user_data
     end
 
     exp_token = token.exp_token
@@ -704,7 +673,11 @@ function retry_token_schedule_retry(
     end
 
     try
-        retry_token_schedule_retry(exp_token, error_type, _standard_on_retry_ready, token)
+        retry_token_schedule_retry(
+            exp_token,
+            error_type,
+            (_exp_token, code) -> _standard_on_retry_ready(token, code),
+        )
     catch
         lock(bucket.lock) do
             token.last_retry_cost = previous_cost
@@ -732,7 +705,6 @@ end
 function retry_token_release!(token::StandardRetryToken)::Nothing
     lock(token.lock) do
         token.on_ready = nothing
-        token.ready_user_data = nothing
         token.on_acquired = nothing
     end
     token.exp_token = nothing

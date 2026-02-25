@@ -272,9 +272,8 @@ mutable struct S2nTlsHandler <: TlsChannelHandler
     protocol::ByteBuffer
     server_name::ByteBuffer
     latest_message_on_completion::Union{EventCallable, Nothing}
-    on_negotiation_result::Union{TlsNegotiationResultCallback, Nothing}
+    tls_negotiation_result::Future{Cint}
     on_data_read::Union{TlsDataReadCallback, Nothing}
-    on_error::Union{TlsErrorCallback, Nothing}
     advertise_alpn_message::Bool
     state::TlsNegotiationState.T
     read_task::ChannelTask
@@ -416,10 +415,17 @@ end
 const _s2n_handler_recv_c = @cfunction(_s2n_handler_recv, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
 const _s2n_handler_send_c = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
 
-function _s2n_on_negotiation_result(handler::S2nTlsHandler, slot::ChannelSlot, error_code::Int)
+function _s2n_finish_negotiation(handler::S2nTlsHandler, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
-    if handler.on_negotiation_result !== nothing
-        handler.on_negotiation_result(handler, slot, error_code)
+    _complete_setup!(error_code, handler.slot.channel)
+    return nothing
+end
+
+@inline function _s2n_fail_pending_negotiation!(handler::S2nTlsHandler, error_code::Int)::Nothing
+    if handler.state == TlsNegotiationState.ONGOING
+        handler.state = TlsNegotiationState.FAILED
+        err = error_code == OP_SUCCESS ? ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE : error_code
+        _s2n_finish_negotiation(handler, err)
     end
     return nothing
 end
@@ -440,7 +446,7 @@ function _s2n_send_alpn_message(handler::S2nTlsHandler)
     )
     message === nothing && return nothing
     message.message_tag = TLS_NEGOTIATED_PROTOCOL_MESSAGE
-    message.user_data = TlsNegotiatedProtocolMessage(handler.protocol)
+    message.negotiated_protocol = byte_buffer_as_string(handler.protocol)
     setfield!(message.message_data, :len, Csize_t(sizeof(TlsNegotiatedProtocolMessage)))
     try
         channel_slot_send_message(slot, message, ChannelDirection.READ)
@@ -474,7 +480,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
                 handler.server_name = _byte_buf_from_c_str(server_name_ptr)
             end
             _s2n_send_alpn_message(handler)
-            _s2n_on_negotiation_result(handler, handler.slot, OP_SUCCESS)
+            _s2n_finish_negotiation(handler, OP_SUCCESS)
             return nothing
         end
 
@@ -487,7 +493,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
                 LogLevel.WARN,
                 LS_IO_TLS,string("s2n negotiate failed: $(_s2n_strerror(s2n_error)) ($(_s2n_strerror_debug(s2n_error)))", " ", ))
             handler.state = TlsNegotiationState.FAILED
-            _s2n_on_negotiation_result(handler, handler.slot, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+            _s2n_finish_negotiation(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 
@@ -863,9 +869,7 @@ function handler_shutdown(
     abort_immediately = free_scarce_resources_immediately
 
     if direction == ChannelDirection.READ
-        if handler.state == TlsNegotiationState.ONGOING
-            handler.state = TlsNegotiationState.FAILED
-        end
+        _s2n_fail_pending_negotiation!(handler, error_code)
         if !abort_immediately &&
                 handler.state == TlsNegotiationState.SUCCEEDED &&
                 !isempty(handler.input_queue) &&
@@ -1319,9 +1323,8 @@ function _s2n_handler_new(
         null_buffer(),
         null_buffer(),
         nothing,
-        options.on_negotiation_result,
+        options.tls_negotiation_result,
         options.on_data_read,
-        options.on_error,
         options.advertise_alpn_message,
         TlsNegotiationState.ONGOING,
         ChannelTask(),

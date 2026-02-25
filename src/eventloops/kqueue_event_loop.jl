@@ -871,11 +871,7 @@
                             logf(
                                 LogLevel.ERROR,
                                 LS_IO_EVENT_LOOP,
-                                "unhandled IO callback exception on fd ",
-                                handle_data.owner.fd,
-                                ": ",
-                                e,
-                                " ",
+                                "unhandled IO callback exception on fd $(handle_data.owner.fd)",
                             )
                         end
                     end
