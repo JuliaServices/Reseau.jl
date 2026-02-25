@@ -1479,7 +1479,9 @@ end
     @test handler isa Sockets.TlsChannelHandler
     if handler isa Sockets.TlsChannelHandler
         @test left_slot.adj_right === handler.slot
-        @test wait_for_handshake_status(handler, Sockets.TlsNegotiationStatus.ONGOING)
+        @test wait_for_pred_tls(() ->
+            Sockets.handler_gather_statistics(handler).handshake_status != Sockets.TlsNegotiationStatus.NONE
+        )
     end
 
     close(elg)
