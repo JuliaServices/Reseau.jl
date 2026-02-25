@@ -52,6 +52,115 @@ end
     return nothing
 end
 
+@inline function _pc_expect_success(code::Int, what::AbstractString)::Nothing
+    code == OP_SUCCESS || error("$what failed with error code $code")
+    return nothing
+end
+
+function _pc_wait_retry_future!(f::EventLoops.Future{Int}, what::AbstractString)::Nothing
+    _pc_expect_success(wait(f), what)
+    return nothing
+end
+
+function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::Nothing
+    exp_strategy = Sockets.ExponentialBackoffRetryStrategy(
+        event_loop_group,
+        ;
+        backoff_scale_factor_ms = 1,
+        max_backoff_secs = 1,
+        max_retries = 1,
+        jitter_mode = :none,
+    )
+
+    exp_acquired = EventLoops.Future{Int}()
+    exp_ready = EventLoops.Future{Int}()
+    try
+        on_ready = function (token, code)
+            notify(exp_ready, code)
+            if code == OP_SUCCESS
+                Sockets.retry_token_record_success(token)
+            end
+            Sockets.retry_token_release!(token)
+            return nothing
+        end
+
+        on_acquired = function (token, code)
+            notify(exp_acquired, code)
+            if code != OP_SUCCESS || token === nothing
+                notify(exp_ready, code)
+                return nothing
+            end
+            try
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.TRANSIENT, on_ready)
+            catch e
+                if e isa ReseauError
+                    notify(exp_ready, e.code)
+                    Sockets.retry_token_release!(token)
+                    return nothing
+                end
+                rethrow()
+            end
+            return nothing
+        end
+
+        Sockets.retry_strategy_acquire_token!(exp_strategy, on_acquired)
+        _pc_wait_retry_future!(exp_acquired, "exponential retry token acquire")
+        _pc_wait_retry_future!(exp_ready, "exponential retry ready")
+    finally
+        Sockets.retry_strategy_shutdown!(exp_strategy)
+    end
+
+    std_strategy = Sockets.StandardRetryStrategy(
+        event_loop_group,
+        ;
+        initial_bucket_capacity = 10,
+        backoff_scale_factor_ms = 1,
+        max_backoff_secs = 1,
+        max_retries = 1,
+        jitter_mode = :none,
+    )
+
+    std_acquired = EventLoops.Future{Int}()
+    std_ready = EventLoops.Future{Int}()
+    try
+        on_ready = function (token, code)
+            notify(std_ready, code)
+            if code == OP_SUCCESS
+                Sockets.retry_token_record_success(token)
+            end
+            Sockets.retry_token_release!(token)
+            return nothing
+        end
+
+        on_acquired = function (token, code)
+            notify(std_acquired, code)
+            if code != OP_SUCCESS || token === nothing
+                notify(std_ready, code)
+                return nothing
+            end
+            try
+                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
+            catch e
+                if e isa ReseauError
+                    notify(std_ready, e.code)
+                    Sockets.retry_token_release!(token)
+                    return nothing
+                end
+                rethrow()
+            end
+            return nothing
+        end
+
+        Sockets.retry_strategy_acquire_token!(std_strategy, "precompile", on_acquired, 0)
+        _pc_wait_retry_future!(std_acquired, "standard retry token acquire")
+        _pc_wait_retry_future!(std_ready, "standard retry ready")
+    finally
+        Sockets.retry_strategy_shutdown!(std_strategy)
+    end
+
+    return nothing
+end
+
 function _pc_cleanup_runtime!()::Nothing
     _pc_close_default_host_resolver!()
     _pc_close_default_event_loop_group!()
@@ -101,6 +210,8 @@ function _pc_run_echo_workload!()::Nothing
 
         response = String(read(client, 5))
         response == "hello" || error("client expected hello, got $(repr(response))")
+
+        _pc_run_retry_workload!(event_loop_group)
 
         close(client)
         client = nothing

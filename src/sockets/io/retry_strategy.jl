@@ -32,16 +32,12 @@ function retry_error_type_from_io_error(error_code::Int)::RetryErrorType.T
     return RetryErrorType.CLIENT_ERROR
 end
 
-# Callback types
-const OnRetryTokenAcquiredFn = Function  # (retry_token, error_code) -> nothing
-const OnRetryReadyFn = Function  # (retry_token, error_code) -> nothing
-
 # Abstract retry strategy interface
 abstract type AbstractRetryStrategy end
 
 # Retry token - represents a single retry attempt
-mutable struct RetryToken
-    strategy::AbstractRetryStrategy
+mutable struct RetryToken{S<:AbstractRetryStrategy}
+    strategy::S
     error_type::RetryErrorType.T
     original_error::Int
     @atomic retry_count::UInt32
@@ -49,9 +45,7 @@ mutable struct RetryToken
     last_error::Int
     bound_loop::Union{Nothing, EventLoop}
     lock::ReentrantLock
-    # For scheduled retry
-    scheduled_retry_task::Union{ScheduledTask, Nothing}  # nullable
-    on_retry_ready::Union{OnRetryReadyFn, Nothing}  # nullable
+    retry_scheduled::Bool
 end
 
 # =============================================================================
@@ -72,9 +66,9 @@ end
 function retry_strategy_acquire_token!(
         strategy::NoRetryStrategy,
         partition_id,
-        on_acquired::OnRetryTokenAcquiredFn,
+        on_acquired::F,
         timeout_ms::Integer = 0,
-    )::Nothing
+    )::Nothing where {F}
     _ = partition_id
     _ = timeout_ms
     _ = on_acquired
@@ -86,8 +80,8 @@ end
 
 function retry_strategy_acquire_token!(
         strategy::NoRetryStrategy,
-        on_acquired::OnRetryTokenAcquiredFn,
-    )::Nothing
+        on_acquired::F,
+    )::Nothing where {F}
     return retry_strategy_acquire_token!(strategy, nothing, on_acquired, 0)
 end
 
@@ -103,27 +97,23 @@ end
 # Exponential Backoff Retry Strategy
 # =============================================================================
 
-# Exponential backoff configuration (matches aws-c-io options)
-struct ExponentialBackoffConfig
+# Exponential backoff retry strategy
+mutable struct ExponentialBackoffRetryStrategy <: AbstractRetryStrategy
+    event_loop_group::EventLoopGroup
     backoff_scale_factor_ms::UInt64
     max_backoff_secs::UInt64
     max_retries::UInt32
-    jitter_mode::Symbol  # :default, :none, :full, :decorrelated
-    generate_random::Union{Nothing, Function}
-    generate_random_impl::Union{Nothing, Function}
+    jitter_mode::Symbol
+    @atomic shutdown::Bool
 end
 
-function _default_generate_random()
-    return rand(UInt64)
-end
-
-function ExponentialBackoffConfig(;
+function ExponentialBackoffRetryStrategy(
+        event_loop_group::EventLoopGroup,
+        ;
         backoff_scale_factor_ms::Integer = 500,
         max_backoff_secs::Integer = 20,
         max_retries::Integer = 5,
         jitter_mode::Symbol = :default,
-        generate_random::Union{Nothing, Function} = nothing,
-        generate_random_impl::Union{Nothing, Function} = nothing,
     )
     if backoff_scale_factor_ms == 0
         backoff_scale_factor_ms = 500
@@ -134,39 +124,18 @@ function ExponentialBackoffConfig(;
     if max_retries == 0
         max_retries = 5
     end
-    if generate_random === nothing && generate_random_impl === nothing
-        generate_random_impl = _default_generate_random
-    end
-    return ExponentialBackoffConfig(
-        UInt64(backoff_scale_factor_ms),
-        UInt64(max_backoff_secs),
-        UInt32(max_retries),
-        jitter_mode,
-        generate_random,
-        generate_random_impl,
-    )
-end
-
-# Exponential backoff retry strategy
-mutable struct ExponentialBackoffRetryStrategy <: AbstractRetryStrategy
-    event_loop_group::EventLoopGroup
-    config::ExponentialBackoffConfig
-    @atomic shutdown::Bool
-end
-
-function ExponentialBackoffRetryStrategy(
-        event_loop_group::EventLoopGroup,
-        config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
-    )
-    if config.max_retries > 63
+    if max_retries > 63
         throw_error(ERROR_INVALID_ARGUMENT)
     end
-    if !(config.jitter_mode in (:default, :none, :full, :decorrelated, :equal))
+    if !(jitter_mode in (:default, :none, :full, :decorrelated, :equal))
         throw_error(ERROR_INVALID_ARGUMENT)
     end
     strategy = ExponentialBackoffRetryStrategy(
         event_loop_group,
-        config,
+        UInt64(backoff_scale_factor_ms),
+        UInt64(max_backoff_secs),
+        UInt32(max_retries),
+        jitter_mode,
         false,
     )
     return strategy
@@ -176,9 +145,9 @@ end
 function retry_strategy_acquire_token!(
         strategy::ExponentialBackoffRetryStrategy,
         partition_id,
-        on_acquired::OnRetryTokenAcquiredFn,
+        on_acquired::F,
         timeout_ms::Integer = 0,
-    )::Nothing
+    )::Nothing where {F}
     _ = partition_id
     _ = timeout_ms
     if @atomic strategy.shutdown
@@ -203,8 +172,7 @@ function retry_strategy_acquire_token!(
         0,
         event_loop,
         ReentrantLock(),
-        nothing,
-        nothing,
+        false,
     )
 
     logf(
@@ -227,8 +195,8 @@ end
 
 function retry_strategy_acquire_token!(
         strategy::ExponentialBackoffRetryStrategy,
-        on_acquired::OnRetryTokenAcquiredFn,
-    )::Nothing
+        on_acquired::F,
+    )::Nothing where {F}
     return retry_strategy_acquire_token!(strategy, nothing, on_acquired, 0)
 end
 
@@ -242,112 +210,101 @@ end
     return a * b
 end
 
-@inline function _backoff_scale_factor_ns(config::ExponentialBackoffConfig)::UInt64
-    return _saturating_mul(config.backoff_scale_factor_ms, UInt64(1_000_000))
+@inline function _backoff_scale_factor_ns(strategy::ExponentialBackoffRetryStrategy)::UInt64
+    return _saturating_mul(strategy.backoff_scale_factor_ms, UInt64(1_000_000))
 end
 
-@inline function _max_backoff_ns(config::ExponentialBackoffConfig)::UInt64
-    return _saturating_mul(config.max_backoff_secs, UInt64(1_000_000_000))
+@inline function _max_backoff_ns(strategy::ExponentialBackoffRetryStrategy)::UInt64
+    return _saturating_mul(strategy.max_backoff_secs, UInt64(1_000_000_000))
 end
 
-@inline function _rand_u64(config::ExponentialBackoffConfig)::UInt64
-    if config.generate_random_impl !== nothing
-        return UInt64(config.generate_random_impl())
-    end
-    if config.generate_random !== nothing
-        return UInt64(config.generate_random())
-    end
-    return rand(UInt64)
-end
-
-@inline function _random_in_range(from::UInt64, to::UInt64, config::ExponentialBackoffConfig)::UInt64
+@inline function _random_in_range(from::UInt64, to::UInt64)::UInt64
     maxv = max(from, to)
     minv = min(from, to)
     diff = maxv - minv
     if diff == 0
         return UInt64(0)
     end
-    return minv + (_rand_u64(config) % diff)
+    return minv + (rand(UInt64) % diff)
 end
 
-function _compute_no_jitter(config::ExponentialBackoffConfig, retry_count::UInt32)::UInt64
+function _compute_no_jitter(strategy::ExponentialBackoffRetryStrategy, retry_count::UInt32)::UInt64
     shift = min(Int(retry_count), 63)
-    scale_ns = _backoff_scale_factor_ns(config)
+    scale_ns = _backoff_scale_factor_ns(strategy)
     backoff = _saturating_mul(UInt64(1) << shift, scale_ns)
-    return min(backoff, _max_backoff_ns(config))
+    return min(backoff, _max_backoff_ns(strategy))
 end
 
-function _compute_full_jitter(config::ExponentialBackoffConfig, retry_count::UInt32)::UInt64
-    non_jittered = _compute_no_jitter(config, retry_count)
-    return _random_in_range(UInt64(0), non_jittered, config)
+function _compute_full_jitter(strategy::ExponentialBackoffRetryStrategy, retry_count::UInt32)::UInt64
+    non_jittered = _compute_no_jitter(strategy, retry_count)
+    return _random_in_range(UInt64(0), non_jittered)
 end
 
 function _compute_decorrelated_jitter(
-        config::ExponentialBackoffConfig,
+        strategy::ExponentialBackoffRetryStrategy,
         retry_count::UInt32,
         last_backoff::UInt64,
     )::UInt64
     if last_backoff == 0
-        return _compute_full_jitter(config, retry_count)
+        return _compute_full_jitter(strategy, retry_count)
     end
-    max_backoff = _max_backoff_ns(config)
+    max_backoff = _max_backoff_ns(strategy)
     upper = min(max_backoff, _saturating_mul(last_backoff, UInt64(3)))
-    scale_ns = _backoff_scale_factor_ns(config)
-    return _random_in_range(scale_ns, upper, config)
+    scale_ns = _backoff_scale_factor_ns(strategy)
+    return _random_in_range(scale_ns, upper)
 end
 
 function _compute_backoff_ns(
-        config::ExponentialBackoffConfig,
+        strategy::ExponentialBackoffRetryStrategy,
         retry_count::UInt32,
         last_backoff::UInt64,
     )::UInt64
-    mode = config.jitter_mode
+    mode = strategy.jitter_mode
     if mode == :none
-        return _compute_no_jitter(config, retry_count)
+        return _compute_no_jitter(strategy, retry_count)
     elseif mode == :full || mode == :default
-        return _compute_full_jitter(config, retry_count)
+        return _compute_full_jitter(strategy, retry_count)
     elseif mode == :equal
-        non_jittered = _compute_no_jitter(config, retry_count)
+        non_jittered = _compute_no_jitter(strategy, retry_count)
         half = non_jittered ÷ UInt64(2)
-        return half + _random_in_range(UInt64(0), half, config)
+        return half + _random_in_range(UInt64(0), half)
     elseif mode == :decorrelated
-        return _compute_decorrelated_jitter(config, retry_count, last_backoff)
+        return _compute_decorrelated_jitter(strategy, retry_count, last_backoff)
     else
-        return _compute_no_jitter(config, retry_count)
+        return _compute_no_jitter(strategy, retry_count)
     end
 end
 
 # Schedule retry for exponential backoff token (default error type)
 function retry_token_schedule_retry(
-        token::RetryToken,
-        on_retry_ready::OnRetryReadyFn,
-    )::Nothing
+        token::RetryToken{ExponentialBackoffRetryStrategy},
+        on_retry_ready::F,
+    )::Nothing where {F}
     return retry_token_schedule_retry(token, token.error_type, on_retry_ready)
 end
 
 # Schedule retry for exponential backoff token
 function retry_token_schedule_retry(
-        token::RetryToken,
+        token::RetryToken{ExponentialBackoffRetryStrategy},
         error_type::RetryErrorType.T,
-        on_retry_ready::OnRetryReadyFn,
-    )::Nothing
-    strategy = token.strategy::ExponentialBackoffRetryStrategy
-    config = strategy.config
+        on_retry_ready::F,
+    )::Nothing where {F}
+    strategy = token.strategy
     token.error_type = error_type
     schedule_at = UInt64(0)
 
     if error_type != RetryErrorType.CLIENT_ERROR
         retry_count = @atomic token.retry_count
-        if retry_count >= config.max_retries
+        if retry_count >= strategy.max_retries
             logf(
                 LogLevel.DEBUG, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
-                "Exponential backoff: max retries ($(config.max_retries)) exceeded"
+                "Exponential backoff: max retries ($(strategy.max_retries)) exceeded"
             )
             throw_error(ERROR_IO_MAX_RETRIES_EXCEEDED)
         end
 
         last_backoff = @atomic token.last_backoff
-        backoff_ns = _compute_backoff_ns(config, retry_count, last_backoff)
+        backoff_ns = _compute_backoff_ns(strategy, retry_count, last_backoff)
 
         event_loop = token.bound_loop
         if event_loop === nothing
@@ -365,21 +322,12 @@ function retry_token_schedule_retry(
         throw_error(ERROR_IO_EVENT_LOOP_SHUTDOWN)
     end
 
-    task = ScheduledTask(; type_tag = "exponential_backoff_retry") do status
-        try
-            _exponential_backoff_retry_task(token, _coerce_task_status(status))
-        catch e
-            Core.println("exponential_backoff_retry task errored")
-        end
-        return nothing
-    end
-    already_scheduled = false
-    lock(token.lock) do
-        if token.scheduled_retry_task !== nothing
-            already_scheduled = true
+    already_scheduled = lock(token.lock) do
+        if token.retry_scheduled
+            true
         else
-            token.on_retry_ready = on_retry_ready
-            token.scheduled_retry_task = task
+            token.retry_scheduled = true
+            false
         end
     end
 
@@ -391,6 +339,20 @@ function retry_token_schedule_retry(
         throw_error(ERROR_INVALID_STATE)
     end
 
+    task = ScheduledTask(
+        TaskFn(function (status::UInt8)
+            try
+                _exponential_backoff_retry_task(token, on_retry_ready, _coerce_task_status(status))
+            catch
+                Core.println("exponential_backoff_retry task errored")
+            end
+            return nothing
+        end),
+        "exponential_backoff_retry",
+        UInt64(0),
+        false,
+    )
+
     event_loop = token.bound_loop
     event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
     schedule_task_future!(event_loop, task, schedule_at)
@@ -399,13 +361,14 @@ function retry_token_schedule_retry(
 end
 
 # Retry task callback
-function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T)
+function _exponential_backoff_retry_task(
+        token::RetryToken{ExponentialBackoffRetryStrategy},
+        on_retry_ready::F,
+        status::TaskStatus.T,
+    ) where {F}
     # Task is executing (or canceled). Clear scheduling state before callbacks.
-    local on_retry_ready
     lock(token.lock) do
-        token.scheduled_retry_task = nothing
-        on_retry_ready = token.on_retry_ready
-        token.on_retry_ready = nothing
+        token.retry_scheduled = false
     end
 
     logf(
@@ -414,22 +377,17 @@ function _exponential_backoff_retry_task(token::RetryToken, status::TaskStatus.T
     )
 
     if status == TaskStatus.CANCELED
-        if on_retry_ready !== nothing
-            on_retry_ready(token, ERROR_IO_OPERATION_CANCELLED)
-        end
+        on_retry_ready(token, ERROR_IO_OPERATION_CANCELLED)
         return nothing
     end
 
-    if on_retry_ready !== nothing
-        on_retry_ready(token, OP_SUCCESS)
-    end
+    on_retry_ready(token, OP_SUCCESS)
 
     return nothing
 end
 
 # Record success for exponential backoff token
-function retry_token_record_success(token::RetryToken)::Nothing
-    _ = token.strategy::ExponentialBackoffRetryStrategy
+function retry_token_record_success(token::RetryToken{ExponentialBackoffRetryStrategy})::Nothing
     retries = @atomic token.retry_count
     logf(
         LogLevel.TRACE, LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
@@ -439,9 +397,10 @@ function retry_token_record_success(token::RetryToken)::Nothing
 end
 
 # Release exponential backoff token
-function retry_token_release!(token::RetryToken)::Nothing
-    _ = token.strategy::ExponentialBackoffRetryStrategy
-    _ = token
+function retry_token_release!(token::RetryToken{ExponentialBackoffRetryStrategy})::Nothing
+    lock(token.lock) do
+        token.retry_scheduled = false
+    end
     return nothing
 end
 
@@ -458,22 +417,6 @@ end
 # =============================================================================
 # Standard Retry Strategy (Token Bucket)
 # =============================================================================
-
-# Standard retry configuration
-struct StandardRetryConfig
-    initial_bucket_capacity::UInt64
-    backoff_config::ExponentialBackoffConfig
-end
-
-function StandardRetryConfig(;
-        initial_bucket_capacity::Integer = 500,
-        backoff_config::ExponentialBackoffConfig = ExponentialBackoffConfig(),
-    )
-    if initial_bucket_capacity == 0
-        initial_bucket_capacity = 500
-    end
-    return StandardRetryConfig(UInt64(initial_bucket_capacity), backoff_config)
-end
 
 const _STANDARD_RETRY_COST = UInt64(5)
 const _STANDARD_TRANSIENT_COST = UInt64(10)
@@ -492,8 +435,11 @@ end
 # Standard retry strategy with token bucket rate limiting
 mutable struct StandardRetryStrategy <: AbstractRetryStrategy
     event_loop_group::EventLoopGroup
-    config::StandardRetryConfig
     max_capacity::UInt64
+    backoff_scale_factor_ms::UInt64
+    max_backoff_secs::UInt64
+    max_retries::UInt32
+    jitter_mode::Symbol
     buckets::Dict{String, RetryBucket}
     lock::ReentrantLock
     backoff_strategy::ExponentialBackoffRetryStrategy
@@ -502,13 +448,39 @@ end
 
 function StandardRetryStrategy(
         event_loop_group::EventLoopGroup,
-        config::StandardRetryConfig = StandardRetryConfig(),
+        ;
+        initial_bucket_capacity::Integer = 500,
+        backoff_scale_factor_ms::Integer = 500,
+        max_backoff_secs::Integer = 20,
+        max_retries::Integer = 5,
+        jitter_mode::Symbol = :default,
     )
-    backoff_strategy = ExponentialBackoffRetryStrategy(event_loop_group, config.backoff_config)
+    if initial_bucket_capacity == 0
+        initial_bucket_capacity = 500
+    end
+    if backoff_scale_factor_ms == 0
+        backoff_scale_factor_ms = 500
+    end
+    if max_backoff_secs == 0
+        max_backoff_secs = 20
+    end
+    if max_retries == 0
+        max_retries = 5
+    end
+    backoff_strategy = ExponentialBackoffRetryStrategy(
+        event_loop_group;
+        backoff_scale_factor_ms = backoff_scale_factor_ms,
+        max_backoff_secs = max_backoff_secs,
+        max_retries = max_retries,
+        jitter_mode = jitter_mode,
+    )
     strategy = StandardRetryStrategy(
         event_loop_group,
-        config,
-        config.initial_bucket_capacity,
+        UInt64(initial_bucket_capacity),
+        UInt64(backoff_scale_factor_ms),
+        UInt64(max_backoff_secs),
+        UInt32(max_retries),
+        jitter_mode,
         Dict{String, RetryBucket}(),
         ReentrantLock(),
         backoff_strategy,
@@ -520,10 +492,8 @@ end
 mutable struct StandardRetryToken
     strategy::StandardRetryStrategy
     bucket::RetryBucket
-    exp_token::Union{Nothing, RetryToken}
+    exp_token::Union{Nothing, RetryToken{ExponentialBackoffRetryStrategy}}
     last_retry_cost::UInt64
-    on_acquired::Union{OnRetryTokenAcquiredFn, Nothing}
-    on_ready::Union{OnRetryReadyFn, Nothing}
     lock::ReentrantLock
 end
 
@@ -553,9 +523,9 @@ end
 function retry_strategy_acquire_token!(
         strategy::StandardRetryStrategy,
         partition_id,
-        on_acquired::OnRetryTokenAcquiredFn,
+        on_acquired::F,
         timeout_ms::Integer = 0,
-    )::Nothing
+    )::Nothing where {F}
     if @atomic strategy.shutdown
         logf(
             LogLevel.ERROR, LS_IO_STANDARD_RETRY_STRATEGY,
@@ -571,23 +541,18 @@ function retry_strategy_acquire_token!(
         bucket,
         nothing,
         _STANDARD_NO_RETRY_COST,
-        on_acquired,
-        nothing,
         ReentrantLock(),
     )
 
     on_backoff_acquired = function (exp_token, code)
-        local cb
-        lock(token.lock) do
-            cb = token.on_acquired
-            token.on_acquired = nothing
-        end
         if code != OP_SUCCESS || exp_token === nothing
-            cb !== nothing && cb(nothing, code)
+            on_acquired(nothing, code)
             return nothing
         end
-        token.exp_token = exp_token
-        cb !== nothing && cb(token, OP_SUCCESS)
+        lock(token.lock) do
+            token.exp_token = exp_token
+        end
+        on_acquired(token, OP_SUCCESS)
         return nothing
     end
 
@@ -602,73 +567,76 @@ end
 
 function retry_strategy_acquire_token!(
         strategy::StandardRetryStrategy,
-        on_acquired::OnRetryTokenAcquiredFn,
-    )::Nothing
+        on_acquired::F,
+    )::Nothing where {F}
     return retry_strategy_acquire_token!(strategy, nothing, on_acquired, 0)
-end
-
-function _standard_on_retry_ready(token::StandardRetryToken, code::Int)
-    local cb
-    lock(token.lock) do
-        cb = token.on_ready
-        token.on_ready = nothing
-    end
-    cb !== nothing && cb(token, code)
-    return nothing
 end
 
 # Schedule retry for standard token (default error type)
 function retry_token_schedule_retry(
         token::StandardRetryToken,
-        on_retry_ready::OnRetryReadyFn,
-    )
+        on_retry_ready::F,
+    ) where {F}
     return retry_token_schedule_retry(token, RetryErrorType.TRANSIENT, on_retry_ready)
+end
+
+@inline function _standard_consume_capacity!(
+        token::StandardRetryToken,
+        error_type::RetryErrorType.T,
+    )::UInt64
+    bucket = token.bucket
+    return lock(bucket.lock) do
+        current = bucket.current_capacity
+        current == 0 && return UInt64(0)
+
+        consumed = if error_type == RetryErrorType.TRANSIENT
+            min(current, _STANDARD_TRANSIENT_COST)
+        else
+            min(current, _STANDARD_RETRY_COST)
+        end
+
+        token.last_retry_cost = consumed
+        bucket.current_capacity = current - consumed
+        return consumed
+    end
+end
+
+@inline function _standard_restore_capacity!(
+        token::StandardRetryToken,
+        capacity_consumed::UInt64,
+        previous_cost::UInt64,
+    )::Nothing
+    bucket = token.bucket
+    lock(bucket.lock) do
+        token.last_retry_cost = previous_cost
+        desired_capacity = bucket.current_capacity + capacity_consumed
+        bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
+    end
+    return nothing
 end
 
 # Schedule retry for standard token
 function retry_token_schedule_retry(
         token::StandardRetryToken,
         error_type::RetryErrorType.T,
-        on_retry_ready::OnRetryReadyFn,
-    )::Nothing
+        on_retry_ready::F,
+    )::Nothing where {F}
     if error_type == RetryErrorType.CLIENT_ERROR
         throw_error(ERROR_IO_RETRY_PERMISSION_DENIED)
     end
 
-    bucket = token.bucket
-    capacity_consumed = UInt64(0)
     previous_cost = token.last_retry_cost
+    capacity_consumed = _standard_consume_capacity!(token, error_type)
 
-    lock(bucket.lock) do
-        current = bucket.current_capacity
-        if current == 0
-            capacity_consumed = UInt64(0)
-        else
-            if error_type == RetryErrorType.TRANSIENT
-                capacity_consumed = min(current, _STANDARD_TRANSIENT_COST)
-            else
-                capacity_consumed = min(current, _STANDARD_RETRY_COST)
-            end
-            token.last_retry_cost = capacity_consumed
-            bucket.current_capacity -= capacity_consumed
-        end
-    end
-
-    if capacity_consumed == 0
+    if iszero(capacity_consumed)
         throw_error(ERROR_IO_RETRY_PERMISSION_DENIED)
     end
 
-    lock(token.lock) do
-        token.on_ready = on_retry_ready
+    exp_token = lock(token.lock) do
+        token.exp_token
     end
-
-    exp_token = token.exp_token
     if exp_token === nothing
-        lock(bucket.lock) do
-            token.last_retry_cost = previous_cost
-            desired_capacity = bucket.current_capacity + capacity_consumed
-            bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
-        end
+        _standard_restore_capacity!(token, capacity_consumed, previous_cost)
         throw_error(ERROR_INVALID_STATE)
     end
 
@@ -676,14 +644,10 @@ function retry_token_schedule_retry(
         retry_token_schedule_retry(
             exp_token,
             error_type,
-            (_exp_token, code) -> _standard_on_retry_ready(token, code),
+            (_exp_token, code) -> on_retry_ready(token, code),
         )
     catch
-        lock(bucket.lock) do
-            token.last_retry_cost = previous_cost
-            desired_capacity = bucket.current_capacity + capacity_consumed
-            bucket.current_capacity = min(token.strategy.max_capacity, desired_capacity)
-        end
+        _standard_restore_capacity!(token, capacity_consumed, previous_cost)
         rethrow()
     end
 
@@ -704,10 +668,8 @@ end
 # Release standard retry token
 function retry_token_release!(token::StandardRetryToken)::Nothing
     lock(token.lock) do
-        token.on_ready = nothing
-        token.on_acquired = nothing
+        token.exp_token = nothing
     end
-    token.exp_token = nothing
     return nothing
 end
 
