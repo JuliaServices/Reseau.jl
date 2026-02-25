@@ -5,6 +5,19 @@ function tls_tests_enabled()::Bool
     return !isempty(val) && (val == "1" || val == "true" || val == "yes" || val == "y" || val == "on")
 end
 
+function test_resource_path(name::AbstractString)::String
+    root = dirname(@__DIR__)
+    roots = (
+        joinpath(root, "test", "resources"),
+        joinpath(root, "aws-c-io", "tests", "resources"),
+    )
+    for resource_root in roots
+        path = joinpath(resource_root, name)
+        isfile(path) && return path
+    end
+    return joinpath(first(roots), name)
+end
+
 const _TEST_KEYCHAIN_PATH = Ref{Union{String, Nothing}}(nothing)
 const _TEST_KEYCHAIN_DIR = Ref{Union{String, Nothing}}(nothing)
 const _TEST_KEYCHAIN_REF = Ref{Ptr{Cvoid}}(C_NULL)

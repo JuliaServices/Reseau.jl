@@ -154,11 +154,17 @@ end
 
 if tls_tests_enabled()
     @testset "bootstrap tls negotiation" begin
+        cert_path = test_resource_path("unittests.crt")
+        key_path = test_resource_path("unittests.key")
+        if !(isfile(cert_path) && isfile(key_path))
+            @info "Skipping bootstrap tls negotiation (set up test certificate resources to enable)."
+            @test true
+            return
+        end
+
         elg = EventLoops.EventLoopGroup(; loop_count = 1)
         resolver = Sockets.HostResolver()
 
-        cert_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.crt")
-        key_path = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources", "unittests.key")
         server_opts = Sockets.tls_ctx_options_init_default_server_from_path(cert_path, key_path)
         maybe_apply_test_keychain!(server_opts)
         @test server_opts isa Sockets.TlsContextOptions

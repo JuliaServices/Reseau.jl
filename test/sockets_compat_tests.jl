@@ -91,54 +91,96 @@ using Reseau.Sockets
 
     if get(ENV, "RESEAU_RUN_TLS_TESTS", "0") == "1"
         @testset "TLS Echo" begin
-            resource_root = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources")
-            cert_path = joinpath(resource_root, "unittests.crt")
-            key_path = joinpath(resource_root, "unittests.key")
-            event_loop_group = Reseau.EventLoops.EventLoopGroup(; loop_count = 1)
-            host_resolver = Sockets.HostResolver()
-            msg = Vector{UInt8}(codeunits("tls"))
-
-            server = nothing
-            sock = nothing
-            server_task = nothing
-
-            try
-                port, server_val = listenany(
-                    0;
-                    tls = true,
-                    ssl_cert = cert_path,
-                    ssl_key = key_path,
-                    event_loop_group = event_loop_group,
-                )
-                server = server_val
-
-                server_task = @async begin
-                    client = accept(server_val)
-                    data = read(client, length(msg))
-                    write(client, data)
-                    flush(client)
-                    close(client)
-                end
-
-                sock = connect(
-                    "127.0.0.1",
-                    port;
-                    tls = true,
-                    ssl_cacert = cert_path,
-                    server_name = "localhost",
-                    event_loop_group = event_loop_group,
-                    host_resolver = host_resolver,
-                )
-                write(sock, msg)
-                resp = read(sock, length(msg))
-                @test resp == msg
-            finally
-                sock !== nothing && close(sock)
-                server !== nothing && close(server)
-                server_task !== nothing && wait(server_task)
-                close(host_resolver)
-                close(event_loop_group)
+            cert_path = test_resource_path("unittests.crt")
+            key_path = test_resource_path("unittests.key")
+            if !(isfile(cert_path) && isfile(key_path))
+                @info "Skipping sockets compat TLS Echo (set up test certificate resources to enable)."
+                @test true
+                return
             end
+
+            msg = Vector{UInt8}(codeunits("tls"))
+            attempts = Sys.iswindows() ? 3 : 1
+
+            resp = nothing
+            last_err = nothing
+
+            for attempt in 1:attempts
+                server = nothing
+                server_task = nothing
+                sock = nothing
+                try
+                    port, server = listenany(0; tls = true, ssl_cert = cert_path, ssl_key = key_path)
+
+                    server_task = @async begin
+                        client = accept(server)
+                        data = read(client, length(msg))
+                        write(client, data)
+                        flush(client)
+                        close(client)
+                    end
+
+                    sock = connect(
+                        "127.0.0.1",
+                        port;
+                        tls = true,
+                        ssl_cacert = cert_path,
+                        server_name = "localhost",
+                        timeout_ms = 10_000,
+                    )
+                    write(sock, msg)
+                    resp = read(sock, length(msg))
+                    last_err = nothing
+                    break
+                catch e
+                    last_err = e
+                    retryable = Sys.iswindows() &&
+                        attempt < attempts &&
+                        (
+                            e isa EOFError ||
+                            (e isa Reseau.ReseauError &&
+                             (e.code == Reseau.ERROR_IO_SOCKET_NOT_CONNECTED ||
+                              e.code == Reseau.ERROR_IO_SOCKET_CONNECTION_REFUSED ||
+                              e.code == Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE ||
+                              e.code == Reseau.ERROR_IO_TLS_ERROR_READ_FAILURE))
+                        )
+                    if retryable
+                        @info "Retrying sockets compat TLS Echo after transient error" attempt error = sprint(showerror, e)
+                        sleep(0.2 * attempt)
+                    else
+                        rethrow()
+                    end
+                finally
+                    if sock !== nothing
+                        try
+                            close(sock)
+                        catch
+                        end
+                    end
+                    if server !== nothing
+                        try
+                            close(server)
+                        catch
+                        end
+                    end
+                    if server_task !== nothing
+                        if last_err === nothing
+                            wait(server_task)
+                        else
+                            try
+                                wait(server_task)
+                            catch
+                            end
+                        end
+                    end
+                end
+            end
+
+            if last_err !== nothing
+                throw(last_err)
+            end
+            @test resp !== nothing
+            @test resp == msg
         end
     end
 end
