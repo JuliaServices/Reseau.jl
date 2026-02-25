@@ -53,84 +53,81 @@ end
 function run_retry_samples()::Nothing
     RS.io_library_init()
 
-    event_loop_group = EL.EventLoopGroup(; loop_count = 1)
+    event_loop_group = EL.get_event_loop_group()
+
+    exp_strategy = RS.ExponentialBackoffRetryStrategy(
+        event_loop_group,
+        ;
+        backoff_scale_factor_ms = 1,
+        max_backoff_secs = 1,
+        max_retries = 1,
+        jitter_mode = :none,
+    )
+    exp_acquired = EL.Future{Int}()
+    exp_ready = EL.Future{Int}()
     try
-        exp_strategy = RS.ExponentialBackoffRetryStrategy(
-            event_loop_group,
-            ;
-            backoff_scale_factor_ms = 1,
-            max_backoff_secs = 1,
-            max_retries = 1,
-            jitter_mode = :none,
-        )
-        exp_acquired = EL.Future{Int}()
-        exp_ready = EL.Future{Int}()
-        try
-            on_ready = function (token, code)
+        on_ready = function (token, code)
+            notify(exp_ready, code)
+            if code == Reseau.OP_SUCCESS
+                RS.retry_token_record_success(token)
+            end
+            RS.retry_token_release!(token)
+            return nothing
+        end
+
+        on_acquired = function (token, code)
+            notify(exp_acquired, code)
+            if code != Reseau.OP_SUCCESS || token === nothing
                 notify(exp_ready, code)
-                if code == Reseau.OP_SUCCESS
-                    RS.retry_token_record_success(token)
-                end
-                RS.retry_token_release!(token)
                 return nothing
             end
-
-            on_acquired = function (token, code)
-                notify(exp_acquired, code)
-                if code != Reseau.OP_SUCCESS || token === nothing
-                    notify(exp_ready, code)
-                    return nothing
-                end
-                RS.retry_token_schedule_retry(token, RS.RetryErrorType.TRANSIENT, on_ready)
-                return nothing
-            end
-
-            RS.retry_strategy_acquire_token!(exp_strategy, on_acquired)
-            _wait_retry_future!(exp_acquired, "trim exponential retry token acquire")
-            _wait_retry_future!(exp_ready, "trim exponential retry ready")
-        finally
-            RS.retry_strategy_shutdown!(exp_strategy)
+            RS.retry_token_schedule_retry(token, RS.RetryErrorType.TRANSIENT, on_ready)
+            return nothing
         end
 
-        std_strategy = RS.StandardRetryStrategy(
-            event_loop_group,
-            ;
-            initial_bucket_capacity = 10,
-            backoff_scale_factor_ms = 1,
-            max_backoff_secs = 1,
-            max_retries = 1,
-            jitter_mode = :none,
-        )
-        std_acquired = EL.Future{Int}()
-        std_ready = EL.Future{Int}()
-        try
-            on_ready = function (token, code)
-                notify(std_ready, code)
-                if code == Reseau.OP_SUCCESS
-                    RS.retry_token_record_success(token)
-                end
-                RS.retry_token_release!(token)
-                return nothing
-            end
-
-            on_acquired = function (token, code)
-                notify(std_acquired, code)
-                if code != Reseau.OP_SUCCESS || token === nothing
-                    notify(std_ready, code)
-                    return nothing
-                end
-                RS.retry_token_schedule_retry(token, RS.RetryErrorType.SERVER_ERROR, on_ready)
-                return nothing
-            end
-
-            RS.retry_strategy_acquire_token!(std_strategy, "trim", on_acquired, 0)
-            _wait_retry_future!(std_acquired, "trim standard retry token acquire")
-            _wait_retry_future!(std_ready, "trim standard retry ready")
-        finally
-            RS.retry_strategy_shutdown!(std_strategy)
-        end
+        RS.retry_strategy_acquire_token!(exp_strategy, on_acquired)
+        _wait_retry_future!(exp_acquired, "trim exponential retry token acquire")
+        _wait_retry_future!(exp_ready, "trim exponential retry ready")
     finally
-        close(event_loop_group)
+        RS.retry_strategy_shutdown!(exp_strategy)
+    end
+
+    std_strategy = RS.StandardRetryStrategy(
+        event_loop_group,
+        ;
+        initial_bucket_capacity = 10,
+        backoff_scale_factor_ms = 1,
+        max_backoff_secs = 1,
+        max_retries = 1,
+        jitter_mode = :none,
+    )
+    std_acquired = EL.Future{Int}()
+    std_ready = EL.Future{Int}()
+    try
+        on_ready = function (token, code)
+            notify(std_ready, code)
+            if code == Reseau.OP_SUCCESS
+                RS.retry_token_record_success(token)
+            end
+            RS.retry_token_release!(token)
+            return nothing
+        end
+
+        on_acquired = function (token, code)
+            notify(std_acquired, code)
+            if code != Reseau.OP_SUCCESS || token === nothing
+                notify(std_ready, code)
+                return nothing
+            end
+            RS.retry_token_schedule_retry(token, RS.RetryErrorType.SERVER_ERROR, on_ready)
+            return nothing
+        end
+
+        RS.retry_strategy_acquire_token!(std_strategy, "trim", on_acquired, 0)
+        _wait_retry_future!(std_acquired, "trim standard retry token acquire")
+        _wait_retry_future!(std_ready, "trim standard retry ready")
+    finally
+        RS.retry_strategy_shutdown!(std_strategy)
     end
 
     return nothing
