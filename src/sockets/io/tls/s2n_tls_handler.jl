@@ -422,6 +422,15 @@ function _s2n_on_negotiation_result(handler::S2nTlsHandler, error_code::Int)
     return nothing
 end
 
+@inline function _s2n_fail_pending_negotiation!(handler::S2nTlsHandler, error_code::Int)::Nothing
+    if handler.state == TlsNegotiationState.ONGOING
+        handler.state = TlsNegotiationState.FAILED
+        err = error_code == OP_SUCCESS ? ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE : error_code
+        _s2n_on_negotiation_result(handler, err)
+    end
+    return nothing
+end
+
 function _s2n_send_alpn_message(handler::S2nTlsHandler)
     slot = handler.slot
     slot === nothing && return nothing
@@ -861,9 +870,7 @@ function handler_shutdown(
     abort_immediately = free_scarce_resources_immediately
 
     if direction == ChannelDirection.READ
-        if handler.state == TlsNegotiationState.ONGOING
-            handler.state = TlsNegotiationState.FAILED
-        end
+        _s2n_fail_pending_negotiation!(handler, error_code)
         if !abort_immediately &&
                 handler.state == TlsNegotiationState.SUCCEEDED &&
                 !isempty(handler.input_queue) &&

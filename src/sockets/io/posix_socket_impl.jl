@@ -1814,6 +1814,21 @@ function socket_subscribe_to_readable_events_impl(::PosixSocket, sock::Socket, o
         )
     end
 
+    if sock.event_loop !== nothing
+        event_loop = sock.event_loop
+        schedule_task_now!(event_loop; type_tag = "posix_socket_subscribe_readable_poll") do status
+            try
+                status = _coerce_task_status(status)
+                status == TaskStatus.CANCELED && return nothing
+                sock.impl === nothing && return nothing
+                _on_socket_io_event(sock, Int(IoEventType.READABLE))
+            catch
+                logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket readable subscribe poll task errored")
+            end
+            return nothing
+        end
+    end
+
     return nothing
 end
 

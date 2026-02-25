@@ -674,7 +674,6 @@ function Channel(
                     return nothing
                 elseif tls_connection_options !== nothing
                     tls_options = tls_connection_options::TlsConnectionOptions
-                    advertise_alpn = on_setup_completed !== nothing && tls_is_alpn_available()
                     local tls_handler
                     try
                         tls_handler = tls_channel_handler_new!(channel, tls_options)
@@ -684,12 +683,6 @@ function Channel(
                         socket_close(socket_obj)
                         notify_exception!(channel.setup_future, ReseauError(err))
                         return nothing
-                    end
-                    if advertise_alpn
-                        alpn_slot = channel_slot_new!(channel)
-                        channel_slot_insert_right!(tls_handler.slot, alpn_slot)
-                        alpn_handler = tls_alpn_handler_new()
-                        channel_slot_set_handler!(alpn_slot, alpn_handler)
                     end
                     try
                         tls_client_handler_start_negotiation(tls_handler)
@@ -743,6 +736,7 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
             socket_close(socket)
             notify_exception!(channel.setup_future, ReseauError(err))
         end
+        _channel_schedule_setup_read_retry!(channel, socket, 200)
         return nothing
     end
     trigger_task = ChannelTask(
@@ -755,12 +749,65 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
                 channel_shutdown!(channel, err)
                 socket_close(socket)
                 notify_exception!(channel.setup_future, ReseauError(err))
+                return nothing
             end
+            _channel_schedule_setup_read_retry!(channel, socket, 200)
             return nothing
         end),
         "channel_trigger_read",
     )
     channel_schedule_task_now!(channel, trigger_task)
+    return nothing
+end
+
+struct _SetupReadRetryCallback
+    channel::Channel
+    socket::Socket
+    attempts_left::Int
+end
+
+@inline function (cb::_SetupReadRetryCallback)(status_raw)::Nothing
+    _channel_setup_read_retry_task(cb, _coerce_task_status(status_raw))
+    return nothing
+end
+
+function _channel_setup_read_retry_task(cb::_SetupReadRetryCallback, status::TaskStatus.T)::Nothing
+    status == TaskStatus.RUN_READY || return nothing
+
+    channel = cb.channel
+    if !channel.setup_pending || channel.channel_state == ChannelState.SHUT_DOWN
+        return nothing
+    end
+
+    try
+        channel_trigger_read(channel)
+    catch e
+        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+        channel_shutdown!(channel, err)
+        socket_close(cb.socket)
+        notify_exception!(channel.setup_future, ReseauError(err))
+        return nothing
+    end
+
+    if channel.setup_pending && channel.channel_state != ChannelState.SHUT_DOWN && cb.attempts_left > 1
+        _channel_schedule_setup_read_retry!(channel, cb.socket, cb.attempts_left - 1)
+    end
+
+    return nothing
+end
+
+function _channel_schedule_setup_read_retry!(
+        channel::Channel,
+        socket::Socket,
+        attempts_left::Int,
+    )::Nothing
+    if attempts_left <= 0 || !channel.setup_pending || channel.channel_state == ChannelState.SHUT_DOWN
+        return nothing
+    end
+    callback = _SetupReadRetryCallback(channel, socket, attempts_left)
+    retry_task = ChannelTask(EventCallable(callback), "channel_setup_read_retry")
+    run_at = clock_now_ns() + UInt64(50_000_000) # 50ms
+    channel_schedule_task_future!(channel, retry_task, run_at)
     return nothing
 end
 

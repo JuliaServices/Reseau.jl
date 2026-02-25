@@ -1222,6 +1222,14 @@ function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::In
     slot = handler.slot
     slot === nothing && return nothing
     channel_slot_is_attached(slot) || return nothing
+    if error_code == OP_SUCCESS
+        protocol = tls_handler_protocol(handler)
+        if protocol.len > 0
+            slot.channel.negotiated_protocol = byte_buffer_as_string(protocol)
+        else
+            slot.channel.negotiated_protocol = nothing
+        end
+    end
     if handler.on_negotiation_result !== nothing
         handler.on_negotiation_result(handler, slot, error_code)
     end

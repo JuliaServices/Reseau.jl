@@ -342,6 +342,19 @@ function _secure_transport_on_negotiation_result(handler::SecureTransportTlsHand
     return nothing
 end
 
+@inline function _secure_transport_fail_pending_negotiation!(
+        handler::SecureTransportTlsHandler,
+        error_code::Int,
+    )::Nothing
+    status = handler.stats.handshake_status
+    if status == TlsNegotiationStatus.ONGOING || status == TlsNegotiationStatus.NONE
+        handler.negotiation_finished = false
+        err = error_code == OP_SUCCESS ? ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE : error_code
+        _secure_transport_on_negotiation_result(handler, err)
+    end
+    return nothing
+end
+
 function _secure_transport_send_alpn_message(handler::SecureTransportTlsHandler)
     slot = handler.slot
     slot === nothing && return nothing
@@ -490,7 +503,7 @@ function _secure_transport_negotiation_task(handler::SecureTransportTlsHandler, 
     try
         _secure_transport_drive_negotiation(handler)
     catch
-        # negotiation result callback already fired inside _secure_transport_drive_negotiation
+        _secure_transport_fail_pending_negotiation!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
     end
     return nothing
 end
@@ -706,6 +719,7 @@ function handler_process_read_message(
                 negotiation_failed = true
             end
             if negotiation_failed
+                _secure_transport_fail_pending_negotiation!(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 channel_shutdown!(slot.channel, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
                 return nothing
             end
@@ -860,6 +874,9 @@ function handler_shutdown(
     abort_immediately = free_scarce_resources_immediately
 
     if direction == ChannelDirection.READ
+        if !handler.negotiation_finished
+            _secure_transport_fail_pending_negotiation!(handler, error_code)
+        end
         if !abort_immediately &&
                 handler.negotiation_finished &&
                 !isempty(handler.input_queue) &&
