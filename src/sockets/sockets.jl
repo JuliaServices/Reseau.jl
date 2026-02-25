@@ -258,6 +258,7 @@ import ..EventLoops:
 @static if Sys.iswindows()
     import ..EventLoops:
         IocpOverlapped,
+        _win_get_last_error,
         iocp_overlapped_init!,
         iocp_overlapped_ptr,
         iocp_overlapped_reset!
