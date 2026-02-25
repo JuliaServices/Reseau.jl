@@ -121,7 +121,6 @@ include("io/pkcs11.jl")
 include("io/pki_utils.jl")
 include("io/pipe.jl")
 include("io/iocp_pipe.jl")
-include("io/channel_bootstrap.jl")
 include("io/channel_bootstrap_new.jl")
 
 # Previously included directly from src/Reseau.jl

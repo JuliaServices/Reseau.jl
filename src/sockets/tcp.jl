@@ -19,7 +19,6 @@ mutable struct TCPSocket <: IO
     tls_enabled::Bool
     event_loop_group::Union{EventLoopGroup, Nothing}
     host_resolver::Union{HostResolver, Nothing}
-    bootstrap::Union{ClientBootstrap, Nothing}
     owns_event_loop_group::Bool
     owns_host_resolver::Bool
     buffer::Vector{UInt8}
@@ -90,7 +89,6 @@ function _new_unconnected_socket(;
         0,
         false,
         false,
-        nothing,
         nothing,
         nothing,
         false,
@@ -252,12 +250,6 @@ function TCPSocket(
         )
     end
 
-    bootstrap = ClientBootstrap(;
-        host_resolution_config = host_resolution_config,
-        socket_options = socket_options,
-        tls_connection_options = tls_conn,
-    )
-
     io = _new_unconnected_socket(
         read_buffer_capacity = read_buffer_capacity,
         enable_read_back_pressure = enable_read_back_pressure,
@@ -268,22 +260,20 @@ function TCPSocket(
     io.is_local = socket_options.domain == SocketDomain.LOCAL
     io.event_loop_group = elg
     io.host_resolver = resolver
-    io.bootstrap = bootstrap
     io.owns_event_loop_group = owns_elg
     io.owns_host_resolver = owns_resolver
 
     channel = client_bootstrap_connect!(
-        bootstrap,
+        (_error_code, _channel) -> nothing,
         host,
-        port,
+        port;
         socket_options,
-        tls_conn,
-        bootstrap.on_protocol_negotiated,
+        tls_connection_options = tls_conn,
         enable_read_back_pressure,
-        nothing,
+        requested_event_loop = nothing,
         host_resolution_config,
-        elg::EventLoopGroup,
-        resolver::HostResolver,
+        event_loop_group = elg::EventLoopGroup,
+        host_resolver = resolver::HostResolver,
     )
     _install_handler_for_connected_channel!(io, channel)
     io.tls_enabled = tls_conn !== nothing
@@ -362,8 +352,8 @@ function Base.close(server::TCPServer)::Nothing
     return nothing
 end
 
-function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, channel, _user_data)
-    if error_code != OP_SUCCESS || channel === nothing
+function _server_on_incoming_setup(state::_TCPServerState, error_code::Int, channel::Channel)
+    if error_code != OP_SUCCESS
         return nothing
     end
     io = _new_unconnected_socket(
@@ -420,7 +410,7 @@ struct _TCPServerOnListenerSetup
     state::_TCPServerState
 end
 
-@inline function (cb::_TCPServerOnListenerSetup)(_bootstrap, error_code::Int, _user_data)::Nothing
+@inline function (cb::_TCPServerOnListenerSetup)(error_code::Int)::Nothing
     st = cb.state
     st.listen_error = error_code
     notify(st.listen_event)
@@ -431,8 +421,11 @@ struct _TCPServerOnIncomingSetup
     state::_TCPServerState
 end
 
-@inline function (cb::_TCPServerOnIncomingSetup)(_bootstrap, error_code::Int, channel, _user_data)::Nothing
-    _server_on_incoming_setup(cb.state, error_code, channel, nothing)
+@inline function (cb::_TCPServerOnIncomingSetup)(error_code::Int, channel)::Nothing
+    if error_code != OP_SUCCESS || !(channel isa Channel)
+        return nothing
+    end
+    _server_on_incoming_setup(cb.state, error_code, channel::Channel)
     return nothing
 end
 
@@ -440,7 +433,7 @@ struct _TCPServerOnListenerDestroy
     state::_TCPServerState
 end
 
-@inline function (cb::_TCPServerOnListenerDestroy)(_bootstrap, _user_data)::Nothing
+@inline function (cb::_TCPServerOnListenerDestroy)(_error_code::Int)::Nothing
     st = cb.state
     st.close_error = OP_SUCCESS
     notify(st.close_event)
@@ -492,7 +485,6 @@ function listen(host::AbstractString, port::Integer;
         on_listener_setup = _TCPServerOnListenerSetup(state),
         on_incoming_channel_setup = _TCPServerOnIncomingSetup(state),
         on_listener_destroy = _TCPServerOnListenerDestroy(state),
-        user_data = state,
         enable_read_back_pressure = enable_read_back_pressure,
     )
     wait(state.listen_event)

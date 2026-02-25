@@ -129,7 +129,7 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
             return nothing
         end
         Sockets.socket_assign_to_event_loop(new_sock, event_loop)
-        channel = Sockets.Channel(event_loop; enable_read_back_pressure = true)
+        channel = Sockets.Channel(event_loop, nothing; enable_read_back_pressure = true)
         handler = try
             Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 4)
         catch
@@ -310,7 +310,7 @@ end
             return nothing
         end
         Sockets.socket_assign_to_event_loop(new_sock, event_loop)
-        channel = Sockets.Channel(event_loop; enable_read_back_pressure = false)
+        channel = Sockets.Channel(event_loop, nothing; enable_read_back_pressure = false)
         socket_handler = try
             Sockets.socket_channel_handler_new!(channel, new_sock)
         catch
@@ -497,7 +497,7 @@ end
             return nothing
         end
         Sockets.socket_assign_to_event_loop(new_sock, event_loop)
-        channel = Sockets.Channel(event_loop; enable_read_back_pressure = false)
+        channel = Sockets.Channel(event_loop, nothing; enable_read_back_pressure = false)
         handler = try
             Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 16)
         catch

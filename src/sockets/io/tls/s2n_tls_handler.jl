@@ -472,7 +472,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
                 handler.server_name = _byte_buf_from_c_str(server_name_ptr)
             end
             _s2n_send_alpn_message(handler)
-            _s2n_on_negotiation_result(handler, handler.slot, OP_SUCCESS)
+            _s2n_on_negotiation_result(handler, OP_SUCCESS)
             return nothing
         end
 
@@ -485,7 +485,7 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
                 LogLevel.WARN,
                 LS_IO_TLS,string("s2n negotiate failed: $(_s2n_strerror(s2n_error)) ($(_s2n_strerror_debug(s2n_error)))", " ", ))
             handler.state = TlsNegotiationState.FAILED
-            _s2n_on_negotiation_result(handler, handler.slot, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
+            _s2n_on_negotiation_result(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
 

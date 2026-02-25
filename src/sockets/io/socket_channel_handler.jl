@@ -583,9 +583,9 @@ end
 
 function _socket_handler_wrap_channel_setup!(handler::SocketChannelHandler, channel::Channel)
     original_cb = channel.on_setup_completed
-    channel.on_setup_completed = EventCallable(err -> begin
+    channel.on_setup_completed = ChannelCallable((err, ch) -> begin
         if original_cb !== nothing
-            original_cb(err)
+            original_cb(err, ch)
         end
         if err == OP_SUCCESS &&
                 channel.channel_state == ChannelState.ACTIVE &&

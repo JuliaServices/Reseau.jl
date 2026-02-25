@@ -1,4 +1,20 @@
-@kwdef mutable struct ConnectionAttempts
+@inline function _socket_uses_network_framework_tls(socket::Socket, tls_options)::Bool
+    @static if Sys.isapple()
+        return tls_options !== nothing && socket.impl isa NWSocket && is_using_secitem()
+    else
+        return false
+    end
+end
+
+@inline _bootstrap_event_callback(::Nothing) = nothing
+@inline _bootstrap_event_callback(callback::EventCallable) = callback
+@inline _bootstrap_event_callback(callback::F) where {F} = EventCallable(callback)
+
+@inline _bootstrap_channel_callback(::Nothing) = nothing
+@inline _bootstrap_channel_callback(callback::ChannelCallable) = callback
+@inline _bootstrap_channel_callback(callback::F) where {F} = ChannelCallable(callback)
+
+mutable struct ConnectionAttempts
     event_loop::EventLoop
     host_resolver::HostResolver
     host_resolution_config::HostResolutionConfig
@@ -6,11 +22,52 @@
     host::String
     port::UInt32
     tls_connection_options::MaybeTlsConnectionOptions
-    enable_read_back_pressure::Bool = false
-    connection_attempt_tasks::Vector{ScheduledTask} = ScheduledTask[]
-    connection_chosen::Bool = false
-    failed_count::Int = 0
-    fut::Future{Socket} = Future{Socket}()
+    enable_read_back_pressure::Bool
+    connection_attempt_tasks::Vector{ScheduledTask}
+    @atomic connection_chosen::Bool
+    failed_count::Int
+    fut::Future{Socket}
+end
+
+function ConnectionAttempts(
+        event_loop::EventLoop,
+        host_resolver::HostResolver,
+        host_resolution_config::HostResolutionConfig,
+        socket_options::SocketOptions,
+        host::String,
+        port::UInt32,
+        tls_connection_options::MaybeTlsConnectionOptions,
+        enable_read_back_pressure::Bool = false,
+    )
+    return ConnectionAttempts(
+        event_loop,
+        host_resolver,
+        host_resolution_config,
+        socket_options,
+        host,
+        port,
+        tls_connection_options,
+        enable_read_back_pressure,
+        ScheduledTask[],
+        false,
+        0,
+        Future{Socket}(),
+    )
+end
+
+function _select_connection_event_loop(
+        event_loop_group::EventLoopGroup,
+        requested_event_loop::Union{EventLoop, Nothing},
+    )::EventLoop
+    if requested_event_loop === nothing
+        return get_next_event_loop(event_loop_group)
+    end
+    for loop in event_loop_group.event_loops
+        if loop === requested_event_loop
+            return requested_event_loop
+        end
+    end
+    throw(ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
 end
 
 function client_bootstrap_connect!(
@@ -31,14 +88,14 @@ function client_bootstrap_connect!(
         host_resolution_config,
     )
     addresses = host_resolver_resolve!(host_resolver, host, host_resolution_config)
-    event_loop = @something(requested_event_loop, get_next_event_loop(event_loop_group))
+    event_loop = _select_connection_event_loop(event_loop_group, requested_event_loop)
     conn_attempts = ConnectionAttempts(
         event_loop,
         host_resolver,
         host_resolution_config,
         socket_options,
         host,
-        port,
+        UInt32(port),
         tls_connection_options,
         enable_read_back_pressure,
     )
@@ -101,7 +158,7 @@ function _schedule_connection_attempts(
         task = ScheduledTask(; type_tag = "client_bootstrap_attempt") do status
             try
                 _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
-                conn_attempts.connection_chosen && return nothing
+                (@atomic conn_attempts.connection_chosen) && return nothing
                 _initiate_socket_connect(conn_attempts, address_count, address)
             catch
                 Core.println("client_bootstrap_attempt task errored")
@@ -152,11 +209,8 @@ function _cancel_connection_attempts(conn_attempts::ConnectionAttempts)
             end
             notify(fut, nothing)
         catch e
-            if e isa ReseauError
-                notify_exception!(fut, e)
-            else
-                notify_exception!(fut, ReseauError(ERROR_UNKNOWN))
-            end
+            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            notify_exception!(fut, ReseauError(err))
         end
         return nothing
     end
@@ -165,7 +219,7 @@ function _cancel_connection_attempts(conn_attempts::ConnectionAttempts)
 end
 
 function _note_connection_attempt_failure(conn_attempts::ConnectionAttempts, address_count::Int, error_code::Int)
-    conn_attempts.connection_chosen && return nothing
+    (@atomic conn_attempts.connection_chosen) && return nothing
     conn_attempts.failed_count += 1
     if conn_attempts.failed_count == address_count
         logf(
@@ -173,8 +227,7 @@ function _note_connection_attempt_failure(conn_attempts::ConnectionAttempts, add
             LS_IO_CHANNEL_BOOTSTRAP,
             "ClientBootstrap: last attempt failed with error $error_code",
         )
-        conn_attempts.connection_chosen = true
-        _cancel_connection_attempts(conn_attempts)
+        @atomic conn_attempts.connection_chosen = true
         notify_exception!(conn_attempts.fut, ReseauError(error_code))
         return nothing
     end
@@ -202,12 +255,11 @@ function _on_socket_connect_complete(
         record_connection_failure!(conn_attempts.host_resolver, address)
         if _socket_uses_network_framework_tls(socket, conn_attempts.tls_connection_options) &&
                 io_error_code_is_tls(error_code)
-            if conn_attempts.connection_chosen
+            if @atomic(conn_attempts.connection_chosen)
                 socket_close(socket)
                 return nothing
             end
-            conn_attempts.connection_chosen = true
-            _cancel_connection_attempts(conn_attempts)
+            @atomic conn_attempts.connection_chosen = true
             socket_close(socket)
             notify_exception!(conn_attempts.fut, ReseauError(error_code))
             return nothing
@@ -216,7 +268,7 @@ function _on_socket_connect_complete(
         _note_connection_attempt_failure(conn_attempts, address_count, error_code)
         return nothing
     end
-    if conn_attempts.connection_chosen
+    if @atomic(conn_attempts.connection_chosen)
         socket_close(socket)
         return nothing
     end
@@ -225,8 +277,7 @@ function _on_socket_connect_complete(
         LS_IO_CHANNEL_BOOTSTRAP,
         "ClientBootstrap: connection established to $(conn_attempts.host):$(conn_attempts.port)",
     )
-    _cancel_connection_attempts(conn_attempts)
-    conn_attempts.connection_chosen = true
+    @atomic conn_attempts.connection_chosen = true
     notify(conn_attempts.fut, socket)
     return nothing
 end
@@ -262,5 +313,334 @@ function _initiate_socket_connect(conn_attempts::ConnectionAttempts, address_cou
         _note_connection_attempt_failure(conn_attempts, address_count, e isa ReseauError ? e.code : ERROR_UNKNOWN)
         return nothing
     end
+    return nothing
+end
+
+# =============================================================================
+# Server bootstrap
+# =============================================================================
+
+mutable struct ServerBootstrap
+    event_loop_group::EventLoopGroup
+    socket_options::SocketOptions
+    host::String
+    port::UInt32
+    backlog::Int
+    tls_connection_options::MaybeTlsConnectionOptions
+    on_listener_setup::Union{EventCallable, Nothing}
+    on_incoming_channel_setup::Union{ChannelCallable, Nothing}
+    on_incoming_channel_shutdown::Union{ChannelCallable, Nothing}
+    on_listener_destroy::Union{EventCallable, Nothing}
+    enable_read_back_pressure::Bool
+    listener_socket::Union{Socket, Nothing}
+    listener_event_loop::Union{EventLoop, Nothing}
+    @atomic inflight_channels::Int
+    @atomic listener_closed::Bool
+    @atomic destroy_called::Bool
+    @atomic shutdown::Bool
+end
+
+function ServerBootstrap(;
+        event_loop_group,
+        socket_options::SocketOptions = SocketOptions(),
+        host::AbstractString = "0.0.0.0",
+        port::Integer,
+        backlog::Integer = 128,
+        tls_connection_options::MaybeTlsConnectionOptions = nothing,
+        on_listener_setup = nothing,
+        on_incoming_channel_setup = nothing,
+        on_incoming_channel_shutdown = nothing,
+        on_listener_destroy = nothing,
+        enable_read_back_pressure::Bool = false,
+    )
+    bootstrap = ServerBootstrap(
+        event_loop_group,
+        socket_options,
+        String(host),
+        UInt32(port),
+        Int(backlog),
+        tls_connection_options,
+        _bootstrap_event_callback(on_listener_setup),
+        _bootstrap_channel_callback(on_incoming_channel_setup),
+        _bootstrap_channel_callback(on_incoming_channel_shutdown),
+        _bootstrap_event_callback(on_listener_destroy),
+        enable_read_back_pressure,
+        nothing,
+        nothing,
+        0,
+        false,
+        false,
+        false,
+    )
+    _server_bootstrap_start_listener!(bootstrap)
+    return bootstrap
+end
+
+struct _ServerOnAcceptResult
+    bootstrap::ServerBootstrap
+end
+
+@inline function (cb::_ServerOnAcceptResult)(err::Int, new_sock)::Nothing
+    if err != OP_SUCCESS || !(new_sock isa Socket)
+        _on_incoming_connection(cb.bootstrap, err, nothing)
+        return nothing
+    end
+    _on_incoming_connection(cb.bootstrap, err, new_sock::Socket)
+    return nothing
+end
+
+function _server_bootstrap_start_listener!(bootstrap::ServerBootstrap)::Nothing
+    listener = nothing
+    try
+        listener = socket_init(bootstrap.socket_options)
+        bootstrap.listener_socket = listener
+
+        local_endpoint = SocketEndpoint()
+        set_address!(local_endpoint, bootstrap.host)
+        local_endpoint.port = bootstrap.port
+
+        if _socket_uses_network_framework_tls(listener, bootstrap.tls_connection_options)
+            socket_bind(listener; local_endpoint, tls_connection_options = bootstrap.tls_connection_options)
+        else
+            socket_bind(listener; local_endpoint)
+        end
+
+        socket_listen(listener, bootstrap.backlog)
+
+        event_loop = get_next_event_loop(bootstrap.event_loop_group)
+        bootstrap.listener_event_loop = event_loop
+
+        on_accept_start = if bootstrap.on_listener_setup !== nothing
+            EventCallable(err -> (bootstrap.on_listener_setup::EventCallable)(err))
+        else
+            nothing
+        end
+
+        socket_start_accept(
+            listener,
+            event_loop;
+            on_accept_result = ChannelCallable(_ServerOnAcceptResult(bootstrap)),
+            on_accept_start = on_accept_start,
+            event_loop_group = bootstrap.event_loop_group,
+        )
+    catch
+        if listener !== nothing
+            try
+                socket_close(listener)
+            catch
+            end
+        end
+        bootstrap.listener_socket = nothing
+        bootstrap.listener_event_loop = nothing
+        rethrow()
+    end
+
+    logf(
+        LogLevel.INFO,
+        LS_IO_CHANNEL_BOOTSTRAP,
+        "ServerBootstrap: listening on $(bootstrap.host):$(bootstrap.port)",
+    )
+    return nothing
+end
+
+function _server_bootstrap_incoming_started!(bootstrap::ServerBootstrap)
+    @atomic bootstrap.inflight_channels += 1
+    return nothing
+end
+
+function _server_bootstrap_incoming_finished!(bootstrap::ServerBootstrap)
+    @atomic bootstrap.inflight_channels -= 1
+    _server_bootstrap_maybe_destroy(bootstrap)
+    return nothing
+end
+
+function _server_bootstrap_maybe_destroy(bootstrap::ServerBootstrap)
+    listener_closed = @atomic bootstrap.listener_closed
+    inflight = @atomic bootstrap.inflight_channels
+    if !listener_closed || inflight != 0
+        return nothing
+    end
+
+    if !(@atomicreplace bootstrap.destroy_called false => true).success
+        return nothing
+    end
+
+    cb = bootstrap.on_listener_destroy
+    cb === nothing && return nothing
+
+    listener_loop = bootstrap.listener_event_loop
+    if listener_loop !== nothing && !event_loop_thread_is_callers_thread(listener_loop)
+        schedule_task_now!(listener_loop; type_tag = "server_listener_destroy") do _
+            cb2 = bootstrap.on_listener_destroy
+            cb2 === nothing && return nothing
+            cb2(OP_SUCCESS)
+            return nothing
+        end
+    else
+        cb(OP_SUCCESS)
+    end
+
+    return nothing
+end
+
+@inline function _server_bootstrap_listener_closed!(bootstrap::ServerBootstrap)::Nothing
+    @atomic bootstrap.listener_closed = true
+    _server_bootstrap_maybe_destroy(bootstrap)
+    return nothing
+end
+
+mutable struct _IncomingLifecycle
+    @atomic finished::Bool
+end
+
+@inline function _finish_incoming_once!(bootstrap::ServerBootstrap, lifecycle::_IncomingLifecycle)::Nothing
+    if !(@atomicreplace lifecycle.finished false => true).success
+        return nothing
+    end
+    _server_bootstrap_incoming_finished!(bootstrap)
+    return nothing
+end
+
+struct _ServerOnListenerClose
+    bootstrap::ServerBootstrap
+end
+
+@inline function (cb::_ServerOnListenerClose)(_status::UInt8)::Nothing
+    _server_bootstrap_listener_closed!(cb.bootstrap)
+    return nothing
+end
+
+function _server_bootstrap_listener_destroy_task(bootstrap::ServerBootstrap, _status::TaskStatus.T)
+    listener = bootstrap.listener_socket
+    bootstrap.listener_socket = nothing
+
+    listener === nothing && return _server_bootstrap_listener_closed!(bootstrap)
+
+    close_callback_installed = false
+    close_started = false
+
+    try
+        socket_set_close_complete_callback(listener, TaskFn(_ServerOnListenerClose(bootstrap)))
+        close_callback_installed = true
+    catch
+    end
+
+    try
+        socket_stop_accept(listener)
+    catch
+    end
+
+    try
+        socket_close(listener)
+        close_started = true
+    catch
+    end
+
+    try
+        socket_cleanup!(listener)
+    catch
+    end
+
+    if !(close_callback_installed && close_started)
+        _server_bootstrap_listener_closed!(bootstrap)
+    end
+
+    return nothing
+end
+
+function _on_incoming_connection(
+        bootstrap::ServerBootstrap,
+        error_code::Int,
+        new_socket::Union{Socket, Nothing},
+    )::Nothing
+    if error_code != OP_SUCCESS || new_socket === nothing
+        logf(
+            LogLevel.DEBUG,
+            LS_IO_CHANNEL_BOOTSTRAP,
+            "ServerBootstrap: incoming connection error $error_code",
+        )
+        return nothing
+    end
+
+    if @atomic bootstrap.shutdown
+        socket_close(new_socket)
+        return nothing
+    end
+
+    _setup_incoming_channel(bootstrap, new_socket::Socket)
+    return nothing
+end
+
+function _setup_incoming_channel(bootstrap::ServerBootstrap, socket::Socket)::Nothing
+    _server_bootstrap_incoming_started!(bootstrap)
+    lifecycle = _IncomingLifecycle(false)
+
+    event_loop = get_next_event_loop(bootstrap.event_loop_group)
+
+    try
+        socket_assign_to_event_loop(socket, event_loop)
+    catch e
+        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+        if bootstrap.on_incoming_channel_setup !== nothing
+            bootstrap.on_incoming_channel_setup(err, nothing)
+        end
+        socket_close(socket)
+        _finish_incoming_once!(bootstrap, lifecycle)
+        return nothing
+    end
+
+    channel_ref = Ref{Union{Channel, Nothing}}(nothing)
+
+    on_setup = bootstrap.on_incoming_channel_setup
+    on_shutdown = EventCallable(err -> begin
+        ch = channel_ref[]
+        if ch !== nothing && bootstrap.on_incoming_channel_shutdown !== nothing
+            (bootstrap.on_incoming_channel_shutdown::ChannelCallable)(err, ch)
+        end
+        _finish_incoming_once!(bootstrap, lifecycle)
+        return nothing
+    end)
+
+    try
+        channel = Channel(
+            event_loop,
+            socket;
+            on_setup_completed = on_setup,
+            on_shutdown_completed = on_shutdown,
+            enable_read_back_pressure = bootstrap.enable_read_back_pressure,
+            tls_connection_options = bootstrap.tls_connection_options,
+        )
+        channel_ref[] = channel
+    catch e
+        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+        if bootstrap.on_incoming_channel_setup !== nothing
+            bootstrap.on_incoming_channel_setup(err, nothing)
+        end
+        socket_close(socket)
+        _finish_incoming_once!(bootstrap, lifecycle)
+        return nothing
+    end
+
+    return nothing
+end
+
+function server_bootstrap_shutdown!(bootstrap::ServerBootstrap)
+    if !(@atomicreplace bootstrap.shutdown false => true).success
+        return nothing
+    end
+
+    if bootstrap.listener_socket !== nothing && bootstrap.listener_event_loop !== nothing
+        schedule_task_now!(bootstrap.listener_event_loop; type_tag = "server_listener_shutdown") do status
+            try
+                _server_bootstrap_listener_destroy_task(bootstrap, _coerce_task_status(status))
+            catch
+                Core.println("server_listener_shutdown task errored")
+            end
+            return nothing
+        end
+    else
+        _server_bootstrap_listener_destroy_task(bootstrap, TaskStatus.RUN_READY)
+    end
+
     return nothing
 end

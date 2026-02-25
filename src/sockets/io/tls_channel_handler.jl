@@ -39,7 +39,7 @@ function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
 end
 
 struct TlsCtxPkcs11Options
-    pkcs11_lib::Pkcs11Lib
+    pkcs11_lib
     user_pin::ByteCursor
     slot_id::Union{UInt64, Nothing}
     token_label::ByteCursor
@@ -1222,6 +1222,9 @@ function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::In
     slot = handler.slot
     slot === nothing && return nothing
     channel_slot_is_attached(slot) || return nothing
+    if handler.on_negotiation_result !== nothing
+        handler.on_negotiation_result(handler, slot, error_code)
+    end
     channel = slot.channel
     now = channel_current_clock_time(channel)
     handler.stats.handshake_end_ns = now
