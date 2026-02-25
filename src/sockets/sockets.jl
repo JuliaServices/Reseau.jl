@@ -256,7 +256,11 @@ import ..EventLoops:
     wait_for_stop_completion
 
 @static if Sys.iswindows()
-    import ..EventLoops: IocpOverlapped
+    import ..EventLoops:
+        IocpOverlapped,
+        iocp_overlapped_init!,
+        iocp_overlapped_ptr,
+        iocp_overlapped_reset!
 end
 
 const _io_library_initialized = Ref{Bool}(false)
