@@ -592,34 +592,6 @@ end
     return nothing
 end
 
-@inline function _channel_setup_wait_timeout_seconds(
-        tls_connection_options::MaybeTlsConnectionOptions,
-    )::Float64
-    tls_connection_options isa TlsConnectionOptions || return 0.0
-    timeout_ms = Int((tls_connection_options::TlsConnectionOptions).timeout_ms)
-    timeout_ms <= 0 && return 0.0
-    return timeout_ms / 1000.0
-end
-
-function _wait_for_channel_setup!(
-        channel::Channel,
-        tls_connection_options::MaybeTlsConnectionOptions,
-    )::Nothing
-    timeout_seconds = _channel_setup_wait_timeout_seconds(tls_connection_options)
-    if timeout_seconds > 0.0
-        wait_status = Base.timedwait(() -> (@atomic channel.setup_future.set) != Int8(0), timeout_seconds)
-        if wait_status == :timed_out && (@atomic channel.setup_future.set) == Int8(0)
-            if channel.setup_pending
-                _complete_setup!(ERROR_IO_TLS_NEGOTIATION_TIMEOUT, channel)
-            else
-                notify_exception!(channel.setup_future, ReseauError(ERROR_IO_TLS_NEGOTIATION_TIMEOUT))
-            end
-        end
-    end
-    wait(channel.setup_future)
-    return nothing
-end
-
 function Channel(
     event_loop::EventLoop,
     socket::Union{Socket, Nothing} = nothing;
@@ -773,7 +745,7 @@ function Channel(
         acquired && Base.release(event_loop)
     end
     if wait_for_setup
-        _wait_for_channel_setup!(channel, tls_connection_options)
+        wait(channel.setup_future)
     end
     return channel
 end
@@ -786,7 +758,6 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
             err = e isa ReseauError ? e.code : ERROR_UNKNOWN
             _channel_fail_setup_or_shutdown!(channel, socket, err)
         end
-        _channel_schedule_setup_read_retry!(channel, socket, 200)
         return nothing
     end
     trigger_task = ChannelTask(
@@ -799,65 +770,11 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
                 _channel_fail_setup_or_shutdown!(channel, socket, err)
                 return nothing
             end
-            _channel_schedule_setup_read_retry!(channel, socket, 200)
             return nothing
         end),
         "channel_trigger_read",
     )
     channel_schedule_task_now!(channel, trigger_task)
-    return nothing
-end
-
-struct _SetupReadRetryCallback
-    channel::Channel
-    socket::Socket
-    attempts_left::Int
-end
-
-@inline function (cb::_SetupReadRetryCallback)(status_raw)::Nothing
-    _channel_setup_read_retry_task(cb, _coerce_task_status(status_raw))
-    return nothing
-end
-
-function _channel_setup_read_retry_task(cb::_SetupReadRetryCallback, status::TaskStatus.T)::Nothing
-    status == TaskStatus.RUN_READY || return nothing
-
-    channel = cb.channel
-    if !channel.setup_pending || channel.channel_state == ChannelState.SHUT_DOWN
-        return nothing
-    end
-
-    try
-        channel_trigger_read(channel)
-    catch e
-        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
-        _channel_fail_setup_or_shutdown!(channel, cb.socket, err)
-        return nothing
-    end
-
-    if channel.setup_pending && channel.channel_state != ChannelState.SHUT_DOWN
-        if cb.attempts_left > 1
-            _channel_schedule_setup_read_retry!(channel, cb.socket, cb.attempts_left - 1)
-        else
-            _channel_fail_setup_or_shutdown!(channel, cb.socket, ERROR_IO_MAX_RETRIES_EXCEEDED)
-        end
-    end
-
-    return nothing
-end
-
-function _channel_schedule_setup_read_retry!(
-        channel::Channel,
-        socket::Socket,
-        attempts_left::Int,
-    )::Nothing
-    if attempts_left <= 0 || !channel.setup_pending || channel.channel_state == ChannelState.SHUT_DOWN
-        return nothing
-    end
-    callback = _SetupReadRetryCallback(channel, socket, attempts_left)
-    retry_task = ChannelTask(EventCallable(callback), "channel_setup_read_retry")
-    run_at = clock_now_ns() + UInt64(50_000_000) # 50ms
-    channel_schedule_task_future!(channel, retry_task, run_at)
     return nothing
 end
 
@@ -1431,8 +1348,6 @@ function _channel_shutdown_write_task(args::ChannelShutdownWriteArgs, status::Ta
 end
 
 function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.T)
-    _finalize_pending_setup_on_shutdown!(channel)
-
     tasks = ChannelTask[]
     lock(channel.pending_tasks_lock) do
         for (task, _) in channel.pending_tasks
@@ -1455,31 +1370,6 @@ function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.
 
     if channel.on_shutdown_completed !== nothing
         channel.on_shutdown_completed(channel.shutdown_error_code)
-    end
-
-    return nothing
-end
-
-function _finalize_pending_setup_on_shutdown!(channel::Channel)::Nothing
-    if !channel.setup_pending || (@atomic channel.setup_future.set) != Int8(0)
-        return nothing
-    end
-
-    setup_error = channel.shutdown_error_code == OP_SUCCESS ? ERROR_IO_SOCKET_CLOSED : channel.shutdown_error_code
-    channel.setup_pending = false
-
-    if channel.on_setup_completed !== nothing
-        try
-            channel.on_setup_completed(setup_error, nothing)
-        catch
-        end
-    end
-
-    notify_exception!(channel.setup_future, ReseauError(setup_error))
-
-    if channel.destroy_pending
-        channel.destroy_pending = false
-        channel_destroy!(channel)
     end
 
     return nothing
