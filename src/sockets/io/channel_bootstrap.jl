@@ -400,7 +400,6 @@ function _initiate_socket_connect(request::SocketConnectionRequest, address::Hos
             socket;
             remote_endpoint,
             event_loop,
-            event_loop_group = request.event_loop_group,
             on_connection_result = EventCallable(err -> _on_socket_connect_complete(socket, err, request, address)),
             tls_connection_options = request.tls_connection_options,
         )

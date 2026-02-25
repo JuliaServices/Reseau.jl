@@ -334,11 +334,11 @@ end
 end
 
 # Channel - a bidirectional pipeline of handlers
-mutable struct Channel
+mutable struct Channel2
     event_loop::EventLoop
     has_event_loop_lease::Bool
-    first::Union{ChannelSlot{Channel}, Nothing}  # nullable - Socket side (leftmost)
-    last::Union{ChannelSlot{Channel}, Nothing}   # nullable - Application side (rightmost)
+    first::Union{ChannelSlot{Channel2}, Nothing}  # nullable - Socket side (leftmost)
+    last::Union{ChannelSlot{Channel2}, Nothing}   # nullable - Application side (rightmost)
     socket::Union{Socket, Nothing}
     channel_state::ChannelState.T
     read_back_pressure_enabled::Bool
@@ -346,9 +346,10 @@ mutable struct Channel
     setup_pending::Bool
     destroy_pending::Bool
     message_pool::Union{MessagePool, Nothing}  # nullable
-    on_setup_completed::Union{EventCallable, Nothing}  # nullable
-    on_shutdown_completed::Union{EventCallable, Nothing}  # nullable
-    shutdown_error_code::Int
+    # Setup state
+    on_setup_completed::Union{ChannelCallable, Nothing}  # nullable
+    negotiated_protocol::Union{String, Nothing}
+    setup_future::Future{Nothing}
     # Statistics tracking
     read_message_count::Csize_t
     write_message_count::Csize_t
@@ -360,7 +361,7 @@ mutable struct Channel
     window_update_batch_emit_threshold::Csize_t
     window_update_scheduled::Bool
     window_update_task::ChannelTask
-    # Channel task tracking
+    # Channel2 task tracking
     pending_tasks::IdDict{ChannelTask, Bool}
     pending_tasks_lock::ReentrantLock
     cross_thread_tasks::Vector{ChannelTask}
@@ -368,6 +369,8 @@ mutable struct Channel
     cross_thread_tasks_scheduled::Bool
     cross_thread_task::ScheduledTask
     # Shutdown tracking
+    on_shutdown_completed::Union{EventCallable, Nothing}  # nullable
+    shutdown_error_code::Int
     shutdown_pending::Bool
     shutdown_immediately::Bool
     shutdown_task::ChannelTask
@@ -387,64 +390,11 @@ end
 mutable struct _ChannelIdCounter
     @atomic value::UInt64
 end
+
 const _channel_id_counter = _ChannelIdCounter(UInt64(0))
 
 function _next_channel_id()::UInt64
     return @atomic _channel_id_counter.value += 1
-end
-
-function Channel(
-        event_loop::EventLoop,
-        message_pool::Union{MessagePool, Nothing} = nothing;
-        enable_read_back_pressure::Bool = false,
-    )
-    channel_id = _next_channel_id()
-    window_threshold = enable_read_back_pressure ? Csize_t(g_channel_max_fragment_size[] * 2) : Csize_t(0)
-
-    channel = Channel(
-        event_loop,
-        false,    # has_event_loop_lease
-        nothing,  # first
-        nothing,  # last
-        nothing,  # socket
-        ChannelState.NOT_INITIALIZED,
-        enable_read_back_pressure,
-        channel_id,
-        false,  # setup_pending
-        false,  # destroy_pending
-        message_pool,
-        nothing,  # on_setup_completed
-        nothing,  # on_shutdown_completed
-        0,        # shutdown_error_code
-        Csize_t(0),  # read_message_count
-        Csize_t(0),  # write_message_count
-        nothing,  # statistics_handler
-        nothing,  # statistics_task
-        UInt64(0),  # statistics_interval_start_time_ms
-        Any[],
-        window_threshold,
-        false,       # window_update_scheduled
-        ChannelTask(),
-        IdDict{ChannelTask, Bool}(),
-        ReentrantLock(),
-        ChannelTask[],
-        ReentrantLock(),
-        false,
-        ScheduledTask((_) -> nothing; type_tag = "channel_cross_thread_placeholder"),
-        false,    # shutdown_pending
-        false,    # shutdown_immediately
-        ChannelTask(),
-        ReentrantLock(),
-    )
-    channel.cross_thread_task = ScheduledTask(; type_tag = "channel_cross_thread_tasks") do status
-        try
-            _channel_schedule_cross_thread_tasks(channel, _coerce_task_status(status))
-        catch e
-            Core.println("channel_cross_thread_tasks errored")
-        end
-        return nothing
-    end
-    return channel
 end
 
 function _channel_add_pending_task!(channel::Channel, task::ChannelTask)
@@ -556,11 +506,6 @@ function channel_trigger_read(channel::Channel)::Nothing
     return nothing
 end
 
-# Channel creation API matching aws_channel_new
-mutable struct ChannelSetupArgs
-    channel::Channel
-end
-
 function _channel_get_or_create_message_pool(channel::Channel)::MessagePool
     pool = channel.event_loop.message_pool
     if pool isa MessagePool
@@ -580,75 +525,204 @@ function _channel_get_or_create_message_pool(channel::Channel)::MessagePool
     return pool
 end
 
-function _channel_setup_task(args::ChannelSetupArgs, status::TaskStatus.T)
-    channel = args.channel
-    channel.setup_pending = false
-    if status != TaskStatus.RUN_READY
-        if channel.on_setup_completed !== nothing
-            channel.on_setup_completed(ERROR_SYS_CALL_FAILURE)
-        end
-        channel.destroy_pending = false
-        channel_destroy!(channel)
-        return nothing
-    end
+negotiated_protocol(channel::Channel) = channel.negotiated_protocol
 
-    pool = _channel_get_or_create_message_pool(channel)
-    channel.message_pool = pool
-    channel.channel_state = ChannelState.ACTIVE
-
-    if channel.on_setup_completed !== nothing
-        channel.on_setup_completed(OP_SUCCESS)
-    end
-    if channel.destroy_pending
-        channel.destroy_pending = false
-        channel_destroy!(channel)
-    end
+function install_last_handler!(channel::Channel, handler::ChannelHandler)
+    new_slot = channel_slot_new!(channel)
+    channel_slot_insert_end!(channel, new_slot)
+    channel_slot_set_handler!(new_slot, handler)
     return nothing
 end
 
-function channel_new(;
-        event_loop,
-        event_loop_group = nothing,
-        on_setup_completed = nothing,
-        on_shutdown_completed = nothing,
-        enable_read_back_pressure::Bool = false,
-    )::Channel
-    _ = event_loop_group
-    if event_loop === nothing
-        throw_error(ERROR_INVALID_ARGUMENT)
+function _complete_setup!(error_code::Int, channel::Channel)::Nothing
+    try
+        if channel.on_setup_completed !== nothing
+            channel.on_setup_completed(error_code, channel)
+        end
+        notify(channel.setup_future, nothing)
+    catch e
+        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+        channel_shutdown!(channel, err)
+        if channel.socket !== nothing
+            socket_close(channel.socket)
+        end
+        notify_exception!(channel.setup_future, ReseauError(err))
+        return nothing
     end
+end
 
+function Channel(
+    event_loop::EventLoop,
+    socket::Socket;
+    on_setup_completed::Union{ChannelCallable, Nothing} = nothing,
+    enable_read_back_pressure::Bool = false,
+    tls_connection_options::MaybeTlsConnectionOptions = nothing,
+)
+    return Channel(
+        event_loop,
+        false,    # has_event_loop_lease
+        nothing,  # first
+        nothing,  # last
+        socket,  # socket,
+        ChannelState.NOT_INITIALIZED,
+        enable_read_back_pressure,
+        _next_channel_id(),
+        false,  # setup_pending
+        false,  # destroy_pending
+        message_pool,
+        on_setup_completed,
+        nothing,  # negotiated_protocol
+        Future{Nothing}(),
+        Csize_t(0),  # read_message_count
+        Csize_t(0),  # write_message_count
+        nothing,  # statistics_handler
+        nothing,  # statistics_task
+        UInt64(0),  # statistics_interval_start_time_ms
+        Any[],
+        enable_read_back_pressure ? Csize_t(g_channel_max_fragment_size[] * 2) : Csize_t(0), # window_threshold
+        false,       # window_update_scheduled
+        ChannelTask(),
+        IdDict{ChannelTask, Bool}(),
+        ReentrantLock(),
+        ChannelTask[],
+        ReentrantLock(),
+        false,
+        ScheduledTask((_) -> nothing; type_tag = "channel_cross_thread_placeholder"),
+        nothing,  # on_shutdown_completed
+        0,        # shutdown_error_code
+        false,    # shutdown_pending
+        false,    # shutdown_immediately
+        ChannelTask(),
+        ReentrantLock(),
+    )
+    channel.cross_thread_task = ScheduledTask(; type_tag = "channel_cross_thread_tasks") do status
+        try
+            _channel_schedule_cross_thread_tasks(channel, _coerce_task_status(status))
+        catch e
+            Core.println("channel_cross_thread_tasks errored")
+        end
+        return nothing
+    end
+    # initial channel setup
     Base.acquire(event_loop)
     acquired = true
     try
-        channel = Channel(
-            event_loop,
-            nothing;
-            enable_read_back_pressure = enable_read_back_pressure,
-        )
         channel.has_event_loop_lease = true
-        channel.on_setup_completed = on_setup_completed
-        channel.on_shutdown_completed = on_shutdown_completed
         channel.channel_state = ChannelState.SETTING_UP
         channel.setup_pending = true
         channel.destroy_pending = false
-
-        setup_args = ChannelSetupArgs(channel)
         schedule_task_now!(event_loop; type_tag = "channel_setup") do status
             try
-                _channel_setup_task(setup_args, _coerce_task_status(status))
+                if status != TaskStatus.RUN_READY
+                    notify_exception!(channel.setup_future, ReseauError(ERROR_SYS_CALL_FAILURE))
+                    channel.destroy_pending = false
+                    channel_destroy!(channel)
+                    return nothing
+                end
+                pool = _channel_get_or_create_message_pool(channel)
+                channel.message_pool = pool
+                channel.channel_state = ChannelState.ACTIVE
+                # install socket handler
+                local handler_result
+                try
+                    handler_result = socket_channel_handler_new!(channel, socket)
+                catch e
+                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_CHANNEL_BOOTSTRAP,
+                        "ClientBootstrap: failed to create socket channel handler",
+                    )
+                    channel_shutdown!(channel, err)
+                    socket_close(socket)
+                    notify_exception!(channel.setup_future, ReseauError(err))
+                    return nothing
+                end
+                # install TLS handler (if applicable)
+                if tls_connection_options !== nothing &&
+                    _socket_uses_network_framework_tls(socket, tls_connection_options)
+                    tls_options = tls_connection_options::TlsConnectionOptions
+                    channel.negotiated_protocol = socket_get_protocol(socket)
+                    _complete_setup!(OP_SUCCESS, channel)
+                    _schedule_trigger_read(channel, socket)
+                    return nothing
+                elseif tls_connection_options !== nothing
+                    tls_options = tls_connection_options::TlsConnectionOptions
+                    advertise_alpn = on_setup_completed !== nothing && tls_is_alpn_available()
+                    local tls_handler
+                    try
+                        tls_handler = tls_channel_handler_new!(channel, tls_options)
+                    catch e
+                        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                        channel_shutdown!(channel, err)
+                        socket_close(socket)
+                        notify_exception!(channel.setup_future, ReseauError(err))
+                        return nothing
+                    end
+                    if advertise_alpn
+                        alpn_slot = channel_slot_new!(channel)
+                        channel_slot_insert_right!(tls_handler.slot, alpn_slot)
+                        alpn_handler = tls_alpn_handler_new()
+                        channel_slot_set_handler!(alpn_slot, alpn_handler)
+                    end
+                    try
+                        tls_client_handler_start_negotiation(tls_handler)
+                    catch e
+                        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                        channel_shutdown!(channel, err)
+                        socket_close(socket)
+                        notify_exception!(channel.setup_future, ReseauError(err))
+                        return nothing
+                    end
+                    _schedule_trigger_read(channel, socket)
+                else
+                    # non-TLS case
+                    _complete_setup!(OP_SUCCESS, channel)
+                    _schedule_trigger_read(channel, socket)
+                    return nothing
+                end
             catch e
-                Core.println("channel_setup task errored")
+                notify_exception!(channel.setup_future, e)
             end
             return nothing
         end
         acquired = false
-        return channel
     finally
-        if acquired
-            Base.release(event_loop)
-        end
+        acquired && Base.release(event_loop)
     end
+    wait(channel.setup_future)
+    return channel
+end
+
+function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
+    if channel_thread_is_callers_thread(channel)
+        try
+            channel_trigger_read(channel)
+        catch e
+            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            channel_shutdown!(channel, err)
+            socket_close(socket)
+            notify_exception!(channel.setup_future, ReseauError(err))
+        end
+        return nothing
+    end
+    trigger_task = ChannelTask(
+        EventCallable(s -> begin
+            _coerce_task_status(s) == TaskStatus.RUN_READY || return nothing
+            try
+                channel_trigger_read(channel)
+            catch e
+                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                channel_shutdown!(channel, err)
+                socket_close(socket)
+                notify_exception!(channel.setup_future, ReseauError(err))
+            end
+            return nothing
+        end),
+        "channel_trigger_read",
+    )
+    channel_schedule_task_now!(channel, trigger_task)
+    return nothing
 end
 
 # Get unique channel ID

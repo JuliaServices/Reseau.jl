@@ -416,11 +416,9 @@ end
 const _s2n_handler_recv_c = @cfunction(_s2n_handler_recv, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
 const _s2n_handler_send_c = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
 
-function _s2n_on_negotiation_result(handler::S2nTlsHandler, slot::ChannelSlot, error_code::Int)
+function _s2n_on_negotiation_result(handler::S2nTlsHandler, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
-    if handler.on_negotiation_result !== nothing
-        handler.on_negotiation_result(handler, slot, error_code)
-    end
+    _complete_setup!(error_code, handler.slot.channel)
     return nothing
 end
 
