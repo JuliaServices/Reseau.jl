@@ -255,6 +255,10 @@ import ..EventLoops:
     unsubscribe_from_io_events!,
     wait_for_stop_completion
 
+@static if Sys.iswindows()
+    import ..EventLoops: IocpOverlapped
+end
+
 const _io_library_initialized = Ref{Bool}(false)
 const _io_library_init_pid = Ref{Int}(0)
 
