@@ -37,7 +37,7 @@ function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
 end
 
 struct TlsCtxPkcs11Options
-    pkcs11_lib
+    pkcs11_lib::Union{Pkcs11Lib, Nothing}
     user_pin::ByteCursor
     slot_id::Union{UInt64, Nothing}
     token_label::ByteCursor
@@ -215,8 +215,9 @@ function TlsCtxPkcs11Options(;
         cert_file_path = nothing,
         cert_file_contents = nothing,
     )
+    pkcs11_lib_val = pkcs11_lib isa Pkcs11Lib ? pkcs11_lib : nothing
     return TlsCtxPkcs11Options(
-        pkcs11_lib,
+        pkcs11_lib_val,
         _tls_pkcs11_cursor(user_pin),
         slot_id,
         _tls_pkcs11_cursor(token_label),
@@ -1247,6 +1248,8 @@ function _tls_backend_init()
         return _secure_transport_init()
     elseif Sys.islinux()
         return _s2n_init_once()
+    elseif Sys.iswindows()
+        return _secure_channel_init()
     else
         return nothing
     end
@@ -1257,6 +1260,8 @@ function _tls_backend_cleanup()
         return _secure_transport_cleanup()
     elseif Sys.islinux()
         return _s2n_cleanup()
+    elseif Sys.iswindows()
+        return _secure_channel_cleanup()
     else
         return nothing
     end
@@ -1265,6 +1270,7 @@ end
 # Backend implementations
 include("tls/s2n_tls_handler.jl")
 include("tls/secure_transport_tls_handler.jl")
+include("tls/secure_channel_tls_handler.jl")
 
 # === Generic TLS API ===
 
@@ -1273,6 +1279,8 @@ function tls_is_alpn_available()::Bool
         return _ssl_copy_alpn_protocols[] != C_NULL
     elseif Sys.islinux()
         return _s2n_available[]
+    elseif Sys.iswindows()
+        return _secure_channel_is_alpn_available()
     else
         return false
     end
@@ -1287,6 +1295,8 @@ function tls_is_cipher_pref_supported(pref::TlsCipherPref.T)::Bool
             pref == TlsCipherPref.TLS_CIPHER_PREF_PQ_TLSV1_2_2024_10 ||
             pref == TlsCipherPref.TLS_CIPHER_PREF_TLSV1_2_2025_07 ||
             pref == TlsCipherPref.TLS_CIPHER_PREF_TLSV1_0_2023_06
+    elseif Sys.iswindows()
+        return pref == TlsCipherPref.TLS_CIPHER_PREF_SYSTEM_DEFAULT
     else
         return false
     end
@@ -1297,6 +1307,8 @@ function _tls_context_new_impl(options::TlsContextOptions)::TlsContext
         return _s2n_context_new(options)
     elseif Sys.isapple()
         return _secure_transport_context_new(options)
+    elseif Sys.iswindows()
+        return _secure_channel_context_new(options)
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
@@ -1309,6 +1321,8 @@ function _tls_context_release_impl(ctx::TlsContext)
         _s2n_ctx_destroy!(ctx.impl)
     elseif ctx.impl isa SecureTransportCtx
         _secure_transport_ctx_destroy!(ctx.impl)
+    elseif ctx.impl isa SecureChannelCtx
+        _secure_channel_ctx_destroy!(ctx.impl)
     end
     return nothing
 end
@@ -1325,6 +1339,8 @@ function tls_client_handler_new(
         return _s2n_handler_new(options, slot, S2N_CLIENT)
     elseif Sys.isapple()
         return _secure_transport_handler_new(options, slot, _kSSLClientSide)
+    elseif Sys.iswindows()
+        return _secure_channel_handler_new(options, slot, true)
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
@@ -1342,6 +1358,8 @@ function tls_server_handler_new(
         return _s2n_handler_new(options, slot, S2N_SERVER)
     elseif Sys.isapple()
         return _secure_transport_handler_new(options, slot, _kSSLServerSide)
+    elseif Sys.iswindows()
+        return _secure_channel_handler_new(options, slot, false)
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
@@ -1376,6 +1394,24 @@ function tls_client_handler_start_negotiation(handler)::Nothing
         channel_task_init!(handler.negotiation_task, EventCallable(s -> _secure_transport_negotiation_task(handler, _coerce_task_status(s))), "secure_transport_channel_handler_start_negotiation")
         channel_schedule_task_now!(slot.channel, handler.negotiation_task)
         return nothing
+    elseif Sys.iswindows()
+        if !(handler isa SecureChannelTlsHandler)
+            throw_error(ERROR_INVALID_STATE)
+        end
+        slot = handler.slot
+        slot !== nothing || throw_error(ERROR_INVALID_STATE)
+        channel_slot_is_attached(slot) || throw_error(ERROR_INVALID_STATE)
+        if channel_thread_is_callers_thread(slot.channel)
+            _secure_channel_drive_negotiation(handler)
+            return nothing
+        end
+        channel_task_init!(
+            handler.negotiation_task,
+            EventCallable(s -> _secure_channel_negotiation_task(handler, _coerce_task_status(s))),
+            "secure_channel_channel_handler_start_negotiation",
+        )
+        channel_schedule_task_now!(slot.channel, handler.negotiation_task)
+        return nothing
     else
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
@@ -1386,6 +1422,8 @@ function tls_handler_protocol(handler::TlsChannelHandler)::ByteBuffer
         return handler.protocol
     elseif handler isa SecureTransportTlsHandler
         return handler.protocol
+    elseif handler isa SecureChannelTlsHandler
+        return handler.protocol
     else
         return null_buffer()
     end
@@ -1395,6 +1433,8 @@ function tls_handler_server_name(handler::TlsChannelHandler)::ByteBuffer
     if handler isa S2nTlsHandler
         return handler.server_name
     elseif handler isa SecureTransportTlsHandler
+        return handler.server_name
+    elseif handler isa SecureChannelTlsHandler
         return handler.server_name
     else
         return null_buffer()

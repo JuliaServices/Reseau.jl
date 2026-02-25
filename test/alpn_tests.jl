@@ -104,6 +104,20 @@ end
     close(elg)
 end
 
+@testset "alpn backend availability on windows" begin
+    if !Sys.iswindows()
+        @test true
+        return
+    end
+    Sockets.tls_init_static_state()
+    expected = true
+    if isdefined(Sys, :windows_version)
+        v = Sys.windows_version()
+        expected = (v.major > 6) || (v.major == 6 && v.minor >= 3)
+    end
+    @test Sockets.tls_is_alpn_available() == expected
+end
+
 @testset "alpn empty protocol does not send message" begin
     if !Sys.isapple()
         @test true

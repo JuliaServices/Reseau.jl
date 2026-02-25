@@ -2,7 +2,21 @@ using Test
 using Reseau
 import Reseau: EventLoops, Sockets
 
-const _PKI_RESOURCE_ROOT = joinpath(dirname(@__DIR__), "aws-c-io", "tests", "resources")
+function _find_pki_resource_root()
+    root = dirname(@__DIR__)
+    candidates = (
+        joinpath(root, "test", "resources"),
+        joinpath(root, "aws-c-io", "tests", "resources"),
+    )
+    for candidate in candidates
+        if isdir(candidate)
+            return candidate
+        end
+    end
+    error("PKI test resources not found. Expected one of: $(join(candidates, ", "))")
+end
+
+const _PKI_RESOURCE_ROOT = _find_pki_resource_root()
 const _CF_LIB = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 
 function _cf_array_count(array_ref::Ptr{Cvoid})::Int
@@ -85,6 +99,34 @@ end
         else
             @info "Skipping SecItem PKI tests (SecItem disabled)."
         end
+    elseif Sys.iswindows()
+        cert = Reseau.ByteCursor("cert")
+        key = Reseau.ByteCursor("key")
+        pkcs12 = Reseau.ByteCursor("pkcs12")
+        pwd = Reseau.ByteCursor("pwd")
+
+        @test_throws Reseau.ReseauError Sockets.import_public_and_private_keys_to_identity(cert, key)
+        @test_throws Reseau.ReseauError Sockets.import_pkcs12_to_identity(pkcs12, pwd)
+        @test_throws Reseau.ReseauError Sockets.import_trusted_certificates(cert)
+        @test_throws Reseau.ReseauError Sockets.secitem_import_cert_and_key(cert, key; cert_label = "cert", key_label = "key")
+        @test_throws Reseau.ReseauError Sockets.secitem_import_pkcs12(pkcs12, pwd; cert_label = "cert", key_label = "key")
+
+        cert_reg_path = "CurrentUser/My/reseau-test-cert"
+        client_opts = Sockets.tls_ctx_options_init_client_mtls_from_system_path(cert_reg_path)
+        @test client_opts isa Sockets.TlsContextOptions
+        @test !client_opts.is_server
+        @test client_opts.verify_peer
+        @test client_opts.system_certificate_path == cert_reg_path
+
+        server_opts = Sockets.tls_ctx_options_init_default_server_from_system_path(cert_reg_path)
+        @test server_opts isa Sockets.TlsContextOptions
+        @test server_opts.is_server
+        @test !server_opts.verify_peer
+        @test server_opts.system_certificate_path == cert_reg_path
+
+        @test_throws Reseau.ReseauError Sockets.load_cert_from_system_cert_store(cert_reg_path)
+        @test_throws Reseau.ReseauError Sockets.import_key_pair_to_cert_context(cert, key; is_client_mode = true)
+        @test Sockets.close_cert_store(C_NULL) === nothing
     else
         cert = Reseau.ByteCursor("cert")
         key = Reseau.ByteCursor("key")
