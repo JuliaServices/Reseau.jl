@@ -1080,9 +1080,18 @@ function _s2n_async_pkey_callback(conn::Ptr{Cvoid}, s2n_op::Ptr{Cvoid})::Cint
         LogLevel.DEBUG,
         LS_IO_TLS,string("Begin TLS key operation. type=$(tls_key_operation_type_str(operation.operation_type)) input_len=$(operation.input.len) signature=$(tls_signature_algorithm_str(operation.signature_algorithm)) digest=$(tls_hash_algorithm_str(operation.digest_algorithm))", " ", ))
 
-    if handler.s2n_ctx !== nothing && handler.s2n_ctx.custom_key_handler !== nothing
-        custom_key_op_handler_perform_operation(handler.s2n_ctx.custom_key_handler, operation)
+    ctx = handler.s2n_ctx
+    if ctx === nothing
+        _tls_key_operation_destroy!(operation)
+        return Cint(S2N_FAILURE)
     end
+
+    custom_key_handler = ctx.custom_key_handler
+    if !(custom_key_handler isa CustomKeyOpHandler)
+        _tls_key_operation_destroy!(operation)
+        return Cint(S2N_FAILURE)
+    end
+    custom_key_op_handler_perform_operation(custom_key_handler, operation)
 
     return Cint(S2N_SUCCESS)
 end
