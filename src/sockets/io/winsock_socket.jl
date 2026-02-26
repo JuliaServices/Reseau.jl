@@ -565,6 +565,10 @@
             return nothing
         end
 
+        # ConnectEx completion reuses the read overlapped slot.
+        # Release it before invoking user callbacks, since callbacks may
+        # immediately subscribe the socket to readable events.
+        impl.read_in_use = false
         sock.readable_fn = nothing
 
         if status_code == 0
@@ -580,7 +584,6 @@
             _winsock_connection_error(sock, socket_err)
         end
 
-        impl.read_in_use = false
         _winsock_maybe_finish_cleanup!(sock)
         return nothing
     end
@@ -1916,30 +1919,6 @@
         end
 
         bytes_to_read = remaining
-        if sock.options.type == SocketType.STREAM
-            # Be defensive: if the socket ever ends up in blocking mode, a 2nd `recv` on the
-            # event-loop thread can deadlock shutdown. Only call `recv` when bytes are ready.
-            bytes_available = Ref{UInt32}(0)
-            if ccall(
-                    (:ioctlsocket, _WS2_32),
-                    Cint,
-                    (UInt, UInt32, Ptr{UInt32}),
-                    _winsock_socket_handle(sock),
-                    FIONREAD,
-                    bytes_available,
-                ) != 0
-                socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
-                throw_error(socket_err)
-            end
-
-            if bytes_available[] == 0
-                _winsock_read_would_block(sock)
-            end
-
-            avail = Csize_t(bytes_available[])
-            bytes_to_read = avail < bytes_to_read ? avail : bytes_to_read
-        end
-
         buf_ptr = pointer(getfield(buffer, :mem)) + Int(buffer.len)
         max_cint = Csize_t(typemax(Cint))
         bytes_to_read_cint = bytes_to_read > max_cint ? Cint(typemax(Cint)) : Cint(bytes_to_read)

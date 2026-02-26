@@ -149,6 +149,7 @@ import ..Reseau:
     byte_buf_init_copy_from_cursor,
     byte_buf_remaining_capacity,
     byte_buf_write,
+    byte_buf_write_to_capacity,
     byte_buf_write_from_whole_buffer,
     byte_buf_write_from_whole_cursor,
     byte_buf_write_u8,

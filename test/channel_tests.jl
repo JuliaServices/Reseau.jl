@@ -116,6 +116,35 @@ end
             close(el)
         end
 
+        @testset "setup callback exception does not stall channel setup" begin
+            el = EventLoops.EventLoop()
+
+            callback_invocations = Threads.Atomic{Int}(0)
+            on_setup = Reseau.EventCallable(err -> begin
+                _ = err
+                Threads.atomic_add!(callback_invocations, 1)
+                error("setup callback boom")
+            end)
+
+            channel = Sockets.channel_new(
+                event_loop = el,
+                on_setup_completed = on_setup,
+                on_shutdown_completed = nothing,
+            )
+
+            @test EventLoops.run!(el) === nothing
+
+            deadline = Base.time_ns() + 1_000_000_000
+            while channel.channel_state != Sockets.ChannelState.SHUT_DOWN && Base.time_ns() < deadline
+                yield()
+            end
+
+            @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
+            @test callback_invocations[] >= 1
+
+            close(el)
+        end
+
         @testset "channel tasks run" begin
             setup = _setup_channel()
             el = setup.el

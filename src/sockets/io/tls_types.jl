@@ -62,8 +62,50 @@ abstract type TlsChannelHandler end
 
 abstract type AbstractPkcs11KeyOpState end
 
+struct _CustomKeyOpCallWrapper <: Function end
+
+@inline function (::_CustomKeyOpCallWrapper)(
+        f::F,
+        key_op_handler_ptr::Ptr{Cvoid},
+        operation_ptr::Ptr{Cvoid},
+    ) where {F}
+    f(_callback_ptr_to_obj(key_op_handler_ptr), _callback_ptr_to_obj(operation_ptr))
+    return nothing
+end
+
+@generated function _custom_key_op_gen_fptr(::Type{F}) where {F}
+    quote
+        @cfunction($(_CustomKeyOpCallWrapper()), Cvoid, (Ref{$F}, Ptr{Cvoid}, Ptr{Cvoid}))
+    end
+end
+
+struct CustomKeyOpCallable
+    ptr::Ptr{Cvoid}
+    objptr::Ptr{Cvoid}
+    _root::Any
+end
+
+function CustomKeyOpCallable(callable::F) where {F}
+    ptr = _custom_key_op_gen_fptr(F)
+    objref = Base.cconvert(Ref{F}, callable)
+    objptr = Ptr{Cvoid}(Base.unsafe_convert(Ref{F}, objref))
+    return CustomKeyOpCallable(ptr, objptr, objref)
+end
+
+@inline function (f::CustomKeyOpCallable)(handler, operation)::Nothing
+    handler_ptr, handler_root = _callback_obj_to_ptr_and_root(handler)
+    operation_ptr, operation_root = _callback_obj_to_ptr_and_root(operation)
+    GC.@preserve handler_root operation_root begin
+        ccall(f.ptr, Cvoid, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), f.objptr, handler_ptr, operation_ptr)
+    end
+    return nothing
+end
+
+@inline _custom_key_op_callable(on_key_operation::CustomKeyOpCallable) = on_key_operation
+@inline _custom_key_op_callable(on_key_operation) = CustomKeyOpCallable(on_key_operation)
+
 mutable struct CustomKeyOpHandler{S <: Union{AbstractPkcs11KeyOpState, Nothing}}
-    on_key_operation::Union{Function, Nothing}
+    on_key_operation::CustomKeyOpCallable
     pkcs11_state::S
 end
 
@@ -71,17 +113,19 @@ function CustomKeyOpHandler(
         on_key_operation;
         pkcs11_state::Union{AbstractPkcs11KeyOpState, Nothing} = nothing,
     )
-    return CustomKeyOpHandler{typeof(pkcs11_state)}(on_key_operation, pkcs11_state)
+    if on_key_operation === nothing
+        throw_error(ERROR_INVALID_ARGUMENT)
+    end
+    callback = _custom_key_op_callable(on_key_operation)
+    return CustomKeyOpHandler{typeof(pkcs11_state)}(callback, pkcs11_state)
 end
 
 custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
 custom_key_op_handler_release(::Nothing)::Nothing = nothing
 custom_key_op_handler_release(::CustomKeyOpHandler)::Nothing = nothing
 
-function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)
-    if handler.on_key_operation !== nothing
-        handler.on_key_operation(handler, operation)
-    end
+@inline function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)::Nothing
+    handler.on_key_operation(handler, operation)
     return nothing
 end
 

@@ -8,6 +8,9 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
+    env:
+      RESEAU_RUN_TLS_TESTS: ${{ matrix.run_tls_tests }}
+      RESEAU_RUN_NETWORK_TESTS: ${{ matrix.run_network_tests }}
     strategy:
       fail-fast: false
       matrix:
@@ -15,12 +18,18 @@ jobs:
           - os: ubuntu-latest
             arch: x64
             version: '1.12'
+            run_tls_tests: '1'
+            run_network_tests: '1'
           - os: windows-latest
             arch: x64
             version: '1.12'
+            run_tls_tests: '1'
+            run_network_tests: '1'
           - os: macOS-latest
             arch: aarch64
             version: '1.12'
+            run_tls_tests: '1'
+            run_network_tests: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2

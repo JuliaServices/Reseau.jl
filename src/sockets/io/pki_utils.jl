@@ -570,6 +570,35 @@ end
 function import_trusted_certificates(
         certificates_blob::ByteCursor,
     )::Ptr{Cvoid}
+    @static if Sys.iswindows()
+        pem_objs = pem_parse(_cursor_to_memory(certificates_blob))
+        cert_count = length(pem_objs)
+        cert_count == 0 && throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
+
+        cert_store = _win_open_memory_cert_store()
+        try
+            for obj in pem_objs
+                data = obj.data
+                cert_ctx = GC.@preserve data _win_query_certificate_blob(pointer(data.mem), _win_to_dword(data.len))
+                add_ok = ccall(
+                    (:CertAddCertificateContextToStore, _WIN_CRYPT32),
+                    Int32,
+                    (Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{Ptr{Cvoid}}),
+                    cert_store,
+                    cert_ctx,
+                    _WIN_CERT_STORE_ADD_ALWAYS,
+                    C_NULL,
+                )
+                _win_free_certificate_context(cert_ctx)
+                add_ok == 0 && throw_error(ERROR_SYS_CALL_FAILURE)
+            end
+            return cert_store
+        catch
+            _win_close_cert_store_raw(cert_store)
+            rethrow()
+        end
+    end
+
     @static if !Sys.isapple()
         _ = certificates_blob
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -997,14 +1026,678 @@ function secitem_import_pkcs12(
     return identity
 end
 
+@static if Sys.iswindows()
+    const _WIN_CRYPT32 = "Crypt32"
+    const _WIN_ADVAPI32 = "Advapi32"
+    const _WIN_KERNEL32 = "Kernel32"
+    const _WIN_NCRYPT = "Ncrypt"
+
+    const _WIN_X509_ASN_ENCODING = UInt32(0x00000001)
+    const _WIN_PKCS7_ASN_ENCODING = UInt32(0x00010000)
+
+    const _WIN_CERT_STORE_PROV_MEMORY = Ptr{UInt8}(2)
+    const _WIN_CERT_STORE_PROV_SYSTEM_A = Ptr{UInt8}(9)
+    const _WIN_CERT_STORE_CREATE_NEW_FLAG = UInt32(0x00002000)
+    const _WIN_CERT_STORE_OPEN_EXISTING_FLAG = UInt32(0x00004000)
+    const _WIN_CERT_STORE_ADD_ALWAYS = UInt32(4)
+    const _WIN_CERT_FIND_HASH = UInt32(0x00010000)
+
+    const _WIN_CRYPT_STRING_HEX = UInt32(0x00000004)
+    const _WIN_CRYPT_DECODE_ALLOC_FLAG = UInt32(0x00008000)
+
+    const _WIN_CERT_QUERY_OBJECT_BLOB = UInt32(2)
+    const _WIN_CERT_QUERY_CONTENT_FLAG_CERT = UInt32(0x00000002)
+    const _WIN_CERT_QUERY_FORMAT_FLAG_ALL = UInt32(0x0000000E)
+
+    const _WIN_PKCS_RSA_PRIVATE_KEY = Ptr{UInt8}(43)
+    const _WIN_PKCS_PRIVATE_KEY_INFO = Ptr{UInt8}(44)
+    const _WIN_X509_ECC_PRIVATE_KEY = Ptr{UInt8}(82)
+
+    const _WIN_PROV_RSA_FULL = UInt32(1)
+    const _WIN_CRYPT_NEWKEYSET = UInt32(0x00000008)
+    const _WIN_CRYPT_MACHINE_KEYSET = UInt32(0x00000020)
+    const _WIN_CERT_KEY_PROV_HANDLE_PROP_ID = UInt32(1)
+    const _WIN_CERT_KEY_PROV_INFO_PROP_ID = UInt32(2)
+    const _WIN_AT_KEYEXCHANGE = UInt32(1)
+
+    const _WIN_CERT_HASH_STR_LEN = 40
+    const _WIN_CERT_HASH_LEN = UInt32(20)
+    const _WIN_BCRYPT_ECDSA_PRIVATE_P256_MAGIC = UInt32(0x32534345)
+    const _WIN_BCRYPT_ECDSA_PRIVATE_P384_MAGIC = UInt32(0x34534345)
+    const _WIN_BCRYPT_ECDSA_PRIVATE_P521_MAGIC = UInt32(0x36534345)
+    const _WIN_NCRYPTBUFFER_VERSION = UInt32(0)
+    const _WIN_NCRYPTBUFFER_PKCS_KEY_NAME = UInt32(45)
+    const _WIN_NCRYPT_OVERWRITE_KEY_FLAG = UInt32(0x00000080)
+    const _WIN_MS_KEY_STORAGE_PROVIDER = "Microsoft Software Key Storage Provider"
+    const _WIN_BCRYPT_ECCPRIVATE_BLOB = "ECCPRIVATEBLOB"
+
+    const _WIN_CERT_STORE_LOCATIONS = Dict{String, UInt32}(
+        "currentuser" => UInt32(0x00010000),
+        "localmachine" => UInt32(0x00020000),
+        "currentservice" => UInt32(0x00040000),
+        "services" => UInt32(0x00050000),
+        "users" => UInt32(0x00060000),
+        "currentusergrouppolicy" => UInt32(0x00070000),
+        "localmachinegrouppolicy" => UInt32(0x00080000),
+        "localmachineenterprise" => UInt32(0x00090000),
+    )
+
+    struct _WinCryptBlob
+        cbData::UInt32
+        pbData::Ptr{UInt8}
+    end
+
+    struct _WinCryptAlgorithmIdentifier
+        pszObjId::Ptr{UInt8}
+        Parameters::_WinCryptBlob
+    end
+
+    struct _WinCryptPrivateKeyInfo
+        Version::UInt32
+        Algorithm::_WinCryptAlgorithmIdentifier
+        PrivateKey::_WinCryptBlob
+        Attributes::Ptr{Cvoid}
+    end
+
+    struct _WinFileTime
+        dwLowDateTime::UInt32
+        dwHighDateTime::UInt32
+    end
+
+    struct _WinCryptBitBlob
+        cbData::UInt32
+        pbData::Ptr{UInt8}
+        cUnusedBits::UInt32
+    end
+
+    struct _WinCertPublicKeyInfo
+        Algorithm::_WinCryptAlgorithmIdentifier
+        PublicKey::_WinCryptBitBlob
+    end
+
+    struct _WinCertInfo
+        dwVersion::UInt32
+        SerialNumber::_WinCryptBlob
+        SignatureAlgorithm::_WinCryptAlgorithmIdentifier
+        Issuer::_WinCryptBlob
+        NotBefore::_WinFileTime
+        NotAfter::_WinFileTime
+        Subject::_WinCryptBlob
+        SubjectPublicKeyInfo::_WinCertPublicKeyInfo
+        IssuerUniqueId::_WinCryptBitBlob
+        SubjectUniqueId::_WinCryptBitBlob
+        cExtension::UInt32
+        rgExtension::Ptr{Cvoid}
+    end
+
+    struct _WinCertContext
+        dwCertEncodingType::UInt32
+        pbCertEncoded::Ptr{UInt8}
+        cbCertEncoded::UInt32
+        pCertInfo::Ptr{_WinCertInfo}
+        hCertStore::Ptr{Cvoid}
+    end
+
+    struct _WinCryptEccPrivateKeyInfo
+        dwVersion::UInt32
+        PrivateKey::_WinCryptBlob
+        szCurveOid::Ptr{UInt8}
+        PublicKey::_WinCryptBitBlob
+    end
+
+    struct _WinBcryptBuffer
+        cbBuffer::UInt32
+        BufferType::UInt32
+        pvBuffer::Ptr{Cvoid}
+    end
+
+    struct _WinBcryptBufferDesc
+        ulVersion::UInt32
+        cBuffers::UInt32
+        pBuffers::Ptr{_WinBcryptBuffer}
+    end
+
+    struct _WinBcryptEccKeyBlob
+        dwMagic::UInt32
+        cbKey::UInt32
+    end
+
+    struct _WinCryptKeyProvInfo
+        pwszContainerName::Ptr{UInt16}
+        pwszProvName::Ptr{UInt16}
+        dwProvType::UInt32
+        dwFlags::UInt32
+        cProvParam::UInt32
+        rgProvParam::Ptr{Cvoid}
+        dwKeySpec::UInt32
+    end
+
+    const _win_cert_store_by_context_lock = ReentrantLock()
+    const _win_cert_store_by_context = Dict{Ptr{Cvoid}, Ptr{Cvoid}}()
+    const _win_key_handles_by_context = Dict{Ptr{Cvoid}, Tuple{Ptr{Cvoid}, Ptr{Cvoid}}}()
+
+    @inline function _win_to_dword(len::Integer)::UInt32
+        (len < 0 || len > typemax(UInt32)) && throw_error(ERROR_INVALID_ARGUMENT)
+        return UInt32(len)
+    end
+
+    @inline function _win_local_free(ptr::Ptr{Cvoid})::Nothing
+        ptr == C_NULL && return nothing
+        _ = ccall((:LocalFree, _WIN_KERNEL32), Ptr{Cvoid}, (Ptr{Cvoid},), ptr)
+        return nothing
+    end
+
+    @inline function _win_free_certificate_context(cert_ctx::Ptr{Cvoid})::Nothing
+        cert_ctx == C_NULL && return nothing
+        _ = ccall((:CertFreeCertificateContext, _WIN_CRYPT32), Int32, (Ptr{Cvoid},), cert_ctx)
+        return nothing
+    end
+
+    @inline function _win_close_cert_store_raw(cert_store::Ptr{Cvoid})::Nothing
+        cert_store == C_NULL && return nothing
+        _ = ccall((:CertCloseStore, _WIN_CRYPT32), Int32, (Ptr{Cvoid}, UInt32), cert_store, UInt32(0))
+        return nothing
+    end
+
+    @inline function _win_release_key_handles(
+            crypto_provider::Ptr{Cvoid},
+            private_key::Ptr{Cvoid},
+        )::Nothing
+        private_key != C_NULL && ccall((:CryptDestroyKey, _WIN_ADVAPI32), Int32, (Ptr{Cvoid},), private_key)
+        crypto_provider != C_NULL && ccall((:CryptReleaseContext, _WIN_ADVAPI32), Int32, (Ptr{Cvoid}, UInt32), crypto_provider, UInt32(0))
+        return nothing
+    end
+
+    function _win_bind_cert_context_store!(cert_ctx::Ptr{Cvoid}, cert_store::Ptr{Cvoid})::Nothing
+        cert_ctx == C_NULL && return nothing
+        lock(_win_cert_store_by_context_lock) do
+            _win_cert_store_by_context[cert_ctx] = cert_store
+        end
+        return nothing
+    end
+
+    function _win_take_store_for_context!(cert_ctx::Ptr{Cvoid})::Ptr{Cvoid}
+        lock(_win_cert_store_by_context_lock) do
+            return pop!(_win_cert_store_by_context, cert_ctx, C_NULL)
+        end
+    end
+
+    function _win_take_contexts_for_store!(cert_store::Ptr{Cvoid})::Vector{Ptr{Cvoid}}
+        lock(_win_cert_store_by_context_lock) do
+            contexts = Ptr{Cvoid}[]
+            for (ctx, bound_store) in collect(_win_cert_store_by_context)
+                if bound_store == cert_store
+                    push!(contexts, ctx)
+                    delete!(_win_cert_store_by_context, ctx)
+                end
+            end
+            return contexts
+        end
+    end
+
+    function _win_bind_cert_context_key_handles!(
+            cert_ctx::Ptr{Cvoid},
+            crypto_provider::Ptr{Cvoid},
+            private_key::Ptr{Cvoid},
+        )::Nothing
+        cert_ctx == C_NULL && return nothing
+        if crypto_provider == C_NULL && private_key == C_NULL
+            return nothing
+        end
+        lock(_win_cert_store_by_context_lock) do
+            _win_key_handles_by_context[cert_ctx] = (crypto_provider, private_key)
+        end
+        return nothing
+    end
+
+    function _win_take_key_handles_for_context!(cert_ctx::Ptr{Cvoid})::Tuple{Ptr{Cvoid}, Ptr{Cvoid}}
+        lock(_win_cert_store_by_context_lock) do
+            return pop!(_win_key_handles_by_context, cert_ctx, (C_NULL, C_NULL))
+        end
+    end
+
+    function _win_release_key_handles_for_context!(cert_ctx::Ptr{Cvoid})::Nothing
+        crypto_provider, private_key = _win_take_key_handles_for_context!(cert_ctx)
+        _win_release_key_handles(crypto_provider, private_key)
+        return nothing
+    end
+
+    function _win_split_system_cert_path(cert_path::AbstractString)::NTuple{3, String}
+        splits = split(cert_path, '\\'; keepempty = true)
+        if length(splits) != 3 || any(isempty, splits)
+            throw_error(ERROR_FILE_INVALID_PATH)
+        end
+        return (String(splits[1]), String(splits[2]), String(splits[3]))
+    end
+
+    @inline function _win_is_hex_hash(s::AbstractString)::Bool
+        ncodeunits(s) == _WIN_CERT_HASH_STR_LEN || return false
+        for ch in codeunits(s)
+            if !((UInt8('0') <= ch <= UInt8('9')) || (UInt8('a') <= ch <= UInt8('f')) || (UInt8('A') <= ch <= UInt8('F')))
+                return false
+            end
+        end
+        return true
+    end
+
+    function _win_open_memory_cert_store()::Ptr{Cvoid}
+        cert_store = ccall(
+            (:CertOpenStore, _WIN_CRYPT32),
+            Ptr{Cvoid},
+            (Ptr{UInt8}, UInt32, Ptr{Cvoid}, UInt32, Ptr{Cvoid}),
+            _WIN_CERT_STORE_PROV_MEMORY,
+            UInt32(0),
+            C_NULL,
+            _WIN_CERT_STORE_CREATE_NEW_FLAG,
+            C_NULL,
+        )
+        cert_store == C_NULL && throw_error(ERROR_SYS_CALL_FAILURE)
+        return cert_store
+    end
+
+    function _win_query_certificate_blob(data_ptr::Ptr{UInt8}, data_len::UInt32)::Ptr{Cvoid}
+        cert_blob = _WinCryptBlob(data_len, data_ptr)
+        cert_ctx_ref = Ref{Ptr{Cvoid}}(C_NULL)
+        ok = ccall(
+            (:CryptQueryObject, _WIN_CRYPT32),
+            Int32,
+            (UInt32, Ref{_WinCryptBlob}, UInt32, UInt32, UInt32, Ptr{UInt32}, Ptr{UInt32}, Ptr{UInt32}, Ptr{Ptr{Cvoid}}, Ptr{Ptr{Cvoid}}, Ref{Ptr{Cvoid}}),
+            _WIN_CERT_QUERY_OBJECT_BLOB,
+            cert_blob,
+            _WIN_CERT_QUERY_CONTENT_FLAG_CERT,
+            _WIN_CERT_QUERY_FORMAT_FLAG_ALL,
+            UInt32(0),
+            C_NULL,
+            C_NULL,
+            C_NULL,
+            C_NULL,
+            C_NULL,
+            cert_ctx_ref,
+        )
+        (ok == 0 || cert_ctx_ref[] == C_NULL) && throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
+        return cert_ctx_ref[]
+    end
+
+    function _win_decode_object_alloc(
+            encoding::UInt32,
+            struct_type::Ptr{UInt8},
+            data_ptr::Ptr{UInt8},
+            data_len::UInt32,
+        )::Tuple{Bool, Ptr{Cvoid}, UInt32}
+        out_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+        out_len = Ref{UInt32}(UInt32(0))
+        ok = ccall(
+            (:CryptDecodeObjectEx, _WIN_CRYPT32),
+            Int32,
+            (UInt32, Ptr{UInt8}, Ptr{UInt8}, UInt32, UInt32, Ptr{Cvoid}, Ref{Ptr{Cvoid}}, Ref{UInt32}),
+            encoding,
+            struct_type,
+            data_ptr,
+            data_len,
+            _WIN_CRYPT_DECODE_ALLOC_FLAG,
+            C_NULL,
+            out_ptr,
+            out_len,
+        )
+        return (ok != 0, out_ptr[], out_len[])
+    end
+
+    function _win_decode_private_key(private_key_objects::Vector{PemObject})::Tuple{Symbol, Ptr{UInt8}, UInt32, Ptr{Cvoid}}
+        for obj in private_key_objects
+            data = obj.data
+            decoded_rsa = GC.@preserve data _win_decode_object_alloc(
+                _WIN_X509_ASN_ENCODING | _WIN_PKCS7_ASN_ENCODING,
+                _WIN_PKCS_RSA_PRIVATE_KEY,
+                pointer(data.mem),
+                _win_to_dword(data.len),
+            )
+
+            if decoded_rsa[1]
+                return (:rsa, Ptr{UInt8}(decoded_rsa[2]), decoded_rsa[3], C_NULL)
+            end
+
+            decoded_wrapper = GC.@preserve data _win_decode_object_alloc(
+                _WIN_X509_ASN_ENCODING,
+                _WIN_PKCS_PRIVATE_KEY_INFO,
+                pointer(data.mem),
+                _win_to_dword(data.len),
+            )
+            if decoded_wrapper[1]
+                wrapper_ptr = decoded_wrapper[2]
+                pk_info = unsafe_load(Ptr{_WinCryptPrivateKeyInfo}(wrapper_ptr))
+                decoded_inner = _win_decode_object_alloc(
+                    _WIN_X509_ASN_ENCODING,
+                    _WIN_PKCS_RSA_PRIVATE_KEY,
+                    pk_info.PrivateKey.pbData,
+                    pk_info.PrivateKey.cbData,
+                )
+                if decoded_inner[1]
+                    return (:rsa, Ptr{UInt8}(decoded_inner[2]), decoded_inner[3], wrapper_ptr)
+                end
+
+                _win_local_free(wrapper_ptr)
+            end
+
+            decoded_ecc = GC.@preserve data _win_decode_object_alloc(
+                _WIN_X509_ASN_ENCODING | _WIN_PKCS7_ASN_ENCODING,
+                _WIN_X509_ECC_PRIVATE_KEY,
+                pointer(data.mem),
+                _win_to_dword(data.len),
+            )
+            if decoded_ecc[1]
+                return (:ecc, Ptr{UInt8}(decoded_ecc[2]), decoded_ecc[3], C_NULL)
+            end
+        end
+
+        return (:none, Ptr{UInt8}(C_NULL), UInt32(0), C_NULL)
+    end
+
+    function _win_attach_rsa_private_key!(
+            cert_ctx::Ptr{Cvoid},
+            key_ptr::Ptr{UInt8},
+            key_len::UInt32;
+            is_client_mode::Bool,
+        )::Tuple{Ptr{Cvoid}, Ptr{Cvoid}}
+        container_name = transcode(UInt16, string(UUIDs.uuid4()) * "\0")
+        flags_to_try = is_client_mode ?
+            (_WIN_CRYPT_NEWKEYSET, _WIN_CRYPT_NEWKEYSET | _WIN_CRYPT_MACHINE_KEYSET, UInt32(0)) :
+            (_WIN_CRYPT_NEWKEYSET, _WIN_CRYPT_NEWKEYSET | _WIN_CRYPT_MACHINE_KEYSET)
+
+        for acquire_flags in flags_to_try
+            container_ptr = acquire_flags == UInt32(0) ? Ptr{UInt16}(C_NULL) : pointer(container_name)
+            crypto_provider = Ref{Ptr{Cvoid}}(C_NULL)
+            acquired = GC.@preserve container_name ccall(
+                (:CryptAcquireContextW, _WIN_ADVAPI32),
+                Int32,
+                (Ref{Ptr{Cvoid}}, Ptr{UInt16}, Ptr{UInt16}, UInt32, UInt32),
+                crypto_provider,
+                container_ptr,
+                C_NULL,
+                _WIN_PROV_RSA_FULL,
+                acquire_flags,
+            )
+            acquired == 0 && continue
+
+            private_key = Ref{Ptr{Cvoid}}(C_NULL)
+            imported = ccall(
+                (:CryptImportKey, _WIN_ADVAPI32),
+                Int32,
+                (Ptr{Cvoid}, Ptr{UInt8}, UInt32, Ptr{Cvoid}, UInt32, Ref{Ptr{Cvoid}}),
+                crypto_provider[],
+                key_ptr,
+                key_len,
+                C_NULL,
+                UInt32(0),
+                private_key,
+            )
+            if imported == 0
+                _win_release_key_handles(crypto_provider[], C_NULL)
+                continue
+            end
+
+            set_ok = Int32(0)
+            if acquire_flags == UInt32(0)
+                set_ok = ccall(
+                    (:CertSetCertificateContextProperty, _WIN_CRYPT32),
+                    Int32,
+                    (Ptr{Cvoid}, UInt32, UInt32, Ptr{Cvoid}),
+                    cert_ctx,
+                    _WIN_CERT_KEY_PROV_HANDLE_PROP_ID,
+                    UInt32(0),
+                    crypto_provider[],
+                )
+            else
+                key_prov_info = GC.@preserve container_name _WinCryptKeyProvInfo(
+                    pointer(container_name),
+                    C_NULL,
+                    _WIN_PROV_RSA_FULL,
+                    acquire_flags & _WIN_CRYPT_MACHINE_KEYSET,
+                    UInt32(0),
+                    C_NULL,
+                    _WIN_AT_KEYEXCHANGE,
+                )
+                key_prov_info_ref = Ref(key_prov_info)
+                set_ok = GC.@preserve container_name key_prov_info_ref ccall(
+                    (:CertSetCertificateContextProperty, _WIN_CRYPT32),
+                    Int32,
+                    (Ptr{Cvoid}, UInt32, UInt32, Ref{_WinCryptKeyProvInfo}),
+                    cert_ctx,
+                    _WIN_CERT_KEY_PROV_INFO_PROP_ID,
+                    UInt32(0),
+                    key_prov_info_ref,
+                )
+            end
+
+            if set_ok != 0
+                return (crypto_provider[], private_key[])
+            end
+
+            _win_release_key_handles(crypto_provider[], private_key[])
+        end
+
+        throw_error(ERROR_SYS_CALL_FAILURE)
+    end
+
+    @inline function _win_ecc_magic_from_private_len(private_key_len::UInt32)::UInt32
+        if private_key_len == UInt32(0x20)
+            return _WIN_BCRYPT_ECDSA_PRIVATE_P256_MAGIC
+        elseif private_key_len == UInt32(0x30)
+            return _WIN_BCRYPT_ECDSA_PRIVATE_P384_MAGIC
+        else
+            return _WIN_BCRYPT_ECDSA_PRIVATE_P521_MAGIC
+        end
+    end
+
+    function _win_attach_ecc_private_key!(
+            cert_ctx::Ptr{Cvoid},
+            key_ptr::Ptr{UInt8},
+            key_len::UInt32,
+        )::Nothing
+        _ = key_len
+        cert_ctx == C_NULL && throw_error(ERROR_INVALID_ARGUMENT)
+        key_ptr == C_NULL && throw_error(ERROR_INVALID_ARGUMENT)
+
+        cert_context = unsafe_load(Ptr{_WinCertContext}(cert_ctx))
+        cert_info_ptr = cert_context.pCertInfo
+        cert_info_ptr == C_NULL && throw_error(ERROR_INVALID_ARGUMENT)
+        cert_info = unsafe_load(cert_info_ptr)
+
+        public_key_blob = cert_info.SubjectPublicKeyInfo.PublicKey
+        public_key_blob.cbData == 0 && throw_error(ERROR_INVALID_ARGUMENT)
+        public_key_blob.pbData == C_NULL && throw_error(ERROR_INVALID_ARGUMENT)
+        unsafe_load(public_key_blob.pbData) == 0x04 || throw_error(ERROR_INVALID_ARGUMENT)
+
+        public_key_len = Int(public_key_blob.cbData) - 1
+        public_key_len > 0 || throw_error(ERROR_INVALID_ARGUMENT)
+
+        private_key_info = unsafe_load(Ptr{_WinCryptEccPrivateKeyInfo}(key_ptr))
+        private_key_blob = private_key_info.PrivateKey
+        private_key_blob.pbData == C_NULL && throw_error(ERROR_INVALID_ARGUMENT)
+        private_key_blob.cbData == 0 && throw_error(ERROR_INVALID_ARGUMENT)
+
+        key_blob_size = sizeof(_WinBcryptEccKeyBlob) + public_key_len + Int(private_key_blob.cbData)
+        key_blob = Memory{UInt8}(undef, key_blob_size)
+        key_blob_header = _WinBcryptEccKeyBlob(
+            _win_ecc_magic_from_private_len(private_key_blob.cbData),
+            private_key_blob.cbData,
+        )
+
+        GC.@preserve key_blob begin
+            unsafe_store!(Ptr{_WinBcryptEccKeyBlob}(pointer(key_blob)), key_blob_header)
+            key_blob_body = pointer(key_blob) + sizeof(_WinBcryptEccKeyBlob)
+            unsafe_copyto!(key_blob_body, public_key_blob.pbData + 1, public_key_len)
+            unsafe_copyto!(
+                key_blob_body + public_key_len,
+                private_key_blob.pbData,
+                Int(private_key_blob.cbData),
+            )
+        end
+
+        provider_name = transcode(UInt16, _WIN_MS_KEY_STORAGE_PROVIDER * "\0")
+        key_name = transcode(UInt16, string(UUIDs.uuid4()) * "\0")
+        blob_type = transcode(UInt16, _WIN_BCRYPT_ECCPRIVATE_BLOB * "\0")
+
+        crypto_provider = Ref{Ptr{Cvoid}}(C_NULL)
+        imported_private_key = Ref{Ptr{Cvoid}}(C_NULL)
+
+        try
+            status = GC.@preserve provider_name ccall(
+                (:NCryptOpenStorageProvider, _WIN_NCRYPT),
+                Int32,
+                (Ref{Ptr{Cvoid}}, Ptr{UInt16}, UInt32),
+                crypto_provider,
+                pointer(provider_name),
+                UInt32(0),
+            )
+            status == 0 || throw_error(ERROR_SYS_CALL_FAILURE)
+
+            ncrypt_buffer = _WinBcryptBuffer[
+                _WinBcryptBuffer(
+                    _win_to_dword(sizeof(UInt16) * length(key_name)),
+                    _WIN_NCRYPTBUFFER_PKCS_KEY_NAME,
+                    Ptr{Cvoid}(pointer(key_name)),
+                ),
+            ]
+            ncrypt_buffer_desc = Ref(_WinBcryptBufferDesc(
+                _WIN_NCRYPTBUFFER_VERSION,
+                UInt32(length(ncrypt_buffer)),
+                pointer(ncrypt_buffer),
+            ))
+
+            status = GC.@preserve key_name blob_type ncrypt_buffer ncrypt_buffer_desc key_blob begin
+                ccall(
+                    (:NCryptImportKey, _WIN_NCRYPT),
+                    Int32,
+                    (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt16}, Ref{_WinBcryptBufferDesc}, Ref{Ptr{Cvoid}}, Ptr{UInt8}, UInt32, UInt32),
+                    crypto_provider[],
+                    C_NULL,
+                    pointer(blob_type),
+                    ncrypt_buffer_desc,
+                    imported_private_key,
+                    pointer(key_blob),
+                    _win_to_dword(length(key_blob)),
+                    _WIN_NCRYPT_OVERWRITE_KEY_FLAG,
+                )
+            end
+            status == 0 || throw_error(ERROR_SYS_CALL_FAILURE)
+
+            key_prov_info = Ref(_WinCryptKeyProvInfo(
+                pointer(key_name),
+                pointer(provider_name),
+                UInt32(0),
+                UInt32(0),
+                UInt32(0),
+                C_NULL,
+                UInt32(0),
+            ))
+            set_ok = GC.@preserve key_name provider_name key_prov_info ccall(
+                (:CertSetCertificateContextProperty, _WIN_CRYPT32),
+                Int32,
+                (Ptr{Cvoid}, UInt32, UInt32, Ref{_WinCryptKeyProvInfo}),
+                cert_ctx,
+                _WIN_CERT_KEY_PROV_INFO_PROP_ID,
+                UInt32(0),
+                key_prov_info,
+            )
+            set_ok == 0 && throw_error(ERROR_SYS_CALL_FAILURE)
+        finally
+            imported_private_key[] != C_NULL &&
+                ccall((:NCryptFreeObject, _WIN_NCRYPT), Int32, (Ptr{Cvoid},), imported_private_key[])
+            crypto_provider[] != C_NULL &&
+                ccall((:NCryptFreeObject, _WIN_NCRYPT), Int32, (Ptr{Cvoid},), crypto_provider[])
+        end
+
+        return nothing
+    end
+end
+
 function load_cert_from_system_cert_store(
         cert_path::AbstractString,
     )::Ptr{Cvoid}
+    @static if Sys.iswindows()
+        store_location, store_path, cert_hash = _win_split_system_cert_path(cert_path)
+        store_val = get(() -> UInt32(0), _WIN_CERT_STORE_LOCATIONS, lowercase(store_location))
+        store_val == UInt32(0) && throw_error(ERROR_FILE_INVALID_PATH)
+        ncodeunits(store_path) >= 128 && throw_error(ERROR_FILE_INVALID_PATH)
+        _win_is_hex_hash(cert_hash) || throw_error(ERROR_FILE_INVALID_PATH)
+
+        cert_store = ccall(
+            (:CertOpenStore, _WIN_CRYPT32),
+            Ptr{Cvoid},
+            (Ptr{UInt8}, UInt32, Ptr{Cvoid}, UInt32, Cstring),
+            _WIN_CERT_STORE_PROV_SYSTEM_A,
+            UInt32(0),
+            C_NULL,
+            _WIN_CERT_STORE_OPEN_EXISTING_FLAG | store_val,
+            store_path,
+        )
+        cert_store == C_NULL && throw_error(ERROR_FILE_INVALID_PATH)
+
+        cert_hash_data = Vector{UInt8}(undef, Int(_WIN_CERT_HASH_LEN))
+        cert_hash_len_ref = Ref{UInt32}(_WIN_CERT_HASH_LEN)
+        parsed_ok = GC.@preserve cert_hash_data ccall(
+            (:CryptStringToBinaryA, _WIN_CRYPT32),
+            Int32,
+            (Cstring, UInt32, UInt32, Ptr{UInt8}, Ref{UInt32}, Ptr{UInt32}, Ptr{UInt32}),
+            cert_hash,
+            UInt32(_WIN_CERT_HASH_STR_LEN),
+            _WIN_CRYPT_STRING_HEX,
+            pointer(cert_hash_data),
+            cert_hash_len_ref,
+            C_NULL,
+            C_NULL,
+        )
+        if parsed_ok == 0 || cert_hash_len_ref[] != _WIN_CERT_HASH_LEN
+            _win_close_cert_store_raw(cert_store)
+            throw_error(ERROR_FILE_INVALID_PATH)
+        end
+
+        cert_ctx = GC.@preserve cert_hash_data begin
+            hash_blob = _WinCryptBlob(cert_hash_len_ref[], pointer(cert_hash_data))
+            ccall(
+                (:CertFindCertificateInStore, _WIN_CRYPT32),
+                Ptr{Cvoid},
+                (Ptr{Cvoid}, UInt32, UInt32, UInt32, Ref{_WinCryptBlob}, Ptr{Cvoid}),
+                cert_store,
+                _WIN_X509_ASN_ENCODING | _WIN_PKCS7_ASN_ENCODING,
+                UInt32(0),
+                _WIN_CERT_FIND_HASH,
+                hash_blob,
+                C_NULL,
+            )
+        end
+
+        if cert_ctx == C_NULL
+            _win_close_cert_store_raw(cert_store)
+            throw_error(ERROR_FILE_INVALID_PATH)
+        end
+
+        _win_bind_cert_context_store!(cert_ctx, cert_store)
+        return cert_ctx
+    end
+
     _ = cert_path
     throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
 end
 
 function close_cert_store(cert_store::Ptr{Cvoid})::Nothing
+    @static if Sys.iswindows()
+        cert_store == C_NULL && return nothing
+
+        bound_store = _win_take_store_for_context!(cert_store)
+        if bound_store != C_NULL
+            _win_release_key_handles_for_context!(cert_store)
+            _win_close_cert_store_raw(bound_store)
+            return nothing
+        end
+
+        for cert_ctx in _win_take_contexts_for_store!(cert_store)
+            _win_release_key_handles_for_context!(cert_ctx)
+        end
+        _win_close_cert_store_raw(cert_store)
+        return nothing
+    end
+
     _ = cert_store
     return nothing
 end
@@ -1014,6 +1707,81 @@ function import_key_pair_to_cert_context(
         private_key::ByteCursor;
         is_client_mode::Bool = true,
     )::Ptr{Cvoid}
+    @static if Sys.iswindows()
+        certificates = pem_parse(_cursor_to_memory(public_cert_chain))
+        private_keys = pem_parse(_cursor_to_memory(private_key))
+
+        cert_store = _win_open_memory_cert_store()
+        cert_ctx = Ptr{Cvoid}(C_NULL)
+        decoded_key_kind = :none
+        decoded_key = Ptr{UInt8}(C_NULL)
+        decoded_key_len = UInt32(0)
+        decoded_key_wrapper = Ptr{Cvoid}(C_NULL)
+        crypto_provider = Ptr{Cvoid}(C_NULL)
+        imported_private_key = Ptr{Cvoid}(C_NULL)
+
+        try
+            for (i, obj) in pairs(certificates)
+                data = obj.data
+                parsed_cert_ctx = GC.@preserve data _win_query_certificate_blob(pointer(data.mem), _win_to_dword(data.len))
+
+                add_ok = ccall(
+                    (:CertAddCertificateContextToStore, _WIN_CRYPT32),
+                    Int32,
+                    (Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{Ptr{Cvoid}}),
+                    cert_store,
+                    parsed_cert_ctx,
+                    _WIN_CERT_STORE_ADD_ALWAYS,
+                    C_NULL,
+                )
+                if add_ok == 0
+                    _win_free_certificate_context(parsed_cert_ctx)
+                    throw_error(ERROR_SYS_CALL_FAILURE)
+                end
+
+                if i == 1
+                    cert_ctx = parsed_cert_ctx
+                else
+                    _win_free_certificate_context(parsed_cert_ctx)
+                end
+            end
+
+            cert_ctx == C_NULL && throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
+
+            decoded_key_kind, decoded_key, decoded_key_len, decoded_key_wrapper = _win_decode_private_key(private_keys)
+            decoded_key == C_NULL && throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
+
+            if decoded_key_kind == :rsa
+                crypto_provider, imported_private_key = _win_attach_rsa_private_key!(
+                    cert_ctx,
+                    decoded_key,
+                    decoded_key_len;
+                    is_client_mode = is_client_mode,
+                )
+            elseif decoded_key_kind == :ecc
+                _win_attach_ecc_private_key!(cert_ctx, decoded_key, decoded_key_len)
+            else
+                throw_error(ERROR_IO_FILE_VALIDATION_FAILURE)
+            end
+
+            _win_bind_cert_context_store!(cert_ctx, cert_store)
+            if decoded_key_kind == :rsa
+                _win_bind_cert_context_key_handles!(cert_ctx, crypto_provider, imported_private_key)
+            end
+            crypto_provider = C_NULL
+            imported_private_key = C_NULL
+            return cert_ctx
+        catch
+            cert_ctx != C_NULL && _win_free_certificate_context(cert_ctx)
+            _win_close_cert_store_raw(cert_store)
+            rethrow()
+        finally
+            _win_release_key_handles(crypto_provider, imported_private_key)
+            decoded_key != C_NULL && _win_local_free(Ptr{Cvoid}(decoded_key))
+            decoded_key_wrapper != C_NULL && _win_local_free(decoded_key_wrapper)
+        end
+    end
+
     _ = public_cert_chain
     _ = private_key
     _ = is_client_mode

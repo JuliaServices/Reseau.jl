@@ -143,13 +143,17 @@ end
 @inline function _s2n_strerror(err::Int)
     fptr = _s2n_symbol(:s2n_strerror)
     fptr == C_NULL && return "<s2n unavailable>"
-    return unsafe_string(ccall(fptr, Cstring, (Cint, Cstring), err, "EN"))
+    msg_ptr = ccall(fptr, Cstring, (Cint, Cstring), err, "EN")
+    msg_ptr == C_NULL && return "<s2n null error string>"
+    return unsafe_string(msg_ptr)
 end
 
 @inline function _s2n_strerror_debug(err::Int)
     fptr = _s2n_symbol(:s2n_strerror_debug)
     fptr == C_NULL && return "<s2n unavailable>"
-    return unsafe_string(ccall(fptr, Cstring, (Cint, Cstring), err, "EN"))
+    msg_ptr = ccall(fptr, Cstring, (Cint, Cstring), err, "EN")
+    msg_ptr == C_NULL && return "<s2n null debug string>"
+    return unsafe_string(msg_ptr)
 end
 
 @inline function _s2n_error_get_type(err::Int)::Cint
@@ -169,6 +173,7 @@ function _s2n_init_once()
         _s2n_initialized[] && return nothing
 
         _s2n_lib_handle()
+        _s2n_init_callbacks()
 
         disable_atexit = _s2n_symbol(:s2n_disable_atexit)
         disable_atexit == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
@@ -229,6 +234,7 @@ function _s2n_cleanup_thread()
     end
     return nothing
 end
+
 function _s2n_wall_clock_time_nanoseconds(context::Ptr{Cvoid}, time_in_ns::Ptr{UInt64})::Cint
     _ = context
     if sys_clock_get_ticks(time_in_ns) != OP_SUCCESS
@@ -247,10 +253,8 @@ function _s2n_monotonic_clock_time_nanoseconds(context::Ptr{Cvoid}, time_in_ns::
     return Cint(0)
 end
 
-const _s2n_wall_clock_time_nanoseconds_c =
-    @cfunction(_s2n_wall_clock_time_nanoseconds, Cint, (Ptr{Cvoid}, Ptr{UInt64}))
-const _s2n_monotonic_clock_time_nanoseconds_c =
-    @cfunction(_s2n_monotonic_clock_time_nanoseconds, Cint, (Ptr{Cvoid}, Ptr{UInt64}))
+const _s2n_wall_clock_time_nanoseconds_c = Ref{Ptr{Cvoid}}(C_NULL)
+const _s2n_monotonic_clock_time_nanoseconds_c = Ref{Ptr{Cvoid}}(C_NULL)
 
 mutable struct S2nTlsCtx
     config::Ptr{Cvoid}
@@ -387,9 +391,12 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
         try
             channel_slot_send_message(slot, message, ChannelDirection.WRITE)
         catch e
-            e isa ReseauError || rethrow()
             channel_release_message_to_pool!(channel, message)
-            Base.Libc.errno(Base.Libc.EPIPE)
+            if e isa ReseauError
+                Base.Libc.errno(Base.Libc.EPIPE)
+            else
+                Base.Libc.errno(Base.Libc.EIO)
+            end
             return Cint(-1)
         end
     end
@@ -403,17 +410,27 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
 end
 
 function _s2n_handler_recv(io_context::Ptr{Cvoid}, buf::Ptr{UInt8}, len::UInt32)::Cint
-    handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
-    return _s2n_generic_read(handler, buf, len)
+    try
+        handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
+        return _s2n_generic_read(handler, buf, len)
+    catch
+        Base.Libc.errno(Base.Libc.EIO)
+        return Cint(-1)
+    end
 end
 
 function _s2n_handler_send(io_context::Ptr{Cvoid}, buf::Ptr{UInt8}, len::UInt32)::Cint
-    handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
-    return _s2n_generic_send(handler, buf, len)
+    try
+        handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
+        return _s2n_generic_send(handler, buf, len)
+    catch
+        Base.Libc.errno(Base.Libc.EIO)
+        return Cint(-1)
+    end
 end
 
-const _s2n_handler_recv_c = @cfunction(_s2n_handler_recv, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
-const _s2n_handler_send_c = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
+const _s2n_handler_recv_c = Ref{Ptr{Cvoid}}(C_NULL)
+const _s2n_handler_send_c = Ref{Ptr{Cvoid}}(C_NULL)
 
 function _s2n_finish_negotiation(handler::S2nTlsHandler, error_code::Int)
     tls_on_negotiation_completed(handler, error_code)
@@ -467,7 +484,6 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
     blocked = Ref{Cint}(S2N_NOT_BLOCKED)
     while true
         negotiation_code = ccall(_s2n_symbol(:s2n_negotiate), Cint, (Ptr{Cvoid}, Ptr{Cint}), handler.connection, blocked)
-        s2n_error = _s2n_errno()
 
         if negotiation_code == S2N_SUCCESS
             handler.state = TlsNegotiationState.SUCCEEDED
@@ -484,6 +500,12 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
             return nothing
         end
 
+        # Trust the blocked out-param first; when blocked, negotiation needs another I/O tick.
+        if blocked[] != S2N_NOT_BLOCKED
+            return nothing
+        end
+
+        s2n_error = _s2n_errno()
         if _s2n_error_get_type(s2n_error) != S2N_ERR_T_BLOCKED
             if _s2n_error_get_type(s2n_error) == S2N_ERR_T_ALERT
                 alert_code = ccall(_s2n_symbol(:s2n_connection_get_alert), Cint, (Ptr{Cvoid},), handler.connection)
@@ -495,10 +517,6 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
             handler.state = TlsNegotiationState.FAILED
             _s2n_finish_negotiation(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-        end
-
-        if blocked[] != S2N_NOT_BLOCKED
-            return nothing
         end
     end
 end
@@ -760,7 +778,14 @@ function handler_process_read_message(
 
         if read_val < 0
             channel_release_message_to_pool!(slot.channel, outgoing)
-            err_type = _s2n_error_get_type(_s2n_errno())
+            if blocked[] != S2N_NOT_BLOCKED
+                if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
+                    break
+                end
+                break
+            end
+            s2n_err = _s2n_errno()
+            err_type = _s2n_error_get_type(s2n_err)
             if err_type == S2N_ERR_T_BLOCKED
                 if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
                     break
@@ -769,7 +794,7 @@ function handler_process_read_message(
             end
             logf(
                 LogLevel.ERROR,
-                LS_IO_TLS,string("s2n recv failed: $(_s2n_strerror(_s2n_errno())) ($(_s2n_strerror_debug(_s2n_errno())))", " ", ))
+                LS_IO_TLS,string("s2n recv failed: $(_s2n_strerror(s2n_err)) ($(_s2n_strerror_debug(s2n_err)))", " ", ))
             shutdown_error_code = ERROR_IO_TLS_ERROR_READ_FAILURE
             break
         end
@@ -879,9 +904,15 @@ function handler_shutdown(
         end
         handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
     else
-        if !abort_immediately && error_code != ERROR_IO_SOCKET_CLOSED
-            _s2n_do_delayed_shutdown(handler, slot, error_code)
-            return nothing
+        if !abort_immediately &&
+                error_code != ERROR_IO_SOCKET_CLOSED &&
+                slot.channel.channel_state == ChannelState.ACTIVE
+            try
+                _s2n_do_delayed_shutdown(handler, slot, error_code)
+                return nothing
+            catch
+                # If delayed shutdown scheduling fails, fall through to immediate shutdown completion.
+            end
         end
     end
 
@@ -1049,14 +1080,41 @@ function _s2n_async_pkey_callback(conn::Ptr{Cvoid}, s2n_op::Ptr{Cvoid})::Cint
         LogLevel.DEBUG,
         LS_IO_TLS,string("Begin TLS key operation. type=$(tls_key_operation_type_str(operation.operation_type)) input_len=$(operation.input.len) signature=$(tls_signature_algorithm_str(operation.signature_algorithm)) digest=$(tls_hash_algorithm_str(operation.digest_algorithm))", " ", ))
 
-    if handler.s2n_ctx !== nothing && handler.s2n_ctx.custom_key_handler !== nothing
-        custom_key_op_handler_perform_operation(handler.s2n_ctx.custom_key_handler, operation)
+    ctx = handler.s2n_ctx
+    if ctx === nothing
+        _tls_key_operation_destroy!(operation)
+        return Cint(S2N_FAILURE)
     end
+
+    custom_key_handler = ctx.custom_key_handler
+    if !(custom_key_handler isa CustomKeyOpHandler)
+        _tls_key_operation_destroy!(operation)
+        return Cint(S2N_FAILURE)
+    end
+    custom_key_op_handler_perform_operation(custom_key_handler::CustomKeyOpHandler, operation)
 
     return Cint(S2N_SUCCESS)
 end
 
-const _s2n_async_pkey_callback_c = @cfunction(_s2n_async_pkey_callback, Cint, (Ptr{Cvoid}, Ptr{Cvoid}))
+const _s2n_async_pkey_callback_c = Ref{Ptr{Cvoid}}(C_NULL)
+
+function _s2n_init_callbacks()::Nothing
+    if _s2n_wall_clock_time_nanoseconds_c[] == C_NULL
+        _s2n_wall_clock_time_nanoseconds_c[] =
+            @cfunction(_s2n_wall_clock_time_nanoseconds, Cint, (Ptr{Cvoid}, Ptr{UInt64}))
+    end
+    if _s2n_monotonic_clock_time_nanoseconds_c[] == C_NULL
+        _s2n_monotonic_clock_time_nanoseconds_c[] =
+            @cfunction(_s2n_monotonic_clock_time_nanoseconds, Cint, (Ptr{Cvoid}, Ptr{UInt64}))
+    end
+    if _s2n_handler_recv_c[] == C_NULL
+        _s2n_handler_recv_c[] = @cfunction(_s2n_handler_recv, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
+    end
+    if _s2n_handler_send_c[] == C_NULL
+        _s2n_handler_send_c[] = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
+    end
+    return nothing
+end
 
 function _s2n_ctx_destroy!(ctx::S2nTlsCtx)
     try
@@ -1073,7 +1131,7 @@ function _s2n_ctx_destroy!(ctx::S2nTlsCtx)
         ctx.custom_cert_chain_and_key = C_NULL
     end
     custom_key_handler = ctx.custom_key_handler
-    if custom_key_handler isa CustomKeyOpHandler{Pkcs11KeyOpState}
+    if custom_key_handler isa CustomKeyOpHandler && custom_key_handler.pkcs11_state isa Pkcs11KeyOpState
         _pkcs11_key_op_state_close!(custom_key_handler.pkcs11_state)
     end
     if custom_key_handler !== nothing
@@ -1118,7 +1176,7 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
             Cint,
             (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
             ctx_impl.config,
-            _s2n_wall_clock_time_nanoseconds_c,
+            _s2n_wall_clock_time_nanoseconds_c[],
             C_NULL,
         ) != S2N_SUCCESS
         logf(LogLevel.ERROR, LS_IO_TLS, "s2n: failed to set wall clock callback")
@@ -1131,7 +1189,7 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
             Cint,
             (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
             ctx_impl.config,
-            _s2n_monotonic_clock_time_nanoseconds_c,
+            _s2n_monotonic_clock_time_nanoseconds_c[],
             C_NULL,
         ) != S2N_SUCCESS
         logf(LogLevel.ERROR, LS_IO_TLS, "s2n: failed to set monotonic clock callback")
@@ -1182,7 +1240,11 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
         end
     elseif options.custom_key_op_handler !== nothing
         ctx_impl.custom_key_handler = custom_key_op_handler_acquire(options.custom_key_op_handler)
-        if ccall(_s2n_symbol(:s2n_config_set_async_pkey_callback), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ctx_impl.config, _s2n_async_pkey_callback_c) !=
+        if _s2n_async_pkey_callback_c[] == C_NULL
+            _s2n_async_pkey_callback_c[] =
+                @cfunction(_s2n_async_pkey_callback, Cint, (Ptr{Cvoid}, Ptr{Cvoid}))
+        end
+        if ccall(_s2n_symbol(:s2n_config_set_async_pkey_callback), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ctx_impl.config, _s2n_async_pkey_callback_c[]) !=
                 S2N_SUCCESS
             _s2n_ctx_destroy!(ctx_impl)
             throw_error(ERROR_IO_TLS_CTX_ERROR)
@@ -1303,13 +1365,14 @@ end
 function _s2n_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-        mode::Cint,
+        mode::Integer,
     )::S2nTlsHandler
     _s2n_lib_handle()
+    _s2n_init_callbacks()
 
     ctx = options.ctx
-    s2n_ctx = ctx.impl isa S2nTlsCtx ? ctx.impl : nothing
-    s2n_ctx === nothing && throw_error(ERROR_IO_TLS_CTX_ERROR)
+    ctx.impl isa S2nTlsCtx || throw_error(ERROR_IO_TLS_CTX_ERROR)
+    s2n_ctx = ctx.impl::S2nTlsCtx
 
     handler = S2nTlsHandler(
         slot,
@@ -1338,22 +1401,56 @@ function _s2n_handler_new(
     crt_statistics_tls_init!(handler.stats)
     channel_task_init!(handler.timeout_task, EventCallable(s -> _tls_timeout_task(handler, _coerce_task_status(s))), "tls_timeout")
 
-    handler.connection = ccall(_s2n_symbol(:s2n_connection_new), Ptr{Cvoid}, (Cint,), mode)
+    handler.connection = ccall(_s2n_symbol(:s2n_connection_new), Ptr{Cvoid}, (Cint,), Cint(mode))
     handler.connection == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
 
     if options.server_name !== nothing
+        handler.server_name = _byte_buf_from_string(options.server_name)
         if ccall(_s2n_symbol(:s2n_set_server_name), Cint, (Ptr{Cvoid}, Cstring), handler.connection, options.server_name) !=
                 S2N_SUCCESS
             throw_error(ERROR_IO_TLS_CTX_ERROR)
         end
     end
 
-    _ = ccall(_s2n_symbol(:s2n_connection_set_recv_cb), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), handler.connection, _s2n_handler_recv_c)
-    _ = ccall(_s2n_symbol(:s2n_connection_set_recv_ctx), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), handler.connection, pointer_from_objref(handler))
-    _ = ccall(_s2n_symbol(:s2n_connection_set_send_cb), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), handler.connection, _s2n_handler_send_c)
-    _ = ccall(_s2n_symbol(:s2n_connection_set_send_ctx), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), handler.connection, pointer_from_objref(handler))
-    _ = ccall(_s2n_symbol(:s2n_connection_set_ctx), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), handler.connection, pointer_from_objref(handler))
-    _ = ccall(_s2n_symbol(:s2n_connection_set_blinding), Cint, (Ptr{Cvoid}, Cint), handler.connection, S2N_SELF_SERVICE_BLINDING)
+    if ccall(_s2n_symbol(:s2n_connection_set_recv_cb), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), handler.connection, _s2n_handler_recv_c[]) !=
+            S2N_SUCCESS
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
+    end
+    if ccall(
+            _s2n_symbol(:s2n_connection_set_recv_ctx),
+            Cint,
+            (Ptr{Cvoid}, Ptr{Cvoid}),
+            handler.connection,
+            pointer_from_objref(handler),
+        ) != S2N_SUCCESS
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
+    end
+    if ccall(_s2n_symbol(:s2n_connection_set_send_cb), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), handler.connection, _s2n_handler_send_c[]) !=
+            S2N_SUCCESS
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
+    end
+    if ccall(
+            _s2n_symbol(:s2n_connection_set_send_ctx),
+            Cint,
+            (Ptr{Cvoid}, Ptr{Cvoid}),
+            handler.connection,
+            pointer_from_objref(handler),
+        ) != S2N_SUCCESS
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
+    end
+    if ccall(
+            _s2n_symbol(:s2n_connection_set_ctx),
+            Cint,
+            (Ptr{Cvoid}, Ptr{Cvoid}),
+            handler.connection,
+            pointer_from_objref(handler),
+        ) != S2N_SUCCESS
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
+    end
+    if ccall(_s2n_symbol(:s2n_connection_set_blinding), Cint, (Ptr{Cvoid}, Cint), handler.connection, S2N_SELF_SERVICE_BLINDING) !=
+            S2N_SUCCESS
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
+    end
 
     if options.alpn_list !== nothing
         _s2n_set_protocol_preferences_connection(handler.connection, options.alpn_list)
