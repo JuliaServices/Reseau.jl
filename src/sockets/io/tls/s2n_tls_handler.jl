@@ -391,9 +391,16 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
         try
             channel_slot_send_message(slot, message, ChannelDirection.WRITE)
         catch e
-            e isa ReseauError || rethrow()
             channel_release_message_to_pool!(channel, message)
-            Base.Libc.errno(Base.Libc.EPIPE)
+            if e isa ReseauError
+                Base.Libc.errno(Base.Libc.EPIPE)
+            else
+                msg = sprint() do io
+                    Base.showerror(io, e, catch_backtrace())
+                end
+                logf(LogLevel.ERROR, LS_IO_TLS, "s2n send callback exception: $msg")
+                Base.Libc.errno(Base.Libc.EIO)
+            end
             return Cint(-1)
         end
     end
@@ -407,13 +414,31 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
 end
 
 function _s2n_handler_recv(io_context::Ptr{Cvoid}, buf::Ptr{UInt8}, len::UInt32)::Cint
-    handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
-    return _s2n_generic_read(handler, buf, len)
+    try
+        handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
+        return _s2n_generic_read(handler, buf, len)
+    catch e
+        msg = sprint() do io
+            Base.showerror(io, e, catch_backtrace())
+        end
+        logf(LogLevel.ERROR, LS_IO_TLS, "s2n recv callback exception: $msg")
+        Base.Libc.errno(Base.Libc.EIO)
+        return Cint(-1)
+    end
 end
 
 function _s2n_handler_send(io_context::Ptr{Cvoid}, buf::Ptr{UInt8}, len::UInt32)::Cint
-    handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
-    return _s2n_generic_send(handler, buf, len)
+    try
+        handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
+        return _s2n_generic_send(handler, buf, len)
+    catch e
+        msg = sprint() do io
+            Base.showerror(io, e, catch_backtrace())
+        end
+        logf(LogLevel.ERROR, LS_IO_TLS, "s2n send callback exception: $msg")
+        Base.Libc.errno(Base.Libc.EIO)
+        return Cint(-1)
+    end
 end
 
 const _s2n_handler_recv_c = @cfunction(_s2n_handler_recv, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
