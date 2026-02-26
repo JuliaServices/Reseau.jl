@@ -1091,7 +1091,7 @@ function _s2n_async_pkey_callback(conn::Ptr{Cvoid}, s2n_op::Ptr{Cvoid})::Cint
         _tls_key_operation_destroy!(operation)
         return Cint(S2N_FAILURE)
     end
-    custom_key_op_handler_perform_operation(custom_key_handler, operation)
+    Base.invokelatest(custom_key_op_handler_perform_operation, custom_key_handler, operation)
 
     return Cint(S2N_SUCCESS)
 end
