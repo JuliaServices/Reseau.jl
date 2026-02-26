@@ -70,7 +70,7 @@ function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)::Nothing
     return nothing
 end
 
-@inline function custom_key_op_handler_release(handler::CustomKeyOpHandler{Pkcs11KeyOpState})::Nothing
+@inline function custom_key_op_handler_release(handler::CustomKeyOpHandler{<:Any, Pkcs11KeyOpState})::Nothing
     _pkcs11_key_op_state_close!(handler.pkcs11_state)
     return nothing
 end

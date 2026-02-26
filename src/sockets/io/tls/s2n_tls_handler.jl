@@ -1134,7 +1134,7 @@ function _s2n_ctx_destroy!(ctx::S2nTlsCtx)
         ctx.custom_cert_chain_and_key = C_NULL
     end
     custom_key_handler = ctx.custom_key_handler
-    if custom_key_handler isa CustomKeyOpHandler{Pkcs11KeyOpState}
+    if custom_key_handler isa CustomKeyOpHandler && custom_key_handler.pkcs11_state isa Pkcs11KeyOpState
         _pkcs11_key_op_state_close!(custom_key_handler.pkcs11_state)
     end
     if custom_key_handler !== nothing
