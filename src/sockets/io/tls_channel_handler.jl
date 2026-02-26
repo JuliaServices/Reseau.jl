@@ -70,7 +70,7 @@ function _pkcs11_key_op_state_close!(state::Pkcs11KeyOpState)::Nothing
     return nothing
 end
 
-@inline function custom_key_op_handler_release(handler::CustomKeyOpHandler{<:Any, Pkcs11KeyOpState})::Nothing
+@inline function custom_key_op_handler_release(handler::CustomKeyOpHandler{Pkcs11KeyOpState})::Nothing
     _pkcs11_key_op_state_close!(handler.pkcs11_state)
     return nothing
 end
@@ -1011,7 +1011,7 @@ function tls_ctx_options_init_client_mtls_with_custom_key_operations(
         throw_error(ERROR_INVALID_ARGUMENT)
     end
     handler = custom_key_op_handler
-    if !(handler isa CustomKeyOpHandler) || handler.on_key_operation === nothing
+    if !(handler isa CustomKeyOpHandler)
         throw_error(ERROR_INVALID_ARGUMENT)
     end
 
