@@ -1315,7 +1315,7 @@ end
 function _s2n_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
-        mode::Cint,
+        mode::Integer,
     )::S2nTlsHandler
     _s2n_lib_handle()
 
@@ -1350,7 +1350,7 @@ function _s2n_handler_new(
     crt_statistics_tls_init!(handler.stats)
     channel_task_init!(handler.timeout_task, EventCallable(s -> _tls_timeout_task(handler, _coerce_task_status(s))), "tls_timeout")
 
-    handler.connection = ccall(_s2n_symbol(:s2n_connection_new), Ptr{Cvoid}, (Cint,), mode)
+    handler.connection = ccall(_s2n_symbol(:s2n_connection_new), Ptr{Cvoid}, (Cint,), Cint(mode))
     handler.connection == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
 
     if options.server_name !== nothing
