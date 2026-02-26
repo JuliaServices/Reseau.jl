@@ -1401,6 +1401,7 @@ function _s2n_handler_new(
     handler.connection == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
 
     if options.server_name !== nothing
+        handler.server_name = _byte_buf_from_string(options.server_name)
         if ccall(_s2n_symbol(:s2n_set_server_name), Cint, (Ptr{Cvoid}, Cstring), handler.connection, options.server_name) !=
                 S2N_SUCCESS
             throw_error(ERROR_IO_TLS_CTX_ERROR)
