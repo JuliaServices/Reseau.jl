@@ -78,10 +78,12 @@ custom_key_op_handler_acquire(handler::CustomKeyOpHandler) = handler
 custom_key_op_handler_release(::Nothing)::Nothing = nothing
 custom_key_op_handler_release(::CustomKeyOpHandler)::Nothing = nothing
 
-custom_key_op_handler_perform_operation(::CustomKeyOpHandler{Nothing}, operation)::Nothing = nothing
-
 function custom_key_op_handler_perform_operation(handler::CustomKeyOpHandler, operation)::Nothing
-    handler.on_key_operation(handler, operation)
+    on_key_operation = handler.on_key_operation
+    if on_key_operation === nothing
+        return nothing
+    end
+    on_key_operation(handler, operation)
     return nothing
 end
 
