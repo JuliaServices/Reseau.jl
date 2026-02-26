@@ -535,6 +535,7 @@ negotiated_protocol(channel::Channel) = channel.negotiated_protocol
     msg = sprint() do io
         Base.showerror(io, e, bt)
     end
+    Core.println("Channel setup non-Reseau exception in $context: $msg")
     logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "Channel: non-Reseau exception in $context: $msg")
     return ERROR_UNKNOWN
 end
@@ -544,7 +545,13 @@ end
         e,
         bt,
     )::Int
-    return e isa ReseauError ? e.code : _channel_log_non_reseau_exception!(context, e, bt)
+    if e isa ReseauError
+        if e.code == ERROR_UNKNOWN
+            Core.println("Channel setup raised ReseauError(ERROR_UNKNOWN) in $context")
+        end
+        return e.code
+    end
+    return _channel_log_non_reseau_exception!(context, e, bt)
 end
 
 function install_last_handler!(channel::Channel, handler)
