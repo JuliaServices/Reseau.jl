@@ -916,9 +916,15 @@ function handler_shutdown(
         end
         handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
     else
-        if !abort_immediately && error_code != ERROR_IO_SOCKET_CLOSED
-            _s2n_do_delayed_shutdown(handler, slot, error_code)
-            return nothing
+        if !abort_immediately &&
+                error_code != ERROR_IO_SOCKET_CLOSED &&
+                slot.channel.channel_state == ChannelState.ACTIVE
+            try
+                _s2n_do_delayed_shutdown(handler, slot, error_code)
+                return nothing
+            catch
+                # If delayed shutdown scheduling fails, fall through to immediate shutdown completion.
+            end
         end
     end
 
