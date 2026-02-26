@@ -10,3 +10,5 @@
 /deps/deps.jl
 /echo_trim_safe
 /echo_trim_safe.exe
+Manifest.toml
+Manifest-v1.12.toml
