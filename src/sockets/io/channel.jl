@@ -527,6 +527,26 @@ end
 
 negotiated_protocol(channel::Channel) = channel.negotiated_protocol
 
+@noinline function _channel_log_non_reseau_exception!(
+        context::AbstractString,
+        e,
+        bt,
+    )::Int
+    msg = sprint() do io
+        Base.showerror(io, e, bt)
+    end
+    logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "Channel: non-Reseau exception in $context: $msg")
+    return ERROR_UNKNOWN
+end
+
+@inline function _channel_error_code_from_exception(
+        context::AbstractString,
+        e,
+        bt,
+    )::Int
+    return e isa ReseauError ? e.code : _channel_log_non_reseau_exception!(context, e, bt)
+end
+
 function install_last_handler!(channel::Channel, handler)
     new_slot = channel_slot_new!(channel)
     channel_slot_insert_end!(channel, new_slot)
@@ -561,7 +581,7 @@ function _complete_setup!(error_code::Int, channel::Channel)::Nothing
         end
         notify(channel.setup_future, nothing)
     catch e
-        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+        err = _channel_error_code_from_exception("setup callback", e, catch_backtrace())
         channel_shutdown!(channel, err)
         if channel.socket !== nothing
             socket_close(channel.socket)
@@ -678,7 +698,7 @@ function Channel(
                 try
                     handler_result = socket_channel_handler_new!(channel, socket_obj)
                 catch e
-                    err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                    err = _channel_error_code_from_exception("socket handler setup", e, catch_backtrace())
                     logf(
                         LogLevel.ERROR,
                         LS_IO_CHANNEL_BOOTSTRAP,
@@ -700,7 +720,7 @@ function Channel(
                     try
                         tls_handler = tls_channel_handler_new!(channel, tls_options)
                     catch e
-                        err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                        err = _channel_error_code_from_exception("tls handler setup", e, catch_backtrace())
                         _complete_setup!(err, channel)
                         return nothing
                     end
@@ -708,7 +728,7 @@ function Channel(
                         try
                             tls_client_handler_start_negotiation(tls_handler)
                         catch e
-                            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                            err = _channel_error_code_from_exception("tls negotiation start", e, catch_backtrace())
                             _complete_setup!(err, channel)
                             return nothing
                         end
@@ -721,7 +741,7 @@ function Channel(
                     return nothing
                 end
             catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                err = _channel_error_code_from_exception("channel setup task", e, catch_backtrace())
                 if channel.setup_pending
                     _complete_setup!(err, channel)
                 end
@@ -755,7 +775,7 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
         try
             channel_trigger_read(channel)
         catch e
-            err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+            err = _channel_error_code_from_exception("trigger_read immediate", e, catch_backtrace())
             _channel_fail_setup_or_shutdown!(channel, socket, err)
         end
         return nothing
@@ -766,7 +786,7 @@ function _schedule_trigger_read(channel::Channel, socket::Socket)::Nothing
             try
                 channel_trigger_read(channel)
             catch e
-                err = e isa ReseauError ? e.code : ERROR_UNKNOWN
+                err = _channel_error_code_from_exception("trigger_read scheduled", e, catch_backtrace())
                 _channel_fail_setup_or_shutdown!(channel, socket, err)
                 return nothing
             end

@@ -532,6 +532,10 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
             if e isa ReseauError
                 last_error = e.code
             else
+                msg = sprint() do io
+                    Base.showerror(io, e, catch_backtrace())
+                end
+                logf(LogLevel.ERROR, LS_IO_SOCKET_HANDLER, "Socket handler: non-Reseau read exception: $msg")
                 last_error = ERROR_UNKNOWN
             end
             channel_release_message_to_pool!(channel, message)
@@ -550,6 +554,14 @@ function _socket_handler_do_read(handler::SocketChannelHandler)
             if e isa ReseauError
                 last_error = e.code
             else
+                msg = sprint() do io
+                    Base.showerror(io, e, catch_backtrace())
+                end
+                logf(
+                    LogLevel.ERROR,
+                    LS_IO_SOCKET_HANDLER,
+                    "Socket handler: non-Reseau downstream exception while sending read message: $msg",
+                )
                 last_error = ERROR_UNKNOWN
             end
             channel_release_message_to_pool!(channel, message)
