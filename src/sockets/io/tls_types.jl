@@ -113,6 +113,9 @@ function CustomKeyOpHandler(
         on_key_operation;
         pkcs11_state::Union{AbstractPkcs11KeyOpState, Nothing} = nothing,
     )
+    if on_key_operation === nothing
+        throw_error(ERROR_INVALID_ARGUMENT)
+    end
     callback = _custom_key_op_callable(on_key_operation)
     return CustomKeyOpHandler{typeof(pkcs11_state)}(callback, pkcs11_state)
 end
