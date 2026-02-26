@@ -1113,9 +1113,6 @@ function _s2n_init_callbacks()::Nothing
     if _s2n_handler_send_c[] == C_NULL
         _s2n_handler_send_c[] = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
     end
-    if _s2n_async_pkey_callback_c[] == C_NULL
-        _s2n_async_pkey_callback_c[] = @cfunction(_s2n_async_pkey_callback, Cint, (Ptr{Cvoid}, Ptr{Cvoid}))
-    end
     return nothing
 end
 
@@ -1243,6 +1240,10 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
         end
     elseif options.custom_key_op_handler !== nothing
         ctx_impl.custom_key_handler = custom_key_op_handler_acquire(options.custom_key_op_handler)
+        if _s2n_async_pkey_callback_c[] == C_NULL
+            _s2n_async_pkey_callback_c[] =
+                @cfunction(_s2n_async_pkey_callback, Cint, (Ptr{Cvoid}, Ptr{Cvoid}))
+        end
         if ccall(_s2n_symbol(:s2n_config_set_async_pkey_callback), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ctx_impl.config, _s2n_async_pkey_callback_c[]) !=
                 S2N_SUCCESS
             _s2n_ctx_destroy!(ctx_impl)
