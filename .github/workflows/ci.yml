@@ -18,8 +18,8 @@ jobs:
           - os: ubuntu-latest
             arch: x64
             version: '1.12'
-            run_tls_tests: '0'
-            run_network_tests: '0'
+            run_tls_tests: '1'
+            run_network_tests: '1'
           - os: windows-latest
             arch: x64
             version: '1.12'
@@ -28,8 +28,8 @@ jobs:
           - os: macOS-latest
             arch: aarch64
             version: '1.12'
-            run_tls_tests: '0'
-            run_network_tests: '0'
+            run_tls_tests: '1'
+            run_network_tests: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
