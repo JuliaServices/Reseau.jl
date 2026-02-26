@@ -143,13 +143,17 @@ end
 @inline function _s2n_strerror(err::Int)
     fptr = _s2n_symbol(:s2n_strerror)
     fptr == C_NULL && return "<s2n unavailable>"
-    return unsafe_string(ccall(fptr, Cstring, (Cint, Cstring), err, "EN"))
+    msg_ptr = ccall(fptr, Cstring, (Cint, Cstring), err, "EN")
+    msg_ptr == C_NULL && return "<s2n null error string>"
+    return unsafe_string(msg_ptr)
 end
 
 @inline function _s2n_strerror_debug(err::Int)
     fptr = _s2n_symbol(:s2n_strerror_debug)
     fptr == C_NULL && return "<s2n unavailable>"
-    return unsafe_string(ccall(fptr, Cstring, (Cint, Cstring), err, "EN"))
+    msg_ptr = ccall(fptr, Cstring, (Cint, Cstring), err, "EN")
+    msg_ptr == C_NULL && return "<s2n null debug string>"
+    return unsafe_string(msg_ptr)
 end
 
 @inline function _s2n_error_get_type(err::Int)::Cint
@@ -467,7 +471,6 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
     blocked = Ref{Cint}(S2N_NOT_BLOCKED)
     while true
         negotiation_code = ccall(_s2n_symbol(:s2n_negotiate), Cint, (Ptr{Cvoid}, Ptr{Cint}), handler.connection, blocked)
-        s2n_error = _s2n_errno()
 
         if negotiation_code == S2N_SUCCESS
             handler.state = TlsNegotiationState.SUCCEEDED
@@ -484,6 +487,12 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
             return nothing
         end
 
+        # Trust the blocked out-param first; when blocked, negotiation needs another I/O tick.
+        if blocked[] != S2N_NOT_BLOCKED
+            return nothing
+        end
+
+        s2n_error = _s2n_errno()
         if _s2n_error_get_type(s2n_error) != S2N_ERR_T_BLOCKED
             if _s2n_error_get_type(s2n_error) == S2N_ERR_T_ALERT
                 alert_code = ccall(_s2n_symbol(:s2n_connection_get_alert), Cint, (Ptr{Cvoid},), handler.connection)
@@ -495,10 +504,6 @@ function _s2n_drive_negotiation(handler::S2nTlsHandler)::Nothing
             handler.state = TlsNegotiationState.FAILED
             _s2n_finish_negotiation(handler, ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
-        end
-
-        if blocked[] != S2N_NOT_BLOCKED
-            return nothing
         end
     end
 end
@@ -760,7 +765,14 @@ function handler_process_read_message(
 
         if read_val < 0
             channel_release_message_to_pool!(slot.channel, outgoing)
-            err_type = _s2n_error_get_type(_s2n_errno())
+            if blocked[] != S2N_NOT_BLOCKED
+                if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
+                    break
+                end
+                break
+            end
+            s2n_err = _s2n_errno()
+            err_type = _s2n_error_get_type(s2n_err)
             if err_type == S2N_ERR_T_BLOCKED
                 if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
                     break
@@ -769,7 +781,7 @@ function handler_process_read_message(
             end
             logf(
                 LogLevel.ERROR,
-                LS_IO_TLS,string("s2n recv failed: $(_s2n_strerror(_s2n_errno())) ($(_s2n_strerror_debug(_s2n_errno())))", " ", ))
+                LS_IO_TLS,string("s2n recv failed: $(_s2n_strerror(s2n_err)) ($(_s2n_strerror_debug(s2n_err)))", " ", ))
             shutdown_error_code = ERROR_IO_TLS_ERROR_READ_FAILURE
             break
         end
