@@ -395,10 +395,6 @@ function _s2n_generic_send(handler::S2nTlsHandler, buf_ptr::Ptr{UInt8}, len::UIn
             if e isa ReseauError
                 Base.Libc.errno(Base.Libc.EPIPE)
             else
-                msg = sprint() do io
-                    Base.showerror(io, e, catch_backtrace())
-                end
-                logf(LogLevel.ERROR, LS_IO_TLS, "s2n send callback exception: $msg")
                 Base.Libc.errno(Base.Libc.EIO)
             end
             return Cint(-1)
@@ -417,11 +413,7 @@ function _s2n_handler_recv(io_context::Ptr{Cvoid}, buf::Ptr{UInt8}, len::UInt32)
     try
         handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
         return _s2n_generic_read(handler, buf, len)
-    catch e
-        msg = sprint() do io
-            Base.showerror(io, e, catch_backtrace())
-        end
-        logf(LogLevel.ERROR, LS_IO_TLS, "s2n recv callback exception: $msg")
+    catch
         Base.Libc.errno(Base.Libc.EIO)
         return Cint(-1)
     end
@@ -431,11 +423,7 @@ function _s2n_handler_send(io_context::Ptr{Cvoid}, buf::Ptr{UInt8}, len::UInt32)
     try
         handler = unsafe_pointer_to_objref(io_context)::S2nTlsHandler
         return _s2n_generic_send(handler, buf, len)
-    catch e
-        msg = sprint() do io
-            Base.showerror(io, e, catch_backtrace())
-        end
-        logf(LogLevel.ERROR, LS_IO_TLS, "s2n send callback exception: $msg")
+    catch
         Base.Libc.errno(Base.Libc.EIO)
         return Cint(-1)
     end
@@ -1373,8 +1361,8 @@ function _s2n_handler_new(
     _s2n_init_callbacks()
 
     ctx = options.ctx
-    s2n_ctx = ctx.impl isa S2nTlsCtx ? ctx.impl : nothing
-    s2n_ctx === nothing && throw_error(ERROR_IO_TLS_CTX_ERROR)
+    ctx.impl isa S2nTlsCtx || throw_error(ERROR_IO_TLS_CTX_ERROR)
+    s2n_ctx = ctx.impl::S2nTlsCtx
 
     handler = S2nTlsHandler(
         slot,

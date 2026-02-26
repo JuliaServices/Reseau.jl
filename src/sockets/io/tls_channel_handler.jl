@@ -488,7 +488,7 @@ function TlsKeyOperation(
         digest_algorithm::TlsHashAlgorithm.T = TlsHashAlgorithm.UNKNOWN,
         on_complete = nothing,
     )
-    return TlsKeyOperation{typeof(on_complete), typeof(nothing)}(
+    return TlsKeyOperation{typeof(on_complete), Any}(
         input,
         nothing,
         operation_type,

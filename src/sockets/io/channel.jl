@@ -527,24 +527,14 @@ end
 
 negotiated_protocol(channel::Channel) = channel.negotiated_protocol
 
-@noinline function _channel_log_non_reseau_exception!(
-        context::AbstractString,
-        e,
-        bt,
-    )::Int
-    msg = sprint() do io
-        Base.showerror(io, e, bt)
-    end
-    logf(LogLevel.ERROR, LS_IO_CHANNEL_BOOTSTRAP, "Channel: non-Reseau exception in $context: $msg")
-    return ERROR_UNKNOWN
-end
-
 @inline function _channel_error_code_from_exception(
         context::AbstractString,
         e,
         bt,
     )::Int
-    return e isa ReseauError ? e.code : _channel_log_non_reseau_exception!(context, e, bt)
+    _ = context
+    _ = bt
+    return e isa ReseauError ? e.code : ERROR_UNKNOWN
 end
 
 function install_last_handler!(channel::Channel, handler)
