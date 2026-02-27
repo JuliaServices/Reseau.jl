@@ -1,5 +1,5 @@
 # SecureChannel TLS backend (Windows)
-# Included by src/sockets/io/tls_channel_handler.jl
+# Included by src/sockets/socket/tls_channel_handler.jl
 
 # === SecureChannel backend (Windows) ===
 
@@ -1225,7 +1225,7 @@ mutable struct SecureChannelTlsHandler <: TlsChannelHandler
     slot::Union{ChannelSlot{Channel}, Nothing}
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
-    timeout_task::ChannelTask
+    timeout_task::ChannelTask{Channel}
     sec_handle::_CtxtHandle
     creds::_CredHandle
     stream_sizes::_SecPkgContextStreamSizes
@@ -1246,11 +1246,11 @@ mutable struct SecureChannelTlsHandler <: TlsChannelHandler
     negotiation_finished::Bool
     negotiation_failed::Bool
     verify_peer::Bool
-    read_task::ChannelTask
+    read_task::ChannelTask{Channel}
     read_task_pending::Bool
     read_state::TlsHandlerReadState.T
     shutdown_error_code::Int
-    negotiation_task::ChannelTask
+    negotiation_task::ChannelTask{Channel}
     ctx_obj::Union{TlsContext, Nothing}
     custom_ca_store::Ptr{Cvoid}
     is_client_mode::Bool
@@ -1870,22 +1870,6 @@ function handler_process_read_message(
     end
 
     channel_release_message_to_pool!(slot.channel, msg)
-    return nothing
-end
-
-function handler_process_read_message(handler::SecureChannelTlsHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    try
-        invoke(
-            handler_process_read_message,
-            Tuple{SecureChannelTlsHandler, ChannelSlot, Union{IoMessage, Nothing}},
-            handler,
-            slot,
-            message,
-        )
-    catch e
-        err = _secure_channel_error_code_from_exception(e, "handler_process_read_message")
-        channel_shutdown!(slot.channel, err)
-    end
     return nothing
 end
 

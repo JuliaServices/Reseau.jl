@@ -1,7 +1,7 @@
 # AWS IO Library - Core definitions
 # Port of aws-c-io/include/aws/io/io.h
 
-# IO error constants are defined in `src/common/error.jl` and are bridged into
+# IO error constants are defined in `src/error.jl` and are bridged into
 # `EventLoops` by `src/eventloops/eventloops.jl`.
 
 # Log subjects for IO operations
@@ -188,9 +188,6 @@ function pkcs11_error_code_str(error_code::Integer)::Union{String, Nothing}
     return nothing
 end
 
-using LibAwsCal
-using LibAwsCommon
-
 const _io_log_subject_infos = (
     LogSubjectInfo(LS_IO_GENERAL, "aws-c-io", "Subject for IO logging that doesn't belong to any particular category"),
     LogSubjectInfo(LS_IO_EVENT_LOOP, "event-loop", "Subject for Event-loop specific logging."),
@@ -223,9 +220,6 @@ function _cal_init()
     if _cal_library_initialized[] && _cal_library_init_pid[] == pid
         return nothing
     end
-    allocator = LibAwsCommon.default_aws_allocator()
-    LibAwsCommon.aws_common_library_init(allocator)
-    LibAwsCal.aws_cal_library_init(allocator)
     _cal_library_initialized[] = true
     _cal_library_init_pid[] = pid
     return nothing
@@ -242,7 +236,5 @@ function _cal_cleanup()
     end
     _cal_library_initialized[] = false
     _cal_library_init_pid[] = 0
-    LibAwsCal.aws_cal_library_clean_up()
-    LibAwsCommon.aws_common_library_clean_up()
     return nothing
 end

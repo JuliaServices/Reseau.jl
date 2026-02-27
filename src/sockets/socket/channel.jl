@@ -7,38 +7,34 @@ const DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE = 16 * 1024
 const g_channel_max_fragment_size = Ref{Csize_t}(Csize_t(DEFAULT_CHANNEL_MAX_FRAGMENT_SIZE))
 
 # Channel task wrapper (aws_channel_task)
-mutable struct ChannelTaskContext{CH, TSK}
-    channel::CH
-    task::TSK
-end
-
-mutable struct ChannelTask
+mutable struct ChannelTask{CH}
     wrapper_task::ScheduledTask
     task_fn::EventCallable
     type_tag::String
-    ctx::ChannelTaskContext
+    channel::CH
+
+    function ChannelTask{CH}(wrapper_task::ScheduledTask, task_fn::EventCallable, type_tag::String) where {CH}
+        return new{CH}(wrapper_task, task_fn, type_tag)
+    end
 end
 
 const _noop_event_callable = EventCallable((_::Int) -> nothing)
 
-function ChannelTask(task_fn::EventCallable, type_tag::AbstractString)
-    ctx = ChannelTaskContext{Any, Union{ChannelTask, Nothing}}(nothing, nothing)
+function ChannelTask{CH}(task_fn::EventCallable, type_tag::AbstractString) where {CH}
+    local task::ChannelTask{CH}
     wrapper_task = ScheduledTask(; type_tag = type_tag) do status
         try
-            _channel_task_wrapper(ctx, _coerce_task_status(status))
+            _channel_task_wrapper(task, _coerce_task_status(status))
         catch
             Core.println("channel task ($type_tag) errored")
         end
         return nothing
     end
-    task = ChannelTask(wrapper_task, task_fn, String(type_tag), ctx)
-    setfield!(ctx, :task, task)
+    task = ChannelTask{CH}(wrapper_task, task_fn, String(type_tag))
     return task
 end
 
-function ChannelTask()
-    return ChannelTask(_noop_event_callable, "channel_task")
-end
+ChannelTask{CH}() where {CH} = ChannelTask{CH}(_noop_event_callable, "channel_task")
 
 function channel_task_init!(task::ChannelTask, task_fn::EventCallable, type_tag::AbstractString)
     task.task_fn = task_fn
@@ -110,105 +106,6 @@ function ChannelSlot{CH}(channel::CH) where {CH}
     )
 end
 
-struct _ChannelHandlerReadDispatch{H} <: Function
-    handler::H
-end
-
-@inline function _channel_handler_read_dispatch(handler, slot::ChannelSlot{CH}, message::IoMessage)::Nothing where {CH}
-    handler_process_read_message(handler, slot, message)::Nothing
-    return nothing
-end
-
-@inline function (f::_ChannelHandlerReadDispatch{H})(slot::ChannelSlot{CH}, message::IoMessage)::Nothing where {H, CH}
-    _channel_handler_read_dispatch(f.handler, slot, message)::Nothing
-    return nothing
-end
-
-struct _ChannelHandlerWriteDispatch{H} <: Function
-    handler::H
-end
-
-@inline function _channel_handler_write_dispatch(handler, slot::ChannelSlot{CH}, message::IoMessage)::Nothing where {CH}
-    handler_process_write_message(handler, slot, message)::Nothing
-    return nothing
-end
-
-@inline function (f::_ChannelHandlerWriteDispatch{H})(slot::ChannelSlot{CH}, message::IoMessage)::Nothing where {H, CH}
-    _channel_handler_write_dispatch(f.handler, slot, message)::Nothing
-    return nothing
-end
-
-struct _ChannelHandlerIncrementWindowDispatch{H} <: Function
-    handler::H
-end
-
-@inline function _channel_handler_increment_window_dispatch(handler, slot::ChannelSlot{CH}, size::Csize_t)::Nothing where {CH}
-    handler_increment_read_window(handler, slot, size)::Nothing
-    return nothing
-end
-
-@inline function (f::_ChannelHandlerIncrementWindowDispatch{H})(slot::ChannelSlot{CH}, size::Csize_t)::Nothing where {H, CH}
-    _channel_handler_increment_window_dispatch(f.handler, slot, size)::Nothing
-    return nothing
-end
-
-struct _ChannelHandlerShutdownDispatch{H} <: Function
-    handler::H
-end
-
-@inline function _channel_handler_shutdown_dispatch(
-        handler,
-        slot::ChannelSlot{CH},
-        direction::ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )::Nothing where {CH}
-    handler_shutdown(handler, slot, direction, error_code, free_scarce_resources_immediately)::Nothing
-    return nothing
-end
-
-@inline function (f::_ChannelHandlerShutdownDispatch{H})(
-        slot::ChannelSlot{CH},
-        direction::ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )::Nothing where {H, CH}
-    _channel_handler_shutdown_dispatch(
-        f.handler,
-        slot,
-        direction,
-        error_code,
-        free_scarce_resources_immediately,
-    )::Nothing
-    return nothing
-end
-
-struct _ChannelHandlerMessageOverheadDispatch{H} <: Function
-    handler::H
-end
-
-@inline function (f::_ChannelHandlerMessageOverheadDispatch{H})()::Csize_t where {H}
-    return handler_message_overhead(f.handler)::Csize_t
-end
-
-struct _ChannelHandlerDestroyDispatch{H} <: Function
-    handler::H
-end
-
-@inline function (f::_ChannelHandlerDestroyDispatch{H})()::Nothing where {H}
-    handler_destroy(f.handler)::Nothing
-    return nothing
-end
-
-struct _ChannelHandlerTriggerReadDispatch{H} <: Function
-    handler::H
-end
-
-@inline function (f::_ChannelHandlerTriggerReadDispatch{H})()::Nothing where {H}
-    handler_trigger_read(f.handler)::Nothing
-    return nothing
-end
-
 @inline function channel_slot_is_attached(slot::ChannelSlot)::Bool
     return (@atomic :acquire slot.state) == _CHANNEL_SLOT_STATE_ATTACHED
 end
@@ -252,7 +149,7 @@ slot_right(slot::ChannelSlot) = slot.adj_right
 # These are dispatched via multiple dispatch on the vtable type
 
 # Process an incoming read message (from socket toward application)
-function handler_process_read_message(handler, slot::ChannelSlot, message::IoMessage)::Nothing
+function handler_process_read_message(handler, slot::ChannelSlot, message)::Nothing
     error("handler_process_read_message must be implemented for $(typeof(handler))")
 end
 
@@ -360,11 +257,11 @@ mutable struct Channel
     # Window/backpressure tracking
     window_update_batch_emit_threshold::Csize_t
     window_update_scheduled::Bool
-    window_update_task::ChannelTask
+    window_update_task::ChannelTask{Channel}
     # Channel task tracking
-    pending_tasks::IdDict{ChannelTask, Bool}
+    pending_tasks::IdDict{ChannelTask{Channel}, Bool}
     pending_tasks_lock::ReentrantLock
-    cross_thread_tasks::Vector{ChannelTask}
+    cross_thread_tasks::Vector{ChannelTask{Channel}}
     cross_thread_tasks_lock::ReentrantLock
     cross_thread_tasks_scheduled::Bool
     cross_thread_task::ScheduledTask
@@ -373,11 +270,14 @@ mutable struct Channel
     shutdown_error_code::Int
     shutdown_pending::Bool
     shutdown_immediately::Bool
-    shutdown_task::ChannelTask
+    shutdown_task::ChannelTask{Channel}
     shutdown_lock::ReentrantLock
 end
 
 ChannelSlot(channel::Channel) = ChannelSlot{Channel}(channel)
+
+ChannelTask(task_fn::EventCallable, type_tag::AbstractString) = ChannelTask{Channel}(task_fn, type_tag)
+ChannelTask() = ChannelTask{Channel}()
 
 @inline function slot_channel(slot::ChannelSlot)::Channel
     channel_slot_is_attached(slot) || error("ChannelSlot is detached")
@@ -397,14 +297,14 @@ function _next_channel_id()::UInt64
     return @atomic _channel_id_counter.value += 1
 end
 
-function _channel_add_pending_task!(channel::Channel, task::ChannelTask)
+function _channel_add_pending_task!(channel::Channel, task::ChannelTask{Channel})
     lock(channel.pending_tasks_lock) do
         channel.pending_tasks[task] = true
     end
     return nothing
 end
 
-function _channel_remove_pending_task!(channel::Channel, task::ChannelTask)
+function _channel_remove_pending_task!(channel::Channel, task::ChannelTask{Channel})
     lock(channel.pending_tasks_lock) do
         delete!(channel.pending_tasks, task)
     end
@@ -419,22 +319,18 @@ end
     return nothing
 end
 
-function _channel_task_wrapper(ctx::ChannelTaskContext, status::TaskStatus.T)
-    task = ctx.task::ChannelTask
-    channel = ctx.channel
-    if channel isa Channel
-        _channel_remove_pending_task!(channel, task)
-        final_status = (status == TaskStatus.CANCELED || channel.channel_state == ChannelState.SHUT_DOWN) ?
-            TaskStatus.CANCELED : status
-        task.task_fn(Int(final_status))
-        return nothing
-    end
-    task.task_fn(Int(status))
+function _channel_task_wrapper(task::ChannelTask{Channel}, status::TaskStatus.T)
+    @assert isdefined(task, :channel)
+    channel = task.channel
+    _channel_remove_pending_task!(channel, task)
+    final_status = (status == TaskStatus.CANCELED || channel.channel_state == ChannelState.SHUT_DOWN) ?
+        TaskStatus.CANCELED : status
+    task.task_fn(Int(final_status))
     return nothing
 end
 
 function _channel_schedule_cross_thread_tasks(channel::Channel, status::TaskStatus.T)
-    tasks = ChannelTask[]
+    tasks = ChannelTask{Channel}[]
     lock(channel.cross_thread_tasks_lock) do
         while !isempty(channel.cross_thread_tasks)
             task = popfirst!(channel.cross_thread_tasks)
@@ -449,7 +345,7 @@ function _channel_schedule_cross_thread_tasks(channel::Channel, status::TaskStat
 
     for task in tasks
         if task.wrapper_task.timestamp == 0 || final_status == TaskStatus.CANCELED
-            _channel_task_wrapper(task.ctx, final_status)
+            _channel_task_wrapper(task, final_status)
         else
             schedule_task_future!(channel.event_loop, task.wrapper_task, task.wrapper_task.timestamp)
         end
@@ -457,7 +353,7 @@ function _channel_schedule_cross_thread_tasks(channel::Channel, status::TaskStat
     return nothing
 end
 
-function _channel_register_task_cross_thread!(channel::Channel, task::ChannelTask)
+function _channel_register_task_cross_thread!(channel::Channel, task::ChannelTask{Channel})
     schedule_now = false
     lock(channel.cross_thread_tasks_lock) do
         if channel.channel_state == ChannelState.SHUT_DOWN
@@ -473,7 +369,7 @@ function _channel_register_task_cross_thread!(channel::Channel, task::ChannelTas
 
     if schedule_now
         if channel.channel_state == ChannelState.SHUT_DOWN
-            _channel_task_wrapper(task.ctx, TaskStatus.CANCELED)
+            _channel_task_wrapper(task, TaskStatus.CANCELED)
         else
             schedule_task_now!(channel.event_loop, channel.cross_thread_task)
         end
@@ -635,10 +531,10 @@ function Channel(
         Any[],
         enable_read_back_pressure ? Csize_t(g_channel_max_fragment_size[] * 2) : Csize_t(0), # window_threshold
         false,       # window_update_scheduled
-        ChannelTask(),
-        IdDict{ChannelTask, Bool}(),
+        ChannelTask{Channel}(),
+        IdDict{ChannelTask{Channel}, Bool}(),
         ReentrantLock(),
-        ChannelTask[],
+        ChannelTask{Channel}[],
         ReentrantLock(),
         false,
         ScheduledTask((_) -> nothing; type_tag = "channel_cross_thread_placeholder"),
@@ -646,7 +542,7 @@ function Channel(
         0,        # shutdown_error_code
         false,    # shutdown_pending
         false,    # shutdown_immediately
-        ChannelTask(),
+        ChannelTask{Channel}(),
         ReentrantLock(),
     )
     channel.cross_thread_task = ScheduledTask(; type_tag = "channel_cross_thread_tasks") do status
@@ -800,7 +696,7 @@ channel_last_slot(channel::Channel) = channel.last
 # Channel task scheduling
 function _channel_register_task!(
         channel::Channel,
-        task::ChannelTask,
+        task::ChannelTask{Channel},
         run_at_nanos::UInt64;
         serialized::Bool = false,
     )
@@ -809,7 +705,7 @@ function _channel_register_task!(
         return nothing
     end
 
-    setfield!(task.ctx, :channel, channel)
+    setfield!(task, :channel, channel)
     task.wrapper_task.timestamp = run_at_nanos
     task.wrapper_task.scheduled = false
     _channel_add_pending_task!(channel, task)
@@ -832,15 +728,15 @@ function _channel_register_task!(
     return nothing
 end
 
-function channel_schedule_task_now!(channel::Channel, task::ChannelTask)
+function channel_schedule_task_now!(channel::Channel, task::ChannelTask{Channel})
     return _channel_register_task!(channel, task, UInt64(0); serialized = false)
 end
 
-function channel_schedule_task_now_serialized!(channel::Channel, task::ChannelTask)
+function channel_schedule_task_now_serialized!(channel::Channel, task::ChannelTask{Channel})
     return _channel_register_task!(channel, task, UInt64(0); serialized = true)
 end
 
-function channel_schedule_task_future!(channel::Channel, task::ChannelTask, run_at_nanos::UInt64)
+function channel_schedule_task_future!(channel::Channel, task::ChannelTask{Channel}, run_at_nanos::UInt64)
     return _channel_register_task!(channel, task, run_at_nanos; serialized = false)
 end
 
@@ -1115,13 +1011,13 @@ function channel_slot_set_handler!(slot::ChannelSlot, handler::H)::Nothing where
     if _channel_slot_has_handler(slot)
         _channel_slot_clear_handler!(slot)
     end
-    slot.handler_read = ChannelHandlerReadCallable(_ChannelHandlerReadDispatch(handler))
-    slot.handler_write = ChannelHandlerWriteCallable(_ChannelHandlerWriteDispatch(handler))
-    slot.handler_increment_window = ChannelHandlerIncrementWindowCallable(_ChannelHandlerIncrementWindowDispatch(handler))
-    slot.handler_shutdown_fn = ChannelHandlerShutdownCallable(_ChannelHandlerShutdownDispatch(handler))
-    slot.handler_message_overhead_fn = ChannelHandlerMessageOverheadCallable(_ChannelHandlerMessageOverheadDispatch(handler))
-    slot.handler_destroy_fn = ChannelHandlerDestroyCallable(_ChannelHandlerDestroyDispatch(handler))
-    slot.handler_trigger_read_fn = ChannelHandlerTriggerReadCallable(_ChannelHandlerTriggerReadDispatch(handler))
+    slot.handler_read = ChannelHandlerReadCallable(handler)
+    slot.handler_write = ChannelHandlerWriteCallable(handler)
+    slot.handler_increment_window = ChannelHandlerIncrementWindowCallable(handler)
+    slot.handler_shutdown_fn = ChannelHandlerShutdownCallable(handler)
+    slot.handler_message_overhead_fn = ChannelHandlerMessageOverheadCallable(handler)
+    slot.handler_destroy_fn = ChannelHandlerDestroyCallable(handler)
+    slot.handler_trigger_read_fn = ChannelHandlerTriggerReadCallable(handler)
     slot.handler_reset_statistics_fn = () -> handler_reset_statistics(handler)
     slot.handler_gather_statistics_fn = () -> handler_gather_statistics(handler)
     setchannelslot!(handler, slot)
@@ -1220,7 +1116,7 @@ function channel_slot_acquire_max_message_for_write(slot::ChannelSlot)
     end
     overhead = channel_slot_upstream_message_overhead(slot)
     if overhead >= g_channel_max_fragment_size[]
-        fatal_assert("Upstream overhead exceeds channel max fragment size", "<unknown>", 0)
+        @assert false "Upstream overhead exceeds channel max fragment size"
     end
     size_hint = g_channel_max_fragment_size[] - overhead
     return channel_acquire_message_from_pool(channel, IoMessageType.APPLICATION_DATA, size_hint)
@@ -1232,17 +1128,14 @@ function channel_slot_increment_read_window!(slot::ChannelSlot, size::Csize_t)::
         return nothing
     end
     channel = slot.channel
-
     if channel.read_back_pressure_enabled && channel.channel_state != ChannelState.SHUT_DOWN
         slot.current_window_update_batch_size = add_size_saturating(slot.current_window_update_batch_size, size)
-
         if !channel.window_update_scheduled && slot.window_size <= channel.window_update_batch_emit_threshold
             channel.window_update_scheduled = true
             channel_task_init!(channel.window_update_task, EventCallable(s -> _channel_window_update_task(channel, _coerce_task_status(s))), "window_update_task")
             channel_schedule_task_now!(channel, channel.window_update_task)
         end
     end
-
     return nothing
 end
 
@@ -1337,28 +1230,26 @@ function channel_setup_complete!(channel::Channel)::Nothing
     return nothing
 end
 
-mutable struct ChannelShutdownWriteArgs
-    slot::ChannelSlot
-    error_code::Int
-    shutdown_immediately::Bool
-end
-
-function _channel_shutdown_write_task(args::ChannelShutdownWriteArgs, status::TaskStatus.T)
-    slot = args.slot
+function _channel_shutdown_write_task(
+        slot::ChannelSlot,
+        error_code::Int,
+        shutdown_immediately::Bool,
+        status::TaskStatus.T,
+    )
     if slot.handler_shutdown_fn === nothing
         return nothing
     end
     (slot.handler_shutdown_fn::ChannelHandlerShutdownCallable)(
         slot,
         ChannelDirection.WRITE,
-        args.error_code,
-        args.shutdown_immediately,
+        error_code,
+        shutdown_immediately,
     )
     return nothing
 end
 
 function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.T)
-    tasks = ChannelTask[]
+    tasks = ChannelTask{Channel}[]
     lock(channel.pending_tasks_lock) do
         for (task, _) in channel.pending_tasks
             push!(tasks, task)
@@ -1503,10 +1394,14 @@ function channel_slot_on_handler_shutdown_complete!(
         end
 
         channel.channel_state = ChannelState.SHUTTING_DOWN_WRITE
-        write_args = ChannelShutdownWriteArgs(slot, error_code, free_scarce_resources_immediately)
         schedule_task_now!(channel.event_loop; type_tag = "channel_shutdown_write") do status
             try
-                _channel_shutdown_write_task(write_args, _coerce_task_status(status))
+                _channel_shutdown_write_task(
+                    slot,
+                    error_code,
+                    free_scarce_resources_immediately,
+                    _coerce_task_status(status),
+                )
             catch e
                 Core.println("channel_shutdown_write task errored")
             end

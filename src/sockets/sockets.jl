@@ -8,8 +8,6 @@ module Sockets
 using EnumX
 using ScopedValues: ScopedValue, @with
 import UUIDs
-using LibAwsCal
-using LibAwsCommon
 
 import ..Reseau:
     ByteBuffer,
@@ -162,10 +160,7 @@ import ..Reseau:
     clock_now_ns,
     close!,
     cursor_getbyte,
-    ensure_capacity!,
     error_name,
-    fatal_assert,
-    fatal_assert_bool,
     high_res_clock,
     high_res_clock_get_ticks,
     io_error_code_is_tls,
@@ -297,34 +292,31 @@ function io_library_clean_up()
 end
 
 # --- IO implementation (moved from `src/io/*`) ---
-include("io/tls_types.jl")
-include("io/posix_socket_types.jl")
-include("io/apple_nw_socket_types.jl")
-include("io/winsock_socket_types.jl")
-include("io/socket.jl")
-include("io/posix_socket_impl.jl")
-include("io/winsock_socket.jl")
-include("io/winsock_init.jl")
-include("io/blocks_abi.jl")
-include("io/apple_nw_socket_impl.jl")
-include("io/channel.jl")
-include("io/statistics.jl")
-include("io/socket_channel_handler.jl")
-include("io/host_resolver.jl")
-include("io/retry_strategy.jl")
-include("io/stream.jl")
-include("io/pem.jl")
-include("io/pkcs11.jl")
-include("io/pki_utils.jl")
-include("io/pipe.jl")
-include("io/iocp_pipe.jl")
-include("io/channel_bootstrap_new.jl")
+include("socket/tls_types.jl")
+include("linux/posix_socket_types.jl")
+include("apple/apple_nw_socket_types.jl")
+include("windows/winsock_socket_types.jl")
+include("socket/socket.jl")
+include("linux/posix_socket_impl.jl")
+include("windows/winsock_socket.jl")
+include("windows/winsock_init.jl")
+include("apple/blocks_abi.jl")
+include("apple/apple_nw_socket_impl.jl")
+include("socket/channel.jl")
+include("socket/statistics.jl")
+include("socket/socket_channel_handler.jl")
+include("socket/host_resolver.jl")
+include("socket/stream.jl")
+include("socket/pem.jl")
+include("socket/pkcs11.jl")
+include("socket/pki_utils.jl")
+include("linux/pipe.jl")
+include("windows/iocp_pipe.jl")
+include("socket/channel_bootstrap.jl")
 
 # Previously included directly from src/Reseau.jl
-include("io/byte_helpers.jl")
-include("io/crypto_primitives.jl")
-include("io/tls_channel_handler.jl")
-include("io/alpn_handler.jl")
+include("socket/tls_channel_handler.jl")
+include("socket/alpn_handler.jl")
 
 # --- Public surface (stdlib-like TCP + LOCAL subset) ---
 include("ipaddr.jl")

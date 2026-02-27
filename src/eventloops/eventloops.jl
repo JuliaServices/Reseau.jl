@@ -38,8 +38,6 @@ using ..Reseau:
     add_u64_saturating,
     capacity,
     clock_now_ns,
-    debug_assert,
-    fatal_assert_bool,
     high_res_clock_get_ticks,
     logf,
     raise_error,
@@ -233,14 +231,14 @@ using ..ForeignThreads: ForeignThread, ThreadJoinStrategy, managed_thread_finish
 include("io.jl")
 include("message_pool.jl")
 
-include("kqueue_event_loop_types.jl")
-include("epoll_event_loop_types.jl")
-include("iocp_event_loop_types.jl")
+include("apple/kqueue_event_loop_types.jl")
+include("linux/epoll_event_loop_types.jl")
+include("windows/iocp_event_loop_types.jl")
 
 include("eventloop.jl")
-include("kqueue_event_loop.jl")
-include("epoll_event_loop.jl")
-include("iocp_event_loop.jl")
+include("apple/kqueue_event_loop.jl")
+include("linux/epoll_event_loop.jl")
+include("windows/iocp_event_loop.jl")
 
 include("future.jl")
 

@@ -1,5 +1,5 @@
 # s2n TLS backend (Linux)
-# Included by src/sockets/io/tls_channel_handler.jl
+# Included by src/sockets/socket/tls_channel_handler.jl
 
 # Backend registration (s2n extension on Linux)
 #
@@ -268,7 +268,7 @@ mutable struct S2nTlsHandler <: TlsChannelHandler
     slot::Union{ChannelSlot{Channel}, Nothing}
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
-    timeout_task::ChannelTask
+    timeout_task::ChannelTask{Channel}
     connection::Ptr{Cvoid}
     ctx::Union{TlsContext, Nothing}
     s2n_ctx::Union{S2nTlsCtx, Nothing}
@@ -280,12 +280,12 @@ mutable struct S2nTlsHandler <: TlsChannelHandler
     on_data_read::Union{TlsDataReadCallback, Nothing}
     advertise_alpn_message::Bool
     state::TlsNegotiationState.T
-    read_task::ChannelTask
+    read_task::ChannelTask{Channel}
     read_task_pending::Bool
     read_state::TlsHandlerReadState.T
     shutdown_error_code::Int
-    delayed_shutdown_task::ChannelTask
-    negotiation_task::ChannelTask
+    delayed_shutdown_task::ChannelTask{Channel}
+    negotiation_task::ChannelTask{Channel}
 end
 
 function setchannelslot!(handler::S2nTlsHandler, slot::ChannelSlot{Channel})::Nothing
@@ -838,17 +838,6 @@ function handler_process_read_message(
         end
     end
 
-    return nothing
-end
-
-function handler_process_read_message(handler::S2nTlsHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    invoke(
-        handler_process_read_message,
-        Tuple{S2nTlsHandler, ChannelSlot, Union{IoMessage, Nothing}},
-        handler,
-        slot,
-        message,
-    )
     return nothing
 end
 

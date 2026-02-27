@@ -1,5 +1,5 @@
 # SecureTransport TLS backend (macOS)
-# Included by src/sockets/io/tls_channel_handler.jl
+# Included by src/sockets/socket/tls_channel_handler.jl
 
 # === SecureTransport backend (macOS) ===
 const CFTypeRef = Ptr{Cvoid}
@@ -104,7 +104,7 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     slot::Union{ChannelSlot{Channel}, Nothing}
     tls_timeout_ms::UInt32
     stats::TlsHandlerStatistics
-    timeout_task::ChannelTask
+    timeout_task::ChannelTask{Channel}
     ctx::SSLContextRef
     ctx_obj::Union{TlsContext, Nothing}
     input_queue::Vector{IoMessage}
@@ -118,11 +118,11 @@ mutable struct SecureTransportTlsHandler <: TlsChannelHandler
     advertise_alpn_message::Bool
     negotiation_finished::Bool
     verify_peer::Bool
-    read_task::ChannelTask
+    read_task::ChannelTask{Channel}
     read_task_pending::Bool
     read_state::TlsHandlerReadState.T
     delay_shutdown_error_code::Int
-    negotiation_task::ChannelTask
+    negotiation_task::ChannelTask{Channel}
 end
 
 function setchannelslot!(handler::SecureTransportTlsHandler, slot::ChannelSlot{Channel})::Nothing
@@ -818,17 +818,6 @@ function handler_process_read_message(
         end
     end
 
-    return nothing
-end
-
-function handler_process_read_message(handler::SecureTransportTlsHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    invoke(
-        handler_process_read_message,
-        Tuple{SecureTransportTlsHandler, ChannelSlot, Union{IoMessage, Nothing}},
-        handler,
-        slot,
-        message,
-    )
     return nothing
 end
 

@@ -1,7 +1,5 @@
 # AWS IO Library - TLS Channel Handler
 
-using LibAwsCal
-using LibAwsCommon
 using Libdl
 
 # TLS callback types — closures capture context for trim-safe dispatch
@@ -13,7 +11,7 @@ const TLS_EST_RECORD_OVERHEAD = 53
 const TLS_EST_HANDSHAKE_SIZE = 7 * 1024
 
 # The TLS backends and PKI utilities currently assume PEM-like text content.
-# Historically, `text_is_utf8()` in `src/common/encoding.jl` only accepted ASCII,
+# Historically, `text_is_utf8()` only accepted ASCII,
 # plus a UTF-8 BOM prefix. Keep that exact behavior here so we can delete the
 # broader encoding helpers.
 function _tls_text_is_ascii_or_utf8_bom(cursor::ByteCursor)::Bool
@@ -476,7 +474,7 @@ mutable struct TlsKeyOperation{F, Handler}
     output::ByteBuffer
     s2n_op::Ptr{Cvoid}
     s2n_handler::Handler
-    completion_task::ChannelTask
+    completion_task::ChannelTask{Channel}
     completion_error_code::Int
     @atomic complete_count::UInt32
 end
@@ -1268,9 +1266,9 @@ function _tls_backend_cleanup()
 end
 
 # Backend implementations
-include("tls/s2n_tls_handler.jl")
-include("tls/secure_transport_tls_handler.jl")
-include("tls/secure_channel_tls_handler.jl")
+include("../linux/s2n_tls_handler.jl")
+include("../apple/secure_transport_tls_handler.jl")
+include("../windows/secure_channel_tls_handler.jl")
 
 # === Generic TLS API ===
 

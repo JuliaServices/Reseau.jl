@@ -966,101 +966,7 @@ function setchannelslot!(handler::_TCPSocketHandler, slot::ChannelSlot)::Nothing
     return nothing
 end
 
-@inline function (::_ChannelSlotReadCallWrapper)(
-        f::_ChannelHandlerReadDispatch{_TCPSocketHandler},
-        slot_ptr::Ptr{Cvoid},
-        message_ptr::Ptr{Cvoid},
-    )::Nothing
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
-    message = _callback_ptr_to_obj(message_ptr)::IoMessage
-    _tcpsocket_handler_process_read_message_impl(f.handler, slot, message)::Nothing
-    return nothing
-end
-
-@inline function (::_ChannelSlotWriteCallWrapper)(
-        f::_ChannelHandlerWriteDispatch{_TCPSocketHandler},
-        slot_ptr::Ptr{Cvoid},
-        message_ptr::Ptr{Cvoid},
-    )::Nothing
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
-    message = _callback_ptr_to_obj(message_ptr)::IoMessage
-    _tcpsocket_handler_process_write_message_impl(f.handler, slot, message)::Nothing
-    return nothing
-end
-
-@inline function (::_ChannelSlotIncrementWindowCallWrapper)(
-        f::_ChannelHandlerIncrementWindowDispatch{_TCPSocketHandler},
-        slot_ptr::Ptr{Cvoid},
-        size::Csize_t,
-    )::Nothing
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
-    _tcpsocket_handler_increment_read_window_impl(f.handler, slot, size)::Nothing
-    return nothing
-end
-
-@inline function (::_ChannelSlotShutdownCallWrapper)(
-        f::_ChannelHandlerShutdownDispatch{_TCPSocketHandler},
-        slot_ptr::Ptr{Cvoid},
-        direction::UInt8,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )::Nothing
-    slot = _callback_ptr_to_obj(slot_ptr)::ChannelSlot{Channel}
-    _tcpsocket_handler_shutdown_impl(
-        f.handler,
-        slot,
-        ChannelDirection.T(direction),
-        error_code,
-        free_scarce_resources_immediately,
-    )::Nothing
-    return nothing
-end
-
-@inline function _channel_handler_read_dispatch(
-        handler::_TCPSocketHandler,
-        slot::ChannelSlot,
-        message::IoMessage,
-    )::Nothing
-    _tcpsocket_handler_process_read_message_impl(handler, slot, message)::Nothing
-    return nothing
-end
-
-@inline function _channel_handler_write_dispatch(
-        handler::_TCPSocketHandler,
-        slot::ChannelSlot,
-        message::IoMessage,
-    )::Nothing
-    _tcpsocket_handler_process_write_message_impl(handler, slot, message)::Nothing
-    return nothing
-end
-
-@inline function _channel_handler_increment_window_dispatch(
-        handler::_TCPSocketHandler,
-        slot::ChannelSlot,
-        size::Csize_t,
-    )::Nothing
-    _tcpsocket_handler_increment_read_window_impl(handler, slot, size)::Nothing
-    return nothing
-end
-
-@inline function _channel_handler_shutdown_dispatch(
-        handler::_TCPSocketHandler,
-        slot::ChannelSlot,
-        direction::ChannelDirection.T,
-        error_code::Int,
-        free_scarce_resources_immediately::Bool,
-    )::Nothing
-    _tcpsocket_handler_shutdown_impl(
-        handler,
-        slot,
-        direction,
-        error_code,
-        free_scarce_resources_immediately,
-    )::Nothing
-    return nothing
-end
-
-function _tcpsocket_handler_process_read_message_impl(
+function handler_process_read_message(
         handler::_TCPSocketHandler,
         slot::ChannelSlot,
         message::IoMessage,
@@ -1082,7 +988,7 @@ function _tcpsocket_handler_process_read_message_impl(
     return nothing
 end
 
-function _tcpsocket_handler_process_write_message_impl(
+function handler_process_write_message(
         handler::_TCPSocketHandler,
         slot::ChannelSlot,
         message::IoMessage,
@@ -1093,7 +999,7 @@ function _tcpsocket_handler_process_write_message_impl(
     throw_error(ERROR_IO_CHANNEL_ERROR_CANT_ACCEPT_INPUT)
 end
 
-function _tcpsocket_handler_increment_read_window_impl(
+function handler_increment_read_window(
         handler::_TCPSocketHandler,
         slot::ChannelSlot,
         size::Csize_t,
@@ -1103,7 +1009,7 @@ function _tcpsocket_handler_increment_read_window_impl(
     return nothing
 end
 
-function _tcpsocket_handler_shutdown_impl(
+function handler_shutdown(
         handler::_TCPSocketHandler,
         slot::ChannelSlot,
         direction::ChannelDirection.T,
@@ -1113,22 +1019,6 @@ function _tcpsocket_handler_shutdown_impl(
     _mark_closed!(handler.io, error_code)
     channel_slot_on_handler_shutdown_complete!(slot, direction, error_code, free_scarce_resources_immediately)
     return nothing
-end
-
-function handler_process_read_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    return _tcpsocket_handler_process_read_message_impl(handler, slot, message)
-end
-
-function handler_process_write_message(handler::_TCPSocketHandler, slot::ChannelSlot, message::IoMessage)::Nothing
-    return _tcpsocket_handler_process_write_message_impl(handler, slot, message)
-end
-
-function handler_increment_read_window(handler::_TCPSocketHandler, slot::ChannelSlot, size::Csize_t)::Nothing
-    return _tcpsocket_handler_increment_read_window_impl(handler, slot, size)
-end
-
-function handler_shutdown(handler::_TCPSocketHandler, slot::ChannelSlot, direction::ChannelDirection.T, error_code::Int, free_scarce_resources_immediately::Bool)::Nothing
-    return _tcpsocket_handler_shutdown_impl(handler, slot, direction, error_code, free_scarce_resources_immediately)
 end
 
 function handler_initial_window_size(handler::_TCPSocketHandler)::Csize_t

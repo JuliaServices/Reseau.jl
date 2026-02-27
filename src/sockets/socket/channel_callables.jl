@@ -32,7 +32,7 @@ function ChannelHandlerReadCallable(callable::F) where {F <: Function}
 end
 
 function ChannelHandlerReadCallable(handler::H) where {H}
-    return ChannelHandlerReadCallable(_ChannelHandlerReadDispatch(handler))
+    return ChannelHandlerReadCallable((slot, message) -> handler_process_read_message(handler, slot, message))
 end
 
 @inline function (f::ChannelHandlerReadCallable)(slot, message)::Nothing
@@ -76,7 +76,7 @@ function ChannelHandlerWriteCallable(callable::F) where {F <: Function}
 end
 
 function ChannelHandlerWriteCallable(handler::H) where {H}
-    return ChannelHandlerWriteCallable(_ChannelHandlerWriteDispatch(handler))
+    return ChannelHandlerWriteCallable((slot, message) -> handler_process_write_message(handler, slot, message))
 end
 
 @inline function (f::ChannelHandlerWriteCallable)(slot, message)::Nothing
@@ -119,7 +119,7 @@ function ChannelHandlerIncrementWindowCallable(callable::F) where {F <: Function
 end
 
 function ChannelHandlerIncrementWindowCallable(handler::H) where {H}
-    return ChannelHandlerIncrementWindowCallable(_ChannelHandlerIncrementWindowDispatch(handler))
+    return ChannelHandlerIncrementWindowCallable((slot, size) -> handler_increment_read_window(handler, slot, size))
 end
 
 @inline function (f::ChannelHandlerIncrementWindowCallable)(slot, size::Csize_t)::Nothing
@@ -168,7 +168,8 @@ function ChannelHandlerShutdownCallable(callable::F) where {F <: Function}
 end
 
 function ChannelHandlerShutdownCallable(handler::H) where {H}
-    return ChannelHandlerShutdownCallable(_ChannelHandlerShutdownDispatch(handler))
+    return ChannelHandlerShutdownCallable((slot, direction, error_code, free_scarce_resources_immediately) ->
+        handler_shutdown(handler, slot, direction, error_code, free_scarce_resources_immediately))
 end
 
 @inline function (f::ChannelHandlerShutdownCallable)(
@@ -218,7 +219,7 @@ function ChannelHandlerMessageOverheadCallable(callable::F) where {F <: Function
 end
 
 function ChannelHandlerMessageOverheadCallable(handler::H) where {H}
-    return ChannelHandlerMessageOverheadCallable(_ChannelHandlerMessageOverheadDispatch(handler))
+    return ChannelHandlerMessageOverheadCallable(() -> handler_message_overhead(handler))
 end
 
 @inline function (f::ChannelHandlerMessageOverheadCallable)()::Csize_t
@@ -251,7 +252,7 @@ function ChannelHandlerDestroyCallable(callable::F) where {F <: Function}
 end
 
 function ChannelHandlerDestroyCallable(handler::H) where {H}
-    return ChannelHandlerDestroyCallable(_ChannelHandlerDestroyDispatch(handler))
+    return ChannelHandlerDestroyCallable(() -> handler_destroy(handler))
 end
 
 @inline function (f::ChannelHandlerDestroyCallable)()::Nothing
@@ -285,7 +286,7 @@ function ChannelHandlerTriggerReadCallable(callable::F) where {F <: Function}
 end
 
 function ChannelHandlerTriggerReadCallable(handler::H) where {H}
-    return ChannelHandlerTriggerReadCallable(_ChannelHandlerTriggerReadDispatch(handler))
+    return ChannelHandlerTriggerReadCallable(() -> handler_trigger_read(handler))
 end
 
 @inline function (f::ChannelHandlerTriggerReadCallable)()::Nothing

@@ -9,7 +9,6 @@ setup_test_keychain!()
 atexit(cleanup_test_keychain!)
 
 if Sys.islinux()
-    using aws_lc_jll
     using s2n_tls_jll
 end
 
@@ -30,7 +29,6 @@ include("future_tests.jl")
 include("stream_tests.jl")
 include("pem_tests.jl")
 include("pki_utils_tests.jl")
-include("crypto_primitives_tests.jl")
 include("statistics_tests.jl")
 include("retry_strategy_tests.jl")
 include("vsock_tests.jl")
