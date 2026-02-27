@@ -1,5 +1,6 @@
 const _PC_FOREIGN_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 const _PC_FOREIGN_THREAD_LOCK = ReentrantLock()
+const _PC_WAIT_TIMEOUT_NS = Int(5_000_000_000) # 5s
 
 ForeignThreads.@wrap_thread_fn function _pc_foreign_thread_entry(started::Base.Threads.Event)
     try
@@ -58,12 +59,17 @@ end
 end
 
 function _pc_wait_retry_future!(f::EventLoops.Future{Int}, what::AbstractString)::Nothing
+    deadline = time_ns() + _PC_WAIT_TIMEOUT_NS
+    while (@atomic f.set) == Int8(0)
+        time_ns() >= deadline && error("timed out waiting for $what")
+        yield()
+    end
     _pc_expect_success(wait(f), what)
     return nothing
 end
 
 function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::Nothing
-    exp_strategy = Sockets.ExponentialBackoffRetryStrategy(
+    exp_strategy = ExponentialBackoffRetryStrategy(
         event_loop_group,
         ;
         backoff_scale_factor_ms = 1,
@@ -78,9 +84,9 @@ function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::N
         on_ready = function (token, code)
             notify(exp_ready, code)
             if code == OP_SUCCESS
-                Sockets.retry_token_record_success(token)
+                retry_token_record_success(token)
             end
-            Sockets.retry_token_release!(token)
+            retry_token_release!(token)
             return nothing
         end
 
@@ -91,11 +97,11 @@ function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::N
                 return nothing
             end
             try
-                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.TRANSIENT, on_ready)
+                retry_token_schedule_retry(token, RetryErrorType.TRANSIENT, on_ready)
             catch e
                 if e isa ReseauError
                     notify(exp_ready, e.code)
-                    Sockets.retry_token_release!(token)
+                    retry_token_release!(token)
                     return nothing
                 end
                 rethrow()
@@ -103,14 +109,14 @@ function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::N
             return nothing
         end
 
-        Sockets.retry_strategy_acquire_token!(exp_strategy, on_acquired)
+        retry_strategy_acquire_token!(exp_strategy, on_acquired)
         _pc_wait_retry_future!(exp_acquired, "exponential retry token acquire")
         _pc_wait_retry_future!(exp_ready, "exponential retry ready")
     finally
-        Sockets.retry_strategy_shutdown!(exp_strategy)
+        retry_strategy_shutdown!(exp_strategy)
     end
 
-    std_strategy = Sockets.StandardRetryStrategy(
+    std_strategy = StandardRetryStrategy(
         event_loop_group,
         ;
         initial_bucket_capacity = 10,
@@ -126,9 +132,9 @@ function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::N
         on_ready = function (token, code)
             notify(std_ready, code)
             if code == OP_SUCCESS
-                Sockets.retry_token_record_success(token)
+                retry_token_record_success(token)
             end
-            Sockets.retry_token_release!(token)
+            retry_token_release!(token)
             return nothing
         end
 
@@ -139,11 +145,11 @@ function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::N
                 return nothing
             end
             try
-                Sockets.retry_token_schedule_retry(token, Sockets.RetryErrorType.SERVER_ERROR, on_ready)
+                retry_token_schedule_retry(token, RetryErrorType.SERVER_ERROR, on_ready)
             catch e
                 if e isa ReseauError
                     notify(std_ready, e.code)
-                    Sockets.retry_token_release!(token)
+                    retry_token_release!(token)
                     return nothing
                 end
                 rethrow()
@@ -151,11 +157,11 @@ function _pc_run_retry_workload!(event_loop_group::EventLoops.EventLoopGroup)::N
             return nothing
         end
 
-        Sockets.retry_strategy_acquire_token!(std_strategy, "precompile", on_acquired, 0)
+        retry_strategy_acquire_token!(std_strategy, "precompile", on_acquired, 0)
         _pc_wait_retry_future!(std_acquired, "standard retry token acquire")
         _pc_wait_retry_future!(std_ready, "standard retry ready")
     finally
-        Sockets.retry_strategy_shutdown!(std_strategy)
+        retry_strategy_shutdown!(std_strategy)
     end
 
     return nothing
@@ -186,43 +192,10 @@ function _pc_run_echo_workload!()::Nothing
     ForeignThreads.join_all_managed()
 
     event_loop_group = EventLoops.EventLoopGroup(; loop_count = 1)
-    host_resolver = Sockets.HostResolver()
-
-    server::Union{Sockets.TCPServer,Nothing} = nothing
-    client::Union{Sockets.TCPSocket,Nothing} = nothing
-    peer::Union{Sockets.TCPSocket,Nothing} = nothing
 
     try
-        port_u16, server = Sockets.listenany(0; event_loop_group = event_loop_group)
-        client = Sockets.connect(Int(port_u16); event_loop_group = event_loop_group, host_resolver = host_resolver)
-        peer = Sockets.accept(server)
-
-        write(client, "hello")
-        flush(client)
-
-        request = String(read(peer, 5))
-        request == "hello" || error("server expected hello, got $(repr(request))")
-
-        write(peer, "hello")
-        flush(peer)
-        close(peer)
-        peer = nothing
-
-        response = String(read(client, 5))
-        response == "hello" || error("client expected hello, got $(repr(response))")
-
         _pc_run_retry_workload!(event_loop_group)
-
-        close(client)
-        client = nothing
-
-        close(server)
-        server = nothing
     finally
-        peer === nothing || close(peer)
-        client === nothing || close(client)
-        server === nothing || close(server)
-        close(host_resolver)
         _pc_yield!()
         close(event_loop_group)
         _pc_yield!()

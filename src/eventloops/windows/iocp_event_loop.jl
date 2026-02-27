@@ -3,8 +3,6 @@
 # Type definitions are in iocp_event_loop_types.jl
 
 @static if Sys.iswindows()
-    using LibAwsCal
-
     @wrap_thread_fn function _iocp_event_loop_thread_entry(event_loop::EventLoop)
         impl = event_loop.impl
         try
@@ -15,7 +13,6 @@
             @atomic impl.startup_error = e isa ReseauError ? e.code : ERROR_SYS_CALL_FAILURE
         finally
             @atomic impl.running_thread_id = UInt64(0)
-            LibAwsCal.aws_cal_thread_clean_up()
             # Always release startup waiters to avoid startup deadlock on early failure.
             notify(impl.startup_event)
             notify(impl.completion_event)
@@ -675,7 +672,7 @@
     end
 
     function cancel_task!(event_loop::EventLoop, impl::IocpEventLoop, task::ScheduledTask)
-        debug_assert(event_loop_thread_is_callers_thread(event_loop))
+        @assert event_loop_thread_is_callers_thread(event_loop)
         impl = event_loop.impl
         if !task.scheduled
             return nothing

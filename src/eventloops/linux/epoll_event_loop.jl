@@ -3,8 +3,6 @@
 # Type definitions are in epoll_event_loop_types.jl
 
 @static if Sys.islinux()
-    using LibAwsCal
-
     const _LIBC_EWOULDBLOCK = isdefined(Base.Libc, :EWOULDBLOCK) ? Base.Libc.EWOULDBLOCK : Base.Libc.EAGAIN
     @inline function event_loop_thread_exit_s2n_cleanup!(::Any)::Nothing
         return nothing
@@ -451,7 +449,7 @@
 
     # Cancel task
     function cancel_task!(event_loop::EventLoop, impl::EpollEventLoop, task::ScheduledTask)
-        debug_assert(event_loop_thread_is_callers_thread(event_loop))
+        @assert event_loop_thread_is_callers_thread(event_loop)
         impl = event_loop.impl
         logf(
             LogLevel.TRACE,
@@ -1033,8 +1031,6 @@
             impl.stop_task = nothing
             @atomic impl.stop_task_scheduled = false
             @atomic event_loop.should_stop = false
-
-            LibAwsCal.aws_cal_thread_clean_up()
         end
         return nothing
     end

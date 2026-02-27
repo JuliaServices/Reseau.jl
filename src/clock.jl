@@ -1,6 +1,4 @@
-const TIMESTAMP_SECS = 1
 const TIMESTAMP_MILLIS = 1000
-const TIMESTAMP_MICROS = 1000000
 const TIMESTAMP_NANOS = 1000000000
 
 @inline function _set_remainder!(remainder::Ptr{T}, value::Integer) where {T}
@@ -38,7 +36,7 @@ function timestamp_convert_u64(
         new_frequency::UInt64,
         remainder,
     )
-    fatal_assert_bool(old_frequency > 0 && new_frequency > 0, "old_frequency > 0 && new_frequency > 0", "<unknown>", 0)
+    @assert old_frequency > 0 && new_frequency > 0 "old_frequency > 0 && new_frequency > 0"
 
     if _remainder_provided(remainder)
         _set_remainder!(remainder, 0)
@@ -363,6 +361,4 @@ function with_clock(f, clock::ClockSource)
     return @with CLOCK => clock f()
 end
 
-get_clock() = CLOCK[]
-
-clock_now_ns() = clock_now_ns(get_clock())
+clock_now_ns() = clock_now_ns(CLOCK[])

@@ -1,6 +1,15 @@
 # AWS IO Library - Retry Strategies
 # Port of aws-c-io/source/retry_strategy.c and exponential_backoff_retry_strategy.c
 
+import .EventLoops:
+    EventLoop,
+    EventLoopGroup,
+    LS_IO_EXPONENTIAL_BACKOFF_RETRY_STRATEGY,
+    LS_IO_STANDARD_RETRY_STRATEGY,
+    get_next_event_loop,
+    schedule_task_future!,
+    schedule_task_now!
+
 # Retry error types
 @enumx RetryErrorType::UInt8 begin
     TRANSIENT = 0       # Retryable transient error

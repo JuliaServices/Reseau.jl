@@ -3,8 +3,6 @@
 # Type definitions are in kqueue_event_loop_types.jl
 
 @static if Sys.isapple() || Sys.isbsd()
-    using LibAwsCal
-
     # Thread entry point for the kqueue event loop.
     @wrap_thread_fn function _kqueue_event_loop_thread_entry(event_loop::EventLoop)
         try
@@ -375,7 +373,7 @@
 
     # Cancel task
     function cancel_task!(event_loop::EventLoop, impl::KqueueEventLoop, task::ScheduledTask)
-        debug_assert(event_loop_thread_is_callers_thread(event_loop))
+        @assert event_loop_thread_is_callers_thread(event_loop)
         logf(LogLevel.TRACE, LS_IO_EVENT_LOOP,string("cancelling task %s", " ", task.type_tag))
         if !task.scheduled
             return nothing
@@ -935,7 +933,6 @@
 
         logf(LogLevel.INFO, LS_IO_EVENT_LOOP, "exiting main loop")
         @atomic impl.running_thread_id = UInt64(0)
-        LibAwsCal.aws_cal_thread_clean_up()
         return nothing
     end
 

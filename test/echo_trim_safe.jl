@@ -55,7 +55,7 @@ function run_retry_samples()::Nothing
 
     event_loop_group = EL.get_event_loop_group()
 
-    exp_strategy = RS.ExponentialBackoffRetryStrategy(
+    exp_strategy = Reseau.ExponentialBackoffRetryStrategy(
         event_loop_group,
         ;
         backoff_scale_factor_ms = 1,
@@ -69,9 +69,9 @@ function run_retry_samples()::Nothing
         on_ready = function (token, code)
             notify(exp_ready, code)
             if code == Reseau.OP_SUCCESS
-                RS.retry_token_record_success(token)
+                Reseau.retry_token_record_success(token)
             end
-            RS.retry_token_release!(token)
+            Reseau.retry_token_release!(token)
             return nothing
         end
 
@@ -81,18 +81,18 @@ function run_retry_samples()::Nothing
                 notify(exp_ready, code)
                 return nothing
             end
-            RS.retry_token_schedule_retry(token, RS.RetryErrorType.TRANSIENT, on_ready)
+            Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.TRANSIENT, on_ready)
             return nothing
         end
 
-        RS.retry_strategy_acquire_token!(exp_strategy, on_acquired)
+        Reseau.retry_strategy_acquire_token!(exp_strategy, on_acquired)
         _wait_retry_future!(exp_acquired, "trim exponential retry token acquire")
         _wait_retry_future!(exp_ready, "trim exponential retry ready")
     finally
-        RS.retry_strategy_shutdown!(exp_strategy)
+        Reseau.retry_strategy_shutdown!(exp_strategy)
     end
 
-    std_strategy = RS.StandardRetryStrategy(
+    std_strategy = Reseau.StandardRetryStrategy(
         event_loop_group,
         ;
         initial_bucket_capacity = 10,
@@ -107,9 +107,9 @@ function run_retry_samples()::Nothing
         on_ready = function (token, code)
             notify(std_ready, code)
             if code == Reseau.OP_SUCCESS
-                RS.retry_token_record_success(token)
+                Reseau.retry_token_record_success(token)
             end
-            RS.retry_token_release!(token)
+            Reseau.retry_token_release!(token)
             return nothing
         end
 
@@ -119,15 +119,15 @@ function run_retry_samples()::Nothing
                 notify(std_ready, code)
                 return nothing
             end
-            RS.retry_token_schedule_retry(token, RS.RetryErrorType.SERVER_ERROR, on_ready)
+            Reseau.retry_token_schedule_retry(token, Reseau.RetryErrorType.SERVER_ERROR, on_ready)
             return nothing
         end
 
-        RS.retry_strategy_acquire_token!(std_strategy, "trim", on_acquired, 0)
+        Reseau.retry_strategy_acquire_token!(std_strategy, "trim", on_acquired, 0)
         _wait_retry_future!(std_acquired, "trim standard retry token acquire")
         _wait_retry_future!(std_ready, "trim standard retry ready")
     finally
-        RS.retry_strategy_shutdown!(std_strategy)
+        Reseau.retry_strategy_shutdown!(std_strategy)
     end
 
     return nothing
@@ -135,7 +135,6 @@ end
 
 function @main(args::Vector{String})::Cint
     _ = args
-    run_echo()
     run_retry_samples()
     return 0
 end

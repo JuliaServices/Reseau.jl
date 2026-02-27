@@ -26,7 +26,7 @@ end
 
 @testset "Trim compile" begin
     project_path = normpath(joinpath(@__DIR__, ".."))
-    script_path = joinpath(project_path, "trim", "echo_trim_safe.jl")
+    script_path = joinpath(@__DIR__, "echo_trim_safe.jl")
     @test isfile(script_path)
 
     with_tempdir() do tmpdir

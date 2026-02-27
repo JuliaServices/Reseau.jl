@@ -438,7 +438,7 @@ end
 function byte_buf_secure_zero(buf::Base.RefValue{ByteBuffer})
     b = buf[]
     if length(b.mem) > 0
-        secure_zero(b.mem)
+        fill!(b.mem, 0x00)
     end
     buf[] = ByteBuffer(b.mem, Csize_t(0))
     return nothing
@@ -706,7 +706,7 @@ end
 ==========================================================================#
 
 function byte_cursor_read(cur::Base.RefValue{ByteCursor}, dest::Memory{UInt8}, dest_offset::Int, len::Integer)
-    precondition(byte_cursor_is_valid(cur))
+    @assert byte_cursor_is_valid(cur)
     if len == 0
         return true
     end
@@ -1104,7 +1104,7 @@ function _byte_buf_append_dynamic(to::Base.RefValue{ByteBuffer}, from::ByteCurso
             unsafe_copyto!(new_mem, Int(t.len) + 1, src_mem, src_start, Int(from.len))
         end
         if clear_released_memory && length(t.mem) > 0
-            secure_zero(t.mem)
+            fill!(t.mem, 0x00)
         end
         to[] = ByteBuffer(new_mem, t.len + from.len)
     else
