@@ -6,6 +6,7 @@
 
 @static if Sys.isapple()
     const _NW_PRECOMPILE_PARK_SWEEP = 4
+    const _DISPATCH_DATA_DESTRUCTOR_DEFAULT = Ptr{Cvoid}(C_NULL)
 
     # Network.framework exports some "constants" (e.g. NW_PARAMETERS_DISABLE_PROTOCOL) as
     # globals whose value is already a pointer type. We must load the pointer value from
@@ -453,6 +454,7 @@
     end
 
     function _nw_create_dispatch_data(cursor::ByteCursor)::dispatch_data_t
+        # Keep parity with aws-c-io: DISPATCH_DATA_DESTRUCTOR_DEFAULT maps to NULL.
         return ccall(
             (:dispatch_data_create, _NW_DISPATCH_LIB),
             dispatch_data_t,
@@ -460,7 +462,7 @@
             cursor.ptr,
             cursor.len,
             C_NULL,
-            C_NULL,
+            _DISPATCH_DATA_DESTRUCTOR_DEFAULT,
         )
     end
 
@@ -1653,7 +1655,7 @@
             return nothing
         end
 
-        ccall((:nw_retain, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
+        _ = ccall((:nw_retain, _NW_NETWORK_LIB), Ptr{Cvoid}, (Ptr{Cvoid},), connection)
         schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_accept") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
