@@ -1363,6 +1363,174 @@ end
         end
     end
 
+    @testset "Kqueue serialized scheduling stress ordering parity" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.isapple() || interactive_threads <= 1 || Base.Threads.nthreads() <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
+            @test run_res === nothing
+
+            try
+                total_ids = 10_000
+                block_size = 200
+                deadline = Base.time_ns() + 30_000_000_000
+
+                sync_lock = ReentrantLock()
+                next_id = Ref(1)
+                last_processed_id = Ref(0)
+                total_processed = Ref(0)
+                external_scheduled = Ref(0)
+                event_loop_scheduled = Ref(0)
+                external_finished = Ref(false)
+                event_loop_finished = Ref(false)
+                ordering_failed = Ref(false)
+                external_error = Ref{Any}(nothing)
+                event_loop_thread_ok = Ref(true)
+                done_ch = Channel{Nothing}(1)
+
+                function claim_next_id(source::Symbol)
+                    return Base.lock(sync_lock) do
+                        next_id[] > total_ids && return 0
+                        id = next_id[]
+                        next_id[] += 1
+                        if source == :external
+                            external_scheduled[] += 1
+                        else
+                            event_loop_scheduled[] += 1
+                        end
+                        return id
+                    end
+                end
+
+                function schedule_payload(id::Int)
+                    task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            Base.lock(sync_lock) do
+                                ordering_failed[] = true
+                            end
+                            return nothing
+                        end
+                        signal_done = false
+                        Base.lock(sync_lock) do
+                            if id != last_processed_id[] + 1
+                                ordering_failed[] = true
+                            end
+                            last_processed_id[] = id
+                            total_processed[] += 1
+                            if total_processed[] == total_ids && !isready(done_ch)
+                                signal_done = true
+                            end
+                        end
+                        signal_done && put!(done_ch, nothing)
+                        return nothing
+                    end); type_tag = "kqueue_serialized_payload")
+                    EventLoops.schedule_task_now_serialized!(el, task)
+                    return nothing
+                end
+
+                function schedule_event_loop_control()
+                    control_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                        if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                            Base.lock(sync_lock) do
+                                ordering_failed[] = true
+                                event_loop_finished[] = true
+                            end
+                            return nothing
+                        end
+                        if !EventLoops.event_loop_thread_is_callers_thread(el)
+                            Base.lock(sync_lock) do
+                                event_loop_thread_ok[] = false
+                            end
+                        end
+
+                        ids_left = true
+                        for _ in 1:block_size
+                            id = claim_next_id(:event_loop)
+                            if id == 0
+                                ids_left = false
+                                break
+                            end
+                            schedule_payload(id)
+                            yield()
+                        end
+
+                        if ids_left
+                            schedule_event_loop_control()
+                        else
+                            Base.lock(sync_lock) do
+                                event_loop_finished[] = true
+                            end
+                        end
+                        return nothing
+                    end); type_tag = "kqueue_serialized_control")
+                    EventLoops.schedule_task_now_serialized!(el, control_task)
+                    return nothing
+                end
+
+                external_thread = errormonitor(Threads.@spawn begin
+                    try
+                        while true
+                            id = claim_next_id(:external)
+                            id == 0 && break
+                            schedule_payload(id)
+                            yield()
+                        end
+                    catch e
+                        Base.lock(sync_lock) do
+                            external_error[] = e
+                        end
+                    finally
+                        Base.lock(sync_lock) do
+                            external_finished[] = true
+                        end
+                    end
+                end)
+
+                schedule_event_loop_control()
+
+                while !isready(done_ch) && Base.time_ns() < deadline
+                    yield()
+                end
+
+                @test isready(done_ch)
+                isready(done_ch) && take!(done_ch)
+
+                producers_done = false
+                while !producers_done && Base.time_ns() < deadline
+                    producers_done = Base.lock(sync_lock) do
+                        return external_finished[] && event_loop_finished[]
+                    end
+                    producers_done || yield()
+                end
+
+                @test producers_done
+                @test external_error[] === nothing
+                wait(external_thread)
+
+                @test Base.lock(sync_lock) do
+                    return total_processed[] == total_ids
+                end
+                @test Base.lock(sync_lock) do
+                    return last_processed_id[] == total_ids
+                end
+                @test Base.lock(sync_lock) do
+                    return !ordering_failed[]
+                end
+                @test Base.lock(sync_lock) do
+                    return external_scheduled[] > 0
+                end
+                @test Base.lock(sync_lock) do
+                    return event_loop_scheduled[] > 0
+                end
+                @test event_loop_thread_ok[]
+            finally
+                close(el)
+            end
+        end
+    end
+
     @testset "Event loop cancel task" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
@@ -2153,6 +2321,43 @@ end
         end
     end
 
+    @testset "Kqueue subscribe rejects empty event mask" begin
+        if !Sys.isapple()
+            @test true
+        else
+            el = EventLoops.EventLoop()
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+
+                err = nothing
+                try
+                    EventLoops.subscribe_to_io_events!(
+                        el,
+                        read_end.io_handle,
+                        0,
+                        EventLoops.EventCallable((events::Int) -> nothing),
+                    )
+                catch e
+                    err = e
+                end
+
+                @test err isa Reseau.ReseauError
+                if err isa Reseau.ReseauError
+                    @test err.code == EventLoops.ERROR_INVALID_ARGUMENT
+                end
+                @test read_end.io_handle.additional_data == C_NULL
+                @test read_end.io_handle.additional_ref === nothing
+            finally
+                close(el)
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
     @testset "Kqueue cleanup task doesn't underflow connected handle count" begin
         if !Sys.isapple()
             @test true
@@ -2187,6 +2392,108 @@ end
                 @test impl.subscribe_eventlist isa Vector{EventLoops.Kevent}
                 @test impl.unsubscribe_changelist isa Vector{EventLoops.Kevent}
             finally
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
+    @testset "Kqueue canceled unsubscribe still runs cleanup" begin
+        if !Sys.isapple()
+            @test true
+        else
+            el = EventLoops.EventLoop()
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+
+                impl = el.impl
+                handle_data = EventLoops.KqueueHandleData(
+                    read_end.io_handle,
+                    impl,
+                    EventLoops.EventCallable(err -> nothing),
+                    Int(EventLoops.IoEventType.READABLE),
+                )
+
+                key = pointer_from_objref(handle_data)
+                handle_data.registry_key = key
+                impl.handle_registry[key] = handle_data
+                handle_data.connected = true
+                impl.thread_data.connected_handle_count = 1
+
+                EventLoops.kqueue_unsubscribe_task_callback(handle_data, Reseau.TaskStatus.CANCELED)
+
+                @test !handle_data.connected
+                @test impl.thread_data.connected_handle_count == 0
+                @test handle_data.registry_key == C_NULL
+                @test !haskey(impl.handle_registry, key)
+            finally
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
+    @testset "Kqueue close cleans up active subscriptions" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.isapple() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
+            @test run_res === nothing
+
+            read_end = nothing
+            write_end = nothing
+            loop_closed = false
+            try
+                read_end, write_end = Sockets.pipe_create()
+                handle = read_end.io_handle
+
+                sub_res = EventLoops.subscribe_to_io_events!(
+                    el,
+                    handle,
+                    Int(EventLoops.IoEventType.READABLE),
+                    EventLoops.EventCallable((events::Int) -> nothing),
+                )
+                @test sub_res === nothing
+
+                handle_data = nothing
+                subscribed = false
+                wait_deadline = Base.time_ns() + 2_000_000_000
+                while Base.time_ns() < wait_deadline
+                    if handle.additional_data != C_NULL
+                        handle_data = unsafe_pointer_to_objref(handle.additional_data)::EventLoops.KqueueHandleData{EventLoops.KqueueEventLoop}
+                        if handle_data.state == EventLoops.HandleState.SUBSCRIBED && handle_data.connected
+                            subscribed = true
+                            break
+                        end
+                    end
+                    yield()
+                end
+
+                @test subscribed
+                if subscribed
+                    impl = el.impl
+                    registry_key = handle_data.registry_key
+                    @test haskey(impl.handle_registry, registry_key)
+                    @test impl.thread_data.connected_handle_count == 1
+
+                    close(el)
+                    loop_closed = true
+
+                    @test handle.additional_data == C_NULL
+                    @test handle.additional_ref === nothing
+                    @test handle_data.state == EventLoops.HandleState.UNSUBSCRIBED
+                    @test !handle_data.connected
+                    @test handle_data.registry_key == C_NULL
+                    @test impl.thread_data.connected_handle_count == 0
+                    @test isempty(impl.handle_registry)
+                end
+            finally
+                !loop_closed && close(el)
                 read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
                 write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
             end

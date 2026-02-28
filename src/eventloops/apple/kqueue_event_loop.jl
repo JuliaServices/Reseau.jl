@@ -528,6 +528,8 @@
         if handle.additional_data != C_NULL
             throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
         end
+        valid_io_events = Int(IoEventType.READABLE) | Int(IoEventType.WRITABLE)
+        (events & valid_io_events) == 0 && throw_error(ERROR_INVALID_ARGUMENT)
 
         impl = event_loop.impl::KqueueEventLoop
         handle_data = KqueueHandleData(handle, impl, on_event, events)
@@ -569,12 +571,8 @@
     end
 
     function kqueue_unsubscribe_task_callback(handle_data::KqueueHandleData{KqueueEventLoop}, status::TaskStatus.T)
-        if status == TaskStatus.CANCELED
-            return nothing
-        end
-
         impl = handle_data.event_loop
-        if handle_data.connected
+        if status != TaskStatus.CANCELED && handle_data.connected
             changelist = impl.unsubscribe_changelist
             empty!(changelist)
 
@@ -967,6 +965,23 @@
                 task_run!(task, TaskStatus.CANCELED)
             end
         end
+
+        # Release any remaining subscription payload roots and normalize
+        # close-time invariants for handles that were still subscribed.
+        remaining_handle_data = KqueueHandleData{KqueueEventLoop}[]
+        append!(remaining_handle_data, values(impl.handle_registry))
+        empty!(impl.handle_registry)
+        for handle_data in remaining_handle_data
+            handle_data.owner.additional_data = C_NULL
+            handle_data.owner.additional_ref = nothing
+            handle_data.state = HandleState.UNSUBSCRIBED
+            handle_data.connected = false
+            handle_data.events_this_loop = 0
+            handle_data.registry_key = C_NULL
+            handle_data.subscribe_task = nothing
+            handle_data.cleanup_task = nothing
+        end
+        impl.thread_data.connected_handle_count = 0
 
         # Remove signal kevent
         del_kevent = Kevent(
