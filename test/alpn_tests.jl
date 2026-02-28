@@ -210,6 +210,21 @@ end
     @test protocol.len == 0
 end
 
+@testset "secure transport minimum protocol mapping and status guard" begin
+    if !Sys.isapple()
+        @test true
+        return
+    end
+    @test Sockets._secure_transport_min_protocol(Sockets.TlsVersion.SSLv3) == Cint(2)
+    @test Sockets._secure_transport_min_protocol(Sockets.TlsVersion.TLSv1) == Cint(4)
+    @test Sockets._secure_transport_min_protocol(Sockets.TlsVersion.TLSv1_1) == Cint(7)
+    @test Sockets._secure_transport_min_protocol(Sockets.TlsVersion.TLSv1_2) == Cint(8)
+    @test Sockets._secure_transport_min_protocol(Sockets.TlsVersion.TLS_VER_SYS_DEFAULTS) == Cint(0)
+
+    @test Sockets._secure_transport_require_ctx_success("test", Int32(0)) === nothing
+    @test_throws Reseau.ReseauError Sockets._secure_transport_require_ctx_success("test", Int32(-1))
+end
+
 @testset "secure transport would-block does not finish negotiation" begin
     if !Sys.isapple()
         @test true

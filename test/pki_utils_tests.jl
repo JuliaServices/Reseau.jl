@@ -78,6 +78,18 @@ end
             Sockets._cf_release(res)
         end
 
+        bad_pwd = Reseau.ByteCursor("wrong-password")
+        @test_throws Reseau.ReseauError Sockets.import_pkcs12_to_identity(pkcs12, bad_pwd)
+
+        mktempdir() do tmp
+            bad_keychain_path = joinpath(tmp, "missing.keychain-db")
+            @test_throws Reseau.ReseauError Sockets.import_public_and_private_keys_to_identity(
+                cert,
+                key;
+                keychain_path = bad_keychain_path,
+            )
+        end
+
         ca = _pki_load_cursor("server_chain.crt")
         pem_objs = Sockets.pem_parse(read(_pki_resource_path("server_chain.crt")))
         res = Sockets.import_trusted_certificates(ca)
@@ -96,6 +108,13 @@ end
             if res isa Ptr{Cvoid}
                 Sockets._cf_release(res)
             end
+
+            @test_throws Reseau.ReseauError Sockets.secitem_import_pkcs12(
+                pkcs12,
+                bad_pwd;
+                cert_label = "reseau-cert-bad",
+                key_label = "reseau-key-bad",
+            )
         else
             @info "Skipping SecItem PKI tests (SecItem disabled)."
         end

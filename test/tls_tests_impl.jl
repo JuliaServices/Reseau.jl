@@ -466,6 +466,9 @@ end
         result = Sockets._nw_determine_socket_error(Int(osstatus))
         @test result == expected_error
     end
+
+    # Unknown OSStatus must fall back to generic not-connected behavior.
+    @test Sockets._nw_determine_socket_error(123456789) == EventLoops.ERROR_IO_SOCKET_NOT_CONNECTED
 end
 
 @testset "TLS ctx options mtls" begin
