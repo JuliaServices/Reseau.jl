@@ -1173,7 +1173,12 @@ function _on_connection_success(sock::Socket)
     logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: connection success")
 
     # Update local endpoint
-    _update_local_endpoint!(sock)
+    try
+        _update_local_endpoint!(sock)
+    catch
+        _on_connection_error(sock, last_error())
+        return nothing
+    end
 
     sock.state = socket_state_mask(SocketState.CONNECTED_READ, SocketState.CONNECTED_WRITE)
 
@@ -1387,7 +1392,10 @@ function _update_local_endpoint!(sock::Socket)
     )
 
     if result != 0
-        return
+        errno_val = get_errno()
+        socket_error = determine_socket_error(errno_val)
+        logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: getsockname failed with errno=$errno_val")
+        throw_error(socket_error)
     end
 
     # Parse family (macOS sockaddr has length in first byte)
@@ -1428,10 +1436,12 @@ function _update_local_endpoint!(sock::Socket)
             vm_addr = GC.@preserve address unsafe_load(Ptr{SockAddrVM}(pointer(address)))
             set_address!(sock.local_endpoint, string(vm_addr.svm_cid))
             sock.local_endpoint.port = UInt32(vm_addr.svm_port)
+            return nothing
         end
     end
 
-    return nothing
+    logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: unsupported address family $family from getsockname")
+    throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
 end
 
 # POSIX impl - bind
@@ -1536,7 +1546,12 @@ function socket_bind_impl(
         throw_error(socket_error)
     end
 
-    _update_local_endpoint!(sock)
+    try
+        _update_local_endpoint!(sock)
+    catch
+        sock.state = SocketState.ERROR
+        rethrow()
+    end
 
     if sock.options.type == SocketType.STREAM
         sock.state = SocketState.BOUND

@@ -931,6 +931,35 @@ end
     end
 end
 
+@testset "posix update local endpoint surfaces getsockname failure" begin
+    if Sys.iswindows()
+        @test true
+        return
+    end
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    sock = Sockets.socket_init(opts)
+    @test sock isa Sockets.Socket
+    if !(sock isa Sockets.Socket)
+        return
+    end
+
+    fd = sock.io_handle.fd
+    @test ccall(:close, Cint, (Cint,), fd) == 0
+    try
+        try
+            Sockets._update_local_endpoint!(sock)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_NOT_CONNECTED
+        end
+    finally
+        sock.io_handle.fd = -1
+        Sockets.socket_cleanup!(sock)
+    end
+end
+
 @testset "socket connect read write" begin
     el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing

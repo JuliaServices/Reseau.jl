@@ -47,7 +47,7 @@
 - Verification evidence:
   - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_tests.jl")'` passed.
 
-### [ ] ITEM-003 (P1) Propagate local-endpoint update failures consistently
+### [x] ITEM-003 (P1) Propagate local-endpoint update failures consistently
 - Description: `_update_local_endpoint!` currently returns silently on `getsockname()` failure; reference C path treats this as a surfaced error in key flows.
 - Desired outcome: Local-endpoint update failure is observable where endpoint updates are semantically required.
 - Affected files: `src/sockets/linux/posix_socket_impl.jl`, `test/socket_tests.jl`
@@ -64,6 +64,8 @@
 - Completion criteria:
   - Endpoint-update failure path is explicit and tested.
   - `test/socket_tests.jl` passes.
+- Verification evidence:
+  - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_tests.jl")'` passed.
 
 ### [ ] ITEM-004 (P1) Add socket-handler EOF and close-propagation regressions
 - Description: Reseau lacks direct equivalents of aws-c-io socket-handler EOF-after-peer-hangup and close-propagation tests.
