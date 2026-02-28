@@ -216,6 +216,16 @@ function _cf_string_to_bytebuffer(str::CFStringRef)::ByteBuffer
     return buf
 end
 
+function _cf_error_description(error::CFTypeRef)::String
+    error == C_NULL && return "no CFError provided"
+    desc = ccall((:CFErrorCopyDescription, _COREFOUNDATION_LIB), CFStringRef, (CFTypeRef,), error)
+    desc == C_NULL && return "unable to retrieve CFError description"
+    buf = _cf_string_to_bytebuffer(desc)
+    _cf_release(desc)
+    buf.len == 0 && return "unable to decode CFError description"
+    return String(byte_cursor_from_buf(buf))
+end
+
 function _secure_transport_init()
     @static if !Sys.isapple()
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -492,18 +502,26 @@ function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)
                 end
             end
 
-            trust_eval = Ref{Cint}(0)
-            status = ccall((:SecTrustEvaluate, _SECURITY_LIB), OSStatus, (SecTrustRef, Ref{Cint}), trust_ref[], trust_eval)
+            trust_error = Ref{CFTypeRef}(C_NULL)
+            trusted = ccall(
+                (:SecTrustEvaluateWithError, _SECURITY_LIB),
+                UInt8,
+                (SecTrustRef, Ref{CFTypeRef}),
+                trust_ref[],
+                trust_error,
+            )
             _cf_release(trust_ref[])
 
-            if status == _errSecSuccess &&
-                    (trust_eval[] == _kSecTrustResultProceed || trust_eval[] == _kSecTrustResultUnspecified)
+            if trusted != 0
+                trust_error[] != C_NULL && _cf_release(trust_error[])
                 return _secure_transport_drive_negotiation(handler)
             end
 
+            error_desc = _cf_error_description(trust_error[])
+            trust_error[] != C_NULL && _cf_release(trust_error[])
             logf(
                 LogLevel.WARN,
-                LS_IO_TLS,string("SecureTransport custom CA validation failed with OSStatus $status and Trust Eval $(trust_eval[])", " ", ))
+                LS_IO_TLS,string("SecureTransport custom CA validation failed: $error_desc", " ", ))
             handler.negotiation_finished = false
             throw_error(ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE)
         end
@@ -1069,8 +1087,13 @@ function _secure_transport_handler_new(
     if min_version == TlsVersion.TLSv1_3
         throw_error(ERROR_IO_TLS_CTX_ERROR)
     end
-    min_status = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _secure_transport_min_protocol(min_version))
-    _secure_transport_require_ctx_success("SSLSetProtocolVersionMin", min_status)
+    min_protocol = _secure_transport_min_protocol(min_version)
+    min_status = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, min_protocol)
+    if min_protocol == _kSSLProtocolUnknown
+        _secure_transport_log_if_error("SSLSetProtocolVersionMin(kSSLProtocolUnknown)", min_status)
+    else
+        _secure_transport_require_ctx_success("SSLSetProtocolVersionMin", min_status)
+    end
 
     io_status = ccall((:SSLSetIOFuncs, _SECURITY_LIB), OSStatus, (SSLContextRef, Ptr{Cvoid}, Ptr{Cvoid}), handler.ctx, _secure_transport_read_cb_c[], _secure_transport_write_cb_c[])
     _secure_transport_require_ctx_success("SSLSetIOFuncs", io_status)
@@ -1084,7 +1107,7 @@ function _secure_transport_handler_new(
             LogLevel.WARN,
             LS_IO_TLS,string("x.509 validation has been disabled. This is unsafe outside of test environments.", " ", ))
         session_status = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
-        _secure_transport_require_ctx_success("SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth)", session_status)
+        _secure_transport_log_if_error("SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth)", session_status)
     end
 
     if st_ctx.certs != C_NULL
@@ -1096,10 +1119,10 @@ function _secure_transport_handler_new(
     if handler.ca_certs != C_NULL
         if protocol_side == _kSSLServerSide && st_ctx.verify_peer
             session_status = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnClientAuth, 1)
-            _secure_transport_require_ctx_success("SSLSetSessionOption(kSSLSessionOptionBreakOnClientAuth)", session_status)
+            _secure_transport_log_if_error("SSLSetSessionOption(kSSLSessionOptionBreakOnClientAuth)", session_status)
         elseif st_ctx.verify_peer
             session_status = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
-            _secure_transport_require_ctx_success("SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth)", session_status)
+            _secure_transport_log_if_error("SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth)", session_status)
         end
     end
 

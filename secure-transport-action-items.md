@@ -32,7 +32,7 @@
 - Verification evidence:
   - 2026-02-28: `julia --project=. -e 'using Test, Reseau; import Reseau: Sockets, EventLoops; include(\"test/alpn_tests.jl\")'` passed.
 
-### [ ] ITEM-002 (P1) Modernize trust evaluation path to current Security API guidance
+### [x] ITEM-002 (P1) Modernize trust evaluation path to current Security API guidance
 - Description: Custom trust validation path uses deprecated `SecTrustEvaluate`.
 - Desired outcome: Trust validation uses `SecTrustEvaluateWithError` and preserves current decision semantics (`trusted` vs `not trusted`) with better diagnostic logging.
 - Affected files: `src/sockets/apple/secure_transport_tls_handler.jl`, `test/tls_tests_impl.jl`
@@ -45,11 +45,15 @@
   - `RESEAU_RUN_TLS_TESTS=1 julia --project=. test/tls_tests.jl`
 - Assumptions:
   - Supported macOS runtime baseline in this project includes `SecTrustEvaluateWithError`.
+- Execution notes (2026-02-28):
+  - Use `SecTrustEvaluateWithError` directly in the SecureTransport custom trust path and log `CFError` descriptions when available.
 - Risks:
   - Trust failure behavior differences between APIs could alter observed error paths in edge cases.
 - Completion criteria:
   - No use of `SecTrustEvaluate` remains in SecureTransport trust-validation path.
   - TLS test suite with TLS enabled passes locally.
+- Verification evidence:
+  - 2026-02-28: `JULIA_NUM_THREADS=1 RESEAU_RUN_TLS_TESTS=1 julia --project=. -e 'using Test, Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/test_utils.jl\"); cleanup_test_sockets!(); setup_test_keychain!(); function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0); start = Base.time_ns(); timeout_ns = Int(timeout_s * 1_000_000_000); while (Base.time_ns() - start) < timeout_ns; pred() && return true; sleep(0.01); end; return false; end; try include(\"test/tls_tests.jl\") finally cleanup_test_keychain!(); cleanup_test_sockets!() end'` passed.
 
 ### [ ] ITEM-003 (P1) Close key SecureTransport parity-test gaps identified in review
 - Description: Current tests miss some actionable parity checks (unknown NW TLS error fallback and selected Apple PKI negative paths).
