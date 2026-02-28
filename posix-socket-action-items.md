@@ -103,7 +103,7 @@
 - Verification evidence:
   - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_handler_tests.jl")'` passed.
 
-### [ ] ITEM-006 (P1) Add pinned event-loop callback-affinity regressions
+### [x] ITEM-006 (P1) Add pinned event-loop callback-affinity regressions
 - Description: aws-c-io includes pinned event-loop and DNS-failure callback-thread regressions; Reseau only has partial bootstrap mismatch checks.
 - Desired outcome: Callback affinity and failure-path behavior are explicitly covered when event loops are pinned.
 - Affected files: `test/channel_bootstrap_tests.jl`, `test/socket_handler_tests.jl` (if needed)
@@ -118,6 +118,8 @@
   - Thread scheduling races can create nondeterminism; use synchronization primitives and explicit waits.
 - Completion criteria:
   - Pinned-loop success/failure regressions are present and passing.
+- Verification evidence:
+  - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/channel_bootstrap_tests.jl")'` passed.
 
 ### [ ] ITEM-007 (P1) Add channel lifecycle parity regressions (hold/liveness/multi-host timeout)
 - Description: aws-c-io has channel lifecycle regression coverage (refcount-delayed cleanup, ELG liveness, multi-host timeout/fallback) that is missing/partial in Reseau.
