@@ -1077,25 +1077,28 @@
 
     function _winsock_try_extract_acceptex_remote_endpoint!(impl::WinsockSocket, incoming::Socket)::Bool
         get_addrs_ptr = winsock_get_acceptexsockaddrs_fn()
+        accept_buffer = impl.accept_buffer
 
         local_addr_ptr = Ref{Ptr{Cvoid}}(C_NULL)
         local_len = Ref{Cint}(0)
         remote_addr_ptr = Ref{Ptr{Cvoid}}(C_NULL)
         remote_len = Ref{Cint}(0)
 
-        GC.@preserve impl.accept_buffer ccall(
-            get_addrs_ptr,
-            Cvoid,
-            (Ptr{Cvoid}, UInt32, UInt32, UInt32, Ptr{Ptr{Cvoid}}, Ptr{Cint}, Ptr{Ptr{Cvoid}}, Ptr{Cint}),
-            pointer(impl.accept_buffer),
-            UInt32(0),
-            UInt32(length(impl.accept_buffer) ÷ 2),
-            UInt32(length(impl.accept_buffer) ÷ 2),
-            local_addr_ptr,
-            local_len,
-            remote_addr_ptr,
-            remote_len,
-        )
+        GC.@preserve accept_buffer begin
+            ccall(
+                get_addrs_ptr,
+                Cvoid,
+                (Ptr{Cvoid}, UInt32, UInt32, UInt32, Ptr{Ptr{Cvoid}}, Ptr{Cint}, Ptr{Ptr{Cvoid}}, Ptr{Cint}),
+                pointer(accept_buffer),
+                UInt32(0),
+                UInt32(length(accept_buffer) ÷ 2),
+                UInt32(length(accept_buffer) ÷ 2),
+                local_addr_ptr,
+                local_len,
+                remote_addr_ptr,
+                remote_len,
+            )
+        end
 
         _ = local_addr_ptr
         _ = local_len
