@@ -30,7 +30,7 @@
   - 2026-02-28: `julia --project=. test/tls_tests.jl` (pass; TLS suite correctly skipped without `RESEAU_RUN_TLS_TESTS=1`).
   - 2026-02-28: `julia --project=. -e 'using Reseau; using Reseau.Sockets; println("ok")'` (pass; output `ok`).
 
-### [ ] ITEM-002 (P1) Add ABI/selection guard tests for Windows secure channel internals
+### [x] ITEM-002 (P1) Add ABI/selection guard tests for Windows secure channel internals
 - Description: Current tests do not explicitly guard Windows credential-path selection and struct/flag assumptions.
 - Desired outcome: Deterministic tests verify credential-path selection, TLS version gating behavior, and core ALPN/credential configuration invariants.
 - Affected files: `test/tls_tests_impl.jl`
@@ -40,12 +40,17 @@
   - Add targeted tests that prevent regressions in min-TLS handling across both paths.
 - Verification:
   - `julia --project=. test/tls_tests.jl`
+  - `julia --project=. -e 'using Test; using Reseau; import Reseau: Sockets; @testset "secure-channel-helpers" begin ... end'`
 - Assumptions:
   - Internal helper functions can be exercised directly from test code without exposing new public API.
+  - Local verification runs on non-Windows will validate deterministic helper behavior; Windows CI will validate runtime credential acquisition path.
 - Risks:
   - Over-coupling tests to implementation details could make refactors noisy.
 - Completion criteria:
   - New tests fail if modern/deprecated path selection regresses.
+- Verification evidence:
+  - 2026-02-28: `julia --project=. -e 'using Test; using Reseau; import Reseau: Sockets; @testset "secure-channel-helpers" begin ... end'` (pass; `13/13`).
+  - 2026-02-28: `julia --project=. test/tls_tests.jl` (pass; TLS suite entrypoint and gating confirmed).
 
 ### [ ] ITEM-003 (P1) Expand TLS network parity matrix toward aws-c-io endpoint coverage
 - Description: Reseau network TLS tests cover core badssl endpoints but miss several edge-case categories covered by aws-c-io.
