@@ -536,6 +536,26 @@
         return nothing
     end
 
+    @inline function _winsock_set_reuseaddr_for_connect!(sock::Socket)::Nothing
+        reuse = Ref{Cint}(1)
+        rc = ccall(
+            (:setsockopt, _WS2_32),
+            Cint,
+            (UInt, Cint, Cint, Ptr{Cint}, Cint),
+            _winsock_socket_handle(sock),
+            WS_SOL_SOCKET,
+            WS_SO_REUSEADDR,
+            reuse,
+            Cint(sizeof(Cint)),
+        )
+        if rc != 0
+            sock.state = SocketState.ERROR
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            throw_error(socket_err)
+        end
+        return nothing
+    end
+
     function _winsock_stream_connection_success(sock::Socket)::Nothing
         handle = _winsock_socket_handle(sock)
 
@@ -691,18 +711,7 @@
         impl = sock.impl::WinsockSocket
         copy!(sock.remote_endpoint, remote_endpoint)
 
-        # Enable SO_REUSEADDR (best-effort)
-        reuse = Ref{Cint}(1)
-        _ = ccall(
-            (:setsockopt, _WS2_32),
-            Cint,
-            (UInt, Cint, Cint, Ptr{Cint}, Cint),
-            _winsock_socket_handle(sock),
-            WS_SOL_SOCKET,
-            WS_SO_REUSEADDR,
-            reuse,
-            Cint(sizeof(Cint)),
-        )
+        _winsock_set_reuseaddr_for_connect!(sock)
 
         try
             socket_assign_to_event_loop(sock, connect_loop)
@@ -799,6 +808,13 @@
         if sock.options.domain == SocketDomain.LOCAL
             connect_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
+            try
+                _winsock_socket_set_options!(sock, sock.options)
+            catch
+                sock.state = SocketState.ERROR
+                rethrow()
+            end
+
             copy!(sock.remote_endpoint, remote_endpoint)
             handle = ccall(
                 (:CreateFileA, _WIN_KERNEL32),
@@ -843,6 +859,7 @@
             # UDP connect is synchronous.
             connect_loop === nothing && (connect_loop = nothing)
             copy!(sock.remote_endpoint, remote_endpoint)
+            _winsock_set_reuseaddr_for_connect!(sock)
 
             address = get_address(remote_endpoint)
             if sock.options.domain == SocketDomain.IPV4
@@ -887,6 +904,12 @@
             end
 
             _winsock_update_local_endpoint_ipv4_ipv6!(sock)
+            try
+                _winsock_socket_set_options!(sock, sock.options)
+            catch
+                sock.state = SocketState.ERROR
+                rethrow()
+            end
             sock.state = SocketState.CONNECTED
 
             if connect_loop !== nothing

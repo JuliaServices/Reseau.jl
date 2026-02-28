@@ -70,7 +70,7 @@
   - 2026-02-28: Focused IOCP callback-argument parity test command passed (`exit code 0`) with testset `IOCP completion callback arguments`.
   - 2026-02-28: Full `event_loop_tests` harness repeatedly failed in pre-existing kqueue test `Event loop callback mutates another subscription safely` (`test/event_loop_tests.jl:1268` / `:1275`), which runs before IOCP test coverage.
 
-### [ ] ITEM-004 (P1) Align connect-path option behavior with aws-c-io reference
+### [x] ITEM-004 (P1) Align connect-path option behavior with aws-c-io reference
 - Description: Connect-path handling differs from aws-c-io around `SO_REUSEADDR` failure behavior and option processing in UDP/local connect paths.
 - Desired outcome: Behavior matches aws-c-io expectations or is explicitly aligned where feasible.
 - Affected files: `src/sockets/windows/winsock_socket.jl`, `test/socket_tests.jl`
@@ -86,6 +86,9 @@
   - Behavior tightening may affect existing tests that assumed best-effort semantics.
 - Completion criteria:
   - Connect-path option behavior is code-aligned with aws-c-io and tests pass.
+- Verification evidence:
+  - 2026-02-28: `socket_tests` harness command passed (`exit code 0`) after connect-path updates.
+  - 2026-02-28: Added regression testset `winsock local connect validates interface options` and observed pass in socket harness output.
 
 ### [ ] ITEM-005 (P2) Ensure Windows resolver path initializes winsock
 - Description: aws-c-io Windows resolver calls winsock init before DNS resolution; Reseau resolver path currently does not explicitly do so.

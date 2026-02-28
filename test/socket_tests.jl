@@ -818,6 +818,49 @@ end
     end
 end
 
+@testset "winsock local connect validates interface options" begin
+    if !Sys.iswindows()
+        @test true
+        return
+    end
+
+    el = EventLoops.EventLoop()
+    el_val = el isa EventLoops.EventLoop ? el : nothing
+    @test el_val !== nothing
+    if el_val === nothing
+        return
+    end
+    @test EventLoops.run!(el_val) === nothing
+
+    opts = Sockets.SocketOptions(;
+        type = Sockets.SocketType.STREAM,
+        domain = Sockets.SocketDomain.LOCAL,
+        network_interface_name = "invalid",
+    )
+    sock = Sockets.socket_init(opts)
+    socket_val = sock isa Sockets.Socket ? sock : nothing
+    @test socket_val !== nothing
+
+    try
+        if socket_val === nothing
+            return
+        end
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("\\\\.\\pipe\\reseau-invalid-pipe"), event_loop = el_val,
+            on_connection_result = Reseau.EventCallable(err -> nothing),
+        )
+        try
+            Sockets.socket_connect(socket_val; connect_opts...)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        end
+    finally
+        socket_val !== nothing && Sockets.socket_cleanup!(socket_val)
+        close(el_val)
+    end
+end
+
 @testset "winsock tcp accept remote endpoint parsing" begin
     if !Sys.iswindows()
         @test true
