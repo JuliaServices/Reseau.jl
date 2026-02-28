@@ -15,6 +15,7 @@ end
 include("common_tests.jl")
 include("event_loop_tests.jl")
 include("socket_tests.jl")
+include("nw_socket_tests.jl")
 include("socket_handler_tests.jl")
 include("channel_tests.jl")
 include("io_testing_channel_tests.jl")

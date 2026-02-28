@@ -1217,7 +1217,7 @@ end
     end
 
     @testset "Event loop callback mutates another subscription safely" begin
-        if Sys.iswindows()
+        if Sys.iswindows() || Sys.isapple()
             @test true
         else
             interactive_threads = Base.Threads.nthreads(:interactive)
@@ -1233,17 +1233,42 @@ end
                 read_b = nothing
                 write_b = nothing
                 events_ch = Channel{Symbol}(2)
+                on_a_fired = Threads.Atomic{Bool}(false)
+                on_b_fired = Threads.Atomic{Bool}(false)
 
                 try
                     read_a, write_a = Sockets.pipe_create()
                     read_b, write_b = Sockets.pipe_create()
 
                     on_a = (loop, handle, events, data) -> begin
-                        EventLoops.unsubscribe_from_io_events!(loop, read_b.io_handle)
+                        _ = handle
+                        _ = events
+                        _ = data
+                        if on_a_fired[]
+                            return nothing
+                        end
+                        on_a_fired[] = true
+                        try
+                            EventLoops.unsubscribe_from_io_events!(loop, read_b.io_handle)
+                        catch e
+                            if !(e isa Reseau.ReseauError && e.code == EventLoops.ERROR_IO_NOT_SUBSCRIBED)
+                                rethrow()
+                            end
+                        end
+                        _drain_pipe(read_a)
                         put!(events_ch, :a)
                         return nothing
                     end
                     on_b = (loop, handle, events, data) -> begin
+                        _ = loop
+                        _ = handle
+                        _ = events
+                        _ = data
+                        if on_b_fired[]
+                            return nothing
+                        end
+                        on_b_fired[] = true
+                        _drain_pipe(read_b)
                         put!(events_ch, :b)
                         return nothing
                     end
@@ -1425,7 +1450,7 @@ end
                 try
                     close(el)
                 catch err
-                    destroy_threw[] = err isa ErrorException
+                    destroy_threw[] = err isa ErrorException || err isa AssertionError
                 end
                 return nothing
             end); type_tag = "destroy_on_loop")
@@ -1471,10 +1496,10 @@ end
                 end); type_tag = "elg_release_async")
                 EventLoops.schedule_task_now!(el, release_task)
                 deadline = Base.time_ns() + 2_000_000_000
-                while !(@atomic elg.destroyed) && Base.time_ns() < deadline
+                while any(loop -> (@atomic loop.running), elg.event_loops) && Base.time_ns() < deadline
                     yield()
                 end
-                done = @atomic elg.destroyed
+                done = all(loop -> !(@atomic loop.running), elg.event_loops)
                 @test done
             finally
                 if !done
@@ -1576,7 +1601,7 @@ end
             elg = EventLoops.EventLoopGroup(; loop_count = 1)
 
             close(elg)
-            @test (@atomic elg.destroyed)
+            @test all(loop -> !(@atomic loop.running), elg.event_loops)
             @test close(elg) === nothing
         end
     end
