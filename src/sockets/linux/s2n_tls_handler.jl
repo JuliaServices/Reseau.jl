@@ -128,6 +128,10 @@ const S2N_TLS_HASH_SHA256 = 4
 const S2N_TLS_HASH_SHA384 = 5
 const S2N_TLS_HASH_SHA512 = 6
 
+const S2N_OCSP_ACTION_ENABLE = 1
+const S2N_OCSP_ACTION_IGNORE = 2
+const S2N_OCSP_ACTION_FAIL = 3
+
 const _s2n_initialized = Ref(false)
 const _s2n_initialized_externally = Ref(false)
 const _s2n_init_lock = ReentrantLock()
@@ -961,6 +965,16 @@ function _s2n_to_tls_hash_algorithm(s2n_alg::Cint)::TlsHashAlgorithm.T
         TlsHashAlgorithm.UNKNOWN
 end
 
+@inline function _s2n_ocsp_action(set_check_rc::Cint, err_type::Cint)::Cint
+    if set_check_rc == S2N_SUCCESS
+        return Cint(S2N_OCSP_ACTION_ENABLE)
+    end
+    if err_type == S2N_ERR_T_USAGE
+        return Cint(S2N_OCSP_ACTION_IGNORE)
+    end
+    return Cint(S2N_OCSP_ACTION_FAIL)
+end
+
 function _s2n_tls_key_operation_new(
         handler::S2nTlsHandler,
         s2n_op::Ptr{Cvoid},
@@ -1268,12 +1282,20 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
     end
 
     if options.verify_peer
-        if ccall(_s2n_symbol(:s2n_config_set_check_stapled_ocsp_response), Cint, (Ptr{Cvoid}, Cint), ctx_impl.config, 1) == S2N_SUCCESS
+        ocsp_rc = ccall(_s2n_symbol(:s2n_config_set_check_stapled_ocsp_response), Cint, (Ptr{Cvoid}, Cint), ctx_impl.config, 1)
+        ocsp_err_type = ocsp_rc == S2N_SUCCESS ? Cint(S2N_ERR_T_OK) : _s2n_error_get_type(_s2n_errno())
+        ocsp_action = _s2n_ocsp_action(ocsp_rc, ocsp_err_type)
+        if ocsp_action == Cint(S2N_OCSP_ACTION_ENABLE)
             if ccall(_s2n_symbol(:s2n_config_set_status_request_type), Cint, (Ptr{Cvoid}, Cint), ctx_impl.config, S2N_STATUS_REQUEST_OCSP) !=
                     S2N_SUCCESS
                 _s2n_ctx_destroy!(ctx_impl)
                 throw_error(ERROR_IO_TLS_CTX_ERROR)
             end
+        elseif ocsp_action == Cint(S2N_OCSP_ACTION_IGNORE)
+            logf(LogLevel.INFO, LS_IO_TLS, "ctx: cannot enable ocsp stapling due to usage constraints")
+        else
+            _s2n_ctx_destroy!(ctx_impl)
+            throw_error(ERROR_IO_TLS_CTX_ERROR)
         end
 
         if options.ca_path !== nothing || options.ca_file_set

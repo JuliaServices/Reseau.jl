@@ -341,6 +341,23 @@ end
     @test conn_copy.timeout_ms == conn.timeout_ms
 end
 
+@testset "TLS s2n OCSP action parity" begin
+    @test Sockets._s2n_ocsp_action(
+        Cint(Sockets.S2N_SUCCESS),
+        Cint(Sockets.S2N_ERR_T_OK),
+    ) == Cint(Sockets.S2N_OCSP_ACTION_ENABLE)
+
+    @test Sockets._s2n_ocsp_action(
+        Cint(Sockets.S2N_FAILURE),
+        Cint(Sockets.S2N_ERR_T_USAGE),
+    ) == Cint(Sockets.S2N_OCSP_ACTION_IGNORE)
+
+    @test Sockets._s2n_ocsp_action(
+        Cint(Sockets.S2N_FAILURE),
+        Cint(Sockets.S2N_ERR_T_INTERNAL),
+    ) == Cint(Sockets.S2N_OCSP_ACTION_FAIL)
+end
+
 @testset "TLS static state" begin
     Sockets.tls_init_static_state()
     @test !Sockets.is_using_secitem()
