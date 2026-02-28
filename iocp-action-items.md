@@ -105,7 +105,7 @@
   - `julia --project=. -e 'using Test; txt = read("src/sockets/windows/winsock_socket.jl", String); fn_start = findfirst("function _winsock_stream_connection_success", txt); @test fn_start !== nothing; body = txt[first(fn_start):min(end, first(fn_start)+2000)]; pos_ctx = findfirst("WS_SO_UPDATE_CONNECT_CONTEXT", body); pos_getsockopt = findfirst("WS_SO_ERROR", body); @test pos_ctx !== nothing; @test pos_getsockopt !== nothing; @test first(pos_ctx) < first(pos_getsockopt); println("ITEM-005 source ordering assertions passed")'` -> passed.
   - `julia --project=. -e 'using Test, Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); setup_test_keychain!(); include("test/socket_tests.jl"); cleanup_test_sockets!(); cleanup_test_keychain!()'` -> passed.
 
-### [ ] ITEM-006 (P0) Full validation, PR creation, and CI pass confirmation
+### [x] ITEM-006 (P0) Full validation, PR creation, and CI pass confirmation
 - Description: After all implementation items, run the full test suite, push commits, open a PR, and ensure all CI platform checks pass.
 - Desired outcome: Clean branch with per-item commits, PR opened to Reseau, and CI checks green across platforms.
 - Affected files: repository-wide verification and GitHub metadata.
@@ -124,6 +124,12 @@
   - Full local test suite passes.
   - PR exists with correct scope.
   - CI checks complete successfully.
+- Verification evidence:
+  - `julia --project=. -e 'using Test, Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); setup_test_keychain!(); atexit(cleanup_test_keychain!); include("test/common_tests.jl"); include("test/event_loop_tests.jl"); include("test/socket_tests.jl"); include("test/channel_tests.jl")'` -> passed (`CORE_TEST_FILES_PASSED`).
+  - Full `runtests.jl` parity sweep via isolated per-file invocations for every remaining include:
+    - `socket_handler_tests.jl`, `io_testing_channel_tests.jl`, `channel_bootstrap_tests.jl`, `pipe_tests.jl`, `tls_tests.jl`, `pkcs11_tests.jl`, `alpn_tests.jl`, `host_resolver_tests.jl`, `io_tests.jl`, `future_tests.jl`, `stream_tests.jl`, `pem_tests.jl`, `pki_utils_tests.jl`, `statistics_tests.jl`, `retry_strategy_tests.jl`, `vsock_tests.jl`, `sockets_compat_tests.jl`, `trim_compile_tests.jl` -> passed (`ALL_REMAINING_TEST_FILES_PASSED`).
+  - PR opened: `https://github.com/JuliaServices/Reseau.jl/pull/55`.
+  - CI checks watched to completion: `gh pr checks 55 --watch` -> all successful on `macOS`, `ubuntu`, and `windows` for run `22520815484`.
 
 ## Compaction Continuity Block
 
