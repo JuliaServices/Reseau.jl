@@ -69,7 +69,7 @@
 - Verification evidence:
   - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed (exit code 0).
 
-### [ ] ITEM-004 (P0) Full validation, PR, and CI completion
+### [x] ITEM-004 (P0) Full validation, PR, and CI completion
 - Description: After implementation items land, we need end-to-end validation and delivery.
 - Desired outcome: Full Reseau test suite passes, PR opened, and all required CI platform checks pass.
 - Affected files: repository-wide (no specific code target), `.github/workflows/*` (read-only for CI mapping), `epoll-action-items.md` status updates
@@ -87,6 +87,16 @@
   - CI-only platform regressions may require additional iterations.
 - Completion criteria:
   - PR is open and all required checks are green.
+- Verification evidence:
+  - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'` passed (exit code 0).
+  - 2026-02-28: `RESEAU_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` passed (exit code 0).
+  - 2026-02-28: `RESEAU_RUN_TLS_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed (exit code 0).
+  - 2026-02-28: `RESEAU_RUN_TLS_TESTS=1 RESEAU_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed (exit code 0).
+  - PR opened: `https://github.com/JuliaServices/Reseau.jl/pull/53`.
+  - CI run `22519273067` concluded `success` for all required checks:
+    - `Julia 1.12 - ubuntu-latest - x64 - pull_request` (pass).
+    - `Julia 1.12 - macOS-latest - aarch64 - pull_request` (pass).
+    - `Julia 1.12 - windows-latest - x64 - pull_request` (pass).
 
 ## Compaction Continuity Block
 
