@@ -129,7 +129,7 @@
   - Full `runtests.jl` parity sweep via isolated per-file invocations for every remaining include:
     - `socket_handler_tests.jl`, `io_testing_channel_tests.jl`, `channel_bootstrap_tests.jl`, `pipe_tests.jl`, `tls_tests.jl`, `pkcs11_tests.jl`, `alpn_tests.jl`, `host_resolver_tests.jl`, `io_tests.jl`, `future_tests.jl`, `stream_tests.jl`, `pem_tests.jl`, `pki_utils_tests.jl`, `statistics_tests.jl`, `retry_strategy_tests.jl`, `vsock_tests.jl`, `sockets_compat_tests.jl`, `trim_compile_tests.jl` -> passed (`ALL_REMAINING_TEST_FILES_PASSED`).
   - PR opened: `https://github.com/JuliaServices/Reseau.jl/pull/55`.
-  - CI checks watched to completion: `gh pr checks 55 --watch` -> all successful on `macOS`, `ubuntu`, and `windows` for run `22520815484`.
+  - CI checks watched to completion: `gh pr checks 55 --watch` -> all successful on `macOS`, `ubuntu`, and `windows` for run `22520890569` (latest PR head).
 
 ## Compaction Continuity Block
 
