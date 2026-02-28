@@ -255,6 +255,36 @@ function _test_tls_network_connect_success(
     return nothing
 end
 
+function _test_tls_network_connect_best_effort_success(
+        host::AbstractString,
+        port::Integer;
+        ctx_options_override::Union{Function, Nothing} = nothing,
+        acceptable_errors::Tuple = (Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE,),
+    )::Nothing
+    setup_err = _tls_network_connect(host, port; ctx_options_override = ctx_options_override)
+    if _tls_badssl_is_flaky(host, setup_err) || setup_err in acceptable_errors
+        @test_skip setup_err == Reseau.OP_SUCCESS
+    else
+        @test setup_err == Reseau.OP_SUCCESS
+    end
+    return nothing
+end
+
+function _test_tls_network_connect_policy_dependent(
+        host::AbstractString,
+        port::Integer;
+        ctx_options_override::Union{Function, Nothing} = nothing,
+    )::Nothing
+    setup_err = _tls_network_connect(host, port; ctx_options_override = ctx_options_override)
+    expected = setup_err == Reseau.OP_SUCCESS || setup_err == Reseau.ERROR_IO_TLS_ERROR_NEGOTIATION_FAILURE
+    if _tls_badssl_is_flaky(host, setup_err)
+        @test_skip expected
+    else
+        @test expected
+    end
+    return nothing
+end
+
 function _test_server_ctx()
     cert_path = _resource_path("unittests.crt")
     key_path = _resource_path("unittests.key")
@@ -339,6 +369,23 @@ end
     @test conn_copy.server_name == conn.server_name
     @test conn_copy.alpn_list == conn.alpn_list
     @test conn_copy.timeout_ms == conn.timeout_ms
+end
+
+@testset "TLS s2n OCSP action parity" begin
+    @test Sockets._s2n_ocsp_action(
+        Cint(Sockets.S2N_SUCCESS),
+        Cint(Sockets.S2N_ERR_T_OK),
+    ) == Cint(Sockets.S2N_OCSP_ACTION_ENABLE)
+
+    @test Sockets._s2n_ocsp_action(
+        Cint(Sockets.S2N_FAILURE),
+        Cint(Sockets.S2N_ERR_T_USAGE),
+    ) == Cint(Sockets.S2N_OCSP_ACTION_IGNORE)
+
+    @test Sockets._s2n_ocsp_action(
+        Cint(Sockets.S2N_FAILURE),
+        Cint(Sockets.S2N_ERR_T_INTERNAL),
+    ) == Cint(Sockets.S2N_OCSP_ACTION_FAIL)
 end
 
 @testset "TLS static state" begin
@@ -2715,6 +2762,11 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         @test _tls_network_connect("www.amazon.com", 443) == Reseau.OP_SUCCESS
         _test_tls_network_connect_success("ecc256.badssl.com", 443)
         _test_tls_network_connect_success("ecc384.badssl.com", 443)
+        _test_tls_network_connect_success("tls-v1-2.badssl.com", 1012)
+        _test_tls_network_connect_success("sha256.badssl.com", 443)
+        _test_tls_network_connect_success("rsa2048.badssl.com", 443)
+        _test_tls_network_connect_best_effort_success("extended-validation.badssl.com", 443)
+        _test_tls_network_connect_success("mozilla-modern.badssl.com", 443)
         # badssl endpoints for sha384/sha512/rsa8192 currently serve expired chains, so
         # we do not treat them as positive connectivity checks across platforms.
 
@@ -2724,6 +2776,15 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         @test _tls_network_connect("untrusted-root.badssl.com", 443) != Reseau.OP_SUCCESS
         @test _tls_network_connect("rc4.badssl.com", 443) != Reseau.OP_SUCCESS
         @test _tls_network_connect("rc4-md5.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh480.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh512.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh1024.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh2048.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("null.badssl.com", 443) != Reseau.OP_SUCCESS
+        _test_tls_network_connect_policy_dependent("tls-v1-0.badssl.com", 1010)
+        _test_tls_network_connect_policy_dependent("tls-v1-1.badssl.com", 1011)
+        @test _tls_network_connect("no-subject.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("no-common-name.badssl.com", 443) != Reseau.OP_SUCCESS
 
         digicert_path = _resource_path("DigiCertGlobalRootCA.crt.pem")
         @test _tls_network_connect(
@@ -2761,6 +2822,21 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         )
         _test_tls_network_connect_success(
             "untrusted-root.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "incomplete-chain.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "no-subject.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "no-common-name.badssl.com",
             443;
             ctx_options_override = disable_verify_peer,
         )

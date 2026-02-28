@@ -128,6 +128,10 @@ const S2N_TLS_HASH_SHA256 = 4
 const S2N_TLS_HASH_SHA384 = 5
 const S2N_TLS_HASH_SHA512 = 6
 
+const S2N_OCSP_ACTION_ENABLE = 1
+const S2N_OCSP_ACTION_IGNORE = 2
+const S2N_OCSP_ACTION_FAIL = 3
+
 const _s2n_initialized = Ref(false)
 const _s2n_initialized_externally = Ref(false)
 const _s2n_init_lock = ReentrantLock()
@@ -183,6 +187,21 @@ function _s2n_init_once()
             _s2n_initialized_externally[] = true
         else
             _s2n_initialized_externally[] = false
+
+            mem_set_callbacks = _s2n_symbol(:s2n_mem_set_callbacks)
+            mem_set_callbacks == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
+            if ccall(
+                    mem_set_callbacks,
+                    Cint,
+                    (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+                    _s2n_mem_init_c[],
+                    _s2n_mem_cleanup_c[],
+                    _s2n_mem_malloc_c[],
+                    _s2n_mem_free_c[],
+                ) != S2N_SUCCESS
+                logf(LogLevel.ERROR, LS_IO_TLS, "s2n_mem_set_callbacks failed: $(_s2n_strerror(_s2n_errno()))")
+                throw_error(ERROR_IO_TLS_CTX_ERROR)
+            end
 
             s2n_init = _s2n_symbol(:s2n_init)
             s2n_init == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
@@ -253,8 +272,43 @@ function _s2n_monotonic_clock_time_nanoseconds(context::Ptr{Cvoid}, time_in_ns::
     return Cint(0)
 end
 
+function _s2n_mem_init()::Cint
+    return Cint(S2N_SUCCESS)
+end
+
+function _s2n_mem_cleanup()::Cint
+    return Cint(S2N_SUCCESS)
+end
+
+function _s2n_mem_malloc(ptr::Ptr{Ptr{Cvoid}}, requested::UInt32, allocated::Ptr{UInt32})::Cint
+    if requested == UInt32(0)
+        unsafe_store!(ptr, C_NULL)
+        unsafe_store!(allocated, UInt32(0))
+        return Cint(S2N_SUCCESS)
+    end
+    mem = Base.Libc.malloc(Csize_t(requested))
+    if mem == C_NULL
+        unsafe_store!(ptr, C_NULL)
+        unsafe_store!(allocated, UInt32(0))
+        return Cint(S2N_FAILURE)
+    end
+    unsafe_store!(ptr, mem)
+    unsafe_store!(allocated, requested)
+    return Cint(S2N_SUCCESS)
+end
+
+function _s2n_mem_free(ptr::Ptr{Cvoid}, size::UInt32)::Cint
+    _ = size
+    ptr != C_NULL && Base.Libc.free(ptr)
+    return Cint(S2N_SUCCESS)
+end
+
 const _s2n_wall_clock_time_nanoseconds_c = Ref{Ptr{Cvoid}}(C_NULL)
 const _s2n_monotonic_clock_time_nanoseconds_c = Ref{Ptr{Cvoid}}(C_NULL)
+const _s2n_mem_init_c = Ref{Ptr{Cvoid}}(C_NULL)
+const _s2n_mem_cleanup_c = Ref{Ptr{Cvoid}}(C_NULL)
+const _s2n_mem_malloc_c = Ref{Ptr{Cvoid}}(C_NULL)
+const _s2n_mem_free_c = Ref{Ptr{Cvoid}}(C_NULL)
 
 mutable struct S2nTlsCtx
     config::Ptr{Cvoid}
@@ -762,21 +816,21 @@ function handler_process_read_message(
         blocked = Ref{Cint}(S2N_NOT_BLOCKED)
         read_val = ccall(
             _s2n_symbol(:s2n_recv),
-            Int,
-            (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cint}),
+            Cssize_t,
+            (Ptr{Cvoid}, Ptr{UInt8}, Cssize_t, Ptr{Cint}),
             handler.connection,
             pointer(outgoing.message_data.mem),
-            outgoing.message_data.capacity,
+            _checked_cssize_length(outgoing.message_data.capacity),
             blocked,
         )
 
-        if read_val == 0
+        if read_val == Cssize_t(0)
             channel_release_message_to_pool!(slot.channel, outgoing)
             force_shutdown = true
             break
         end
 
-        if read_val < 0
+        if read_val < Cssize_t(0)
             channel_release_message_to_pool!(slot.channel, outgoing)
             if blocked[] != S2N_NOT_BLOCKED
                 if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
@@ -855,17 +909,18 @@ function handler_process_write_message(
 
     _s2n_lib_handle()
     blocked = Ref{Cint}(S2N_NOT_BLOCKED)
+    write_len = _checked_cssize_length(message.message_data.len)
     write_val = ccall(
         _s2n_symbol(:s2n_send),
-        Int,
-        (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cint}),
+        Cssize_t,
+        (Ptr{Cvoid}, Ptr{UInt8}, Cssize_t, Ptr{Cint}),
         handler.connection,
         pointer(message.message_data.mem),
-        message.message_data.len,
+        write_len,
         blocked,
     )
 
-    if write_val < Int(message.message_data.len)
+    if write_val < write_len
         throw_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
     end
 
@@ -959,6 +1014,16 @@ function _s2n_to_tls_hash_algorithm(s2n_alg::Cint)::TlsHashAlgorithm.T
         s2n_alg == S2N_TLS_HASH_SHA384 ? TlsHashAlgorithm.SHA384 :
         s2n_alg == S2N_TLS_HASH_SHA512 ? TlsHashAlgorithm.SHA512 :
         TlsHashAlgorithm.UNKNOWN
+end
+
+@inline function _s2n_ocsp_action(set_check_rc::Cint, err_type::Cint)::Cint
+    if set_check_rc == S2N_SUCCESS
+        return Cint(S2N_OCSP_ACTION_ENABLE)
+    end
+    if err_type == S2N_ERR_T_USAGE
+        return Cint(S2N_OCSP_ACTION_IGNORE)
+    end
+    return Cint(S2N_OCSP_ACTION_FAIL)
 end
 
 function _s2n_tls_key_operation_new(
@@ -1101,6 +1166,18 @@ function _s2n_init_callbacks()::Nothing
     end
     if _s2n_handler_send_c[] == C_NULL
         _s2n_handler_send_c[] = @cfunction(_s2n_handler_send, Cint, (Ptr{Cvoid}, Ptr{UInt8}, UInt32))
+    end
+    if _s2n_mem_init_c[] == C_NULL
+        _s2n_mem_init_c[] = @cfunction(_s2n_mem_init, Cint, ())
+    end
+    if _s2n_mem_cleanup_c[] == C_NULL
+        _s2n_mem_cleanup_c[] = @cfunction(_s2n_mem_cleanup, Cint, ())
+    end
+    if _s2n_mem_malloc_c[] == C_NULL
+        _s2n_mem_malloc_c[] = @cfunction(_s2n_mem_malloc, Cint, (Ptr{Ptr{Cvoid}}, UInt32, Ptr{UInt32}))
+    end
+    if _s2n_mem_free_c[] == C_NULL
+        _s2n_mem_free_c[] = @cfunction(_s2n_mem_free, Cint, (Ptr{Cvoid}, UInt32))
     end
     return nothing
 end
@@ -1246,9 +1323,9 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
         end
 
         cert_ptr = pointer(options.certificate.mem)
-        cert_len = options.certificate.len
+        cert_len = _checked_uint32_length(options.certificate.len)
         if ccall(_s2n_symbol(:s2n_cert_chain_and_key_load_public_pem_bytes), Cint,
-                (Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
+                (Ptr{Cvoid}, Ptr{UInt8}, UInt32),
                 ctx_impl.custom_cert_chain_and_key,
                 cert_ptr,
                 cert_len) != S2N_SUCCESS
@@ -1268,12 +1345,20 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
     end
 
     if options.verify_peer
-        if ccall(_s2n_symbol(:s2n_config_set_check_stapled_ocsp_response), Cint, (Ptr{Cvoid}, Cint), ctx_impl.config, 1) == S2N_SUCCESS
+        ocsp_rc = ccall(_s2n_symbol(:s2n_config_set_check_stapled_ocsp_response), Cint, (Ptr{Cvoid}, Cint), ctx_impl.config, 1)
+        ocsp_err_type = ocsp_rc == S2N_SUCCESS ? Cint(S2N_ERR_T_OK) : _s2n_error_get_type(_s2n_errno())
+        ocsp_action = _s2n_ocsp_action(ocsp_rc, ocsp_err_type)
+        if ocsp_action == Cint(S2N_OCSP_ACTION_ENABLE)
             if ccall(_s2n_symbol(:s2n_config_set_status_request_type), Cint, (Ptr{Cvoid}, Cint), ctx_impl.config, S2N_STATUS_REQUEST_OCSP) !=
                     S2N_SUCCESS
                 _s2n_ctx_destroy!(ctx_impl)
                 throw_error(ERROR_IO_TLS_CTX_ERROR)
             end
+        elseif ocsp_action == Cint(S2N_OCSP_ACTION_IGNORE)
+            logf(LogLevel.INFO, LS_IO_TLS, "ctx: cannot enable ocsp stapling due to usage constraints")
+        else
+            _s2n_ctx_destroy!(ctx_impl)
+            throw_error(ERROR_IO_TLS_CTX_ERROR)
         end
 
         if options.ca_path !== nothing || options.ca_file_set
@@ -1323,6 +1408,11 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
             end
         end
     elseif !options.is_server
+        logf(
+            LogLevel.WARN,
+            LS_IO_TLS,
+            "ctx: X.509 validation has been disabled. If this is not a test environment, this is likely a security vulnerability.",
+        )
         _ = ccall(_s2n_symbol(:s2n_config_disable_x509_verification), Cint, (Ptr{Cvoid},), ctx_impl.config)
     end
 
