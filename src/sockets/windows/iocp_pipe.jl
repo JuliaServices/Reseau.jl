@@ -11,6 +11,7 @@
 
     const STATUS_PIPE_BROKEN = UInt32(0xC000014B)
     const STATUS_CANCELLED = UInt32(0xC0000120)
+    const PIPE_UNIQUE_NAME_MAX_TRIES = 10
 
     const PIPE_ACCESS_OUTBOUND = UInt32(0x00000002)
     const FILE_FLAG_OVERLAPPED = UInt32(0x40000000)
@@ -104,27 +105,37 @@
     end
 
     function pipe_create_iocp()::Tuple{PipeReadEnd, PipeWriteEnd}
-        pipe_name = _iocp_pipe_unique_name()
-
         open_mode = PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE
         pipe_mode = PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS
 
-        write_handle = ccall(
-            (:CreateNamedPipeA, _KERNEL32),
-            Ptr{Cvoid},
-            (Cstring, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, Ptr{Cvoid}),
-            pipe_name,
-            open_mode,
-            pipe_mode,
-            UInt32(1), # nMaxInstances
-            PIPE_BUFFER_SIZE,
-            PIPE_BUFFER_SIZE,
-            UInt32(0),
-            C_NULL,
-        )
+        write_handle = INVALID_HANDLE_VALUE
+        pipe_name = ""
+        tries = 0
 
-        if write_handle == INVALID_HANDLE_VALUE
-            _iocp_pipe_raise_last_error()
+        while true
+            pipe_name = _iocp_pipe_unique_name()
+            write_handle = ccall(
+                (:CreateNamedPipeA, _KERNEL32),
+                Ptr{Cvoid},
+                (Cstring, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, Ptr{Cvoid}),
+                pipe_name,
+                open_mode,
+                pipe_mode,
+                UInt32(1), # nMaxInstances
+                PIPE_BUFFER_SIZE,
+                PIPE_BUFFER_SIZE,
+                UInt32(0),
+                C_NULL,
+            )
+
+            if write_handle != INVALID_HANDLE_VALUE
+                break
+            end
+
+            tries += 1
+            if tries >= PIPE_UNIQUE_NAME_MAX_TRIES
+                _iocp_pipe_raise_last_error()
+            end
         end
 
         read_handle = ccall(
