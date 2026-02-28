@@ -121,7 +121,7 @@
 - Verification evidence:
   - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/channel_bootstrap_tests.jl")'` passed.
 
-### [ ] ITEM-007 (P1) Add channel lifecycle parity regressions (hold/liveness/multi-host timeout)
+### [x] ITEM-007 (P1) Add channel lifecycle parity regressions (hold/liveness/multi-host timeout)
 - Description: aws-c-io has channel lifecycle regression coverage (refcount-delayed cleanup, ELG liveness, multi-host timeout/fallback) that is missing/partial in Reseau.
 - Desired outcome: Reseau channel/bootstrap tests cover these lifecycle scenarios explicitly.
 - Affected files: `test/channel_tests.jl`, `test/channel_bootstrap_tests.jl`
@@ -138,6 +138,9 @@
   - Potential test flakiness due async timing; prefer deterministic wait predicates.
 - Completion criteria:
   - New lifecycle regressions pass and reduce parity gaps against aws-c-io suite.
+- Verification evidence:
+  - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/channel_bootstrap_tests.jl")'` passed.
+  - `julia --project=. /tmp/verify_item007_newtests.jl` passed (`verify delayed destroy + liveness`).
 
 ### [ ] ITEM-008 (P0) Full validation, PR creation, and CI-green confirmation
 - Description: After all code/test work, full project validation and PR workflow must complete successfully.
