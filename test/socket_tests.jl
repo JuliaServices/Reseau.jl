@@ -212,6 +212,32 @@ end
     end
 end
 
+@testset "socket endpoint address length validation" begin
+    max_len = Int(Sockets.ADDRESS_MAX_LEN)
+    valid_address = repeat("a", max_len - 1)
+    too_long_address = repeat("b", max_len)
+
+    endpoint = Sockets.SocketEndpoint(valid_address, 0)
+    @test endpoint isa Sockets.SocketEndpoint
+    @test Sockets.get_address(endpoint) == valid_address
+
+    try
+        Sockets.SocketEndpoint(too_long_address, 0)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
+
+    try
+        Sockets.SocketEndpoint("abc\0def", 0)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16

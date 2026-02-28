@@ -52,9 +52,11 @@ end
 
 # Constants
 const NETWORK_INTERFACE_NAME_MAX = 16
-# Unix socket path max - typically sizeof(sockaddr_un.sun_path) = 108 on Linux
+# Unix socket path max depends on platform sockaddr_un.sun_path size.
 @static if Sys.iswindows()
     const ADDRESS_MAX_LEN = 256
+elseif Sys.isapple() || Sys.isbsd()
+    const ADDRESS_MAX_LEN = 104
 else
     const ADDRESS_MAX_LEN = 108
 end

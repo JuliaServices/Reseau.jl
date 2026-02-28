@@ -97,6 +97,8 @@ struct PollFd
     revents::Cshort
 end
 
+const NfdsT = @static (Sys.isapple() || Sys.isbsd()) ? Cuint : Culong
+
 # Shutdown directions
 const SHUT_RD = Cint(0)
 const SHUT_WR = Cint(1)
@@ -990,7 +992,7 @@ end
 
 function _is_socket_connect_ready_for_completion(fd::Integer)::Bool
     pollfd_ref = Ref(PollFd(Cint(fd), _POLLIN | _POLLOUT, Cshort(0)))
-    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), pollfd_ref, Culong(1), Cint(0))
+    rc = ccall(:poll, Cint, (Ptr{PollFd}, NfdsT, Cint), pollfd_ref, NfdsT(1), Cint(0))
     if rc <= 0
         return false
     end
@@ -1006,7 +1008,7 @@ end
 
 function _is_socket_readable_now(fd::Integer)::Bool
     pollfd_ref = Ref(PollFd(Cint(fd), _POLLIN, Cshort(0)))
-    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), pollfd_ref, Culong(1), Cint(0))
+    rc = ccall(:poll, Cint, (Ptr{PollFd}, NfdsT, Cint), pollfd_ref, NfdsT(1), Cint(0))
     if rc <= 0
         # Some kernels/edge-triggered paths can transiently clear pollable events,
         # so try a non-consuming readability probe before declaring not readable.

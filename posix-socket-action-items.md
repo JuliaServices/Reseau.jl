@@ -27,7 +27,7 @@
 - Verification evidence:
   - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_tests.jl")'` passed.
 
-### [ ] ITEM-002 (P0) Fix platform portability for path length and poll nfds type
+### [x] ITEM-002 (P0) Fix platform portability for path length and poll nfds type
 - Description: Endpoint address validation currently uses a fixed non-Windows max of 108 bytes; on Apple/BSD local socket path max is 104. Poll `nfds_t` is currently hard-coded as `Culong`, which is not portable.
 - Desired outcome: Platform-sensitive constants/types are used so POSIX path behaves correctly on Linux and Apple/BSD.
 - Affected files: `src/sockets/socket/socket.jl`, `src/sockets/linux/posix_socket_impl.jl`, `test/socket_tests.jl`
@@ -44,6 +44,8 @@
 - Completion criteria:
   - Platform-specific max path checks are deterministic in validation and no silent truncation is possible.
   - Poll calls use a dedicated `nfds_t` alias and tests pass.
+- Verification evidence:
+  - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_tests.jl")'` passed.
 
 ### [ ] ITEM-003 (P1) Propagate local-endpoint update failures consistently
 - Description: `_update_local_endpoint!` currently returns silently on `getsockname()` failure; reference C path treats this as a surfaced error in key flows.
