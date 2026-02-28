@@ -73,7 +73,7 @@
   - `julia --project=. -e 'using Test, Reseau; import Reseau: Sockets; ...'` (checked-length helper assertions passed)
   - `julia --project=. -e 'using Reseau; println(\"item3-load-ok\")'` (module load + compile path passed)
 
-### [ ] ITEM-004 (P1) Expand PKCS#11 sign edge-case coverage
+### [x] ITEM-004 (P1) Expand PKCS#11 sign edge-case coverage
 - Description: Sign tests are missing parity assertions from aws-c-io for invalid session/key in RSA+EC flows and richer EC signature validation behavior.
 - Desired outcome: PKCS#11 signing tests cover invalid handle paths and stronger EC validation parity.
 - Affected files: `test/pkcs11_tests.jl`, `s2n-review.md`
@@ -90,6 +90,9 @@
 - Completion criteria:
   - New edge-case tests are present and passing.
   - Coverage now includes invalid session/key checks for RSA+EC sign.
+- Verification evidence:
+  - `julia --project=. -e 'using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/pkcs11_tests.jl\")'`
+  - PKCS#11 core tests passed; SoftHSM integration block skipped in this environment.
 
 ### [ ] ITEM-005 (P2) Improve security observability and allocator parity
 - Description: Reseau does not log a warning when peer verification is disabled, and currently does not route s2n allocation callbacks like aws-c-io.

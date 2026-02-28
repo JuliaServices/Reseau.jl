@@ -371,6 +371,76 @@ function pkcs11_verify_signature(
     return nothing
 end
 
+function _pkcs11_asn1_read_length(bytes::Vector{UInt8}, offset::Int)::Tuple{Int, Int}
+    offset > length(bytes) && throw(ErrorException("ASN.1 length offset out of bounds"))
+    first_len = bytes[offset]
+    offset += 1
+    if (first_len & 0x80) == 0
+        return Int(first_len), offset
+    end
+    len_octets = Int(first_len & 0x7f)
+    len_octets < 1 && throw(ErrorException("ASN.1 indefinite lengths are unsupported"))
+    (offset + len_octets - 1) > length(bytes) && throw(ErrorException("ASN.1 length extends past input"))
+    value = 0
+    for _ in 1:len_octets
+        value = (value << 8) | Int(bytes[offset])
+        offset += 1
+    end
+    return value, offset
+end
+
+function _pkcs11_asn1_uint_to_fixed(bytes::Vector{UInt8}, size::Int)::Vector{UInt8}
+    i = 1
+    while i < length(bytes) && bytes[i] == 0x00
+        i += 1
+    end
+    payload = bytes[i:end]
+    length(payload) > size && throw(ErrorException("ASN.1 integer larger than expected field size"))
+    out = fill(UInt8(0), size)
+    copyto!(out, size - length(payload) + 1, payload, 1, length(payload))
+    return out
+end
+
+function pkcs11_ecdsa_der_signature_to_raw(signature::Reseau.ByteBuffer, component_len::Int)::Reseau.ByteBuffer
+    sig_len = Int(signature.len)
+    sig_len > 0 || throw(ErrorException("ECDSA DER signature cannot be empty"))
+    bytes = Vector{UInt8}(undef, sig_len)
+    copyto!(bytes, 1, signature.mem, 1, sig_len)
+
+    offset = 1
+    bytes[offset] == 0x30 || throw(ErrorException("ECDSA DER signature is missing sequence tag"))
+    offset += 1
+    seq_len, offset = _pkcs11_asn1_read_length(bytes, offset)
+    seq_end = offset + seq_len - 1
+    seq_end <= length(bytes) || throw(ErrorException("ECDSA DER sequence length exceeds signature size"))
+
+    bytes[offset] == 0x02 || throw(ErrorException("ECDSA DER signature is missing first integer tag"))
+    offset += 1
+    r_len, offset = _pkcs11_asn1_read_length(bytes, offset)
+    r_end = offset + r_len - 1
+    r_end <= seq_end || throw(ErrorException("ECDSA DER r length exceeds sequence bounds"))
+    r_bytes = bytes[offset:r_end]
+    offset = r_end + 1
+
+    offset <= seq_end || throw(ErrorException("ECDSA DER signature is truncated before s component"))
+    bytes[offset] == 0x02 || throw(ErrorException("ECDSA DER signature is missing second integer tag"))
+    offset += 1
+    s_len, offset = _pkcs11_asn1_read_length(bytes, offset)
+    s_end = offset + s_len - 1
+    s_end <= seq_end || throw(ErrorException("ECDSA DER s length exceeds sequence bounds"))
+    s_bytes = bytes[offset:s_end]
+    offset = s_end + 1
+    offset == seq_end + 1 || throw(ErrorException("ECDSA DER signature has trailing sequence bytes"))
+    offset == length(bytes) + 1 || throw(ErrorException("ECDSA DER signature has trailing data"))
+
+    r_fixed = _pkcs11_asn1_uint_to_fixed(r_bytes, component_len)
+    s_fixed = _pkcs11_asn1_uint_to_fixed(s_bytes, component_len)
+    out_ref = Ref(Reseau.ByteBuffer(component_len * 2))
+    @test Reseau.byte_buf_write_from_whole_cursor(out_ref, Reseau.ByteCursor(r_fixed))
+    @test Reseau.byte_buf_write_from_whole_cursor(out_ref, Reseau.ByteCursor(s_fixed))
+    return out_ref[]
+end
+
 function pkcs11_create_rsa_key(
         tester::Pkcs11Tester,
         session::Sockets.CK_SESSION_HANDLE,
@@ -1004,6 +1074,26 @@ end
                     digest_alg,
                     Sockets.TlsSignatureAlgorithm.RSA,
                 )
+
+                @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
+                    tester.lib::Sockets.Pkcs11Lib,
+                    Sockets.CK_INVALID_HANDLE,
+                    priv,
+                    Sockets.CKK_RSA,
+                    message,
+                    digest_alg,
+                    Sockets.TlsSignatureAlgorithm.RSA,
+                )
+
+                @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
+                    tester.lib::Sockets.Pkcs11Lib,
+                    session,
+                    Sockets.CK_INVALID_HANDLE,
+                    Sockets.CKK_RSA,
+                    message,
+                    digest_alg,
+                    Sockets.TlsSignatureAlgorithm.RSA,
+                )
             finally
                 pkcs11_tester_cleanup!(tester)
             end
@@ -1032,12 +1122,41 @@ end
                 Sockets.TlsSignatureAlgorithm.ECDSA,
             )
             @test signature isa Reseau.ByteBuffer
+            raw_signature = pkcs11_ecdsa_der_signature_to_raw(signature, 32)
+            pkcs11_verify_signature(
+                tester,
+                message,
+                raw_signature,
+                session,
+                pub,
+                Sockets.CKM_ECDSA,
+            )
 
             @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
                 tester.lib::Sockets.Pkcs11Lib,
                 session,
                 priv,
                 Sockets.CKK_GENERIC_SECRET,
+                message,
+                Sockets.TlsHashAlgorithm.UNKNOWN,
+                Sockets.TlsSignatureAlgorithm.ECDSA,
+            )
+
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
+                tester.lib::Sockets.Pkcs11Lib,
+                Sockets.CK_INVALID_HANDLE,
+                priv,
+                Sockets.CKK_EC,
+                message,
+                Sockets.TlsHashAlgorithm.UNKNOWN,
+                Sockets.TlsSignatureAlgorithm.ECDSA,
+            )
+
+            @test_throws Reseau.ReseauError Sockets.pkcs11_lib_sign(
+                tester.lib::Sockets.Pkcs11Lib,
+                session,
+                Sockets.CK_INVALID_HANDLE,
+                Sockets.CKK_EC,
                 message,
                 Sockets.TlsHashAlgorithm.UNKNOWN,
                 Sockets.TlsSignatureAlgorithm.ECDSA,
