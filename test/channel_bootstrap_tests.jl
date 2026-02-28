@@ -204,20 +204,35 @@ if tls_tests_enabled()
             server_name = "localhost",
         )
 
-        client_channel[] = Sockets.client_bootstrap_connect!(
-            (err, channel) -> begin
-                client_setup[] = err == Reseau.OP_SUCCESS
-                client_channel[] = channel
-                return nothing
-            end,
-            cfg.host,
-            port;
-            socket_options = cfg.sock_opts,
-            tls_connection_options = client_tls_opts,
-            host_resolution_config = cfg.resolution_config,
-            event_loop_group = elg,
-            host_resolver = resolver,
-        )
+        connect_attempts = Sys.iswindows() ? 3 : 1
+        for attempt in 1:connect_attempts
+            try
+                client_channel[] = Sockets.client_bootstrap_connect!(
+                    (err, channel) -> begin
+                        client_setup[] = err == Reseau.OP_SUCCESS
+                        client_channel[] = channel
+                        return nothing
+                    end,
+                    cfg.host,
+                    port;
+                    socket_options = cfg.sock_opts,
+                    tls_connection_options = client_tls_opts,
+                    host_resolution_config = cfg.resolution_config,
+                    event_loop_group = elg,
+                    host_resolver = resolver,
+                )
+                break
+            catch e
+                if e isa Reseau.ReseauError &&
+                        e.code == Reseau.ERROR_IO_SOCKET_NOT_CONNECTED &&
+                        attempt < connect_attempts
+                    @info "Retrying bootstrap TLS connect after transient socket-not-connected error." attempt
+                    sleep(0.05 * attempt)
+                    continue
+                end
+                rethrow()
+            end
+        end
 
         @test wait_for_pred(() -> server_setup[])
         @test wait_for_pred(() -> client_setup[])
