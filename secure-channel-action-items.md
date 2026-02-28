@@ -52,7 +52,7 @@
   - 2026-02-28: `julia --project=. -e 'using Test; using Reseau; import Reseau: Sockets; @testset "secure-channel-helpers" begin ... end'` (pass; `13/13`).
   - 2026-02-28: `julia --project=. test/tls_tests.jl` (pass; TLS suite entrypoint and gating confirmed).
 
-### [ ] ITEM-003 (P1) Expand TLS network parity matrix toward aws-c-io endpoint coverage
+### [x] ITEM-003 (P1) Expand TLS network parity matrix toward aws-c-io endpoint coverage
 - Description: Reseau network TLS tests cover core badssl endpoints but miss several edge-case categories covered by aws-c-io.
 - Desired outcome: Reseau network-gated tests include additional endpoints/scenarios, with resilient handling for known endpoint flakiness.
 - Affected files: `test/tls_tests_impl.jl`
@@ -64,10 +64,13 @@
   - `RESEAU_RUN_TLS_TESTS=1 RESEAU_RUN_NETWORK_TESTS=1 julia --project=. test/tls_tests.jl`
 - Assumptions:
   - External endpoints may intermittently fail; tests may need soft expectations for specific transient cases.
+  - We should prioritize endpoints that are still broadly stable in 2026 and avoid adding known-rotated cert endpoints as strict positive assertions.
 - Risks:
   - Increased network dependence can introduce flakiness if not carefully guarded.
 - Completion criteria:
   - Added scenarios are represented in the network matrix and pass in current CI environment.
+- Verification evidence:
+  - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); setup_test_keychain!(); atexit(cleanup_test_keychain!); function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0); start = Base.time_ns(); timeout_ns = Int(timeout_s * 1_000_000_000); while (Base.time_ns() - start) < timeout_ns; pred() && return true; sleep(0.01); end; return pred(); end; ENV["RESEAU_RUN_TLS_TESTS"] = "1"; ENV["RESEAU_RUN_NETWORK_TESTS"] = "1"; include("test/tls_tests.jl")'` (pass; includes `TLS network negotiation` `32/32`).
 
 ### [ ] ITEM-004 (P2) Document intentional SecureTransport protocol semantics and on-error parity stance
 - Description: There are intentional-but-surprising parity behaviors (e.g., TLSv1_1 mapping on SecureTransport) and API stance differences (`on_error` callback surface).

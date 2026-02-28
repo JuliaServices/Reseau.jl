@@ -2767,14 +2767,18 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         disable_verify_peer = opts -> Sockets.tls_ctx_options_set_verify_peer(opts, false)
 
         set_tls13 = opts -> Sockets.tls_ctx_options_set_minimum_tls_version(opts, Sockets.TlsVersion.TLSv1_3)
+        set_tls12 = opts -> Sockets.tls_ctx_options_set_minimum_tls_version(opts, Sockets.TlsVersion.TLSv1_2)
 
         function override_ca_file(path::AbstractString)
             return opts -> Sockets.tls_ctx_options_override_default_trust_store_from_path(opts; ca_file = path)
         end
 
-        @test _tls_network_connect("www.amazon.com", 443) == Reseau.OP_SUCCESS
+        _test_tls_network_connect_success("www.amazon.com", 443)
         _test_tls_network_connect_success("ecc256.badssl.com", 443)
         _test_tls_network_connect_success("ecc384.badssl.com", 443)
+        _test_tls_network_connect_success("tls-v1-2.badssl.com", 1012)
+        _test_tls_network_connect_success("sha256.badssl.com", 443)
+        _test_tls_network_connect_success("rsa2048.badssl.com", 443)
         # badssl endpoints for sha384/sha512/rsa8192 currently serve expired chains, so
         # we do not treat them as positive connectivity checks across platforms.
 
@@ -2784,6 +2788,23 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         @test _tls_network_connect("untrusted-root.badssl.com", 443) != Reseau.OP_SUCCESS
         @test _tls_network_connect("rc4.badssl.com", 443) != Reseau.OP_SUCCESS
         @test _tls_network_connect("rc4-md5.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh480.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh512.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh1024.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh2048.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("null.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("no-subject.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("no-common-name.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect(
+            "tls-v1-0.badssl.com",
+            1010;
+            ctx_options_override = set_tls12,
+        ) != Reseau.OP_SUCCESS
+        @test _tls_network_connect(
+            "tls-v1-1.badssl.com",
+            1011;
+            ctx_options_override = set_tls12,
+        ) != Reseau.OP_SUCCESS
 
         digicert_path = _resource_path("DigiCertGlobalRootCA.crt.pem")
         @test _tls_network_connect(
@@ -2821,6 +2842,21 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         )
         _test_tls_network_connect_success(
             "untrusted-root.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "incomplete-chain.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "no-subject.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "no-common-name.badssl.com",
             443;
             ctx_options_override = disable_verify_peer,
         )
