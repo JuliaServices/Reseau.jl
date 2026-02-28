@@ -67,7 +67,7 @@
 - Verification evidence:
   - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_tests.jl")'` passed.
 
-### [ ] ITEM-004 (P1) Add socket-handler EOF and close-propagation regressions
+### [x] ITEM-004 (P1) Add socket-handler EOF and close-propagation regressions
 - Description: Reseau lacks direct equivalents of aws-c-io socket-handler EOF-after-peer-hangup and close-propagation tests.
 - Desired outcome: EOF and close behavior is directly tested for LOCAL/IPv4/IPv6 socket handler paths.
 - Affected files: `test/socket_handler_tests.jl`, `test/test_utils.jl`
@@ -82,6 +82,8 @@
   - Timing-sensitive tests may be flaky; include robust wait predicates and bounded timeouts.
 - Completion criteria:
   - New EOF/close regression tests are present and passing reliably.
+- Verification evidence:
+  - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_handler_tests.jl")'` passed.
 
 ### [ ] ITEM-005 (P1) Add large multi-frame socket-handler backpressure regression
 - Description: aws-c-io tests large multi-frame payload behavior; Reseau currently has smaller payload/backpressure cases only.
