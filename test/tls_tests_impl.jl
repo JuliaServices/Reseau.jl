@@ -334,6 +334,7 @@ end
     @test conn.advertise_alpn_message
     @test conn.tls_negotiation_result isa EventLoops.Future{Cint}
     @test conn.on_data_read isa Reseau.TlsDataReadCallback
+    @test !hasproperty(conn, :on_error)
 
     conn_copy = Sockets.tls_connection_options_copy(conn)
     @test conn_copy.server_name == conn.server_name
@@ -605,6 +606,82 @@ end
     end
 
     close(elg)
+end
+
+@testset "TLS secure transport minimum version mapping helpers" begin
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.SSLv3) == Sockets._kSSLProtocol3
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1) == Sockets._kTLSProtocol1
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1_1) == Sockets._kTLSProtocol12
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1_2) == Sockets._kTLSProtocol12
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLS_VER_SYS_DEFAULTS) == Sockets._kSSLProtocolUnknown
+
+    try
+        Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1_3)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_IO_TLS_CTX_ERROR
+    end
+end
+
+@testset "TLS secure channel protocol helpers" begin
+    client_tls12 = Sockets._secure_channel_get_disabled_protocols(Sockets.TlsVersion.TLSv1_2, true, false)
+    @test (client_tls12 & Sockets._SECPROT_TLS1_2_CLIENT) == 0
+    @test (client_tls12 & Sockets._SECPROT_TLS1_1_CLIENT) != 0
+    @test (client_tls12 & Sockets._SECPROT_TLS1_0_CLIENT) != 0
+    @test (client_tls12 & Sockets._SECPROT_SSL3_CLIENT) != 0
+    @test (client_tls12 & Sockets._SECPROT_TLS1_3_CLIENT) == 0
+
+    client_tls13 = Sockets._secure_channel_get_disabled_protocols(Sockets.TlsVersion.TLSv1_3, true, false)
+    @test (client_tls13 & Sockets._SECPROT_TLS1_2_CLIENT) != 0
+    @test (client_tls13 & Sockets._SECPROT_TLS1_1_CLIENT) != 0
+    @test (client_tls13 & Sockets._SECPROT_TLS1_0_CLIENT) != 0
+    @test (client_tls13 & Sockets._SECPROT_SSL3_CLIENT) != 0
+    @test (client_tls13 & Sockets._SECPROT_TLS1_3_CLIENT) == 0
+
+    client_tls12_no13 = Sockets._secure_channel_get_disabled_protocols(Sockets.TlsVersion.TLSv1_2, true, true)
+    @test (client_tls12_no13 & Sockets._SECPROT_TLS1_3_CLIENT) != 0
+
+    server_tls12 = Sockets._secure_channel_get_disabled_protocols(Sockets.TlsVersion.TLSv1_2, false, false)
+    @test (server_tls12 & Sockets._SECPROT_TLS1_2_SERVER) == 0
+    @test (server_tls12 & Sockets._SECPROT_TLS1_1_SERVER) != 0
+    @test (server_tls12 & Sockets._SECPROT_TLS1_0_SERVER) != 0
+    @test (server_tls12 & Sockets._SECPROT_SSL3_SERVER) != 0
+    @test (server_tls12 & Sockets._SECPROT_TLS1_3_SERVER) == 0
+
+    server_tls12_no13 = Sockets._secure_channel_get_disabled_protocols(Sockets.TlsVersion.TLSv1_2, false, true)
+    @test (server_tls12_no13 & Sockets._SECPROT_TLS1_3_SERVER) != 0
+
+    for is_client_mode in (true, false)
+        try
+            Sockets._secure_channel_get_enabled_protocols(Sockets.TlsVersion.TLSv1_3, is_client_mode)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_IO_TLS_VERSION_UNSUPPORTED
+        end
+    end
+end
+
+@testset "TLS secure channel credential selection helpers" begin
+    build_number = Sockets._secure_channel_windows_build_number()
+    @test build_number >= 0
+    !Sys.iswindows() && @test build_number == 0
+
+    expected_default = Sys.iswindows() && build_number >= Sockets._WINDOWS_BUILD_TLS13
+    original_force = Sockets._secure_channel_force_schannel_creds[]
+    try
+        Sockets.windows_force_schannel_creds(false)
+        @test Sockets._secure_channel_can_use_sch_credentials() == expected_default
+
+        Sockets.windows_force_schannel_creds(true)
+        @test !Sockets._secure_channel_can_use_sch_credentials()
+
+        Sockets.windows_force_schannel_creds(false)
+        @test Sockets._secure_channel_can_use_sch_credentials() == expected_default
+    finally
+        Sockets._secure_channel_force_schannel_creds[] = original_force
+    end
 end
 
 @testset "TLS ctx options custom key ops" begin
@@ -2707,14 +2784,18 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         disable_verify_peer = opts -> Sockets.tls_ctx_options_set_verify_peer(opts, false)
 
         set_tls13 = opts -> Sockets.tls_ctx_options_set_minimum_tls_version(opts, Sockets.TlsVersion.TLSv1_3)
+        set_tls12 = opts -> Sockets.tls_ctx_options_set_minimum_tls_version(opts, Sockets.TlsVersion.TLSv1_2)
 
         function override_ca_file(path::AbstractString)
             return opts -> Sockets.tls_ctx_options_override_default_trust_store_from_path(opts; ca_file = path)
         end
 
-        @test _tls_network_connect("www.amazon.com", 443) == Reseau.OP_SUCCESS
+        _test_tls_network_connect_success("www.amazon.com", 443)
         _test_tls_network_connect_success("ecc256.badssl.com", 443)
         _test_tls_network_connect_success("ecc384.badssl.com", 443)
+        _test_tls_network_connect_success("tls-v1-2.badssl.com", 1012)
+        _test_tls_network_connect_success("sha256.badssl.com", 443)
+        _test_tls_network_connect_success("rsa2048.badssl.com", 443)
         # badssl endpoints for sha384/sha512/rsa8192 currently serve expired chains, so
         # we do not treat them as positive connectivity checks across platforms.
 
@@ -2724,6 +2805,23 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         @test _tls_network_connect("untrusted-root.badssl.com", 443) != Reseau.OP_SUCCESS
         @test _tls_network_connect("rc4.badssl.com", 443) != Reseau.OP_SUCCESS
         @test _tls_network_connect("rc4-md5.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh480.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh512.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh1024.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("dh2048.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("null.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("no-subject.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect("no-common-name.badssl.com", 443) != Reseau.OP_SUCCESS
+        @test _tls_network_connect(
+            "tls-v1-0.badssl.com",
+            1010;
+            ctx_options_override = set_tls12,
+        ) != Reseau.OP_SUCCESS
+        @test _tls_network_connect(
+            "tls-v1-1.badssl.com",
+            1011;
+            ctx_options_override = set_tls12,
+        ) != Reseau.OP_SUCCESS
 
         digicert_path = _resource_path("DigiCertGlobalRootCA.crt.pem")
         @test _tls_network_connect(
@@ -2761,6 +2859,21 @@ if get(ENV, "RESEAU_RUN_NETWORK_TESTS", "0") == "1"
         )
         _test_tls_network_connect_success(
             "untrusted-root.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "incomplete-chain.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "no-subject.badssl.com",
+            443;
+            ctx_options_override = disable_verify_peer,
+        )
+        _test_tls_network_connect_success(
+            "no-common-name.badssl.com",
             443;
             ctx_options_override = disable_verify_peer,
         )

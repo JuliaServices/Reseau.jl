@@ -1223,6 +1223,8 @@ end
 function tls_on_negotiation_completed(handler::TlsChannelHandler, error_code::Int)
     handler.stats.handshake_status =
         error_code == OP_SUCCESS ? TlsNegotiationStatus.SUCCESS : TlsNegotiationStatus.FAILURE
+    # Errors are intentionally propagated through this Future and regular channel shutdown,
+    # rather than a separate TLS `on_error` callback.
     notify(handler.tls_negotiation_result, Cint(error_code))
     slot = handler.slot
     slot === nothing && return nothing

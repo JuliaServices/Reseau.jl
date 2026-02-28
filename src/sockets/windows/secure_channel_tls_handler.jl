@@ -60,8 +60,11 @@ const _SECPROT_TLS1_1_SERVER = UInt32(0x00000100)
 const _SECPROT_TLS1_1_CLIENT = UInt32(0x00000200)
 const _SECPROT_TLS1_2_SERVER = UInt32(0x00000400)
 const _SECPROT_TLS1_2_CLIENT = UInt32(0x00000800)
+const _SECPROT_TLS1_3_SERVER = UInt32(0x00001000)
+const _SECPROT_TLS1_3_CLIENT = UInt32(0x00002000)
 
 const _SCHANNEL_CRED_VERSION = UInt32(0x00000004)
+const _SCH_CREDENTIALS_VERSION = UInt32(0x00000005)
 const _SCH_CRED_NO_SERVERNAME_CHECK = UInt32(0x00000004)
 const _SCH_CRED_MANUAL_CRED_VALIDATION = UInt32(0x00000008)
 const _SCH_CRED_NO_DEFAULT_CREDS = UInt32(0x00000010)
@@ -87,6 +90,7 @@ const _USAGE_MATCH_TYPE_OR = UInt32(0x00000001)
 
 const _SEC_APP_PROTO_NEGOTIATION_EXT_ALPN = UInt32(2)
 const _SEC_APP_PROTO_NEGOTIATION_STATUS_SUCCESS = UInt32(1)
+const _WINDOWS_BUILD_TLS13 = 20348
 
 const _CP_UTF8 = UInt32(65001)
 const _MB_ERR_INVALID_CHARS = UInt32(0x00000008)
@@ -102,6 +106,8 @@ const _OID_SGC_NETSCAPE = "2.16.840.1.113730.4.1"
     SERVER_NEGOTIATION_STEP_2 = 4
     APPLICATION_DECRYPT = 5
 end
+
+const _secure_channel_force_schannel_creds = Ref(false)
 
 struct _SecHandle
     dwLower::UInt
@@ -158,6 +164,29 @@ struct _SCHANNEL_CRED
     dwSessionLifespan::UInt32
     dwFlags::UInt32
     dwCredFormat::UInt32
+end
+
+struct _TLS_PARAMETERS
+    cAlpnIds::UInt32
+    rgstrAlpnIds::Ptr{Cstring}
+    grbitDisabledProtocols::UInt32
+    cDisabledCrypto::UInt32
+    pDisabledCrypto::Ptr{Cvoid}
+    dwFlags::UInt32
+end
+
+struct _SCH_CREDENTIALS
+    dwVersion::UInt32
+    dwCredFormat::UInt32
+    cCreds::UInt32
+    paCred::Ptr{Ptr{Cvoid}}
+    hRootStore::Ptr{Cvoid}
+    cMappers::UInt32
+    aphMappers::Ptr{Ptr{Cvoid}}
+    dwSessionLifespan::UInt32
+    dwFlags::UInt32
+    cTlsParameters::UInt32
+    pTlsParameters::Ptr{_TLS_PARAMETERS}
 end
 
 struct _CERT_CONTEXT
@@ -1272,6 +1301,7 @@ function _secure_channel_init()
 end
 
 function _secure_channel_cleanup()
+    _secure_channel_force_schannel_creds[] = false
     return nothing
 end
 
@@ -1379,6 +1409,103 @@ function _secure_channel_get_enabled_protocols(minimum_tls_version::TlsVersion.T
     end
 
     return enabled
+end
+
+function _secure_channel_get_disabled_protocols(
+        minimum_tls_version::TlsVersion.T,
+        is_client_mode::Bool,
+        disable_tls13::Bool,
+    )::UInt32
+    disabled = UInt32(0)
+    if is_client_mode
+        if minimum_tls_version == TlsVersion.TLSv1_3
+            disabled |= _SECPROT_TLS1_2_CLIENT
+            disabled |= _SECPROT_TLS1_1_CLIENT
+            disabled |= _SECPROT_TLS1_0_CLIENT
+            disabled |= _SECPROT_SSL3_CLIENT
+        elseif minimum_tls_version == TlsVersion.TLSv1_2
+            disabled |= _SECPROT_TLS1_1_CLIENT
+            disabled |= _SECPROT_TLS1_0_CLIENT
+            disabled |= _SECPROT_SSL3_CLIENT
+        elseif minimum_tls_version == TlsVersion.TLSv1_1
+            disabled |= _SECPROT_TLS1_0_CLIENT
+            disabled |= _SECPROT_SSL3_CLIENT
+        elseif minimum_tls_version == TlsVersion.TLSv1
+            disabled |= _SECPROT_SSL3_CLIENT
+        elseif minimum_tls_version == TlsVersion.TLS_VER_SYS_DEFAULTS
+            disabled = UInt32(0)
+        end
+        if disable_tls13
+            disabled |= _SECPROT_TLS1_3_CLIENT
+        end
+    else
+        if minimum_tls_version == TlsVersion.TLSv1_3
+            disabled |= _SECPROT_TLS1_2_SERVER
+            disabled |= _SECPROT_TLS1_1_SERVER
+            disabled |= _SECPROT_TLS1_0_SERVER
+            disabled |= _SECPROT_SSL3_SERVER
+        elseif minimum_tls_version == TlsVersion.TLSv1_2
+            disabled |= _SECPROT_TLS1_1_SERVER
+            disabled |= _SECPROT_TLS1_0_SERVER
+            disabled |= _SECPROT_SSL3_SERVER
+        elseif minimum_tls_version == TlsVersion.TLSv1_1
+            disabled |= _SECPROT_TLS1_0_SERVER
+            disabled |= _SECPROT_SSL3_SERVER
+        elseif minimum_tls_version == TlsVersion.TLSv1
+            disabled |= _SECPROT_SSL3_SERVER
+        elseif minimum_tls_version == TlsVersion.TLS_VER_SYS_DEFAULTS
+            disabled = UInt32(0)
+        end
+        if disable_tls13
+            disabled |= _SECPROT_TLS1_3_SERVER
+        end
+    end
+
+    return disabled
+end
+
+function _secure_channel_windows_build_number()::Int
+    @static if !Sys.iswindows()
+        return 0
+    end
+    if !isdefined(Sys, :windows_version)
+        return 0
+    end
+    v = Sys.windows_version()
+    version_component_to_int(component)::Int = if component isa Integer
+        Int(component)
+    elseif component isa Tuple
+        build = 0
+        for value in reverse(component)
+            if value isa Integer
+                build = Int(value)
+                break
+            end
+        end
+        build
+    else
+        0
+    end
+    if hasproperty(v, :build)
+        return version_component_to_int(getproperty(v, :build))
+    elseif hasproperty(v, :patch)
+        return version_component_to_int(getproperty(v, :patch))
+    else
+        return 0
+    end
+end
+
+@inline function _secure_channel_can_use_sch_credentials()::Bool
+    return _secure_channel_windows_build_number() >= _WINDOWS_BUILD_TLS13 && !_secure_channel_force_schannel_creds[]
+end
+
+function windows_force_schannel_creds(use_schannel_creds::Bool)::Nothing
+    @static if Sys.iswindows()
+        _secure_channel_force_schannel_creds[] = use_schannel_creds
+    else
+        _ = use_schannel_creds
+    end
+    return nothing
 end
 
 function _secure_channel_context_new(options::TlsContextOptions)::TlsContext
@@ -1520,43 +1647,86 @@ function _secure_channel_handler_new(
         c_creds = UInt32(1)
     end
 
-    creds_struct = _SCHANNEL_CRED(
-        _SCHANNEL_CRED_VERSION,
-        c_creds,
-        pa_cred,
-        C_NULL,
-        0,
-        C_NULL,
-        0,
-        C_NULL,
-        _secure_channel_get_enabled_protocols(sc_ctx.minimum_tls_version, is_client_mode),
-        0,
-        0,
-        0,
-        sc_ctx.credential_flags,
-        0,
-    )
-
     cred_handle_ref = Ref(_zero_sechandle())
     ts_ref = Ref(_TimeStamp(0, 0))
-    creds_struct_ref = Ref(creds_struct)
-
     cred_use = is_client_mode ? _SECPKG_CRED_OUTBOUND : _SECPKG_CRED_INBOUND
-    status = GC.@preserve creds_struct_ref cert_contexts begin
-        ccall(
-            (:AcquireCredentialsHandleA, _SECUR32_LIB),
-            Int32,
-            (Cstring, Cstring, UInt32, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ref{_CredHandle}, Ref{_TimeStamp}),
-            C_NULL,
-            _UNISP_NAME,
-            cred_use,
-            C_NULL,
-            Base.unsafe_convert(Ptr{Cvoid}, creds_struct_ref),
-            C_NULL,
-            C_NULL,
-            cred_handle_ref,
-            ts_ref,
+    use_sch_credentials = _secure_channel_can_use_sch_credentials()
+    sc_ctx.disable_tls13 = sc_ctx.disable_tls13 || !use_sch_credentials
+    !use_sch_credentials && sc_ctx.minimum_tls_version == TlsVersion.TLSv1_3 &&
+        throw_error(ERROR_IO_TLS_VERSION_UNSUPPORTED)
+
+    status = if use_sch_credentials
+        disabled_protocols = _secure_channel_get_disabled_protocols(
+            sc_ctx.minimum_tls_version,
+            is_client_mode,
+            sc_ctx.disable_tls13,
         )
+        tls_parameters = _TLS_PARAMETERS(0, C_NULL, disabled_protocols, 0, C_NULL, 0)
+        tls_parameters_ref = Ref(tls_parameters)
+        creds_struct = _SCH_CREDENTIALS(
+            _SCH_CREDENTIALS_VERSION,
+            0,
+            c_creds,
+            pa_cred,
+            C_NULL,
+            0,
+            C_NULL,
+            0,
+            sc_ctx.credential_flags,
+            UInt32(1),
+            Base.unsafe_convert(Ptr{_TLS_PARAMETERS}, tls_parameters_ref),
+        )
+        creds_struct_ref = Ref(creds_struct)
+        GC.@preserve creds_struct_ref tls_parameters_ref cert_contexts begin
+            ccall(
+                (:AcquireCredentialsHandleA, _SECUR32_LIB),
+                Int32,
+                (Cstring, Cstring, UInt32, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ref{_CredHandle}, Ref{_TimeStamp}),
+                C_NULL,
+                _UNISP_NAME,
+                cred_use,
+                C_NULL,
+                Base.unsafe_convert(Ptr{Cvoid}, creds_struct_ref),
+                C_NULL,
+                C_NULL,
+                cred_handle_ref,
+                ts_ref,
+            )
+        end
+    else
+        creds_struct = _SCHANNEL_CRED(
+            _SCHANNEL_CRED_VERSION,
+            c_creds,
+            pa_cred,
+            C_NULL,
+            0,
+            C_NULL,
+            0,
+            C_NULL,
+            _secure_channel_get_enabled_protocols(sc_ctx.minimum_tls_version, is_client_mode),
+            0,
+            0,
+            0,
+            sc_ctx.credential_flags,
+            0,
+        )
+        creds_struct_ref = Ref(creds_struct)
+        GC.@preserve creds_struct_ref cert_contexts begin
+            ccall(
+                (:AcquireCredentialsHandleA, _SECUR32_LIB),
+                Int32,
+                (Cstring, Cstring, UInt32, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ref{_CredHandle}, Ref{_TimeStamp}),
+                C_NULL,
+                _UNISP_NAME,
+                cred_use,
+                C_NULL,
+                Base.unsafe_convert(Ptr{Cvoid}, creds_struct_ref),
+                C_NULL,
+                C_NULL,
+                cred_handle_ref,
+                ts_ref,
+            )
+        end
     end
     if status != _SEC_E_OK
         throw_error(_secure_channel_determine_sspi_error(status))

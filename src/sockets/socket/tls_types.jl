@@ -245,6 +245,8 @@ mutable struct TlsConnectionOptions
     server_name::Union{String, Nothing}
     alpn_list::Union{String, Nothing}
     advertise_alpn_message::Bool
+    # Reseau intentionally surfaces negotiation outcome via Future + channel shutdown path
+    # instead of a dedicated `on_error` callback field from aws-c-io's public options.
     tls_negotiation_result::Future{Cint}
     on_data_read::Union{TlsDataReadCallback, Nothing}
     timeout_ms::UInt32
