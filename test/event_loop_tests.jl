@@ -1261,11 +1261,12 @@ end
                             Int(EventLoops.IoEventType.READABLE),
                             EventLoops.EventCallable((events::Int) -> on_b(el, read_b.io_handle, events, nothing)),
                         ) === nothing
-                        Sockets.pipe_write!(write_a, _payload_abc())
-                        Sockets.pipe_write!(write_b, _payload_abc())
                         return nothing
                     end; type_tag = "subscribe_mutating_cb")
                     @test _wait_for_channel(sub_done)
+
+                    Sockets.pipe_write_sync!(write_a, _payload_abc())
+                    Sockets.pipe_write_sync!(write_b, _payload_abc())
 
                     # callback on A should run and may unsubscribe B without breaking the loop.
                     deadline = Base.time_ns() + _EVENT_LOOP_TEST_TIMEOUT_NS
@@ -1425,7 +1426,7 @@ end
                 try
                     close(el)
                 catch err
-                    destroy_threw[] = err isa ErrorException
+                    destroy_threw[] = err isa AssertionError
                 end
                 return nothing
             end); type_tag = "destroy_on_loop")

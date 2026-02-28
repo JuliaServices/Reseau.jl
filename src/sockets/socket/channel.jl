@@ -650,7 +650,7 @@ function Channel(
     finally
         acquired && Base.release(event_loop)
     end
-    if wait_for_setup
+    if wait_for_setup && @atomic event_loop.running
         wait(channel.setup_future)
     end
     return channel
@@ -1249,6 +1249,7 @@ function _channel_shutdown_write_task(
 end
 
 function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.T)
+    _ = status
     tasks = ChannelTask{Channel}[]
     lock(channel.pending_tasks_lock) do
         for (task, _) in channel.pending_tasks
@@ -1271,6 +1272,11 @@ function _channel_shutdown_completion_task(channel::Channel, status::TaskStatus.
 
     if channel.on_shutdown_completed !== nothing
         channel.on_shutdown_completed(channel.shutdown_error_code)
+    end
+
+    if channel.destroy_pending
+        channel.destroy_pending = false
+        channel_destroy!(channel)
     end
 
     return nothing
@@ -1476,9 +1482,11 @@ function _channel_destroy_impl!(channel::Channel)
     end
 
     if channel.channel_state != ChannelState.SHUT_DOWN
+        channel.destroy_pending = true
+        channel_shutdown!(channel, channel.shutdown_error_code)
         logf(
             LogLevel.ERROR, LS_IO_CHANNEL,
-            "Channel id=$(channel.channel_id): destroy called before shutdown complete"
+            "Channel id=$(channel.channel_id): destroy requested before shutdown complete; deferring"
         )
         return nothing
     end

@@ -179,6 +179,7 @@ end
 
 mutable struct EventLoopGroup
     event_loops::Vector{EventLoop}
+    @atomic destroyed::Bool
 end
 
 function EventLoopGroup(; loop_count::Integer = 0, cpu_group::Union{Nothing, Integer} = nothing)
@@ -199,12 +200,20 @@ function EventLoopGroup(; loop_count::Integer = 0, cpu_group::Union{Nothing, Int
     for loop in loops
         run!(loop)
     end
-    return EventLoopGroup(loops)
+    return EventLoopGroup(loops, false)
 end
 
-_close(elg::EventLoopGroup) = foreach(Base.close, elg.event_loops)
+function _close(elg::EventLoopGroup)::Nothing
+    foreach(Base.close, elg.event_loops)
+    return nothing
+end
 
 function Base.close(elg::EventLoopGroup)
+    if @atomic elg.destroyed
+        return nothing
+    end
+    @atomic elg.destroyed = true
+
     # if called from loop thread, schedule a task to close the event loops
     for loop in elg.event_loops
         if event_loop_thread_is_callers_thread(loop)
