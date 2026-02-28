@@ -121,7 +121,7 @@
   - `RESEAU_RUN_TLS_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` (pass: `TLS network tests skipped`, TLS suites pass, `Testing Reseau tests passed`).
   - `RESEAU_RUN_TLS_TESTS=1 RESEAU_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` (pass: `TLS network negotiation (requires network)` and `Testing Reseau tests passed`).
 
-### [ ] ITEM-006 (P1) Open PR and ensure CI passes on all platforms
+### [x] ITEM-006 (P1) Open PR and ensure CI passes on all platforms
 - Description: User requested PR creation and confirmation that all CI platform checks pass.
 - Desired outcome: PR is open against `main`, all required checks complete successfully, and status/report is provided.
 - Affected files: `.github/workflows/*` (only if CI fix required), PR metadata
@@ -142,6 +142,11 @@
 - Completion criteria:
   - PR exists with correct description.
   - CI checks are passing across configured platforms.
+- Verification evidence:
+  - `gh auth status --hostname github.com` (pass: authenticated as `quinnj`).
+  - `git push -u origin codex/kqueue-parity-review` (pass: branch pushed).
+  - `gh pr create --base main --head codex/kqueue-parity-review --title \"Harden kqueue parity and coverage\" --body-file /tmp/reseau-kqueue-pr.md` (pass: PR opened: `https://github.com/JuliaServices/Reseau.jl/pull/49`).
+  - `gh pr checks 49 --watch --interval 30` (pass: `Julia 1.12 - macOS-latest - aarch64 - pull_request`, `Julia 1.12 - ubuntu-latest - x64 - pull_request`, `Julia 1.12 - windows-latest - x64 - pull_request`).
 
 ## Compaction Continuity Block
 ```text
