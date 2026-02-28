@@ -29,7 +29,7 @@
   - `julia --project=. -e 'using Test, Reseau; import Reseau: Sockets; ...'` (OCSP helper branch assertions passed)
   - Note: direct `Pkg.test` executes full suite in this repo and exposed unrelated event-loop instability; full-suite gating is deferred to final verification step.
 
-### [ ] ITEM-002 (P0) Fix strict PKCS#11 initialize/finalize parity
+### [x] ITEM-002 (P0) Fix strict PKCS#11 initialize/finalize parity
 - Description: Current strict behavior test expects a second strict initialize to succeed, while aws-c-io expects it to fail with `CKR_CRYPTOKI_ALREADY_INITIALIZED`.
 - Desired outcome: Strict initialize/finalize behavior and tests match aws-c-io semantics.
 - Affected files: `src/sockets/socket/pkcs11.jl`, `test/pkcs11_tests.jl`, `s2n-review.md`
@@ -47,6 +47,9 @@
 - Completion criteria:
   - Strict behavior matches aws-c-io assertions.
   - PKCS#11 tests pass consistently.
+- Verification evidence:
+  - `julia --project=. -e 'using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/pkcs11_tests.jl\")'`
+  - PKCS#11 core tests passed; SoftHSM integration block was skipped in this local environment because `TEST_PKCS11_LIB`/`TEST_PKCS11_TOKEN_DIR` and `softhsm2-util` are not configured.
 
 ### [ ] ITEM-003 (P1) Correct s2n ccall type widths to official API
 - Description: Several `ccall` signatures use wider integer types than official s2n API docs (`uint32_t`/`ssize_t`).

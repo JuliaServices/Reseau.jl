@@ -632,10 +632,21 @@ end
             )
             lib1 = Sockets.pkcs11_lib_new(opts)
             @test lib1 isa Sockets.Pkcs11Lib
+            err = try
+                Sockets.pkcs11_lib_new(opts)
+                nothing
+            catch e
+                e
+            end
+            @test err isa Reseau.ReseauError
+            if err isa Reseau.ReseauError
+                @test err.code == EventLoops.ERROR_IO_PKCS11_CKR_CRYPTOKI_ALREADY_INITIALIZED
+            end
+            Sockets.pkcs11_lib_release(lib1)
+
             lib2 = Sockets.pkcs11_lib_new(opts)
             @test lib2 isa Sockets.Pkcs11Lib
-            Sockets.pkcs11_lib_release(lib1::Sockets.Pkcs11Lib)
-            Sockets.pkcs11_lib_release(lib2::Sockets.Pkcs11Lib)
+            Sockets.pkcs11_lib_release(lib2)
         finally
             pkcs11_tester_cleanup!(tester)
         end
