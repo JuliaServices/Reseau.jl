@@ -28,6 +28,7 @@
 
     # mswsock.h values (see docs); used with setsockopt(SOL_SOCKET,...)
     const WS_SO_UPDATE_CONNECT_CONTEXT = Cint(0x7010)
+    const WS_SO_UPDATE_ACCEPT_CONTEXT = Cint(0x700B)
 
     # Shutdown directions
     const WS_SD_RECEIVE = Cint(0)
@@ -1059,6 +1060,71 @@
         throw_error(socket_err)
     end
 
+    function _winsock_update_accept_context!(listener::Socket, accepted::Socket)::Nothing
+        listen_handle = Ref{UInt}(_winsock_socket_handle(listener))
+        _ = ccall(
+            (:setsockopt, _WS2_32),
+            Cint,
+            (UInt, Cint, Cint, Ptr{UInt}, Cint),
+            _winsock_socket_handle(accepted),
+            WS_SOL_SOCKET,
+            WS_SO_UPDATE_ACCEPT_CONTEXT,
+            listen_handle,
+            Cint(sizeof(UInt)),
+        )
+        return nothing
+    end
+
+    function _winsock_try_extract_acceptex_remote_endpoint!(impl::WinsockSocket, incoming::Socket)::Bool
+        get_addrs_ptr = winsock_get_acceptexsockaddrs_fn()
+
+        local_addr_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+        local_len = Ref{Cint}(0)
+        remote_addr_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+        remote_len = Ref{Cint}(0)
+
+        GC.@preserve impl.accept_buffer ccall(
+            get_addrs_ptr,
+            Cvoid,
+            (Ptr{Cvoid}, UInt32, UInt32, UInt32, Ptr{Ptr{Cvoid}}, Ptr{Cint}, Ptr{Ptr{Cvoid}}, Ptr{Cint}),
+            pointer(impl.accept_buffer),
+            UInt32(0),
+            UInt32(length(impl.accept_buffer) ÷ 2),
+            UInt32(length(impl.accept_buffer) ÷ 2),
+            local_addr_ptr,
+            local_len,
+            remote_addr_ptr,
+            remote_len,
+        )
+
+        _ = local_addr_ptr
+        _ = local_len
+
+        addr = remote_addr_ptr[]
+        if addr == C_NULL || remote_len[] <= 0
+            return false
+        end
+
+        family = unsafe_load(Ptr{Cushort}(addr)) |> Cint
+        if family == WS_AF_INET
+            port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(Ptr{UInt8}(addr) + 2))))
+            addr_ptr = Ptr{UInt8}(addr) + 4
+            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv4(addr_ptr))
+            incoming.options.domain = SocketDomain.IPV4
+            incoming.remote_endpoint.port = port
+            return true
+        elseif family == WS_AF_INET6
+            port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(Ptr{UInt8}(addr) + 2))))
+            addr_ptr = Ptr{UInt8}(addr) + 8
+            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv6(addr_ptr))
+            incoming.options.domain = SocketDomain.IPV6
+            incoming.remote_endpoint.port = port
+            return true
+        end
+
+        return false
+    end
+
     # =============================================================================
     # Accept
     # =============================================================================
@@ -1105,26 +1171,39 @@
 
         incoming.state = SocketState.CONNECTED
 
-        # Best-effort parse remote endpoint from accept buffer.
-        addr_mem = impl.accept_buffer
-        family = unsafe_load(Ptr{Cushort}(pointer(addr_mem))) |> Cint
-        port = UInt32(0)
-        if family == WS_AF_INET
-            port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
-            addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 4)
-            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv4(addr_ptr))
-            incoming.options.domain = SocketDomain.IPV4
-        elseif family == WS_AF_INET6
-            port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
-            addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 8)
-            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv6(addr_ptr))
-            incoming.options.domain = SocketDomain.IPV6
+        # Parse remote endpoint from AcceptEx buffer using the WinSock helper API.
+        parsed_remote = false
+        try
+            parsed_remote = _winsock_try_extract_acceptex_remote_endpoint!(impl, incoming)
+        catch
+            parsed_remote = false
         end
-        incoming.remote_endpoint.port = port
+
+        if !parsed_remote
+            # Fallback to existing buffer interpretation if helper extraction fails.
+            addr_mem = impl.accept_buffer
+            family = unsafe_load(Ptr{Cushort}(pointer(addr_mem))) |> Cint
+            port = UInt32(0)
+            if family == WS_AF_INET
+                port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
+                addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 4)
+                set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv4(addr_ptr))
+                incoming.options.domain = SocketDomain.IPV4
+            elseif family == WS_AF_INET6
+                port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
+                addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 8)
+                set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv6(addr_ptr))
+                incoming.options.domain = SocketDomain.IPV6
+            end
+            incoming.remote_endpoint.port = port
+        end
 
         # Make accepted socket non-blocking.
         nb = Ref{UInt32}(1)
         _ = ccall((:ioctlsocket, _WS2_32), Cint, (UInt, UInt32, Ptr{UInt32}), _winsock_socket_handle(incoming), FIONBIO, nb)
+
+        # Best-effort update of accepted socket context.
+        _winsock_update_accept_context!(sock, incoming)
 
         try
             _winsock_socket_set_options!(incoming, sock.options)

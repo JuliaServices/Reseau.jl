@@ -816,6 +816,14 @@ end
         @test e isa Reseau.ReseauError
         @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
     end
+
+    try
+        res = Sockets.winsock_get_acceptexsockaddrs_fn()
+        @test res isa Ptr
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+    end
 end
 
 @testset "socket nonblocking cloexec" begin
