@@ -421,8 +421,8 @@
                     cb = op.on_completion
                     cb === nothing && continue
 
-                    # `Internal` carries an NTSTATUS-style status code (0 on success).
-                    status_code = _iocp_normalize_status_code(entry.Internal)
+                    # OVERLAPPED_ENTRY.Internal is reserved; get per-op status from OVERLAPPED.Internal.
+                    status_code = _iocp_normalize_status_code(hdr.overlapped.Internal)
                     bytes = Csize_t(entry.dwNumberOfBytesTransferred)
                     try
                         cb(event_loop, op, status_code, bytes)
