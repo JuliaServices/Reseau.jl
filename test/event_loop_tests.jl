@@ -94,6 +94,39 @@ end
         end
     end
 
+    @testset "Epoll fd cloexec flag" begin
+        if Sys.islinux()
+            el = EventLoops.EventLoop()
+            try
+                epoll_fd = getfield(getfield(el, :impl), :epoll_fd)
+                fd_flags = Reseau._fcntl(Cint(epoll_fd), Sockets.F_GETFD)
+                @test fd_flags != -1
+                @test (fd_flags & Sockets.FD_CLOEXEC) != 0
+            finally
+                close(el)
+            end
+        else
+            @test true
+        end
+    end
+
+    @testset "Epoll backend creation contract" begin
+        if Sys.islinux()
+            el = EventLoops.EventLoop()
+            try
+                impl = getfield(el, :impl)
+                @test hasfield(typeof(impl), :epoll_fd)
+                @test hasfield(typeof(impl), :use_eventfd)
+                @test getfield(impl, :epoll_fd) >= 0
+                @test getfield(impl, :use_eventfd) isa Bool
+            finally
+                close(el)
+            end
+        else
+            @test true
+        end
+    end
+
     @testset "Event loop scheduling" begin
         el = EventLoops.EventLoop()
 
@@ -1531,6 +1564,73 @@ end
         end
     end
 
+    @testset "Event loop serialized ordering under dual-producer contention" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            @test EventLoops.run!(el) === nothing
+
+            submission_order = Int[]
+            submission_lock = ReentrantLock()
+            execution_order = Int[]
+            execution_lock = ReentrantLock()
+            done_ch = Channel{Nothing}(1)
+
+            producer_count = 2
+            tasks_per_producer = 64
+            total = producer_count * tasks_per_producer
+
+            producers = Vector{Task}(undef, producer_count)
+            try
+                for producer in 1:producer_count
+                    producers[producer] = errormonitor(Threads.@spawn begin
+                        for i in 1:tasks_per_producer
+                            task_id = (producer * 10_000) + i
+                            task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                                if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                                    return nothing
+                                end
+                                local count
+                                Base.lock(execution_lock) do
+                                    push!(execution_order, task_id)
+                                    count = length(execution_order)
+                                end
+                                if count == total
+                                    put!(done_ch, nothing)
+                                end
+                                return nothing
+                            end); type_tag = "serialized_dual_producer")
+                            Base.lock(submission_lock) do
+                                push!(submission_order, task_id)
+                                EventLoops.schedule_task_now_serialized!(el, task)
+                            end
+                        end
+                    end)
+                end
+
+                for producer in producers
+                    wait(producer)
+                end
+
+                deadline = Base.time_ns() + 5_000_000_000
+                while !isready(done_ch) && Base.time_ns() < deadline
+                    yield()
+                end
+
+                @test isready(done_ch)
+                isready(done_ch) && take!(done_ch)
+                Base.lock(execution_lock) do
+                    @test length(execution_order) == total
+                    @test execution_order == submission_order
+                end
+            finally
+                close(el)
+            end
+        end
+    end
+
     @testset "Event loop cancel task" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
@@ -1584,9 +1684,9 @@ end
             run_res = EventLoops.run!(el)
             @test run_res === nothing
 
-            status_ch = Channel{Reseau.TaskStatus.T}(1)
+            status_ch = Channel{Tuple{Reseau.TaskStatus.T, Bool}}(1)
             future_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                put!(status_ch, Reseau.TaskStatus.T(status))
+                put!(status_ch, (Reseau.TaskStatus.T(status), EventLoops.event_loop_thread_is_callers_thread(el)))
                 return nothing
             end); type_tag = "future_task_destroy")
 
@@ -1596,8 +1696,9 @@ end
 
             @test isready(status_ch)
             if isready(status_ch)
-                status = take!(status_ch)
+                status, thread_ok = take!(status_ch)
                 @test status == Reseau.TaskStatus.CANCELED
+                @test thread_ok
             end
         end
     end
@@ -1686,6 +1787,43 @@ end
             @test el_count == cpu_count
         finally
             close(elg)
+        end
+    end
+
+    @testset "Event loop wait_for_stop_completion is thread-guarded" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            @test EventLoops.run!(el) === nothing
+
+            result_ch = Channel{Any}(1)
+            task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                    put!(result_ch, :not_ready)
+                    return nothing
+                end
+                try
+                    EventLoops.wait_for_stop_completion(el)
+                    put!(result_ch, :unexpected_success)
+                catch e
+                    put!(result_ch, e)
+                end
+                return nothing
+            end); type_tag = "event_loop_wait_for_stop_completion_guard")
+            EventLoops.schedule_task_now!(el, task)
+
+            @test _wait_for_channel(result_ch)
+            if isready(result_ch)
+                result = take!(result_ch)
+                @test result isa Reseau.ReseauError
+                if result isa Reseau.ReseauError
+                    @test result.code == EventLoops.ERROR_INVALID_STATE
+                end
+            end
+
+            close(el)
         end
     end
 

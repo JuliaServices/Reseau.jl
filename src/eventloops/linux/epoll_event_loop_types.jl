@@ -10,6 +10,7 @@
     const EPOLLHUP = UInt32(0x0010)
     const EPOLLERR = UInt32(0x0008)
     const EPOLLET = UInt32(1 << 31)  # Edge-triggered
+    const EPOLL_CLOEXEC = Cint(0o2000000)
 
     const EPOLL_CTL_ADD = Cint(1)
     const EPOLL_CTL_DEL = Cint(2)
@@ -62,6 +63,11 @@
     end
 
     # fcntl flags (Linux)
+    const F_GETFD = Cint(1)
+    const F_SETFD = Cint(2)
+    const F_GETFL = Cint(3)
+    const F_SETFL = Cint(4)
+    const FD_CLOEXEC = Cint(0x0001)
     const O_NONBLOCK = Cint(0x0800)
     const O_CLOEXEC = Cint(0o2000000)
 
