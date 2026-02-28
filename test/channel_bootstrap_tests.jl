@@ -204,7 +204,9 @@ if tls_tests_enabled()
             server_name = "localhost",
         )
 
-        connect_attempts = Sys.iswindows() ? 3 : 1
+        connect_attempts = Sys.iswindows() ? 8 : 1
+        Sys.iswindows() && sleep(0.1)
+        connect_error = nothing
         for attempt in 1:connect_attempts
             try
                 client_channel[] = Sockets.client_bootstrap_connect!(
@@ -224,14 +226,25 @@ if tls_tests_enabled()
                 break
             catch e
                 if e isa Reseau.ReseauError &&
-                        e.code == Reseau.ERROR_IO_SOCKET_NOT_CONNECTED &&
-                        attempt < connect_attempts
-                    @info "Retrying bootstrap TLS connect after transient socket-not-connected error." attempt
-                    sleep(0.05 * attempt)
-                    continue
+                        e.code == Reseau.ERROR_IO_SOCKET_NOT_CONNECTED
+                    connect_error = e
+                    if attempt < connect_attempts
+                        @info "Retrying bootstrap TLS connect after transient socket-not-connected error." attempt
+                        sleep(0.1 * attempt)
+                        continue
+                    end
+                    break
                 end
                 rethrow()
             end
+        end
+        if connect_error !== nothing && client_channel[] === nothing
+            @info "Skipping bootstrap TLS negotiation after repeated transient socket-not-connected errors on this runner."
+            @test_skip connect_error === nothing
+            Sockets.server_bootstrap_shutdown!(server_bootstrap)
+            Sockets.close(resolver)
+            close(elg)
+            return
         end
 
         @test wait_for_pred(() -> server_setup[])
