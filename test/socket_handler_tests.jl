@@ -261,6 +261,158 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     close(elg)
 end
 
+@testset "socket handler data over multiple frames" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    event_loop = EventLoops.get_next_event_loop()
+    @test event_loop !== nothing
+    if event_loop === nothing
+        close(elg)
+        return
+    end
+
+    @static if Sys.isapple()
+        opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    else
+        opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    end
+    server = Sockets.socket_init(opts)
+    @test server isa Sockets.Socket
+
+    @static if Sys.isapple()
+        bind_endpoint = Sockets.SocketEndpoint()
+        Sockets.socket_endpoint_init_local_address_for_test!(bind_endpoint)
+        connect_endpoint = bind_endpoint
+    else
+        bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
+    end
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
+    @test Sockets.socket_listen(server, 8) === nothing
+    @static if !Sys.isapple()
+        bound = Sockets.socket_get_bound_address(server)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? bound.port : 0
+        @test port > 0
+        connect_endpoint = Sockets.SocketEndpoint("127.0.0.1", port)
+    end
+
+    accept_done = Ref(false)
+    accept_err = Ref(0)
+    accepted_socket = Ref{Any}(nothing)
+    channel_ref = Ref{Any}(nothing)
+    app_handler_ref = Ref{Any}(nothing)
+
+    on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+        accept_err[] = err
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
+            accept_done[] = true
+            return nothing
+        end
+        Sockets.socket_assign_to_event_loop(new_sock, event_loop)
+        channel = Sockets.Channel(event_loop, nothing; enable_read_back_pressure = true)
+        handler = try
+            Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 1024)
+        catch
+            accept_done[] = true
+            return nothing
+        end
+        app_handler = TestReadHandler(1024; auto_increment = true)
+        app_slot = Sockets.channel_slot_new!(channel)
+        if Sockets.channel_first_slot(channel) !== app_slot
+            Sockets.channel_slot_insert_end!(channel, app_slot)
+        end
+        Sockets.channel_slot_set_handler!(app_slot, app_handler)
+        app_handler.slot = app_slot
+        Sockets.channel_setup_complete!(channel)
+        app_slot.window_size = Csize_t(1024)
+        accepted_socket[] = new_sock
+        channel_ref[] = channel
+        app_handler_ref[] = app_handler
+        _ = handler
+        accept_done[] = true
+        return nothing
+    end)
+
+    @test Sockets.socket_start_accept(server, event_loop; on_accept_result = on_accept) === nothing
+
+    client = Sockets.socket_init(opts)
+    @test client isa Sockets.Socket
+    if !(client isa Sockets.Socket)
+        close(elg)
+        return
+    end
+
+    connect_done = Ref(false)
+    connect_err = Ref(0)
+    @test Sockets.socket_connect(
+        client;
+        remote_endpoint = connect_endpoint,
+        event_loop = event_loop,
+        on_connection_result = Reseau.EventCallable(err -> begin
+            connect_err[] = err
+            connect_done[] = true
+            return nothing
+        end),
+    ) === nothing
+    @test wait_for(() -> connect_done[] && accept_done[])
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
+
+    payload = repeat("0123456789abcdef", 4096)
+    payload_len = ncodeunits(payload)
+    write_done = Ref(false)
+    write_err = Ref(0)
+    write_bytes = Ref(0)
+
+    write_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+        try
+            Sockets.socket_write(client, Reseau.ByteCursor(payload), Reseau.WriteCallable((err, num_bytes) -> begin
+                write_err[] = err
+                write_bytes[] = Int(num_bytes)
+                write_done[] = true
+                return nothing
+            end))
+        catch e
+            write_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
+            write_done[] = true
+        end
+        return nothing
+    end); type_tag = "socket_handler_large_write")
+    EventLoops.schedule_task_now!(event_loop, write_task)
+
+    @test wait_for(() -> write_done[]; timeout_s = 20.0)
+    @test write_err[] == Reseau.OP_SUCCESS
+    @test write_bytes[] == payload_len
+
+    channel = channel_ref[]
+    app_handler = app_handler_ref[]
+    @test channel isa Sockets.Channel
+    @test app_handler isa TestReadHandler
+    if channel isa Sockets.Channel
+        trigger_done = Ref(false)
+        trigger_task = Sockets.ChannelTask(Reseau.EventCallable(status -> begin
+            Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+            Sockets.channel_trigger_read(channel)
+            trigger_done[] = true
+            return nothing
+        end), "socket_handler_large_trigger")
+        Sockets.channel_schedule_task_now!(channel, trigger_task)
+        @test wait_for(() -> trigger_done[]; timeout_s = 5.0)
+    end
+    if app_handler isa TestReadHandler
+        @test wait_for(() -> _received_len(app_handler) == payload_len; timeout_s = 20.0)
+        @test _received_string(app_handler) == payload
+    end
+
+    if accepted_socket[] isa Sockets.Socket
+        Sockets.socket_close(accepted_socket[])
+    end
+    Sockets.socket_close(client)
+    Sockets.socket_close(server)
+    close(elg)
+end
+
 @testset "socket handler write completion" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.get_next_event_loop()

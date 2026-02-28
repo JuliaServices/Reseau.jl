@@ -85,7 +85,7 @@
 - Verification evidence:
   - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_handler_tests.jl")'` passed.
 
-### [ ] ITEM-005 (P1) Add large multi-frame socket-handler backpressure regression
+### [x] ITEM-005 (P1) Add large multi-frame socket-handler backpressure regression
 - Description: aws-c-io tests large multi-frame payload behavior; Reseau currently has smaller payload/backpressure cases only.
 - Desired outcome: Large fragmented payload read/write + backpressure behavior is covered in socket handler tests.
 - Affected files: `test/socket_handler_tests.jl`
@@ -100,6 +100,8 @@
   - Resource-heavy test may increase runtime; keep payload large enough for regression value but not excessive.
 - Completion criteria:
   - Multi-frame large payload path is tested and passing.
+- Verification evidence:
+  - `julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); atexit(cleanup_test_sockets!); include("test/socket_handler_tests.jl")'` passed.
 
 ### [ ] ITEM-006 (P1) Add pinned event-loop callback-affinity regressions
 - Description: aws-c-io includes pinned event-loop and DNS-failure callback-thread regressions; Reseau only has partial bootstrap mismatch checks.
