@@ -55,7 +55,7 @@
 - Verification evidence:
   - 2026-02-28: `JULIA_NUM_THREADS=1 RESEAU_RUN_TLS_TESTS=1 julia --project=. -e 'using Test, Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/test_utils.jl\"); cleanup_test_sockets!(); setup_test_keychain!(); function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0); start = Base.time_ns(); timeout_ns = Int(timeout_s * 1_000_000_000); while (Base.time_ns() - start) < timeout_ns; pred() && return true; sleep(0.01); end; return false; end; try include(\"test/tls_tests.jl\") finally cleanup_test_keychain!(); cleanup_test_sockets!() end'` passed.
 
-### [ ] ITEM-003 (P1) Close key SecureTransport parity-test gaps identified in review
+### [x] ITEM-003 (P1) Close key SecureTransport parity-test gaps identified in review
 - Description: Current tests miss some actionable parity checks (unknown NW TLS error fallback and selected Apple PKI negative paths).
 - Desired outcome: Add deterministic regression tests for these gaps so future regressions are caught.
 - Affected files: `test/tls_tests_impl.jl`, `test/pki_utils_tests.jl`
@@ -67,10 +67,15 @@
   - `RESEAU_RUN_TLS_TESTS=1 julia --project=. test/tls_tests.jl`
 - Assumptions:
   - These negative-path tests are stable across local macOS environments when TLS tests are enabled.
+- Execution notes (2026-02-28):
+  - Add only deterministic negative-path checks that do not rely on external network state.
 - Risks:
   - Keychain/path behavior can vary by host policy; tests may need robust assertions around error-type rather than exact status.
 - Completion criteria:
   - New regression tests are present and passing.
+- Verification evidence:
+  - 2026-02-28: `RESEAU_RUN_TLS_TESTS=1 julia --project=. -e 'using Test, Reseau; import Reseau: EventLoops, Sockets; include(\"test/test_utils.jl\"); setup_test_keychain!(); try include(\"test/pki_utils_tests.jl\") finally cleanup_test_keychain!() end'` passed.
+  - 2026-02-28: `JULIA_NUM_THREADS=1 RESEAU_RUN_TLS_TESTS=1 julia --project=. -e 'using Test, Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/test_utils.jl\"); cleanup_test_sockets!(); setup_test_keychain!(); function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0); start = Base.time_ns(); timeout_ns = Int(timeout_s * 1_000_000_000); while (Base.time_ns() - start) < timeout_ns; pred() && return true; sleep(0.01); end; return false; end; try include(\"test/tls_tests.jl\") finally cleanup_test_keychain!(); cleanup_test_sockets!() end'` passed.
 
 ### [ ] ITEM-004 (P0) Full validation, PR open, and CI pass on all platforms
 - Description: After implementing all fixes, run full validation, open a PR, and ensure CI platform checks are green.
