@@ -1472,10 +1472,24 @@ function _secure_channel_windows_build_number()::Int
         return 0
     end
     v = Sys.windows_version()
+    version_component_to_int(component)::Int = if component isa Integer
+        Int(component)
+    elseif component isa Tuple
+        build = 0
+        for value in reverse(component)
+            if value isa Integer
+                build = Int(value)
+                break
+            end
+        end
+        build
+    else
+        0
+    end
     if hasproperty(v, :build)
-        return Int(getproperty(v, :build))
+        return version_component_to_int(getproperty(v, :build))
     elseif hasproperty(v, :patch)
-        return Int(getproperty(v, :patch))
+        return version_component_to_int(getproperty(v, :patch))
     else
         return 0
     end
