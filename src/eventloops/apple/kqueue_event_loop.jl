@@ -569,12 +569,8 @@
     end
 
     function kqueue_unsubscribe_task_callback(handle_data::KqueueHandleData{KqueueEventLoop}, status::TaskStatus.T)
-        if status == TaskStatus.CANCELED
-            return nothing
-        end
-
         impl = handle_data.event_loop
-        if handle_data.connected
+        if status != TaskStatus.CANCELED && handle_data.connected
             changelist = impl.unsubscribe_changelist
             empty!(changelist)
 

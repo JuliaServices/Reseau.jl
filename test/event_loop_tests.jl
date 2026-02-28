@@ -2168,6 +2168,44 @@ end
         end
     end
 
+    @testset "Kqueue canceled unsubscribe still runs cleanup" begin
+        if !Sys.isapple()
+            @test true
+        else
+            el = EventLoops.EventLoop()
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+
+                impl = el.impl
+                handle_data = EventLoops.KqueueHandleData(
+                    read_end.io_handle,
+                    impl,
+                    EventLoops.EventCallable(err -> nothing),
+                    Int(EventLoops.IoEventType.READABLE),
+                )
+
+                key = pointer_from_objref(handle_data)
+                handle_data.registry_key = key
+                impl.handle_registry[key] = handle_data
+                handle_data.connected = true
+                impl.thread_data.connected_handle_count = 1
+
+                EventLoops.kqueue_unsubscribe_task_callback(handle_data, Reseau.TaskStatus.CANCELED)
+
+                @test !handle_data.connected
+                @test impl.thread_data.connected_handle_count == 0
+                @test handle_data.registry_key == C_NULL
+                @test !haskey(impl.handle_registry, key)
+            finally
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
     @testset "IOCP OVERLAPPED_ENTRY layout" begin
         if !Sys.iswindows()
             @test true
