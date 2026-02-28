@@ -97,6 +97,8 @@ struct PollFd
     revents::Cshort
 end
 
+const NfdsT = @static (Sys.isapple() || Sys.isbsd()) ? Cuint : Culong
+
 # Shutdown directions
 const SHUT_RD = Cint(0)
 const SHUT_WR = Cint(1)
@@ -810,6 +812,8 @@ function socket_connect_impl(
         throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
     end
 
+    event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
+
     if sock.options.type != SocketType.DGRAM
         if sock.state != SocketState.INIT
             throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
@@ -988,7 +992,7 @@ end
 
 function _is_socket_connect_ready_for_completion(fd::Integer)::Bool
     pollfd_ref = Ref(PollFd(Cint(fd), _POLLIN | _POLLOUT, Cshort(0)))
-    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), pollfd_ref, Culong(1), Cint(0))
+    rc = ccall(:poll, Cint, (Ptr{PollFd}, NfdsT, Cint), pollfd_ref, NfdsT(1), Cint(0))
     if rc <= 0
         return false
     end
@@ -1004,7 +1008,7 @@ end
 
 function _is_socket_readable_now(fd::Integer)::Bool
     pollfd_ref = Ref(PollFd(Cint(fd), _POLLIN, Cshort(0)))
-    rc = ccall(:poll, Cint, (Ptr{PollFd}, Culong, Cint), pollfd_ref, Culong(1), Cint(0))
+    rc = ccall(:poll, Cint, (Ptr{PollFd}, NfdsT, Cint), pollfd_ref, NfdsT(1), Cint(0))
     if rc <= 0
         # Some kernels/edge-triggered paths can transiently clear pollable events,
         # so try a non-consuming readability probe before declaring not readable.
@@ -1169,7 +1173,12 @@ function _on_connection_success(sock::Socket)
     logf(LogLevel.INFO, LS_IO_SOCKET, "Socket fd=$fd: connection success")
 
     # Update local endpoint
-    _update_local_endpoint!(sock)
+    try
+        _update_local_endpoint!(sock)
+    catch
+        _on_connection_error(sock, last_error())
+        return nothing
+    end
 
     sock.state = socket_state_mask(SocketState.CONNECTED_READ, SocketState.CONNECTED_WRITE)
 
@@ -1383,7 +1392,10 @@ function _update_local_endpoint!(sock::Socket)
     )
 
     if result != 0
-        return
+        errno_val = get_errno()
+        socket_error = determine_socket_error(errno_val)
+        logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: getsockname failed with errno=$errno_val")
+        throw_error(socket_error)
     end
 
     # Parse family (macOS sockaddr has length in first byte)
@@ -1424,10 +1436,12 @@ function _update_local_endpoint!(sock::Socket)
             vm_addr = GC.@preserve address unsafe_load(Ptr{SockAddrVM}(pointer(address)))
             set_address!(sock.local_endpoint, string(vm_addr.svm_cid))
             sock.local_endpoint.port = UInt32(vm_addr.svm_port)
+            return nothing
         end
     end
 
-    return nothing
+    logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: unsupported address family $family from getsockname")
+    throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
 end
 
 # POSIX impl - bind
@@ -1532,7 +1546,12 @@ function socket_bind_impl(
         throw_error(socket_error)
     end
 
-    _update_local_endpoint!(sock)
+    try
+        _update_local_endpoint!(sock)
+    catch
+        sock.state = SocketState.ERROR
+        rethrow()
+    end
 
     if sock.options.type == SocketType.STREAM
         sock.state = SocketState.BOUND
@@ -2106,6 +2125,8 @@ function socket_start_accept_impl(
     )::Nothing
     _ = event_loop_group
     fd = sock.io_handle.fd
+
+    on_accept_result === nothing && throw_error(ERROR_INVALID_ARGUMENT)
 
     if sock.event_loop !== nothing
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: already assigned to event loop")

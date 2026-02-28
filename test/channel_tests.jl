@@ -9,6 +9,79 @@ function _wait_ready_channel(ch::Channel; timeout_ns::Int = 2_000_000_000)
     return isready(ch)
 end
 
+function _wait_for_pred(pred::Function; timeout_ns::Int = 2_000_000_000)
+    deadline = Base.time_ns() + timeout_ns
+    while Base.time_ns() < deadline
+        pred() && return true
+        yield()
+    end
+    return pred()
+end
+
+function _wait_for_task(task::Task; timeout_ns::Int = 2_000_000_000)
+    return _wait_for_pred(() -> istaskdone(task); timeout_ns = timeout_ns)
+end
+
+mutable struct TestDelayedDestroyHandler
+    slot::Union{Sockets.ChannelSlot, Nothing}
+    destroy_entered::Channel{Bool}
+    release_destroy::Channel{Bool}
+end
+
+function Sockets.handler_process_read_message(
+        ::TestDelayedDestroyHandler,
+        ::Sockets.ChannelSlot,
+        _message,
+    )::Nothing
+    return nothing
+end
+
+function Sockets.handler_process_write_message(
+        ::TestDelayedDestroyHandler,
+        ::Sockets.ChannelSlot,
+        _message::Sockets.IoMessage,
+    )::Nothing
+    return nothing
+end
+
+function Sockets.handler_increment_read_window(
+        ::TestDelayedDestroyHandler,
+        ::Sockets.ChannelSlot,
+        ::Csize_t,
+    )::Nothing
+    return nothing
+end
+
+function Sockets.handler_shutdown(
+        ::TestDelayedDestroyHandler,
+        slot::Sockets.ChannelSlot,
+        direction::Sockets.ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    Sockets.channel_slot_on_handler_shutdown_complete!(
+        slot,
+        direction,
+        error_code,
+        free_scarce_resources_immediately,
+    )
+    return nothing
+end
+
+Sockets.handler_initial_window_size(::TestDelayedDestroyHandler)::Csize_t = typemax(Csize_t)
+Sockets.handler_message_overhead(::TestDelayedDestroyHandler)::Csize_t = Csize_t(0)
+
+function Sockets.handler_destroy(handler::TestDelayedDestroyHandler)::Nothing
+    put!(handler.destroy_entered, true)
+    take!(handler.release_destroy)
+    return nothing
+end
+
+function Sockets.setchannelslot!(handler::TestDelayedDestroyHandler, slot::Sockets.ChannelSlot)::Nothing
+    handler.slot = slot
+    return nothing
+end
+
 function _setup_channel(; with_shutdown_cb::Bool = false)
     el = EventLoops.EventLoop()
     EventLoops.run!(el)
@@ -82,6 +155,76 @@ end
             close(el)
         end
 
+        @testset "channel delayed destroy cleanup completes once handler is released" begin
+            setup = _setup_channel(with_shutdown_cb = true)
+            el = setup.el
+            channel = setup.channel
+            shutdown_ch = setup.shutdown_ch
+
+            destroy_entered = Channel{Bool}(1)
+            release_destroy = Channel{Bool}(1)
+            handler = TestDelayedDestroyHandler(nothing, destroy_entered, release_destroy)
+
+            slot = Sockets.channel_slot_new!(channel)
+            Sockets.channel_slot_set_handler!(slot, handler)
+
+            Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
+            @test _wait_ready_channel(shutdown_ch)
+
+            Sockets.channel_destroy!(channel)
+            @test _wait_ready_channel(destroy_entered)
+            @test channel.first !== nothing
+
+            put!(release_destroy, true)
+            @test _wait_for_pred(() -> channel.first === nothing)
+
+            close(el)
+        end
+
+        @testset "channel keeps event loop alive until shutdown" begin
+            elg = EventLoops.EventLoopGroup(; loop_count = 1)
+            loop = elg.event_loops[1]
+
+            setup_ch = Channel{Int}(1)
+            shutdown_ch = Channel{Int}(1)
+            channel = Sockets.Channel(
+                loop,
+                nothing;
+                on_setup_completed = Reseau.ChannelCallable((err, _channel) -> begin
+                    put!(setup_ch, err)
+                    return nothing
+                end),
+                on_shutdown_completed = Reseau.EventCallable(err -> begin
+                    put!(shutdown_ch, err)
+                    return nothing
+                end),
+                auto_setup = true,
+            )
+
+            @test _wait_ready_channel(setup_ch)
+            @test take!(setup_ch) == Reseau.OP_SUCCESS
+
+            close_started = Threads.Atomic{Bool}(false)
+            close_finished = Threads.Atomic{Bool}(false)
+            close_task = errormonitor(Threads.@spawn begin
+                close_started[] = true
+                close(elg)
+                close_finished[] = true
+                return nothing
+            end)
+
+            @test _wait_for_pred(() -> close_started[]; timeout_ns = 1_000_000_000)
+            sleep(0.05)
+            @test !close_finished[]
+
+            Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
+            @test _wait_ready_channel(shutdown_ch)
+            Sockets.channel_destroy!(channel)
+            @test _wait_for_pred(() -> close_finished[]; timeout_ns = 3_000_000_000)
+            @test _wait_for_task(close_task; timeout_ns = 3_000_000_000)
+            istaskdone(close_task) && wait(close_task)
+        end
+
         @testset "destroy before setup completes waits for setup" begin
             el = EventLoops.EventLoop()
 
@@ -114,7 +257,10 @@ end
             end
             @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
 
-            close(el)
+            Sockets.channel_destroy!(channel)
+            close_task = errormonitor(Threads.@spawn close(el))
+            @test _wait_for_task(close_task; timeout_ns = 3_000_000_000)
+            istaskdone(close_task) && wait(close_task)
         end
 
         @testset "setup callback exception does not stall channel setup" begin
@@ -125,6 +271,7 @@ end
                 _ = err
                 Threads.atomic_add!(callback_invocations, 1)
                 error("setup callback boom")
+                return nothing
             end)
 
             channel = Sockets.Channel(
@@ -220,8 +367,10 @@ end
                 Sockets.channel_schedule_task_now!(channel, tasks[3])
                 Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
             end)
-            wait(t1)
-            wait(t2)
+            @test _wait_for_task(t1)
+            @test _wait_for_task(t2)
+            istaskdone(t1) && wait(t1)
+            istaskdone(t2) && wait(t2)
 
             deadline = Base.time_ns() + 2_000_000_000
             results = Dict{Int, Reseau.TaskStatus.T}()
@@ -320,7 +469,10 @@ end
 
             try
                 EventLoops.schedule_task_now!(el, blocker)
-                @test take!(ready_ch)
+                @test _wait_ready_channel(ready_ch)
+                if isready(ready_ch)
+                    @test take!(ready_ch)
+                end
 
                 queued = false
                 lock(channel.cross_thread_tasks_lock) do
@@ -452,8 +604,10 @@ end
             end
             @test ready[] == 2
             go[] = true
-            wait(t1)
-            wait(t2)
+            @test _wait_for_task(t1)
+            @test _wait_for_task(t2)
+            istaskdone(t1) && wait(t1)
+            istaskdone(t2) && wait(t2)
 
             @test _wait_ready_channel(shutdown_ch)
             err = take!(shutdown_ch)

@@ -152,6 +152,205 @@ end
     close(elg)
 end
 
+@testset "client bootstrap pinned event loop callback affinity" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    resolver = Sockets.HostResolver()
+    cfg = _bootstrap_test_config()
+
+    server_setup_called = Ref(false)
+    server_channel = Ref{Any}(nothing)
+    server_bootstrap = Sockets.ServerBootstrap(;
+        event_loop_group = elg,
+        socket_options = cfg.sock_opts,
+        host = cfg.host,
+        port = 0,
+        on_incoming_channel_setup = (err, channel) -> begin
+            server_setup_called[] = err == Reseau.OP_SUCCESS
+            server_channel[] = channel
+            return nothing
+        end,
+    )
+
+    listener = server_bootstrap.listener_socket
+    @test listener !== nothing
+    port = _listener_port(listener, cfg)
+
+    requested_loop = EventLoops.get_next_event_loop(elg)
+    callback_called = Ref(false)
+    callback_error = Ref(-1)
+    callback_channel = Ref{Any}(nothing)
+    callback_on_requested_loop = Ref(false)
+
+    client_channel = Sockets.client_bootstrap_connect!(
+        (err, channel) -> begin
+            callback_called[] = true
+            callback_error[] = err
+            callback_channel[] = channel
+            callback_on_requested_loop[] = EventLoops.event_loop_thread_is_callers_thread(requested_loop)
+            return nothing
+        end,
+        cfg.host,
+        port;
+        socket_options = cfg.sock_opts,
+        requested_event_loop = requested_loop,
+        host_resolution_config = cfg.resolution_config,
+        event_loop_group = elg,
+        host_resolver = resolver,
+    )
+
+    @test callback_called[]
+    @test callback_error[] == Reseau.OP_SUCCESS
+    @test callback_channel[] === client_channel
+    @test callback_on_requested_loop[]
+    @test Sockets.channel_event_loop(client_channel) === requested_loop
+    @test wait_for_pred(() -> server_setup_called[])
+
+    Sockets.channel_shutdown!(client_channel, 0)
+    if server_channel[] !== nothing
+        Sockets.channel_shutdown!(server_channel[], 0)
+    end
+
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.close(resolver)
+    close(elg)
+end
+
+@testset "client bootstrap pinned event loop dns failure callback affinity" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    resolver = Sockets.HostResolver()
+    requested_loop = EventLoops.get_next_event_loop(elg)
+
+    callback_called = Ref(false)
+    callback_error = Ref(Reseau.OP_SUCCESS)
+    callback_channel = Ref{Any}(:unset)
+    callback_on_requested_loop = Ref(false)
+
+    thrown_error_code = Ref(Reseau.OP_SUCCESS)
+    got_throw = Ref(false)
+    try
+        Sockets.client_bootstrap_connect!(
+            (err, channel) -> begin
+                callback_called[] = true
+                callback_error[] = err
+                callback_channel[] = channel
+                callback_on_requested_loop[] = EventLoops.event_loop_thread_is_callers_thread(requested_loop)
+                return nothing
+            end,
+            "notavalid.domain-seriously.uffda",
+            443;
+            socket_options = Sockets.SocketOptions(),
+            requested_event_loop = requested_loop,
+            event_loop_group = elg,
+            host_resolver = resolver,
+        )
+    catch e
+        got_throw[] = true
+        if e isa Reseau.ReseauError
+            thrown_error_code[] = e.code
+        elseif hasproperty(e, :code)
+            thrown_error_code[] = Int(getproperty(e, :code))
+        else
+            rethrow()
+        end
+    end
+
+    @test got_throw[]
+    @test wait_for_pred(() -> callback_called[]; timeout_s = 15.0)
+    @test callback_channel[] === nothing
+    @test callback_error[] != Reseau.OP_SUCCESS
+    @test callback_on_requested_loop[]
+    @test callback_error[] == thrown_error_code[]
+
+    Sockets.close(resolver)
+    close(elg)
+end
+
+@testset "client bootstrap multi-host fallback succeeds after first-attempt failure" begin
+    if !Sys.islinux()
+        @test true
+        return
+    end
+
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    resolver = Sockets.HostResolver()
+
+    listener_cfg = (;
+        host = "127.0.0.1",
+        sock_opts = Sockets.SocketOptions(; domain = Sockets.SocketDomain.IPV4, type = Sockets.SocketType.STREAM),
+        use_port = true,
+    )
+
+    server_setup_called = Ref(false)
+    server_channel = Ref{Any}(nothing)
+    server_bootstrap = Sockets.ServerBootstrap(;
+        event_loop_group = elg,
+        socket_options = listener_cfg.sock_opts,
+        host = listener_cfg.host,
+        port = 0,
+        on_incoming_channel_setup = (err, channel) -> begin
+            server_setup_called[] = err == Reseau.OP_SUCCESS
+            server_channel[] = channel
+            return nothing
+        end,
+    )
+
+    listener = server_bootstrap.listener_socket
+    @test listener !== nothing
+    port = _listener_port(listener, listener_cfg)
+
+    host = "fallback.local.test"
+    resolution_config = Sockets.HostResolutionConfig(;
+        first_address_family_count = 1,
+        connection_attempt_delay_ns = 25_000_000,
+        min_connection_attempt_delay_ns = 25_000_000,
+        resolution_delay_ns = 10_000_000,
+    )
+    now = Reseau.clock_now_ns()
+    entry = Sockets.HostEntry(resolver, host, resolution_config, now)
+    expiry = now + UInt64(10_000_000_000)
+    v6_blackhole = Sockets.HostAddress("2001:db8::1", Sockets.HostAddressType.AAAA, host, expiry)
+    v4_loopback = Sockets.HostAddress("127.0.0.1", Sockets.HostAddressType.A, host, expiry)
+    put!(entry.aaaa_records, v6_blackhole.address, v6_blackhole)
+    put!(entry.a_records, v4_loopback.address, v4_loopback)
+    lock(resolver.lock)
+    try
+        resolver.cache[host] = entry
+    finally
+        unlock(resolver.lock)
+    end
+
+    callback_error = Ref(-1)
+    callback_channel = Ref{Any}(nothing)
+    client_channel = Sockets.client_bootstrap_connect!(
+        (err, channel) -> begin
+            callback_error[] = err
+            callback_channel[] = channel
+            return nothing
+        end,
+        host,
+        port;
+        socket_options = Sockets.SocketOptions(connect_timeout_ms = 250),
+        host_resolution_config = resolution_config,
+        event_loop_group = elg,
+        host_resolver = resolver,
+    )
+
+    @test callback_error[] == Reseau.OP_SUCCESS
+    @test callback_channel[] === client_channel
+    @test wait_for_pred(() -> server_setup_called[])
+    @test Sockets.get_host_address_count(resolver, host; count_type_a = true, count_type_aaaa = false) >= 1
+    @test Sockets.get_host_address_count(resolver, host; count_type_a = false, count_type_aaaa = true) == 0
+
+    Sockets.channel_shutdown!(client_channel, 0)
+    if server_channel[] !== nothing
+        Sockets.channel_shutdown!(server_channel[], 0)
+    end
+
+    Sockets.server_bootstrap_shutdown!(server_bootstrap)
+    Sockets.close(resolver)
+    close(elg)
+end
+
 if tls_tests_enabled()
     @testset "bootstrap tls negotiation" begin
         cert_path = test_resource_path("unittests.crt")

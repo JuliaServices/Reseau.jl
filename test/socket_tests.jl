@@ -212,6 +212,32 @@ end
     end
 end
 
+@testset "socket endpoint address length validation" begin
+    max_len = Int(Sockets.ADDRESS_MAX_LEN)
+    valid_address = repeat("a", max_len - 1)
+    too_long_address = repeat("b", max_len)
+
+    endpoint = Sockets.SocketEndpoint(valid_address, 0)
+    @test endpoint isa Sockets.SocketEndpoint
+    @test Sockets.get_address(endpoint) == valid_address
+
+    try
+        Sockets.SocketEndpoint(too_long_address, 0)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
+
+    try
+        Sockets.SocketEndpoint("abc\0def", 0)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS
+    end
+end
+
 function _mem_from_bytes(bytes::NTuple{16, UInt8})
     mem = Memory{UInt8}(undef, 16)
     for i in 1:16
@@ -837,6 +863,101 @@ end
 	            Sockets.socket_close(sock)
 	        end
 	    end
+end
+
+@testset "posix connect requires event loop" begin
+    if Sys.iswindows()
+        @test true
+        return
+    end
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    sock = Sockets.socket_init(opts)
+    endpoint = Sockets.SocketEndpoint()
+    Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+    try
+        try
+            Sockets.socket_connect(sock; remote_endpoint = endpoint)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_MISSING_EVENT_LOOP
+        end
+    finally
+        Sockets.socket_cleanup!(sock)
+        sock_path = Sockets.get_address(endpoint)
+        if !isempty(sock_path) && ispath(sock_path)
+            rm(sock_path; force = true)
+        end
+    end
+end
+
+@testset "posix start accept requires callback" begin
+    if Sys.iswindows()
+        @test true
+        return
+    end
+
+    el = EventLoops.EventLoop()
+    el_val = el isa EventLoops.EventLoop ? el : nothing
+    @test el_val !== nothing
+    if el_val === nothing
+        return
+    end
+    @test EventLoops.run!(el_val) === nothing
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    server = Sockets.socket_init(opts)
+    endpoint = Sockets.SocketEndpoint()
+    Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+    try
+        @test Sockets.socket_bind(server; local_endpoint = endpoint) === nothing
+        @test Sockets.socket_listen(server, 8) === nothing
+
+        try
+            Sockets.socket_start_accept(server, el_val)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_INVALID_ARGUMENT
+        end
+    finally
+        Sockets.socket_cleanup!(server)
+        close(el_val)
+        sock_path = Sockets.get_address(endpoint)
+        if !isempty(sock_path) && ispath(sock_path)
+            rm(sock_path; force = true)
+        end
+    end
+end
+
+@testset "posix update local endpoint surfaces getsockname failure" begin
+    if Sys.iswindows()
+        @test true
+        return
+    end
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    sock = Sockets.socket_init(opts)
+    @test sock isa Sockets.Socket
+    if !(sock isa Sockets.Socket)
+        return
+    end
+
+    fd = sock.io_handle.fd
+    @test ccall(:close, Cint, (Cint,), fd) == 0
+    try
+        try
+            Sockets._update_local_endpoint!(sock)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_NOT_CONNECTED
+        end
+    finally
+        sock.io_handle.fd = -1
+        Sockets.socket_cleanup!(sock)
+    end
 end
 
 @testset "socket connect read write" begin

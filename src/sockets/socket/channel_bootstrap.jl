@@ -70,6 +70,46 @@ function _select_connection_event_loop(
     throw(ReseauError(ERROR_IO_SOCKET_MISSING_EVENT_LOOP))
 end
 
+@inline function _connection_error_code_from_exception(e)::Int
+    if e isa ReseauError
+        return e.code
+    end
+    if e isa DNSError
+        return Int(e.code)
+    end
+    return ERROR_UNKNOWN
+end
+
+function _dispatch_connection_setup_failure_callback!(
+        callback::ChannelCallable,
+        event_loop::EventLoop,
+        error_code::Int,
+    )::Nothing
+    run_callback = function ()
+        try
+            callback(error_code, nothing)
+        catch
+        end
+        return nothing
+    end
+
+    if !(@atomic event_loop.running) || event_loop_thread_is_callers_thread(event_loop)
+        return run_callback()
+    end
+
+    try
+        schedule_task_now!(event_loop; type_tag = "client_bootstrap_setup_failure_callback") do status
+            _coerce_task_status(status) == TaskStatus.RUN_READY || return nothing
+            run_callback()
+            return nothing
+        end
+    catch
+        run_callback()
+    end
+
+    return nothing
+end
+
 function client_bootstrap_connect!(
     f::F,
     host::AbstractString,
@@ -83,12 +123,11 @@ function client_bootstrap_connect!(
     host_resolver::HostResolver = get_host_resolver(),
 ) where {F}
     host = String(host)
+    event_loop = _select_connection_event_loop(event_loop_group, requested_event_loop)
     host_resolution_config = _normalize_resolution_config(
         host_resolver,
         host_resolution_config,
     )
-    addresses = host_resolver_resolve!(host_resolver, host, host_resolution_config)
-    event_loop = _select_connection_event_loop(event_loop_group, requested_event_loop)
     conn_attempts = ConnectionAttempts(
         event_loop,
         host_resolver,
@@ -100,19 +139,26 @@ function client_bootstrap_connect!(
         enable_read_back_pressure,
     )
     cb = ChannelCallable(f)
+    socket = nothing
     try
+        addresses = host_resolver_resolve!(host_resolver, host, host_resolution_config)
         socket = _schedule_connection_attempts(conn_attempts, addresses)
-        return Channel(
-            event_loop,
-            socket;
-            on_setup_completed = cb,
-            enable_read_back_pressure,
-            tls_connection_options,
-        )
-    catch
+    catch e
         _cancel_connection_attempts(conn_attempts)
+        _dispatch_connection_setup_failure_callback!(
+            cb,
+            event_loop,
+            _connection_error_code_from_exception(e),
+        )
         rethrow()
     end
+    return Channel(
+        event_loop,
+        socket::Socket;
+        on_setup_completed = cb,
+        enable_read_back_pressure,
+        tls_connection_options,
+    )
 end
 
 @inline function _connection_request_has_both_families(addresses::Vector{HostAddress})::Bool

@@ -261,6 +261,158 @@ Sockets.handler_destroy(::TestReadHandler) = nothing
     close(elg)
 end
 
+@testset "socket handler data over multiple frames" begin
+    elg = EventLoops.EventLoopGroup(; loop_count = 1)
+    event_loop = EventLoops.get_next_event_loop()
+    @test event_loop !== nothing
+    if event_loop === nothing
+        close(elg)
+        return
+    end
+
+    @static if Sys.isapple()
+        opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    else
+        opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    end
+    server = Sockets.socket_init(opts)
+    @test server isa Sockets.Socket
+
+    @static if Sys.isapple()
+        bind_endpoint = Sockets.SocketEndpoint()
+        Sockets.socket_endpoint_init_local_address_for_test!(bind_endpoint)
+        connect_endpoint = bind_endpoint
+    else
+        bind_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0)
+    end
+    bind_opts = (; local_endpoint = bind_endpoint)
+    @test Sockets.socket_bind(server; bind_opts...) === nothing
+    @test Sockets.socket_listen(server, 8) === nothing
+    @static if !Sys.isapple()
+        bound = Sockets.socket_get_bound_address(server)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? bound.port : 0
+        @test port > 0
+        connect_endpoint = Sockets.SocketEndpoint("127.0.0.1", port)
+    end
+
+    accept_done = Ref(false)
+    accept_err = Ref(0)
+    accepted_socket = Ref{Any}(nothing)
+    channel_ref = Ref{Any}(nothing)
+    app_handler_ref = Ref{Any}(nothing)
+
+    on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+        accept_err[] = err
+        if err != Reseau.OP_SUCCESS || new_sock === nothing
+            accept_done[] = true
+            return nothing
+        end
+        Sockets.socket_assign_to_event_loop(new_sock, event_loop)
+        channel = Sockets.Channel(event_loop, nothing; enable_read_back_pressure = true)
+        handler = try
+            Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 1024)
+        catch
+            accept_done[] = true
+            return nothing
+        end
+        app_handler = TestReadHandler(1024; auto_increment = true)
+        app_slot = Sockets.channel_slot_new!(channel)
+        if Sockets.channel_first_slot(channel) !== app_slot
+            Sockets.channel_slot_insert_end!(channel, app_slot)
+        end
+        Sockets.channel_slot_set_handler!(app_slot, app_handler)
+        app_handler.slot = app_slot
+        Sockets.channel_setup_complete!(channel)
+        app_slot.window_size = Csize_t(1024)
+        accepted_socket[] = new_sock
+        channel_ref[] = channel
+        app_handler_ref[] = app_handler
+        _ = handler
+        accept_done[] = true
+        return nothing
+    end)
+
+    @test Sockets.socket_start_accept(server, event_loop; on_accept_result = on_accept) === nothing
+
+    client = Sockets.socket_init(opts)
+    @test client isa Sockets.Socket
+    if !(client isa Sockets.Socket)
+        close(elg)
+        return
+    end
+
+    connect_done = Ref(false)
+    connect_err = Ref(0)
+    @test Sockets.socket_connect(
+        client;
+        remote_endpoint = connect_endpoint,
+        event_loop = event_loop,
+        on_connection_result = Reseau.EventCallable(err -> begin
+            connect_err[] = err
+            connect_done[] = true
+            return nothing
+        end),
+    ) === nothing
+    @test wait_for(() -> connect_done[] && accept_done[])
+    @test connect_err[] == Reseau.OP_SUCCESS
+    @test accept_err[] == Reseau.OP_SUCCESS
+
+    payload = repeat("0123456789abcdef", 4096)
+    payload_len = ncodeunits(payload)
+    write_done = Ref(false)
+    write_err = Ref(0)
+    write_bytes = Ref(0)
+
+    write_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+        Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+        try
+            Sockets.socket_write(client, Reseau.ByteCursor(payload), Reseau.WriteCallable((err, num_bytes) -> begin
+                write_err[] = err
+                write_bytes[] = Int(num_bytes)
+                write_done[] = true
+                return nothing
+            end))
+        catch e
+            write_err[] = e isa Reseau.ReseauError ? e.code : Reseau.ERROR_UNKNOWN
+            write_done[] = true
+        end
+        return nothing
+    end); type_tag = "socket_handler_large_write")
+    EventLoops.schedule_task_now!(event_loop, write_task)
+
+    @test wait_for(() -> write_done[]; timeout_s = 20.0)
+    @test write_err[] == Reseau.OP_SUCCESS
+    @test write_bytes[] == payload_len
+
+    channel = channel_ref[]
+    app_handler = app_handler_ref[]
+    @test channel isa Sockets.Channel
+    @test app_handler isa TestReadHandler
+    if channel isa Sockets.Channel
+        trigger_done = Ref(false)
+        trigger_task = Sockets.ChannelTask(Reseau.EventCallable(status -> begin
+            Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+            Sockets.channel_trigger_read(channel)
+            trigger_done[] = true
+            return nothing
+        end), "socket_handler_large_trigger")
+        Sockets.channel_schedule_task_now!(channel, trigger_task)
+        @test wait_for(() -> trigger_done[]; timeout_s = 5.0)
+    end
+    if app_handler isa TestReadHandler
+        @test wait_for(() -> _received_len(app_handler) == payload_len; timeout_s = 20.0)
+        @test _received_string(app_handler) == payload
+    end
+
+    if accepted_socket[] isa Sockets.Socket
+        Sockets.socket_close(accepted_socket[])
+    end
+    Sockets.socket_close(client)
+    Sockets.socket_close(server)
+    close(elg)
+end
+
 @testset "socket handler write completion" begin
     elg = EventLoops.EventLoopGroup(; loop_count = 1)
     event_loop = EventLoops.get_next_event_loop()
@@ -621,4 +773,303 @@ end
         Sockets.socket_close(server)
     end
     close(elg)
+end
+
+mutable struct TestReadToEofHandler
+    slot::Union{Sockets.ChannelSlot, Nothing}
+    received::Vector{UInt8}
+    lock::ReentrantLock
+    shutdown_called::Bool
+    shutdown_error::Int
+end
+
+function TestReadToEofHandler()
+    return TestReadToEofHandler(nothing, UInt8[], ReentrantLock(), false, 0)
+end
+
+function Sockets.handler_process_read_message(handler::TestReadToEofHandler, slot::Sockets.ChannelSlot, message::EventLoops.IoMessage)::Nothing
+    payload = String(Reseau.byte_cursor_from_buf(message.message_data))
+    lock(handler.lock) do
+        append!(handler.received, codeunits(payload))
+    end
+    Sockets.channel_slot_increment_read_window!(slot, message.message_data.len)
+    if Sockets.channel_slot_is_attached(slot)
+        Sockets.channel_release_message_to_pool!(slot.channel, message)
+    end
+    return nothing
+end
+
+function Sockets.handler_process_write_message(handler::TestReadToEofHandler, slot::Sockets.ChannelSlot, message::EventLoops.IoMessage)::Nothing
+    Sockets.channel_slot_send_message(slot, message, Sockets.ChannelDirection.WRITE)
+    return nothing
+end
+
+function Sockets.handler_shutdown(
+        handler::TestReadToEofHandler,
+        slot::Sockets.ChannelSlot,
+        direction::Sockets.ChannelDirection.T,
+        error_code::Int,
+        free_scarce_resources_immediately::Bool,
+    )::Nothing
+    _ = direction
+    lock(handler.lock) do
+        handler.shutdown_called = true
+        handler.shutdown_error = error_code
+    end
+    Sockets.channel_slot_on_handler_shutdown_complete!(slot, Sockets.ChannelDirection.READ, error_code, free_scarce_resources_immediately)
+    return nothing
+end
+
+Sockets.handler_initial_window_size(::TestReadToEofHandler) = Csize_t(1024)
+Sockets.handler_message_overhead(::TestReadToEofHandler) = Csize_t(0)
+Sockets.handler_destroy(::TestReadToEofHandler) = nothing
+
+function _eof_received_string(handler::TestReadToEofHandler)::String
+    return lock(handler.lock) do
+        String(handler.received)
+    end
+end
+
+function _eof_shutdown_state(handler::TestReadToEofHandler)::Tuple{Bool, Int}
+    return lock(handler.lock) do
+        (handler.shutdown_called, handler.shutdown_error)
+    end
+end
+
+@testset "socket handler read to eof after peer hangup" begin
+    if Sys.iswindows()
+        @test true
+        return
+    end
+
+    domains = @static Sys.isapple() ?
+        [Sockets.SocketDomain.LOCAL] :
+        [Sockets.SocketDomain.IPV4, Sockets.SocketDomain.IPV6]
+
+    for domain in domains
+        @testset "domain $(domain)" begin
+            elg = EventLoops.EventLoopGroup(; loop_count = 1)
+            event_loop = EventLoops.get_next_event_loop()
+            @test event_loop !== nothing
+            if event_loop === nothing
+                close(elg)
+                continue
+            end
+
+            opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = domain)
+            server = Sockets.socket_init(opts)
+            @test server isa Sockets.Socket
+            if !(server isa Sockets.Socket)
+                close(elg)
+                continue
+            end
+
+            bind_endpoint = if domain == Sockets.SocketDomain.LOCAL
+                endpoint = Sockets.SocketEndpoint()
+                Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+                endpoint
+            elseif domain == Sockets.SocketDomain.IPV4
+                Sockets.SocketEndpoint("127.0.0.1", 0)
+            else
+                Sockets.SocketEndpoint("::1", 0)
+            end
+            local_sock_path = domain == Sockets.SocketDomain.LOCAL ? Sockets.get_address(bind_endpoint) : ""
+
+            connect_endpoint = bind_endpoint
+            client_socket = nothing
+            accepted_socket = Ref{Any}(nothing)
+            channel_ref = Ref{Any}(nothing)
+            app_handler_ref = Ref{Any}(nothing)
+
+            accept_done = Ref(false)
+            accept_err = Ref(0)
+            connect_done = Ref(false)
+            connect_err = Ref(0)
+            write_done = Ref(false)
+            write_err = Ref(0)
+
+            try
+                try
+                    @test Sockets.socket_bind(server; local_endpoint = bind_endpoint) === nothing
+                    @test Sockets.socket_listen(server, 8) === nothing
+                catch e
+                    if domain == Sockets.SocketDomain.IPV6 && e isa Reseau.ReseauError
+                        @test e.code == EventLoops.ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY ||
+                            e.code == EventLoops.ERROR_IO_SOCKET_INVALID_ADDRESS ||
+                            e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+                        continue
+                    end
+                    rethrow()
+                end
+
+                if domain != Sockets.SocketDomain.LOCAL
+                    bound = Sockets.socket_get_bound_address(server)
+                    @test bound isa Sockets.SocketEndpoint
+                    port = bound isa Sockets.SocketEndpoint ? bound.port : 0
+                    @test port > 0
+                    if domain == Sockets.SocketDomain.IPV4
+                        connect_endpoint = Sockets.SocketEndpoint("127.0.0.1", port)
+                    else
+                        connect_endpoint = Sockets.SocketEndpoint("::1", port)
+                    end
+                end
+
+                on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+                    accept_err[] = err
+                    if err != Reseau.OP_SUCCESS || new_sock === nothing
+                        accept_done[] = true
+                        return nothing
+                    end
+                    try
+                        Sockets.socket_assign_to_event_loop(new_sock, event_loop)
+                        channel = Sockets.Channel(event_loop, nothing; enable_read_back_pressure = false)
+                        Sockets.socket_channel_handler_new!(channel, new_sock; max_read_size = 64)
+                        app_handler = TestReadToEofHandler()
+                        app_slot = Sockets.channel_slot_new!(channel)
+                        if Sockets.channel_first_slot(channel) !== app_slot
+                            Sockets.channel_slot_insert_end!(channel, app_slot)
+                        end
+                        Sockets.channel_slot_set_handler!(app_slot, app_handler)
+                        app_handler.slot = app_slot
+                        Sockets.channel_setup_complete!(channel)
+                        accepted_socket[] = new_sock
+                        channel_ref[] = channel
+                        app_handler_ref[] = app_handler
+                    catch ex
+                        accept_err[] = ex isa Reseau.ReseauError ? ex.code : Reseau.ERROR_UNKNOWN
+                    end
+                    accept_done[] = true
+                    return nothing
+                end)
+
+                @test Sockets.socket_start_accept(server, event_loop; on_accept_result = on_accept) === nothing
+
+                client = Sockets.socket_init(opts)
+                client_socket = client isa Sockets.Socket ? client : nothing
+                @test client_socket !== nothing
+                if client_socket === nothing
+                    continue
+                end
+
+                @test Sockets.socket_connect(
+                    client_socket;
+                    remote_endpoint = connect_endpoint,
+                    event_loop = event_loop,
+                    on_connection_result = Reseau.EventCallable(err -> begin
+                        connect_err[] = err
+                        connect_done[] = true
+                        return nothing
+                    end),
+                ) === nothing
+
+                @test wait_for(() -> connect_done[] && accept_done[])
+                @test connect_err[] == Reseau.OP_SUCCESS
+                @test accept_err[] == Reseau.OP_SUCCESS
+
+                payload = "hangup"
+                write_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                    Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                    try
+                        Sockets.socket_write(
+                            client_socket,
+                            Reseau.ByteCursor(payload),
+                            Reseau.WriteCallable((err, _) -> begin
+                                write_err[] = err
+                                write_done[] = true
+                                return nothing
+                            end),
+                        )
+                    catch ex
+                        write_err[] = ex isa Reseau.ReseauError ? ex.code : Reseau.ERROR_UNKNOWN
+                        write_done[] = true
+                    end
+                    return nothing
+                end); type_tag = "socket_handler_read_to_eof_write")
+                EventLoops.schedule_task_now!(event_loop, write_task)
+
+                @test wait_for(() -> write_done[])
+                @test write_err[] == Reseau.OP_SUCCESS
+
+                channel = channel_ref[]
+                @test channel isa Sockets.Channel
+                if channel isa Sockets.Channel
+                    for _ in 1:20
+                        trigger_done = Ref(false)
+                        trigger_task = Sockets.ChannelTask(Reseau.EventCallable(status -> begin
+                            Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                            Sockets.channel_trigger_read(channel)
+                            trigger_done[] = true
+                            return nothing
+                        end), "socket_handler_read_to_eof_trigger")
+                        Sockets.channel_schedule_task_now!(channel, trigger_task)
+                        @test wait_for(() -> trigger_done[]; timeout_s = 1.0)
+                        handler = app_handler_ref[]
+                        if handler isa TestReadToEofHandler && _eof_received_string(handler) == payload
+                            break
+                        end
+                        sleep(0.01)
+                    end
+                end
+
+                @static if Sys.isapple()
+                    Sockets.socket_close(client_socket)
+                else
+                    # On POSIX, half-close write side first so peer reliably observes
+                    # queued payload before EOF under CI scheduler jitter.
+                    @test Sockets.socket_shutdown_dir(client_socket, Sockets.ChannelDirection.WRITE) === nothing
+                end
+
+                if channel isa Sockets.Channel
+                    for _ in 1:20
+                        trigger_done = Ref(false)
+                        trigger_task = Sockets.ChannelTask(Reseau.EventCallable(status -> begin
+                            Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                            Sockets.channel_trigger_read(channel)
+                            trigger_done[] = true
+                            return nothing
+                        end), "socket_handler_read_to_eof_post_close_trigger")
+                        Sockets.channel_schedule_task_now!(channel, trigger_task)
+                        @test wait_for(() -> trigger_done[]; timeout_s = 1.0)
+
+                        handler = app_handler_ref[]
+                        if handler isa TestReadToEofHandler
+                            shutdown_called, _ = _eof_shutdown_state(handler)
+                            if _eof_received_string(handler) == payload && shutdown_called
+                                break
+                            end
+                        end
+                        sleep(0.01)
+                    end
+                end
+
+                @test wait_for(() -> begin
+                    handler = app_handler_ref[]
+                    handler isa TestReadToEofHandler && _eof_shutdown_state(handler)[1]
+                end)
+
+                handler = app_handler_ref[]
+                @test handler isa TestReadToEofHandler
+                if handler isa TestReadToEofHandler
+                    if domain != Sockets.SocketDomain.LOCAL
+                        @test _eof_received_string(handler) == payload
+                    end
+                    shutdown_called, shutdown_error = _eof_shutdown_state(handler)
+                    @test shutdown_called
+                    @test shutdown_error == EventLoops.ERROR_IO_SOCKET_CLOSED || shutdown_error == Reseau.OP_SUCCESS
+                end
+            finally
+                if client_socket isa Sockets.Socket
+                    Sockets.socket_cleanup!(client_socket)
+                end
+                if accepted_socket[] isa Sockets.Socket
+                    Sockets.socket_cleanup!(accepted_socket[])
+                end
+                Sockets.socket_cleanup!(server)
+                close(elg)
+                if !isempty(local_sock_path) && ispath(local_sock_path)
+                    rm(local_sock_path; force = true)
+                end
+            end
+        end
+    end
 end
