@@ -31,7 +31,7 @@
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/event_loop_tests.jl\")'` (pass: `Event Loops | 66/66`).
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false, test_args=[\"event_loop_tests\"])'` (pass: `Testing Reseau tests passed`).
 
-### [ ] ITEM-002 (P0) Validate kqueue subscribe event masks
+### [x] ITEM-002 (P0) Validate kqueue subscribe event masks
 - Description: kqueue subscribe path currently accepts empty/invalid event masks; aws-c-io expects read/write bits to be present.
 - Desired outcome: kqueue subscribe rejects invalid masks with a deterministic error and has test coverage.
 - Affected files: `src/eventloops/apple/kqueue_event_loop.jl`, `test/event_loop_tests.jl`
@@ -49,6 +49,9 @@
 - Completion criteria:
   - Invalid mask is rejected on kqueue path.
   - New test passes and no regressions in event loop tests.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/event_loop_tests.jl\")'` (pass: `Event Loops | 70/70`).
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false, test_args=[\"event_loop_tests\"])'` (pass: `Testing Reseau tests passed`).
 
 ### [ ] ITEM-003 (P1) Harden kqueue close invariants and add regression tests
 - Description: kqueue close path does not explicitly enforce/sweep active subscription invariants; leaks could be silent if callers close with active subscriptions.

@@ -528,6 +528,8 @@
         if handle.additional_data != C_NULL
             throw_error(ERROR_IO_ALREADY_SUBSCRIBED)
         end
+        valid_io_events = Int(IoEventType.READABLE) | Int(IoEventType.WRITABLE)
+        (events & valid_io_events) == 0 && throw_error(ERROR_INVALID_ARGUMENT)
 
         impl = event_loop.impl::KqueueEventLoop
         handle_data = KqueueHandleData(handle, impl, on_event, events)

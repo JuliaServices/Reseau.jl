@@ -2128,6 +2128,43 @@ end
         end
     end
 
+    @testset "Kqueue subscribe rejects empty event mask" begin
+        if !Sys.isapple()
+            @test true
+        else
+            el = EventLoops.EventLoop()
+
+            read_end = nothing
+            write_end = nothing
+            try
+                read_end, write_end = Sockets.pipe_create()
+
+                err = nothing
+                try
+                    EventLoops.subscribe_to_io_events!(
+                        el,
+                        read_end.io_handle,
+                        0,
+                        EventLoops.EventCallable((events::Int) -> nothing),
+                    )
+                catch e
+                    err = e
+                end
+
+                @test err isa Reseau.ReseauError
+                if err isa Reseau.ReseauError
+                    @test err.code == EventLoops.ERROR_INVALID_ARGUMENT
+                end
+                @test read_end.io_handle.additional_data == C_NULL
+                @test read_end.io_handle.additional_ref === nothing
+            finally
+                close(el)
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
     @testset "Kqueue cleanup task doesn't underflow connected handle count" begin
         if !Sys.isapple()
             @test true
