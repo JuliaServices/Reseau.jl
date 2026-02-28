@@ -94,6 +94,22 @@ end
         end
     end
 
+    @testset "Epoll fd cloexec flag" begin
+        if Sys.islinux()
+            el = EventLoops.EventLoop()
+            try
+                epoll_fd = getfield(getfield(el, :impl), :epoll_fd)
+                fd_flags = Reseau._fcntl(Cint(epoll_fd), Sockets.F_GETFD)
+                @test fd_flags != -1
+                @test (fd_flags & Sockets.FD_CLOEXEC) != 0
+            finally
+                close(el)
+            end
+        else
+            @test true
+        end
+    end
+
     @testset "Event loop scheduling" begin
         el = EventLoops.EventLoop()
 
