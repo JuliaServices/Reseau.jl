@@ -29,7 +29,7 @@
 - Verification evidence:
   - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed (exit code 0).
 
-### [ ] ITEM-002 (P0) Harden event-loop lifecycle safety semantics
+### [x] ITEM-002 (P0) Harden event-loop lifecycle safety semantics
 - Description: Findings identified lifecycle risk areas: no explicit self-thread guard in `wait_for_stop_completion`, and potential unsafe teardown sequencing if stop/wait errors occur.
 - Desired outcome: Lifecycle operations should be robust, explicit, and safe under error/shutdown races, with behavior documented in code paths.
 - Affected files: `src/eventloops/linux/epoll_event_loop.jl`, `test/event_loop_tests.jl`
@@ -46,6 +46,8 @@
   - Lifecycle changes can introduce deadlocks or shutdown flakiness if lock/thread ordering is wrong.
 - Completion criteria:
   - Lifecycle edge-case tests pass and code explicitly guards unsafe usage.
+- Verification evidence:
+  - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed (exit code 0).
 
 ### [ ] ITEM-003 (P1) Close test parity gaps identified in epoll review
 - Description: Review found parity gaps versus aws-c-io coverage depth (e.g., destroy-path cancellation thread affinity, high-contention serialized scheduling, explicit epoll-specific contracts).

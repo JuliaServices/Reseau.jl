@@ -303,6 +303,10 @@
     function wait_for_stop_completion(event_loop::EventLoop, impl::EpollEventLoop)::Nothing
         impl = event_loop.impl
 
+        if event_loop_thread_is_callers_thread(event_loop)
+            throw_error(ERROR_INVALID_STATE)
+        end
+
         if impl.thread_created_on !== nothing
             wait(impl.completion_event)
         end
@@ -1130,74 +1134,84 @@
             logf(LogLevel.ERROR, LS_IO_EVENT_LOOP, "epoll event-loop destroy failed: $e")
             destroy_error = destroy_error === nothing ? e : destroy_error
         finally
-            remaining_handle_data = EpollEventHandleData[]
-
-            # Close file descriptors
-            lock(impl.subscribed_handle_data_mutex)
-            try
-                append!(remaining_handle_data, values(impl.subscribed_handle_data))
-                empty!(impl.subscribed_handle_data)
-            finally
-                unlock(impl.subscribed_handle_data_mutex)
-            end
-            for event_data in remaining_handle_data
-                try
-                    event_data.is_subscribed = false
-                    event_data.cleanup_task = nothing
-                    epoll_release_handle_data!(event_data.handle)
-                catch e
-                    destroy_error = destroy_error === nothing ? e : destroy_error
+            if @atomic event_loop.running
+                logf(
+                    LogLevel.ERROR,
+                    LS_IO_EVENT_LOOP,
+                    "skipping epoll descriptor/resource teardown because event-loop is still running",
+                )
+                if destroy_error === nothing
+                    destroy_error = ReseauError(ERROR_INVALID_STATE)
                 end
-            end
-            if impl.use_eventfd
-                read_task_fd = impl.read_task_handle.fd
-                write_task_fd = impl.write_task_handle.fd
-                if read_task_fd != write_task_fd && read_task_fd >= 0
-                    try
-                        @ccall close(read_task_fd::Cint)::Cint
-                    catch e
-                        destroy_error = destroy_error === nothing ? e : destroy_error
-                    end
-                end
-                if write_task_fd >= 0
-                    try
-                        @ccall close(write_task_fd::Cint)::Cint
-                    catch e
-                        destroy_error = destroy_error === nothing ? e : destroy_error
-                    end
-                end
-                impl.read_task_handle = IoHandle()
-                impl.write_task_handle = IoHandle()
             else
-                read_task_fd = impl.read_task_handle.fd
-                write_task_fd = impl.write_task_handle.fd
-                if read_task_fd >= 0
-                    try
-                        @ccall close(read_task_fd::Cint)::Cint
-                    catch e
-                        destroy_error = destroy_error === nothing ? e : destroy_error
-                    end
-                end
-                if write_task_fd >= 0
-                    try
-                        @ccall close(write_task_fd::Cint)::Cint
-                    catch e
-                        destroy_error = destroy_error === nothing ? e : destroy_error
-                    end
-                end
-                impl.read_task_handle = IoHandle()
-                impl.write_task_handle = IoHandle()
-            end
+                remaining_handle_data = EpollEventHandleData[]
 
-            epoll_fd = impl.epoll_fd
-            if epoll_fd >= 0
+                lock(impl.subscribed_handle_data_mutex)
                 try
-                    @ccall close(epoll_fd::Cint)::Cint
-                catch e
-                    destroy_error = destroy_error === nothing ? e : destroy_error
+                    append!(remaining_handle_data, values(impl.subscribed_handle_data))
+                    empty!(impl.subscribed_handle_data)
+                finally
+                    unlock(impl.subscribed_handle_data_mutex)
                 end
+                for event_data in remaining_handle_data
+                    try
+                        event_data.is_subscribed = false
+                        event_data.cleanup_task = nothing
+                        epoll_release_handle_data!(event_data.handle)
+                    catch e
+                        destroy_error = destroy_error === nothing ? e : destroy_error
+                    end
+                end
+                if impl.use_eventfd
+                    read_task_fd = impl.read_task_handle.fd
+                    write_task_fd = impl.write_task_handle.fd
+                    if read_task_fd != write_task_fd && read_task_fd >= 0
+                        try
+                            @ccall close(read_task_fd::Cint)::Cint
+                        catch e
+                            destroy_error = destroy_error === nothing ? e : destroy_error
+                        end
+                    end
+                    if write_task_fd >= 0
+                        try
+                            @ccall close(write_task_fd::Cint)::Cint
+                        catch e
+                            destroy_error = destroy_error === nothing ? e : destroy_error
+                        end
+                    end
+                    impl.read_task_handle = IoHandle()
+                    impl.write_task_handle = IoHandle()
+                else
+                    read_task_fd = impl.read_task_handle.fd
+                    write_task_fd = impl.write_task_handle.fd
+                    if read_task_fd >= 0
+                        try
+                            @ccall close(read_task_fd::Cint)::Cint
+                        catch e
+                            destroy_error = destroy_error === nothing ? e : destroy_error
+                        end
+                    end
+                    if write_task_fd >= 0
+                        try
+                            @ccall close(write_task_fd::Cint)::Cint
+                        catch e
+                            destroy_error = destroy_error === nothing ? e : destroy_error
+                        end
+                    end
+                    impl.read_task_handle = IoHandle()
+                    impl.write_task_handle = IoHandle()
+                end
+
+                epoll_fd = impl.epoll_fd
+                if epoll_fd >= 0
+                    try
+                        @ccall close(epoll_fd::Cint)::Cint
+                    catch e
+                        destroy_error = destroy_error === nothing ? e : destroy_error
+                    end
+                end
+                impl.epoll_fd = Int32(-1)
             end
-            impl.epoll_fd = Int32(-1)
         end
 
         destroy_error === nothing || throw(destroy_error)

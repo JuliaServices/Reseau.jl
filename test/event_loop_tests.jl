@@ -1705,6 +1705,43 @@ end
         end
     end
 
+    @testset "Event loop wait_for_stop_completion is thread-guarded" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            @test EventLoops.run!(el) === nothing
+
+            result_ch = Channel{Any}(1)
+            task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+                if Reseau.TaskStatus.T(status) != Reseau.TaskStatus.RUN_READY
+                    put!(result_ch, :not_ready)
+                    return nothing
+                end
+                try
+                    EventLoops.wait_for_stop_completion(el)
+                    put!(result_ch, :unexpected_success)
+                catch e
+                    put!(result_ch, e)
+                end
+                return nothing
+            end); type_tag = "event_loop_wait_for_stop_completion_guard")
+            EventLoops.schedule_task_now!(el, task)
+
+            @test _wait_for_channel(result_ch)
+            if isready(result_ch)
+                result = take!(result_ch)
+                @test result isa Reseau.ReseauError
+                if result isa Reseau.ReseauError
+                    @test result.code == EventLoops.ERROR_INVALID_STATE
+                end
+            end
+
+            close(el)
+        end
+    end
+
     @testset "Event loop stop then restart" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if interactive_threads <= 1
