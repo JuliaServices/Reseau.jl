@@ -18,6 +18,10 @@ function _wait_for_pred(pred::Function; timeout_ns::Int = 2_000_000_000)
     return pred()
 end
 
+function _wait_for_task(task::Task; timeout_ns::Int = 2_000_000_000)
+    return _wait_for_pred(() -> istaskdone(task); timeout_ns = timeout_ns)
+end
+
 mutable struct TestDelayedDestroyHandler
     slot::Union{Sockets.ChannelSlot, Nothing}
     destroy_entered::Channel{Bool}
@@ -215,9 +219,10 @@ end
 
             Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS)
             @test _wait_ready_channel(shutdown_ch)
+            Sockets.channel_destroy!(channel)
             @test _wait_for_pred(() -> close_finished[]; timeout_ns = 3_000_000_000)
-
-            wait(close_task)
+            @test _wait_for_task(close_task; timeout_ns = 3_000_000_000)
+            istaskdone(close_task) && wait(close_task)
         end
 
         @testset "destroy before setup completes waits for setup" begin
@@ -252,7 +257,10 @@ end
             end
             @test channel.channel_state == Sockets.ChannelState.SHUT_DOWN
 
-            close(el)
+            Sockets.channel_destroy!(channel)
+            close_task = errormonitor(Threads.@spawn close(el))
+            @test _wait_for_task(close_task; timeout_ns = 3_000_000_000)
+            istaskdone(close_task) && wait(close_task)
         end
 
         @testset "setup callback exception does not stall channel setup" begin
@@ -263,6 +271,7 @@ end
                 _ = err
                 Threads.atomic_add!(callback_invocations, 1)
                 error("setup callback boom")
+                return nothing
             end)
 
             channel = Sockets.Channel(
@@ -358,8 +367,10 @@ end
                 Sockets.channel_schedule_task_now!(channel, tasks[3])
                 Sockets.channel_schedule_task_future!(channel, tasks[4], UInt64(1))
             end)
-            wait(t1)
-            wait(t2)
+            @test _wait_for_task(t1)
+            @test _wait_for_task(t2)
+            istaskdone(t1) && wait(t1)
+            istaskdone(t2) && wait(t2)
 
             deadline = Base.time_ns() + 2_000_000_000
             results = Dict{Int, Reseau.TaskStatus.T}()
@@ -458,7 +469,10 @@ end
 
             try
                 EventLoops.schedule_task_now!(el, blocker)
-                @test take!(ready_ch)
+                @test _wait_ready_channel(ready_ch)
+                if isready(ready_ch)
+                    @test take!(ready_ch)
+                end
 
                 queued = false
                 lock(channel.cross_thread_tasks_lock) do
@@ -590,8 +604,10 @@ end
             end
             @test ready[] == 2
             go[] = true
-            wait(t1)
-            wait(t2)
+            @test _wait_for_task(t1)
+            @test _wait_for_task(t2)
+            istaskdone(t1) && wait(t1)
+            istaskdone(t2) && wait(t2)
 
             @test _wait_ready_channel(shutdown_ch)
             err = take!(shutdown_ch)

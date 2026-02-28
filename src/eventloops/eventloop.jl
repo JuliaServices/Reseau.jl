@@ -84,7 +84,7 @@ connect_to_io_completion_port(event_loop::EventLoop, handle::IoHandle) =
     connect_to_io_completion_port(event_loop, event_loop.impl, handle)
 
 function Base.close(event_loop::EventLoop)
-    @assert !event_loop_thread_is_callers_thread(event_loop) "close on loop thread"
+    event_loop_thread_is_callers_thread(event_loop) && error("close on loop thread")
     lock(event_loop.cond)
     try
         while event_loop.semaphore > 0
@@ -179,6 +179,7 @@ end
 
 mutable struct EventLoopGroup
     event_loops::Vector{EventLoop}
+    @atomic destroyed::Bool
 end
 
 function EventLoopGroup(; loop_count::Integer = 0, cpu_group::Union{Nothing, Integer} = nothing)
@@ -199,21 +200,28 @@ function EventLoopGroup(; loop_count::Integer = 0, cpu_group::Union{Nothing, Int
     for loop in loops
         run!(loop)
     end
-    return EventLoopGroup(loops)
+    return EventLoopGroup(loops, false)
 end
 
-_close(elg::EventLoopGroup) = foreach(Base.close, elg.event_loops)
+function _close(elg::EventLoopGroup)::Nothing
+    foreach(Base.close, elg.event_loops)
+    return nothing
+end
 
 function Base.close(elg::EventLoopGroup)
+    if !(@atomicreplace elg.destroyed false => true).success
+        return nothing
+    end
+
     # if called from loop thread, schedule a task to close the event loops
     for loop in elg.event_loops
         if event_loop_thread_is_callers_thread(loop)
-            wait(Threads.@spawn _close(elg))
-            return
+            wait(errormonitor(Threads.@spawn _close(elg)))
+            return nothing
         end
     end
     _close(elg)
-    return
+    return nothing
 end
 
 const EVENT_LOOP_GROUP = OncePerProcess(() -> EventLoopGroup())

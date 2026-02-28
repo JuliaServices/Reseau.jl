@@ -564,7 +564,9 @@
             impl.thread_data.connected_handle_count -= 1
         end
         if handle_data.registry_key != C_NULL
-            delete!(impl.handle_registry, handle_data.registry_key)
+            if haskey(impl.handle_registry, handle_data.registry_key)
+                delete!(impl.handle_registry, handle_data.registry_key)
+            end
             handle_data.registry_key = C_NULL
         end
         return nothing
@@ -573,25 +575,28 @@
     function kqueue_unsubscribe_task_callback(handle_data::KqueueHandleData{KqueueEventLoop}, status::TaskStatus.T)
         impl = handle_data.event_loop
         if status != TaskStatus.CANCELED && handle_data.connected
+            fd = handle_data.owner.fd
             changelist = impl.unsubscribe_changelist
             empty!(changelist)
 
-            if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
-                push!(changelist, Kevent(handle_data.owner.fd, EVFILT_READ, EV_DELETE))
-            end
-            if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
-                push!(changelist, Kevent(handle_data.owner.fd, EVFILT_WRITE, EV_DELETE))
-            end
+            if fd >= 0
+                if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
+                    push!(changelist, Kevent(fd, EVFILT_READ, EV_DELETE))
+                end
+                if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
+                    push!(changelist, Kevent(fd, EVFILT_WRITE, EV_DELETE))
+                end
 
-            if !isempty(changelist)
-                @ccall kevent(
-                    impl.kq_fd::Cint,
-                    changelist::Ptr{Kevent},
-                    length(changelist)::Cint,
-                    C_NULL::Ptr{Kevent},
-                    0::Cint,
-                    C_NULL::Ptr{Cvoid},
-                )::Cint
+                if !isempty(changelist)
+                    @ccall kevent(
+                        impl.kq_fd::Cint,
+                        changelist::Ptr{Kevent},
+                        length(changelist)::Cint,
+                        C_NULL::Ptr{Kevent},
+                        0::Cint,
+                        C_NULL::Ptr{Cvoid},
+                    )::Cint
+                end
             end
         end
 
@@ -617,25 +622,28 @@
             if event_loop_thread_is_callers_thread(event_loop)
                 # If called on event-loop thread, delete kqueue registration directly.
                 if handle_data.state == HandleState.SUBSCRIBED
+                    fd = handle.fd
                     changelist = impl.unsubscribe_changelist
                     empty!(changelist)
 
-                    if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
-                        push!(changelist, Kevent(handle.fd, EVFILT_READ, EV_DELETE))
-                    end
-                    if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
-                        push!(changelist, Kevent(handle.fd, EVFILT_WRITE, EV_DELETE))
-                    end
+                    if fd >= 0
+                        if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
+                            push!(changelist, Kevent(fd, EVFILT_READ, EV_DELETE))
+                        end
+                        if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
+                            push!(changelist, Kevent(fd, EVFILT_WRITE, EV_DELETE))
+                        end
 
-                    if !isempty(changelist)
-                        @ccall kevent(
-                            impl.kq_fd::Cint,
-                            changelist::Ptr{Kevent},
-                            length(changelist)::Cint,
-                            C_NULL::Ptr{Kevent},
-                            0::Cint,
-                            C_NULL::Ptr{Cvoid},
-                        )::Cint
+                        if !isempty(changelist)
+                            @ccall kevent(
+                                impl.kq_fd::Cint,
+                                changelist::Ptr{Kevent},
+                                length(changelist)::Cint,
+                                C_NULL::Ptr{Kevent},
+                                0::Cint,
+                                C_NULL::Ptr{Cvoid},
+                            )::Cint
+                        end
                     end
                 end
 
@@ -668,7 +676,9 @@
                 handle_data.connected = false
             end
             if handle_data.registry_key != C_NULL
-                delete!(impl.handle_registry, handle_data.registry_key)
+                if haskey(impl.handle_registry, handle_data.registry_key)
+                    delete!(impl.handle_registry, handle_data.registry_key)
+                end
                 handle_data.registry_key = C_NULL
             end
             handle_data.cleanup_task = nothing
