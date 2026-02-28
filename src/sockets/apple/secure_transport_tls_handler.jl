@@ -390,6 +390,30 @@ function _secure_transport_handle_would_block(handler::SecureTransportTlsHandler
     return nothing
 end
 
+@inline function _secure_transport_min_protocol(minimum_tls_version::TlsVersion.T)::Cint
+    return minimum_tls_version == TlsVersion.SSLv3 ? _kSSLProtocol3 :
+        minimum_tls_version == TlsVersion.TLSv1 ? _kTLSProtocol1 :
+        minimum_tls_version == TlsVersion.TLSv1_1 ? _kTLSProtocol11 :
+        minimum_tls_version == TlsVersion.TLSv1_2 ? _kTLSProtocol12 :
+        _kSSLProtocolUnknown
+end
+
+@inline function _secure_transport_require_ctx_success(api_name::AbstractString, status::OSStatus)::Nothing
+    status == _errSecSuccess && return nothing
+    logf(
+        LogLevel.ERROR,
+        LS_IO_TLS,string("SecureTransport $api_name failed with OSStatus $status", " ", ))
+    throw_error(ERROR_IO_TLS_CTX_ERROR)
+end
+
+@inline function _secure_transport_log_if_error(api_name::AbstractString, status::OSStatus)::Nothing
+    status == _errSecSuccess && return nothing
+    logf(
+        LogLevel.WARN,
+        LS_IO_TLS,string("SecureTransport $api_name failed with OSStatus $status", " ", ))
+    return nothing
+end
+
 function _secure_transport_drive_negotiation(handler::SecureTransportTlsHandler)::Nothing
     @static if !Sys.isapple()
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -875,7 +899,8 @@ function handler_shutdown(
         handler.read_state = TlsHandlerReadState.SHUT_DOWN_COMPLETE
     else
         if !abort_immediately && error_code != ERROR_IO_SOCKET_CLOSED
-            _ = ccall((:SSLClose, _SECURITY_LIB), OSStatus, (SSLContextRef,), handler.ctx)
+            close_status = ccall((:SSLClose, _SECURITY_LIB), OSStatus, (SSLContextRef,), handler.ctx)
+            _secure_transport_log_if_error("SSLClose", close_status)
         end
     end
 
@@ -1040,23 +1065,17 @@ function _secure_transport_handler_new(
     handler.ctx == C_NULL && throw_error(ERROR_IO_TLS_CTX_ERROR)
     _secure_transport_init_callbacks()
 
-    if options.ctx.options.minimum_tls_version == TlsVersion.SSLv3
-        _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kSSLProtocol3)
-    elseif options.ctx.options.minimum_tls_version == TlsVersion.TLSv1
-        _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kTLSProtocol1)
-    elseif options.ctx.options.minimum_tls_version == TlsVersion.TLSv1_1
-        _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kTLSProtocol12)
-    elseif options.ctx.options.minimum_tls_version == TlsVersion.TLSv1_2
-        _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kTLSProtocol12)
-    elseif options.ctx.options.minimum_tls_version == TlsVersion.TLSv1_3
-        throw_error(ERROR_IO_TLS_CTX_ERROR)
-    else
-        _ = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _kSSLProtocolUnknown)
-    end
-    if ccall((:SSLSetIOFuncs, _SECURITY_LIB), OSStatus, (SSLContextRef, Ptr{Cvoid}, Ptr{Cvoid}), handler.ctx, _secure_transport_read_cb_c[], _secure_transport_write_cb_c[]) != _errSecSuccess ||
-            ccall((:SSLSetConnection, _SECURITY_LIB), OSStatus, (SSLContextRef, SSLConnectionRef), handler.ctx, pointer_from_objref(handler)) != _errSecSuccess
+    min_version = options.ctx.options.minimum_tls_version
+    if min_version == TlsVersion.TLSv1_3
         throw_error(ERROR_IO_TLS_CTX_ERROR)
     end
+    min_status = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, _secure_transport_min_protocol(min_version))
+    _secure_transport_require_ctx_success("SSLSetProtocolVersionMin", min_status)
+
+    io_status = ccall((:SSLSetIOFuncs, _SECURITY_LIB), OSStatus, (SSLContextRef, Ptr{Cvoid}, Ptr{Cvoid}), handler.ctx, _secure_transport_read_cb_c[], _secure_transport_write_cb_c[])
+    _secure_transport_require_ctx_success("SSLSetIOFuncs", io_status)
+    connection_status = ccall((:SSLSetConnection, _SECURITY_LIB), OSStatus, (SSLContextRef, SSLConnectionRef), handler.ctx, pointer_from_objref(handler))
+    _secure_transport_require_ctx_success("SSLSetConnection", connection_status)
 
     handler.verify_peer = st_ctx.verify_peer
 
@@ -1064,25 +1083,30 @@ function _secure_transport_handler_new(
         logf(
             LogLevel.WARN,
             LS_IO_TLS,string("x.509 validation has been disabled. This is unsafe outside of test environments.", " ", ))
-        _ = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
+        session_status = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
+        _secure_transport_require_ctx_success("SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth)", session_status)
     end
 
     if st_ctx.certs != C_NULL
-        _ = ccall((:SSLSetCertificate, _SECURITY_LIB), OSStatus, (SSLContextRef, CFArrayRef), handler.ctx, st_ctx.certs)
+        cert_status = ccall((:SSLSetCertificate, _SECURITY_LIB), OSStatus, (SSLContextRef, CFArrayRef), handler.ctx, st_ctx.certs)
+        _secure_transport_require_ctx_success("SSLSetCertificate", cert_status)
     end
 
     handler.ca_certs = st_ctx.ca_cert
     if handler.ca_certs != C_NULL
         if protocol_side == _kSSLServerSide && st_ctx.verify_peer
-            _ = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnClientAuth, 1)
+            session_status = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnClientAuth, 1)
+            _secure_transport_require_ctx_success("SSLSetSessionOption(kSSLSessionOptionBreakOnClientAuth)", session_status)
         elseif st_ctx.verify_peer
-            _ = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
+            session_status = ccall((:SSLSetSessionOption, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint, UInt8), handler.ctx, _kSSLSessionOptionBreakOnServerAuth, 1)
+            _secure_transport_require_ctx_success("SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth)", session_status)
         end
     end
 
     if options.server_name !== nothing
         handler.server_name = _byte_buf_from_string(options.server_name)
-        _ = ccall((:SSLSetPeerDomainName, _SECURITY_LIB), OSStatus, (SSLContextRef, Cstring, Csize_t), handler.ctx, options.server_name, ncodeunits(options.server_name))
+        server_name_status = ccall((:SSLSetPeerDomainName, _SECURITY_LIB), OSStatus, (SSLContextRef, Cstring, Csize_t), handler.ctx, options.server_name, ncodeunits(options.server_name))
+        _secure_transport_require_ctx_success("SSLSetPeerDomainName", server_name_status)
     end
 
     if options.alpn_list !== nothing
