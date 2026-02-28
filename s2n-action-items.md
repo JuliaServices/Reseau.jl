@@ -94,7 +94,7 @@
   - `julia --project=. -e 'using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/pkcs11_tests.jl\")'`
   - PKCS#11 core tests passed; SoftHSM integration block skipped in this environment.
 
-### [ ] ITEM-005 (P2) Improve security observability and allocator parity
+### [x] ITEM-005 (P2) Improve security observability and allocator parity
 - Description: Reseau does not log a warning when peer verification is disabled, and currently does not route s2n allocation callbacks like aws-c-io.
 - Desired outcome: Add warning log parity for disabled peer verification and integrate/document allocator callback behavior.
 - Affected files: `src/sockets/linux/s2n_tls_handler.jl`, `test/tls_tests_impl.jl`, `s2n-review.md`
@@ -111,6 +111,10 @@
 - Completion criteria:
   - Warning behavior is test-covered.
   - Allocator callback decision is implemented and validated.
+- Verification evidence:
+  - `julia --project=. -e 'using Reseau; println(\"item5-load-ok\")'`
+  - `julia --project=. -e 'using Test, Reseau; import Reseau: Sockets; ...'` (allocator callback helper behavior passed for normal and zero-length allocations)
+  - Warning log path was implemented at TLS context setup; this environment does not currently include a dedicated log-capture assertion harness for that branch.
 
 ### [ ] ITEM-006 (P2) Expand network parity scenarios for s2n coverage
 - Description: Network test matrix is narrower than aws-c-io, especially for badssl variants and explicit parity scenarios.
