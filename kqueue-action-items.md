@@ -96,7 +96,7 @@
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/event_loop_tests.jl\")'` (pass: `Event Loops | 72/72`).
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false, test_args=[\"event_loop_tests\"])'` (pass: `Testing Reseau tests passed`).
 
-### [ ] ITEM-005 (P1) Run full test matrix locally and stabilize failures
+### [x] ITEM-005 (P1) Run full test matrix locally and stabilize failures
 - Description: All Reseau tests must pass before PR.
 - Desired outcome: Full local test matrix passes for this worktree.
 - Affected files: `test/` (as needed), source files from prior items
@@ -115,6 +115,11 @@
   - Network/TLS flakiness may require reruns and targeted hardening.
 - Completion criteria:
   - All four matrix commands pass.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.test(; coverage=false)'` (pass: `Testing Reseau tests passed`).
+  - `RESEAU_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` (pass: `host resolver default dns lookups (network)` and `Testing Reseau tests passed`).
+  - `RESEAU_RUN_TLS_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` (pass: `TLS network tests skipped`, TLS suites pass, `Testing Reseau tests passed`).
+  - `RESEAU_RUN_TLS_TESTS=1 RESEAU_RUN_NETWORK_TESTS=1 JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` (pass: `TLS network negotiation (requires network)` and `Testing Reseau tests passed`).
 
 ### [ ] ITEM-006 (P1) Open PR and ensure CI passes on all platforms
 - Description: User requested PR creation and confirmation that all CI platform checks pass.
