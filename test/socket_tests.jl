@@ -865,7 +865,7 @@ end
         if socket_val === nothing
             return
         end
-        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("\\\\.\\pipe\\reseau-invalid-pipe"), event_loop = el_val,
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("\\\\.\\pipe\\reseau-invalid-pipe", 0), event_loop = el_val,
             on_connection_result = Reseau.EventCallable(err -> nothing),
         )
         try
