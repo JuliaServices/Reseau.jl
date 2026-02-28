@@ -1011,14 +1011,30 @@ end
                     end
                 end
 
-                if domain != Sockets.SocketDomain.LOCAL
-                    @test wait_for(() -> begin
-                        handler = app_handler_ref[]
-                        handler isa TestReadToEofHandler && _eof_received_string(handler) == payload
-                    end)
-                end
-
                 Sockets.socket_close(client_socket)
+
+                if channel isa Sockets.Channel
+                    for _ in 1:20
+                        trigger_done = Ref(false)
+                        trigger_task = Sockets.ChannelTask(Reseau.EventCallable(status -> begin
+                            Reseau.TaskStatus.T(status) == Reseau.TaskStatus.RUN_READY || return nothing
+                            Sockets.channel_trigger_read(channel)
+                            trigger_done[] = true
+                            return nothing
+                        end), "socket_handler_read_to_eof_post_close_trigger")
+                        Sockets.channel_schedule_task_now!(channel, trigger_task)
+                        @test wait_for(() -> trigger_done[]; timeout_s = 1.0)
+
+                        handler = app_handler_ref[]
+                        if handler isa TestReadToEofHandler
+                            shutdown_called, _ = _eof_shutdown_state(handler)
+                            if _eof_received_string(handler) == payload && shutdown_called
+                                break
+                            end
+                        end
+                        sleep(0.01)
+                    end
+                end
 
                 @test wait_for(() -> begin
                     handler = app_handler_ref[]
