@@ -72,7 +72,7 @@
 - Verification evidence:
   - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); setup_test_keychain!(); atexit(cleanup_test_keychain!); function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0); start = Base.time_ns(); timeout_ns = Int(timeout_s * 1_000_000_000); while (Base.time_ns() - start) < timeout_ns; pred() && return true; sleep(0.01); end; return pred(); end; ENV["RESEAU_RUN_TLS_TESTS"] = "1"; ENV["RESEAU_RUN_NETWORK_TESTS"] = "1"; include("test/tls_tests.jl")'` (pass; includes `TLS network negotiation` `32/32`).
 
-### [ ] ITEM-004 (P2) Document intentional SecureTransport protocol semantics and on-error parity stance
+### [x] ITEM-004 (P2) Document intentional SecureTransport protocol semantics and on-error parity stance
 - Description: There are intentional-but-surprising parity behaviors (e.g., TLSv1_1 mapping on SecureTransport) and API stance differences (`on_error` callback surface).
 - Desired outcome: Code and tests clearly document intentional behavior and reduce ambiguity for future maintainers.
 - Affected files: `src/sockets/apple/secure_transport_tls_handler.jl`, `src/sockets/socket/tls_types.jl`, `src/sockets/socket/tls_channel_handler.jl`, `test/tls_tests_impl.jl`, `secure-channel-review.md`
@@ -84,7 +84,10 @@
   - `julia --project=. test/tls_tests.jl`
 - Assumptions:
   - No public API breaking changes are required for this item.
+  - We will document and test the existing callback model (Future + shutdown propagation) rather than introducing a new `on_error` option in this pass.
 - Risks:
   - Over-documentation noise if comments are too verbose.
 - Completion criteria:
   - Behavior is explicit in code/tests and aligned with parity decisions.
+- Verification evidence:
+  - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); setup_test_keychain!(); atexit(cleanup_test_keychain!); function wait_for_pred(pred::Function; timeout_s::Float64 = 5.0); start = Base.time_ns(); timeout_ns = Int(timeout_s * 1_000_000_000); while (Base.time_ns() - start) < timeout_ns; pred() && return true; sleep(0.01); end; return pred(); end; ENV["RESEAU_RUN_TLS_TESTS"] = "1"; include("test/tls_tests.jl")'` (pass; includes new SecureTransport mapping helpers `7/7`).

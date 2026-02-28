@@ -1036,6 +1036,24 @@ function _secure_transport_context_new(options::TlsContextOptions)::TlsContext
     return ctx
 end
 
+function _secure_transport_min_protocol_version(minimum_tls_version::TlsVersion.T)::Cint
+    if minimum_tls_version == TlsVersion.SSLv3
+        return _kSSLProtocol3
+    elseif minimum_tls_version == TlsVersion.TLSv1
+        return _kTLSProtocol1
+    elseif minimum_tls_version == TlsVersion.TLSv1_1
+        # Intentional aws-c-io parity: SecureTransport promotes TLSv1_1 minimum to TLS 1.2.
+        return _kTLSProtocol12
+    elseif minimum_tls_version == TlsVersion.TLSv1_2
+        return _kTLSProtocol12
+    elseif minimum_tls_version == TlsVersion.TLSv1_3
+        # SecureTransport backend does not support explicit TLS 1.3 selection.
+        throw_error(ERROR_IO_TLS_CTX_ERROR)
+    else
+        return _kSSLProtocolUnknown
+    end
+end
+
 function _secure_transport_handler_new(
         options::TlsConnectionOptions,
         slot::ChannelSlot,
@@ -1087,7 +1105,7 @@ function _secure_transport_handler_new(
     if min_version == TlsVersion.TLSv1_3
         throw_error(ERROR_IO_TLS_CTX_ERROR)
     end
-    min_protocol = _secure_transport_min_protocol(min_version)
+    min_protocol = _secure_transport_min_protocol_version(min_version)
     min_status = ccall((:SSLSetProtocolVersionMin, _SECURITY_LIB), OSStatus, (SSLContextRef, Cint), handler.ctx, min_protocol)
     if min_protocol == _kSSLProtocolUnknown
         _secure_transport_log_if_error("SSLSetProtocolVersionMin(kSSLProtocolUnknown)", min_status)

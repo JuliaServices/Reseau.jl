@@ -334,6 +334,7 @@ end
     @test conn.advertise_alpn_message
     @test conn.tls_negotiation_result isa EventLoops.Future{Cint}
     @test conn.on_data_read isa Reseau.TlsDataReadCallback
+    @test !hasproperty(conn, :on_error)
 
     conn_copy = Sockets.tls_connection_options_copy(conn)
     @test conn_copy.server_name == conn.server_name
@@ -605,6 +606,22 @@ end
     end
 
     close(elg)
+end
+
+@testset "TLS secure transport minimum version mapping helpers" begin
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.SSLv3) == Sockets._kSSLProtocol3
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1) == Sockets._kTLSProtocol1
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1_1) == Sockets._kTLSProtocol12
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1_2) == Sockets._kTLSProtocol12
+    @test Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLS_VER_SYS_DEFAULTS) == Sockets._kSSLProtocolUnknown
+
+    try
+        Sockets._secure_transport_min_protocol_version(Sockets.TlsVersion.TLSv1_3)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        @test e.code == Reseau.ERROR_IO_TLS_CTX_ERROR
+    end
 end
 
 @testset "TLS secure channel protocol helpers" begin
