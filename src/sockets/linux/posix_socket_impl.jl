@@ -810,6 +810,8 @@ function socket_connect_impl(
         throw_error(ERROR_IO_EVENT_LOOP_ALREADY_ASSIGNED)
     end
 
+    event_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
+
     if sock.options.type != SocketType.DGRAM
         if sock.state != SocketState.INIT
             throw_error(ERROR_IO_SOCKET_ILLEGAL_OPERATION_FOR_STATE)
@@ -2106,6 +2108,8 @@ function socket_start_accept_impl(
     )::Nothing
     _ = event_loop_group
     fd = sock.io_handle.fd
+
+    on_accept_result === nothing && throw_error(ERROR_INVALID_ARGUMENT)
 
     if sock.event_loop !== nothing
         logf(LogLevel.ERROR, LS_IO_SOCKET, "Socket fd=$fd: already assigned to event loop")

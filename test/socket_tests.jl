@@ -839,6 +839,72 @@ end
 	    end
 end
 
+@testset "posix connect requires event loop" begin
+    if Sys.iswindows()
+        @test true
+        return
+    end
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    sock = Sockets.socket_init(opts)
+    endpoint = Sockets.SocketEndpoint()
+    Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+    try
+        try
+            Sockets.socket_connect(sock; remote_endpoint = endpoint)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_SOCKET_MISSING_EVENT_LOOP
+        end
+    finally
+        Sockets.socket_cleanup!(sock)
+        sock_path = Sockets.get_address(endpoint)
+        if !isempty(sock_path) && ispath(sock_path)
+            rm(sock_path; force = true)
+        end
+    end
+end
+
+@testset "posix start accept requires callback" begin
+    if Sys.iswindows()
+        @test true
+        return
+    end
+
+    el = EventLoops.EventLoop()
+    el_val = el isa EventLoops.EventLoop ? el : nothing
+    @test el_val !== nothing
+    if el_val === nothing
+        return
+    end
+    @test EventLoops.run!(el_val) === nothing
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.LOCAL)
+    server = Sockets.socket_init(opts)
+    endpoint = Sockets.SocketEndpoint()
+    Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
+    try
+        @test Sockets.socket_bind(server; local_endpoint = endpoint) === nothing
+        @test Sockets.socket_listen(server, 8) === nothing
+
+        try
+            Sockets.socket_start_accept(server, el_val)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_INVALID_ARGUMENT
+        end
+    finally
+        Sockets.socket_cleanup!(server)
+        close(el_val)
+        sock_path = Sockets.get_address(endpoint)
+        if !isempty(sock_path) && ispath(sock_path)
+            rm(sock_path; force = true)
+        end
+    end
+end
+
 @testset "socket connect read write" begin
     el = EventLoops.EventLoop()
     el_val = el isa EventLoops.EventLoop ? el : nothing
