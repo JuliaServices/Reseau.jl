@@ -1011,7 +1011,13 @@ end
                     end
                 end
 
-                Sockets.socket_close(client_socket)
+                @static if Sys.isapple()
+                    Sockets.socket_close(client_socket)
+                else
+                    # On POSIX, half-close write side first so peer reliably observes
+                    # queued payload before EOF under CI scheduler jitter.
+                    @test Sockets.socket_shutdown_dir(client_socket, Sockets.ChannelDirection.WRITE) === nothing
+                end
 
                 if channel isa Sockets.Channel
                     for _ in 1:20
