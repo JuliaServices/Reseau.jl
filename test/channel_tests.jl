@@ -97,6 +97,7 @@ end
                 on_setup_completed = on_setup,
                 on_shutdown_completed = nothing,
                 auto_setup = true,
+                wait_for_setup = false,
             )
 
             Sockets.channel_destroy!(channel)
@@ -120,16 +121,19 @@ end
             el = EventLoops.EventLoop()
 
             callback_invocations = Threads.Atomic{Int}(0)
-            on_setup = Reseau.EventCallable(err -> begin
+            on_setup = Reseau.ChannelCallable((err, _channel) -> begin
                 _ = err
                 Threads.atomic_add!(callback_invocations, 1)
                 error("setup callback boom")
             end)
 
-            channel = Sockets.channel_new(
-                event_loop = el,
+            channel = Sockets.Channel(
+                el,
+                nothing;
                 on_setup_completed = on_setup,
                 on_shutdown_completed = nothing,
+                auto_setup = true,
+                wait_for_setup = false,
             )
 
             @test EventLoops.run!(el) === nothing

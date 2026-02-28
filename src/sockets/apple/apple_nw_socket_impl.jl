@@ -3,9 +3,11 @@
 
 # Type definitions (NWSocket, NWSendContext, enums, type aliases, library paths)
 # are in apple_nw_socket_types.jl — included before socket.jl for type ordering.
+using Libdl
 
 @static if Sys.isapple()
     const _NW_PRECOMPILE_PARK_SWEEP = 4
+    const _DISPATCH_DATA_DESTRUCTOR_DEFAULT = Ptr{Cvoid}(C_NULL)
 
     # Network.framework exports some "constants" (e.g. NW_PARAMETERS_DISABLE_PROTOCOL) as
     # globals whose value is already a pointer type. We must load the pointer value from
@@ -17,6 +19,11 @@
     const _NW_DISABLE_PROTOCOL_BLOCK = Ref{Ptr{Cvoid}}(C_NULL)
     const _NW_DEFAULT_MESSAGE_CONTEXT = Ref{nw_content_context_t}(C_NULL)
     const _NW_GLOBALS_INIT_LOCK = ReentrantLock()
+    const _NW_SECURITY_HANDLE = Ref{Union{Nothing,Ptr{Nothing}}}(nothing)
+    const _NW_COPY_NEGOTIATED_PROTOCOL_SYMBOL = Ref{Ptr{Cvoid}}(C_NULL)
+    const _NW_GET_NEGOTIATED_PROTOCOL_SYMBOL = Ref{Ptr{Cvoid}}(C_NULL)
+    const _NW_PROTOCOL_SYMBOLS_LOADED = Ref(false)
+    const _NW_PROTOCOL_SYMBOLS_LOCK = ReentrantLock()
 
     function _nw_ensure_globals!()
         if _NW_DISABLE_PROTOCOL_BLOCK[] != C_NULL && _NW_DEFAULT_MESSAGE_CONTEXT[] != C_NULL
@@ -32,6 +39,54 @@
             end
         finally
             unlock(_NW_GLOBALS_INIT_LOCK)
+        end
+        return nothing
+    end
+
+    function _nw_ensure_protocol_symbols!()::Nothing
+        _NW_PROTOCOL_SYMBOLS_LOADED[] && return nothing
+        lock(_NW_PROTOCOL_SYMBOLS_LOCK)
+        try
+            if _NW_PROTOCOL_SYMBOLS_LOADED[]
+                return nothing
+            end
+            handle = _NW_SECURITY_HANDLE[]
+            if handle === nothing
+                handle = Libdl.dlopen(_NW_SECURITY_LIB, Libdl.RTLD_LAZY; throw_error = false)
+                _NW_SECURITY_HANDLE[] = handle
+            end
+            if handle !== nothing
+                copy_sym = Libdl.dlsym(handle, :sec_protocol_metadata_copy_negotiated_protocol; throw_error = false)
+                get_sym = Libdl.dlsym(handle, :sec_protocol_metadata_get_negotiated_protocol; throw_error = false)
+                _NW_COPY_NEGOTIATED_PROTOCOL_SYMBOL[] = Ptr{Cvoid}(copy_sym)
+                _NW_GET_NEGOTIATED_PROTOCOL_SYMBOL[] = Ptr{Cvoid}(get_sym)
+            end
+            _NW_PROTOCOL_SYMBOLS_LOADED[] = true
+        finally
+            unlock(_NW_PROTOCOL_SYMBOLS_LOCK)
+        end
+        return nothing
+    end
+
+    function _nw_protocol_from_metadata(metadata::sec_protocol_metadata_t)::Union{String,Nothing}
+        metadata == C_NULL && return nothing
+        _nw_ensure_protocol_symbols!()
+
+        copy_sym = _NW_COPY_NEGOTIATED_PROTOCOL_SYMBOL[]
+        if copy_sym != C_NULL
+            copied_protocol = ccall(copy_sym, Cstring, (sec_protocol_metadata_t,), metadata)
+            if copied_protocol != C_NULL
+                protocol = unsafe_string(copied_protocol)
+                ccall(:free, Cvoid, (Ptr{Cvoid},), Ptr{Cvoid}(copied_protocol))
+                return protocol
+            end
+        end
+
+        get_sym = _NW_GET_NEGOTIATED_PROTOCOL_SYMBOL[]
+        if get_sym != C_NULL
+            negotiated = ccall(get_sym, Cstring, (sec_protocol_metadata_t,), metadata)
+            negotiated == C_NULL && return nothing
+            return unsafe_string(negotiated)
         end
         return nothing
     end
@@ -453,6 +508,7 @@
     end
 
     function _nw_create_dispatch_data(cursor::ByteCursor)::dispatch_data_t
+        # Keep parity with aws-c-io: DISPATCH_DATA_DESTRUCTOR_DEFAULT maps to NULL.
         return ccall(
             (:dispatch_data_create, _NW_DISPATCH_LIB),
             dispatch_data_t,
@@ -460,7 +516,7 @@
             cursor.ptr,
             cursor.len,
             C_NULL,
-            C_NULL,
+            _DISPATCH_DATA_DESTRUCTOR_DEFAULT,
         )
     end
 
@@ -1327,14 +1383,9 @@
                 )
                 tls_def != C_NULL && ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), tls_def)
                 if metadata != C_NULL
-                    negotiated = ccall(
-                        (:sec_protocol_metadata_get_negotiated_protocol, _NW_SECURITY_LIB),
-                        Cstring,
-                        (sec_protocol_metadata_t,),
-                        metadata,
-                    )
-                    if negotiated != C_NULL
-                        nw_socket.protocol_buf = byte_buf_from_c_str(unsafe_string(negotiated))
+                    negotiated_protocol = _nw_protocol_from_metadata(metadata)
+                    if negotiated_protocol !== nothing
+                        nw_socket.protocol_buf = byte_buf_from_c_str(negotiated_protocol)
                     end
                     ccall((:nw_release, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), metadata)
                 end
@@ -1653,7 +1704,7 @@
             return nothing
         end
 
-        ccall((:nw_retain, _NW_NETWORK_LIB), Cvoid, (Ptr{Cvoid},), connection)
+        _ = ccall((:nw_retain, _NW_NETWORK_LIB), Ptr{Cvoid}, (Ptr{Cvoid},), connection)
         schedule_task_now!(nw_socket.event_loop; type_tag="nw_listener_accept") do status
             try
                 if _coerce_task_status(status) == TaskStatus.CANCELED
