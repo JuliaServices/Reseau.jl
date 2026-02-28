@@ -29,7 +29,7 @@
 - Verification evidence:
   - 2026-02-28: command above passed (`exit code 0`), including all socket testsets.
 
-### [ ] ITEM-002 (P0) Add Windows accept regression tests for remote endpoint correctness
+### [x] ITEM-002 (P0) Add Windows accept regression tests for remote endpoint correctness
 - Description: There is no explicit regression asserting accepted socket endpoint correctness on Windows AcceptEx flow.
 - Desired outcome: Windows test coverage validates accepted remote endpoint is populated correctly after accept.
 - Affected files: `test/socket_tests.jl`
@@ -45,6 +45,8 @@
   - Port assertion may be racey if endpoint update is delayed; assertions must run after accept callback completion.
 - Completion criteria:
   - New test passes and fails against intentionally broken endpoint parsing.
+- Verification evidence:
+  - 2026-02-28: socket test harness command passed (`exit code 0`) with new testset `winsock tcp accept remote endpoint parsing`.
 
 ### [ ] ITEM-003 (P1) Close Windows test parity gaps from aws-c-io
 - Description: Key Windows parity tests are missing/partial compared to aws-c-io (`event_loop_completion_events`, wrong-thread read/write behavior, interface-name behavior).

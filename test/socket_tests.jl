@@ -818,6 +818,95 @@ end
     end
 end
 
+@testset "winsock tcp accept remote endpoint parsing" begin
+    if !Sys.iswindows()
+        @test true
+        return
+    end
+
+    el = EventLoops.EventLoop()
+    el_val = el isa EventLoops.EventLoop ? el : nothing
+    @test el_val !== nothing
+    if el_val === nothing
+        return
+    end
+    @test EventLoops.run!(el_val) === nothing
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    server = Sockets.socket_init(opts)
+    server_socket = server isa Sockets.Socket ? server : nothing
+    @test server_socket !== nothing
+
+    client_socket = nothing
+    accepted = Ref{Any}(nothing)
+    accept_err = Ref{Int}(0)
+    connect_err = Ref{Int}(0)
+    accept_done = Threads.Atomic{Bool}(false)
+    connect_done = Threads.Atomic{Bool}(false)
+
+    try
+        if server_socket === nothing
+            return
+        end
+
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
+        @test Sockets.socket_listen(server_socket, 8) === nothing
+
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+            accept_err[] = err
+            accepted[] = new_sock
+            accept_done[] = true
+            return nothing
+        end)
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
+
+        bound = Sockets.socket_get_bound_address(server_socket)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
+        @test port != 0
+        if port == 0
+            return
+        end
+
+        client = Sockets.socket_init(opts)
+        client_socket = client isa Sockets.Socket ? client : nothing
+        @test client_socket !== nothing
+        if client_socket === nothing
+            return
+        end
+
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
+            on_connection_result = Reseau.EventCallable(err -> begin
+                connect_err[] = err
+                connect_done[] = true
+                return nothing
+            end),
+        )
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
+
+        @test wait_for_flag(connect_done)
+        @test wait_for_flag(accept_done)
+        @test connect_err[] == Reseau.OP_SUCCESS
+        @test accept_err[] == Reseau.OP_SUCCESS
+
+        accepted_sock = accepted[]
+        @test accepted_sock isa Sockets.Socket
+        if accepted_sock isa Sockets.Socket
+            client_bound = Sockets.socket_get_bound_address(client_socket)
+            accepted_remote = copy(accepted_sock.remote_endpoint)
+            @test accepted_remote.port == client_bound.port
+            @test Sockets.get_address(accepted_remote) == Sockets.get_address(client_bound)
+        end
+    finally
+        client_socket !== nothing && Sockets.socket_cleanup!(client_socket)
+        accepted[] !== nothing && Sockets.socket_cleanup!(accepted[])
+        server_socket !== nothing && Sockets.socket_cleanup!(server_socket)
+        close(el_val)
+    end
+end
+
 @testset "socket nonblocking cloexec" begin
     if Sys.iswindows()
         @test true
