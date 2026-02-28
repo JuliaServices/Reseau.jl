@@ -2243,6 +2243,70 @@ end
         end
     end
 
+    @testset "Kqueue close cleans up active subscriptions" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.isapple() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            run_res = EventLoops.run!(el)
+            @test run_res === nothing
+
+            read_end = nothing
+            write_end = nothing
+            loop_closed = false
+            try
+                read_end, write_end = Sockets.pipe_create()
+                handle = read_end.io_handle
+
+                sub_res = EventLoops.subscribe_to_io_events!(
+                    el,
+                    handle,
+                    Int(EventLoops.IoEventType.READABLE),
+                    EventLoops.EventCallable((events::Int) -> nothing),
+                )
+                @test sub_res === nothing
+
+                handle_data = nothing
+                subscribed = false
+                wait_deadline = Base.time_ns() + 2_000_000_000
+                while Base.time_ns() < wait_deadline
+                    if handle.additional_data != C_NULL
+                        handle_data = unsafe_pointer_to_objref(handle.additional_data)::EventLoops.KqueueHandleData{EventLoops.KqueueEventLoop}
+                        if handle_data.state == EventLoops.HandleState.SUBSCRIBED && handle_data.connected
+                            subscribed = true
+                            break
+                        end
+                    end
+                    yield()
+                end
+
+                @test subscribed
+                if subscribed
+                    impl = el.impl
+                    registry_key = handle_data.registry_key
+                    @test haskey(impl.handle_registry, registry_key)
+                    @test impl.thread_data.connected_handle_count == 1
+
+                    close(el)
+                    loop_closed = true
+
+                    @test handle.additional_data == C_NULL
+                    @test handle.additional_ref === nothing
+                    @test handle_data.state == EventLoops.HandleState.UNSUBSCRIBED
+                    @test !handle_data.connected
+                    @test handle_data.registry_key == C_NULL
+                    @test impl.thread_data.connected_handle_count == 0
+                    @test isempty(impl.handle_registry)
+                end
+            finally
+                !loop_closed && close(el)
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+            end
+        end
+    end
+
     @testset "IOCP OVERLAPPED_ENTRY layout" begin
         if !Sys.iswindows()
             @test true

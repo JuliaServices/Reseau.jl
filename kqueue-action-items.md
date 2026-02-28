@@ -53,7 +53,7 @@
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/event_loop_tests.jl\")'` (pass: `Event Loops | 70/70`).
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false, test_args=[\"event_loop_tests\"])'` (pass: `Testing Reseau tests passed`).
 
-### [ ] ITEM-003 (P1) Harden kqueue close invariants and add regression tests
+### [x] ITEM-003 (P1) Harden kqueue close invariants and add regression tests
 - Description: kqueue close path does not explicitly enforce/sweep active subscription invariants; leaks could be silent if callers close with active subscriptions.
 - Desired outcome: close is robust when handles remain subscribed, and tests cover that state.
 - Affected files: `src/eventloops/apple/kqueue_event_loop.jl`, `test/event_loop_tests.jl`
@@ -71,6 +71,9 @@
 - Completion criteria:
   - Active-subscription close test passes.
   - No stale handle registry entries remain after close.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/event_loop_tests.jl\")'` (pass: `Event Loops | 71/71`).
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false, test_args=[\"event_loop_tests\"])'` (pass: `Testing Reseau tests passed`).
 
 ### [ ] ITEM-004 (P1) Add serialized scheduling stress parity coverage for kqueue
 - Description: Reseau lacks a kqueue-focused high-volume serialized cross-thread scheduling parity test equivalent in spirit to aws-c-io's stress case.

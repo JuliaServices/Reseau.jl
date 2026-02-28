@@ -966,6 +966,23 @@
             end
         end
 
+        # Release any remaining subscription payload roots and normalize
+        # close-time invariants for handles that were still subscribed.
+        remaining_handle_data = KqueueHandleData{KqueueEventLoop}[]
+        append!(remaining_handle_data, values(impl.handle_registry))
+        empty!(impl.handle_registry)
+        for handle_data in remaining_handle_data
+            handle_data.owner.additional_data = C_NULL
+            handle_data.owner.additional_ref = nothing
+            handle_data.state = HandleState.UNSUBSCRIBED
+            handle_data.connected = false
+            handle_data.events_this_loop = 0
+            handle_data.registry_key = C_NULL
+            handle_data.subscribe_task = nothing
+            handle_data.cleanup_task = nothing
+        end
+        impl.thread_data.connected_handle_count = 0
+
         # Remove signal kevent
         del_kevent = Kevent(
             impl.cross_thread_signal_pipe[READ_FD],
