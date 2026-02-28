@@ -487,6 +487,18 @@
     function _winsock_stream_connection_success(sock::Socket)::Nothing
         handle = _winsock_socket_handle(sock)
 
+        # Best-effort update of connect context.
+        _ = ccall(
+            (:setsockopt, _WS2_32),
+            Cint,
+            (UInt, Cint, Cint, Ptr{Cvoid}, Cint),
+            handle,
+            WS_SOL_SOCKET,
+            WS_SO_UPDATE_CONNECT_CONTEXT,
+            C_NULL,
+            Cint(0),
+        )
+
         # Apply keepalive, etc.
         _winsock_socket_set_options!(sock, sock.options)
 
@@ -512,18 +524,6 @@
         end
 
         _winsock_update_local_endpoint_ipv4_ipv6!(sock)
-
-        # Best-effort update of connect context.
-        _ = ccall(
-            (:setsockopt, _WS2_32),
-            Cint,
-            (UInt, Cint, Cint, Ptr{Cvoid}, Cint),
-            handle,
-            WS_SOL_SOCKET,
-            WS_SO_UPDATE_CONNECT_CONTEXT,
-            C_NULL,
-            Cint(0),
-        )
 
         sock.state = SocketState.CONNECTED
         sock.connection_result_fn !== nothing && sock.connection_result_fn(OP_SUCCESS)

@@ -87,7 +87,7 @@
   - `julia --project=. -e 'using Test; txt = read("src/sockets/windows/winsock_socket.jl", String); @test occursin("_winsock_update_accept_context!", txt); @test occursin("_winsock_try_extract_acceptex_remote_endpoint!", txt); @test occursin("winsock_get_acceptexsockaddrs_fn()", txt); println("ITEM-004 winsock_socket assertions passed")'` -> passed.
   - `julia --project=. -e 'using Test, Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); setup_test_keychain!(); include("test/socket_tests.jl"); cleanup_test_sockets!(); cleanup_test_keychain!()'` -> passed.
 
-### [ ] ITEM-005 (P2) Align ConnectEx post-connect context update ordering
+### [x] ITEM-005 (P2) Align ConnectEx post-connect context update ordering
 - Description: Connect flow sets `SO_UPDATE_CONNECT_CONTEXT` after other post-connect checks; docs suggest context update should happen immediately after successful ConnectEx completion before dependent socket queries.
 - Desired outcome: `SO_UPDATE_CONNECT_CONTEXT` is applied earlier in the success path while preserving current behavior.
 - Affected files: `src/sockets/windows/winsock_socket.jl`
@@ -101,6 +101,9 @@
 - Completion criteria:
   - Context update occurs earlier in success path.
   - Socket tests pass.
+- Verification evidence:
+  - `julia --project=. -e 'using Test; txt = read("src/sockets/windows/winsock_socket.jl", String); fn_start = findfirst("function _winsock_stream_connection_success", txt); @test fn_start !== nothing; body = txt[first(fn_start):min(end, first(fn_start)+2000)]; pos_ctx = findfirst("WS_SO_UPDATE_CONNECT_CONTEXT", body); pos_getsockopt = findfirst("WS_SO_ERROR", body); @test pos_ctx !== nothing; @test pos_getsockopt !== nothing; @test first(pos_ctx) < first(pos_getsockopt); println("ITEM-005 source ordering assertions passed")'` -> passed.
+  - `julia --project=. -e 'using Test, Reseau; import Reseau: Threads, EventLoops, Sockets; include("test/test_utils.jl"); cleanup_test_sockets!(); setup_test_keychain!(); include("test/socket_tests.jl"); cleanup_test_sockets!(); cleanup_test_keychain!()'` -> passed.
 
 ### [ ] ITEM-006 (P0) Full validation, PR creation, and CI pass confirmation
 - Description: After all implementation items, run the full test suite, push commits, open a PR, and ensure all CI platform checks pass.
