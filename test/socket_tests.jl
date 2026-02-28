@@ -818,6 +818,26 @@ end
     end
 end
 
+@testset "winsock resolver initializes winsock" begin
+    if !Sys.iswindows()
+        @test true
+        return
+    end
+
+    script = """
+    using Reseau
+    resolver = Reseau.Sockets.HostResolver()
+    try
+        addrs = Reseau.Sockets.host_resolver_resolve!(resolver, "localhost")
+        isempty(addrs) && error("host resolver returned no addresses")
+    finally
+        close(resolver)
+    end
+    """
+    cmd = `$(Base.julia_cmd()) --project=$(dirname(@__DIR__)) --startup-file=no --history-file=no -e $script`
+    @test success(pipeline(cmd; stdout = devnull, stderr = devnull))
+end
+
 @testset "winsock local connect validates interface options" begin
     if !Sys.iswindows()
         @test true

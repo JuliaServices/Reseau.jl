@@ -90,7 +90,7 @@
   - 2026-02-28: `socket_tests` harness command passed (`exit code 0`) after connect-path updates.
   - 2026-02-28: Added regression testset `winsock local connect validates interface options` and observed pass in socket harness output.
 
-### [ ] ITEM-005 (P2) Ensure Windows resolver path initializes winsock
+### [x] ITEM-005 (P2) Ensure Windows resolver path initializes winsock
 - Description: aws-c-io Windows resolver calls winsock init before DNS resolution; Reseau resolver path currently does not explicitly do so.
 - Desired outcome: Resolver behavior is robust and parity-aligned for Windows process-init sequencing.
 - Affected files: `src/sockets/socket/host_resolver.jl`, `test/socket_tests.jl` (or resolver-focused tests if available)
@@ -106,6 +106,10 @@
   - Initialization ordering side effects if resolver is called very early.
 - Completion criteria:
   - Resolver path explicitly initializes winsock on Windows and full suite remains green.
+- Verification evidence:
+  - 2026-02-28: `socket_tests` harness command passed (`exit code 0`) with new testset `winsock resolver initializes winsock`.
+  - 2026-02-28: Full suite passed with `JULIA_NUM_THREADS=1 julia --project=. test/runtests.jl` (`exit code 0`).
+  - 2026-02-28: Default-thread full suite run was terminated by `signal 15` while entering `event_loop_tests.jl` in the pre-existing kqueue-flaky region.
 
 ## Compaction Continuity Block
 
