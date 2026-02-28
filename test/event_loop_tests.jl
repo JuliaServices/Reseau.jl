@@ -1261,11 +1261,12 @@ end
                             Int(EventLoops.IoEventType.READABLE),
                             EventLoops.EventCallable((events::Int) -> on_b(el, read_b.io_handle, events, nothing)),
                         ) === nothing
-                        Sockets.pipe_write!(write_a, _payload_abc())
-                        Sockets.pipe_write!(write_b, _payload_abc())
                         return nothing
                     end; type_tag = "subscribe_mutating_cb")
                     @test _wait_for_channel(sub_done)
+
+                    Sockets.pipe_write_sync!(write_a, _payload_abc())
+                    Sockets.pipe_write_sync!(write_b, _payload_abc())
 
                     # callback on A should run and may unsubscribe B without breaking the loop.
                     deadline = Base.time_ns() + _EVENT_LOOP_TEST_TIMEOUT_NS
@@ -1425,7 +1426,7 @@ end
                 try
                     close(el)
                 catch err
-                    destroy_threw[] = err isa ErrorException
+                    destroy_threw[] = err isa AssertionError
                 end
                 return nothing
             end); type_tag = "destroy_on_loop")
@@ -2175,6 +2176,57 @@ end
             expected_size = Sys.WORD_SIZE == 64 ? 32 : 16
             @test sizeof(EventLoops.OverlappedEntry) == expected_size
             @test fieldoffset(EventLoops.OverlappedEntry, 4) == 3 * sizeof(UInt)
+        end
+    end
+
+    @testset "IOCP completion status comes from OVERLAPPED.Internal" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.iswindows() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            try
+                @test EventLoops.run!(el) === nothing
+
+                completion_ch = Channel{Any}(1)
+                op = EventLoops.IocpOverlapped()
+                EventLoops.iocp_overlapped_init!(op, (event_loop, completed_op, status_code, bytes_transferred) -> begin
+                    put!(completion_ch, (event_loop, completed_op, status_code, bytes_transferred))
+                    return nothing
+                end, nothing)
+
+                seeded_status = UInt(0x13579BDF)
+                header = op.storage[]
+                op.storage[] = EventLoops.IocpOverlappedHeader(
+                    EventLoops.Win32OVERLAPPED(
+                        seeded_status,
+                        header.overlapped.InternalHigh,
+                        header.overlapped.Offset,
+                        header.overlapped.OffsetHigh,
+                        header.overlapped.hEvent,
+                    ),
+                    header.objref,
+                )
+
+                posted = EventLoops._win_post_queued_completion_status(
+                    el.impl.iocp_handle,
+                    UInt32(11),
+                    UInt(0),
+                    EventLoops.iocp_overlapped_ptr(op),
+                )
+                @test posted
+                @test _wait_for_channel(completion_ch; timeout_ns = 3_000_000_000)
+
+                if isready(completion_ch)
+                    cb_loop, cb_op, cb_status, cb_bytes = take!(completion_ch)
+                    @test cb_loop === el
+                    @test cb_op === op
+                    @test cb_status == Int(UInt32(seeded_status))
+                    @test cb_bytes == Csize_t(11)
+                end
+            finally
+                close(el)
+            end
         end
     end
 

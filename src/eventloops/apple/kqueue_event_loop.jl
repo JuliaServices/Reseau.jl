@@ -577,12 +577,15 @@
         if handle_data.connected
             changelist = impl.unsubscribe_changelist
             empty!(changelist)
+            fd = handle_data.owner.fd
 
-            if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
-                push!(changelist, Kevent(handle_data.owner.fd, EVFILT_READ, EV_DELETE))
-            end
-            if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
-                push!(changelist, Kevent(handle_data.owner.fd, EVFILT_WRITE, EV_DELETE))
+            if fd >= 0
+                if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
+                    push!(changelist, Kevent(fd, EVFILT_READ, EV_DELETE))
+                end
+                if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
+                    push!(changelist, Kevent(fd, EVFILT_WRITE, EV_DELETE))
+                end
             end
 
             if !isempty(changelist)
@@ -621,12 +624,15 @@
                 if handle_data.state == HandleState.SUBSCRIBED
                     changelist = impl.unsubscribe_changelist
                     empty!(changelist)
+                    fd = handle.fd
 
-                    if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
-                        push!(changelist, Kevent(handle.fd, EVFILT_READ, EV_DELETE))
-                    end
-                    if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
-                        push!(changelist, Kevent(handle.fd, EVFILT_WRITE, EV_DELETE))
+                    if fd >= 0
+                        if (handle_data.events_subscribed & Int(IoEventType.READABLE)) != 0
+                            push!(changelist, Kevent(fd, EVFILT_READ, EV_DELETE))
+                        end
+                        if (handle_data.events_subscribed & Int(IoEventType.WRITABLE)) != 0
+                            push!(changelist, Kevent(fd, EVFILT_WRITE, EV_DELETE))
+                        end
                     end
 
                     if !isempty(changelist)

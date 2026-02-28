@@ -10,6 +10,7 @@
     const _winsock_init_pid = Ref{Int}(0)
     const _connectex_fn = Ref{Ptr{Cvoid}}(C_NULL)
     const _acceptex_fn = Ref{Ptr{Cvoid}}(C_NULL)
+    const _acceptex_sockaddrs_fn = Ref{Ptr{Cvoid}}(C_NULL)
 
     const AF_INET = Cint(2)
     const SOCK_STREAM = Cint(1)
@@ -34,6 +35,12 @@
     )
     const WSAID_ACCEPTEX = GUID(
         0xb5367df1,
+        0xcbac,
+        0x11cf,
+        (0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92),
+    )
+    const WSAID_GETACCEPTEXSOCKADDRS = GUID(
+        0xb5367df2,
         0xcbac,
         0x11cf,
         (0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92),
@@ -70,6 +77,7 @@
                 _winsock_initialized[] = false
                 _connectex_fn[] = C_NULL
                 _acceptex_fn[] = C_NULL
+                _acceptex_sockaddrs_fn[] = C_NULL
             end
 
             logf(LogLevel.INFO, LS_IO_SOCKET, "static: initializing WinSock")
@@ -149,6 +157,35 @@
                     throw_error(ERROR_SYS_CALL_FAILURE)
                 end
                 _acceptex_fn[] = acceptex_ref[]
+
+                logf(LogLevel.INFO, LS_IO_SOCKET, "static: loading WSAID_GETACCEPTEXSOCKADDRS function")
+                bytes_written[] = 0
+                acceptex_sockaddrs_ref = Ref{Ptr{Cvoid}}(C_NULL)
+                guid3 = Ref(WSAID_GETACCEPTEXSOCKADDRS)
+                rc = ccall(
+                    (:WSAIoctl, _WS2_32),
+                    Cint,
+                    (UInt, UInt32, Ptr{GUID}, UInt32, Ptr{Ptr{Cvoid}}, UInt32, Ptr{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
+                    dummy,
+                    SIO_GET_EXTENSION_FUNCTION_POINTER,
+                    guid3,
+                    UInt32(sizeof(GUID)),
+                    acceptex_sockaddrs_ref,
+                    UInt32(sizeof(Ptr{Cvoid})),
+                    bytes_written,
+                    C_NULL,
+                    C_NULL,
+                )
+                if rc != 0 || acceptex_sockaddrs_ref[] == C_NULL
+                    err = _wsa_get_last_error()
+                    logf(
+                        LogLevel.ERROR,
+                        LS_IO_SOCKET,
+                        string("static: failed to load WSAID_GETACCEPTEXSOCKADDRS with WSAError %d", " ", string(err)),
+                    )
+                    throw_error(ERROR_SYS_CALL_FAILURE)
+                end
+                _acceptex_sockaddrs_fn[] = acceptex_sockaddrs_ref[]
             finally
                 _ = ccall((:closesocket, _WS2_32), Cint, (UInt,), dummy)
             end
@@ -176,6 +213,14 @@
         end
         return _acceptex_fn[]
     end
+
+    function winsock_get_acceptexsockaddrs_fn()::Ptr{Cvoid}
+        winsock_check_and_init!()
+        if _acceptex_sockaddrs_fn[] == C_NULL
+            throw_error(ERROR_SYS_CALL_FAILURE)
+        end
+        return _acceptex_sockaddrs_fn[]
+    end
 else
     function winsock_check_and_init!()::Nothing
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
@@ -186,6 +231,10 @@ else
     end
 
     function winsock_get_acceptex_fn()::Ptr{Cvoid}
+        throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
+    end
+
+    function winsock_get_acceptexsockaddrs_fn()::Ptr{Cvoid}
         throw_error(ERROR_PLATFORM_NOT_SUPPORTED)
     end
 end
