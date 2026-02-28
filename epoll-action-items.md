@@ -49,7 +49,7 @@
 - Verification evidence:
   - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed (exit code 0).
 
-### [ ] ITEM-003 (P1) Close test parity gaps identified in epoll review
+### [x] ITEM-003 (P1) Close test parity gaps identified in epoll review
 - Description: Review found parity gaps versus aws-c-io coverage depth (e.g., destroy-path cancellation thread affinity, high-contention serialized scheduling, explicit epoll-specific contracts).
 - Desired outcome: Add targeted regression tests in Reseau covering missing parity scenarios.
 - Affected files: `test/event_loop_tests.jl` (and helpers if needed)
@@ -66,6 +66,8 @@
   - Overly timing-sensitive tests can create CI flakiness.
 - Completion criteria:
   - New parity tests are merged, stable, and passing locally/CI.
+- Verification evidence:
+  - 2026-02-28: `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed (exit code 0).
 
 ### [ ] ITEM-004 (P0) Full validation, PR, and CI completion
 - Description: After implementation items land, we need end-to-end validation and delivery.
