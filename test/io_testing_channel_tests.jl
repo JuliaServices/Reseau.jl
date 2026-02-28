@@ -175,6 +175,8 @@ end
         @test _wait_until(() -> left_handler.latest_window_update == Csize_t(12345))
         @test left_handler.latest_window_update == Csize_t(12345)
 
+        @test Sockets.channel_shutdown!(channel, Reseau.OP_SUCCESS) === nothing
+        @test _wait_until(() -> channel.channel_state == Sockets.ChannelState.SHUT_DOWN)
         Sockets.channel_destroy!(channel)
         close(el)
     end

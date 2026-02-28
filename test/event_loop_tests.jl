@@ -1261,8 +1261,8 @@ end
                             Int(EventLoops.IoEventType.READABLE),
                             EventLoops.EventCallable((events::Int) -> on_b(el, read_b.io_handle, events, nothing)),
                         ) === nothing
-                        Sockets.pipe_write!(write_a, _payload_abc())
-                        Sockets.pipe_write!(write_b, _payload_abc())
+                        Sockets.pipe_write_sync!(write_a, _payload_abc())
+                        Sockets.pipe_write_sync!(write_b, _payload_abc())
                         return nothing
                     end; type_tag = "subscribe_mutating_cb")
                     @test _wait_for_channel(sub_done)
