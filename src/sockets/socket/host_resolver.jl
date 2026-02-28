@@ -815,6 +815,9 @@ const NI_NUMERICHOST = @static Sys.islinux() ? Cint(0x00000001) : Cint(0x0000000
 Native getaddrinfo wrapper - returns a vector of address/family pairs.
 """
 function _native_getaddrinfo(hostname::String; flags::Cint = Cint(0))::Vector{Tuple{String, Cint}}
+    @static if Sys.iswindows()
+        winsock_check_and_init!()
+    end
     addresses = Tuple{String, Cint}[]
     hints = Ref{addrinfo}()
     hints_ptr = Base.unsafe_convert(Ptr{addrinfo}, hints)

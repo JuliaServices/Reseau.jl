@@ -27,6 +27,7 @@
     const WS_SO_EXCLUSIVEADDRUSE = ~WS_SO_REUSEADDR
 
     # mswsock.h values (see docs); used with setsockopt(SOL_SOCKET,...)
+    const WS_SO_UPDATE_ACCEPT_CONTEXT = Cint(0x700B)
     const WS_SO_UPDATE_CONNECT_CONTEXT = Cint(0x7010)
 
     # Shutdown directions
@@ -257,6 +258,58 @@
         throw_error(ERROR_IO_SOCKET_UNSUPPORTED_ADDRESS_FAMILY)
     end
 
+    function _winsock_set_endpoint_from_sockaddr_ptr!(endpoint::SocketEndpoint, sockaddr_ptr::Ptr{Cvoid})::Union{SocketDomain.T, Nothing}
+        sockaddr_ptr == C_NULL && return nothing
+
+        sockaddr_bytes = Ptr{UInt8}(sockaddr_ptr)
+        family = unsafe_load(Ptr{Cushort}(sockaddr_bytes)) |> Cint
+        if family == WS_AF_INET
+            port = ntohs(unsafe_load(Ptr{Cushort}(sockaddr_bytes + 2)))
+            addr_ptr = sockaddr_bytes + 4
+            set_address!(endpoint, _winsock_inet_ntop_ipv4(addr_ptr))
+            endpoint.port = UInt32(port)
+            return SocketDomain.IPV4
+        elseif family == WS_AF_INET6
+            port = ntohs(unsafe_load(Ptr{Cushort}(sockaddr_bytes + 2)))
+            addr_ptr = sockaddr_bytes + 8
+            set_address!(endpoint, _winsock_inet_ntop_ipv6(addr_ptr))
+            endpoint.port = UInt32(port)
+            return SocketDomain.IPV6
+        end
+
+        return nothing
+    end
+
+    function _winsock_update_remote_endpoint_from_accept_buffer!(incoming::Socket, accept_buffer::Memory{UInt8})::Nothing
+        get_addrs_ptr = winsock_get_getacceptexsockaddrs_fn()
+        local_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+        local_len = Ref{Cint}(0)
+        remote_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+        remote_len = Ref{Cint}(0)
+        addr_len = UInt32(length(accept_buffer) ÷ 2)
+
+        GC.@preserve accept_buffer ccall(
+            get_addrs_ptr,
+            Cvoid,
+            (Ptr{UInt8}, UInt32, UInt32, UInt32, Ptr{Ptr{Cvoid}}, Ptr{Cint}, Ptr{Ptr{Cvoid}}, Ptr{Cint}),
+            pointer(accept_buffer),
+            UInt32(0),
+            addr_len,
+            addr_len,
+            local_ptr,
+            local_len,
+            remote_ptr,
+            remote_len,
+        )
+
+        parsed_domain = _winsock_set_endpoint_from_sockaddr_ptr!(incoming.remote_endpoint, remote_ptr[])
+        if parsed_domain !== nothing
+            incoming.options.domain = parsed_domain
+        end
+
+        return nothing
+    end
+
     function _winsock_socket_set_options!(sock::Socket, options::SocketOptions)::Nothing
         if sock.options.domain != options.domain || sock.options.type != options.type
             throw_error(ERROR_IO_SOCKET_INVALID_OPTIONS)
@@ -483,6 +536,26 @@
         return nothing
     end
 
+    @inline function _winsock_set_reuseaddr_for_connect!(sock::Socket)::Nothing
+        reuse = Ref{Cint}(1)
+        rc = ccall(
+            (:setsockopt, _WS2_32),
+            Cint,
+            (UInt, Cint, Cint, Ptr{Cint}, Cint),
+            _winsock_socket_handle(sock),
+            WS_SOL_SOCKET,
+            WS_SO_REUSEADDR,
+            reuse,
+            Cint(sizeof(Cint)),
+        )
+        if rc != 0
+            sock.state = SocketState.ERROR
+            socket_err = _winsock_determine_socket_error(_wsa_get_last_error())
+            throw_error(socket_err)
+        end
+        return nothing
+    end
+
     function _winsock_stream_connection_success(sock::Socket)::Nothing
         handle = _winsock_socket_handle(sock)
 
@@ -638,18 +711,7 @@
         impl = sock.impl::WinsockSocket
         copy!(sock.remote_endpoint, remote_endpoint)
 
-        # Enable SO_REUSEADDR (best-effort)
-        reuse = Ref{Cint}(1)
-        _ = ccall(
-            (:setsockopt, _WS2_32),
-            Cint,
-            (UInt, Cint, Cint, Ptr{Cint}, Cint),
-            _winsock_socket_handle(sock),
-            WS_SOL_SOCKET,
-            WS_SO_REUSEADDR,
-            reuse,
-            Cint(sizeof(Cint)),
-        )
+        _winsock_set_reuseaddr_for_connect!(sock)
 
         try
             socket_assign_to_event_loop(sock, connect_loop)
@@ -746,6 +808,13 @@
         if sock.options.domain == SocketDomain.LOCAL
             connect_loop === nothing && throw_error(ERROR_IO_SOCKET_MISSING_EVENT_LOOP)
 
+            try
+                _winsock_socket_set_options!(sock, sock.options)
+            catch
+                sock.state = SocketState.ERROR
+                rethrow()
+            end
+
             copy!(sock.remote_endpoint, remote_endpoint)
             handle = ccall(
                 (:CreateFileA, _WIN_KERNEL32),
@@ -790,6 +859,7 @@
             # UDP connect is synchronous.
             connect_loop === nothing && (connect_loop = nothing)
             copy!(sock.remote_endpoint, remote_endpoint)
+            _winsock_set_reuseaddr_for_connect!(sock)
 
             address = get_address(remote_endpoint)
             if sock.options.domain == SocketDomain.IPV4
@@ -834,6 +904,12 @@
             end
 
             _winsock_update_local_endpoint_ipv4_ipv6!(sock)
+            try
+                _winsock_socket_set_options!(sock, sock.options)
+            catch
+                sock.state = SocketState.ERROR
+                rethrow()
+            end
             sock.state = SocketState.CONNECTED
 
             if connect_loop !== nothing
@@ -1105,26 +1181,24 @@
 
         incoming.state = SocketState.CONNECTED
 
-        # Best-effort parse remote endpoint from accept buffer.
-        addr_mem = impl.accept_buffer
-        family = unsafe_load(Ptr{Cushort}(pointer(addr_mem))) |> Cint
-        port = UInt32(0)
-        if family == WS_AF_INET
-            port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
-            addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 4)
-            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv4(addr_ptr))
-            incoming.options.domain = SocketDomain.IPV4
-        elseif family == WS_AF_INET6
-            port = UInt32(ntohs(unsafe_load(Ptr{Cushort}(pointer(addr_mem) + 2))))
-            addr_ptr = Ptr{UInt8}(pointer(addr_mem) + 8)
-            set_address!(incoming.remote_endpoint, _winsock_inet_ntop_ipv6(addr_ptr))
-            incoming.options.domain = SocketDomain.IPV6
-        end
-        incoming.remote_endpoint.port = port
+        _winsock_update_remote_endpoint_from_accept_buffer!(incoming, impl.accept_buffer)
 
         # Make accepted socket non-blocking.
         nb = Ref{UInt32}(1)
         _ = ccall((:ioctlsocket, _WS2_32), Cint, (UInt, UInt32, Ptr{UInt32}), _winsock_socket_handle(incoming), FIONBIO, nb)
+
+        # Required by AcceptEx before using several socket APIs on the accepted socket.
+        listener_handle = Ref{UInt}(_winsock_socket_handle(sock))
+        _ = ccall(
+            (:setsockopt, _WS2_32),
+            Cint,
+            (UInt, Cint, Cint, Ptr{UInt}, Cint),
+            _winsock_socket_handle(incoming),
+            WS_SOL_SOCKET,
+            WS_SO_UPDATE_ACCEPT_CONTEXT,
+            listener_handle,
+            Cint(sizeof(UInt)),
+        )
 
         try
             _winsock_socket_set_options!(incoming, sock.options)

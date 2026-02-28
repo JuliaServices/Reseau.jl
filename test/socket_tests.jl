@@ -628,24 +628,24 @@ end
 end
 
 @testset "socket bind to invalid interface" begin
-    if Sys.iswindows()
-        @test true
-    else
-        opts = Sockets.SocketOptions(;
-            type = Sockets.SocketType.STREAM,
-            domain = Sockets.SocketDomain.IPV4,
-            connect_timeout_ms = 3000,
-            keepalive = true,
-            keep_alive_interval_sec = 1000,
-            keep_alive_timeout_sec = 60000,
-            network_interface_name = "invalid",
-        )
+    opts = Sockets.SocketOptions(;
+        type = Sockets.SocketType.STREAM,
+        domain = Sockets.SocketDomain.IPV4,
+        connect_timeout_ms = 3000,
+        keepalive = true,
+        keep_alive_interval_sec = 1000,
+        keep_alive_timeout_sec = 60000,
+        network_interface_name = "invalid",
+    )
 
-        try
-            Sockets.socket_init(opts)
-            @test false
-        catch e
-            @test e isa Reseau.ReseauError
+    try
+        Sockets.socket_init(opts)
+        @test false
+    catch e
+        @test e isa Reseau.ReseauError
+        if Sys.iswindows()
+            @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        else
             @test e.code == EventLoops.ERROR_IO_SOCKET_INVALID_OPTIONS ||
                 e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
         end
@@ -815,6 +815,158 @@ end
     catch e
         @test e isa Reseau.ReseauError
         @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+    end
+end
+
+@testset "winsock resolver initializes winsock" begin
+    if !Sys.iswindows()
+        @test true
+        return
+    end
+
+    script = """
+    using Reseau
+    resolver = Reseau.Sockets.HostResolver()
+    try
+        addrs = Reseau.Sockets.host_resolver_resolve!(resolver, "localhost")
+        isempty(addrs) && error("host resolver returned no addresses")
+    finally
+        close(resolver)
+    end
+    """
+    cmd = `$(Base.julia_cmd()) --project=$(dirname(@__DIR__)) --startup-file=no --history-file=no -e $script`
+    @test success(pipeline(cmd; stdout = devnull, stderr = devnull))
+end
+
+@testset "winsock local connect validates interface options" begin
+    if !Sys.iswindows()
+        @test true
+        return
+    end
+
+    el = EventLoops.EventLoop()
+    el_val = el isa EventLoops.EventLoop ? el : nothing
+    @test el_val !== nothing
+    if el_val === nothing
+        return
+    end
+    @test EventLoops.run!(el_val) === nothing
+
+    opts = Sockets.SocketOptions(;
+        type = Sockets.SocketType.STREAM,
+        domain = Sockets.SocketDomain.LOCAL,
+        network_interface_name = "invalid",
+    )
+    sock = Sockets.socket_init(opts)
+    socket_val = sock isa Sockets.Socket ? sock : nothing
+    @test socket_val !== nothing
+
+    try
+        if socket_val === nothing
+            return
+        end
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("\\\\.\\pipe\\reseau-invalid-pipe", 0), event_loop = el_val,
+            on_connection_result = Reseau.EventCallable(err -> nothing),
+        )
+        try
+            Sockets.socket_connect(socket_val; connect_opts...)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == Reseau.ERROR_PLATFORM_NOT_SUPPORTED
+        end
+    finally
+        socket_val !== nothing && Sockets.socket_cleanup!(socket_val)
+        close(el_val)
+    end
+end
+
+@testset "winsock tcp accept remote endpoint parsing" begin
+    if !Sys.iswindows()
+        @test true
+        return
+    end
+
+    el = EventLoops.EventLoop()
+    el_val = el isa EventLoops.EventLoop ? el : nothing
+    @test el_val !== nothing
+    if el_val === nothing
+        return
+    end
+    @test EventLoops.run!(el_val) === nothing
+
+    opts = Sockets.SocketOptions(; type = Sockets.SocketType.STREAM, domain = Sockets.SocketDomain.IPV4)
+    server = Sockets.socket_init(opts)
+    server_socket = server isa Sockets.Socket ? server : nothing
+    @test server_socket !== nothing
+
+    client_socket = nothing
+    accepted = Ref{Any}(nothing)
+    accept_err = Ref{Int}(0)
+    connect_err = Ref{Int}(0)
+    accept_done = Threads.Atomic{Bool}(false)
+    connect_done = Threads.Atomic{Bool}(false)
+
+    try
+        if server_socket === nothing
+            return
+        end
+
+        bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        @test Sockets.socket_bind(server_socket; bind_opts...) === nothing
+        @test Sockets.socket_listen(server_socket, 8) === nothing
+
+        on_accept = Reseau.ChannelCallable((err, new_sock) -> begin
+            accept_err[] = err
+            accepted[] = new_sock
+            accept_done[] = true
+            return nothing
+        end)
+        accept_opts = (; on_accept_result = on_accept)
+        @test Sockets.socket_start_accept(server_socket, el_val; accept_opts...) === nothing
+
+        bound = Sockets.socket_get_bound_address(server_socket)
+        @test bound isa Sockets.SocketEndpoint
+        port = bound isa Sockets.SocketEndpoint ? Int(bound.port) : 0
+        @test port != 0
+        if port == 0
+            return
+        end
+
+        client = Sockets.socket_init(opts)
+        client_socket = client isa Sockets.Socket ? client : nothing
+        @test client_socket !== nothing
+        if client_socket === nothing
+            return
+        end
+
+        connect_opts = (; remote_endpoint = Sockets.SocketEndpoint("127.0.0.1", port), event_loop = el_val,
+            on_connection_result = Reseau.EventCallable(err -> begin
+                connect_err[] = err
+                connect_done[] = true
+                return nothing
+            end),
+        )
+        @test Sockets.socket_connect(client_socket; connect_opts...) === nothing
+
+        @test wait_for_flag(connect_done)
+        @test wait_for_flag(accept_done)
+        @test connect_err[] == Reseau.OP_SUCCESS
+        @test accept_err[] == Reseau.OP_SUCCESS
+
+        accepted_sock = accepted[]
+        @test accepted_sock isa Sockets.Socket
+        if accepted_sock isa Sockets.Socket
+            client_bound = Sockets.socket_get_bound_address(client_socket)
+            accepted_remote = copy(accepted_sock.remote_endpoint)
+            @test accepted_remote.port == client_bound.port
+            @test Sockets.get_address(accepted_remote) == Sockets.get_address(client_bound)
+        end
+    finally
+        client_socket !== nothing && Sockets.socket_cleanup!(client_socket)
+        accepted[] !== nothing && Sockets.socket_cleanup!(accepted[])
+        server_socket !== nothing && Sockets.socket_cleanup!(server_socket)
+        close(el_val)
     end
 end
 
@@ -2104,64 +2256,69 @@ end
 end
 
 @testset "wrong thread read write fails" begin
-    if Sys.iswindows()
-        @test true
+    el = EventLoops.EventLoop()
+    el_val = el isa EventLoops.EventLoop ? el : nothing
+    @test el_val !== nothing
+    if el_val === nothing
+        return
+    end
+    @test EventLoops.run!(el_val) === nothing
+
+    # Use LOCAL on POSIX and IPV4 on Windows to exercise each platform's native implementation.
+    @static if Sys.iswindows()
+        opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.IPV4)
     else
-        el = EventLoops.EventLoop()
-        el_val = el isa EventLoops.EventLoop ? el : nothing
-        @test el_val !== nothing
-        if el_val === nothing
-            return
-        end
-        @test EventLoops.run!(el_val) === nothing
-
-        # Use LOCAL domain (POSIX path on all platforms) since this test
-        # exercises POSIX-specific bind/assign/read/write/close flow
         opts = Sockets.SocketOptions(; type = Sockets.SocketType.DGRAM, domain = Sockets.SocketDomain.LOCAL)
-        sock = Sockets.socket_init(opts)
-        socket_val = sock isa Sockets.Socket ? sock : nothing
-        @test socket_val !== nothing
-        if socket_val === nothing
-            close(el_val)
-            return
-        end
+    end
+    sock = Sockets.socket_init(opts)
+    socket_val = sock isa Sockets.Socket ? sock : nothing
+    @test socket_val !== nothing
+    if socket_val === nothing
+        close(el_val)
+        return
+    end
 
-        try
+    try
+        @static if Sys.iswindows()
+            bind_opts = (; local_endpoint = Sockets.SocketEndpoint("127.0.0.1", 0))
+        else
             endpoint = Sockets.SocketEndpoint()
             Sockets.socket_endpoint_init_local_address_for_test!(endpoint)
             bind_opts = (; local_endpoint = endpoint)
-            @test Sockets.socket_bind(socket_val; bind_opts...) === nothing
-            @test Sockets.socket_assign_to_event_loop(socket_val, el_val) === nothing
-            Sockets.socket_subscribe_to_readable_events(socket_val, Reseau.EventCallable(err -> nothing))
-
-            buf = Reseau.ByteBuffer(4)
-            try
-                Sockets.socket_read(socket_val, buf)
-                @test false
-            catch e
-                @test e isa Reseau.ReseauError
-                @test e.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
-            end
-
-            try
-                Sockets.socket_write(socket_val, Reseau.ByteCursor("noop"), Reseau.WriteCallable((err, bytes) -> nothing))
-                @test false
-            catch e
-                @test e isa Reseau.ReseauError
-                @test e.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
-            end
-
-            close_done = Threads.Atomic{Bool}(false)
-            close_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
-                Sockets.socket_close(socket_val)
-                close_done[] = true
-                return nothing
-            end); type_tag = "socket_close_wrong_thread")
-            EventLoops.schedule_task_now!(el_val, close_task)
-            @test wait_for_flag(close_done)
-        finally
-            close(el_val)
         end
+        @test Sockets.socket_bind(socket_val; bind_opts...) === nothing
+        @test Sockets.socket_assign_to_event_loop(socket_val, el_val) === nothing
+        @static if !Sys.iswindows()
+            Sockets.socket_subscribe_to_readable_events(socket_val, Reseau.EventCallable(err -> nothing))
+        end
+
+        buf = Reseau.ByteBuffer(4)
+        try
+            Sockets.socket_read(socket_val, buf)
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+        end
+
+        try
+            Sockets.socket_write(socket_val, Reseau.ByteCursor("noop"), Reseau.WriteCallable((err, bytes) -> nothing))
+            @test false
+        catch e
+            @test e isa Reseau.ReseauError
+            @test e.code == EventLoops.ERROR_IO_EVENT_LOOP_THREAD_ONLY
+        end
+
+        close_done = Threads.Atomic{Bool}(false)
+        close_task = Reseau.ScheduledTask(Reseau.TaskFn(status -> begin
+            Sockets.socket_close(socket_val)
+            close_done[] = true
+            return nothing
+        end); type_tag = "socket_close_wrong_thread")
+        EventLoops.schedule_task_now!(el_val, close_task)
+        @test wait_for_flag(close_done)
+    finally
+        close(el_val)
     end
 end
 
