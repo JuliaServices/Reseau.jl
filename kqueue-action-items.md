@@ -75,7 +75,7 @@
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/event_loop_tests.jl\")'` (pass: `Event Loops | 71/71`).
   - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false, test_args=[\"event_loop_tests\"])'` (pass: `Testing Reseau tests passed`).
 
-### [ ] ITEM-004 (P1) Add serialized scheduling stress parity coverage for kqueue
+### [x] ITEM-004 (P1) Add serialized scheduling stress parity coverage for kqueue
 - Description: Reseau lacks a kqueue-focused high-volume serialized cross-thread scheduling parity test equivalent in spirit to aws-c-io's stress case.
 - Desired outcome: kqueue path has a robust ordering test under concurrent scheduling pressure.
 - Affected files: `test/event_loop_tests.jl`
@@ -92,6 +92,9 @@
   - Overly aggressive stress size may create flaky runtime behavior.
 - Completion criteria:
   - New kqueue serialized stress test passes consistently.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Test; using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/event_loop_tests.jl\")'` (pass: `Event Loops | 72/72`).
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false, test_args=[\"event_loop_tests\"])'` (pass: `Testing Reseau tests passed`).
 
 ### [ ] ITEM-005 (P1) Run full test matrix locally and stabilize failures
 - Description: All Reseau tests must pass before PR.
