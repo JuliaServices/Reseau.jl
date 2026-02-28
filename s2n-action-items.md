@@ -116,7 +116,7 @@
   - `julia --project=. -e 'using Test, Reseau; import Reseau: Sockets; ...'` (allocator callback helper behavior passed for normal and zero-length allocations)
   - Warning log path was implemented at TLS context setup; this environment does not currently include a dedicated log-capture assertion harness for that branch.
 
-### [ ] ITEM-006 (P2) Expand network parity scenarios for s2n coverage
+### [x] ITEM-006 (P2) Expand network parity scenarios for s2n coverage
 - Description: Network test matrix is narrower than aws-c-io, especially for badssl variants and explicit parity scenarios.
 - Desired outcome: Add high-value missing network parity scenarios without making CI unstable.
 - Affected files: `test/tls_tests_impl.jl`, `s2n-review.md`
@@ -133,6 +133,9 @@
   - External endpoint drift/flakiness can create intermittent failures.
 - Completion criteria:
   - Network matrix is materially closer to aws-c-io and still guard-railed for flakiness.
+- Verification evidence:
+  - `julia --project=. -e 'let src = read(\"test/tls_tests_impl.jl\", String); ...; println(\"item6-parse-ok\"); end'`
+  - Network suite remains behind `RESEAU_RUN_NETWORK_TESTS=1`; matrix was expanded while preserving the existing flaky-endpoint guard behavior.
 
 ## Compaction Continuity Block
 
