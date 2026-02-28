@@ -2510,6 +2510,59 @@ end
         end
     end
 
+    @testset "IOCP completion callback arguments" begin
+        interactive_threads = Base.Threads.nthreads(:interactive)
+        if !Sys.iswindows() || interactive_threads <= 1
+            @test true
+        else
+            el = EventLoops.EventLoop()
+            read_end = nothing
+            write_end = nothing
+            try
+                @test EventLoops.run!(el) === nothing
+                read_end, write_end = Sockets.pipe_init(el, el)
+
+                completion_ch = Channel{Any}(1)
+                payload = Vector{UInt8}("Cherry Pie")
+                overlapped = EventLoops.IocpOverlapped()
+                EventLoops.iocp_overlapped_init!(
+                    overlapped,
+                    (loop, completed, status_code, bytes_transferred) -> begin
+                        put!(completion_ch, (loop, completed, status_code, bytes_transferred, EventLoops.event_loop_thread_is_callers_thread(loop)))
+                        return nothing
+                    end,
+                    nothing,
+                )
+
+                write_ok = GC.@preserve payload overlapped ccall(
+                    (:WriteFile, "Kernel32"),
+                    Int32,
+                    (Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{UInt32}, Ptr{Cvoid}),
+                    write_end.io_handle.handle,
+                    pointer(payload),
+                    UInt32(length(payload)),
+                    C_NULL,
+                    EventLoops.iocp_overlapped_ptr(overlapped),
+                ) != 0
+                @test write_ok || EventLoops._win_get_last_error() == UInt32(997)
+
+                @test _wait_for_channel(completion_ch; timeout_ns = 3_000_000_000)
+                if isready(completion_ch)
+                    cb_loop, cb_overlapped, cb_status, cb_bytes, cb_thread_ok = take!(completion_ch)
+                    @test cb_loop === el
+                    @test cb_overlapped === overlapped
+                    @test cb_status == 0
+                    @test cb_bytes == Csize_t(length(payload))
+                    @test cb_thread_ok
+                end
+            finally
+                read_end !== nothing && Sockets.pipe_read_end_close!(read_end)
+                write_end !== nothing && Sockets.pipe_write_end_close!(write_end)
+                close(el)
+            end
+        end
+    end
+
     @testset "IOCP rerun clears stop state" begin
         interactive_threads = Base.Threads.nthreads(:interactive)
         if !Sys.iswindows() || interactive_threads <= 1

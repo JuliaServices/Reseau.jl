@@ -48,7 +48,7 @@
 - Verification evidence:
   - 2026-02-28: socket test harness command passed (`exit code 0`) with new testset `winsock tcp accept remote endpoint parsing`.
 
-### [ ] ITEM-003 (P1) Close Windows test parity gaps from aws-c-io
+### [x] ITEM-003 (P1) Close Windows test parity gaps from aws-c-io
 - Description: Key Windows parity tests are missing/partial compared to aws-c-io (`event_loop_completion_events`, wrong-thread read/write behavior, interface-name behavior).
 - Desired outcome: Reseau Windows tests cover these core scenarios.
 - Affected files: `test/event_loop_tests.jl`, `test/socket_tests.jl`
@@ -65,6 +65,10 @@
   - IOCP callback tests can be timing-sensitive; synchronization must be robust.
 - Completion criteria:
   - New/updated tests are non-noop on Windows and pass consistently.
+- Verification evidence:
+  - 2026-02-28: `socket_tests` harness command passed (`exit code 0`), including updated testsets `socket bind to invalid interface` and `wrong thread read write fails`.
+  - 2026-02-28: Focused IOCP callback-argument parity test command passed (`exit code 0`) with testset `IOCP completion callback arguments`.
+  - 2026-02-28: Full `event_loop_tests` harness repeatedly failed in pre-existing kqueue test `Event loop callback mutates another subscription safely` (`test/event_loop_tests.jl:1268` / `:1275`), which runs before IOCP test coverage.
 
 ### [ ] ITEM-004 (P1) Align connect-path option behavior with aws-c-io reference
 - Description: Connect-path handling differs from aws-c-io around `SO_REUSEADDR` failure behavior and option processing in UDP/local connect paths.
