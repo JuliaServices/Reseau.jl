@@ -462,6 +462,20 @@ function tls_key_operation_type_str(op::TlsKeyOperationType.T)::String
         "UNKNOWN"
 end
 
+@inline function _checked_uint32_length(len::Csize_t)::UInt32
+    if len > Csize_t(typemax(UInt32))
+        throw_error(ERROR_INVALID_ARGUMENT)
+    end
+    return UInt32(len)
+end
+
+@inline function _checked_cssize_length(len::Csize_t)::Cssize_t
+    if len > Csize_t(typemax(Cssize_t))
+        throw_error(ERROR_INVALID_ARGUMENT)
+    end
+    return Cssize_t(len)
+end
+
 mutable struct TlsKeyOperation{F, Handler}
     input::ByteCursor
     input_buf::Union{ByteBuffer, Nothing}
@@ -591,13 +605,14 @@ function _tls_key_operation_complete_common(
     if output !== nothing && !out_buf_failed && operation.s2n_op != C_NULL
         try
             lib = _s2n_lib_handle()
+            output_len = _checked_uint32_length(operation.output.len)
             if ccall(
                     _s2n_symbol(:s2n_async_pkey_op_set_output),
                     Cint,
-                    (Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
+                    (Ptr{Cvoid}, Ptr{UInt8}, UInt32),
                     operation.s2n_op,
                     pointer(operation.output.mem),
-                    operation.output.len,
+                    output_len,
                 ) != S2N_SUCCESS
                 logf(LogLevel.ERROR, LS_IO_TLS, "Failed setting output on s2n async pkey op")
                 error_code = ERROR_INVALID_STATE

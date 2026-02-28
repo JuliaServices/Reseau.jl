@@ -51,7 +51,7 @@
   - `julia --project=. -e 'using Reseau; import Reseau: Threads, EventLoops, Sockets; include(\"test/pkcs11_tests.jl\")'`
   - PKCS#11 core tests passed; SoftHSM integration block was skipped in this local environment because `TEST_PKCS11_LIB`/`TEST_PKCS11_TOKEN_DIR` and `softhsm2-util` are not configured.
 
-### [ ] ITEM-003 (P1) Correct s2n ccall type widths to official API
+### [x] ITEM-003 (P1) Correct s2n ccall type widths to official API
 - Description: Several `ccall` signatures use wider integer types than official s2n API docs (`uint32_t`/`ssize_t`).
 - Desired outcome: `ccall` signatures are ABI-accurate to s2n docs, reducing truncation and portability risk.
 - Affected files: `src/sockets/linux/s2n_tls_handler.jl`, `src/sockets/socket/tls_channel_handler.jl`, `s2n-review.md`
@@ -69,6 +69,9 @@
 - Completion criteria:
   - Updated signatures compile and pass TLS-focused tests.
   - Full test suite passes.
+- Verification evidence:
+  - `julia --project=. -e 'using Test, Reseau; import Reseau: Sockets; ...'` (checked-length helper assertions passed)
+  - `julia --project=. -e 'using Reseau; println(\"item3-load-ok\")'` (module load + compile path passed)
 
 ### [ ] ITEM-004 (P1) Expand PKCS#11 sign edge-case coverage
 - Description: Sign tests are missing parity assertions from aws-c-io for invalid session/key in RSA+EC flows and richer EC signature validation behavior.

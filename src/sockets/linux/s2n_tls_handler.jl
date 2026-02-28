@@ -766,21 +766,21 @@ function handler_process_read_message(
         blocked = Ref{Cint}(S2N_NOT_BLOCKED)
         read_val = ccall(
             _s2n_symbol(:s2n_recv),
-            Int,
-            (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cint}),
+            Cssize_t,
+            (Ptr{Cvoid}, Ptr{UInt8}, Cssize_t, Ptr{Cint}),
             handler.connection,
             pointer(outgoing.message_data.mem),
-            outgoing.message_data.capacity,
+            _checked_cssize_length(outgoing.message_data.capacity),
             blocked,
         )
 
-        if read_val == 0
+        if read_val == Cssize_t(0)
             channel_release_message_to_pool!(slot.channel, outgoing)
             force_shutdown = true
             break
         end
 
-        if read_val < 0
+        if read_val < Cssize_t(0)
             channel_release_message_to_pool!(slot.channel, outgoing)
             if blocked[] != S2N_NOT_BLOCKED
                 if handler.read_state == TlsHandlerReadState.SHUTTING_DOWN
@@ -859,17 +859,18 @@ function handler_process_write_message(
 
     _s2n_lib_handle()
     blocked = Ref{Cint}(S2N_NOT_BLOCKED)
+    write_len = _checked_cssize_length(message.message_data.len)
     write_val = ccall(
         _s2n_symbol(:s2n_send),
-        Int,
-        (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cint}),
+        Cssize_t,
+        (Ptr{Cvoid}, Ptr{UInt8}, Cssize_t, Ptr{Cint}),
         handler.connection,
         pointer(message.message_data.mem),
-        message.message_data.len,
+        write_len,
         blocked,
     )
 
-    if write_val < Int(message.message_data.len)
+    if write_val < write_len
         throw_error(ERROR_IO_TLS_ERROR_WRITE_FAILURE)
     end
 
@@ -1260,9 +1261,9 @@ function _s2n_context_new(options::TlsContextOptions)::TlsContext
         end
 
         cert_ptr = pointer(options.certificate.mem)
-        cert_len = options.certificate.len
+        cert_len = _checked_uint32_length(options.certificate.len)
         if ccall(_s2n_symbol(:s2n_cert_chain_and_key_load_public_pem_bytes), Cint,
-                (Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
+                (Ptr{Cvoid}, Ptr{UInt8}, UInt32),
                 ctx_impl.custom_cert_chain_and_key,
                 cert_ptr,
                 cert_len) != S2N_SUCCESS
