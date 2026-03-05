@@ -792,7 +792,16 @@ function accept!(fd::FD)::Tuple{Cint, SocketOps.AcceptPeer}
             end
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
                 @static if Sys.iswindows()
-                    _windows_accept_backoff!()
+                    # Windows currently uses a short backoff loop for listener
+                    # readiness. Do not hold the read lock while backing off,
+                    # otherwise close/shutdown can deadlock waiting on this lock.
+                    _fd_read_unlock!(fd)
+                    try
+                        _windows_accept_backoff!()
+                    finally
+                        _fd_read_lock!(fd)
+                    end
+                    prepare_read!(fd.pd, fd.is_file)
                 else
                     wait_read!(fd.pd, fd.is_file)
                 end
