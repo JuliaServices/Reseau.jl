@@ -9,10 +9,7 @@ using ..Reseau.SocketOps
 using ..Reseau.IOPoll
 
 @inline function _resolver_debug(msg::AbstractString)
-    @static if Sys.iswindows()
-        println("[host_resolvers] ", msg)
-        flush(stdout)
-    end
+    _ = msg
     return nothing
 end
 using ..Reseau.TCP

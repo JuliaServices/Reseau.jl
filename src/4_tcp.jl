@@ -9,10 +9,7 @@ using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 
 @inline function _tcp_debug(msg::AbstractString)
-    @static if Sys.iswindows()
-        println("[tcp] ", msg)
-        flush(stdout)
-    end
+    _ = msg
     return nothing
 end
 
