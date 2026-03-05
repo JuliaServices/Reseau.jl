@@ -127,6 +127,7 @@ mutable struct Poller
     kq::Cint
     wake_ident::UInt
     backend_scratch::Any
+    poll_task::Union{Nothing, Task}
     @atomic wak_sig::UInt32
     @atomic next_token::UInt64
     @atomic running::Bool
@@ -140,6 +141,7 @@ function Poller()
         Base.Threads.Event(),
         Cint(-1),
         UInt(1),
+        nothing,
         nothing,
         UInt32(0),
         UInt64(0),
@@ -249,11 +251,17 @@ function init!()::Poller
     @atomic new_state.running = true
     POLLER[] = new_state
     try
-        _spawn_detached_thread(
-            "reseau-eventloops-poller",
-            _POLLER_THREAD_ENTRY_C,
-            new_state,
-        )
+        @static if Sys.iswindows()
+            # Windows path uses a Julia task for poller execution to avoid
+            # foreign-thread scheduler interactions when waking Julia tasks.
+            new_state.poll_task = errormonitor(Threads.@spawn _poller_thread_main!(new_state))
+        else
+            _spawn_detached_thread(
+                "reseau-eventloops-poller",
+                _POLLER_THREAD_ENTRY_C,
+                new_state,
+            )
+        end
     catch
         @atomic :release new_state.running = false
         _backend_close!(new_state)
@@ -292,6 +300,12 @@ function shutdown!()
         wake_errno = _backend_wake!(state)
         wake_errno == Int32(0) || _throw_errno("event loop wake", wake_errno)
         wait(state.shutdown_event)
+        poll_task = state.poll_task
+        if poll_task isa Task
+            _ = timedwait(() -> istaskdone(poll_task), 1.0; pollint = 0.001)
+            istaskdone(poll_task) && wait(poll_task)
+        end
+        state.poll_task = nothing
     end
     _backend_close!(state)
     return nothing
