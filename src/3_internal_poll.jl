@@ -526,6 +526,7 @@ function init!(fd::FD; net::Symbol = :tcp, pollable::Bool = true)
     lock(pd.lock)
     try
         if pollable
+            _set_nonblocking!(fd.sysfd)
             registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE)
             pd.sysfd = fd.sysfd
             pd.token = registration.token
