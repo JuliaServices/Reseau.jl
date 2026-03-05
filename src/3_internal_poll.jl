@@ -620,6 +620,7 @@ function wait_read!(pd::PollState, is_file::Bool = false)
     pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
     registration = pd.registration
     (registration === nothing || registration.fd != pd.sysfd || registration.token != pd.token) && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+    EventLoops.arm_waiter!(registration, EventLoops.PollMode.READ)
     EventLoops.pollwait!(registration.read_waiter)
     _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
     return nothing
@@ -633,6 +634,7 @@ function wait_write!(pd::PollState, is_file::Bool = false)
     pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
     registration = pd.registration
     (registration === nothing || registration.fd != pd.sysfd || registration.token != pd.token) && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+    EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
     EventLoops.pollwait!(registration.write_waiter)
     _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
     return nothing
@@ -649,9 +651,11 @@ function wait_canceled!(pd::PollState, mode::PollOp.T)
         return nothing
     end
     if mode == PollOp.WRITE
+        EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
         EventLoops.pollwait!(registration.write_waiter)
         return nothing
     end
+    EventLoops.arm_waiter!(registration, EventLoops.PollMode.READ)
     EventLoops.pollwait!(registration.read_waiter)
     return nothing
 end
@@ -800,7 +804,7 @@ function read!(fd::FD, p::Vector{UInt8})::Int
                 end
                 return Int(n)
             end
-            errno = Int32(Base.Libc.errno())
+            errno = SocketOps.last_error()
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
                 wait_read!(fd.pd, fd.is_file)
                 continue
@@ -848,7 +852,7 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
                 continue
             end
             n == 0 && throw(EOFError())
-            errno = Int32(Base.Libc.errno())
+            errno = SocketOps.last_error()
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
                 wait_write!(fd.pd, fd.is_file)
                 continue

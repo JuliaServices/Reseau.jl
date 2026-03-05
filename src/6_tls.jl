@@ -9,6 +9,7 @@ using OpenSSL_jll
 using NetworkOptions
 using EnumX: @enumx
 using ..Reseau.IOPoll
+using ..Reseau.SocketOps
 using ..Reseau.TCP
 using ..Reseau.HostResolvers
 
@@ -803,7 +804,7 @@ function _wait_ssl_ready!(conn::Conn, ssl_err::Cint, op::AbstractString)
         return true
     end
     if ssl_err == _SSL_ERROR_SYSCALL
-        errno = Int32(Base.Libc.errno())
+        errno = SocketOps.last_error()
         if _is_socket_would_block(errno)
             IOPoll.wait_read!(conn.tcp.fd.pfd.pd)
             return true

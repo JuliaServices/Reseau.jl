@@ -243,12 +243,17 @@ const _HR_AF_INET = SocketOps.AF_INET
 const _HR_AF_INET6 = SocketOps.AF_INET6
 
 @inline function _gai_error_string(code::Cint)::String
-    ptr = ccall(:gai_strerror, Cstring, (Cint,), code)
+    ptr = @static if Sys.iswindows()
+        ccall((:gai_strerrorA, "Ws2_32"), Cstring, (Cint,), code)
+    else
+        ccall(:gai_strerror, Cstring, (Cint,), code)
+    end
     ptr == C_NULL && return "unknown getaddrinfo error code $code"
     return unsafe_string(ptr)
 end
 
 function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::Vector{TCP.SocketEndpoint}
+    SocketOps.ensure_winsock!()
     addresses = TCP.SocketEndpoint[]
     hints = Ref{_AddrInfo}()
     hints_ptr = Base.unsafe_convert(Ptr{_AddrInfo}, hints)
@@ -261,12 +266,24 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
     end
     result_ptr = Ref{Ptr{_AddrInfo}}(C_NULL)
     ret = GC.@preserve hints begin
-        @ccall gc_safe = true getaddrinfo(
-            String(hostname)::Cstring,
-            C_NULL::Cstring,
-            hints_ptr::Ptr{_AddrInfo},
-            result_ptr::Ptr{Ptr{_AddrInfo}},
-        )::Cint
+        @static if Sys.iswindows()
+            ccall(
+                (:getaddrinfo, "Ws2_32"),
+                Cint,
+                (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
+                String(hostname),
+                C_NULL,
+                hints_ptr,
+                result_ptr,
+            )
+        else
+            @ccall gc_safe = true getaddrinfo(
+                String(hostname)::Cstring,
+                C_NULL::Cstring,
+                hints_ptr::Ptr{_AddrInfo},
+                result_ptr::Ptr{Ptr{_AddrInfo}},
+            )::Cint
+        end
     end
     ret == 0 || _addr_error("lookup failed: $(_gai_error_string(ret))", String(hostname))
     try
@@ -289,7 +306,13 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
             current = ai.ai_next
         end
     finally
-        result_ptr[] != C_NULL && ccall(:freeaddrinfo, Cvoid, (Ptr{_AddrInfo},), result_ptr[])
+        if result_ptr[] != C_NULL
+            @static if Sys.iswindows()
+                ccall((:freeaddrinfo, "Ws2_32"), Cvoid, (Ptr{_AddrInfo},), result_ptr[])
+            else
+                ccall(:freeaddrinfo, Cvoid, (Ptr{_AddrInfo},), result_ptr[])
+            end
+        end
     end
     return addresses
 end

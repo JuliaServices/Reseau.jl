@@ -150,6 +150,13 @@ function _backend_open_fd!(
     return Int32(0)
 end
 
+function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
+    _ = state
+    _ = registration
+    _ = mode
+    return Int32(0)
+end
+
 """
 Unregister read/write filters for `fd`.
 """
@@ -279,6 +286,13 @@ function _backend_open_fd!(state::Poller, fd::Cint, mode::PollMode.T, token::UIn
     _ = fd
     _ = mode
     _ = token
+    return Int32(Base.Libc.ENOSYS)
+end
+
+function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
+    _ = state
+    _ = registration
+    _ = mode
     return Int32(Base.Libc.ENOSYS)
 end
 

@@ -5,11 +5,11 @@ Platform socket syscall facade and sockaddr helpers.
 """
 module SocketOps
 
-const SockLen = UInt32
+const SockLen = @static Sys.iswindows() ? Cint : UInt32
 
 const AF_UNIX = Cint(1)
 const AF_INET = Cint(2)
-const AF_INET6 = @static Sys.islinux() ? Cint(10) : Cint(30)
+const AF_INET6 = @static Sys.iswindows() ? Cint(23) : Sys.islinux() ? Cint(10) : Cint(30)
 
 const SOCK_STREAM = Cint(1)
 const SOCK_DGRAM = Cint(2)
@@ -306,6 +306,8 @@ end
 include("2_socket_ops_darwin.jl")
 elseif Sys.islinux()
 include("2_socket_ops_linux.jl")
+elseif Sys.iswindows()
+include("2_socket_ops_windows.jl")
 else
 
 function fd_is_cloexec(fd::Cint)::Bool

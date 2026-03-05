@@ -179,7 +179,7 @@ end
 end
 
 @inline function _runtime_supported()::Bool
-    return Sys.isapple() || Sys.islinux()
+    return Sys.isapple() || Sys.islinux() || Sys.iswindows()
 end
 
 function _new_registration(fd::Cint, token::UInt64, mode::PollMode.T)::Registration
@@ -242,7 +242,7 @@ function init!()::Poller
         state = POLLER[]
         (@atomic state.running) && return state
     end
-    _runtime_supported() || throw(ArgumentError("eventloops backend is currently supported on macOS and Linux only"))
+    _runtime_supported() || throw(ArgumentError("eventloops backend is currently supported on macOS, Linux, and Windows"))
     new_state = Poller()
     errno = _backend_init!(new_state)
     errno == Int32(0) || _throw_errno("eventloops backend init", errno)
@@ -355,6 +355,31 @@ function deregister!(fd::Integer)
 end
 
 """
+    arm_waiter!(registration, mode)
+
+Backend hook invoked immediately before waiting so platforms that need explicit
+arming (such as IOCP readiness probes) can submit a wait operation.
+"""
+function arm_waiter!(registration::Registration, mode::PollMode.T)
+    _mode_is_empty(mode) && return nothing
+    isassigned(POLLER) || return nothing
+    state = POLLER[]
+    (@atomic :acquire state.running) || return nothing
+    errno = Int32(0)
+    lock(state.lock)
+    try
+        (@atomic :acquire state.running) || return nothing
+        current = get(state.registrations, registration.fd, nothing)
+        current === registration || return nothing
+        errno = _backend_arm_waiter!(state, registration, mode)
+    finally
+        unlock(state.lock)
+    end
+    errno == Int32(0) || _throw_errno("event loop arm", errno)
+    return nothing
+end
+
+"""
     _dispatch_ready_event!(state, event)
 
 Route decoded backend events to registered waiter(s).
@@ -434,6 +459,8 @@ end
     include("1_eventloops_kqueue.jl")
 elseif Sys.islinux()
     include("1_eventloops_epoll.jl")
+elseif Sys.iswindows()
+    include("1_eventloops_iocp.jl")
 else
     include("1_eventloops_kqueue.jl")
 end

@@ -123,6 +123,13 @@ function _backend_open_fd!(
     return Int32(0)
 end
 
+function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
+    _ = state
+    _ = registration
+    _ = mode
+    return Int32(0)
+end
+
 """
 Remove fd from epoll interest set.
 """

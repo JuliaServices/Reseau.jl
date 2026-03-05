@@ -23,6 +23,14 @@ const _accept4_state = Ref{Int32}(_ACCEPT4_UNSET)
     return Int32(Base.Libc.errno())
 end
 
+@inline function ensure_winsock!()
+    return nothing
+end
+
+@inline function last_error()::Int32
+    return _errno_i32()
+end
+
 function _throw_errno(op::AbstractString, errno::Int32)
     throw(SystemError(op, Int(errno)))
 end
