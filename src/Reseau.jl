@@ -1,32 +1,23 @@
+"""
+    Reseau
+
+Root module for the rewritten Go-parity networking stack.
+
+The package is organized in layers:
+- low-level eventing/polling and socket ops
+- TCP core primitives + host resolution/connection orchestration
+- TLS transport
+- HTTP/1 + HTTP/2 client/server stacks
+"""
 module Reseau
 
-using EnumX
-using PrecompileTools: @compile_workload, @setup_workload
-using ScopedValues
-import UUIDs
+include("1_eventloops.jl")
+include("2_socket_ops.jl")
+include("3_internal_poll.jl")
+include("4_tcp.jl")
+include("5_host_resolvers.jl")
+include("6_tls.jl")
+include("7_http.jl")
+include("8_precompile_workload.jl")
 
-# Debug flag for internal asserts
-const DEBUG_BUILD = Ref(false)
-
-# --- shared runtime ---
-include("error.jl")
-include("utils.jl")
-include("logging.jl")
-include("byte_buf.jl")
-include("clock.jl")
-
-# --- public submodules (native implementations) ---
-include("foreign_threads.jl")
-include("task_scheduler.jl")
-include("eventloops/eventloops.jl")
-include("retry_strategy.jl")
-include("sockets/sockets.jl")
-include("precompile_workload.jl")
-
-function __init__()
-    ForeignThreads.__init__()
-    EventLoops.__init__()
-    Sockets.io_library_init()
 end
-
-end # module Reseau
