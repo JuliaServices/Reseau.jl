@@ -10,9 +10,13 @@ else
     typemax(Int)
 end
 
-function _run_trim_compile(project_path::String, script_path::String, output_name::String; timeout_s::Float64 = 120.0)
+function _run_trim_compile(project_path::String, script_path::String, output_name::String; timeout_s::Float64 = 120.0, bundle_dir::Union{Nothing, String} = nothing)
     julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
-    cmd = `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e "using JuliaC; JuliaC.main(ARGS)" -- --output-exe $output_name --project=$project_path --experimental --trim=safe $script_path`
+    cmd = if bundle_dir === nothing
+        `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e "using JuliaC; JuliaC.main(ARGS)" -- --output-exe $output_name --project=$project_path --experimental --trim=safe $script_path`
+    else
+        `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e "using JuliaC; JuliaC.main(ARGS)" -- --output-exe $output_name --bundle $bundle_dir --project=$project_path --experimental --trim=safe $script_path`
+    end
     return _run_command_with_timeout(cmd; timeout_s = timeout_s, log_label = "compile")
 end
 
@@ -103,6 +107,11 @@ function _trim_selected_workloads(workloads::Vector{Tuple{String, String}})::Vec
     return selected
 end
 
+function _trim_use_bundle()::Bool
+    default = Sys.iswindows() ? "1" : "0"
+    return get(ENV, "RESEAU_TRIM_BUNDLE", default) == "1"
+end
+
 function _run_trim_case(project_path::String, script_file::String, output_name::String)
     script_path = joinpath(@__DIR__, script_file)
     @test isfile(script_path)
@@ -110,7 +119,8 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
     start_t = time()
     mktempdir() do tmpdir
         cd(tmpdir) do
-            exit_code, output, timed_out = _run_trim_compile(project_path, script_path, output_name)
+            bundle_dir = _trim_use_bundle() ? joinpath(tmpdir, "bundle") : nothing
+            exit_code, output, timed_out = _run_trim_compile(project_path, script_path, output_name; bundle_dir = bundle_dir)
             timed_out && _trim_timeout_error("compile", script_file, output)
             totals = _parse_trim_verify_totals(output)
             trim_errors, trim_warnings = if totals === nothing
@@ -125,9 +135,10 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
             @test trim_warnings >= 0
             output_path = Sys.iswindows() ? "$(output_name).exe" : output_name
             if trim_errors == 0
+                run_path = bundle_dir === nothing ? output_path : joinpath(bundle_dir, "bin", output_path)
                 @test exit_code == 0
-                @test isfile(output_path)
-                run_cmd = Sys.iswindows() ? `$output_path` : `./$output_path`
+                @test isfile(run_path)
+                run_cmd = Sys.iswindows() ? `$(abspath(run_path))` : `$(abspath(run_path))`
                 run_timeout_s = _trim_executable_timeout_s()
                 run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd; timeout_s = run_timeout_s)
                 run_timed_out && _trim_timeout_error("executable run", script_file, run_output)
