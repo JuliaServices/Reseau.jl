@@ -122,7 +122,10 @@ end
 
 function _cancel_probe!(reg::IocpRegistration, op::IocpOp)
     (@atomic :acquire op.active) || return nothing
-    ok = ccall((:CancelIoEx, _KERNEL32), Int32, (Ptr{Cvoid}, Ptr{Cvoid}), _socket_handle(reg.fd), _op_ptr(op))
+    ok = @ccall gc_safe = true _KERNEL32.CancelIoEx(
+        _socket_handle(reg.fd)::Ptr{Cvoid},
+        _op_ptr(op)::Ptr{Cvoid},
+    )::Int32
     if ok == 0
         err = _win_get_last_error()
         if err == _ERROR_NOT_FOUND
@@ -181,15 +184,12 @@ function _submit_iocp_probe!(registration::Registration, reg::IocpRegistration, 
 end
 
 function _backend_init!(state::Poller)::Int32
-    port = ccall(
-        (:CreateIoCompletionPort, _KERNEL32),
-        Ptr{Cvoid},
-        (Ptr{Cvoid}, Ptr{Cvoid}, UInt, UInt32),
-        _INVALID_HANDLE_VALUE,
-        C_NULL,
-        UInt(0),
-        UInt32(0),
-    )
+    port = @ccall gc_safe = true _KERNEL32.CreateIoCompletionPort(
+        _INVALID_HANDLE_VALUE::Ptr{Cvoid},
+        C_NULL::Ptr{Cvoid},
+        UInt(0)::UInt,
+        UInt32(0)::UInt32,
+    )::Ptr{Cvoid}
     port == C_NULL && return _map_win_errno(_win_get_last_error())
     state.backend_scratch = IocpBackendScratch(
         port,
@@ -207,7 +207,9 @@ function _backend_close!(state::Poller)
     if scratch_any isa IocpBackendScratch
         scratch = scratch_any::IocpBackendScratch
         if scratch.port != C_NULL
-            _ = ccall((:CloseHandle, _KERNEL32), Int32, (Ptr{Cvoid},), scratch.port)
+            _ = @ccall gc_safe = true _KERNEL32.CloseHandle(
+                scratch.port::Ptr{Cvoid},
+            )::Int32
         end
     end
     state.backend_scratch = nothing
@@ -224,15 +226,12 @@ function _backend_open_fd!(
     scratch_any = state.backend_scratch
     scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
     scratch = scratch_any::IocpBackendScratch
-    associated = ccall(
-        (:CreateIoCompletionPort, _KERNEL32),
-        Ptr{Cvoid},
-        (Ptr{Cvoid}, Ptr{Cvoid}, UInt, UInt32),
-        _socket_handle(fd),
-        scratch.port,
-        UInt(token),
-        UInt32(0),
-    )
+    associated = @ccall gc_safe = true _KERNEL32.CreateIoCompletionPort(
+        _socket_handle(fd)::Ptr{Cvoid},
+        scratch.port::Ptr{Cvoid},
+        UInt(token)::UInt,
+        UInt32(0)::UInt32,
+    )::Ptr{Cvoid}
     associated == C_NULL && return _map_win_errno(_win_get_last_error())
     reg = _new_iocp_registration(fd, token)
     scratch.by_fd[fd] = reg
@@ -278,15 +277,12 @@ function _backend_wake!(state::Poller)::Int32
     scratch = scratch_any::IocpBackendScratch
     _, ok = @atomicreplace(state.wak_sig, UInt32(0) => UInt32(1))
     ok || return Int32(0)
-    posted = ccall(
-        (:PostQueuedCompletionStatus, _KERNEL32),
-        Int32,
-        (Ptr{Cvoid}, UInt32, UInt, Ptr{Cvoid}),
-        scratch.port,
-        UInt32(0),
-        _WAKE_KEY,
-        C_NULL,
-    )
+    posted = @ccall gc_safe = true _KERNEL32.PostQueuedCompletionStatus(
+        scratch.port::Ptr{Cvoid},
+        UInt32(0)::UInt32,
+        _WAKE_KEY::UInt,
+        C_NULL::Ptr{Cvoid},
+    )::Int32
     if posted == 0
         @atomic :release state.wak_sig = UInt32(0)
         return _map_win_errno(_win_get_last_error())

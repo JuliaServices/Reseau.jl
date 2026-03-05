@@ -303,7 +303,10 @@ function _ssl_alpn_select_cb(
 end
 
 function __init__()
-    _ = ccall((:OPENSSL_init_ssl, _LIBSSL), Cint, (Culong, Ptr{Cvoid}), Culong(0), C_NULL)
+    _ = @ccall gc_safe = true _LIBSSL.OPENSSL_init_ssl(
+        Culong(0)::Culong,
+        C_NULL::Ptr{Cvoid},
+    )::Cint
     handle = Base.Libc.Libdl.dlopen(_LIBSSL)
     _VERIFY_ALLOW_ALL_CB[] = @cfunction(_verify_allow_all_cb, Cint, (Cint, Ptr{Cvoid}))
     _ALPN_SELECT_CB[] = @cfunction(_ssl_alpn_select_cb, Cint, (Ptr{Cvoid}, Ptr{Ptr{UInt8}}, Ptr{UInt8}, Ptr{UInt8}, Cuint, Ptr{Cvoid}))
@@ -622,19 +625,32 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
         if need_verify_paths
             ca_path = _effective_ca_file(config; is_server = is_server)
             if ca_path === nothing
-                ok = ccall((:SSL_CTX_set_default_verify_paths, _LIBSSL), Cint, (Ptr{Cvoid},), ctx)
+                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_set_default_verify_paths(
+                    ctx::Ptr{Cvoid},
+                )::Cint
                 ok == 1 || throw(_make_tls_error("SSL_CTX_set_default_verify_paths", Int32(ok)))
             else
-                ok = ccall((:SSL_CTX_load_verify_locations, _LIBSSL), Cint, (Ptr{Cvoid}, Cstring, Cstring), ctx, ca_path, C_NULL)
+                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_load_verify_locations(
+                    ctx::Ptr{Cvoid},
+                    ca_path::Cstring,
+                    C_NULL::Cstring,
+                )::Cint
                 ok == 1 || throw(_make_tls_error("SSL_CTX_load_verify_locations", Int32(ok)))
             end
         end
         if is_server
             cert_file = config.cert_file::String
             key_file = config.key_file::String
-            ok = ccall((:SSL_CTX_use_certificate_chain_file, _LIBSSL), Cint, (Ptr{Cvoid}, Cstring), ctx, cert_file)
+            ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_certificate_chain_file(
+                ctx::Ptr{Cvoid},
+                cert_file::Cstring,
+            )::Cint
             ok == 1 || throw(_make_tls_error("SSL_CTX_use_certificate_chain_file", Int32(ok)))
-            ok = ccall((:SSL_CTX_use_PrivateKey_file, _LIBSSL), Cint, (Ptr{Cvoid}, Cstring, Cint), ctx, key_file, _SSL_FILETYPE_PEM)
+            ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_PrivateKey_file(
+                ctx::Ptr{Cvoid},
+                key_file::Cstring,
+                _SSL_FILETYPE_PEM::Cint,
+            )::Cint
             ok == 1 || throw(_make_tls_error("SSL_CTX_use_PrivateKey_file", Int32(ok)))
             ok = ccall((:SSL_CTX_check_private_key, _LIBSSL), Cint, (Ptr{Cvoid},), ctx)
             ok == 1 || throw(_make_tls_error("SSL_CTX_check_private_key", Int32(ok)))
@@ -668,9 +684,16 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
             if config.cert_file !== nothing
                 cert_file = config.cert_file::String
                 key_file = config.key_file::String
-                ok = ccall((:SSL_CTX_use_certificate_chain_file, _LIBSSL), Cint, (Ptr{Cvoid}, Cstring), ctx, cert_file)
+                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_certificate_chain_file(
+                    ctx::Ptr{Cvoid},
+                    cert_file::Cstring,
+                )::Cint
                 ok == 1 || throw(_make_tls_error("SSL_CTX_use_certificate_chain_file", Int32(ok)))
-                ok = ccall((:SSL_CTX_use_PrivateKey_file, _LIBSSL), Cint, (Ptr{Cvoid}, Cstring, Cint), ctx, key_file, _SSL_FILETYPE_PEM)
+                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_PrivateKey_file(
+                    ctx::Ptr{Cvoid},
+                    key_file::Cstring,
+                    _SSL_FILETYPE_PEM::Cint,
+                )::Cint
                 ok == 1 || throw(_make_tls_error("SSL_CTX_use_PrivateKey_file", Int32(ok)))
                 ok = ccall((:SSL_CTX_check_private_key, _LIBSSL), Cint, (Ptr{Cvoid},), ctx)
                 ok == 1 || throw(_make_tls_error("SSL_CTX_check_private_key", Int32(ok)))

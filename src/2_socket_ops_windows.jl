@@ -56,6 +56,7 @@ const _ERROR_INVALID_HANDLE = UInt32(6)
 const _ERROR_NOT_SUPPORTED = UInt32(50)
 const _WSADATA_DESC_ZERO = ntuple(_ -> UInt8(0), 257)
 const _WSADATA_STATUS_ZERO = ntuple(_ -> UInt8(0), 129)
+const _ERRNO_ESOCKTNOSUPPORT = @static isdefined(Base.Libc, :ESOCKTNOSUPPORT) ? Int32(getfield(Base.Libc, :ESOCKTNOSUPPORT)) : Int32(Base.Libc.EPROTONOSUPPORT)
 const _ERRNO_ESHUTDOWN = @static isdefined(Base.Libc, :ESHUTDOWN) ? Int32(getfield(Base.Libc, :ESHUTDOWN)) : Int32(Base.Libc.ENOTCONN)
 const _ERRNO_EHOSTDOWN = @static isdefined(Base.Libc, :EHOSTDOWN) ? Int32(getfield(Base.Libc, :EHOSTDOWN)) : Int32(Base.Libc.EHOSTUNREACH)
 
@@ -121,7 +122,7 @@ end
     err == _WSAEPROTOTYPE && return Int32(Base.Libc.EPROTOTYPE)
     err == _WSAENOPROTOOPT && return Int32(Base.Libc.ENOPROTOOPT)
     err == _WSAEPROTONOSUPPORT && return Int32(Base.Libc.EPROTONOSUPPORT)
-    err == _WSAESOCKTNOSUPPORT && return Int32(Base.Libc.ESOCKTNOSUPPORT)
+    err == _WSAESOCKTNOSUPPORT && return _ERRNO_ESOCKTNOSUPPORT
     err == _WSAEOPNOTSUPP && return Int32(Base.Libc.EOPNOTSUPP)
     err == _WSAEPFNOSUPPORT && return Int32(Base.Libc.EAFNOSUPPORT)
     err == _WSAEAFNOSUPPORT && return Int32(Base.Libc.EAFNOSUPPORT)
@@ -195,7 +196,10 @@ function ensure_winsock!()
             UInt16(0),
             C_NULL,
         ))
-        rc = ccall((:WSAStartup, _WS2_32), Cint, (UInt16, Ref{_WSAData}), UInt16(0x0202), wsa_data)
+        rc = @ccall gc_safe = true _WS2_32.WSAStartup(
+            UInt16(0x0202)::UInt16,
+            wsa_data::Ref{_WSAData},
+        )::Cint
         rc == 0 || _throw_errno("WSAStartup", _map_wsa_errno(Int32(rc)))
         _winsock_initialized[] = true
         _winsock_init_pid[] = pid
@@ -298,7 +302,9 @@ end
 
 function close_socket_nothrow(fd::Cint)::Int32
     _clear_fd_state!(fd)
-    ret = ccall((:closesocket, _WS2_32), Cint, (UInt,), _socket_value(fd))
+    ret = @ccall gc_safe = true _WS2_32.closesocket(
+        _socket_value(fd)::UInt,
+    )::Cint
     ret == 0 && return Int32(0)
     errno = _map_wsa_errno(_wsa_get_last_error())
     errno == Int32(Base.Libc.EBADF) && return errno
@@ -328,13 +334,20 @@ function bind_socket(fd::Cint, addr::SockAddrIn6)
 end
 
 function bind_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)
-    ret = ccall((:bind, _WS2_32), Cint, (UInt, Ptr{Cvoid}, Cint), _socket_value(fd), addr, Cint(addrlen))
+    ret = @ccall gc_safe = true _WS2_32.bind(
+        _socket_value(fd)::UInt,
+        addr::Ptr{Cvoid},
+        Cint(addrlen)::Cint,
+    )::Cint
     ret == 0 && return nothing
     _throw_errno("bind", _map_wsa_errno(_wsa_get_last_error()))
 end
 
 function listen_socket(fd::Cint, backlog::Integer)
-    ret = ccall((:listen, _WS2_32), Cint, (UInt, Cint), _socket_value(fd), Cint(backlog))
+    ret = @ccall gc_safe = true _WS2_32.listen(
+        _socket_value(fd)::UInt,
+        Cint(backlog)::Cint,
+    )::Cint
     ret == 0 && return nothing
     _throw_errno("listen", _map_wsa_errno(_wsa_get_last_error()))
 end
@@ -517,7 +530,10 @@ function get_peer_name_in6(fd::Cint)::SockAddrIn6
 end
 
 function shutdown_socket(fd::Cint, how::Integer)
-    ret = ccall((:shutdown, _WS2_32), Cint, (UInt, Cint), _socket_value(fd), Cint(how))
+    ret = @ccall gc_safe = true _WS2_32.shutdown(
+        _socket_value(fd)::UInt,
+        Cint(how)::Cint,
+    )::Cint
     ret == 0 && return nothing
     _throw_errno("shutdown", _map_wsa_errno(_wsa_get_last_error()))
 end
