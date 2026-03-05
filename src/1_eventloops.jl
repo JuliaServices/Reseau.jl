@@ -184,6 +184,20 @@ end
     return Sys.isapple() || Sys.islinux() || Sys.iswindows()
 end
 
+@inline function _poll_once_delay_ns()::Int64
+    @static if Sys.iswindows()
+        Threads.nthreads() == 1 && return Int64(1_000_000)
+    end
+    return Int64(-1)
+end
+
+@inline function _poll_once_post_yield()
+    @static if Sys.iswindows()
+        Threads.nthreads() == 1 && yield()
+    end
+    return nothing
+end
+
 function _new_registration(fd::Cint, token::UInt64, mode::PollMode.T)::Registration
     return Registration(fd, token, mode, PollWaiter(), PollWaiter(), false)
 end
@@ -433,13 +447,18 @@ end
 
 function _poller_thread_main!(state::Poller)
     while @atomic state.running
-        errno = _backend_poll_once!(state, Int64(-1))
-        errno == Int32(0) && continue
+        errno = _backend_poll_once!(state, _poll_once_delay_ns())
+        if errno == Int32(0)
+            _poll_once_post_yield()
+            continue
+        end
         if errno == Int32(Base.Libc.EINTR)
+            _poll_once_post_yield()
             continue
         end
         _notify_all_waiters!(state)
         @atomic :release state.running = false
+        _poll_once_post_yield()
     end
     notify(state.shutdown_event)
     return nothing
