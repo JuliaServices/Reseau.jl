@@ -78,7 +78,11 @@ end
         @test String(_read_all_server_bytes(response.body)) == "ok"
         HT.shutdown!(server; force = true)
         _wait_task_done(task)
-        @test_throws Exception HT.get!(client, address, "/after-shutdown")
+        # Bound the post-shutdown probe so Windows CI cannot hang indefinitely
+        # if a stale keep-alive conn does not surface close immediately.
+        probe = HT.Request("GET", "/after-shutdown"; host = address, body = HT.EmptyBody(), content_length = 0)
+        HT.set_deadline!(probe.context, Int64(time_ns()) + Int64(2_000_000_000))
+        @test_throws Exception HT.do!(client, address, probe)
     finally
         close(client.transport)
     end
