@@ -153,6 +153,7 @@ end
 @testset "Trim compile" begin
     project_path = normpath(joinpath(@__DIR__, ".."))
     trim_workloads = [
+        ("reseau_load_trim_safe.jl", "reseau_load_trim_safe"),
         ("eventloops_trim_safe.jl", "eventloops_trim_safe"),
         ("socket_ops_trim_safe.jl", "socket_ops_trim_safe"),
         ("tcp_trim_safe.jl", "tcp_trim_safe"),
