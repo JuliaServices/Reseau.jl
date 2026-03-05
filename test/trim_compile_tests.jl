@@ -10,12 +10,23 @@ else
     typemax(Int)
 end
 
-function _run_trim_compile(project_path::String, script_path::String, output_name::String)
+function _run_trim_compile(project_path::String, script_path::String, output_name::String; timeout_s::Float64 = 300.0)
     julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
     cmd = `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e "using JuliaC; JuliaC.main(ARGS)" -- --output-exe $output_name --project=$project_path --experimental --trim=safe $script_path`
     io = IOBuffer()
-    proc = run(pipeline(ignorestatus(cmd), stdout = io, stderr = io))
-    return proc.exitcode, String(take!(io))
+    proc = run(pipeline(ignorestatus(cmd), stdout = io, stderr = io); wait = false)
+    start_t = time()
+    timed_out = false
+    while process_running(proc)
+        if (time() - start_t) >= timeout_s
+            timed_out = true
+            kill(proc)
+            break
+        end
+        sleep(0.1)
+    end
+    wait(proc)
+    return proc.exitcode, String(take!(io)), timed_out
 end
 
 function _parse_trim_verify_totals(output::String)
@@ -37,9 +48,12 @@ end
     for (script_file, output_name) in trim_workloads
         script_path = joinpath(@__DIR__, script_file)
         @test isfile(script_path)
+        println("[trim] compile START $(script_file)")
+        start_t = time()
         mktempdir() do tmpdir
             cd(tmpdir) do
-                exit_code, output = _run_trim_compile(project_path, script_path, output_name)
+                exit_code, output, timed_out = _run_trim_compile(project_path, script_path, output_name)
+                timed_out && error("trim compile timed out for $(script_file)")
                 totals = _parse_trim_verify_totals(output)
                 trim_errors, trim_warnings = if totals === nothing
                     exit_code == 0 ? (0, 0) : error("failed to parse trim verifier summary:\n$output")
@@ -72,5 +86,6 @@ end
                 end
             end
         end
+        println("[trim] compile DONE $(script_file) ($(round(time() - start_t; digits = 2))s)")
     end
 end
