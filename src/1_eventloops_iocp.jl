@@ -323,18 +323,15 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     entries = scratch.entries
     removed = Ref{UInt32}(UInt32(0))
     wait_ms = _iocp_timeout_ms(delay_ns)
-    ok = GC.@preserve entries begin
-        ccall(
-            (:GetQueuedCompletionStatusEx, _KERNEL32),
-            Int32,
-            (Ptr{Cvoid}, Ptr{OverlappedEntry}, UInt32, Ref{UInt32}, UInt32, Int32),
-            scratch.port,
-            pointer(entries),
-            UInt32(length(entries)),
-            removed,
-            wait_ms,
-            Int32(0),
-        )
+    ok = GC.@preserve entries removed begin
+        @ccall gc_safe = true _KERNEL32.GetQueuedCompletionStatusEx(
+            scratch.port::Ptr{Cvoid},
+            pointer(entries)::Ptr{OverlappedEntry},
+            UInt32(length(entries))::UInt32,
+            removed::Ref{UInt32},
+            wait_ms::UInt32,
+            Int32(0)::Int32,
+        )::Int32
     end
     if ok == 0
         err = _win_get_last_error()

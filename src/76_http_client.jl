@@ -14,8 +14,10 @@ using ..Reseau.TLS
 const _CONN_READER_DEFAULT_BUFFER_BYTES = 16 * 1024
 
 @inline function _http_transport_debug(msg::AbstractString)
-    println("[http_transport] ", msg)
-    flush(stdout)
+    @static if Sys.iswindows()
+        println("[http_transport] ", msg)
+        flush(stdout)
+    end
     return nothing
 end
 
