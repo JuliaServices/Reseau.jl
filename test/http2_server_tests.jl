@@ -124,7 +124,8 @@ end
     end
     HT.shutdown_h2_server!(server)
     _ = timedwait(() -> istaskdone(task), 3.0; pollint = 0.001)
-    @test_throws Exception HT.connect_h2!(address; secure = false)
+    fail_fast_resolver = ND.HostResolver(timeout_ns = Int64(1_000_000_000))
+    @test_throws Exception HT.connect_h2!(address; secure = false, host_resolver = fail_fast_resolver)
 end
 
 @testset "HTTP/2 server splits large response bodies into valid DATA frames" begin
