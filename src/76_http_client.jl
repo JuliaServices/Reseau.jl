@@ -1084,6 +1084,136 @@ function _prepare_request_for_redirect(request::Request, status_code::Int, new_t
     return redirected
 end
 
+struct _RedirectStep
+    address::String
+    secure::Bool
+    server_name::String
+    request::Request
+end
+
+@inline function _apply_request_cookies!(
+        client::Client,
+        request::Request,
+        host::String,
+        path::String,
+        secure::Bool,
+    )
+    if client.jar isa MemoryCookieJar
+        cookie_value = _cookie_header(client.jar::MemoryCookieJar, host, path, secure)
+        cookie_value === nothing || set_header!(request.headers, "Cookie", cookie_value)
+    end
+    return nothing
+end
+
+@inline function _store_response_cookies!(
+        client::Client,
+        response::Response,
+        host::String,
+    )
+    if client.jar isa MemoryCookieJar
+        set_cookie_values = get_headers(response.headers, "Set-Cookie")
+        isempty(set_cookie_values) || _store_set_cookies!(client.jar::MemoryCookieJar, host, set_cookie_values)
+    end
+    return nothing
+end
+
+function _client_roundtrip_h2_or_fallback(
+        client::Client,
+        address::String,
+        send_request::Request,
+        secure::Bool,
+        server_name::String,
+        protocol::Symbol,
+    )::Response
+    try
+        conn = _acquire_h2_conn!(client, address, secure; server_name = server_name)
+        return h2_roundtrip!(conn, send_request)
+    catch err
+        _drop_h2_conn!(client, address, secure)
+        if protocol == :auto && _should_fallback_h2_to_h1(err)
+            return roundtrip!(
+                client.transport,
+                address,
+                send_request;
+                secure = secure,
+                server_name = server_name,
+            )
+        end
+        rethrow(err)
+    end
+end
+
+function _client_roundtrip_response(
+        client::Client,
+        address::String,
+        send_request::Request,
+        secure::Bool,
+        server_name::String,
+        protocol::Symbol,
+    )::Response
+    if _use_h2(client, secure, protocol)
+        return _client_roundtrip_h2_or_fallback(
+            client,
+            address,
+            send_request,
+            secure,
+            server_name,
+            protocol,
+        )
+    end
+    return roundtrip!(
+        client.transport,
+        address,
+        send_request;
+        secure = secure,
+        server_name = server_name,
+    )
+end
+
+function _next_redirect_step(
+        client::Client,
+        response::Response,
+        current_request::Request,
+        initial_address::String,
+        current_address::String,
+        current_secure::Bool,
+        current_server_name::String,
+        explicit_server_name::Bool,
+        redirect_count::Int,
+    )::Union{Nothing, _RedirectStep}
+    !_is_redirect_status(response.status_code) && return nothing
+    location = get_header(response.headers, "Location")
+    location === nothing && return nothing
+    redirect_count == client.max_redirects && throw(ProtocolError("stopped after maximum redirect count ($(client.max_redirects))"))
+    if client.check_redirect !== nothing
+        proceed = (client.check_redirect::Function)(response, current_request, location)
+        proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
+        proceed || return nothing
+    end
+    if (response.status_code == 307 || response.status_code == 308) && !_redirect_body_replayable(current_request)
+        return nothing
+    end
+    body_close!(response.body)
+    previous_secure = current_secure
+    previous_address = current_address
+    previous_target = current_request.target
+    next_address, next_secure, next_target = _resolve_redirect_target(current_address, current_secure, location, current_request.target)
+    next_server_name = explicit_server_name ? current_server_name : _host_for_sni(next_address)
+    next_request = _prepare_request_for_redirect(current_request, response.status_code, next_target)
+    existing_ref = get_header(next_request.headers, "Referer")
+    next_ref = _redirect_referer(previous_secure, previous_address, previous_target, next_secure, existing_ref)
+    if next_ref === nothing
+        delete_header!(next_request.headers, "Referer")
+    else
+        set_header!(next_request.headers, "Referer", next_ref::String)
+    end
+    if !_should_copy_sensitive_headers_on_redirect(initial_address, next_address)
+        _strip_sensitive_redirect_headers!(next_request.headers)
+    end
+    next_request.host = next_address
+    return _RedirectStep(next_address, next_secure, next_server_name, next_request)
+end
+
 """
     do!(client, address, request; secure=false, server_name=nothing, protocol=:auto)
 
@@ -1106,79 +1236,36 @@ function do!(
     for redirect_count in 0:client.max_redirects
         send_request = _copy_request_for_send(current_request; allow_nonreplayable = redirect_count == 0)
         host, path = _host_path_from_request(current_address, current_request)
-        if client.jar isa MemoryCookieJar
-            cookie_value = _cookie_header(client.jar::MemoryCookieJar, host, path, current_secure)
-            cookie_value === nothing || set_header!(send_request.headers, "Cookie", cookie_value)
-        end
+        _apply_request_cookies!(client, send_request, host, path, current_secure)
         _trace_call(client.trace, :on_get_conn, current_address, current_secure)
-        response = if _use_h2(client, current_secure, protocol)
-            try
-                conn = _acquire_h2_conn!(client, current_address, current_secure; server_name = current_server_name)
-                h2_roundtrip!(conn, send_request)
-            catch err
-                _drop_h2_conn!(client, current_address, current_secure)
-                if protocol == :auto && _should_fallback_h2_to_h1(err)
-                    roundtrip!(
-                        client.transport,
-                        current_address,
-                        send_request;
-                        secure = current_secure,
-                        server_name = current_server_name,
-                    )
-                else
-                    rethrow(err)
-                end
-            end
-        else
-            roundtrip!(
-                client.transport,
-                current_address,
-                send_request;
-                secure = current_secure,
-                server_name = current_server_name,
-            )
-        end
+        response = _client_roundtrip_response(
+            client,
+            current_address,
+            send_request,
+            current_secure,
+            current_server_name,
+            protocol,
+        )
         _trace_call(client.trace, :on_got_conn, current_address, current_secure)
         _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
         _trace_call(client.trace, :on_got_first_response_byte, response.status_code)
-        if client.jar isa MemoryCookieJar
-            set_cookie_values = get_headers(response.headers, "Set-Cookie")
-            isempty(set_cookie_values) || _store_set_cookies!(client.jar::MemoryCookieJar, host, set_cookie_values)
-        end
-        if !_is_redirect_status(response.status_code)
-            return response
-        end
-        location = get_header(response.headers, "Location")
-        location === nothing && return response
-        redirect_count == client.max_redirects && throw(ProtocolError("stopped after maximum redirect count ($(client.max_redirects))"))
-        if client.check_redirect !== nothing
-            proceed = (client.check_redirect::Function)(response, current_request, location)
-            proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
-            proceed || return response
-        end
-        if (response.status_code == 307 || response.status_code == 308) && !_redirect_body_replayable(current_request)
-            return response
-        end
-        body_close!(response.body)
-        previous_secure = current_secure
-        previous_address = current_address
-        previous_target = current_request.target
-        current_address, current_secure, next_target = _resolve_redirect_target(current_address, current_secure, location, current_request.target)
-        if !explicit_server_name
-            current_server_name = _host_for_sni(current_address)
-        end
-        current_request = _prepare_request_for_redirect(current_request, response.status_code, next_target)
-        existing_ref = get_header(current_request.headers, "Referer")
-        next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, existing_ref)
-        if next_ref === nothing
-            delete_header!(current_request.headers, "Referer")
-        else
-            set_header!(current_request.headers, "Referer", next_ref::String)
-        end
-        if !_should_copy_sensitive_headers_on_redirect(initial_address, current_address)
-            _strip_sensitive_redirect_headers!(current_request.headers)
-        end
-        current_request.host = current_address
+        _store_response_cookies!(client, response, host)
+        redirect_step = _next_redirect_step(
+            client,
+            response,
+            current_request,
+            initial_address,
+            current_address,
+            current_secure,
+            current_server_name,
+            explicit_server_name,
+            redirect_count,
+        )
+        redirect_step === nothing && return response
+        current_address = (redirect_step::_RedirectStep).address
+        current_secure = redirect_step.secure
+        current_server_name = redirect_step.server_name
+        current_request = redirect_step.request
     end
     throw(ProtocolError("unexpected redirect loop termination"))
 end
