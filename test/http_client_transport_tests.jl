@@ -420,3 +420,7 @@ end
         end
     end
 end
+
+@testset "HTTP client transport treats not-pollable reused errors as retryable" begin
+    @test HT._retryable_reused_conn_error(Reseau.IOPoll.NotPollableError())
+end

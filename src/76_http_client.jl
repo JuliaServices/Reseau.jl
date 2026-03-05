@@ -461,6 +461,7 @@ end
     err isa SystemError && return true
     err isa ParseError && return true
     err isa IOPoll.NetClosingError && return true
+    err isa IOPoll.NotPollableError && return true
     err isa IOPoll.DeadlineExceededError && return false
     return false
 end
