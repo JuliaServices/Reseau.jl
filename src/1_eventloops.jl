@@ -447,7 +447,13 @@ function __init__()
     if _is_generating_output()
         POLLER[] = Poller()
     elseif _runtime_supported()
-        init!()
+        @static if Sys.iswindows()
+            # Avoid eager foreign-thread startup during module load on Windows.
+            # Runtime initialization remains lazy via `init!()` at first use.
+            POLLER[] = Poller()
+        else
+            init!()
+        end
     else
         POLLER[] = Poller()
     end
