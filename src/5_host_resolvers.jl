@@ -945,6 +945,32 @@ function _partition_addrs(addrs::Vector{TCP.SocketEndpoint})::Tuple{Vector{TCP.S
     return primaries, fallbacks
 end
 
+@inline function _prefer_ipv4_first!(addrs::Vector{TCP.SocketEndpoint}, policy::ResolverPolicy)
+    @static if Sys.iswindows()
+        if Threads.nthreads() == 1 && !policy.prefer_ipv6
+            (!isempty(addrs) && _is_ipv6(addrs[1])) || return nothing
+            has_v4 = false
+            for addr in addrs
+                if _is_ipv4(addr)
+                    has_v4 = true
+                    break
+                end
+            end
+            has_v4 || return nothing
+            reordered = TCP.SocketEndpoint[]
+            for addr in addrs
+                _is_ipv4(addr) && push!(reordered, addr)
+            end
+            for addr in addrs
+                _is_ipv6(addr) && push!(reordered, addr)
+            end
+            empty!(addrs)
+            append!(addrs, reordered)
+        end
+    end
+    return nothing
+end
+
 @inline function _wrap_op_error(
         op::AbstractString,
         net::AbstractString,
@@ -1171,6 +1197,7 @@ function connect(d::HostResolver, network::AbstractString, address::AbstractStri
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
     end
+    _prefer_ipv4_first!(addrs, d.policy)
     primaries, fallbacks = _partition_addrs(addrs)
     conn = nothing
     err = nothing
