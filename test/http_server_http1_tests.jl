@@ -32,6 +32,13 @@ function _wait_task_done(task::Task; timeout_s::Float64 = 5.0)
     return fetch(task)
 end
 
+function _run_with_timeout(f::F; timeout_s::Float64 = 5.0, label::String = "operation") where {F <: Function}
+    task = errormonitor(Threads.@spawn f())
+    status = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    status == :timed_out && error("timed out waiting for $label")
+    return fetch(task)
+end
+
 @testset "HTTP server basic request handling" begin
     seen_targets = String[]
     server = HT.Server(
@@ -56,8 +63,8 @@ end
         @test seen_targets == ["/one", "/two"]
     finally
         close(client.transport)
-        HT.shutdown!(server; force = true)
-        _wait_task_done(task)
+        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
+        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
     end
 end
 
@@ -73,16 +80,16 @@ end
     address = _wait_server_addr(server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try
-        response = HT.get!(client, address, "/live")
+        response = _run_with_timeout(() -> HT.get!(client, address, "/live"); label = "live request")
         @test response.status_code == 200
         @test String(_read_all_server_bytes(response.body)) == "ok"
-        HT.shutdown!(server; force = true)
-        _wait_task_done(task)
+        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
+        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
         # Bound the post-shutdown probe so Windows CI cannot hang indefinitely
         # if a stale keep-alive conn does not surface close immediately.
         probe = HT.Request("GET", "/after-shutdown"; host = address, body = HT.EmptyBody(), content_length = 0)
         HT.set_deadline!(probe.context, Int64(time_ns()) + Int64(2_000_000_000))
-        @test_throws Exception HT.do!(client, address, probe)
+        @test_throws Exception _run_with_timeout(() -> HT.do!(client, address, probe); timeout_s = 3.0, label = "post-shutdown request")
     finally
         close(client.transport)
     end
@@ -112,7 +119,7 @@ end
         @test String(_read_all_server_bytes(response2.body)) == "ok:/two"
     finally
         close(client.transport)
-        HT.shutdown!(server; force = true)
-        _wait_task_done(task)
+        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
+        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
     end
 end
