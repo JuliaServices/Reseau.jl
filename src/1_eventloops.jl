@@ -161,13 +161,26 @@ end
 
 function _trim_debug(msg::AbstractString)::Nothing
     _trim_debug_enabled() || return nothing
-    full = "[eventloops] " * String(msg)
+    bytes = Vector{UInt8}(codeunits("[eventloops] " * String(msg) * "\n"))
     @static if Sys.iswindows()
-        ccall((:puts, "ucrtbase"), Cint, (Cstring,), full)
-        ccall((:fflush, "ucrtbase"), Cint, (Ptr{Cvoid},), C_NULL)
+        handle = ccall((:GetStdHandle, "kernel32"), Ptr{Cvoid}, (Int32,), Int32(-11))
+        written = Ref{UInt32}(0)
+        GC.@preserve bytes written begin
+            _ = ccall(
+                (:WriteFile, "kernel32"),
+                Int32,
+                (Ptr{Cvoid}, Ptr{UInt8}, UInt32, Ref{UInt32}, Ptr{Cvoid}),
+                handle,
+                pointer(bytes),
+                UInt32(length(bytes)),
+                written,
+                C_NULL,
+            )
+        end
     else
-        ccall(:puts, Cint, (Cstring,), full)
-        ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
+        GC.@preserve bytes begin
+            _ = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), Cint(1), pointer(bytes), Csize_t(length(bytes)))
+        end
     end
     return nothing
 end
