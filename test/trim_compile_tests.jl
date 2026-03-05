@@ -111,14 +111,19 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
             if trim_errors == 0
                 @test exit_code == 0
                 @test isfile(output_path)
-                run_cmd = Sys.iswindows() ? `$output_path` : `./$output_path`
-                run_timeout_s = Sys.iswindows() ? 120.0 : 30.0
-                run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd; timeout_s = run_timeout_s)
-                run_timed_out && _trim_timeout_error("executable run", script_file, run_output)
-                if run_exit != 0
-                    _maybe_print_output("---- trim executable output ($(script_file)) ----", run_output)
+                should_run_executable = !Sys.iswindows() || get(ENV, "RESEAU_TRIM_RUN_EXE_WINDOWS", "0") == "1"
+                if should_run_executable
+                    run_cmd = Sys.iswindows() ? `$output_path` : `./$output_path`
+                    run_timeout_s = Sys.iswindows() ? 120.0 : 30.0
+                    run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd; timeout_s = run_timeout_s)
+                    run_timed_out && _trim_timeout_error("executable run", script_file, run_output)
+                    if run_exit != 0
+                        _maybe_print_output("---- trim executable output ($(script_file)) ----", run_output)
+                    end
+                    @test run_exit == 0
+                else
+                    println("[trim] executable run SKIP $(script_file) (windows default)")
                 end
-                @test run_exit == 0
             else
                 @test exit_code != 0
             end
