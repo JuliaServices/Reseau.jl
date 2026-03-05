@@ -5,7 +5,10 @@ const _WS2_32 = "Ws2_32"
 const _KERNEL32 = "Kernel32"
 const _INVALID_SOCKET = UInt(typemax(UInt))
 const _SOCKET_ERROR = Cint(-1)
-const _FIONBIO = Clong(0x8004667e)
+# FIONBIO is defined as an unsigned ioctl bit-pattern; preserve bits, then
+# reinterpret as signed long for the ioctlsocket `cmd` parameter.
+const _FIONBIO_BITS = UInt32(0x8004667e)
+const _FIONBIO = reinterpret(Int32, _FIONBIO_BITS)
 const _WSA_FLAG_OVERLAPPED = UInt32(0x01)
 const _WSA_FLAG_NO_HANDLE_INHERIT = UInt32(0x80)
 const _HANDLE_FLAG_INHERIT = UInt32(0x00000001)
@@ -231,7 +234,7 @@ end
 function set_nonblocking!(fd::Cint, enabled::Bool = true)
     ensure_winsock!()
     arg = Ref{UInt32}(enabled ? UInt32(1) : UInt32(0))
-    ret = ccall((:ioctlsocket, _WS2_32), Cint, (UInt, Clong, Ref{UInt32}), _socket_value(fd), _FIONBIO, arg)
+    ret = ccall((:ioctlsocket, _WS2_32), Cint, (UInt, Clong, Ref{UInt32}), _socket_value(fd), Clong(_FIONBIO), arg)
     ret == 0 || _throw_errno("ioctlsocket(FIONBIO)", _map_wsa_errno(_wsa_get_last_error()))
     _set_fd_nonblocking_state!(fd, enabled)
     return nothing
