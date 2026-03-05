@@ -71,8 +71,12 @@ function _wait_process_with_timeout!(proc::Base.Process; timeout_s::Float64, log
     return timed_out
 end
 
-function _trim_timeout_error(kind::String, script_file::String)
-    throw(ArgumentError("trim $kind timed out for $(script_file)"))
+function _trim_timeout_error(kind::String, script_file::String, output::String = "")
+    msg = "trim $kind timed out for $(script_file)"
+    if !isempty(output)
+        msg = string(msg, "\n---- captured output ----\n", output, "\n---- end captured output ----")
+    end
+    throw(ArgumentError(msg))
 end
 
 function _maybe_print_output(header::String, output::String)
@@ -91,7 +95,7 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
     mktempdir() do tmpdir
         cd(tmpdir) do
             exit_code, output, timed_out = _run_trim_compile(project_path, script_path, output_name)
-            timed_out && _trim_timeout_error("compile", script_file)
+            timed_out && _trim_timeout_error("compile", script_file, output)
             totals = _parse_trim_verify_totals(output)
             trim_errors, trim_warnings = if totals === nothing
                 exit_code == 0 ? (0, 0) : error("failed to parse trim verifier summary:\n$output")
@@ -108,8 +112,9 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
                 @test exit_code == 0
                 @test isfile(output_path)
                 run_cmd = Sys.iswindows() ? `$output_path` : `./$output_path`
-                run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd)
-                run_timed_out && _trim_timeout_error("executable run", script_file)
+                run_timeout_s = Sys.iswindows() ? 120.0 : 30.0
+                run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd; timeout_s = run_timeout_s)
+                run_timed_out && _trim_timeout_error("executable run", script_file, run_output)
                 if run_exit != 0
                     _maybe_print_output("---- trim executable output ($(script_file)) ----", run_output)
                 end
