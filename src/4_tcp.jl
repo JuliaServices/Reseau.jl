@@ -356,7 +356,7 @@ end
 Create and connect a non-blocking TCP `FD` using Go-style connect completion:
 wait write-ready, then verify with `SO_ERROR`.
 """
-function _connect_tcp_fd_impl(
+@noinline function _connect_tcp_fd_impl(
         remote_addr::SocketAddr,
         local_addr::Union{Nothing, SocketAddr},
         connect_deadline_ns::Int64,
