@@ -350,7 +350,11 @@ function connect_socket(fd::Cint, addr::SockAddrIn6)::Int32
 end
 
 function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
-    ret = ccall((:connect, _WS2_32), Cint, (UInt, Ptr{Cvoid}, Cint), _socket_value(fd), addr, Cint(addrlen))
+    ret = @ccall gc_safe = true "Ws2_32".connect(
+        _socket_value(fd)::UInt,
+        addr::Ptr{Cvoid},
+        Cint(addrlen)::Cint,
+    )::Cint
     ret == 0 && return Int32(0)
     err = _wsa_get_last_error()
     err == _WSAEWOULDBLOCK && return Int32(Base.Libc.EINPROGRESS)
@@ -374,14 +378,11 @@ function try_accept_socket(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()
     addrlen = Ref{SockLen}(SockLen(_ACCEPT_ADDRBUF_LEN))
     new_sock = GC.@preserve addrbuf begin
-        ccall(
-            (:accept, _WS2_32),
-            UInt,
-            (UInt, Ptr{Cvoid}, Ref{SockLen}),
-            _socket_value(fd),
-            Base.unsafe_convert(Ptr{Cvoid}, addrbuf),
-            addrlen,
-        )
+        @ccall gc_safe = true "Ws2_32".accept(
+            _socket_value(fd)::UInt,
+            Base.unsafe_convert(Ptr{Cvoid}, addrbuf)::Ptr{Cvoid},
+            addrlen::Ref{SockLen},
+        )::UInt
     end
     if new_sock == _INVALID_SOCKET
         return Cint(-1), nothing, _map_wsa_errno(_wsa_get_last_error())
@@ -519,14 +520,24 @@ end
 
 function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = ccall((:recv, _WS2_32), Cint, (UInt, Ptr{UInt8}, Cint, Cint), _socket_value(fd), ptr, Cint(n), Cint(0))
+    ret = @ccall gc_safe = true "Ws2_32".recv(
+        _socket_value(fd)::UInt,
+        ptr::Ptr{UInt8},
+        Cint(n)::Cint,
+        Cint(0)::Cint,
+    )::Cint
     ret >= 0 && return Cssize_t(ret)
     return Cssize_t(-1)
 end
 
 function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = ccall((:send, _WS2_32), Cint, (UInt, Ptr{UInt8}, Cint, Cint), _socket_value(fd), ptr, Cint(n), Cint(0))
+    ret = @ccall gc_safe = true "Ws2_32".send(
+        _socket_value(fd)::UInt,
+        ptr::Ptr{UInt8},
+        Cint(n)::Cint,
+        Cint(0)::Cint,
+    )::Cint
     ret >= 0 && return Cssize_t(ret)
     return Cssize_t(-1)
 end
@@ -540,17 +551,14 @@ function recv_from!(
         fromlen::Ptr{SockLen} = Ptr{SockLen}(C_NULL),
     )::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = ccall(
-        (:recvfrom, _WS2_32),
-        Cint,
-        (UInt, Ptr{UInt8}, Cint, Cint, Ptr{Cvoid}, Ptr{SockLen}),
-        _socket_value(fd),
-        ptr,
-        Cint(n),
-        flags,
-        from,
-        fromlen,
-    )
+    ret = @ccall gc_safe = true "Ws2_32".recvfrom(
+        _socket_value(fd)::UInt,
+        ptr::Ptr{UInt8},
+        Cint(n)::Cint,
+        flags::Cint,
+        from::Ptr{Cvoid},
+        fromlen::Ptr{SockLen},
+    )::Cint
     ret >= 0 && return Cssize_t(ret)
     return Cssize_t(-1)
 end
@@ -564,17 +572,14 @@ function send_to!(
         tolen::SockLen = SockLen(0),
     )::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = ccall(
-        (:sendto, _WS2_32),
-        Cint,
-        (UInt, Ptr{UInt8}, Cint, Cint, Ptr{Cvoid}, Cint),
-        _socket_value(fd),
-        ptr,
-        Cint(n),
-        flags,
-        to,
-        Cint(tolen),
-    )
+    ret = @ccall gc_safe = true "Ws2_32".sendto(
+        _socket_value(fd)::UInt,
+        ptr::Ptr{UInt8},
+        Cint(n)::Cint,
+        flags::Cint,
+        to::Ptr{Cvoid},
+        Cint(tolen)::Cint,
+    )::Cint
     ret >= 0 && return Cssize_t(ret)
     return Cssize_t(-1)
 end

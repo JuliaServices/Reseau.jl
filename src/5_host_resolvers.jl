@@ -275,15 +275,12 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
     result_ptr = Ref{Ptr{_AddrInfo}}(C_NULL)
     ret = GC.@preserve hints begin
         @static if Sys.iswindows()
-            ccall(
-                (:getaddrinfo, "Ws2_32"),
-                Cint,
-                (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
-                String(hostname),
-                C_NULL,
-                hints_ptr,
-                result_ptr,
-            )
+            @ccall gc_safe = true "Ws2_32".getaddrinfo(
+                String(hostname)::Cstring,
+                C_NULL::Cstring,
+                hints_ptr::Ptr{_AddrInfo},
+                result_ptr::Ptr{Ptr{_AddrInfo}},
+            )::Cint
         else
             @ccall gc_safe = true getaddrinfo(
                 String(hostname)::Cstring,

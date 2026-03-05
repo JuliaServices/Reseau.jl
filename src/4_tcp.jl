@@ -350,6 +350,8 @@ function connect_tcp_fd!(
         if local_addr !== nothing
             SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         end
+        # Defensive re-assert: keep connect path non-blocking even if platform state drifts.
+        SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
         _tcp_debug("connect_tcp_fd! connect_socket begin fd=$(fd.pfd.sysfd)")
         errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))
         _tcp_debug("connect_tcp_fd! connect_socket errno=$(errno)")
