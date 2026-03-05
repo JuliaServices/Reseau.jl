@@ -39,6 +39,20 @@ const _SSL_CTRL_SET_TLSEXT_HOSTNAME = Cint(55)
 const _TLSEXT_NAMETYPE_HOST_NAME = Clong(0)
 const _ERRNO_EAGAIN = Int32(Base.Libc.EAGAIN)
 const _ERRNO_EWOULDBLOCK = _ERRNO_EAGAIN
+const _TRIM_DEBUG_TLS = Ref(false)
+
+function _trim_debug(msg::AbstractString)::Nothing
+    _TRIM_DEBUG_TLS[] || return nothing
+    full = "[tls] " * String(msg)
+    @static if Sys.iswindows()
+        ccall((:puts, "ucrtbase"), Cint, (Cstring,), full)
+        ccall((:fflush, "ucrtbase"), Cint, (Ptr{Cvoid},), C_NULL)
+    else
+        ccall(:puts, Cint, (Cstring,), full)
+        ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
+    end
+    return nothing
+end
 
 const _SSL_OP_NO_TLSv1 = Culong(0x04000000)
 const _SSL_OP_NO_TLSv1_1 = Culong(0x10000000)
@@ -303,6 +317,8 @@ function _ssl_alpn_select_cb(
 end
 
 function __init__()
+    _TRIM_DEBUG_TLS[] = get(ENV, "RESEAU_TRIM_DEBUG", "0") == "1"
+    _trim_debug("__init__ enter")
     _ = @ccall gc_safe = true _LIBSSL.OPENSSL_init_ssl(
         Culong(0)::Culong,
         C_NULL::Ptr{Cvoid},
@@ -314,6 +330,7 @@ function __init__()
     _HAS_SSL_CTX_SET_MIN_PROTO_VERSION[] = Base.Libc.Libdl.dlsym_e(handle, :SSL_CTX_set_min_proto_version) != C_NULL
     _HAS_SSL_CTX_SET_MAX_PROTO_VERSION[] = Base.Libc.Libdl.dlsym_e(handle, :SSL_CTX_set_max_proto_version) != C_NULL
     atexit(_free_ssl_ctx_cache!)
+    _trim_debug("__init__ exit")
     return nothing
 end
 
@@ -517,6 +534,7 @@ end
 end
 
 function _free_ssl_ctx_cache!()
+    _trim_debug("_free_ssl_ctx_cache! enter")
     lock(_CTX_CACHE_LOCK)
     try
         for ctx in values(_CTX_CACHE)
@@ -529,6 +547,7 @@ function _free_ssl_ctx_cache!()
     finally
         unlock(_CTX_CACHE_LOCK)
     end
+    _trim_debug("_free_ssl_ctx_cache! exit")
     return nothing
 end
 

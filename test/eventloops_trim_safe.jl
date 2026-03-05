@@ -1,4 +1,28 @@
+const _TRIM_DEBUG = get(ENV, "RESEAU_TRIM_DEBUG", "0") == "1"
+
+function _trim_debug(msg::AbstractString)::Nothing
+    _TRIM_DEBUG || return nothing
+    full = "[eventloops-trim] " * String(msg)
+    @static if Sys.iswindows()
+        ccall((:puts, "ucrtbase"), Cint, (Cstring,), full)
+        ccall((:fflush, "ucrtbase"), Cint, (Ptr{Cvoid},), C_NULL)
+    else
+        ccall(:puts, Cint, (Cstring,), full)
+        ccall(:fflush, Cint, (Ptr{Cvoid},), C_NULL)
+    end
+    return nothing
+end
+
+@inline function _trim_is_generating_output()::Bool
+    return ccall(:jl_generating_output, Cint, ()) == 1
+end
+
+_trim_debug("script start")
+_trim_is_generating_output() || atexit(() -> _trim_debug("atexit hook reached"))
+
 using Reseau
+
+_trim_debug("loaded Reseau")
 
 const NP = Reseau.EventLoops
 const IP = Reseau.IOPoll
@@ -102,12 +126,20 @@ end
 
 function @main(args::Vector{String})::Cint
     _ = args
+    _trim_debug("main start")
     try
+        _trim_debug("run_eventloops_trim_sample start")
         run_eventloops_trim_sample()
+        _trim_debug("run_eventloops_trim_sample done")
+        _trim_debug("run_internal_poll_trim_sample start")
         run_internal_poll_trim_sample()
+        _trim_debug("run_internal_poll_trim_sample done")
     finally
+        isassigned(NP.POLLER) && _trim_debug("shutdown start running=$((@atomic :acquire NP.POLLER[].running))")
         NP.shutdown!()
+        isassigned(NP.POLLER) && _trim_debug("shutdown done running=$((@atomic :acquire NP.POLLER[].running))")
     end
+    _trim_debug("main return")
     return 0
 end
 

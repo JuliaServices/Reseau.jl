@@ -79,6 +79,15 @@ const _winsock_initialized = Ref{Bool}(false)
 const _winsock_init_pid = Ref{Int}(0)
 const _fd_state_lock = ReentrantLock()
 const _fd_nonblocking_state = Dict{Cint, Bool}()
+const _trim_debug_socketops = Ref(false)
+
+function _trim_debug(msg::AbstractString)::Nothing
+    _trim_debug_socketops[] || return nothing
+    full = "[socketops-windows] " * String(msg)
+    ccall((:puts, "ucrtbase"), Cint, (Cstring,), full)
+    ccall((:fflush, "ucrtbase"), Cint, (Ptr{Cvoid},), C_NULL)
+    return nothing
+end
 
 @inline function _socket_value(fd::Cint)::UInt
     return UInt(reinterpret(UInt32, fd))
@@ -187,6 +196,7 @@ function ensure_winsock!()
         if _winsock_initialized[] && _winsock_init_pid[] == pid
             return nothing
         end
+        _trim_debug("ensure_winsock! init start pid=$(pid)")
         wsa_data = Ref(_WSAData(
             UInt16(0),
             UInt16(0),
@@ -203,6 +213,7 @@ function ensure_winsock!()
         rc == 0 || _throw_errno("WSAStartup", _map_wsa_errno(Int32(rc)))
         _winsock_initialized[] = true
         _winsock_init_pid[] = pid
+        _trim_debug("ensure_winsock! init done pid=$(pid)")
     finally
         unlock(_winsock_lock)
     end
@@ -619,6 +630,9 @@ function send_msg!(fd::Cint, msg::Ref{MsgHdr}, flags::Cint = Cint(0))::Cssize_t
 end
 
 function __init__()
+    _trim_debug_socketops[] = get(ENV, "RESEAU_TRIM_DEBUG", "0") == "1"
+    _trim_debug("__init__ enter")
     ensure_winsock!()
+    _trim_debug("__init__ exit")
     return nothing
 end
