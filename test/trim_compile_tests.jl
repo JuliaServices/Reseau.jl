@@ -15,18 +15,23 @@ function _run_trim_compile(project_path::String, script_path::String, output_nam
     cmd = `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e "using JuliaC; JuliaC.main(ARGS)" -- --output-exe $output_name --project=$project_path --experimental --trim=safe $script_path`
     io = IOBuffer()
     proc = run(pipeline(ignorestatus(cmd), stdout = io, stderr = io); wait = false)
-    start_t = time()
-    timed_out = false
-    while process_running(proc)
-        if (time() - start_t) >= timeout_s
-            timed_out = true
+    wait_task = @async wait(proc)
+    timed_out = timedwait(() -> istaskdone(wait_task), timeout_s; pollint = 0.1) == :timed_out
+    if timed_out
+        try
             kill(proc)
-            break
+        catch
         end
-        sleep(0.1)
+        _ = timedwait(() -> istaskdone(wait_task), 10.0; pollint = 0.1)
     end
-    wait(proc)
-    return proc.exitcode, String(take!(io)), timed_out
+    if istaskdone(wait_task)
+        try
+            fetch(wait_task)
+        catch
+        end
+    end
+    exit_code = something(proc.exitcode, -1)
+    return exit_code, String(take!(io)), timed_out
 end
 
 function _parse_trim_verify_totals(output::String)

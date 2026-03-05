@@ -3,6 +3,8 @@ using Reseau
 const NP = Reseau.EventLoops
 const IP = Reseau.IOPoll
 
+@static if !Sys.iswindows()
+
 function _socketpair_stream()::Tuple{Cint, Cint}
     fds = Vector{Cint}(undef, 2)
     ret = ccall(:socketpair, Cint, (Cint, Cint, Cint, Ptr{Cint}), Cint(1), Cint(1), Cint(0), pointer(fds))
@@ -84,6 +86,18 @@ function run_internal_poll_trim_sample()::Nothing
         _close_fd(fd1)
     end
     return nothing
+end
+
+else
+
+function run_eventloops_trim_sample()::Nothing
+    return nothing
+end
+
+function run_internal_poll_trim_sample()::Nothing
+    return nothing
+end
+
 end
 
 function @main(args::Vector{String})::Cint
