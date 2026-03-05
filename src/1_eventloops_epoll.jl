@@ -12,13 +12,10 @@ const EFD_CLOEXEC = Cint(0x80000)
 const MAX_EPOLL_EVENTS = 128
 const _WAKE_TOKEN = UInt64(0)
 
-"""
-Mirror of Linux `struct epoll_event`.
-
-Go carries architecture-specific layouts here as well:
-- amd64/386: unaligned data payload at offset 4
-- most other arches: 4-byte pad, data payload at offset 8
-"""
+# Mirror of Linux `struct epoll_event`.
+# Go carries architecture-specific layouts here as well:
+# amd64/386 use unaligned data payload at offset 4, while most other
+# architectures use a 4-byte pad and place the payload at offset 8.
 @static if Sys.ARCH == :x86_64 || Sys.ARCH == :i686
 struct EpollEvent
     events::UInt32
