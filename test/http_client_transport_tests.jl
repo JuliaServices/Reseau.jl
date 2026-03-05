@@ -52,6 +52,12 @@ function _wait_task!(task::Task; timeout_s::Float64 = 5.0)
     return nothing
 end
 
+function _transport_debug(msg::AbstractString)
+    println("[http_client_transport] ", msg)
+    flush(stdout)
+    return nothing
+end
+
 mutable struct _ChunkReadConn
     payload::Vector{UInt8}
     idx::Int
@@ -86,6 +92,7 @@ end
 end
 
 @testset "HTTP client transport keep-alive reuse" begin
+    _transport_debug("keep-alive reuse: start")
     listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
     laddr = NC.addr(listener)::NC.SocketAddrV4
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
@@ -93,7 +100,9 @@ end
     accept_count = Ref(0)
     paths = String[]
     server_task = errormonitor(Threads.@spawn begin
+        _transport_debug("keep-alive reuse: server waiting accept")
         conn = NC.accept!(listener)
+        _transport_debug("keep-alive reuse: server accepted")
         lock(lock_obj)
         try
             accept_count[] += 1
@@ -102,10 +111,13 @@ end
         end
         try
             for _ in 1:2
+                _transport_debug("keep-alive reuse: server read_request begin")
                 request = HT.read_request(HT._ConnReader(conn))
+                _transport_debug("keep-alive reuse: server read_request done")
                 push!(paths, request.target)
                 _read_all_body_bytes(request.body)
                 _write_response_to_conn!(conn, request; body_text = "ok")
+                _transport_debug("keep-alive reuse: server response written")
             end
         finally
             try
@@ -117,13 +129,19 @@ end
     end)
     transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4)
     try
+        _transport_debug("keep-alive reuse: client req1 begin")
         req1 = HT.Request("GET", "/one"; host = address, body = HT.EmptyBody(), content_length = 0)
         res1 = HT.roundtrip!(transport, address, req1)
+        _transport_debug("keep-alive reuse: client req1 roundtrip done")
         @test String(_read_all_body_bytes(res1.body)) == "ok"
+        _transport_debug("keep-alive reuse: client req2 begin")
         req2 = HT.Request("GET", "/two"; host = address, body = HT.EmptyBody(), content_length = 0)
         res2 = HT.roundtrip!(transport, address, req2)
+        _transport_debug("keep-alive reuse: client req2 roundtrip done")
         @test String(_read_all_body_bytes(res2.body)) == "ok"
+        _transport_debug("keep-alive reuse: waiting server task")
         _wait_task!(server_task)
+        _transport_debug("keep-alive reuse: server task done")
         @test accept_count[] == 1
         @test paths == ["/one", "/two"]
         @test HT.idle_connection_count(transport; key = "http://$address") == 1
