@@ -7,6 +7,14 @@ module HostResolvers
 
 using ..Reseau.SocketOps
 using ..Reseau.IOPoll
+
+@inline function _resolver_debug(msg::AbstractString)
+    @static if Sys.iswindows()
+        println("[host_resolvers] ", msg)
+        flush(stdout)
+    end
+    return nothing
+end
 using ..Reseau.TCP
 
 """
@@ -988,6 +996,7 @@ function _resolve_serial(
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
     first_err::Union{Nothing, Exception} = nothing
     for (i, remote_addr) in pairs(addrs)
+        _resolver_debug("_resolve_serial attempt=$(i) remote_addr=$(remote_addr)")
         if @atomic :acquire state.done
             return nothing, first_err
         end
@@ -1008,12 +1017,14 @@ function _resolve_serial(
                     return nothing, first_err
                 end
                 try
+                    _resolver_debug("_resolve_serial connect_tcp_fd! begin remote_addr=$(remote_addr)")
                     fd = TCP.connect_tcp_fd!(
                         remote_addr;
                         local_addr = d.local_addr,
                         connect_deadline_ns = attempt_deadline,
                         cancel_state = state,
                     )
+                    _resolver_debug("_resolve_serial connect_tcp_fd! done remote_addr=$(remote_addr)")
                     conn = TCP.Conn(fd)
                     if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
                         TCP.close!(conn)
@@ -1144,6 +1155,7 @@ end
 Connect a TCP connection from a `host:port` string.
 """
 function connect(d::HostResolver, network::AbstractString, address::AbstractString)::TCP.Conn
+    _resolver_debug("connect start network=$(network) address=$(address)")
     deadline_ns = _connect_deadline_ns(d)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
@@ -1158,6 +1170,7 @@ function connect(d::HostResolver, network::AbstractString, address::AbstractStri
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
+    _resolver_debug("connect resolved addrs=$(length(addrs))")
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
     end
@@ -1165,11 +1178,14 @@ function connect(d::HostResolver, network::AbstractString, address::AbstractStri
     conn = nothing
     err = nothing
     if _dual_stack_enabled(d) && kind == :tcp && !isempty(fallbacks)
+        _resolver_debug("connect entering _resolve_parallel")
         conn, err = _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
     else
+        _resolver_debug("connect entering _resolve_serial")
         state = DNSRaceState()
         conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
     end
+    _resolver_debug("connect resolve complete conn=$(conn !== nothing)")
     conn !== nothing && return conn
     throw(_wrap_op_error(
         "connect",

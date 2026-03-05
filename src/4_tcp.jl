@@ -8,6 +8,14 @@ module TCP
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 
+@inline function _tcp_debug(msg::AbstractString)
+    @static if Sys.iswindows()
+        println("[tcp] ", msg)
+        flush(stdout)
+    end
+    return nothing
+end
+
 """
     SocketAddr
 
@@ -337,11 +345,14 @@ function connect_tcp_fd!(
         throw(ArgumentError("local and remote address families must match"))
     end
     fd = open_tcp_fd!(; family = family)
+    _tcp_debug("connect_tcp_fd! opened fd=$(fd.pfd.sysfd)")
     try
         if local_addr !== nothing
             SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         end
+        _tcp_debug("connect_tcp_fd! connect_socket begin fd=$(fd.pfd.sysfd)")
         errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))
+        _tcp_debug("connect_tcp_fd! connect_socket errno=$(errno)")
         if errno == Int32(0) || errno == Int32(Base.Libc.EISCONN)
             IOPoll.init!(fd.pfd; net = :tcp, pollable = true)
             _finalize_connected_addrs!(fd, remote_addr)
