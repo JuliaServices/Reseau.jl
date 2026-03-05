@@ -444,8 +444,13 @@ function _sleep_until_ns(deadline_ns::Int64, t::DeadlineTask, pd::PollState, seq
         remaining_ns = deadline_ns - _monotonic_ns()
         remaining_ns <= 0 && return true
         # Sleep in short chunks so cancellation/sequence updates are observed quickly.
-        sleep_us = max(Int64(1), min(remaining_ns ÷ Int64(1000), Int64(50_000)))
-        @ccall gc_safe = true usleep(Cuint(sleep_us)::Cuint)::Cint
+        @static if Sys.iswindows()
+            sleep_ms = max(Int64(1), min(cld(remaining_ns, Int64(1_000_000)), Int64(50)))
+            @ccall gc_safe = true "Kernel32".Sleep(UInt32(sleep_ms)::UInt32)::Cvoid
+        else
+            sleep_us = max(Int64(1), min(remaining_ns ÷ Int64(1000), Int64(50_000)))
+            @ccall gc_safe = true usleep(Cuint(sleep_us)::Cuint)::Cint
+        end
     end
 end
 
