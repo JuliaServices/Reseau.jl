@@ -356,11 +356,11 @@ end
 Create and connect a non-blocking TCP `FD` using Go-style connect completion:
 wait write-ready, then verify with `SO_ERROR`.
 """
-@noinline function _connect_tcp_fd_impl(
-        remote_addr::SocketAddr,
-        local_addr::Union{Nothing, SocketAddr},
+@noinline Base.@nospecializeinfer function _connect_tcp_fd_impl(
+        @nospecialize(remote_addr::SocketAddr),
+        @nospecialize(local_addr::Union{Nothing, SocketAddr}),
         connect_deadline_ns::Int64,
-        cancel_state,
+        @nospecialize(cancel_state),
     )::FD
     family = _addr_family(remote_addr)
     if local_addr !== nothing && _addr_family(local_addr) != family
