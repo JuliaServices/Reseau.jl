@@ -83,16 +83,6 @@ end
     return errno == Int32(Base.Libc.EINTR) || errno == Int32(Base.Libc.ECONNABORTED)
 end
 
-@inline function _windows_accept_backoff!()
-    yield()
-    @static if Sys.iswindows()
-        # TODO(windows-accept): Replace this temporary spin/yield backoff with
-        # IOCP-native AcceptEx readiness/accept integration (Go-style).
-        @ccall gc_safe = true Sleep(UInt32(1)::UInt32)::Cvoid
-    end
-    return nothing
-end
-
 @inline function _monotonic_ns()::Int64
     return Int64(time_ns())
 end
@@ -612,6 +602,12 @@ function pollable(pd::PollState)::Bool
     return @atomic :acquire pd.pollable
 end
 
+@inline function _poll_registration(pd::PollState)::EventLoops.Registration
+    registration = pd.registration
+    (registration === nothing || registration.fd != pd.sysfd || registration.token != pd.token) && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+    return registration
+end
+
 """
 Validate read path state before issuing a read syscall.
 """
@@ -634,8 +630,7 @@ Block until read readiness, then re-check for close/timeout/not-pollable errors.
 function wait_read!(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
     pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
-    registration = pd.registration
-    (registration === nothing || registration.fd != pd.sysfd || registration.token != pd.token) && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+    registration = _poll_registration(pd)
     EventLoops.arm_waiter!(registration, EventLoops.PollMode.READ)
     EventLoops.pollwait!(registration.read_waiter)
     _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
@@ -648,8 +643,7 @@ Block until write readiness, then re-check for close/timeout/not-pollable errors
 function wait_write!(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
     pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
-    registration = pd.registration
-    (registration === nothing || registration.fd != pd.sysfd || registration.token != pd.token) && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+    registration = _poll_registration(pd)
     EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
     EventLoops.pollwait!(registration.write_waiter)
     _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
@@ -776,35 +770,87 @@ function set_blocking!(fd::FD)
 end
 
 """
+Submit a Windows `ConnectEx` operation and wait for completion through IOCP.
+
+The fd must already be initialized as pollable and have any required local bind
+applied before calling this helper.
+"""
+function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
+    _fd_write_lock!(fd)
+    try
+        prepare_write!(fd.pd, fd.is_file)
+        registration = _poll_registration(fd.pd)
+        errno = EventLoops._iocp_submit_connect!(registration, addrbuf, addrlen)
+        errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
+        try
+            EventLoops.pollwait!(registration.write_waiter)
+            _convert_poll_error!(_check_error(fd.pd, PollOp.WRITE), fd.is_file)
+        catch err
+            ex = err::Exception
+            if EventLoops._iocp_cancel_mode!(registration, EventLoops.PollMode.WRITE)
+                EventLoops.pollwait!(registration.write_waiter)
+            end
+            _ = EventLoops._iocp_finish_connect!(registration)
+            rethrow(ex)
+        end
+        errno = EventLoops._iocp_finish_connect!(registration)
+        errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
+        SocketOps.update_connect_context!(fd.sysfd)
+    finally
+        _fd_write_unlock!(fd)
+    end
+    return nothing
+end
+
+"""
 Accept one non-blocking child fd from `fd`.
 
 This mirrors Go `internal/poll` accept semantics: read-lock + prepare + retry
 on `EINTR`/`ECONNABORTED`, wait on `EAGAIN`.
 """
-function accept!(fd::FD)::Tuple{Cint, SocketOps.AcceptPeer}
+function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.AcceptPeer}
     _fd_read_lock!(fd)
     try
         prepare_read!(fd.pd, fd.is_file)
         while true
+            @static if Sys.iswindows()
+                registration = _poll_registration(fd.pd)
+                child_sysfd = SocketOps.open_socket(family, sotype)
+                addrbuf = Vector{UInt8}(undef, Int(2 * SocketOps._ACCEPT_ADDRBUF_LEN))
+                errno = EventLoops._iocp_submit_accept!(registration, child_sysfd, addrbuf)
+                if errno != Int32(0)
+                    SocketOps.close_socket_nothrow(child_sysfd)
+                    throw(SystemError("acceptex", Int(errno)))
+                end
+                try
+                    EventLoops.pollwait!(registration.read_waiter)
+                    _convert_poll_error!(_check_error(fd.pd, PollOp.READ), fd.is_file)
+                catch err
+                    ex = err::Exception
+                    if EventLoops._iocp_cancel_mode!(registration, EventLoops.PollMode.READ)
+                        EventLoops.pollwait!(registration.read_waiter)
+                    end
+                    _, _, _ = EventLoops._iocp_finish_accept!(registration)
+                    SocketOps.close_socket_nothrow(child_sysfd)
+                    rethrow(ex)
+                end
+                accepted_sysfd, accepted_addrbuf, errno = EventLoops._iocp_finish_accept!(registration)
+                if errno == Int32(0)
+                    peer_addr = SocketOps.finish_accept_ex!(fd.sysfd, accepted_sysfd, accepted_addrbuf)
+                    return accepted_sysfd, peer_addr
+                end
+                SocketOps.close_socket_nothrow(accepted_sysfd)
+                if errno == Int32(Base.Libc.ECONNRESET) || _is_accept_retry_errno(errno)
+                    continue
+                end
+                throw(SystemError("acceptex", Int(errno)))
+            end
             child_sysfd, peer_addr, errno = SocketOps.try_accept_socket(fd.sysfd)
             if child_sysfd != Cint(-1)
                 return child_sysfd, peer_addr
             end
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
-                @static if Sys.iswindows()
-                    # Windows currently uses a short backoff loop for listener
-                    # readiness. Do not hold the read lock while backing off,
-                    # otherwise close/shutdown can deadlock waiting on this lock.
-                    _fd_read_unlock!(fd)
-                    try
-                        _windows_accept_backoff!()
-                    finally
-                        _fd_read_lock!(fd)
-                    end
-                    prepare_read!(fd.pd, fd.is_file)
-                else
-                    wait_read!(fd.pd, fd.is_file)
-                end
+                wait_read!(fd.pd, fd.is_file)
                 continue
             end
             _is_accept_retry_errno(errno) && continue

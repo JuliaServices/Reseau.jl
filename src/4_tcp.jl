@@ -8,11 +8,6 @@ module TCP
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 
-@inline function _tcp_debug(msg::AbstractString)
-    _ = msg
-    return nothing
-end
-
 """
     SocketAddr
 
@@ -277,6 +272,27 @@ function _wait_connect_complete!(
     )
     _connect_wait_register!(cancel_state, fd)
     try
+        @static if Sys.iswindows()
+            sockaddr = _to_sockaddr(remote_addr)
+            addrbuf = SocketOps.sockaddr_bytes(sockaddr)
+            addrlen = Int32(sizeof(typeof(sockaddr)))
+            while true
+                if _connect_canceled(cancel_state)
+                    throw(ConnectCanceledError())
+                end
+                try
+                    IOPoll.connect!(fd.pfd, addrbuf, addrlen)
+                catch err
+                    ex = err::Exception
+                    if ex isa IOPoll.DeadlineExceededError && _connect_canceled(cancel_state)
+                        throw(ConnectCanceledError())
+                    end
+                    rethrow(ex)
+                end
+                _finalize_connected_addrs!(fd, remote_addr)
+                return nothing
+            end
+        end
         while true
             if _connect_canceled(cancel_state)
                 throw(ConnectCanceledError())
@@ -315,6 +331,15 @@ function _wait_connect_complete!(
     end
 end
 
+@inline function _bind_connectex_local!(fd::FD, family::Cint)
+    if family == SocketOps.AF_INET6
+        SocketOps.bind_socket(fd.pfd.sysfd, SocketOps.sockaddr_in6_any(0))
+        return nothing
+    end
+    SocketOps.bind_socket(fd.pfd.sysfd, SocketOps.sockaddr_in_any(0))
+    return nothing
+end
+
 """
     open_tcp_fd!(; family=AF_INET)
 
@@ -342,16 +367,37 @@ function connect_tcp_fd!(
         throw(ArgumentError("local and remote address families must match"))
     end
     fd = open_tcp_fd!(; family = family)
-    _tcp_debug("connect_tcp_fd! opened fd=$(fd.pfd.sysfd)")
     try
         if local_addr !== nothing
             SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
+        elseif Sys.iswindows()
+            _bind_connectex_local!(fd, family)
         end
         # Defensive re-assert: keep connect path non-blocking even if platform state drifts.
         SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
-        _tcp_debug("connect_tcp_fd! connect_socket begin fd=$(fd.pfd.sysfd)")
+        @static if Sys.iswindows()
+            IOPoll.init!(fd.pfd; net = :tcp, pollable = true)
+            if connect_deadline_ns != 0
+                IOPoll.set_write_deadline!(fd.pfd, connect_deadline_ns)
+            end
+            try
+                _wait_connect_complete!(
+                    fd,
+                    remote_addr;
+                    cancel_state = cancel_state,
+                )
+            finally
+                if connect_deadline_ns != 0
+                    try
+                        IOPoll.set_write_deadline!(fd.pfd, Int64(0))
+                    catch
+                    end
+                end
+            end
+            _apply_default_tcp_opts!(fd)
+            return fd
+        end
         errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))
-        _tcp_debug("connect_tcp_fd! connect_socket errno=$(errno)")
         if errno == Int32(0) || errno == Int32(Base.Libc.EISCONN)
             IOPoll.init!(fd.pfd; net = :tcp, pollable = true)
             _finalize_connected_addrs!(fd, remote_addr)
@@ -412,7 +458,7 @@ end
 Accept a child TCP connection, retrying transient accept errors with Go parity.
 """
 function accept_tcp_fd!(listener_fd::FD)::FD
-    child_sysfd, peer_addr = IOPoll.accept!(listener_fd.pfd)
+    child_sysfd, peer_addr = IOPoll.accept!(listener_fd.pfd, listener_fd.family, listener_fd.sotype)
     child = _new_netfd(
         child_sysfd;
         family = listener_fd.family,

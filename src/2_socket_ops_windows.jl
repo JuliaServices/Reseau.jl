@@ -2,6 +2,7 @@
 # Wrappers normalize retry/error behavior and expose POSIX-like errno semantics.
 
 const _WS2_32 = "Ws2_32"
+const _MSWSOCK = "Mswsock"
 const _KERNEL32 = "Kernel32"
 const _INVALID_SOCKET = UInt(typemax(UInt))
 const _SOCKET_ERROR = Cint(-1)
@@ -50,15 +51,20 @@ const _WSAEHOSTDOWN = Int32(10064)
 const _WSAEHOSTUNREACH = Int32(10065)
 
 const _ERROR_IO_PENDING = Int32(997)
+const _ERROR_OPERATION_ABORTED = Int32(995)
+const _ERROR_NETNAME_DELETED = UInt32(64)
 const _ERROR_INVALID_PARAMETER = UInt32(87)
 const _ERROR_NOT_ENOUGH_MEMORY = UInt32(8)
 const _ERROR_INVALID_HANDLE = UInt32(6)
 const _ERROR_NOT_SUPPORTED = UInt32(50)
+const _SO_UPDATE_ACCEPT_CONTEXT = Cint(0x700b)
+const _SO_UPDATE_CONNECT_CONTEXT = Cint(0x7010)
 const _WSADATA_DESC_ZERO = ntuple(_ -> UInt8(0), 257)
 const _WSADATA_STATUS_ZERO = ntuple(_ -> UInt8(0), 129)
 const _ERRNO_ESOCKTNOSUPPORT = @static isdefined(Base.Libc, :ESOCKTNOSUPPORT) ? Int32(getfield(Base.Libc, :ESOCKTNOSUPPORT)) : Int32(Base.Libc.EPROTONOSUPPORT)
 const _ERRNO_ESHUTDOWN = @static isdefined(Base.Libc, :ESHUTDOWN) ? Int32(getfield(Base.Libc, :ESHUTDOWN)) : Int32(Base.Libc.ENOTCONN)
 const _ERRNO_EHOSTDOWN = @static isdefined(Base.Libc, :EHOSTDOWN) ? Int32(getfield(Base.Libc, :EHOSTDOWN)) : Int32(Base.Libc.EHOSTUNREACH)
+const _ERRNO_ECANCELED = @static isdefined(Base.Libc, :ECANCELED) ? Int32(getfield(Base.Libc, :ECANCELED)) : Int32(Base.Libc.EINTR)
 
 struct _SockAddrHeader
     sa_family::UInt16
@@ -101,12 +107,14 @@ end
     err == _ERROR_INVALID_PARAMETER && return Int32(Base.Libc.EINVAL)
     err == _ERROR_NOT_ENOUGH_MEMORY && return Int32(Base.Libc.ENOMEM)
     err == _ERROR_NOT_SUPPORTED && return Int32(Base.Libc.ENOSYS)
+    err == _ERROR_NETNAME_DELETED && return Int32(Base.Libc.ECONNRESET)
     return Int32(Base.Libc.EIO)
 end
 
 @inline function _map_wsa_errno(err::Int32)::Int32
     err == Int32(0) && return Int32(0)
     err == _ERROR_IO_PENDING && return Int32(Base.Libc.EINPROGRESS)
+    err == _ERROR_OPERATION_ABORTED && return _ERRNO_ECANCELED
     err == _WSAEINTR && return Int32(Base.Libc.EINTR)
     err == _WSAEBADF && return Int32(Base.Libc.EBADF)
     err == _WSAEACCES && return Int32(Base.Libc.EACCES)
@@ -378,6 +386,32 @@ function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
     return _map_wsa_errno(err)
 end
 
+function sockaddr_bytes(addr::SockAddrIn)::Vector{UInt8}
+    bytes = Vector{UInt8}(undef, sizeof(SockAddrIn))
+    addr_ref = Ref(addr)
+    GC.@preserve addr_ref bytes begin
+        unsafe_copyto!(
+            pointer(bytes),
+            Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrIn}, addr_ref)),
+            sizeof(SockAddrIn),
+        )
+    end
+    return bytes
+end
+
+function sockaddr_bytes(addr::SockAddrIn6)::Vector{UInt8}
+    bytes = Vector{UInt8}(undef, sizeof(SockAddrIn6))
+    addr_ref = Ref(addr)
+    GC.@preserve addr_ref bytes begin
+        unsafe_copyto!(
+            pointer(bytes),
+            Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrIn6}, addr_ref)),
+            sizeof(SockAddrIn6),
+        )
+    end
+    return bytes
+end
+
 @inline function _decode_accept_peer(addrptr::Ptr{UInt8}, addrlen::SockLen)::AcceptPeer
     Int(addrlen) < sizeof(_SockAddrHeader) && return nothing
     header = unsafe_load(Ptr{_SockAddrHeader}(addrptr))
@@ -426,6 +460,64 @@ function accept_socket(fd::Cint)::Cint
     newfd, _, errno = try_accept_socket(fd)
     newfd != Cint(-1) && return newfd
     _throw_errno("accept", errno)
+end
+
+function _set_sockopt_ptr!(fd::Cint, optname::Cint, ptr::Ptr{UInt8}, optlen::Integer)
+    ret = ccall(
+        (:setsockopt, _WS2_32),
+        Cint,
+        (UInt, Cint, Cint, Ptr{UInt8}, Cint),
+        _socket_value(fd),
+        SOL_SOCKET,
+        optname,
+        ptr,
+        Cint(optlen),
+    )
+    ret == 0 && return nothing
+    _throw_errno("setsockopt", _map_wsa_errno(_wsa_get_last_error()))
+end
+
+function update_connect_context!(fd::Cint)
+    handle_ref = Ref{UInt}(_socket_value(fd))
+    GC.@preserve handle_ref begin
+        _set_sockopt_ptr!(
+            fd,
+            _SO_UPDATE_CONNECT_CONTEXT,
+            Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt}, handle_ref)),
+            sizeof(UInt),
+        )
+    end
+    return nothing
+end
+
+function finish_accept_ex!(listener_fd::Cint, acceptfd::Cint, addrbuf::Vector{UInt8})::AcceptPeer
+    listener_ref = Ref{UInt}(_socket_value(listener_fd))
+    GC.@preserve listener_ref begin
+        _set_sockopt_ptr!(
+            acceptfd,
+            _SO_UPDATE_ACCEPT_CONTEXT,
+            Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt}, listener_ref)),
+            sizeof(UInt),
+        )
+    end
+    local_ptr = Ref{Ptr{UInt8}}(C_NULL)
+    local_len = Ref{Cint}(0)
+    remote_ptr = Ref{Ptr{UInt8}}(C_NULL)
+    remote_len = Ref{Cint}(0)
+    GC.@preserve addrbuf begin
+        @ccall gc_safe = true _MSWSOCK.GetAcceptExSockaddrs(
+            pointer(addrbuf)::Ptr{UInt8},
+            UInt32(0)::UInt32,
+            UInt32(_ACCEPT_ADDRBUF_LEN)::UInt32,
+            UInt32(_ACCEPT_ADDRBUF_LEN)::UInt32,
+            local_ptr::Ref{Ptr{UInt8}},
+            local_len::Ref{Cint},
+            remote_ptr::Ref{Ptr{UInt8}},
+            remote_len::Ref{Cint},
+        )::Cvoid
+    end
+    remote_ptr[] == C_NULL && return nothing
+    return _decode_accept_peer(remote_ptr[], SockLen(remote_len[]))
 end
 
 function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
