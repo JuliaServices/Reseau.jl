@@ -153,37 +153,6 @@ Global singleton state for the runtime event loop poller.
 const POLLER = Ref{Poller}()
 const _POLLER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 const _pthread_t = UInt
-const _TRIM_DEBUG = Ref(false)
-
-@inline function _trim_debug_enabled()::Bool
-    return _TRIM_DEBUG[]
-end
-
-function _trim_debug(msg::AbstractString)::Nothing
-    _trim_debug_enabled() || return nothing
-    bytes = Vector{UInt8}(codeunits("[eventloops] " * String(msg) * "\n"))
-    @static if Sys.iswindows()
-        handle = ccall((:GetStdHandle, "kernel32"), Ptr{Cvoid}, (Int32,), Int32(-11))
-        written = Ref{UInt32}(0)
-        GC.@preserve bytes written begin
-            _ = ccall(
-                (:WriteFile, "kernel32"),
-                Int32,
-                (Ptr{Cvoid}, Ptr{UInt8}, UInt32, Ref{UInt32}, Ptr{Cvoid}),
-                handle,
-                pointer(bytes),
-                UInt32(length(bytes)),
-                written,
-                C_NULL,
-            )
-        end
-    else
-        GC.@preserve bytes begin
-            _ = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), Cint(1), pointer(bytes), Csize_t(length(bytes)))
-        end
-    end
-    return nothing
-end
 
 @inline function _is_generating_output()::Bool
     return ccall(:jl_generating_output, Cint, ()) == 1
@@ -269,7 +238,6 @@ end
 Initialize the runtime poller state and start the dedicated foreign kqueue thread.
 """
 function init!()::Poller
-    _trim_debug("init! enter assigned=$(isassigned(POLLER))")
     if isassigned(POLLER)
         state = POLLER[]
         (@atomic state.running) && return state
@@ -280,14 +248,12 @@ function init!()::Poller
     errno == Int32(0) || _throw_errno("eventloops backend init", errno)
     @atomic new_state.running = true
     POLLER[] = new_state
-    _trim_debug("init! backend initialized")
     try
         _spawn_detached_thread(
             "reseau-eventloops-poller",
             _POLLER_THREAD_ENTRY_C,
             new_state,
         )
-        _trim_debug("init! poller thread spawned")
     catch
         @atomic :release new_state.running = false
         _backend_close!(new_state)
@@ -305,7 +271,6 @@ Stop the dedicated poller thread and tear down kqueue resources.
 function shutdown!()
     isassigned(POLLER) || return nothing
     state = POLLER[]
-    _trim_debug("shutdown! enter running=$((@atomic :acquire state.running))")
     registrations = Registration[]
     stop_requested = false
     lock(state.lock)
@@ -324,15 +289,11 @@ function shutdown!()
         _notify_registration!(registration, PollMode.READWRITE)
     end
     if stop_requested
-        _trim_debug("shutdown! waking backend")
         wake_errno = _backend_wake!(state)
         wake_errno == Int32(0) || _throw_errno("event loop wake", wake_errno)
-        _trim_debug("shutdown! waiting for poller thread")
         wait(state.shutdown_event)
-        _trim_debug("shutdown! poller thread finished")
     end
     _backend_close!(state)
-    _trim_debug("shutdown! backend closed")
     return nothing
 end
 
@@ -457,7 +418,6 @@ function _notify_all_waiters!(state::Poller)
 end
 
 function _poller_thread_main!(state::Poller)
-    _trim_debug("poller thread main start")
     while @atomic state.running
         errno = _backend_poll_once!(state, Int64(-1))
         errno == Int32(0) && continue
@@ -468,7 +428,6 @@ function _poller_thread_main!(state::Poller)
         @atomic :release state.running = false
     end
     notify(state.shutdown_event)
-    _trim_debug("poller thread main exit")
     return nothing
 end
 
@@ -484,18 +443,14 @@ function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
 end
 
 function __init__()
-    _TRIM_DEBUG[] = get(ENV, "RESEAU_TRIM_DEBUG", "0") == "1"
-    _trim_debug("__init__ enter generating_output=$(_is_generating_output())")
     _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
     if _is_generating_output()
         POLLER[] = Poller()
-        _trim_debug("__init__ generating output path")
     elseif _runtime_supported()
         @static if Sys.iswindows()
             # Avoid eager foreign-thread startup during module load on Windows.
             # Runtime initialization remains lazy via `init!()` at first use.
             POLLER[] = Poller()
-            _trim_debug("__init__ windows lazy init path")
         else
             init!()
         end
@@ -503,7 +458,6 @@ function __init__()
         POLLER[] = Poller()
     end
     @assert isassigned(POLLER)
-    _trim_debug("__init__ exit")
     return nothing
 end
 

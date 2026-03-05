@@ -1,41 +1,4 @@
-const _TRIM_DEBUG = get(ENV, "RESEAU_TRIM_DEBUG", "0") == "1"
-
-function _trim_debug(msg::AbstractString)::Nothing
-    _TRIM_DEBUG || return nothing
-    bytes = Vector{UInt8}(codeunits("[eventloops-trim] " * String(msg) * "\n"))
-    @static if Sys.iswindows()
-        handle = ccall((:GetStdHandle, "kernel32"), Ptr{Cvoid}, (Int32,), Int32(-11))
-        written = Ref{UInt32}(0)
-        GC.@preserve bytes written begin
-            _ = ccall(
-                (:WriteFile, "kernel32"),
-                Int32,
-                (Ptr{Cvoid}, Ptr{UInt8}, UInt32, Ref{UInt32}, Ptr{Cvoid}),
-                handle,
-                pointer(bytes),
-                UInt32(length(bytes)),
-                written,
-                C_NULL,
-            )
-        end
-    else
-        GC.@preserve bytes begin
-            _ = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), Cint(1), pointer(bytes), Csize_t(length(bytes)))
-        end
-    end
-    return nothing
-end
-
-@inline function _trim_is_generating_output()::Bool
-    return ccall(:jl_generating_output, Cint, ()) == 1
-end
-
-_trim_debug("script start")
-_trim_is_generating_output() || atexit(() -> _trim_debug("atexit hook reached"))
-
 using Reseau
-
-_trim_debug("loaded Reseau")
 
 const NP = Reseau.EventLoops
 const IP = Reseau.IOPoll
@@ -139,20 +102,12 @@ end
 
 function @main(args::Vector{String})::Cint
     _ = args
-    _trim_debug("main start")
     try
-        _trim_debug("run_eventloops_trim_sample start")
         run_eventloops_trim_sample()
-        _trim_debug("run_eventloops_trim_sample done")
-        _trim_debug("run_internal_poll_trim_sample start")
         run_internal_poll_trim_sample()
-        _trim_debug("run_internal_poll_trim_sample done")
     finally
-        isassigned(NP.POLLER) && _trim_debug("shutdown start running=$((@atomic :acquire NP.POLLER[].running))")
         NP.shutdown!()
-        isassigned(NP.POLLER) && _trim_debug("shutdown done running=$((@atomic :acquire NP.POLLER[].running))")
     end
-    _trim_debug("main return")
     return 0
 end
 
