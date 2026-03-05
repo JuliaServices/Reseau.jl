@@ -54,6 +54,10 @@ const _ERROR_INVALID_PARAMETER = UInt32(87)
 const _ERROR_NOT_ENOUGH_MEMORY = UInt32(8)
 const _ERROR_INVALID_HANDLE = UInt32(6)
 const _ERROR_NOT_SUPPORTED = UInt32(50)
+const _WSADATA_DESC_ZERO = ntuple(_ -> UInt8(0), 257)
+const _WSADATA_STATUS_ZERO = ntuple(_ -> UInt8(0), 129)
+const _ERRNO_ESHUTDOWN = @static isdefined(Base.Libc, :ESHUTDOWN) ? Int32(getfield(Base.Libc, :ESHUTDOWN)) : Int32(Base.Libc.ENOTCONN)
+const _ERRNO_EHOSTDOWN = @static isdefined(Base.Libc, :EHOSTDOWN) ? Int32(getfield(Base.Libc, :EHOSTDOWN)) : Int32(Base.Libc.EHOSTUNREACH)
 
 struct _SockAddrHeader
     sa_family::UInt16
@@ -131,10 +135,10 @@ end
     err == _WSAENOBUFS && return Int32(Base.Libc.ENOBUFS)
     err == _WSAEISCONN && return Int32(Base.Libc.EISCONN)
     err == _WSAENOTCONN && return Int32(Base.Libc.ENOTCONN)
-    err == _WSAESHUTDOWN && return Int32(Base.Libc.ESHUTDOWN)
+    err == _WSAESHUTDOWN && return _ERRNO_ESHUTDOWN
     err == _WSAETIMEDOUT && return Int32(Base.Libc.ETIMEDOUT)
     err == _WSAECONNREFUSED && return Int32(Base.Libc.ECONNREFUSED)
-    err == _WSAEHOSTDOWN && return Int32(Base.Libc.EHOSTDOWN)
+    err == _WSAEHOSTDOWN && return _ERRNO_EHOSTDOWN
     err == _WSAEHOSTUNREACH && return Int32(Base.Libc.EHOSTUNREACH)
     return Int32(Base.Libc.EIO)
 end
@@ -185,8 +189,8 @@ function ensure_winsock!()
         wsa_data = Ref(_WSAData(
             UInt16(0),
             UInt16(0),
-            ntuple(_ -> UInt8(0), 257),
-            ntuple(_ -> UInt8(0), 129),
+            _WSADATA_DESC_ZERO,
+            _WSADATA_STATUS_ZERO,
             UInt16(0),
             UInt16(0),
             C_NULL,
