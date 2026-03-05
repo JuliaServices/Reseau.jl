@@ -9,6 +9,7 @@ end
 _log_test_progress("[runtests] loading Reseau")
 using Reseau
 _log_test_progress("[runtests] loaded Reseau")
+_log_test_progress("[runtests] julia threads: $(Threads.nthreads())")
 
 function _include_with_progress(path::AbstractString)
     _log_test_progress("[runtests] include START: $(path)")

@@ -53,7 +53,7 @@ function _wait_task!(task::Task; timeout_s::Float64 = 5.0)
 end
 
 function _transport_debug(msg::AbstractString)
-    println("[http_client_transport] ", msg)
+    println("[http_client_transport][tid=$(Threads.threadid())] ", msg)
     flush(stdout)
     return nothing
 end

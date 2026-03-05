@@ -13,6 +13,14 @@ using ..Reseau.TLS
 
 const _CONN_READER_DEFAULT_BUFFER_BYTES = 16 * 1024
 
+@inline function _http_transport_debug(msg::AbstractString)
+    @static if Sys.iswindows()
+        println("[http_transport] ", msg)
+        flush(stdout)
+    end
+    return nothing
+end
+
 mutable struct _ConnReader{C} <: IO
     conn::C
     buf::Vector{UInt8}
@@ -202,13 +210,17 @@ function _effective_tls_config(transport::Transport, address::String, server_nam
 end
 
 function _new_conn!(transport::Transport, key::String, address::String; secure::Bool, server_name::Union{Nothing, String})::ClientConn
+    _http_transport_debug("_new_conn! begin key=$(key) address=$(address) secure=$(secure)")
     tcp = HostResolvers.connect(transport.host_resolver, "tcp", address)
+    _http_transport_debug("_new_conn! tcp connected address=$(address)")
     if secure
         cfg = _effective_tls_config(transport, address, server_name)
         tls = TLS.client(tcp, cfg)
         TLS.handshake!(tls)
+        _http_transport_debug("_new_conn! tls handshake complete address=$(address)")
         return ClientConn(key, address, true, tcp, tls, _ConnReader(tls), IOBuffer(), false, false, time_ns())
     end
+    _http_transport_debug("_new_conn! return plain conn address=$(address)")
     return ClientConn(key, address, false, tcp, nothing, _ConnReader(tcp), IOBuffer(), false, false, time_ns())
 end
 
@@ -234,6 +246,7 @@ function _evict_expired_idle_locked!(transport::Transport, key::String, now_ns::
 end
 
 function _acquire_conn!(transport::Transport, key::String, address::String; secure::Bool, server_name::Union{Nothing, String})::ClientConn
+    _http_transport_debug("_acquire_conn! begin key=$(key) address=$(address)")
     _transport_closed(transport) && throw(ProtocolError("transport is closed"))
     lock(transport.lock)
     try
@@ -246,13 +259,16 @@ function _acquire_conn!(transport::Transport, key::String, address::String; secu
             isempty(idle_list::Vector{ClientConn}) && delete!(transport.idle, key)
             if !_conn_closed(conn)
                 conn.reused = true
+                _http_transport_debug("_acquire_conn! reused key=$(key) fd_closed=false")
                 return conn
             end
             _close_conn!(conn)
+            _http_transport_debug("_acquire_conn! dropped closed idle conn key=$(key)")
         end
     finally
         unlock(transport.lock)
     end
+    _http_transport_debug("_acquire_conn! idle miss, creating new conn key=$(key)")
     return _new_conn!(transport, key, address; secure = secure, server_name = server_name)
 end
 
@@ -502,14 +518,17 @@ function roundtrip!(
         secure::Bool = false,
         server_name::Union{Nothing, AbstractString} = nothing,
     )
+    _http_transport_debug("roundtrip! begin method=$(request.method) target=$(request.target) address=$(address) secure=$(secure)")
     key = string(secure ? "https://" : "http://", address)
     request_deadline = _request_deadline_ns(request)
     retry_template = _retryable_request(request) ? _copy_request(request) : nothing
     attempt = 1
     current_request = request
     while true
+        _http_transport_debug("roundtrip! attempt=$(attempt) acquiring connection")
         conn = _acquire_conn!(transport, key, String(address); secure = secure, server_name = server_name === nothing ? nothing : String(server_name))
         was_reused = conn.reused
+        _http_transport_debug("roundtrip! attempt=$(attempt) acquired connection reused=$(was_reused)")
         try
             _apply_conn_deadline!(conn, request_deadline)
             request_io = _reset_request_buffer!(conn)
@@ -523,9 +542,11 @@ function roundtrip!(
             end
             stream = _conn_stream(conn)
             request_bytes = request_io.size
+            _http_transport_debug("roundtrip! attempt=$(attempt) writing bytes=$(request_bytes)")
             n = write(stream, request_io.data, request_bytes)
             n == request_bytes || throw(ProtocolError("transport short write"))
             reader = conn.reader
+            _http_transport_debug("roundtrip! attempt=$(attempt) reading response head")
             raw_response = read_response(reader, current_request)
             while (raw_response.status_code >= 100 && raw_response.status_code < 200) && raw_response.status_code != 101
                 try
@@ -534,6 +555,7 @@ function roundtrip!(
                 end
                 raw_response = read_response(reader, current_request)
             end
+            _http_transport_debug("roundtrip! attempt=$(attempt) received status=$(raw_response.status_code)")
             reusable = _response_reusable(raw_response, current_request)
             if raw_response.body isa EmptyBody
                 if reusable
@@ -557,10 +579,12 @@ function roundtrip!(
                 raw_response.request,
             )
         catch err
+            _http_transport_debug("roundtrip! attempt=$(attempt) caught err=$(typeof(err))")
             _close_conn!(conn)
             if attempt == 1 && was_reused && retry_template !== nothing && _retryable_reused_conn_error(err)
                 current_request = _copy_request(retry_template::Request)
                 attempt = 2
+                _http_transport_debug("roundtrip! retrying after reused-conn error")
                 continue
             end
             rethrow(err)
