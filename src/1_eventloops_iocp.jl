@@ -139,7 +139,7 @@ function _submit_iocp_probe!(registration::Registration, reg::IocpRegistration, 
     wsabuf = Ref(WSABUF(UInt32(0), Ptr{UInt8}(C_NULL)))
     bytes = Ref{UInt32}(UInt32(0))
     flags = Ref{UInt32}(UInt32(0))
-    rc = GC.@preserve op.storage wsabuf bytes flags begin
+    rc = GC.@preserve op wsabuf bytes flags begin
         if op.mode == PollMode.READ
             ccall(
                 (:WSARecv, _WS2_32),
