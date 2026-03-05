@@ -130,7 +130,10 @@ end
     transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4)
     try
         _transport_debug("keep-alive reuse: client req1 begin")
+        _transport_debug("keep-alive reuse: client req1 build request")
         req1 = HT.Request("GET", "/one"; host = address, body = HT.EmptyBody(), content_length = 0)
+        _transport_debug("keep-alive reuse: client req1 build done")
+        _transport_debug("keep-alive reuse: client req1 roundtrip call")
         res1 = HT.roundtrip!(transport, address, req1)
         _transport_debug("keep-alive reuse: client req1 roundtrip done")
         @test String(_read_all_body_bytes(res1.body)) == "ok"
