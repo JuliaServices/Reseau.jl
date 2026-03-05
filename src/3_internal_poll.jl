@@ -83,6 +83,16 @@ end
     return errno == Int32(Base.Libc.EINTR) || errno == Int32(Base.Libc.ECONNABORTED)
 end
 
+@inline function _windows_accept_backoff!()
+    yield()
+    @static if Sys.iswindows()
+        # TODO(windows-accept): Replace this temporary spin/yield backoff with
+        # IOCP-native AcceptEx readiness/accept integration (Go-style).
+        @ccall gc_safe = true Sleep(UInt32(1)::UInt32)::Cvoid
+    end
+    return nothing
+end
+
 @inline function _monotonic_ns()::Int64
     return Int64(time_ns())
 end
@@ -776,7 +786,11 @@ function accept!(fd::FD)::Tuple{Cint, SocketOps.AcceptPeer}
                 return child_sysfd, peer_addr
             end
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
-                wait_read!(fd.pd, fd.is_file)
+                @static if Sys.iswindows()
+                    _windows_accept_backoff!()
+                else
+                    wait_read!(fd.pd, fd.is_file)
+                end
                 continue
             end
             _is_accept_retry_errno(errno) && continue
