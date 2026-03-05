@@ -310,11 +310,32 @@ function _close_listener!(server::Server)
         unlock(server.lock)
     end
     if listener !== nothing
+        _close_listener_with_timeout!(listener::TCP.Listener)
+    end
+    return nothing
+end
+
+function _close_listener_with_timeout!(listener::TCP.Listener; timeout_s::Float64 = 1.0)
+    task = errormonitor(Threads.@spawn begin
         try
-            TCP.close!(listener::TCP.Listener)
+            TCP.close!(listener)
         catch
         end
-    end
+        return nothing
+    end)
+    _ = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    return nothing
+end
+
+function _force_close_conn_with_timeout!(conn::TCP.Conn; timeout_s::Float64 = 1.0)
+    task = errormonitor(Threads.@spawn begin
+        try
+            TCP.close!(conn)
+        catch
+        end
+        return nothing
+    end)
+    _ = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
     return nothing
 end
 
@@ -346,11 +367,11 @@ function shutdown!(server::Server; force::Bool = false, timeout_s::Float64 = 5.0
         unlock(server.lock)
     end
     if force
+        close_deadline = time() + timeout_s
         for conn in conns
-            try
-                TCP.close!(conn)
-            catch
-            end
+            remaining = close_deadline - time()
+            remaining <= 0 && break
+            _force_close_conn_with_timeout!(conn; timeout_s = min(remaining, 1.0))
         end
     end
     deadline = time() + timeout_s
