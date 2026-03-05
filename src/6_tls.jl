@@ -886,7 +886,9 @@ function handshake!(conn::Conn)
             _with_handshake_deadline(conn) do
                 while true
                     _ensure_open!(conn, "handshake")
-                    ret = ccall((:SSL_do_handshake, _LIBSSL), Cint, (Ptr{Cvoid},), conn.ssl)
+                    ret = @ccall gc_safe = true _LIBSSL.SSL_do_handshake(
+                        conn.ssl::Ptr{Cvoid},
+                    )::Cint
                     if ret == 1
                         _set_handshake_complete!(conn)
                         return nothing
@@ -929,14 +931,11 @@ function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
     try
         _ensure_open!(conn, "read")
         while true
-            ret = GC.@preserve buf ccall(
-                (:SSL_read, _LIBSSL),
-                Cint,
-                (Ptr{Cvoid}, Ptr{UInt8}, Cint),
-                conn.ssl,
-                pointer(buf),
-                Cint(length(buf)),
-            )
+            ret = GC.@preserve buf @ccall gc_safe = true _LIBSSL.SSL_read(
+                conn.ssl::Ptr{Cvoid},
+                pointer(buf)::Ptr{UInt8},
+                Cint(length(buf))::Cint,
+            )::Cint
             if ret > 0
                 return Int(ret)
             end
@@ -981,14 +980,11 @@ function _write!(conn::Conn, buf, nbytes::Integer)::Int
             base_ptr = pointer(buf)
             while total < nbytes_int
                 chunk_len = nbytes_int - total
-                wrote = ccall(
-                    (:SSL_write, _LIBSSL),
-                    Cint,
-                    (Ptr{Cvoid}, Ptr{UInt8}, Cint),
-                    conn.ssl,
-                    base_ptr + total,
-                    Cint(chunk_len),
-                )
+                wrote = @ccall gc_safe = true _LIBSSL.SSL_write(
+                    conn.ssl::Ptr{Cvoid},
+                    (base_ptr + total)::Ptr{UInt8},
+                    Cint(chunk_len)::Cint,
+                )::Cint
                 if wrote > 0
                     total += Int(wrote)
                     continue
@@ -1024,7 +1020,9 @@ function _ssl_shutdown!(conn::Conn)
     catch
     end
     for _ in 1:4
-        ret = ccall((:SSL_shutdown, _LIBSSL), Cint, (Ptr{Cvoid},), conn.ssl)
+        ret = @ccall gc_safe = true _LIBSSL.SSL_shutdown(
+            conn.ssl::Ptr{Cvoid},
+        )::Cint
         if ret == 1 || ret == 0
             return nothing
         end

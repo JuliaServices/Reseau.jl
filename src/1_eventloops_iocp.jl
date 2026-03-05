@@ -141,31 +141,25 @@ function _submit_iocp_probe!(registration::Registration, reg::IocpRegistration, 
     flags = Ref{UInt32}(UInt32(0))
     rc = GC.@preserve op wsabuf bytes flags begin
         if op.mode == PollMode.READ
-            ccall(
-                (:WSARecv, _WS2_32),
-                Cint,
-                (UInt, Ref{WSABUF}, UInt32, Ref{UInt32}, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
-                _socket_value(reg.fd),
-                wsabuf,
-                UInt32(1),
-                bytes,
-                flags,
-                _op_ptr(op),
-                C_NULL,
-            )
+            @ccall gc_safe = true _WS2_32.WSARecv(
+                _socket_value(reg.fd)::UInt,
+                wsabuf::Ref{WSABUF},
+                UInt32(1)::UInt32,
+                bytes::Ref{UInt32},
+                flags::Ref{UInt32},
+                _op_ptr(op)::Ptr{Cvoid},
+                C_NULL::Ptr{Cvoid},
+            )::Cint
         else
-            ccall(
-                (:WSASend, _WS2_32),
-                Cint,
-                (UInt, Ref{WSABUF}, UInt32, Ref{UInt32}, UInt32, Ptr{Cvoid}, Ptr{Cvoid}),
-                _socket_value(reg.fd),
-                wsabuf,
-                UInt32(1),
-                bytes,
-                UInt32(0),
-                _op_ptr(op),
-                C_NULL,
-            )
+            @ccall gc_safe = true _WS2_32.WSASend(
+                _socket_value(reg.fd)::UInt,
+                wsabuf::Ref{WSABUF},
+                UInt32(1)::UInt32,
+                bytes::Ref{UInt32},
+                UInt32(0)::UInt32,
+                _op_ptr(op)::Ptr{Cvoid},
+                C_NULL::Ptr{Cvoid},
+            )::Cint
         end
     end
     if rc == 0

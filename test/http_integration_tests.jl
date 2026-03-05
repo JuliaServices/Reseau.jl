@@ -38,8 +38,8 @@ end
         handled = false
         for _ in 1:2
             conn = TL.accept!(listener)
-            TL.handshake!(conn)
             try
+                TL.handshake!(conn)
                 request = HT.read_request(HT._ConnReader(conn))
                 payload = collect(codeunits("tls-h1:" * request.target))
                 response = HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), request = request)
@@ -49,7 +49,7 @@ end
                 handled = true
                 return nothing
             catch err
-                if err isa EOFError || err isa HT.ParseError || err isa HT.ProtocolError
+                if err isa TL.TLSError || err isa TL.TLSHandshakeTimeoutError || err isa EOFError || err isa HT.ParseError || err isa HT.ProtocolError
                     # First ALPN-mismatched h2 attempt may connect and close before sending h1 bytes.
                     continue
                 end
@@ -80,7 +80,7 @@ end
     finally
         close(client)
         TL.close!(listener)
-        _ = timedwait(() -> istaskdone(server_task), 3.0; pollint = 0.001)
+        @test timedwait(() -> istaskdone(server_task), 3.0; pollint = 0.001) != :timed_out
     end
 end
 
@@ -126,7 +126,7 @@ end
     finally
         close(client)
         HT.shutdown!(h1_server; force = true)
-        _ = timedwait(() -> istaskdone(h1_task), 3.0; pollint = 0.001)
+        @test timedwait(() -> istaskdone(h1_task), 3.0; pollint = 0.001) != :timed_out
     end
 
     h2_server = HT.H2Server(
@@ -147,6 +147,6 @@ end
     finally
         close(client2)
         HT.shutdown_h2_server!(h2_server)
-        _ = timedwait(() -> istaskdone(h2_task), 3.0; pollint = 0.001)
+        @test timedwait(() -> istaskdone(h2_task), 3.0; pollint = 0.001) != :timed_out
     end
 end
