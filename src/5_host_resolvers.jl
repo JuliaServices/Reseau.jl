@@ -852,6 +852,16 @@ end
     return Int64(300_000_000)
 end
 
+@inline function _use_parallel_race(d::HostResolver, kind::Symbol, fallbacks::Vector{TCP.SocketEndpoint})::Bool
+    _dual_stack_enabled(d) || return false
+    kind == :tcp || return false
+    isempty(fallbacks) && return false
+    @static if Sys.iswindows()
+        Threads.nthreads() == 1 && return false
+    end
+    return true
+end
+
 function _connect_deadline_ns(d::HostResolver)::Int64
     now = Int64(time_ns())
     timeout_deadline = d.timeout_ns == 0 ? Int64(0) : now + d.timeout_ns
@@ -1201,7 +1211,7 @@ function connect(d::HostResolver, network::AbstractString, address::AbstractStri
     primaries, fallbacks = _partition_addrs(addrs)
     conn = nothing
     err = nothing
-    if _dual_stack_enabled(d) && kind == :tcp && !isempty(fallbacks)
+    if _use_parallel_race(d, kind, fallbacks)
         _resolver_debug("connect entering _resolve_parallel")
         conn, err = _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
     else
