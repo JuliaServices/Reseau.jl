@@ -506,10 +506,26 @@ end
     laddr = TL.addr(listener)::NC.SocketAddrV4
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
     server_task = errormonitor(Threads.@spawn begin
-        conn = TL.accept!(listener)
-        TL.handshake!(conn)
-        sleep(0.05)
-        TL.close!(conn)
+        conn = nothing
+        try
+            conn = TL.accept!(listener)
+            try
+                TL.handshake!(conn)
+                sleep(0.05)
+            catch err
+                # The client intentionally aborts once ALPN negotiation fails.
+                # Server-side TLS failures are expected in this test path.
+                ex = err::Exception
+                if !(ex isa TL.TLSError || ex isa EOFError || ex isa SystemError)
+                    rethrow(ex)
+                end
+            end
+        finally
+            conn === nothing || try
+                TL.close!(conn::TL.Conn)
+            catch
+            end
+        end
         return nothing
     end)
     @test_throws HT.H2NegotiationError HT.connect_h2!(
