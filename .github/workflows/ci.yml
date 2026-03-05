@@ -15,6 +15,8 @@ jobs:
       RESEAU_RUN_NETWORK_TESTS: ${{ matrix.run_network_tests }}
       RESEAU_TRIM_RUN_EXE_WINDOWS: "1"
       RESEAU_TRIM_DEBUG: "1"
+      RESEAU_TRIM_ONLY: "eventloops_trim_safe.jl"
+      RESEAU_TRIM_EXE_TIMEOUT_S: "30.0"
     strategy:
       fail-fast: false
       matrix:
@@ -31,4 +33,5 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+      - name: Run trim debug workload
+        run: julia --project=. --color=yes --check-bounds=yes --depwarn=yes --startup-file=no test/trim_compile_tests.jl

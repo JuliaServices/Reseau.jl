@@ -87,6 +87,22 @@ function _maybe_print_output(header::String, output::String)
     return nothing
 end
 
+function _trim_executable_timeout_s()::Float64
+    default = Sys.iswindows() ? "120.0" : "30.0"
+    return parse(Float64, get(ENV, "RESEAU_TRIM_EXE_TIMEOUT_S", default))
+end
+
+function _trim_selected_workloads(workloads::Vector{Tuple{String, String}})::Vector{Tuple{String, String}}
+    only = strip(get(ENV, "RESEAU_TRIM_ONLY", ""))
+    isempty(only) && return workloads
+    selected = Tuple{String, String}[]
+    for workload in workloads
+        workload[1] == only && push!(selected, workload)
+    end
+    isempty(selected) && throw(ArgumentError("unknown RESEAU_TRIM_ONLY workload: $(only)"))
+    return selected
+end
+
 function _run_trim_case(project_path::String, script_file::String, output_name::String)
     script_path = joinpath(@__DIR__, script_file)
     @test isfile(script_path)
@@ -112,7 +128,7 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
                 @test exit_code == 0
                 @test isfile(output_path)
                 run_cmd = Sys.iswindows() ? `$output_path` : `./$output_path`
-                run_timeout_s = Sys.iswindows() ? 120.0 : 30.0
+                run_timeout_s = _trim_executable_timeout_s()
                 run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd; timeout_s = run_timeout_s)
                 run_timed_out && _trim_timeout_error("executable run", script_file, run_output)
                 if run_exit != 0
@@ -144,6 +160,7 @@ end
         ("tls_trim_safe.jl", "tls_trim_safe"),
         ("http_trim_safe.jl", "http_trim_safe"),
     ]
+    trim_workloads = _trim_selected_workloads(trim_workloads)
     for (script_file, output_name) in trim_workloads
         _run_trim_case(project_path, script_file, output_name)
     end
