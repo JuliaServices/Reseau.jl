@@ -169,6 +169,8 @@ function _submit_iocp_probe!(registration::Registration, reg::IocpRegistration, 
         end
     end
     if rc == 0
+        @atomic :release op.active = false
+        _notify_registration!(registration, op.mode)
         return Int32(0)
     end
     err = _wsa_get_last_error()
