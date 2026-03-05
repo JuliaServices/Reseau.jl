@@ -989,6 +989,67 @@ function _mark_connect_done!(state::DNSRaceState)
     end
 end
 
+@inline function _state_done(state::DNSRaceState)::Bool
+    return @atomic :acquire state.done
+end
+
+function _serial_attempt_deadline(
+        now_ns::Int64,
+        deadline_ns::Int64,
+        addrs_remaining::Int,
+        address::AbstractString,
+    )::Int64
+    try
+        return _partial_deadline_ns(now_ns, deadline_ns, addrs_remaining)
+    catch err
+        err isa DNSTimeoutError || rethrow(err)
+        return Int64(-1)
+    end
+end
+
+function _attempt_resolve_connect(
+        d::HostResolver,
+        address::AbstractString,
+        remote_addr::TCP.SocketEndpoint,
+        attempt_deadline::Int64,
+        state::DNSRaceState,
+        attempt::Int,
+        max_attempts::Int,
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}, Bool}
+    _state_done(state) && return nothing, nothing, false
+    try
+        fd = TCP.connect_tcp_fd!(
+            remote_addr;
+            local_addr = d.local_addr,
+            connect_deadline_ns = attempt_deadline,
+            cancel_state = state,
+        )
+        conn = TCP.Conn(fd)
+        if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
+            TCP.close!(conn)
+            return nothing, nothing, true
+        end
+        if _mark_connect_done!(state)
+            return conn, nothing, false
+        end
+        TCP.close!(conn)
+        return nothing, nothing, false
+    catch err
+        ex = _as_exception(err)
+        if ex isa TCP.ConnectCanceledError && _state_done(state)
+            return nothing, nothing, false
+        end
+        if d.local_addr === nothing &&
+           ex isa SystemError &&
+           (ex::SystemError).errnum == Int(Base.Libc.EADDRNOTAVAIL) &&
+           attempt < max_attempts
+            return nothing, nothing, true
+        end
+        mapped = ex isa IOPoll.DeadlineExceededError ? DNSTimeoutError(String(address)) : ex
+        return nothing, mapped, false
+    end
+end
+
 function _resolve_serial(
         d::HostResolver,
         network::AbstractString,
@@ -999,61 +1060,44 @@ function _resolve_serial(
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
     first_err::Union{Nothing, Exception} = nothing
     for (i, remote_addr) in pairs(addrs)
-        if @atomic :acquire state.done
+        if _state_done(state)
             return nothing, first_err
         end
         now_ns = Int64(time_ns())
         if deadline_ns != 0 && now_ns >= deadline_ns
             return nothing, DNSTimeoutError(String(address))
         end
-        attempt_deadline = try
-            _partial_deadline_ns(now_ns, deadline_ns, length(addrs) - i + 1)
-        catch err
-            err isa DNSTimeoutError || rethrow(err)
+        attempt_deadline = _serial_attempt_deadline(
+            now_ns,
+            deadline_ns,
+            length(addrs) - i + 1,
+            address,
+        )
+        if attempt_deadline < 0
             return nothing, DNSTimeoutError(String(address))
         end
-        try
-            max_attempts = d.local_addr === nothing ? 3 : 1
-            for attempt in 1:max_attempts
-                if @atomic :acquire state.done
-                    return nothing, first_err
-                end
-                try
-                    fd = TCP.connect_tcp_fd!(
-                        remote_addr;
-                        local_addr = d.local_addr,
-                        connect_deadline_ns = attempt_deadline,
-                        cancel_state = state,
-                    )
-                    conn = TCP.Conn(fd)
-                    if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
-                        TCP.close!(conn)
-                        continue
-                    end
-                    if _mark_connect_done!(state)
-                        return conn, nothing
-                    end
-                    TCP.close!(conn)
-                    return nothing, first_err
-                catch err
-                    ex = _as_exception(err)
-                    if ex isa TCP.ConnectCanceledError && (@atomic :acquire state.done)
-                        return nothing, first_err
-                    end
-                    if d.local_addr === nothing &&
-                       ex isa SystemError &&
-                       (ex::SystemError).errnum == Int(Base.Libc.EADDRNOTAVAIL) &&
-                       attempt < max_attempts
-                        continue
-                    end
-                    mapped = ex isa IOPoll.DeadlineExceededError ? DNSTimeoutError(String(address)) : ex
-                    first_err === nothing && (first_err = mapped)
-                    break
-                end
+        max_attempts = d.local_addr === nothing ? 3 : 1
+        for attempt in 1:max_attempts
+            if _state_done(state)
+                return nothing, first_err
             end
-        catch err
-            ex = _as_exception(err)
-            first_err === nothing && (first_err = ex)
+            conn, err, retry = _attempt_resolve_connect(
+                d,
+                address,
+                remote_addr,
+                attempt_deadline,
+                state,
+                attempt,
+                max_attempts,
+            )
+            conn !== nothing && return conn, nothing
+            retry && continue
+            if err !== nothing
+                first_err === nothing && (first_err = err::Exception)
+            elseif _state_done(state)
+                return nothing, first_err
+            end
+            break
         end
     end
     first_err === nothing && (first_err = AddressError("missing address", String(address)))
