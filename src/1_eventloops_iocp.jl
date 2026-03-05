@@ -375,13 +375,14 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
         connectex_ptr = _load_connectex_ptr(reg.fd)
         connectex_ptr == C_NULL && return _map_overlapped_errno(_wsa_get_last_error())
         bytes_ref = Ref{UInt32}(UInt32(0))
-        rc = GC.@preserve op request.addrbuf bytes_ref begin
+        addrbuf = request.addrbuf
+        rc = GC.@preserve op addrbuf bytes_ref begin
             ccall(
                 connectex_ptr,
                 Int32,
                 (UInt, Ptr{Cvoid}, Cint, Ptr{UInt8}, UInt32, Ref{UInt32}, Ptr{Cvoid}),
                 _socket_value(reg.fd),
-                pointer(request.addrbuf),
+                pointer(addrbuf),
                 request.addrlen,
                 C_NULL,
                 UInt32(0),
@@ -393,14 +394,15 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
         request = op.request
         request isa IocpAcceptRequest || throw(ArgumentError("missing AcceptEx request"))
         bytes_ref = Ref{UInt32}(UInt32(0))
-        rc = GC.@preserve op request.addrbuf bytes_ref begin
+        addrbuf = request.addrbuf
+        rc = GC.@preserve op addrbuf bytes_ref begin
             @ccall gc_safe = true _MSWSOCK.AcceptEx(
                 _socket_value(reg.fd)::UInt,
                 _socket_value(request.acceptfd)::UInt,
-                pointer(request.addrbuf)::Ptr{UInt8},
+                pointer(addrbuf)::Ptr{UInt8},
                 UInt32(0)::UInt32,
-                UInt32(length(request.addrbuf) ÷ 2)::UInt32,
-                UInt32(length(request.addrbuf) ÷ 2)::UInt32,
+                UInt32(length(addrbuf) ÷ 2)::UInt32,
+                UInt32(length(addrbuf) ÷ 2)::UInt32,
                 bytes_ref::Ref{UInt32},
                 _op_ptr(op)::Ptr{Cvoid},
             )::Int32
