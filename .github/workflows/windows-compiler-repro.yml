@@ -21,6 +21,7 @@ jobs:
         with:
           version: nightly
           arch: x64
+      - uses: julia-actions/julia-buildpkg@v1
       - name: Run package-load repro
         shell: bash
         env:
