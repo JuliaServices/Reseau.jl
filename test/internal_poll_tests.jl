@@ -105,6 +105,49 @@ else
                 EL.shutdown!()
             end
         end
+        @testset "combined deadline entry normalization" begin
+            registration = EL.Registration(Cint(7), UInt64(11), EL.PollMode.READWRITE, EL.PollWaiter(), EL.PollWaiter(), false)
+            combined = EL._build_deadline_entries(registration, Int64(10), Int64(10), UInt64(3), UInt64(5))
+            @test length(combined) == 1
+            @test combined[1].mode == EL.PollMode.READWRITE
+            @test combined[1].rseq == UInt64(3)
+            @test combined[1].wseq == UInt64(5)
+            split = EL._build_deadline_entries(registration, Int64(10), Int64(11), UInt64(3), UInt64(5))
+            @test length(split) == 2
+            @test split[1].mode == EL.PollMode.READ
+            @test split[2].mode == EL.PollMode.WRITE
+        end
+        @testset "set_deadline uses one combined heap entry and expires both sides" begin
+            fd0, fd1 = _ip_socketpair_stream()
+            ipfd = IP.FD(fd0)
+            fd0 = Cint(-1)
+            try
+                IP._set_nonblocking!(ipfd.sysfd)
+                IP.init!(ipfd)
+                state = EL.POLLER[]
+                future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
+                IP.set_deadline!(ipfd, future_deadline)
+                lock(state.lock)
+                try
+                    entries = filter(x -> (x.registration::EL.Registration).token == ipfd.pd.token, state.deadline_heap)
+                    @test length(entries) == 1
+                    @test entries[1].mode == EL.PollMode.READWRITE
+                finally
+                    unlock(state.lock)
+                end
+                IP.set_deadline!(ipfd, Int64(time_ns()) + Int64(30_000_000))
+                sleep(0.06)
+                @test IP._check_error(ipfd.pd, IP.PollOp.READ) == Int32(2)
+                @test IP._check_error(ipfd.pd, IP.PollOp.WRITE) == Int32(2)
+                IP.set_deadline!(ipfd, Int64(0))
+                @test IP._check_error(ipfd.pd, IP.PollOp.READ) == Int32(0)
+                @test IP._check_error(ipfd.pd, IP.PollOp.WRITE) == Int32(0)
+            finally
+                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                _ip_close_fd(fd1)
+                EL.shutdown!()
+            end
+        end
         @testset "close evicts blocked waiters" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)

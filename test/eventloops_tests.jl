@@ -82,6 +82,45 @@ else
                 NP._backend_close!(state)
             end
         end
+        @testset "earlier scheduled deadline wakes poll early" begin
+            old_poller = NP.POLLER[]
+            state = NP.Poller()
+            poll_task = nothing
+            fd0 = Cint(-1)
+            fd1 = Cint(-1)
+            try
+                errno = NP._backend_init!(state)
+                @test errno == Int32(0)
+                @atomic :release state.running = true
+                NP.POLLER[] = state
+                fd0, fd1 = _el_socketpair_stream()
+                token = UInt64(41)
+                registration = NP.Registration(fd0, token, NP.PollMode.READWRITE, NP.PollWaiter(), NP.PollWaiter(), false)
+                state.registrations[fd0] = registration
+                state.registrations_by_token[token] = registration
+                @atomic :release state.poll_until_ns = Int64(time_ns()) + Int64(5_000_000_000)
+                poll_task = errormonitor(Threads.@spawn begin
+                    t0 = time_ns()
+                    err = NP._backend_poll_once!(state, Int64(5_000_000_000))
+                    return err, time_ns() - t0
+                end)
+                sleep(0.03)
+                NP.schedule_deadlines!(registration, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
+                err, elapsed_ns = fetch(poll_task)
+                @test err == Int32(0)
+                @test elapsed_ns < 500_000_000
+            finally
+                if poll_task isa Task && !istaskdone(poll_task)
+                    NP._backend_wake!(state)
+                    @test _el_wait_task_done(poll_task, 1.0) != :timed_out
+                end
+                poll_task isa Task && istaskdone(poll_task) && wait(poll_task)
+                NP.POLLER[] = old_poller
+                _el_close_fd(fd0)
+                _el_close_fd(fd1)
+                NP._backend_close!(state)
+            end
+        end
         @testset "runtime register/pollwait/deregister" begin
             NP.init!()
             fd0, fd1 = _el_socketpair_stream()
