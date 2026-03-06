@@ -496,10 +496,10 @@ end
 
 Execute one HTTP/1 request/response exchange through `transport`.
 """
-@noinline function _roundtrip_impl(
+@noinline Base.@nospecializeinfer function _roundtrip_impl(
         transport::Transport,
         address::String,
-        request::Request,
+        @nospecialize(request::Request),
         secure::Bool,
         server_name::Union{Nothing, String},
     )
@@ -1133,10 +1133,10 @@ end
     return nothing
 end
 
-@noinline function _client_roundtrip_h2_or_fallback(
+@noinline Base.@nospecializeinfer function _client_roundtrip_h2_or_fallback(
         client::Client,
         address::String,
-        send_request::Request,
+        @nospecialize(send_request::Request),
         secure::Bool,
         server_name::String,
         protocol::Symbol,
@@ -1159,10 +1159,10 @@ end
     end
 end
 
-@noinline function _client_roundtrip_response(
+@noinline Base.@nospecializeinfer function _client_roundtrip_response(
         client::Client,
         address::String,
-        send_request::Request,
+        @nospecialize(send_request::Request),
         secure::Bool,
         server_name::String,
         protocol::Symbol,
@@ -1235,10 +1235,10 @@ end
 
 Send a request with redirect handling and return the final response.
 """
-@noinline function _do_impl(
+@noinline Base.@nospecializeinfer function _do_impl(
         client::Client,
         address::String,
-        request::Request,
+        @nospecialize(request::Request),
         secure::Bool,
         server_name::Union{Nothing, String},
         protocol::Symbol,
