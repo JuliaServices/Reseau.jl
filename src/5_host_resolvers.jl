@@ -1007,12 +1007,12 @@ function _serial_attempt_deadline(
     end
 end
 
-@noinline Base.@nospecializeinfer function _attempt_resolve_connect(
-        @nospecialize(d::HostResolver),
+@noinline function _attempt_resolve_connect(
+        d::HostResolver,
         address::AbstractString,
-        @nospecialize(remote_addr::TCP.SocketEndpoint),
+        remote_addr::TCP.SocketEndpoint,
         attempt_deadline::Int64,
-        @nospecialize(state::DNSRaceState),
+        state::DNSRaceState,
         attempt::Int,
         max_attempts::Int,
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}, Bool}
