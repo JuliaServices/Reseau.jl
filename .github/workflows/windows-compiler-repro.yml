@@ -8,13 +8,17 @@ on:
 
 jobs:
   repro:
-    name: Julia nightly - windows-latest - compiler repro - layer ${{ matrix.max_layer }}
+    name: Julia nightly - windows-latest - compiler repro - ${{ matrix.case }}
     runs-on: windows-latest
     timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        max_layer: [5, 6, 7, 8]
+        include:
+          - case: hostresolver-connect
+            repro_script: repro/windows-compiler-issue-hostresolver-connect.jl
+          - case: tcp-connect-kwcall
+            repro_script: repro/windows-compiler-issue-tcp-connect-kwcall.jl
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -25,10 +29,11 @@ jobs:
       - name: Run package-backed repro
         shell: bash
         env:
-          RESEAU_REPRO_MAX_LAYER: ${{ matrix.max_layer }}
+          RESEAU_REPRO_MAX_LAYER: 5
         run: |
           set -euo pipefail
           echo "[repro] pwd=${PWD}"
+          echo "[repro] case=${{ matrix.case }}"
           echo "[repro] RESEAU_REPRO_MAX_LAYER=${RESEAU_REPRO_MAX_LAYER}"
           julia \
             --color=yes \
@@ -40,4 +45,4 @@ jobs:
             --startup-file=no \
             --track-allocation=none \
             --code-coverage="@${PWD}" \
-            repro/windows-compiler-issue-package-repro.jl
+            "${{ matrix.repro_script }}"
