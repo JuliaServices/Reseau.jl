@@ -944,9 +944,21 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
 end
 
 """
-Read up to `length(p)` bytes into `p`.
+Read up to `length(p)` bytes into `p` and return the number of bytes read.
 
-In non-blocking mode this loops on `EAGAIN` by waiting for read readiness.
+Important behavior notes:
+- the return value may be smaller than `length(p)` whenever fewer bytes are
+  currently available than the caller requested; this is normal for stream
+  sockets and does not imply EOF
+- once at least one byte has been read, the call returns immediately instead of
+  waiting to fill the rest of `p`
+- if no bytes are currently available and the descriptor is pollable, the call
+  waits for read readiness and then retries
+- a zero-length `p` returns `0` immediately without touching the descriptor
+
+Throws `EOFError` when the peer cleanly closes a stream whose
+`zero_read_is_eof` flag is set, `DeadlineExceededError` when the read deadline
+expires while waiting, and `SystemError` for OS-level read failures.
 """
 function read!(fd::FD, p::Vector{UInt8})::Int
     _fd_read_lock!(fd)
@@ -974,9 +986,11 @@ function read!(fd::FD, p::Vector{UInt8})::Int
 end
 
 """
-Write all bytes from `p`.
+Write all bytes from `p` and return the number of bytes written.
 
-In non-blocking mode this loops on `EAGAIN` by waiting for write readiness.
+Unlike `read!`, a successful return means the full buffer was written. In
+non-blocking mode this loops on `EAGAIN` by waiting for write readiness and
+then resuming from the first unwritten byte.
 """
 function write!(fd::FD, p::Vector{UInt8})::Int
     GC.@preserve p begin
@@ -985,7 +999,10 @@ function write!(fd::FD, p::Vector{UInt8})::Int
 end
 
 """
-Write `nbytes` from a `Memory{UInt8}` buffer.
+Write exactly `nbytes` from a `Memory{UInt8}` buffer and return the byte count.
+
+This follows the same blocking/retry behavior as `write!(fd, ::Vector{UInt8})`
+and only returns successfully once all requested bytes have been accepted.
 """
 function write!(fd::FD, p::Memory{UInt8}, nbytes::Integer)::Int
     n = Int(nbytes)

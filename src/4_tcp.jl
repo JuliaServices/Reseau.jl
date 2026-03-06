@@ -613,8 +613,17 @@ end
 
 Read up to `length(buf)` bytes into `buf` and return the number of bytes read.
 
-Throws the same errors as `IOPoll.read!`, including deadline and close-related
-exceptions.
+Important behavior notes:
+- the result may be smaller than `length(buf)` whenever fewer bytes are
+  presently available on the stream than the caller asked for
+- once at least one byte is read, the call returns immediately instead of
+  waiting to fill the remainder of `buf`
+- if no bytes are currently available, the underlying descriptor waits for read
+  readiness and then retries, subject to any active read deadline
+- `length(buf) == 0` returns `0` immediately
+
+Throws the same errors as `IOPoll.read!`, including `EOFError`,
+`IOPoll.DeadlineExceededError`, and close-related exceptions.
 """
 function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
     return IOPoll.read!(conn.fd.pfd, buf)
@@ -623,7 +632,11 @@ end
 """
     write(conn, buf) -> Int
 
-Write bytes from `buf` and return the number of bytes written.
+Write all bytes from `buf` and return the number of bytes written.
+
+On success, the return value is always `length(buf)`. If the socket cannot
+currently accept data, the call waits for write readiness and resumes until the
+entire buffer has been written or an error/deadline interrupts the operation.
 """
 function Base.write(conn::Conn, buf::Vector{UInt8})::Int
     return IOPoll.write!(conn.fd.pfd, buf)
@@ -634,6 +647,10 @@ end
 
 Write the first `nbytes` bytes from `buf` and return the number of bytes
 written.
+
+On success, the return value is always exactly `nbytes`. Like the `Vector`
+overload, this may block waiting for write readiness between partial kernel
+writes.
 """
 function Base.write(conn::Conn, buf::Memory{UInt8}, nbytes::Integer)::Int
     return IOPoll.write!(conn.fd.pfd, buf, nbytes)

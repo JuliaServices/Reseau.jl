@@ -1074,7 +1074,17 @@ The return value matches Julia's standard `read!` convention:
 - `0` means EOF
 - positive values report the number of bytes written into `buf`
 
+The result may be smaller than `length(buf)` for the same reasons as plain TCP:
+OpenSSL may already have only part of a TLS record decrypted, the underlying
+socket may currently have less data available than requested, or EOF may arrive
+before the buffer is filled. Once at least one plaintext byte is produced, the
+call returns immediately instead of waiting to fill the rest of `buf`.
+
 The handshake is performed lazily before the first application read.
+
+If no application bytes are currently available, the call waits for whichever
+underlying socket readiness OpenSSL requests (`WANT_READ` or `WANT_WRITE`),
+subject to any active connection deadline.
 
 Throws `TLSError`, `TLSHandshakeTimeoutError`, or transport-layer close/timeout errors
 wrapped as TLS failures.
@@ -1122,6 +1132,11 @@ Write plaintext application bytes through the TLS connection.
 allows callers to cap the write at `nbytes`.
 
 Returns the number of plaintext bytes accepted by OpenSSL.
+
+On success, the return value is always the full requested length. If OpenSSL or
+the underlying transport cannot make progress immediately, the call waits for
+the requested readiness (`WANT_READ`/`WANT_WRITE`) and then resumes until the
+whole payload is written or an error occurs.
 
 Throws `TLSError` on TLS failure. A write timeout becomes a permanent write error for
 the connection, matching Go's behavior that a timed-out TLS write leaves record framing
