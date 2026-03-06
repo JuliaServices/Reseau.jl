@@ -18,6 +18,9 @@ jobs:
           - case: hostresolver-connect
             max_layer: 5
             repro_script: repro/windows-compiler-issue-hostresolver-connect.jl
+          - case: tcp-connect-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-connect-layer4.jl
           - case: tcp-connect-kwcall-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-connect-kwcall-layer4.jl
