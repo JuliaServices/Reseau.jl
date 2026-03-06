@@ -1,5 +1,12 @@
 # Windows socket syscall bindings used by `SocketOps`.
-# Wrappers normalize retry/error behavior and expose POSIX-like errno semantics.
+#
+# This backend deliberately translates WinSock behavior into a POSIX-flavored
+# contract so the rest of Reseau can share logic with the Unix implementations.
+# The main adaptations are:
+# - mapping WinSock and Win32 errors onto `Base.Libc` errno values
+# - remembering non-blocking state in Julia because WinSock does not expose the
+#   same `fcntl(F_GETFL)` style query API
+# - configuring handles to be non-inheritable so they behave like CLOEXEC fds
 
 const _WS2_32 = "Ws2_32"
 const _MSWSOCK = "Mswsock"
@@ -185,6 +192,14 @@ function _fd_nonblocking_enabled(fd::Cint)::Bool
     end
 end
 
+"""
+    ensure_winsock!()
+
+Initialize WinSock for the current process if it has not already been started.
+
+This is safe to call repeatedly. The per-process pid check matters because a
+Julia process can fork in ways that invalidate the inherited WinSock state.
+"""
 function ensure_winsock!()
     pid = Base.getpid()
     if _winsock_initialized[] && _winsock_init_pid[] == pid
@@ -247,6 +262,12 @@ function set_close_on_exec!(fd::Cint)
     return nothing
 end
 
+"""
+    set_nonblocking!(fd, enabled=true)
+
+Toggle WinSock non-blocking mode and update the Julia-side bookkeeping used by
+`fd_is_nonblocking`.
+"""
 function set_nonblocking!(fd::Cint, enabled::Bool = true)
     ensure_winsock!()
     arg = Ref{UInt32}(enabled ? UInt32(1) : UInt32(0))
@@ -256,6 +277,17 @@ function set_nonblocking!(fd::Cint, enabled::Bool = true)
     return nothing
 end
 
+"""
+    open_socket(family, sotype, proto=0) -> Cint
+
+Create a WinSock socket configured for overlapped I/O, non-inheritable handle
+semantics, and non-blocking operation.
+
+The preferred path uses `WSASocketW(..., WSA_FLAG_NO_HANDLE_INHERIT)` so the
+socket never becomes inheritable in the first place. If that flag is rejected,
+the backend falls back to manually clearing inheritability with
+`SetHandleInformation`, which is the closest analogue to Unix `FD_CLOEXEC`.
+"""
 function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
     ensure_winsock!()
     raw_type = Cint(sotype)
@@ -308,6 +340,13 @@ function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
     return fd
 end
 
+"""
+    close_socket_nothrow(fd) -> Int32
+
+Best-effort close that mirrors the Unix backends: return `0` for success or
+consumed close errors, and return `EBADF` only when the socket handle was
+already invalid.
+"""
 function close_socket_nothrow(fd::Cint)::Int32
     _clear_fd_state!(fd)
     ret = @ccall gc_safe = true _WS2_32.closesocket(
@@ -374,6 +413,15 @@ function connect_socket(fd::Cint, addr::SockAddrIn6)::Int32
     end
 end
 
+"""
+    connect_socket(fd, addr::Ptr{Cvoid}, addrlen::SockLen) -> Int32
+
+Attempt one non-blocking WinSock connect and return a POSIX-like errno code.
+
+WinSock reports deferred completion as `WSAEWOULDBLOCK`; this backend maps that
+to `EINPROGRESS` so the transport layer can use the same poll-driven connect
+completion path as it does on Unix.
+"""
 function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
     ret = @ccall gc_safe = true "Ws2_32".connect(
         _socket_value(fd)::UInt,
@@ -386,6 +434,12 @@ function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
     return _map_wsa_errno(err)
 end
 
+"""
+    sockaddr_bytes(addr) -> Vector{UInt8}
+
+Copy a sockaddr struct into a byte vector suitable for APIs like ConnectEx that
+want raw address buffers instead of typed Julia structs.
+"""
 function sockaddr_bytes(addr::SockAddrIn)::Vector{UInt8}
     bytes = Vector{UInt8}(undef, sizeof(SockAddrIn))
     addr_ref = Ref(addr)
@@ -425,6 +479,15 @@ end
     return nothing
 end
 
+"""
+    try_accept_socket(fd) -> Tuple{Cint, AcceptPeer, Int32}
+
+Perform one non-blocking WinSock `accept` attempt and return `(newfd, peer,
+errno)`.
+
+The returned child socket is normalized to the same invariants as Unix:
+non-inheritable and non-blocking before it escapes to higher layers.
+"""
 function try_accept_socket(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()
     addrlen = Ref{SockLen}(SockLen(_ACCEPT_ADDRBUF_LEN))
@@ -477,6 +540,14 @@ function _set_sockopt_ptr!(fd::Cint, optname::Cint, ptr::Ptr{UInt8}, optlen::Int
     _throw_errno("setsockopt", _map_wsa_errno(_wsa_get_last_error()))
 end
 
+"""
+    update_connect_context!(fd)
+
+Finalize a socket that completed connection establishment through ConnectEx.
+
+Windows requires `SO_UPDATE_CONNECT_CONTEXT` before APIs like `getsockname` and
+`getpeername` reflect the connected state consistently.
+"""
 function update_connect_context!(fd::Cint)
     handle_ref = Ref{UInt}(_socket_value(fd))
     GC.@preserve handle_ref begin
@@ -490,6 +561,12 @@ function update_connect_context!(fd::Cint)
     return nothing
 end
 
+"""
+    finish_accept_ex!(listener_fd, acceptfd, addrbuf) -> AcceptPeer
+
+Finalize a socket accepted through AcceptEx and decode the remote peer address
+from the AcceptEx scratch buffer.
+"""
 function finish_accept_ex!(listener_fd::Cint, acceptfd::Cint, addrbuf::Vector{UInt8})::AcceptPeer
     listener_ref = Ref{UInt}(_socket_value(listener_fd))
     GC.@preserve listener_ref begin
@@ -520,6 +597,11 @@ function finish_accept_ex!(listener_fd::Cint, acceptfd::Cint, addrbuf::Vector{UI
     return _decode_accept_peer(remote_ptr[], SockLen(remote_len[]))
 end
 
+"""
+    get_sockopt_int(fd, level, optname) -> Int32
+
+Read an integer socket option and return it in host byte order.
+"""
 function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
     value = Ref{Cint}(0)
     optlen = Ref{Cint}(Cint(sizeof(Cint)))
@@ -539,6 +621,11 @@ function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
     _throw_errno("getsockopt", _map_wsa_errno(_wsa_get_last_error()))
 end
 
+"""
+    set_sockopt_int(fd, level, optname, value)
+
+Write an integer socket option.
+"""
 function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     raw = Ref{Cint}(Cint(value))
     ret = GC.@preserve raw begin
@@ -557,6 +644,11 @@ function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     _throw_errno("setsockopt", _map_wsa_errno(_wsa_get_last_error()))
 end
 
+"""
+    get_socket_error(fd) -> Int32
+
+Read `SO_ERROR`, primarily for finishing non-blocking connect attempts.
+"""
 function get_socket_error(fd::Cint)::Int32
     return get_sockopt_int(fd, SOL_SOCKET, SO_ERROR)
 end
@@ -621,6 +713,11 @@ function get_peer_name_in6(fd::Cint)::SockAddrIn6
     _throw_errno("getpeername", _map_wsa_errno(_wsa_get_last_error()))
 end
 
+"""
+    shutdown_socket(fd, how)
+
+Half-close or fully close the directions designated by `how`.
+"""
 function shutdown_socket(fd::Cint, how::Integer)
     ret = @ccall gc_safe = true _WS2_32.shutdown(
         _socket_value(fd)::UInt,
@@ -630,6 +727,13 @@ function shutdown_socket(fd::Cint, how::Integer)
     _throw_errno("shutdown", _map_wsa_errno(_wsa_get_last_error()))
 end
 
+"""
+    read_once!(fd, ptr, nbytes) -> Cssize_t
+
+Perform one raw `recv` call. WinSock already reports interruption through the
+error code, so this wrapper simply returns `-1` on failure and leaves error
+inspection to the caller.
+"""
 function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
     ret = @ccall gc_safe = true "Ws2_32".recv(
@@ -642,6 +746,11 @@ function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     return Cssize_t(-1)
 end
 
+"""
+    write_once!(fd, ptr, nbytes) -> Cssize_t
+
+Perform one raw `send` call and surface short writes or errors to the caller.
+"""
 function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
     ret = @ccall gc_safe = true "Ws2_32".send(

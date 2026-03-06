@@ -3,6 +3,12 @@
 
 Go-style poll descriptor layer built on `EventLoops`.
 Provides deadline-aware readiness waiting for network descriptors.
+
+Conceptually this sits where Go's `internal/poll` package sits:
+- `EventLoops` is the runtime-facing readiness engine
+- `IOPoll` turns readiness and deadlines into descriptor-centric operations
+- higher transport layers call `prepare_*`, `wait_*`, and deadline helpers
+  instead of talking to the event loop directly
 """
 module IOPoll
 
@@ -31,6 +37,9 @@ const _POLL_ERR_NOT_POLLABLE = Int32(3)
 
 """
 Bitmask of operations used for readiness waits and deadline management.
+
+`READWRITE` is intentionally the bitwise OR of `READ` and `WRITE` so callers can
+test or combine directions cheaply.
 """
 @enumx PollOp::UInt8 begin
     READ = 0x01
@@ -91,9 +100,13 @@ end
 end
 
 """
-Small counting semaphore used by `FDLock` lock wait paths.
+    RuntimeSema
 
-This is unbounded, so multiple wakeups can accumulate.
+Small counting semaphore used by `FDLock` slow paths.
+
+Unlike `PollWaiter`, this is deliberately unbounded: repeated wakeups must not
+be lost while a goroutine-like lock waiter is still making progress through the
+`FDLock` state machine.
 """
 mutable struct RuntimeSema
     lock::ReentrantLock
@@ -105,6 +118,13 @@ mutable struct RuntimeSema
     end
 end
 
+"""
+    _runtime_sema_acquire!(sema)
+
+Block until one semaphore unit is available, then consume it.
+
+Returns `nothing`.
+"""
 function _runtime_sema_acquire!(sema::RuntimeSema)
     lock(sema.lock)
     try
@@ -118,6 +138,13 @@ function _runtime_sema_acquire!(sema::RuntimeSema)
     return nothing
 end
 
+"""
+    _runtime_sema_release!(sema)
+
+Add one semaphore unit and notify one blocked waiter.
+
+Returns `nothing`.
+"""
 function _runtime_sema_release!(sema::RuntimeSema)
     lock(sema.lock)
     try
@@ -153,6 +180,16 @@ mutable struct FDLock
     end
 end
 
+"""
+    _fdlock_incref!(mu)
+
+Acquire one shared descriptor reference.
+
+Returns `true` on success and `false` if close has already started.
+
+Throws `ArgumentError` if the reference count overflows, which would indicate an
+unreasonable number of concurrent operations on one descriptor.
+"""
 function _fdlock_incref!(mu::FDLock)::Bool
     while true
         old = @atomic :acquire mu.state
@@ -164,6 +201,15 @@ function _fdlock_incref!(mu::FDLock)::Bool
     end
 end
 
+"""
+    _fdlock_incref_and_close!(mu)
+
+Start close, acquire one final shared reference, and wake all queued lock
+waiters.
+
+Returns `true` if this call successfully initiated close and `false` if another
+task had already done so.
+"""
 function _fdlock_incref_and_close!(mu::FDLock)::Bool
     while true
         old = @atomic :acquire mu.state
@@ -188,6 +234,15 @@ function _fdlock_incref_and_close!(mu::FDLock)::Bool
     end
 end
 
+"""
+    _fdlock_decref!(mu)
+
+Release one shared descriptor reference.
+
+Returns `true` exactly when the descriptor has already been marked closed and
+this call released the final outstanding reference, meaning the underlying OS
+handle may now be destroyed.
+"""
 function _fdlock_decref!(mu::FDLock)::Bool
     while true
         old = @atomic :acquire mu.state
@@ -199,6 +254,18 @@ function _fdlock_decref!(mu::FDLock)::Bool
     end
 end
 
+"""
+    _fdlock_rwlock!(mu, read_lock, wait_lock)
+
+Acquire the descriptor's read or write operation lock.
+
+Arguments:
+- `read_lock`: `true` for the read lock, `false` for the write lock
+- `wait_lock`: whether to queue and block if the lock is already held
+
+Returns `true` on success and `false` if the descriptor is closed or if
+`wait_lock == false` and the lock is already held.
+"""
 function _fdlock_rwlock!(mu::FDLock, read_lock::Bool, wait_lock::Bool)::Bool
     mutex_bit = read_lock ? _MUTEX_RLOCK : _MUTEX_WLOCK
     mutex_wait = read_lock ? _MUTEX_RWAIT : _MUTEX_WWAIT
@@ -225,6 +292,14 @@ function _fdlock_rwlock!(mu::FDLock, read_lock::Bool, wait_lock::Bool)::Bool
     end
 end
 
+"""
+    _fdlock_rwunlock!(mu, read_lock)
+
+Release the descriptor's read or write operation lock.
+
+Returns `true` when the descriptor has already been marked closed and this call
+released the final reference, so destruction should proceed.
+"""
 function _fdlock_rwunlock!(mu::FDLock, read_lock::Bool)::Bool
     mutex_bit = read_lock ? _MUTEX_RLOCK : _MUTEX_WLOCK
     mutex_wait = read_lock ? _MUTEX_RWAIT : _MUTEX_WWAIT
@@ -251,6 +326,12 @@ Internal file descriptor wrapper used by the poll layer.
 
 This coordinates descriptor lifetime, read/write serialization, and integration
 with `PollState`.
+
+Fields:
+- `fdlock`: Go-style reference and read/write lock state
+- `pd`: deadline/readiness state shared with `EventLoops`
+- `csema`: close semaphore used to wait for non-blocking operations to drain
+- `is_blocking`: whether the OS descriptor has been switched back to blocking
 """
 mutable struct FD
     fdlock::FDLock
@@ -280,6 +361,16 @@ mutable struct FD
     end
 end
 
+"""
+    _convert_poll_error!(res, is_file)
+
+Map a compact internal poll status code to the public exception surface.
+
+Returns `nothing` when `res` indicates success.
+
+Throws one of `NetClosingError`, `FileClosingError`, `DeadlineExceededError`,
+`NotPollableError`, or `ArgumentError` for an invalid status code.
+"""
 function _convert_poll_error!(res::Int32, is_file::Bool)
     res == _POLL_NO_ERROR && return nothing
     res == _POLL_ERR_CLOSING && throw(_closing_error(is_file))
@@ -290,6 +381,10 @@ end
 
 """
 Map current `PollState` state into a compact poll error code.
+
+This mirrors the shape of Go's `runtime_pollWait` checks: close and deadline
+state are consulted before and after parking so callers can distinguish "ready"
+from "woken because the descriptor was closed or timed out".
 """
 function _check_error(pd::PollState, mode::PollOp.T)::Int32
     (@atomic :acquire pd.closing) && return _POLL_ERR_CLOSING
@@ -306,6 +401,16 @@ function _check_error(pd::PollState, mode::PollOp.T)::Int32
     return _POLL_NO_ERROR
 end
 
+"""
+    _refresh_event_err!(pd)
+
+Synchronize the persistent backend error bit from the live registration into
+`pd.event_err`.
+
+Backends set `registration.event_err` when the OS reports an error/hangup event
+that should permanently make the descriptor non-pollable. Higher layers cache
+that on `PollState` because `PollState` outlives any single readiness wait.
+"""
 function _refresh_event_err!(pd::PollState)
     (@atomic :acquire pd.pollable) || return nothing
     registration = EventLoops.current_registration(pd)
@@ -315,6 +420,13 @@ function _refresh_event_err!(pd::PollState)
     return nothing
 end
 
+"""
+    _wake_waiters!(pd, mode)
+
+Notify the read and/or write waiters associated with `pd`.
+
+Returns `nothing`.
+"""
 function _wake_waiters!(pd::PollState, mode::PollOp.T)
     (@atomic :acquire pd.pollable) || return nothing
     registration = EventLoops.current_registration(pd)
@@ -329,6 +441,19 @@ function _wake_waiters!(pd::PollState, mode::PollOp.T)
     return nothing
 end
 
+"""
+    deadline_fire!(pd, mode, rseq, wseq)
+
+Consume one expired poller deadline entry.
+
+The poller thread passes in the sequence numbers captured when the deadline was
+scheduled. If they still match the current `PollState`, the deadline is live and
+the corresponding read/write deadline slot is flipped to `-1`, which is the
+local sentinel for "deadline exceeded". If the sequences no longer match, the
+entry is stale and ignored.
+
+Returns `nothing`.
+"""
 function deadline_fire!(
         pd::PollState,
         mode::EventLoops.PollMode.T,
@@ -371,6 +496,12 @@ Set read/write deadline state on an `FD`.
 
 `deadline_ns == 0` disables deadlines for the selected mode.
 `deadline_ns <= time_ns()` triggers immediate timeout.
+
+Returns `nothing`.
+
+Throws:
+- `NetClosingError` / `FileClosingError` if close has already started
+- `NoDeadlineError` if the descriptor is not managed by the poller
 """
 function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
     deadline = Int64(deadline_ns)
@@ -389,6 +520,8 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
         try
             (@atomic :acquire pd.closing) && return nothing
             if _mode_has_read(mode)
+                # The new sequence invalidates every previously scheduled read
+                # deadline entry for this descriptor.
                 @atomic pd.rseq += UInt64(1)
                 if deadline == 0
                     @atomic :release pd.rd_ns = Int64(0)
@@ -417,6 +550,10 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
         finally
             unlock(pd.lock)
         end
+        # Publish the post-update snapshot to the poller heap. Stale entries are
+        # left in the heap and filtered by sequence/token checks when they reach
+        # the top, which keeps scheduling cheap and matches Go's timer seq
+        # invalidation strategy.
         EventLoops.schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
         if wake_read && wake_write
             _wake_waiters!(pd, PollOp.READWRITE)
@@ -436,6 +573,15 @@ Initialize polling state for an `FD`.
 
 When `pollable=true`, the fd is registered with `EventLoops`; otherwise the fd
 is treated as blocking and deadline support is disabled.
+
+Keyword arguments:
+- `net`: reserved for parity with higher-level callers that track transport kind
+- `pollable`: whether the descriptor should be registered with the runtime
+  poller
+
+Returns `nothing`.
+
+Throws `SystemError` if event loop registration fails.
 """
 function init!(fd::FD; net::Symbol = :tcp, pollable::Bool = true)
     _ = net
@@ -466,6 +612,8 @@ end
 
 """
 Tear down polling state for a descriptor and deregister from `EventLoops`.
+
+Returns `nothing`.
 """
 function close!(pd::PollState)
     was_pollable = false
@@ -482,6 +630,9 @@ end
 
 """
 Mark descriptor as closing and wake all waiters.
+
+This does not itself destroy the OS descriptor; it only forces all future poll
+operations to observe closing and all parked waiters to wake up promptly.
 """
 function evict!(pd::PollState)
     lock(pd.lock)
@@ -512,6 +663,11 @@ end
 
 """
 Validate read path state before issuing a read syscall.
+
+Returns `nothing`.
+
+Throws the same exceptions as `_convert_poll_error!` if close, timeout, or
+backend error state is already visible.
 """
 function prepare_read!(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
@@ -520,6 +676,8 @@ end
 
 """
 Validate write path state before issuing a write syscall.
+
+Returns `nothing`.
 """
 function prepare_write!(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
@@ -528,6 +686,14 @@ end
 
 """
 Block until read readiness, then re-check for close/timeout/not-pollable errors.
+
+Returns `nothing`.
+
+Throws:
+- `ArgumentError` if the descriptor is not pollable
+- `NetClosingError` / `FileClosingError` if the descriptor closes while waiting
+- `DeadlineExceededError` if the read deadline expires
+- `NotPollableError` if the backend reports a permanent readiness error
 """
 function wait_read!(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
@@ -541,6 +707,8 @@ end
 
 """
 Block until write readiness, then re-check for close/timeout/not-pollable errors.
+
+Returns `nothing`.
 """
 function wait_write!(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
@@ -554,6 +722,12 @@ end
 
 """
 Wait for readiness in a cancellation context (used by close/deadline wake paths).
+
+Returns `nothing`.
+
+Unlike `wait_read!`/`wait_write!`, this helper intentionally does not translate
+the wakeup into exceptions; callers use it when they need a best-effort park
+that can be interrupted by close/cancel machinery.
 """
 function wait_canceled!(pd::PollState, mode::PollOp.T)
     pollable(pd) || return nothing
@@ -571,6 +745,9 @@ end
 
 """
 Set both read and write deadlines for `fd`.
+
+`deadline_ns` is interpreted as an absolute `time_ns()`-style monotonic
+timestamp. Use `0` to clear both deadlines.
 """
 function set_deadline!(fd::FD, deadline_ns::Integer)
     _set_deadline_impl!(fd, deadline_ns, PollOp.READWRITE)
@@ -643,6 +820,10 @@ end
 
 """
 Close the descriptor and wait for outstanding non-blocking operations to drain.
+
+Returns `nothing`.
+
+Throws `NetClosingError` or `FileClosingError` if close had already started.
 """
 function close!(fd::FD)
     _fdlock_incref_and_close!(fd.fdlock) || throw(_closing_error(fd.is_file))
@@ -656,6 +837,8 @@ end
 
 """
 Switch an `FD` into blocking mode via `ioctl(FIONBIO, 0)`.
+
+Returns `nothing`.
 """
 function set_blocking!(fd::FD)
     _fd_incref!(fd)
@@ -761,9 +944,21 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
 end
 
 """
-Read up to `length(p)` bytes into `p`.
+Read up to `length(p)` bytes into `p` and return the number of bytes read.
 
-In non-blocking mode this loops on `EAGAIN` by waiting for read readiness.
+Important behavior notes:
+- the return value may be smaller than `length(p)` whenever fewer bytes are
+  currently available than the caller requested; this is normal for stream
+  sockets and does not imply EOF
+- once at least one byte has been read, the call returns immediately instead of
+  waiting to fill the rest of `p`
+- if no bytes are currently available and the descriptor is pollable, the call
+  waits for read readiness and then retries
+- a zero-length `p` returns `0` immediately without touching the descriptor
+
+Throws `EOFError` when the peer cleanly closes a stream whose
+`zero_read_is_eof` flag is set, `DeadlineExceededError` when the read deadline
+expires while waiting, and `SystemError` for OS-level read failures.
 """
 function read!(fd::FD, p::Vector{UInt8})::Int
     _fd_read_lock!(fd)
@@ -791,9 +986,11 @@ function read!(fd::FD, p::Vector{UInt8})::Int
 end
 
 """
-Write all bytes from `p`.
+Write all bytes from `p` and return the number of bytes written.
 
-In non-blocking mode this loops on `EAGAIN` by waiting for write readiness.
+Unlike `read!`, a successful return means the full buffer was written. In
+non-blocking mode this loops on `EAGAIN` by waiting for write readiness and
+then resuming from the first unwritten byte.
 """
 function write!(fd::FD, p::Vector{UInt8})::Int
     GC.@preserve p begin
@@ -802,7 +999,10 @@ function write!(fd::FD, p::Vector{UInt8})::Int
 end
 
 """
-Write `nbytes` from a `Memory{UInt8}` buffer.
+Write exactly `nbytes` from a `Memory{UInt8}` buffer and return the byte count.
+
+This follows the same blocking/retry behavior as `write!(fd, ::Vector{UInt8})`
+and only returns successfully once all requested bytes have been accepted.
 """
 function write!(fd::FD, p::Memory{UInt8}, nbytes::Integer)::Int
     n = Int(nbytes)

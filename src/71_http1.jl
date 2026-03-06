@@ -15,6 +15,9 @@ const _HTTP1_DEFAULT_MAX_HEADER_BYTES = 1 * 1024 * 1024
     FixedLengthBody
 
 HTTP/1 body reader for a known `Content-Length`.
+
+Reads are bounded strictly by `remaining`; once the counter reaches zero the
+body reports EOF even if more bytes are available on the underlying stream.
 """
 mutable struct FixedLengthBody{I <: IO} <: AbstractBody
     io::I
@@ -26,6 +29,10 @@ end
     ChunkedBody
 
 HTTP/1 body reader for `Transfer-Encoding: chunked`.
+
+This reader owns the chunk parser state. It lazily advances from chunk-size
+line to chunk payload to trailing CRLF, and after the terminal zero-sized chunk
+it parses trailer headers into `trailers`.
 """
 mutable struct ChunkedBody{I <: IO} <: AbstractBody
     io::I
@@ -42,6 +49,9 @@ end
 
 HTTP/1 body reader that consumes until EOF (typically response bodies without
 length/chunk framing on non-keepalive connections).
+
+Because EOF is the framing signal, these bodies generally imply that the
+connection cannot be safely reused afterwards.
 """
 mutable struct EOFBody{I <: IO} <: AbstractBody
     io::I
@@ -62,6 +72,10 @@ end
     ChunkedBody(io; max_line_bytes=..., max_header_bytes=...)
 
 Create a chunked body reader with parser limits.
+
+Throws `ArgumentError` when either limit is non-positive. The returned reader
+converts malformed chunk syntax and trailer overflows into `ParseError` or
+`ProtocolError`.
 """
 function ChunkedBody(io::I; max_line_bytes::Integer = _HTTP1_DEFAULT_MAX_LINE_BYTES, max_header_bytes::Integer = _HTTP1_DEFAULT_MAX_HEADER_BYTES) where {I <: IO}
     max_line_bytes <= 0 && throw(ArgumentError("max_line_bytes must be > 0"))
@@ -108,7 +122,11 @@ end
 """
     trailers(body)
 
-Return parsed trailer headers for a chunked body; empty headers for other body types.
+Return parsed trailer headers for a chunked body; empty headers for other body
+types.
+
+The returned `Headers` object is copied so callers can inspect or mutate it
+without racing the body reader.
 """
 function trailers(body::ChunkedBody)::Headers
     return copy(body.trailers)
@@ -263,6 +281,9 @@ end
 
 function _read_next_chunk!(body::ChunkedBody)
     body.done && return nothing
+    # Chunked framing is a tiny state machine: parse the next size line, switch
+    # into payload-reading mode, and after a zero-sized chunk parse trailers
+    # instead of more body bytes.
     line = _readline_crlf(body.io, body.max_line_bytes)
     size = _parse_chunk_size(line)
     if size == 0
@@ -464,6 +485,15 @@ end
     write_request!(io, request)
 
 Serialize an HTTP/1 request to `io`, including body framing.
+
+Behavior:
+- injects `Host` from `request.host` when missing
+- normalizes connection-close signaling
+- chooses between `Content-Length` and chunked transfer-coding
+- serializes trailers only for chunked bodies
+
+Returns `nothing`. May throw `ProtocolError` for inconsistent framing or
+propagate exceptions from `io` and the request body.
 """
 function write_request!(io::IO, request::Request{B}) where {B <: AbstractBody}
     headers = copy(request.headers)
@@ -502,6 +532,10 @@ end
     write_response!(io, response)
 
 Serialize an HTTP/1 response to `io`, including body framing.
+
+Body suppression rules for status codes like `1xx`, `204`, and `304` are
+enforced here so callers can hand the function a regular `Response` object and
+let the serializer apply wire-level HTTP/1 rules.
 """
 function write_response!(io::IO, response::Response{B}) where {B <: AbstractBody}
     headers = copy(response.headers)
@@ -635,6 +669,16 @@ end
     read_request(io; max_line_bytes=..., max_header_bytes=...)
 
 Parse one HTTP/1 request from `io`.
+
+Returns a `Request` whose body is one of `EmptyBody`, `FixedLengthBody`, or
+`ChunkedBody` depending on the incoming framing headers.
+
+Throws:
+- `ArgumentError` for invalid parser limits
+- `ParseError` for malformed syntax or truncated framed bodies
+- `ProtocolError` for invalid semantic combinations such as conflicting length
+  metadata
+- any exception propagated by the underlying `IO`
 """
 function read_request(io::IO; max_line_bytes::Integer = _HTTP1_DEFAULT_MAX_LINE_BYTES, max_header_bytes::Integer = _HTTP1_DEFAULT_MAX_HEADER_BYTES)
     line = _readline_crlf(io, max_line_bytes)
@@ -696,6 +740,10 @@ end
 
 Parse one HTTP/1 response from `io`.
 `request` is optional but allows HEAD/no-body response handling parity.
+
+Returns a `Response` whose body is one of `EmptyBody`, `FixedLengthBody`,
+`ChunkedBody`, or `EOFBody` depending on the status code and framing headers.
+Exception behavior mirrors `read_request`.
 """
 function read_response(
         io::IO,

@@ -10,6 +10,12 @@ using ..Reseau.IOPoll
 
 const _H2_PREFACE = collect(codeunits("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
 
+"""
+    H2NegotiationError
+
+Raised when the connection transport succeeds but cannot be used for HTTP/2,
+most notably when TLS ALPN negotiates a protocol other than `h2`.
+"""
 struct H2NegotiationError <: Exception
     message::String
 end
@@ -22,7 +28,11 @@ end
 """
     H2StreamState
 
-Per-stream response assembly state owned by the HTTP/2 client read loop.
+Per-stream response assembly state owned by the shared HTTP/2 client read loop.
+
+Each active stream has exactly one `H2StreamState`. The read loop appends
+header fragments and DATA payloads here, while the response body reader drains
+them and returns HTTP/2 flow-control credits back to the peer.
 """
 mutable struct H2StreamState
     stream_id::UInt32
@@ -58,7 +68,12 @@ end
 """
     H2Connection
 
-Stateful HTTP/2 client connection with HPACK encoder/decoder state.
+Stateful HTTP/2 client connection with HPACK codec state, stream registry, and
+connection-level flow-control bookkeeping.
+
+One `H2Connection` multiplexes many logical requests over a single TCP or TLS
+transport. A dedicated background read task owns frame intake, similar in spirit
+to Go's separation between connection reader state and per-stream consumers.
 """
 mutable struct H2Connection{F <: Framer}
     address::String
@@ -86,6 +101,10 @@ end
     H2Body
 
 Streaming HTTP/2 response body backed by per-stream read-loop buffers.
+
+Reading from `H2Body` drains the buffered DATA bytes accumulated by the read
+loop, and each successful read sends WINDOW_UPDATE frames so the peer can keep
+transmitting.
 """
 mutable struct H2Body{C <: H2Connection} <: AbstractBody
     conn::C
@@ -144,6 +163,8 @@ function _reserve_send_window!(conn::H2Connection, stream_id::UInt32, wanted::In
             conn.conn_error === nothing || throw(conn.conn_error::Exception)
             stream_window = get(() -> Int64(0), conn.stream_send_window, stream_id)
             if stream_window <= 0 || conn.conn_send_window <= 0
+                # Both the connection-level and per-stream windows must allow
+                # progress. The read loop replenishes these via WINDOW_UPDATE.
                 wait(conn.window_condition)
                 continue
             end
@@ -386,6 +407,8 @@ function _send_window_updates!(conn::H2Connection, stream_id::UInt32, nbytes::In
 end
 
 function _process_incoming_frame!(conn::H2Connection, frame::AbstractFrame)
+    # Frame-local validation already happened in `read_frame!`; this function is
+    # responsible for connection- and stream-level state transitions.
     if frame isa SettingsFrame
         settings = frame::SettingsFrame
         if !settings.ack
@@ -537,7 +560,17 @@ end
 """
     connect_h2!(address; secure=false, host_resolver=HostResolver(), tls_config=nothing)
 
-Open and initialize an HTTP/2 client connection, including SETTINGS exchange.
+Open and initialize an HTTP/2 client connection, including client preface,
+SETTINGS exchange, optional TLS handshake, and ALPN verification.
+
+Keyword arguments:
+- `secure`: when `true`, connect over TLS and require ALPN `h2`
+- `host_resolver`: resolver/dialer used for the underlying TCP connection
+- `tls_config`: optional TLS configuration, augmented as needed to advertise `h2`
+
+Returns a ready-to-use `H2Connection`. Throws `H2NegotiationError` for ALPN
+failures, `ProtocolError` for invalid peer behavior during setup, and any TCP,
+TLS, or I/O exceptions from the underlying transport.
 """
 function connect_h2!(
         address::AbstractString;
@@ -545,7 +578,7 @@ function connect_h2!(
         host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
         tls_config::Union{Nothing, TLS.Config} = nothing,
     )::H2Connection
-    tcp = HostResolvers.connect(host_resolver, "tcp", address)
+    tcp = TCP.connect(host_resolver, "tcp", address)
     tls_conn = nothing
     try
         stream_reader = nothing
@@ -604,6 +637,10 @@ end
     close(conn::H2Connection)
 
 Close the HTTP/2 connection and underlying transport.
+
+All active streams are failed, buffered readers are awakened, and the
+background read loop is given a chance to exit. The function is idempotent and
+returns `nothing`.
 """
 function Base.close(conn::H2Connection)
     stream_states = H2StreamState[]
@@ -698,7 +735,14 @@ end
 """
     h2_roundtrip!(conn, request)
 
-Send one request on `conn` and read the matching response stream.
+Send one request on `conn` and return the matching HTTP/2 `Response`.
+
+The returned response body is either:
+- `EmptyBody` when the peer completed the stream without DATA payload
+- `H2Body` when the response body must be streamed incrementally
+
+This function may throw `ProtocolError`, `ParseError`, `H2NegotiationError`,
+transport exceptions, or any stream-level error synthesized by the read loop.
 """
 @inline function _stream_available_bytes(state::H2StreamState)::Int
     available = (length(state.body) - state.body_read_index) + 1

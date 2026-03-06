@@ -40,6 +40,40 @@ function _tls_server_config(; handshake_timeout_ns::Int64 = 0)
     )
 end
 
+function _tls_connect(
+        network::AbstractString,
+        address::AbstractString,
+        config::TL.Config = TL.Config();
+        timeout_ns::Integer = Int64(0),
+        deadline_ns::Integer = Int64(0),
+        local_addr::Union{Nothing, NC.SocketEndpoint} = nothing,
+        fallback_delay_ns::Integer = Int64(300_000_000),
+        resolver::ND.AbstractResolver = ND.DEFAULT_RESOLVER,
+        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
+    )::TL.Conn
+    return TL.connect(
+        network,
+        address;
+        timeout_ns = timeout_ns,
+        deadline_ns = deadline_ns,
+        local_addr = local_addr,
+        fallback_delay_ns = fallback_delay_ns,
+        resolver = resolver,
+        policy = policy,
+        server_name = config.server_name,
+        verify_peer = config.verify_peer,
+        client_auth = config.client_auth,
+        cert_file = config.cert_file,
+        key_file = config.key_file,
+        ca_file = config.ca_file,
+        client_ca_file = config.client_ca_file,
+        alpn_protocols = copy(config.alpn_protocols),
+        handshake_timeout_ns = config.handshake_timeout_ns,
+        min_version = config.min_version,
+        max_version = config.max_version,
+    )
+end
+
 if !(Sys.isapple() || Sys.islinux())
     @testset "TLS (macOS/Linux only)" begin
         @test true
@@ -137,7 +171,7 @@ else
                             return err
                         end
                     end)
-                    request_client = TL.connect("tcp", "127.0.0.1:$(Int(request_addr.port))", TL.Config(
+                    request_client = _tls_connect("tcp", "127.0.0.1:$(Int(request_addr.port))", TL.Config(
                         verify_peer = false,
                         server_name = "localhost",
                     ))
@@ -172,7 +206,7 @@ else
                 client_cfg = TL.Config(verify_peer = false, server_name = "localhost", handshake_timeout_ns = 10_000_000_000)
                 connect_err = nothing
                 try
-                    client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                 catch ex
                     connect_err = ex
                 end
@@ -249,7 +283,7 @@ else
                     server_name = "localhost",
                     alpn_protocols = ["h2", "http/1.1"],
                 )
-                client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
                 @test TL.connection_state(client).alpn_protocol == "h2"
@@ -281,8 +315,8 @@ else
                     return conns
                 end)
                 client_cfg = TL.Config(verify_peer = false, server_name = "localhost")
-                client1 = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                client2 = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                client1 = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                client2 = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                 @test client1.ssl_ctx != C_NULL
                 @test client1.ssl_ctx == client2.ssl_ctx
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
@@ -344,7 +378,7 @@ else
                     server_name = "localhost",
                     handshake_timeout_ns = 10_000_000_000,
                 )
-                client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                 payload = UInt8[0x61, 0x62, 0x63, 0x64]
                 @test write(client, payload) == 4
                 recv_buf = Vector{UInt8}(undef, 4)
@@ -380,7 +414,7 @@ else
                     TL.close!(conn)
                     return nothing
                 end)
-                client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                 ))
@@ -406,7 +440,7 @@ else
                     TL.handshake!(conn)
                     return conn
                 end)
-                client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                 ))
@@ -491,7 +525,7 @@ else
                     handshake_timeout_ns = 10_000_000_000,
                 )
                 connect_result = try
-                    TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                 catch ex
                     ex
                 end
@@ -534,7 +568,7 @@ else
                     handshake_timeout_ns = 10_000_000_000,
                 )
                 bad_connect_err = try
-                    TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", bad_client_cfg)
+                    _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", bad_client_cfg)
                     nothing
                 catch ex
                     ex
@@ -573,7 +607,7 @@ else
                 )
                 connect_err = nothing
                 try
-                    client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
                 catch ex
                     connect_err = ex
                 end
@@ -695,7 +729,17 @@ else
                 )
                 started_ns = time_ns()
                 err = try
-                    TL.connect_with_resolver(host_resolver, "tcp", "127.0.0.1:$(Int(laddr.port))", cfg)
+                    _tls_connect(
+                        "tcp",
+                        "127.0.0.1:$(Int(laddr.port))",
+                        cfg;
+                        timeout_ns = host_resolver.timeout_ns,
+                        deadline_ns = host_resolver.deadline_ns,
+                        local_addr = host_resolver.local_addr,
+                        fallback_delay_ns = host_resolver.fallback_delay_ns,
+                        resolver = host_resolver.resolver,
+                        policy = host_resolver.policy,
+                    )
                     nothing
                 catch ex
                     ex
@@ -726,7 +770,7 @@ else
                     TL.handshake!(conn)
                     return conn
                 end)
-                client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                 ))
@@ -758,7 +802,7 @@ else
                     TL.close!(conn)
                     return nothing
                 end)
-                client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                 ))
@@ -806,7 +850,7 @@ else
                     TL.handshake!(conn)
                     return conn
                 end)
-                client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
                 ))

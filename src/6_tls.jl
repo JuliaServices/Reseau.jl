@@ -2,6 +2,12 @@
     TLS
 
 TLS client/server layer built on OpenSSL and `TCP` connections.
+
+The design intentionally tracks the shape of Go's `crypto/tls` package:
+- `Config` is an immutable policy object that can be shared across connections
+- `Conn` lazily completes the handshake on first I/O unless `handshake!` is called eagerly
+- deadline handling is delegated to the underlying transport so TLS retries follow the
+  same timeout model as plain TCP
 """
 module TLS
 
@@ -62,6 +68,9 @@ end
     ConfigError
 
 Raised when TLS configuration is invalid.
+
+This is thrown before any network I/O starts, typically while normalizing a `Config`
+or constructing an `SSL_CTX`.
 """
 struct ConfigError <: Exception
     message::String
@@ -71,6 +80,11 @@ end
     TLSError
 
 Raised when TLS handshake/read/write/close operations fail.
+
+`code` is usually an OpenSSL `SSL_get_error` result, though wrapper paths may set it to
+`0` when the failure is higher-level than one OpenSSL call. `cause` preserves the
+underlying Julia-side exception when the failure originated in the transport/poller
+layer instead of OpenSSL itself.
 """
 struct TLSError <: Exception
     op::String
@@ -83,6 +97,9 @@ end
     TLSHandshakeTimeoutError
 
 Raised when handshake exceeds the configured timeout.
+
+This is kept separate from `TLSError` because handshake timeouts are often configured
+and handled distinctly from generic TLS failures.
 """
 struct TLSHandshakeTimeoutError <: Exception
     timeout_ns::Int64
@@ -114,6 +131,27 @@ end
     Config(; ...)
 
 Go-style TLS configuration for client/server TLS sessions.
+
+Keyword arguments:
+- `server_name`: hostname or IP literal used for certificate verification. For clients,
+  this also drives SNI when it is a hostname. If omitted, `connect` will try to derive
+  it from the dial target.
+- `verify_peer`: whether to validate the remote certificate chain and peer name.
+- `client_auth`: server-side client certificate policy.
+- `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
+  provide both; clients may provide both for mutual TLS.
+- `ca_file`: PEM bundle used to verify remote servers. When omitted, the platform/OpenSSL
+  defaults are used when possible.
+- `client_ca_file`: PEM bundle used by servers to verify client certificates.
+- `alpn_protocols`: ordered ALPN protocol preference list.
+- `handshake_timeout_ns`: optional cap, in monotonic nanoseconds, applied only while the
+  handshake is running. Existing transport deadlines still win if they are earlier.
+- `min_version` / `max_version`: TLS protocol version bounds. `nothing` leaves the bound
+  unset.
+
+Returns a reusable immutable `Config`.
+
+Throws `ConfigError` if the keyword combination is internally inconsistent.
 """
 struct Config
     server_name::Union{Nothing, String}
@@ -165,6 +203,8 @@ function Config(;
         min_version::Union{Nothing, UInt16} = TLS1_2_VERSION,
         max_version::Union{Nothing, UInt16} = nothing,
     )
+    # Normalize to owned `String` storage so shared configs do not depend on caller-owned
+    # string buffers or views.
     server_name_s = server_name === nothing ? nothing : String(server_name)
     cert_file_s = cert_file === nothing ? nothing : String(cert_file)
     key_file_s = key_file === nothing ? nothing : String(key_file)
@@ -214,6 +254,11 @@ end
     ConnectionState
 
 Snapshot of negotiated TLS connection state.
+
+Fields:
+- `handshake_complete`: whether the TLS handshake has finished successfully.
+- `version`: negotiated TLS protocol version string as reported by OpenSSL.
+- `alpn_protocol`: negotiated ALPN protocol, or `nothing` if ALPN was not used.
 """
 struct ConnectionState
     handshake_complete::Bool
@@ -225,6 +270,11 @@ end
     Conn
 
 TLS stream wrapper over one `TCP.Conn`.
+
+`Conn` is safe for one concurrent reader and one concurrent writer, mirroring the
+underlying TCP transport and Go's `tls.Conn`. Handshake, read, and write all have
+separate locks so lazy handshakes and shutdown can coordinate without corrupting the
+OpenSSL state machine.
 """
 mutable struct Conn
     tcp::TCP.Conn
@@ -244,27 +294,13 @@ end
     Listener
 
 TLS listener wrapper over `TCP.Listener`.
+
+Accepted connections are wrapped in server-side TLS state but are not handshaken until
+`handshake!` or the first read/write call.
 """
 struct Listener
     listener::TCP.Listener
     config::Config
-end
-
-"""
-    Connector
-
-TLS connector using a `HostResolvers.HostResolver` for the underlying TCP connect.
-"""
-struct Connector
-    host_resolver::HostResolvers.HostResolver
-    config::Config
-end
-
-function Connector(;
-        host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
-        config::Config = Config(),
-    )
-    return Connector(host_resolver, config)
 end
 
 @inline function _verify_allow_all_cb(_preverify_ok::Cint, _store_ctx::Ptr{Cvoid})::Cint
@@ -279,6 +315,9 @@ function _ssl_alpn_select_cb(
         inlen::Cuint,
         arg::Ptr{Cvoid},
     )::Cint
+    # OpenSSL stores the callback argument as an opaque pointer. We root the actual Julia
+    # object in `_CTX_SERVER_ALPN`, then recover it here so the ALPN preference bytes stay
+    # alive for as long as the shared `SSL_CTX` remains cached.
     arg == C_NULL && return _SSL_TLSEXT_ERR_NOACK
     data = unsafe_pointer_to_objref(arg)::_ALPNServerData
     wire = data.wire
@@ -303,6 +342,9 @@ function _ssl_alpn_select_cb(
 end
 
 function __init__()
+    # Module initialization is also where we discover which OpenSSL entry points exist on
+    # the linked library. Some version-bounding APIs are absent on older builds, so later
+    # config code falls back to `SSL_OP_NO_*` masks when needed.
     _ = @ccall gc_safe = true _LIBSSL.OPENSSL_init_ssl(
         Culong(0)::Culong,
         C_NULL::Ptr{Cvoid},
@@ -359,6 +401,8 @@ end
 end
 
 function _apply_client_server_name!(ssl::Ptr{Cvoid}, config::Config)
+    # Match Go's client behavior: SNI is sent only for hostnames, while peer verification
+    # still supports both DNS names and IP literals.
     config.server_name === nothing && return nothing
     configured = config.server_name::String
     verify_name = _verify_name(configured)
@@ -468,6 +512,8 @@ function _encode_alpn_protocols(protocols::Vector{String})::Vector{UInt8}
 end
 
 function _validate_config(config::Config; is_server::Bool)
+    # Keep validation centralized so callers can rely on `Config` being cheap to construct
+    # while the expensive filesystem/OpenSSL checks happen only when a context is needed.
     has_cert = config.cert_file !== nothing
     has_key = config.key_file !== nothing
     has_cert == has_key || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
@@ -594,6 +640,9 @@ function _set_ctx_max_version!(ctx::Ptr{Cvoid}, version::UInt16)
 end
 
 function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
+    # `SSL_CTX` is the expensive, shareable part of OpenSSL configuration. We mirror Go's
+    # preference for immutable shared config objects by fully configuring the context up
+    # front, then reusing it across many live `Conn`s.
     _validate_config(config; is_server = is_server)
     method = ccall((:TLS_method, _LIBSSL), Ptr{Cvoid}, ())
     method == C_NULL && throw(_make_tls_error("TLS_method", Int32(0)))
@@ -610,6 +659,8 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
         else
             C_NULL
         end
+        # Verification mode lives on the context so every connection built from it starts
+        # with the same authentication policy.
         ccall((:SSL_CTX_set_verify, _LIBSSL), Cvoid, (Ptr{Cvoid}, Cint, Ptr{Cvoid}), ctx, verify_mode, verify_cb)
         if config.min_version !== nothing
             _set_ctx_min_version!(ctx, config.min_version::UInt16)
@@ -658,6 +709,8 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
                 cb = _ALPN_SELECT_CB[]
                 cb == C_NULL && throw(ConfigError("ALPN select callback is not initialized"))
                 alpn_data = _ALPNServerData(_encode_alpn_protocols(config.alpn_protocols))
+                # The callback receives an opaque pointer, so cache the Julia owner next to
+                # the shared context to keep the ALPN wire bytes rooted.
                 ccall(
                     (:SSL_CTX_set_alpn_select_cb, _LIBSSL),
                     Cvoid,
@@ -728,6 +781,9 @@ end
 end
 
 function _shared_ssl_ctx(config::Config; is_server::Bool)::Ptr{Cvoid}
+    # Context reuse matters for throughput-oriented clients/servers because parsing PEM
+    # files, loading CA bundles, and allocating OpenSSL tables per connection would be
+    # needlessly expensive.
     key = _ssl_context_key(config; is_server = is_server)
     lock(_CTX_CACHE_LOCK)
     try
@@ -744,6 +800,8 @@ function _shared_ssl_ctx(config::Config; is_server::Bool)::Ptr{Cvoid}
 end
 
 function _ssl_new(ctx::Ptr{Cvoid}, tcp::TCP.Conn, config::Config; is_server::Bool)::Ptr{Cvoid}
+    # `SSL_new` creates the per-connection state machine. The shared `SSL_CTX` contributes
+    # configuration; the resulting `SSL*` binds that policy to one live socket.
     ssl = ccall((:SSL_new, _LIBSSL), Ptr{Cvoid}, (Ptr{Cvoid},), ctx)
     ssl == C_NULL && throw(_make_tls_error("SSL_new", Int32(0)))
     try
@@ -768,10 +826,28 @@ function _new_conn(tcp::TCP.Conn, config::Config; is_server::Bool)::Conn
     return Conn(tcp, ctx, ssl, is_server, config, ReentrantLock(), ReentrantLock(), ReentrantLock(), false, false, nothing)
 end
 
+"""
+    client(tcp, config) -> Conn
+
+Wrap an established `TCP.Conn` in client-side TLS state.
+
+The handshake is deferred until `handshake!` or the first read/write operation.
+
+Throws `ConfigError` or `TLSError` if the TLS state cannot be initialized.
+"""
 function client(tcp::TCP.Conn, config::Config)::Conn
     return _new_conn(tcp, config; is_server = false)
 end
 
+"""
+    server(tcp, config) -> Conn
+
+Wrap an established `TCP.Conn` in server-side TLS state.
+
+The handshake is deferred until `handshake!` or the first read/write operation.
+
+Throws `ConfigError` or `TLSError` if the TLS state cannot be initialized.
+"""
 function server(tcp::TCP.Conn, config::Config)::Conn
     return _new_conn(tcp, config; is_server = true)
 end
@@ -818,6 +894,8 @@ function _ensure_open!(conn::Conn, op::AbstractString)
 end
 
 function _wait_ssl_ready!(conn::Conn, ssl_err::Cint, op::AbstractString)
+    # OpenSSL's nonblocking contract is the same basic model Go's tls.Conn builds on:
+    # retry the operation after the underlying socket becomes readable or writable.
     if ssl_err == _SSL_ERROR_WANT_READ
         IOPoll.wait_read!(conn.tcp.fd.pfd.pd)
         return true
@@ -847,6 +925,9 @@ end
 end
 
 function _with_handshake_deadline(f::F, conn::Conn) where {F}
+    # Go overlays handshake timeouts onto the transport deadline rather than inventing a
+    # separate timer path. We do the same by temporarily tightening the read/write
+    # deadlines on the underlying poll descriptor, then restoring the prior values.
     timeout_ns = conn.config.handshake_timeout_ns
     if timeout_ns <= 0
         return f()
@@ -875,6 +956,9 @@ function _with_handshake_deadline(f::F, conn::Conn) where {F}
 end
 
 function _with_temporary_deadline_cap(f::F, conn::Conn, deadline_ns::Int64) where {F}
+    # Used when the outer dial path already computed an overall connect deadline. TLS
+    # should respect that cap during the initial handshake without permanently mutating
+    # the caller's long-lived socket deadlines.
     deadline_ns == 0 && return f()
     pfd = conn.tcp.fd.pfd
     pd = pfd.pd
@@ -898,6 +982,21 @@ function _with_temporary_deadline_cap(f::F, conn::Conn, deadline_ns::Int64) wher
     end
 end
 
+"""
+    handshake!(conn)
+
+Run the TLS handshake to completion if it has not already finished.
+
+This method is idempotent. Concurrent callers serialize through `handshake_lock`, so
+only one task drives OpenSSL while the others observe the completed state afterward.
+
+Returns `nothing`.
+
+Throws:
+- `TLSHandshakeTimeoutError` when `config.handshake_timeout_ns` expires
+- `TLSError` for OpenSSL or transport failures
+- `EOFError` if the peer closes cleanly during the handshake
+"""
 function handshake!(conn::Conn)
     _ensure_open!(conn, "handshake")
     _handshake_complete(conn) && return nothing
@@ -946,6 +1045,30 @@ end
     return nothing
 end
 
+"""
+    read!(conn, buf) -> Int
+
+Read decrypted application data into `buf`.
+
+The return value matches Julia's standard `read!` convention:
+- `0` means EOF
+- positive values report the number of bytes written into `buf`
+
+The result may be smaller than `length(buf)` for the same reasons as plain TCP:
+OpenSSL may already have only part of a TLS record decrypted, the underlying
+socket may currently have less data available than requested, or EOF may arrive
+before the buffer is filled. Once at least one plaintext byte is produced, the
+call returns immediately instead of waiting to fill the rest of `buf`.
+
+The handshake is performed lazily before the first application read.
+
+If no application bytes are currently available, the call waits for whichever
+underlying socket readiness OpenSSL requests (`WANT_READ` or `WANT_WRITE`),
+subject to any active connection deadline.
+
+Throws `TLSError`, `TLSHandshakeTimeoutError`, or transport-layer close/timeout errors
+wrapped as TLS failures.
+"""
 function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
     length(buf) == 0 && return 0
     _ensure_open!(conn, "read")
@@ -979,6 +1102,26 @@ function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
     end
 end
 
+"""
+    write(conn, buf) -> Int
+    write(conn, buf, nbytes) -> Int
+
+Write plaintext application bytes through the TLS connection.
+
+`write(conn, buf)` attempts to write the entire buffer. The `Memory{UInt8}` overload
+allows callers to cap the write at `nbytes`.
+
+Returns the number of plaintext bytes accepted by OpenSSL.
+
+On success, the return value is always the full requested length. If OpenSSL or
+the underlying transport cannot make progress immediately, the call waits for
+the requested readiness (`WANT_READ`/`WANT_WRITE`) and then resumes until the
+whole payload is written or an error occurs.
+
+Throws `TLSError` on TLS failure. A write timeout becomes a permanent write error for
+the connection, matching Go's behavior that a timed-out TLS write leaves record framing
+state ambiguous for future writes.
+"""
 function Base.write(conn::Conn, buf::Vector{UInt8})::Int
     return _write!(conn, buf, length(buf))
 end
@@ -1038,6 +1181,9 @@ function _write!(conn::Conn, buf, nbytes::Integer)::Int
 end
 
 function _ssl_shutdown!(conn::Conn)
+    # `SSL_shutdown` may need multiple rounds because a close-notify alert can require
+    # additional socket readiness before OpenSSL considers the shutdown complete. We cap
+    # the write side so close does not hang forever on an unresponsive peer.
     try
         TCP.set_write_deadline!(conn.tcp, Int64(time_ns()) + Int64(5_000_000_000))
     catch
@@ -1081,6 +1227,14 @@ end
     return nothing
 end
 
+"""
+    close!(conn)
+
+Close the TLS connection and the underlying TCP transport.
+
+If the handshake completed, this best-effort sends a TLS `close_notify` alert before
+closing the socket. The method is idempotent and returns `nothing`.
+"""
 function close!(conn::Conn)
     _mark_closed!(conn) || return nothing
     if _handshake_complete(conn) && conn.ssl != C_NULL
@@ -1111,6 +1265,18 @@ function close!(conn::Conn)
     return nothing
 end
 
+"""
+    close_write!(conn)
+
+Send TLS shutdown on the write side and mark future writes as permanently failed.
+
+This is the TLS analogue of half-closing a TCP socket. It requires the handshake to
+have completed because the TLS close-notify alert is itself a TLS record.
+
+Returns `nothing`.
+
+Throws `TLSError` if the TLS shutdown path fails.
+"""
 function close_write!(conn::Conn)
     _ensure_open!(conn, "close_write")
     _handshake_complete(conn) || throw(TLSError("close_write", Int32(0), "close_write before handshake complete", nothing))
@@ -1137,29 +1303,68 @@ function Base.close(conn::Conn)
     return nothing
 end
 
+"""
+    set_deadline!(conn, deadline_ns)
+
+Set both read and write deadlines on the underlying transport.
+
+`deadline_ns` is interpreted using the same monotonic-clock convention as `TCP` and
+`IOPoll`: `0` clears the deadline, negative values mean the deadline has already
+expired, and positive values are absolute `time_ns()` values.
+"""
 function set_deadline!(conn::Conn, deadline_ns::Integer)
     TCP.set_deadline!(conn.tcp, deadline_ns)
     return nothing
 end
 
+"""
+    set_read_deadline!(conn, deadline_ns)
+
+Set the read deadline on the underlying transport. See `set_deadline!` for the timestamp
+convention.
+"""
 function set_read_deadline!(conn::Conn, deadline_ns::Integer)
     TCP.set_read_deadline!(conn.tcp, deadline_ns)
     return nothing
 end
 
+"""
+    set_write_deadline!(conn, deadline_ns)
+
+Set the write deadline on the underlying transport. See `set_deadline!` for the
+timestamp convention.
+"""
 function set_write_deadline!(conn::Conn, deadline_ns::Integer)
     TCP.set_write_deadline!(conn.tcp, deadline_ns)
     return nothing
 end
 
+"""
+    local_addr(conn)
+
+Return the local `TCP.SocketAddr` for the wrapped transport.
+"""
 function local_addr(conn::Conn)
     return TCP.local_addr(conn.tcp)
 end
 
+"""
+    remote_addr(conn)
+
+Return the remote `TCP.SocketAddr` for the wrapped transport.
+"""
 function remote_addr(conn::Conn)
     return TCP.remote_addr(conn.tcp)
 end
 
+"""
+    net_conn(conn) -> TCP.Conn
+
+Expose the underlying TCP connection.
+
+This mirrors Go's `(*tls.Conn).NetConn()` idea: callers that need transport-level
+inspection can reach through the TLS wrapper without reconstructing the socket state.
+"""
 function net_conn(conn::Conn)::TCP.Conn
     return conn.tcp
 end
@@ -1187,6 +1392,14 @@ function _ssl_alpn_protocol(conn::Conn)::Union{Nothing, String}
     return unsafe_string(Ptr{Cchar}(data), len)
 end
 
+"""
+    connection_state(conn) -> ConnectionState
+
+Return a snapshot of the currently negotiated TLS state.
+
+This does not force a handshake; if the handshake has not yet run, the returned
+`ConnectionState` reports `handshake_complete=false`.
+"""
 function connection_state(conn::Conn)::ConnectionState
     return ConnectionState(
         _handshake_complete(conn),
@@ -1195,6 +1408,17 @@ function connection_state(conn::Conn)::ConnectionState
     )
 end
 
+"""
+    listen(network, address, config; backlog=128, reuseaddr=true) -> Listener
+
+Create a TLS listener by first creating a TCP listener and then associating a server
+`Config` with accepted connections.
+
+Accepted `Conn`s are returned in lazy-handshake form.
+
+Throws `ConfigError` if the server config is invalid and propagates any listener creation
+errors from `TCP.listen`.
+"""
 function listen(
         network::AbstractString,
         address::AbstractString,
@@ -1203,15 +1427,27 @@ function listen(
         reuseaddr::Bool = true,
     )::Listener
     _validate_config(config; is_server = true)
-    listener = HostResolvers.listen(network, address; backlog = backlog, reuseaddr = reuseaddr)
+    listener = TCP.listen(network, address; backlog = backlog, reuseaddr = reuseaddr)
     return Listener(listener, config)
 end
 
+"""
+    accept!(listener) -> Conn
+
+Accept one inbound TCP connection and wrap it in server-side TLS state.
+
+The returned `Conn` has not handshaken yet.
+"""
 function accept!(listener::Listener)::Conn
     tcp = TCP.accept!(listener.listener)
     return server(tcp, listener.config)
 end
 
+"""
+    close!(listener)
+
+Close the underlying TCP listener. Returns `nothing`.
+"""
 function close!(listener::Listener)
     TCP.close!(listener.listener)
     return nothing
@@ -1222,11 +1458,18 @@ function Base.close(listener::Listener)
     return nothing
 end
 
+"""
+    addr(listener)
+
+Return the local listening address for the wrapped TCP listener.
+"""
 function addr(listener::Listener)
     return TCP.addr(listener.listener)
 end
 
 function _prepare_connect_config(config::Config, address::AbstractString)::Config
+    # Match the ergonomic Go behavior where client TLS verification can infer the peer
+    # name from the dial target unless the caller explicitly overrides it.
     if config.server_name !== nothing
         return config
     end
@@ -1243,15 +1486,15 @@ function _prepare_connect_config(config::Config, address::AbstractString)::Confi
     return _config_with_server_name(config, host)
 end
 
-function connect_with_resolver(
+function _connect(
         host_resolver::HostResolvers.HostResolver,
         network::AbstractString,
         address::AbstractString,
-        config::Config = Config(),
+        config::Config,
     )::Conn
     tls_config = _prepare_connect_config(config, address)
     connect_deadline_ns = HostResolvers._connect_deadline_ns(host_resolver)
-    tcp = HostResolvers.connect(host_resolver, network, address)
+    tcp = TCP.connect(host_resolver, network, address)
     tls_conn = nothing
     try
         tls_conn = client(tcp, tls_config)
@@ -1276,12 +1519,58 @@ function connect_with_resolver(
     end
 end
 
-function connect(connector::Connector, network::AbstractString, address::AbstractString)::Conn
-    return connect_with_resolver(connector.host_resolver, network, address, connector.config)
+"""
+    connect(network, address; kwargs...) -> Conn
+
+Connect to `address`, negotiate TLS, and return a fully handshaken client
+connection.
+
+Host-resolution keyword arguments are forwarded to `HostResolvers.HostResolver`:
+- `timeout_ns`
+- `deadline_ns`
+- `local_addr`
+- `fallback_delay_ns`
+- `resolver`
+- `policy`
+
+TLS keyword arguments are forwarded to `Config`:
+- `server_name`
+- `verify_peer`
+- `client_auth`
+- `cert_file`
+- `key_file`
+- `ca_file`
+- `client_ca_file`
+- `alpn_protocols`
+- `handshake_timeout_ns`
+- `min_version`
+- `max_version`
+
+If `server_name` is omitted, it is derived from `address` when possible so SNI
+and peer verification behave like Go's client defaults.
+"""
+function connect(
+        network::AbstractString,
+        address::AbstractString;
+        timeout_ns::Integer = Int64(0),
+        deadline_ns::Integer = Int64(0),
+        local_addr::Union{Nothing, TCP.SocketEndpoint} = nothing,
+        fallback_delay_ns::Integer = Int64(300_000_000),
+        resolver::HostResolvers.AbstractResolver = HostResolvers.DEFAULT_RESOLVER,
+        policy::HostResolvers.ResolverPolicy = HostResolvers.ResolverPolicy(),
+        kw...
+    )::Conn
+    host_resolver = HostResolvers.HostResolver(; timeout_ns, deadline_ns, local_addr, fallback_delay_ns, resolver, policy)
+    return _connect(host_resolver, network, address, Config(; kw...))
 end
 
-function connect(network::AbstractString, address::AbstractString, config::Config = Config())::Conn
-    return connect_with_resolver(HostResolvers.HostResolver(), network, address, config)
+"""
+    connect(address; kwargs...) -> Conn
+
+Convenience shorthand for `connect("tcp", address; kwargs...)`.
+"""
+function connect(address::AbstractString; kwargs...)::Conn
+    return connect("tcp", address; kwargs...)
 end
 
 end

@@ -1,5 +1,14 @@
 # Linux socket syscall bindings used by `SocketOps`.
-# Wrappers normalize retry/error behavior and expose consistent errno semantics.
+#
+# The higher layers assume Go-like invariants:
+# - newly created sockets are non-blocking and close-on-exec before they escape
+# - retryable syscall interruptions are handled here instead of in every caller
+# - connect/accept can surface raw errno so the poll layer can finish the state
+#   machine after readiness notifications
+#
+# Linux gives us the best-case primitives (`SOCK_NONBLOCK`, `SOCK_CLOEXEC`,
+# `accept4`) so this backend mostly tries to take the atomic fast path first and
+# only falls back to older-kernel behavior when required.
 const _F_GETFD = Cint(1)
 const _F_SETFD = Cint(2)
 const _F_GETFL = Cint(3)
@@ -120,6 +129,12 @@ end
     open_socket(family, sotype, proto=0)
 
 Create a socket and configure it as close-on-exec and non-blocking.
+
+On modern Linux kernels this is done atomically with `socket(..., SOCK_NONBLOCK |
+SOCK_CLOEXEC, ...)`, which avoids the small post-open race that exists when those
+flags must be applied with `fcntl`.
+
+Returns the new file descriptor or throws `SystemError` on failure.
 """
 function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
     raw_type = Cint(sotype)
@@ -292,6 +307,13 @@ end
     try_accept_socket(fd)
 
 Perform one non-blocking `accept` attempt and return `(newfd, peer, errno)`.
+
+This prefers `accept4` so the accepted descriptor inherits non-blocking and
+close-on-exec atomically. If the running kernel reports `ENOSYS` or `EINVAL`,
+the backend permanently falls back to plain `accept` plus post-accept flag
+fixups. That mirrors the strategy Go uses on older kernels.
+
+`newfd == -1` indicates failure and `errno` contains the mapped Linux errno.
 """
 function try_accept_socket(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     state = _accept4_state[]
@@ -314,6 +336,9 @@ end
     accept_socket(fd)
 
 Accept a connection or throw `SystemError` on failure.
+
+This is a convenience wrapper over `try_accept_socket` for callers that want
+exception-based control flow instead of raw errno handling.
 """
 function accept_socket(fd::Cint)::Cint
     newfd, _, errno = try_accept_socket(fd)
@@ -321,6 +346,13 @@ function accept_socket(fd::Cint)::Cint
     _throw_errno("accept", errno)
 end
 
+"""
+    get_sockopt_int(fd, level, optname) -> Int32
+
+Read an integer socket option and return it in host byte order.
+
+Throws `SystemError` if `getsockopt` fails.
+"""
 function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
     value = Ref{Cint}(0)
     optlen = Ref{SockLen}(SockLen(sizeof(Cint)))
@@ -339,6 +371,13 @@ function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
     end
 end
 
+"""
+    set_sockopt_int(fd, level, optname, value)
+
+Write an integer socket option.
+
+Throws `SystemError` if `setsockopt` fails.
+"""
 function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     raw = Ref{Cint}(Cint(value))
     while true
@@ -356,6 +395,13 @@ function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     end
 end
 
+"""
+    get_socket_error(fd) -> Int32
+
+Read and return `SO_ERROR` for `fd`. This is primarily used to complete the
+non-blocking connect state machine after poll readiness says the socket is
+writable.
+"""
 function get_socket_error(fd::Cint)::Int32
     return get_sockopt_int(fd, SOL_SOCKET, SO_ERROR)
 end
@@ -408,6 +454,12 @@ function get_peer_name_in6(fd::Cint)::SockAddrIn6
     end
 end
 
+"""
+    shutdown_socket(fd, how)
+
+Half-close or fully close the socket send/receive direction designated by
+`how`, which should be one of `SHUT_RD`, `SHUT_WR`, or `SHUT_RDWR`.
+"""
 function shutdown_socket(fd::Cint, how::Integer)
     while true
         ret = @ccall gc_safe = true shutdown(fd::Cint, Cint(how)::Cint)::Cint
@@ -418,6 +470,15 @@ function shutdown_socket(fd::Cint, how::Integer)
     end
 end
 
+"""
+    read_once!(fd, ptr, nbytes) -> Cssize_t
+
+Perform one raw `read(2)` call.
+
+This wrapper intentionally does not loop on `EAGAIN` or short reads; higher
+layers use the return value together with readiness polling to drive the full
+read loop.
+"""
 function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     # Single read syscall with EINTR retry; caller owns EAGAIN and short-read handling.
     while true
@@ -429,6 +490,14 @@ function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     end
 end
 
+"""
+    write_once!(fd, ptr, nbytes) -> Cssize_t
+
+Perform one raw `write(2)` call.
+
+Short writes and `EAGAIN` are surfaced to the caller so `IOPoll` can decide
+whether to retry immediately or wait for write readiness.
+"""
 function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     # Single write syscall with EINTR retry; caller owns EAGAIN and short-write handling.
     while true

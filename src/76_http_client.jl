@@ -20,6 +20,16 @@ mutable struct _ConnReader{C} <: IO
     stop::Int
 end
 
+"""
+    _ConnReader(conn; buffer_bytes=16*1024)
+
+Buffered `IO` adapter layered over `TCP.Conn` or `TLS.Conn`.
+
+HTTP/1 parsing wants a byte-oriented reader with a small amount of lookahead so
+it can parse lines and then continue reading bodies from the same transport.
+This type provides that without forcing the transport types themselves to own
+HTTP-specific buffering policy.
+"""
 function _ConnReader(conn::C; buffer_bytes::Integer = _CONN_READER_DEFAULT_BUFFER_BYTES) where {C}
     buffer_bytes > 0 || throw(ArgumentError("buffer_bytes must be > 0"))
     return _ConnReader{C}(conn, Vector{UInt8}(undef, Int(buffer_bytes)), 1, 0)
@@ -64,6 +74,13 @@ end
 
 const _ClientConnReader = Union{_ConnReader{TCP.Conn}, _ConnReader{TLS.Conn}}
 
+"""
+    ClientConn
+
+Internal pooled HTTP/1 connection record. It bundles the underlying transport,
+the parser's `_ConnReader`, a reusable request serialization buffer, and a few
+small pieces of pooling metadata such as `reused` and `last_used_ns`.
+"""
 mutable struct ClientConn
     key::String
     address::String
@@ -81,6 +98,10 @@ end
     Transport(; ...)
 
 Connection-pooling transport for HTTP/1 requests.
+
+This is the closest analogue to Go's `http.Transport` in the current codebase.
+It owns dial/TLS policy and decides when an idle connection can be reused versus
+closed.
 """
 mutable struct Transport
     host_resolver::HostResolvers.HostResolver
@@ -99,6 +120,11 @@ end
 
 Response body wrapper that returns/tears down pooled connections once the body
 is fully consumed or closed.
+
+If the caller drains the body to EOF, `ManagedBody` returns the underlying
+connection to the idle pool when it is safe to do so. If the body is abandoned
+early or an error occurs, the connection is closed instead so the next request
+does not observe leftover bytes.
 """
 mutable struct ManagedBody{B <: AbstractBody} <: AbstractBody
     inner::B
@@ -202,7 +228,7 @@ function _effective_tls_config(transport::Transport, address::String, server_nam
 end
 
 function _new_conn!(transport::Transport, key::String, address::String; secure::Bool, server_name::Union{Nothing, String})::ClientConn
-    tcp = HostResolvers.connect(transport.host_resolver, "tcp", address)
+    tcp = TCP.connect(transport.host_resolver, "tcp", address)
     if secure
         cfg = _effective_tls_config(transport, address, server_name)
         tls = TLS.client(tcp, cfg)
@@ -287,6 +313,12 @@ function _put_idle_conn!(transport::Transport, conn::ClientConn)
     return nothing
 end
 
+"""
+    close_idle_connections!(transport)
+
+Close and discard all currently idle pooled connections. Active in-flight
+requests are unaffected. Returns `nothing`.
+"""
 function close_idle_connections!(transport::Transport)
     lock(transport.lock)
     try
@@ -303,6 +335,12 @@ function close_idle_connections!(transport::Transport)
     return nothing
 end
 
+"""
+    close(transport)
+
+Close `transport` and eagerly drop every idle connection it owns. In-flight
+requests are allowed to finish on the connections they already hold.
+"""
 function Base.close(transport::Transport)
     _transport_closed(transport) && return nothing
     @atomic :release transport.closed = true
@@ -314,6 +352,9 @@ end
     idle_connection_count(transport; key=nothing)
 
 Return idle pooled connection count globally or for one host key.
+
+When `key === nothing`, returns the transport-wide count. Otherwise `key`
+should match the transport's internal pool key such as `https://example.com:443`.
 """
 function idle_connection_count(transport::Transport; key::Union{Nothing, AbstractString} = nothing)::Int
     lock(transport.lock)
@@ -495,6 +536,13 @@ end
     roundtrip!(transport, address, request; secure=false, server_name=nothing)
 
 Execute one HTTP/1 request/response exchange through `transport`.
+
+This is the low-level HTTP/1 path used by the higher-level client APIs. It
+returns a `Response`, potentially wrapping the body in `ManagedBody` so the
+connection can be recycled when the caller finishes consuming it.
+
+Throws parser, protocol, transport, TLS, and timeout exceptions depending on
+where the exchange fails.
 """
 function roundtrip!(
         transport::Transport,
@@ -528,6 +576,9 @@ function roundtrip!(
             n == request_bytes || throw(ProtocolError("transport short write"))
             reader = conn.reader
             raw_response = read_response(reader, current_request)
+            # HTTP/1 informational responses are consumed internally so callers
+            # observe the final non-1xx response, matching the behavior of Go's
+            # client transport.
             while (raw_response.status_code >= 100 && raw_response.status_code < 200) && raw_response.status_code != 101
                 try
                     body_close!(raw_response.body)
@@ -593,6 +644,9 @@ abstract type AbstractCookieJar end
     Cookie
 
 Minimal in-memory cookie representation used by `MemoryCookieJar`.
+
+Only the subset of attributes the current client uses is modeled here: name,
+value, path, and whether the cookie requires a secure transport.
 """
 struct Cookie
     name::String
@@ -605,6 +659,10 @@ end
     MemoryCookieJar()
 
 Simple host-keyed cookie jar for client redirect/session flows.
+
+This is intentionally small and conservative. It stores cookies per host, uses
+prefix path matching, and ignores advanced attributes such as expiry, domain
+wildcards, and SameSite.
 """
 mutable struct MemoryCookieJar <: AbstractCookieJar
     lock::ReentrantLock
@@ -615,6 +673,10 @@ end
     ClientTrace(; ...)
 
 Optional callback hooks for client request lifecycle events.
+
+Each field may be `nothing` or a callback function. Callbacks are invoked
+synchronously from the request path, so they should stay lightweight and may
+throw to abort a request.
 """
 struct ClientTrace
     on_get_conn::Union{Nothing, Function}
@@ -626,7 +688,17 @@ end
 """
     Client(; ...)
 
-High-level HTTP client with transport pooling, redirect policy, cookies, and optional HTTP/2.
+High-level HTTP client with transport pooling, redirect policy, cookies, and
+optional HTTP/2.
+
+Keyword arguments:
+- `transport`: lower-level HTTP/1 transport/pool implementation
+- `check_redirect`: optional callback deciding whether a redirect should be
+  followed
+- `jar`: cookie jar implementation, or `nothing` to disable cookies
+- `max_redirects`: maximum redirect hops before failing
+- `trace`: optional lifecycle callback bundle
+- `prefer_http2`: whether secure requests should try HTTP/2 when available
 """
 mutable struct Client
     transport::Transport
@@ -1087,7 +1159,14 @@ end
 """
     do!(client, address, request; secure=false, server_name=nothing, protocol=:auto)
 
-Send a request with redirect handling and return the final response.
+Send `request` with redirect handling and return the final low-level `Response`.
+
+This method preserves streaming bodies, so callers are responsible for draining
+or closing `response.body`.
+
+`protocol` accepts `:auto`, `:h1`, or `:h2`. In `:auto` mode the client may try
+HTTP/2 first for secure requests and fall back to HTTP/1 when negotiation says
+that h2 is unavailable.
 """
 function do!(
         client::Client,
@@ -1187,6 +1266,8 @@ end
     get!(client, address, target; secure=false, protocol=:auto)
 
 Convenience GET request using an existing `Client`.
+
+Returns the same low-level `Response` shape as `do!`.
 """
 function get!(client::Client, address::AbstractString, target::AbstractString; secure::Bool = false, protocol::Symbol = :auto)
     request = Request("GET", target; host = String(address), body = EmptyBody(), content_length = 0)
@@ -1199,6 +1280,9 @@ import Base: get
     ClientResponse
 
 Materialized high-level response returned by `request/get/post/...` helpers.
+
+Unlike the lower-level `Response`, the response body has already been fully read
+into memory as `body::Vector{UInt8}`.
 """
 struct ClientResponse
     status::Int
@@ -1557,7 +1641,24 @@ end
 """
     request(method, url, headers=Pair{String,String}[], body=nothing; kwargs...)
 
-High-level one-shot HTTP request API (similar shape to HTTP.jl convenience methods).
+High-level one-shot HTTP request API (similar shape to HTTP.jl convenience
+methods).
+
+Keyword arguments:
+- `status_exception`: throw `StatusError` for non-success responses
+- `redirect`: follow redirects through `do!`
+- `query`: optional query string or key/value collection appended to the URL
+- `client`: optional explicit `Client`; otherwise a default or ephemeral client
+  is created
+- `connect_timeout`: connection timeout in seconds for implicit clients
+- `readtimeout`: overall request deadline in seconds
+- `require_ssl_verification`: disable certificate verification only for testing
+- `protocol`: `:auto`, `:h1`, or `:h2`
+
+Returns a fully materialized `ClientResponse`. Throws `ArgumentError` for
+unsupported inputs, `StatusError` when `status_exception=true` and the response
+status is considered failing, plus any lower-level transport or protocol
+exception raised during the request.
 """
 function request(
         method::AbstractString,
