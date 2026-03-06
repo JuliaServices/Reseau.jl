@@ -8,9 +8,13 @@ on:
 
 jobs:
   repro:
-    name: Julia nightly - windows-latest - compiler repro
+    name: Julia nightly - windows-latest - compiler repro - layer ${{ matrix.max_layer }}
     runs-on: windows-latest
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        max_layer: [5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -19,9 +23,12 @@ jobs:
           arch: x64
       - name: Run package-load repro
         shell: bash
+        env:
+          RESEAU_REPRO_MAX_LAYER: ${{ matrix.max_layer }}
         run: |
           set -euo pipefail
           echo "[repro] pwd=${PWD}"
+          echo "[repro] RESEAU_REPRO_MAX_LAYER=${RESEAU_REPRO_MAX_LAYER}"
           julia \
             --color=yes \
             --project=. \

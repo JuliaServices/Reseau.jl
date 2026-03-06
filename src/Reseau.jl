@@ -11,13 +11,15 @@ The package is organized in layers:
 """
 module Reseau
 
-include("1_eventloops.jl")
-include("2_socket_ops.jl")
-include("3_internal_poll.jl")
-include("4_tcp.jl")
-include("5_host_resolvers.jl")
-include("6_tls.jl")
-include("7_http.jl")
-include("8_precompile_workload.jl")
+const _REPRO_MAX_LAYER = something(tryparse(Int, get(ENV, "RESEAU_REPRO_MAX_LAYER", "8")), 8)
+
+_REPRO_MAX_LAYER >= 1 && include("1_eventloops.jl")
+_REPRO_MAX_LAYER >= 2 && include("2_socket_ops.jl")
+_REPRO_MAX_LAYER >= 3 && include("3_internal_poll.jl")
+_REPRO_MAX_LAYER >= 4 && include("4_tcp.jl")
+_REPRO_MAX_LAYER >= 5 && include("5_host_resolvers.jl")
+_REPRO_MAX_LAYER >= 6 && include("6_tls.jl")
+_REPRO_MAX_LAYER >= 7 && include("7_http.jl")
+_REPRO_MAX_LAYER >= 8 && include("8_precompile_workload.jl")
 
 end
