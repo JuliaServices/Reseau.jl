@@ -39,14 +39,6 @@ test_files = [
     "trim_compile_tests.jl",
 ]
 
-const _WINDOWS_COMPILER_ISSUE_TESTS = Set([
-    "http_client_transport_tests.jl",
-    "http_client_tests.jl",
-    "http_server_http1_tests.jl",
-    "http_integration_tests.jl",
-    "http_parity_tests.jl",
-])
-
 only_test = strip(get(ENV, "RESEAU_TEST_ONLY", ""))
 if !isempty(only_test)
     test_files = filter(==(only_test), test_files)
@@ -54,9 +46,5 @@ if !isempty(only_test)
 end
 
 for test_file in test_files
-    if Sys.iswindows() && in(test_file, _WINDOWS_COMPILER_ISSUE_TESTS)
-        _log_test_progress("[runtests] include SKIP: $(test_file) (temporary Windows compiler issue)")
-        continue
-    end
     _include_with_progress(test_file)
 end
