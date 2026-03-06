@@ -9,6 +9,9 @@ module IOPoll
 using EnumX
 using ..Reseau.EventLoops
 using ..Reseau.SocketOps
+import ..Reseau.EventLoops: deadline_fire!
+
+const PollState = EventLoops.PollState
 
 # FDLock state bits packed into one atomic word (close flag, lock flags, refs, waiter counts).
 const _MUTEX_CLOSED = UInt64(1) << 0
@@ -244,58 +247,6 @@ function _fdlock_rwunlock!(mu::FDLock, read_lock::Bool)::Bool
 end
 
 """
-Handle for an active deadline timer task.
-
-`canceled` lets a newer deadline update invalidate an older timer cheaply.
-"""
-mutable struct DeadlineTask
-    @atomic canceled::Bool
-    task::Union{Nothing, Task}
-    function DeadlineTask()
-        return new(false, nothing)
-    end
-end
-
-"""
-Per-descriptor poll integration state.
-
-This stores the `EventLoops` registration (`sysfd`, `token`), deadline state,
-and optional timer tasks for read/write deadlines.
-"""
-mutable struct PollState
-    lock::ReentrantLock
-    sysfd::Cint
-    token::UInt64
-    registration::Union{Nothing, EventLoops.Registration}
-    @atomic pollable::Bool
-    @atomic closing::Bool
-    @atomic event_err::Bool
-    @atomic rd_ns::Int64
-    @atomic wd_ns::Int64
-    @atomic rseq::UInt64
-    @atomic wseq::UInt64
-    rtask::Union{Nothing, DeadlineTask}
-    wtask::Union{Nothing, DeadlineTask}
-    function PollState()
-        return new(
-            ReentrantLock(),
-            Cint(-1),
-            UInt64(0),
-            nothing,
-            false,
-            false,
-            false,
-            Int64(0),
-            Int64(0),
-            UInt64(0),
-            UInt64(0),
-            nothing,
-            nothing,
-        )
-    end
-end
-
-"""
 Internal file descriptor wrapper used by the poll layer.
 
 This coordinates descriptor lifetime, read/write serialization, and integration
@@ -357,10 +308,8 @@ end
 
 function _refresh_event_err!(pd::PollState)
     (@atomic :acquire pd.pollable) || return nothing
-    registration = pd.registration
+    registration = EventLoops.current_registration(pd)
     registration === nothing && return nothing
-    registration.fd == pd.sysfd || return nothing
-    registration.token == pd.token || return nothing
     has_event_error = @atomic :acquire registration.event_err
     @atomic :release pd.event_err = has_event_error
     return nothing
@@ -368,10 +317,8 @@ end
 
 function _wake_waiters!(pd::PollState, mode::PollOp.T)
     (@atomic :acquire pd.pollable) || return nothing
-    registration = pd.registration
+    registration = EventLoops.current_registration(pd)
     registration === nothing && return nothing
-    registration.fd == pd.sysfd || return nothing
-    registration.token == pd.token || return nothing
     event_mode = EventLoops.PollMode.READWRITE
     if mode == PollOp.READ
         event_mode = EventLoops.PollMode.READ
@@ -382,78 +329,41 @@ function _wake_waiters!(pd::PollState, mode::PollOp.T)
     return nothing
 end
 
-function _clear_deadline_task!(t::Union{Nothing, DeadlineTask})
-    t === nothing && return nothing
-    @atomic :release t.canceled = true
-    return nothing
-end
-
-function _deadline_fire!(pd::PollState, seq::UInt64, mode::PollOp.T)
-    wake_mode = PollOp.READWRITE
+function deadline_fire!(
+        pd::PollState,
+        mode::EventLoops.PollMode.T,
+        rseq::UInt64,
+        wseq::UInt64,
+    )
+    wake_read = false
+    wake_write = false
     lock(pd.lock)
     try
-        if _mode_has_read(mode)
-            (@atomic :acquire pd.rseq) == seq || return nothing
-            if (@atomic :acquire pd.rd_ns) > 0
+        (@atomic :acquire pd.closing) && return nothing
+        EventLoops.current_registration(pd) === nothing && return nothing
+        if (UInt8(mode) & UInt8(EventLoops.PollMode.READ)) != 0
+            if (@atomic :acquire pd.rseq) == rseq && (@atomic :acquire pd.rd_ns) > 0
                 @atomic :release pd.rd_ns = Int64(-1)
+                wake_read = true
             end
-            pd.rtask = nothing
-            wake_mode = PollOp.READ
         end
-        if _mode_has_write(mode)
-            (@atomic :acquire pd.wseq) == seq || return nothing
-            if (@atomic :acquire pd.wd_ns) > 0
+        if (UInt8(mode) & UInt8(EventLoops.PollMode.WRITE)) != 0
+            if (@atomic :acquire pd.wseq) == wseq && (@atomic :acquire pd.wd_ns) > 0
                 @atomic :release pd.wd_ns = Int64(-1)
+                wake_write = true
             end
-            pd.wtask = nothing
-            wake_mode = mode == PollOp.READ ? PollOp.READWRITE : PollOp.WRITE
         end
     finally
         unlock(pd.lock)
     end
-    _wake_waiters!(pd, wake_mode)
+    if wake_read && wake_write
+        _wake_waiters!(pd, PollOp.READWRITE)
+    elseif wake_read
+        _wake_waiters!(pd, PollOp.READ)
+    elseif wake_write
+        _wake_waiters!(pd, PollOp.WRITE)
+    end
     return nothing
-end
-
-function _deadline_task_current(pd::PollState, seq::UInt64, mode::PollOp.T)::Bool
-    if _mode_has_read(mode)
-        (@atomic :acquire pd.rseq) == seq || return false
-    end
-    if _mode_has_write(mode)
-        (@atomic :acquire pd.wseq) == seq || return false
-    end
-    return true
-end
-
-# TODO(phase-2): Replace this sleep loop with poller-integrated deadline timers
-# (Go-style runtime_pollSetDeadline semantics) instead of per-deadline usleep.
-function _sleep_until_ns(deadline_ns::Int64, t::DeadlineTask, pd::PollState, seq::UInt64, mode::PollOp.T)::Bool
-    while true
-        (@atomic :acquire t.canceled) && return false
-        _deadline_task_current(pd, seq, mode) || return false
-        remaining_ns = deadline_ns - _monotonic_ns()
-        remaining_ns <= 0 && return true
-        # Sleep in short chunks so cancellation/sequence updates are observed quickly.
-        @static if Sys.iswindows()
-            sleep_ms = max(Int64(1), min(cld(remaining_ns, Int64(1_000_000)), Int64(50)))
-            @ccall gc_safe = true "Kernel32".Sleep(UInt32(sleep_ms)::UInt32)::Cvoid
-        else
-            sleep_us = max(Int64(1), min(remaining_ns ÷ Int64(1000), Int64(50_000)))
-            @ccall gc_safe = true usleep(Cuint(sleep_us)::Cuint)::Cint
-        end
-    end
-end
-
-# TODO(phase-2): Remove one-task-per-deadline spawning in favor of a shared
-# timer queue owned by the event loop/poller thread.
-function _spawn_deadline_task!(pd::PollState, seq::UInt64, mode::PollOp.T, deadline_ns::Int64)::DeadlineTask
-    deadline_task = DeadlineTask()
-    deadline_task.task = errormonitor(Threads.@spawn begin
-        _sleep_until_ns(deadline_ns, deadline_task, pd, seq, mode) || return nothing
-        _deadline_fire!(pd, seq, mode)
-        return nothing
-    end)
-    return deadline_task
 end
 
 """
@@ -470,13 +380,16 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
         (@atomic :acquire pd.pollable) || throw(NoDeadlineError())
         wake_read = false
         wake_write = false
+        registration = nothing
+        rd_ns = Int64(0)
+        wd_ns = Int64(0)
+        rseq = UInt64(0)
+        wseq = UInt64(0)
         lock(pd.lock)
         try
             (@atomic :acquire pd.closing) && return nothing
             if _mode_has_read(mode)
                 @atomic pd.rseq += UInt64(1)
-                _clear_deadline_task!(pd.rtask)
-                pd.rtask = nothing
                 if deadline == 0
                     @atomic :release pd.rd_ns = Int64(0)
                 elseif deadline <= _monotonic_ns()
@@ -484,14 +397,10 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
                     wake_read = true
                 else
                     @atomic :release pd.rd_ns = deadline
-                    seq = @atomic :acquire pd.rseq
-                    pd.rtask = _spawn_deadline_task!(pd, seq, PollOp.READ, deadline)
                 end
             end
             if _mode_has_write(mode)
                 @atomic pd.wseq += UInt64(1)
-                _clear_deadline_task!(pd.wtask)
-                pd.wtask = nothing
                 if deadline == 0
                     @atomic :release pd.wd_ns = Int64(0)
                 elseif deadline <= _monotonic_ns()
@@ -499,13 +408,16 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
                     wake_write = true
                 else
                     @atomic :release pd.wd_ns = deadline
-                    seq = @atomic :acquire pd.wseq
-                    pd.wtask = _spawn_deadline_task!(pd, seq, PollOp.WRITE, deadline)
                 end
             end
+            rd_ns = @atomic :acquire pd.rd_ns
+            wd_ns = @atomic :acquire pd.wd_ns
+            rseq = @atomic :acquire pd.rseq
+            wseq = @atomic :acquire pd.wseq
         finally
             unlock(pd.lock)
         end
+        EventLoops.schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
         if wake_read && wake_write
             _wake_waiters!(pd, PollOp.READWRITE)
         elseif wake_read
@@ -532,10 +444,9 @@ function init!(fd::FD; net::Symbol = :tcp, pollable::Bool = true)
     try
         if pollable
             _set_nonblocking!(fd.sysfd)
-            registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE)
+            registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE, pollstate = pd)
             pd.sysfd = fd.sysfd
             pd.token = registration.token
-            pd.registration = registration
             @atomic :release pd.pollable = true
             @atomic :release pd.closing = false
             @atomic :release pd.event_err = false
@@ -561,16 +472,11 @@ function close!(pd::PollState)
     lock(pd.lock)
     try
         was_pollable = @atomic :acquire pd.pollable
-        _clear_deadline_task!(pd.rtask)
-        _clear_deadline_task!(pd.wtask)
-        pd.rtask = nothing
-        pd.wtask = nothing
         @atomic :release pd.pollable = false
     finally
         unlock(pd.lock)
     end
     was_pollable && pd.sysfd >= 0 && EventLoops.deregister!(pd.sysfd)
-    pd.registration = nothing
     return nothing
 end
 
@@ -584,10 +490,6 @@ function evict!(pd::PollState)
         @atomic :release pd.closing = true
         @atomic pd.rseq += UInt64(1)
         @atomic pd.wseq += UInt64(1)
-        _clear_deadline_task!(pd.rtask)
-        _clear_deadline_task!(pd.wtask)
-        pd.rtask = nothing
-        pd.wtask = nothing
     finally
         unlock(pd.lock)
     end
@@ -603,8 +505,8 @@ function pollable(pd::PollState)::Bool
 end
 
 @inline function _poll_registration(pd::PollState)::EventLoops.Registration
-    registration = pd.registration
-    (registration === nothing || registration.fd != pd.sysfd || registration.token != pd.token) && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+    registration = EventLoops.current_registration(pd)
+    registration === nothing && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
     return registration
 end
 
@@ -655,11 +557,8 @@ Wait for readiness in a cancellation context (used by close/deadline wake paths)
 """
 function wait_canceled!(pd::PollState, mode::PollOp.T)
     pollable(pd) || return nothing
-    registration = pd.registration
+    registration = EventLoops.current_registration(pd)
     registration === nothing && return nothing
-    if registration.fd != pd.sysfd || registration.token != pd.token
-        return nothing
-    end
     if mode == PollOp.WRITE
         EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
         EventLoops.pollwait!(registration.write_waiter)

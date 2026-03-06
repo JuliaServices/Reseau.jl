@@ -99,6 +99,33 @@ struct PollEvent
     errored::Bool
 end
 
+mutable struct PollState
+    lock::ReentrantLock
+    sysfd::Cint
+    token::UInt64
+    @atomic pollable::Bool
+    @atomic closing::Bool
+    @atomic event_err::Bool
+    @atomic rd_ns::Int64
+    @atomic wd_ns::Int64
+    @atomic rseq::UInt64
+    @atomic wseq::UInt64
+    function PollState(sysfd::Integer = Cint(-1), token::UInt64 = UInt64(0))
+        return new(
+            ReentrantLock(),
+            Cint(sysfd),
+            token,
+            false,
+            false,
+            false,
+            Int64(0),
+            Int64(0),
+            UInt64(0),
+            UInt64(0),
+        )
+    end
+end
+
 """
     Registration
 
@@ -111,6 +138,26 @@ mutable struct Registration
     read_waiter::PollWaiter
     write_waiter::PollWaiter
     @atomic event_err::Bool
+    pollstate::PollState
+end
+
+function Registration(
+        fd::Cint,
+        token::UInt64,
+        mode::PollMode.T,
+        read_waiter::PollWaiter,
+        write_waiter::PollWaiter,
+        event_err::Bool,
+    )
+    return Registration(fd, token, mode, read_waiter, write_waiter, event_err, PollState(fd, token))
+end
+
+struct DeadlineEntry
+    deadline_ns::Int64
+    pollstate::PollState
+    mode::PollMode.T
+    rseq::UInt64
+    wseq::UInt64
 end
 
 """
@@ -123,12 +170,14 @@ mutable struct Poller
     lock::ReentrantLock
     registrations::Dict{Cint, Registration}
     registrations_by_token::Dict{UInt64, Registration}
+    deadline_heap::Vector{DeadlineEntry}
     shutdown_event::Base.Threads.Event
     kq::Cint
     wake_ident::UInt
     backend_scratch::Any
     @atomic wak_sig::UInt32
     @atomic next_token::UInt64
+    @atomic poll_until_ns::Int64
     @atomic running::Bool
 end
 
@@ -137,12 +186,14 @@ function Poller()
         ReentrantLock(),
         Dict{Cint, Registration}(),
         Dict{UInt64, Registration}(),
+        DeadlineEntry[],
         Base.Threads.Event(),
         Cint(-1),
         UInt(1),
         nothing,
         UInt32(0),
         UInt64(0),
+        Int64(0),
         false,
     )
 end
@@ -184,6 +235,209 @@ end
 
 function _new_registration(fd::Cint, token::UInt64, mode::PollMode.T)::Registration
     return Registration(fd, token, mode, PollWaiter(), PollWaiter(), false)
+end
+
+function deadline_fire!(owner, mode::PollMode.T, rseq::UInt64, wseq::UInt64)
+    _ = owner
+    _ = mode
+    _ = rseq
+    _ = wseq
+    return nothing
+end
+
+@inline function _deadline_less(a::DeadlineEntry, b::DeadlineEntry)::Bool
+    if a.deadline_ns != b.deadline_ns
+        return a.deadline_ns < b.deadline_ns
+    end
+    if a.pollstate.token != b.pollstate.token
+        return a.pollstate.token < b.pollstate.token
+    end
+    return UInt8(a.mode) < UInt8(b.mode)
+end
+
+@inline function _heap_parent_index(i::Int)::Int
+    return i >>> 1
+end
+
+@inline function _heap_left_index(i::Int)::Int
+    return i << 1
+end
+
+@inline function _heap_right_index(i::Int)::Int
+    return (i << 1) + 1
+end
+
+function _deadline_swap!(heap::Vector{DeadlineEntry}, i::Int, j::Int)
+    heap[i], heap[j] = heap[j], heap[i]
+    return nothing
+end
+
+function _deadline_sift_up!(heap::Vector{DeadlineEntry}, i::Int)
+    while i > 1
+        parent = _heap_parent_index(i)
+        _deadline_less(heap[i], heap[parent]) || break
+        _deadline_swap!(heap, i, parent)
+        i = parent
+    end
+    return nothing
+end
+
+function _deadline_sift_down!(heap::Vector{DeadlineEntry}, i::Int)
+    len = length(heap)
+    while true
+        left = _heap_left_index(i)
+        left > len && break
+        smallest = left
+        right = _heap_right_index(i)
+        if right <= len && _deadline_less(heap[right], heap[left])
+            smallest = right
+        end
+        _deadline_less(heap[smallest], heap[i]) || break
+        _deadline_swap!(heap, i, smallest)
+        i = smallest
+    end
+    return nothing
+end
+
+function _deadline_push_locked!(state::Poller, entry::DeadlineEntry)
+    heap = state.deadline_heap
+    push!(heap, entry)
+    _deadline_sift_up!(heap, length(heap))
+    return nothing
+end
+
+function _deadline_pop_locked!(state::Poller)::DeadlineEntry
+    heap = state.deadline_heap
+    isempty(heap) && throw(ArgumentError("deadline heap is empty"))
+    entry = heap[1]
+    last = pop!(heap)
+    if !isempty(heap)
+        heap[1] = last
+        _deadline_sift_down!(heap, 1)
+    end
+    return entry
+end
+
+@inline function _registration_active_locked(state::Poller, pd::PollState)::Bool
+    current = get(() -> nothing, state.registrations_by_token, pd.token)
+    return current !== nothing && current.fd == pd.sysfd && current.pollstate === pd
+end
+
+function _discard_stale_deadlines_locked!(state::Poller)
+    while !isempty(state.deadline_heap)
+        entry = state.deadline_heap[1]
+        _registration_active_locked(state, entry.pollstate) && return nothing
+        _ = _deadline_pop_locked!(state)
+    end
+    return nothing
+end
+
+function _deadline_peek_locked(state::Poller)
+    _discard_stale_deadlines_locked!(state)
+    isempty(state.deadline_heap) && return nothing
+    return state.deadline_heap[1]
+end
+
+function _build_deadline_entries(
+        pd::PollState,
+        rd_ns::Int64,
+        wd_ns::Int64,
+        rseq::UInt64,
+        wseq::UInt64,
+    )::Vector{DeadlineEntry}
+    entries = DeadlineEntry[]
+    if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
+        push!(entries, DeadlineEntry(rd_ns, pd, PollMode.READWRITE, rseq, wseq))
+        return entries
+    end
+    rd_ns > 0 && push!(entries, DeadlineEntry(rd_ns, pd, PollMode.READ, rseq, UInt64(0)))
+    wd_ns > 0 && push!(entries, DeadlineEntry(wd_ns, pd, PollMode.WRITE, UInt64(0), wseq))
+    return entries
+end
+
+function schedule_deadlines!(
+        pd::PollState,
+        rd_ns::Int64,
+        wd_ns::Int64,
+        rseq::UInt64,
+        wseq::UInt64,
+    )
+    isassigned(POLLER) || return nothing
+    state = POLLER[]
+    (@atomic :acquire state.running) || return nothing
+    new_earliest = Int64(0)
+    lock(state.lock)
+    try
+        _registration_active_locked(state, pd) || return nothing
+        for entry in _build_deadline_entries(pd, rd_ns, wd_ns, rseq, wseq)
+            _deadline_push_locked!(state, entry)
+            if new_earliest == 0 || entry.deadline_ns < new_earliest
+                new_earliest = entry.deadline_ns
+            end
+        end
+    finally
+        unlock(state.lock)
+    end
+    if new_earliest > 0
+        poll_until_ns = @atomic :acquire state.poll_until_ns
+        if poll_until_ns == 0 || new_earliest < poll_until_ns
+            errno = _backend_wake!(state)
+            errno == Int32(0) || _throw_errno("event loop wake", errno)
+        end
+    end
+    return nothing
+end
+
+function _poll_delay_ns(state::Poller)::Int64
+    deadline_ns = Int64(0)
+    lock(state.lock)
+    try
+        entry = _deadline_peek_locked(state)
+        deadline_ns = entry === nothing ? Int64(0) : entry.deadline_ns
+        @atomic :release state.poll_until_ns = deadline_ns
+    finally
+        unlock(state.lock)
+    end
+    deadline_ns == 0 && return Int64(-1)
+    now_ns = Int64(time_ns())
+    remaining_ns = deadline_ns - now_ns
+    remaining_ns <= 0 && return Int64(0)
+    return remaining_ns
+end
+
+function _drain_expired_deadlines!(state::Poller, now_ns::Int64)
+    expired = DeadlineEntry[]
+    lock(state.lock)
+    try
+        while true
+            entry = _deadline_peek_locked(state)
+            (entry === nothing || entry.deadline_ns > now_ns) && break
+            push!(expired, _deadline_pop_locked!(state))
+        end
+    finally
+        unlock(state.lock)
+    end
+    for entry in expired
+        deadline_fire!(entry.pollstate, entry.mode, entry.rseq, entry.wseq)
+    end
+    return nothing
+end
+
+function current_registration(pd::PollState)
+    isassigned(POLLER) || return nothing
+    state = POLLER[]
+    lock(state.lock)
+    try
+        registration = get(() -> nothing, state.registrations_by_token, pd.token)
+        if registration === nothing
+            return nothing
+        end
+        registration.fd == pd.sysfd || return nothing
+        registration.pollstate === pd || return nothing
+        return registration
+    finally
+        unlock(state.lock)
+    end
 end
 
 function _notify_registration!(registration::Registration, mode::PollMode.T)
@@ -302,7 +556,7 @@ end
 
 Register an fd with the runtime poller and return its `Registration`.
 """
-function register!(fd::Integer; mode::PollMode.T = PollMode.READWRITE)::Registration
+function register!(fd::Integer; mode::PollMode.T = PollMode.READWRITE, pollstate::Union{Nothing, PollState} = nothing)::Registration
     _mode_is_empty(mode) && throw(ArgumentError("register! requires READ and/or WRITE mode"))
     state = init!()
     cfd = Cint(fd)
@@ -318,6 +572,11 @@ function register!(fd::Integer; mode::PollMode.T = PollMode.READWRITE)::Registra
         errno = _backend_open_fd!(state, cfd, mode, token)
         if errno == Int32(0)
             registration = _new_registration(cfd, token, mode)
+            if pollstate !== nothing
+                registration.pollstate = pollstate::PollState
+            end
+            registration.pollstate.sysfd = cfd
+            registration.pollstate.token = token
             state.registrations[cfd] = registration
             state.registrations_by_token[token] = registration
         end
@@ -419,7 +678,10 @@ end
 
 function _poller_thread_main!(state::Poller)
     while @atomic state.running
-        errno = _backend_poll_once!(state, Int64(-1))
+        delay_ns = _poll_delay_ns(state)
+        errno = _backend_poll_once!(state, delay_ns)
+        @atomic :release state.poll_until_ns = Int64(0)
+        _drain_expired_deadlines!(state, Int64(time_ns()))
         errno == Int32(0) && continue
         if errno == Int32(Base.Libc.EINTR)
             continue
