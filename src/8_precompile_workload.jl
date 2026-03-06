@@ -310,7 +310,21 @@ function _pc_run_tls_workload!()
             server_name = "localhost",
             handshake_timeout_ns = 1_000_000_000,
         )
-        client = TL.connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+        client = TL.connect(
+            "tcp",
+            "127.0.0.1:$(Int(laddr.port))";
+            server_name = client_cfg.server_name,
+            verify_peer = client_cfg.verify_peer,
+            client_auth = client_cfg.client_auth,
+            cert_file = client_cfg.cert_file,
+            key_file = client_cfg.key_file,
+            ca_file = client_cfg.ca_file,
+            client_ca_file = client_cfg.client_ca_file,
+            alpn_protocols = copy(client_cfg.alpn_protocols),
+            handshake_timeout_ns = client_cfg.handshake_timeout_ns,
+            min_version = client_cfg.min_version,
+            max_version = client_cfg.max_version,
+        )
         status = timedwait(() -> istaskdone(accept_task), 2.0; pollint = 0.001)
         status == :timed_out && throw(ArgumentError("TLS precompile workload timed out during accept"))
         server = fetch(accept_task)

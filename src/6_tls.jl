@@ -303,26 +303,6 @@ struct Listener
     config::Config
 end
 
-"""
-    Connector
-
-TLS connector using a `HostResolvers.HostResolver` for the underlying TCP connect.
-
-This bundles dial policy and TLS policy together so repeated outbound connections can
-share both the host-resolution behavior and the immutable `Config`.
-"""
-struct Connector
-    host_resolver::HostResolvers.HostResolver
-    config::Config
-end
-
-function Connector(;
-        host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
-        config::Config = Config(),
-    )
-    return Connector(host_resolver, config)
-end
-
 @inline function _verify_allow_all_cb(_preverify_ok::Cint, _store_ctx::Ptr{Cvoid})::Cint
     return Cint(1)
 end
@@ -1437,7 +1417,7 @@ Create a TLS listener by first creating a TCP listener and then associating a se
 Accepted `Conn`s are returned in lazy-handshake form.
 
 Throws `ConfigError` if the server config is invalid and propagates any listener creation
-errors from `HostResolvers.listen`.
+errors from `TCP.listen`.
 """
 function listen(
         network::AbstractString,
@@ -1447,7 +1427,7 @@ function listen(
         reuseaddr::Bool = true,
     )::Listener
     _validate_config(config; is_server = true)
-    listener = HostResolvers.listen(network, address; backlog = backlog, reuseaddr = reuseaddr)
+    listener = TCP.listen(network, address; backlog = backlog, reuseaddr = reuseaddr)
     return Listener(listener, config)
 end
 
@@ -1506,29 +1486,15 @@ function _prepare_connect_config(config::Config, address::AbstractString)::Confi
     return _config_with_server_name(config, host)
 end
 
-"""
-    connect_with_resolver(host_resolver, network, address, config=Config()) -> Conn
-
-Dial a TCP connection through `host_resolver`, wrap it in client-side TLS, and complete
-the handshake before returning.
-
-If `config.server_name` is unset, this derives it from `address` when possible so
-certificate verification and SNI behave as expected.
-
-Returns a fully handshaken `Conn`.
-
-Throws `ConfigError`, `TLSHandshakeTimeoutError`, `TLSError`, or any underlying
-connection/resolution exceptions.
-"""
-function connect_with_resolver(
+function _connect(
         host_resolver::HostResolvers.HostResolver,
         network::AbstractString,
         address::AbstractString,
-        config::Config = Config(),
+        config::Config,
     )::Conn
     tls_config = _prepare_connect_config(config, address)
     connect_deadline_ns = HostResolvers._connect_deadline_ns(host_resolver)
-    tcp = HostResolvers.connect(host_resolver, network, address)
+    tcp = TCP.connect(host_resolver, network, address)
     tls_conn = nothing
     try
         tls_conn = client(tcp, tls_config)
@@ -1554,22 +1520,57 @@ function connect_with_resolver(
 end
 
 """
-    connect(connector, network, address) -> Conn
+    connect(network, address; kwargs...) -> Conn
 
-Connect using the `HostResolver` and `Config` bundled in `connector`.
+Connect to `address`, negotiate TLS, and return a fully handshaken client
+connection.
+
+Host-resolution keyword arguments are forwarded to `HostResolvers.HostResolver`:
+- `timeout_ns`
+- `deadline_ns`
+- `local_addr`
+- `fallback_delay_ns`
+- `resolver`
+- `policy`
+
+TLS keyword arguments are forwarded to `Config`:
+- `server_name`
+- `verify_peer`
+- `client_auth`
+- `cert_file`
+- `key_file`
+- `ca_file`
+- `client_ca_file`
+- `alpn_protocols`
+- `handshake_timeout_ns`
+- `min_version`
+- `max_version`
+
+If `server_name` is omitted, it is derived from `address` when possible so SNI
+and peer verification behave like Go's client defaults.
 """
-function connect(connector::Connector, network::AbstractString, address::AbstractString)::Conn
-    return connect_with_resolver(connector.host_resolver, network, address, connector.config)
+function connect(
+        network::AbstractString,
+        address::AbstractString;
+        timeout_ns::Integer = Int64(0),
+        deadline_ns::Integer = Int64(0),
+        local_addr::Union{Nothing, TCP.SocketEndpoint} = nothing,
+        fallback_delay_ns::Integer = Int64(300_000_000),
+        resolver::HostResolvers.AbstractResolver = HostResolvers.DEFAULT_RESOLVER,
+        policy::HostResolvers.ResolverPolicy = HostResolvers.ResolverPolicy(),
+        kw...
+    )::Conn
+    host_resolver = HostResolvers.HostResolver(; timeout_ns, deadline_ns, local_addr, fallback_delay_ns, resolver, policy)
+    return _connect(host_resolver, network, address, Config(; kw...))
 end
 
 """
-    connect(network, address, config=Config()) -> Conn
+    connect(address; kwargs...) -> Conn
 
-Convenience wrapper that connects with the default `HostResolver` and returns a fully
-handshaken client TLS connection.
+Convenience shorthand for `connect("tcp", address; kwargs...)`.
 """
-function connect(network::AbstractString, address::AbstractString, config::Config = Config())::Conn
-    return connect_with_resolver(HostResolvers.HostResolver(), network, address, config)
+function connect(address::AbstractString; kwargs...)::Conn
+    return connect("tcp", address; kwargs...)
 end
 
 end

@@ -43,7 +43,7 @@ end
 Create an HTTP server with timeouts and parser limits.
 
 Keyword arguments:
-- `network`, `address`: bind information passed to `HostResolvers.listen`
+- `network`, `address`: bind information passed to `TCP.listen`
 - `handler`: function taking `Request` and returning `Response`
 - `read_timeout_ns`: whole-request read deadline once a request is underway
 - `read_header_timeout_ns`: stricter deadline while waiting for request headers
@@ -302,7 +302,7 @@ Returns `nothing` when serving stops. Listener cleanup is performed in a
 `finally` block so shutdown paths do not leak the bound socket.
 """
 function listen_and_serve!(server::Server)
-    listener = HostResolvers.listen(server.network, server.address; backlog = 128)
+    listener = TCP.listen(server.network, server.address; backlog = 128)
     try
         serve!(server, listener)
     finally

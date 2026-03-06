@@ -228,7 +228,7 @@ function _effective_tls_config(transport::Transport, address::String, server_nam
 end
 
 function _new_conn!(transport::Transport, key::String, address::String; secure::Bool, server_name::Union{Nothing, String})::ClientConn
-    tcp = HostResolvers.connect(transport.host_resolver, "tcp", address)
+    tcp = TCP.connect(transport.host_resolver, "tcp", address)
     if secure
         cfg = _effective_tls_config(transport, address, server_name)
         tls = TLS.client(tcp, cfg)

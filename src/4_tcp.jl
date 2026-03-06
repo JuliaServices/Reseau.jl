@@ -18,6 +18,20 @@ using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 
 """
+    connect
+    listen
+
+Primary user-facing TCP entry points.
+
+This file defines the concrete-address methods like `connect(::SocketAddr)` and
+`listen(::SocketAddr)`. String/hostname-based overloads are added later by the
+`HostResolvers` module so callers can still use one unified `TCP.connect` /
+`TCP.listen` surface.
+"""
+function connect end
+function listen end
+
+"""
     SocketAddr
 
 Abstract network endpoint type for TCP socket addresses.
@@ -578,8 +592,9 @@ end
 
 Connect a TCP connection and return `Conn`.
 
-This is the simplest direct-address API. For name resolution, timeouts, local
-bind preferences, or Happy Eyeballs-style racing, use `HostResolvers.connect`.
+This is the simplest direct-address API. For host/port strings, name
+resolution, and timeout-aware connect policy, use the `connect(network,
+address...)` overloads on the same `TCP.connect` generic.
 """
 function connect(remote_addr::SocketAddr; local_addr::Union{Nothing, SocketAddr} = nothing)::Conn
     return Conn(connect_tcp_fd!(remote_addr; local_addr = local_addr))
@@ -590,7 +605,8 @@ end
 
 Create a TCP listener from a bound local address.
 
-This is the direct-address equivalent of `HostResolvers.listen`.
+This is the direct-address equivalent of the `listen(network, address; ...)`
+overloads on the same `TCP.listen` generic.
 """
 function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
     return Listener(listen_tcp_fd!(local_addr; backlog = backlog, reuseaddr = reuseaddr))

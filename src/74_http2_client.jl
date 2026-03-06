@@ -578,7 +578,7 @@ function connect_h2!(
         host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
         tls_config::Union{Nothing, TLS.Config} = nothing,
     )::H2Connection
-    tcp = HostResolvers.connect(host_resolver, "tcp", address)
+    tcp = TCP.connect(host_resolver, "tcp", address)
     tls_conn = nothing
     try
         stream_reader = nothing

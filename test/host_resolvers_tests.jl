@@ -50,7 +50,7 @@ end
 function _nd_ipv6_supported()::Bool
     listener = nothing
     try
-        listener = ND.listen("tcp6", "[::1]:0"; backlog = 4)
+        listener = NC.listen("tcp6", "[::1]:0"; backlog = 4)
         return true
     catch
         return false
@@ -234,10 +234,10 @@ else
             server = nothing
             accept_task = nothing
             try
-                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 16)
+                listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
                 laddr = NC.addr(listener)
                 accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
-                client = ND.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)))
+                client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)); timeout_ns = 1_000_000_000)
                 status = _nd_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
                 server = fetch(accept_task)
@@ -259,7 +259,7 @@ else
             connected = nothing
             accepted = nothing
             try
-                listener = ND.listen("tcp4", "127.0.0.1:0"; backlog = 16)
+                listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 16)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 port = Int(laddr.port)
                 resolver = ND.StaticResolver(
@@ -271,13 +271,13 @@ else
                     ),
                 )
                 warm_accept = errormonitor(Threads.@spawn NC.accept!(listener))
-                warm_client = ND.connect(ND.HostResolver(; resolver = resolver, fallback_delay_ns = 1_000_000), "tcp", "dual.test:$port")
+                warm_client = NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 1_000_000)
                 @test _nd_wait_task_done(warm_accept, 2.0) != :timed_out
                 warm_server = fetch(warm_accept)
                 _nd_close_quiet!(warm_server)
                 _nd_close_quiet!(warm_client)
                 accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
-                connect_task = errormonitor(Threads.@spawn ND.connect(ND.HostResolver(; resolver = resolver, fallback_delay_ns = 5_000_000_000), "tcp", "dual.test:$port"))
+                connect_task = errormonitor(Threads.@spawn NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 5_000_000_000))
                 @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
                 @test _nd_wait_task_done(accept_task, 1.5) != :timed_out
                 connected = fetch(connect_task)
@@ -301,10 +301,10 @@ else
                 server = nothing
                 accept_task = nothing
                 try
-                    listener = ND.listen("tcp6", "[::1]:0"; backlog = 16)
+                    listener = NC.listen("tcp6", "[::1]:0"; backlog = 16)
                     laddr = NC.addr(listener)::NC.SocketAddrV6
                     accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
-                    client = ND.connect("tcp6", ND.join_host_port("::1", Int(laddr.port)))
+                    client = NC.connect("tcp6", ND.join_host_port("::1", Int(laddr.port)); timeout_ns = 1_000_000_000)
                     @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
                     server = fetch(accept_task)
                     payload = UInt8[0x90, 0x91, 0x92]
@@ -322,10 +322,9 @@ else
         end
         @testset "error typing and wrapping (phase 5C)" begin
             slow_resolver = _SlowResolver(0.25, NC.SocketEndpoint[NC.loopback_addr(1)])
-            timeout_resolver = ND.HostResolver(timeout_ns = 20_000_000, resolver = slow_resolver)
             started_ns = time_ns()
             timeout_err = try
-                ND.connect(timeout_resolver, "tcp", "slow.local:80")
+                NC.connect("tcp", "slow.local:80"; timeout_ns = 20_000_000, resolver = slow_resolver)
                 nothing
             catch ex
                 ex
@@ -344,7 +343,7 @@ else
             end
             @test empty_net_err isa ND.UnknownNetworkError
             err_unknown = try
-                ND.connect("udp", "127.0.0.1:1")
+                NC.connect("udp", "127.0.0.1:1")
                 nothing
             catch ex
                 ex
@@ -354,7 +353,7 @@ else
                 @test err_unknown.err isa ND.UnknownNetworkError
             end
             err_bad_addr = try
-                ND.listen("tcp", "bad-address")
+                NC.listen("tcp", "bad-address")
                 nothing
             catch ex
                 ex
@@ -365,7 +364,7 @@ else
             end
             past_deadline = Int64(time_ns()) - Int64(1)
             err_timeout = try
-                ND.connect(ND.HostResolver(; deadline_ns = past_deadline), "tcp", "127.0.0.1:1")
+                NC.connect("tcp", "127.0.0.1:1"; deadline_ns = past_deadline)
                 nothing
             catch ex
                 ex

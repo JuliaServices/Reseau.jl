@@ -36,7 +36,7 @@ end
 Create an HTTP/2 server configured with a request handler.
 
 Arguments:
-- `network`: transport network passed to `HostResolvers.listen`
+- `network`: transport network passed to `TCP.listen`
 - `address`: bind address, typically `host:port`
 - `handler`: function taking `Request` and returning `Response`
 
@@ -373,7 +373,7 @@ Returns the spawned listener `Task`. The server's effective bound address can
 be queried afterwards with `h2_server_addr`.
 """
 function start_h2_server!(server::H2Server)::Task
-    listener = HostResolvers.listen(server.network, server.address; backlog = 128)
+    listener = TCP.listen(server.network, server.address; backlog = 128)
     lock(server.lock)
     try
         server.listener = listener

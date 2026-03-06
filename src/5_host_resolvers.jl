@@ -1,7 +1,7 @@
 """
     HostResolvers
 
-Address parsing, name resolution, and connect/listen orchestration APIs.
+Address parsing, name resolution, and TCP string-address helpers.
 
 This layer is the bridge between string-oriented user input like
 `"example.com:443"` and the lower-level `TCP` primitives that operate on concrete
@@ -10,6 +10,10 @@ socket addresses. The overall shape intentionally follows Go's `net` package:
 - resolve hostnames according to a resolver policy
 - attempt connections serially or in a Happy Eyeballs-style race
 - wrap failures in an operation-specific error that preserves context
+
+The public-facing string overloads for `TCP.connect` and `TCP.listen` are
+implemented here so users can stay on the `TCP` surface while the host/service
+resolution logic remains factored into its own file.
 """
 module HostResolvers
 
@@ -17,6 +21,7 @@ using ..Reseau.SocketOps
 using ..Reseau.IOPoll
 
 using ..Reseau.TCP
+import ..Reseau.TCP: connect, listen
 
 """
     AddressError
@@ -1280,30 +1285,30 @@ function connect(d::HostResolver, network::AbstractString, address::AbstractStri
 end
 
 """
-    connect(network, address) -> TCP.Conn
+    connect(network, address; kwargs...) -> TCP.Conn
 
 Connect using a default `HostResolver`.
+
+All keyword arguments are forwarded to `HostResolver(; kwargs...)`, so callers
+can configure `timeout_ns`, `deadline_ns`, `local_addr`, `fallback_delay_ns`,
+`resolver`, and `policy` without explicitly constructing a resolver first.
 """
-function connect(network::AbstractString, address::AbstractString)::TCP.Conn
-    return connect(HostResolver(), network, address)
+function connect(
+        network::AbstractString,
+        address::AbstractString;
+        kwargs...,
+    )::TCP.Conn
+    resolver = isempty(kwargs) ? HostResolver() : HostResolver(; kwargs...)
+    return connect(resolver, network, address)
 end
 
 """
-    connect(address) -> TCP.Conn
+    connect(address; kwargs...) -> TCP.Conn
 
-Convenience shorthand for `connect("tcp", address)`.
+Convenience shorthand for `connect("tcp", address; kwargs...)`.
 """
-function connect(address::AbstractString)::TCP.Conn
-    return connect(HostResolver(), "tcp", address)
-end
-
-"""
-    connect_timeout(network, address, timeout_ns) -> TCP.Conn
-
-Connect using a default `HostResolver` with a relative timeout budget.
-"""
-function connect_timeout(network::AbstractString, address::AbstractString, timeout_ns::Integer)::TCP.Conn
-    return connect(HostResolver(; timeout_ns = Int64(timeout_ns)), network, address)
+function connect(address::AbstractString; kwargs...)::TCP.Conn
+    return connect("tcp", address; kwargs...)
 end
 
 """
