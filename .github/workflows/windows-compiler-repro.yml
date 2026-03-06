@@ -15,6 +15,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - case: tcp-open-catch-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-open-catch-layer4.jl
+          - case: tcp-bind-init-catch-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-bind-init-catch-layer4.jl
+          - case: tcp-full-copied-nocatch-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-full-copied-nocatch-layer4.jl
+          - case: tcp-full-copied-catch-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-full-copied-catch-layer4.jl
           - case: hostresolver-connect
             max_layer: 5
             repro_script: repro/windows-compiler-issue-hostresolver-connect.jl
