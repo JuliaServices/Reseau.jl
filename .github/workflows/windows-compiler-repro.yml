@@ -1,0 +1,32 @@
+name: Windows Compiler Repro
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repro:
+    name: Julia nightly - windows-latest - compiler repro
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: nightly
+          arch: x64
+      - name: Run standalone repro
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[repro] pwd=${PWD}"
+          julia \
+            --color=yes \
+            --project=. \
+            --check-bounds=yes \
+            --compiled-modules=yes \
+            --depwarn=yes \
+            --inline=yes \
+            --startup-file=no \
+            --track-allocation=none \
+            --code-coverage="@${PWD}" \
+            repro/windows-compiler-issue-repro.jl
