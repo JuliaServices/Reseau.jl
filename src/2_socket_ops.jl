@@ -1,7 +1,20 @@
 """
     SocketOps
 
-Platform socket syscall facade and sockaddr helpers.
+Cross-platform socket syscall facade and sockaddr helpers.
+
+This module is intentionally lower level than `TCP`: it exposes thin wrappers
+around the OS socket APIs, normalizes the most important portability differences,
+and leaves policy decisions to higher layers.
+
+A few conventions are worth keeping in mind when reading the code:
+- successful mutating operations usually return `nothing`
+- operations that need to preserve transient errno values often return the raw
+  integer error code instead of throwing immediately
+- wrappers aim to look POSIX-like even on Windows so the polling and transport
+  layers can share most control flow
+- address helpers always build or decode structs in network byte order so callers
+  can treat the Julia-level tuples as ordinary host-order values
 """
 module SocketOps
 
@@ -163,9 +176,15 @@ end
 end
 
 """
-    sockaddr_in(ip::NTuple{4,UInt8}, port)
+    sockaddr_in(ip::NTuple{4,UInt8}, port) -> SockAddrIn
 
 Build a platform-compatible `sockaddr_in` from an IPv4 address tuple and port.
+
+`ip` is interpreted in presentation order, for example `(127, 0, 0, 1)`.
+`port` is validated to be in `[0, 65535]` and converted to network byte order
+inside the returned struct.
+
+Throws `ArgumentError` if the port is out of range.
 """
 function sockaddr_in(ip::NTuple{4, UInt8}, port::Integer)::SockAddrIn
     p = _hton16(_port_u16(port))
@@ -191,18 +210,34 @@ function sockaddr_in(ip::NTuple{4, <:Integer}, port::Integer)::SockAddrIn
     return sockaddr_in((_byte_u8(ip[1]), _byte_u8(ip[2]), _byte_u8(ip[3]), _byte_u8(ip[4])), port)
 end
 
+"""
+    sockaddr_in_loopback(port) -> SockAddrIn
+
+Convenience constructor for `127.0.0.1:port`.
+"""
 function sockaddr_in_loopback(port::Integer)::SockAddrIn
     return sockaddr_in((UInt8(127), UInt8(0), UInt8(0), UInt8(1)), port)
 end
 
+"""
+    sockaddr_in_any(port) -> SockAddrIn
+
+Convenience constructor for `0.0.0.0:port`, typically used for wildcard binds.
+"""
 function sockaddr_in_any(port::Integer)::SockAddrIn
     return sockaddr_in((UInt8(0), UInt8(0), UInt8(0), UInt8(0)), port)
 end
 
 """
-    sockaddr_in6(ip::NTuple{16,UInt8}, port; flowinfo=0, scope_id=0)
+    sockaddr_in6(ip::NTuple{16,UInt8}, port; flowinfo=0, scope_id=0) -> SockAddrIn6
 
 Build a platform-compatible `sockaddr_in6` from an IPv6 address tuple and port.
+
+`scope_id` is preserved for scoped addresses such as link-local endpoints and
+`flowinfo` is exposed for completeness even though higher layers usually leave it
+as zero.
+
+Throws `ArgumentError` if the port, `flowinfo`, or `scope_id` is out of range.
 """
 function sockaddr_in6(
         ip::NTuple{16, UInt8},
@@ -251,6 +286,11 @@ function sockaddr_in6(
     )
 end
 
+"""
+    sockaddr_in6_loopback(port; scope_id=0) -> SockAddrIn6
+
+Convenience constructor for the IPv6 loopback address `[::1]:port`.
+"""
 function sockaddr_in6_loopback(port::Integer; scope_id::Integer = 0)::SockAddrIn6
     return sockaddr_in6((
             UInt8(0), UInt8(0), UInt8(0), UInt8(0),
@@ -263,10 +303,20 @@ function sockaddr_in6_loopback(port::Integer; scope_id::Integer = 0)::SockAddrIn
     )
 end
 
+"""
+    sockaddr_in6_any(port; scope_id=0) -> SockAddrIn6
+
+Convenience constructor for the IPv6 wildcard bind address `[::]:port`.
+"""
 function sockaddr_in6_any(port::Integer; scope_id::Integer = 0)::SockAddrIn6
     return sockaddr_in6(ntuple(_ -> UInt8(0), 16), port; scope_id = scope_id)
 end
 
+"""
+    sockaddr_in_port(addr) -> UInt16
+
+Decode the IPv4 port from `addr` into host byte order.
+"""
 @inline function sockaddr_in_port(addr::SockAddrIn)::UInt16
     return _ntoh16(addr.sin_port)
 end
@@ -290,10 +340,20 @@ end
     return _ntoh16(addr.sin6_port)
 end
 
+"""
+    sockaddr_in6_ip(addr) -> NTuple{16,UInt8}
+
+Decode the raw IPv6 address bytes from `addr`.
+"""
 @inline function sockaddr_in6_ip(addr::SockAddrIn6)::NTuple{16, UInt8}
     return addr.sin6_addr
 end
 
+"""
+    sockaddr_in6_scopeid(addr) -> UInt32
+
+Return the IPv6 scope id stored in `addr`.
+"""
 @inline function sockaddr_in6_scopeid(addr::SockAddrIn6)::UInt32
     return addr.sin6_scope_id
 end
@@ -309,6 +369,10 @@ include("2_socket_ops_linux.jl")
 elseif Sys.iswindows()
 include("2_socket_ops_windows.jl")
 else
+
+# Unsupported platforms keep the same API surface but fail eagerly with ENOSYS.
+# This lets trim/smoke tests and higher-level code compile while still making the
+# lack of backend support obvious at runtime.
 
 function fd_is_cloexec(fd::Cint)::Bool
     _ = fd

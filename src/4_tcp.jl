@@ -2,6 +2,15 @@
     TCP
 
 Core TCP socket operations and connection/listener types.
+
+This layer sits directly above `SocketOps` and `IOPoll`. It is responsible for
+turning raw non-blocking sockets into higher-level connection/listener objects,
+while still keeping the control flow close to Go's `netFD` implementation:
+- sockets are created non-blocking and registered with the poller
+- non-blocking connect completes by waiting for write readiness and then reading
+  `SO_ERROR`
+- accept returns already-initialized child descriptors that are ready for the
+  same poll-driven read/write paths as outbound connections
 """
 module TCP
 
@@ -19,6 +28,10 @@ abstract type SocketAddr end
     SocketAddrV4
 
 IPv4 endpoint snapshot.
+
+The address bytes are stored in presentation order and the port is stored in
+host byte order. Conversion to platform sockaddr structs happens lazily when a
+socket operation actually needs one.
 """
 struct SocketAddrV4 <: SocketAddr
     ip::NTuple{4, UInt8}
@@ -32,7 +45,11 @@ end
 """
     SocketAddrV6
 
-IPv6 endpoint snapshot. `scope_id` is used for scoped link-local addresses.
+IPv6 endpoint snapshot.
+
+`scope_id` is used for scoped link-local addresses and is preserved all the way
+down to the platform sockaddr representation so bind/connect can target the same
+interface the caller selected.
 """
 struct SocketAddrV6 <: SocketAddr
     ip::NTuple{16, UInt8}
@@ -63,14 +80,29 @@ function SocketAddrV6(ip::NTuple{16, <:Integer}, port::Integer; scope_id::Intege
     )
 end
 
+"""
+    loopback_addr(port) -> SocketAddrV4
+
+Convenience constructor for `127.0.0.1:port`.
+"""
 function loopback_addr(port::Integer)::SocketAddrV4
     return SocketAddrV4((UInt8(127), UInt8(0), UInt8(0), UInt8(1)), port)
 end
 
+"""
+    any_addr(port) -> SocketAddrV4
+
+Convenience constructor for `0.0.0.0:port`, typically used for wildcard binds.
+"""
 function any_addr(port::Integer)::SocketAddrV4
     return SocketAddrV4((UInt8(0), UInt8(0), UInt8(0), UInt8(0)), port)
 end
 
+"""
+    loopback_addr6(port; scope_id=0) -> SocketAddrV6
+
+Convenience constructor for `[::1]:port`.
+"""
 function loopback_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
     return SocketAddrV6((
             UInt8(0), UInt8(0), UInt8(0), UInt8(0),
@@ -83,6 +115,11 @@ function loopback_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
     )
 end
 
+"""
+    any_addr6(port; scope_id=0) -> SocketAddrV6
+
+Convenience constructor for the IPv6 wildcard bind address `[::]:port`.
+"""
 function any_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
     return SocketAddrV6((
             UInt8(0), UInt8(0), UInt8(0), UInt8(0),
@@ -123,6 +160,11 @@ end
     FD
 
 Go-style network descriptor owner built on `IOPoll.FD`.
+
+This is the internal object that owns the actual socket. Public callers usually
+interact with `Conn` or `Listener`, but the transport implementation keeps the
+extra metadata here so it can cache local/remote addresses, remember the socket
+family, and share shutdown/close/deadline behavior with the poll layer.
 """
 mutable struct FD
     pfd::IOPoll.FD
@@ -138,6 +180,10 @@ end
     Conn
 
 User-facing connected TCP stream.
+
+Reads and writes are forwarded to `IOPoll`, which means blocking operations are
+actually readiness waits against the shared low-level poller rather than
+thread-per-socket blocking syscalls.
 """
 struct Conn
     fd::FD
@@ -147,6 +193,10 @@ end
     Listener
 
 User-facing passive TCP listener.
+
+Accepted children are returned as `Conn` values whose underlying sockets are
+already non-blocking, poll-registered, and configured with the default TCP
+options Reseau wants.
 """
 struct Listener
     fd::FD
@@ -237,6 +287,10 @@ function _set_remote_addr!(fd::FD)
 end
 
 function _finalize_connected_addrs!(fd::FD, fallback_remote::SocketAddr)
+    # `getpeername` can lag slightly behind the moment the kernel considers a
+    # non-blocking connect complete. We optimistically refresh both ends, but
+    # fall back to the requested remote address when the peer lookup is only
+    # temporarily unavailable.
     _set_local_addr!(fd)
     if fd.raddr === nothing
         try
@@ -281,6 +335,9 @@ function _wait_connect_complete!(
                     throw(ConnectCanceledError())
                 end
                 try
+                    # Windows completes the ConnectEx/IOCP path inside `IOPoll.connect!`.
+                    # Deadline expiry can still be the signal that the higher-level DNS
+                    # race lost, so we translate that case below.
                     IOPoll.connect!(fd.pfd, addrbuf, addrlen)
                 catch err
                     ex = err::Exception
@@ -298,6 +355,9 @@ function _wait_connect_complete!(
                 throw(ConnectCanceledError())
             end
             try
+                # This mirrors Go's non-blocking connect completion path:
+                # wait for writability, then inspect `SO_ERROR` to learn whether
+                # the connection actually succeeded.
                 IOPoll.wait_write!(fd.pfd.pd)
             catch err
                 ex = err::Exception
@@ -343,7 +403,14 @@ end
 """
     open_tcp_fd!(; family=AF_INET)
 
-Open a non-blocking, cloexec TCP socket and wrap it in `FD`.
+Open a non-blocking, close-on-exec TCP socket and wrap it in `FD`.
+
+This is the lowest-level TCP constructor exposed within the package. The
+returned descriptor is not yet registered with `IOPoll`; callers that plan to
+issue readiness-driven operations should call `IOPoll.init!` before use.
+
+Returns an internal `FD` object and throws `SystemError` on socket creation
+failure.
 """
 function open_tcp_fd!(; family::Cint = SocketOps.AF_INET)::FD
     sysfd = SocketOps.open_socket(family, SocketOps.SOCK_STREAM)
@@ -355,6 +422,21 @@ end
 
 Create and connect a non-blocking TCP `FD` using Go-style connect completion:
 wait write-ready, then verify with `SO_ERROR`.
+
+Arguments:
+- `remote_addr`: remote endpoint to connect to
+- `local_addr`: optional source address to bind before connecting
+- `connect_deadline_ns`: absolute monotonic deadline used for the write-wait path
+- `cancel_state`: internal cancellation hook used by parallel dial racing
+
+Returns the connected internal `FD`.
+
+Throws:
+- `ArgumentError` if local/remote address families do not match
+- `SystemError` for socket, bind, connect, or socket-option failures
+- `IOPoll.DeadlineExceededError` if the connect wait times out
+- `ConnectCanceledError` when a higher-level parallel dial path cancels the
+  attempt after another candidate wins
 """
 function connect_tcp_fd!(
         remote_addr::SocketAddr;
@@ -371,6 +453,8 @@ function connect_tcp_fd!(
         if local_addr !== nothing
             SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         elseif Sys.iswindows()
+            # ConnectEx requires the socket to be bound first, even when the user
+            # did not request a specific local address.
             _bind_connectex_local!(fd, family)
         end
         # Defensive re-assert: keep connect path non-blocking even if platform state drifts.
@@ -435,6 +519,13 @@ end
     listen_tcp_fd!(local_addr; backlog=128, reuseaddr=true)
 
 Create a listening TCP `FD` bound to `local_addr`.
+
+Keyword arguments:
+- `backlog`: listen backlog passed to the kernel
+- `reuseaddr`: whether to enable `SO_REUSEADDR` before binding
+
+Returns an internal listening `FD`. Throws `SystemError` on bind/listen/setup
+failures.
 """
 function listen_tcp_fd!(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::FD
     family = _addr_family(local_addr)
@@ -456,6 +547,9 @@ end
     accept_tcp_fd!(listener_fd)
 
 Accept a child TCP connection, retrying transient accept errors with Go parity.
+
+The returned child descriptor is already poll-initialized and has the default
+TCP options applied, so callers can immediately wrap it in `Conn`.
 """
 function accept_tcp_fd!(listener_fd::FD)::FD
     child_sysfd, peer_addr = IOPoll.accept!(listener_fd.pfd, listener_fd.family, listener_fd.sotype)
@@ -483,6 +577,9 @@ end
     connect(remote_addr; local_addr=nothing)
 
 Connect a TCP connection and return `Conn`.
+
+This is the simplest direct-address API. For name resolution, timeouts, local
+bind preferences, or Happy Eyeballs-style racing, use `HostResolvers.connect`.
 """
 function connect(remote_addr::SocketAddr; local_addr::Union{Nothing, SocketAddr} = nothing)::Conn
     return Conn(connect_tcp_fd!(remote_addr; local_addr = local_addr))
@@ -492,6 +589,8 @@ end
     listen(local_addr; backlog=128, reuseaddr=true)
 
 Create a TCP listener from a bound local address.
+
+This is the direct-address equivalent of `HostResolvers.listen`.
 """
 function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
     return Listener(listen_tcp_fd!(local_addr; backlog = backlog, reuseaddr = reuseaddr))
@@ -501,38 +600,80 @@ end
     accept!(listener)
 
 Accept a new `Conn` from `listener`.
+
+Throws `SystemError`, `IOPoll.DeadlineExceededError`, or other poll/transport
+errors if the underlying accept path fails.
 """
 function accept!(listener::Listener)::Conn
     return Conn(accept_tcp_fd!(listener.fd))
 end
 
+"""
+    read!(conn, buf) -> Int
+
+Read up to `length(buf)` bytes into `buf` and return the number of bytes read.
+
+Throws the same errors as `IOPoll.read!`, including deadline and close-related
+exceptions.
+"""
 function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
     return IOPoll.read!(conn.fd.pfd, buf)
 end
 
+"""
+    write(conn, buf) -> Int
+
+Write bytes from `buf` and return the number of bytes written.
+"""
 function Base.write(conn::Conn, buf::Vector{UInt8})::Int
     return IOPoll.write!(conn.fd.pfd, buf)
 end
 
+"""
+    write(conn, buf, nbytes) -> Int
+
+Write the first `nbytes` bytes from `buf` and return the number of bytes
+written.
+"""
 function Base.write(conn::Conn, buf::Memory{UInt8}, nbytes::Integer)::Int
     return IOPoll.write!(conn.fd.pfd, buf, nbytes)
 end
 
+"""
+    close!(conn)
+
+Close the connection. Repeated closes are treated as no-ops.
+"""
 function close!(conn::Conn)
     close!(conn.fd)
     return nothing
 end
 
+"""
+    close!(listener)
+
+Close the listening socket. Repeated closes are treated as no-ops.
+"""
 function close!(listener::Listener)
     close!(listener.fd)
     return nothing
 end
 
+"""
+    close_read!(conn)
+
+Shut down the read side of the TCP connection.
+"""
 function close_read!(conn::Conn)
     SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_RD)
     return nothing
 end
 
+"""
+    close_write!(conn)
+
+Shut down the write side of the TCP connection.
+"""
 function close_write!(conn::Conn)
     SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_WR)
     return nothing
@@ -598,6 +739,11 @@ function set_write_deadline!(conn::Conn, deadline_ns::Integer)
     return nothing
 end
 
+"""
+    set_nodelay!(conn, enabled=true)
+
+Enable or disable `TCP_NODELAY` on `conn`.
+"""
 function set_nodelay!(conn::Conn, enabled::Bool = true)
     SocketOps.set_sockopt_int(
         conn.fd.pfd.sysfd,
@@ -608,6 +754,11 @@ function set_nodelay!(conn::Conn, enabled::Bool = true)
     return nothing
 end
 
+"""
+    set_keepalive!(conn, enabled=true)
+
+Enable or disable `SO_KEEPALIVE` on `conn`.
+"""
 function set_keepalive!(conn::Conn, enabled::Bool = true)
     SocketOps.set_sockopt_int(
         conn.fd.pfd.sysfd,
@@ -618,14 +769,29 @@ function set_keepalive!(conn::Conn, enabled::Bool = true)
     return nothing
 end
 
+"""
+    local_addr(conn) -> Union{Nothing, SocketAddr}
+
+Return the cached local endpoint for `conn`, if known.
+"""
 function local_addr(conn::Conn)::Union{Nothing, SocketAddr}
     return conn.fd.laddr
 end
 
+"""
+    remote_addr(conn) -> Union{Nothing, SocketAddr}
+
+Return the cached remote endpoint for `conn`, if known.
+"""
 function remote_addr(conn::Conn)::Union{Nothing, SocketAddr}
     return conn.fd.raddr
 end
 
+"""
+    addr(listener) -> Union{Nothing, SocketAddr}
+
+Return the listener's bound local endpoint, if known.
+"""
 function addr(listener::Listener)::Union{Nothing, SocketAddr}
     return listener.fd.laddr
 end

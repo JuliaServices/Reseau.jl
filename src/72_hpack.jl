@@ -11,6 +11,12 @@ export set_max_dynamic_table_size!
     HeaderField
 
 One HPACK header field entry.
+
+Fields:
+- `name`: lower-level header name exactly as encoded/decoded
+- `value`: header value
+- `sensitive`: when `true`, the encoder avoids dynamic-table indexing so the
+  value is not retained in compression state
 """
 struct HeaderField
     name::String
@@ -28,6 +34,10 @@ end
     DynamicTable(max_size=4096)
 
 Mutable HPACK dynamic table for recently indexed header fields.
+
+The table follows RFC 7541's size accounting rules (`32 + |name| + |value|` per
+entry) and evicts from the end when the size limit is lowered or new indexed
+entries would overflow capacity.
 """
 mutable struct DynamicTable
     entries::Vector{DynamicTableEntry}
@@ -38,7 +48,11 @@ end
 """
     Encoder(; max_table_size=4096)
 
-Stateful HPACK encoder that tracks dynamic table updates.
+Stateful HPACK encoder that tracks peer-visible dynamic table updates.
+
+Like Go's HPACK encoder, this object is stateful: successive calls to
+`encode_header_block` reuse the same dynamic table and may emit table-size
+update instructions before the next header block.
 """
 mutable struct Encoder
     table::DynamicTable
@@ -50,7 +64,8 @@ end
 """
     Decoder(; max_table_size=4096)
 
-Stateful HPACK decoder that tracks peer dynamic table state.
+Stateful HPACK decoder that tracks peer dynamic table state across header
+blocks.
 """
 mutable struct Decoder
     table::DynamicTable
@@ -714,7 +729,9 @@ end
 function _encode_string!(out::Vector{UInt8}, value::String)
     raw_len = ncodeunits(value)
     huff_len = _huffman_encoded_length(value)
-    # Same policy as Go: use Huffman only when encoded payload is strictly smaller.
+    # Match Go's HPACK policy: Huffman is only chosen when it produces a
+    # strictly smaller payload. This keeps encode/decode behavior predictable
+    # and avoids paying the CPU cost for ties.
     if huff_len < raw_len
         _encode_integer!(out, huff_len, 7, 0x80)
         _append_huffman_string!(out, value)
@@ -816,12 +833,20 @@ end
 """
     encode_header_block(encoder, headers)
 
-Encode HPACK header fields into a header block fragment.
+Encode HPACK header fields into one HPACK header block fragment.
+
+The returned `Vector{UInt8}` is suitable for a single HEADERS/CONTINUATION
+fragment sequence. The encoder's dynamic table may be mutated as a side effect.
+Throws `ArgumentError` for invalid sizing inputs and `ProtocolError` if an
+indexed lookup becomes inconsistent.
 """
 function encode_header_block(encoder::Encoder, headers::Vector{HeaderField})::Vector{UInt8}
     out = UInt8[]
     _emit_table_size_updates!(out, encoder)
     for header in headers
+        # Prefer the most compact representation available, in the same order
+        # Go's HPACK encoder reasons about it: exact indexed match, indexed-name
+        # literal with optional insertion, then literal new-name forms.
         exact = _find_exact_index(encoder.table, header.name, header.value)
         if exact > 0
             _encode_indexed!(out, exact)
@@ -866,7 +891,11 @@ end
 """
     decode_header_block(decoder, block)
 
-Decode an HPACK header block fragment into header fields.
+Decode one HPACK header block fragment into a `Vector{HeaderField}`.
+
+The decoder's dynamic table is updated as encoded instructions are processed.
+Throws `ParseError` for malformed integer/string encodings and `ProtocolError`
+for invalid indexing semantics.
 """
 function decode_header_block(decoder::Decoder, block::Vector{UInt8})::Vector{HeaderField}
     headers = HeaderField[]

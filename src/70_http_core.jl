@@ -28,22 +28,46 @@ export cancel!
 export canceled
 export expired
 
-"""Raised for malformed HTTP syntax during parsing."""
+"""
+    ParseError
+
+Raised when byte-level HTTP syntax cannot be parsed. This is used for malformed
+request/status lines, invalid header syntax, truncated framed bodies, and other
+wire-format failures where the peer did not send valid HTTP.
+"""
 struct ParseError <: Exception
     message::String
 end
 
-"""Raised for semantic HTTP protocol violations."""
+"""
+    ProtocolError
+
+Raised when the bytes are syntactically valid but violate higher-level HTTP
+rules. Examples include mismatched `Content-Length` values, impossible frame
+ordering, or unsupported control-flow states in the client/server stacks.
+"""
 struct ProtocolError <: Exception
     message::String
 end
 
-"""Raised when request processing is explicitly canceled."""
+"""
+    CanceledError
+
+Raised when request processing is canceled explicitly through `RequestContext`.
+Unlike `ParseError` and `ProtocolError`, this usually reflects local control
+flow rather than a bad peer.
+"""
 struct CanceledError <: Exception
     message::String
 end
 
-"""Raised when a timeout/deadline expires for an HTTP operation."""
+"""
+    HTTPTimeoutError
+
+Raised when an HTTP-layer deadline expires. This is intentionally separate from
+lower-level socket timeout exceptions so higher layers can distinguish "request
+context expired" from transport-specific readiness or handshake failures.
+"""
 struct HTTPTimeoutError <: Exception
     operation::String
     timeout_ns::Int64
@@ -119,9 +143,16 @@ const _COMMON_CANONICAL_HEADER_KEYS = let headers = (
 end
 
 """
-    canonical_header_key(key)
+    canonical_header_key(key) -> String
 
-Canonicalize header keys using Go-like MIME canonicalization rules.
+Canonicalize a header field name using the same "MIME canonical form" used by
+Go's `textproto.CanonicalMIMEHeaderKey`: the first character and every
+character after `-` is uppercased; other ASCII letters are lowercased.
+
+Returns a newly owned `String` unless `key` is already in canonical form, in
+which case a cached common-header string may be reused. This function does not
+validate that `key` is a legal HTTP token; callers are still responsible for
+protocol validation where needed.
 """
 function canonical_header_key(key::AbstractString)::String
     isempty(key) && return ""
@@ -165,18 +196,31 @@ end
     Headers
 
 Ordered, case-canonicalized HTTP header map.
+
+`Headers` deliberately preserves insertion order for keys while storing one
+vector of values per canonicalized name. That mirrors the parts of Go's
+`http.Header` behavior that are useful to higher layers:
+- key lookups are case-insensitive after canonicalization
+- repeated headers preserve value order
+- header iteration is stable and reflects the original append/replace pattern
 """
 mutable struct Headers
     order::Vector{String}
     values::Dict{String, Vector{String}}
 end
 
-"""Create an empty ordered header collection."""
+"""Create and return an empty `Headers` collection."""
 function Headers()
     return Headers(String[], Dict{String, Vector{String}}())
 end
 
-"""Create an empty ordered header collection with preallocation hint."""
+"""
+    Headers(hint)
+
+Create an empty `Headers` collection and use `hint` as a preallocation hint for
+both the key-order vector and backing dictionary. Throws `ArgumentError` when
+`hint < 0`.
+"""
 function Headers(hint::Integer)
     hint < 0 && throw(ArgumentError("hint must be >= 0"))
     order = String[]
@@ -186,7 +230,13 @@ function Headers(hint::Integer)
     return Headers(order, values)
 end
 
-"""Deep copy constructor for header collections."""
+"""
+    Headers(headers)
+
+Deep-copy constructor for header collections. Both the ordered key list and
+every value vector are copied, so mutating the result does not affect the
+source.
+"""
 function Headers(headers::Headers)
     copied = Dict{String, Vector{String}}()
     for key in headers.order
@@ -213,18 +263,23 @@ function Base.empty!(headers::Headers)
     return headers
 end
 
-"""Return header keys in insertion order."""
+"""Return a newly allocated `Vector{String}` of header keys in insertion order."""
 function header_keys(headers::Headers)::Vector{String}
     return copy(headers.order)
 end
 
-"""Check whether a header key exists."""
+"""Return `true` when `headers` contains at least one value for `key`."""
 function has_header(headers::Headers, key::AbstractString)::Bool
     canon = canonical_header_key(key)
     return haskey(headers.values, canon)
 end
 
-"""Return all values for a header key."""
+"""
+    get_headers(headers, key) -> Vector{String}
+
+Return a freshly allocated vector containing all values for `key` in stored
+order. Returns `String[]` when the header is absent.
+"""
 function get_headers(headers::Headers, key::AbstractString)::Vector{String}
     canon = canonical_header_key(key)
     values = get(() -> nothing, headers.values, canon)
@@ -232,7 +287,7 @@ function get_headers(headers::Headers, key::AbstractString)::Vector{String}
     return copy(values::Vector{String})
 end
 
-"""Return first header value for a key, or `nothing`."""
+"""Return the first value for `key`, or `nothing` if the header is absent."""
 function get_header(headers::Headers, key::AbstractString)::Union{Nothing, String}
     canon = canonical_header_key(key)
     values = get(() -> nothing, headers.values, canon)
@@ -241,7 +296,13 @@ function get_header(headers::Headers, key::AbstractString)::Union{Nothing, Strin
     return values[1]
 end
 
-"""Replace header key with a single value."""
+"""
+    set_header!(headers, key, value) -> Headers
+
+Replace all existing values for `key` with a single `value`, preserving the
+original key position if the key already exists and appending it otherwise.
+Returns the mutated `headers`.
+"""
 function set_header!(headers::Headers, key::AbstractString, value::AbstractString)
     canon = canonical_header_key(key)
     if haskey(headers.values, canon)
@@ -253,7 +314,7 @@ function set_header!(headers::Headers, key::AbstractString, value::AbstractStrin
     return headers
 end
 
-"""Append one value for a header key."""
+"""Append one additional value for `key` and return the mutated `headers`."""
 function add_header!(headers::Headers, key::AbstractString, value::AbstractString)
     canon = canonical_header_key(key)
     values = get(() -> nothing, headers.values, canon)
@@ -266,7 +327,7 @@ function add_header!(headers::Headers, key::AbstractString, value::AbstractStrin
     return headers
 end
 
-"""Delete a header key and all associated values."""
+"""Delete `key` and all associated values, then return the mutated `headers`."""
 function delete_header!(headers::Headers, key::AbstractString)
     canon = canonical_header_key(key)
     haskey(headers.values, canon) || return headers
@@ -310,10 +371,14 @@ end
 end
 
 """
-    has_header_token(headers, key, token)
+    has_header_token(headers, key, token) -> Bool
 
-Return `true` when a comma-separated header value contains `token`
-case-insensitively (e.g. `Connection: close`).
+Return `true` when a comma-separated header field contains `token`
+case-insensitively after trimming optional whitespace.
+
+This is the helper used for semantics like `Connection: close` and
+`Transfer-Encoding: chunked`, where RFCs define one header line as a list of
+tokens rather than one opaque string.
 """
 function has_header_token(headers::Headers, key::AbstractString, token::AbstractString)::Bool
     needle = _ascii_lowercase_string(_trim_http_ows(token))
@@ -349,7 +414,15 @@ end
 """
     RequestContext(; deadline_ns=0)
 
-Per-request cancellation and deadline metadata.
+Per-request cancellation and deadline metadata shared across the HTTP client and
+server layers.
+
+Arguments:
+- `deadline_ns`: absolute monotonic deadline in nanoseconds, or `0` to disable
+  deadline tracking.
+
+The context itself does not schedule timers; it is a passive state container
+that transport code consults before or during blocking operations.
 """
 mutable struct RequestContext
     deadline_ns::Int64
@@ -357,64 +430,106 @@ mutable struct RequestContext
     cancel_message::Union{Nothing, String}
 end
 
-"""Create a request context with optional absolute deadline (ns)."""
+"""Construct a `RequestContext`; throws `ArgumentError` when `deadline_ns < 0`."""
 function RequestContext(; deadline_ns::Integer = Int64(0))
     deadline_ns < 0 && throw(ArgumentError("deadline_ns must be >= 0"))
     return RequestContext(Int64(deadline_ns), false, nothing)
 end
 
-"""Set absolute deadline timestamp in nanoseconds."""
+"""
+    set_deadline!(ctx, deadline_ns) -> RequestContext
+
+Set an absolute monotonic deadline in nanoseconds. Passing `0` clears any
+deadline. Throws `ArgumentError` when `deadline_ns < 0`.
+"""
 function set_deadline!(ctx::RequestContext, deadline_ns::Integer)
     deadline_ns < 0 && throw(ArgumentError("deadline_ns must be >= 0"))
     ctx.deadline_ns = Int64(deadline_ns)
     return ctx
 end
 
-"""Mark context canceled with an optional message."""
+"""
+    cancel!(ctx; message="request canceled") -> RequestContext
+
+Mark `ctx` canceled and store a human-readable message for higher layers. This
+does not throw on its own; callers typically check `canceled(ctx)` or turn the
+state into a `CanceledError`.
+"""
 function cancel!(ctx::RequestContext; message::AbstractString = "request canceled")
     @atomic :release ctx.canceled_flag = true
     ctx.cancel_message = String(message)
     return ctx
 end
 
-"""Return whether context has been canceled."""
+"""Return `true` once `cancel!` has been called for `ctx`."""
 function canceled(ctx::RequestContext)::Bool
     return @atomic :acquire ctx.canceled_flag
 end
 
-"""Return whether context deadline has passed."""
+"""
+    expired(ctx, now_ns=time_ns()) -> Bool
+
+Return `true` when `ctx.deadline_ns` is non-zero and less than or equal to
+`now_ns`. `now_ns` is injectable so tests and higher-level schedulers can reuse
+an already-sampled monotonic timestamp.
+"""
 function expired(ctx::RequestContext, now_ns::Integer = time_ns())::Bool
     deadline = ctx.deadline_ns
     deadline <= 0 && return false
     return Int64(now_ns) >= deadline
 end
 
+"""
+    AbstractBody
+
+Abstract streaming body interface used throughout the HTTP stack.
+
+Concrete subtypes are expected to implement:
+- `body_read!(body, dst)::Int`
+- `body_close!(body)`
+- `body_closed(body)::Bool`
+
+`body_read!` must return the number of bytes written into `dst`, with `0`
+signaling EOF. Implementations may throw transport-specific exceptions.
+"""
 abstract type AbstractBody end
 
-"""Empty body implementation."""
+"""Zero-length body that immediately reports EOF and ignores close requests."""
 struct EmptyBody <: AbstractBody
 end
 
-"""In-memory byte-backed body implementation."""
+"""
+    BytesBody(data)
+
+Simple in-memory body backed by a copied `Vector{UInt8}`. Reads advance an
+internal cursor until EOF; closing marks the body closed but does not free or
+truncate the stored bytes.
+"""
 mutable struct BytesBody <: AbstractBody
     data::Vector{UInt8}
     next_index::Int
     @atomic closed::Bool
 end
 
-"""Create a byte body from a vector-like input."""
+"""Copy `data` into a new `BytesBody` and reset the read cursor to the start."""
 function BytesBody(data::AbstractVector{UInt8})
     return BytesBody(copy(data), 1, false)
 end
 
-"""Callback-driven streaming body implementation."""
+"""
+    CallbackBody(read_cb, close_cb)
+
+Callback-driven streaming body. `read_cb(dst)` must return the number of bytes
+written into `dst`, and `close_cb()` is invoked once when the body is closed.
+This is the escape hatch for non-buffered request or response bodies.
+"""
 mutable struct CallbackBody{R, C} <: AbstractBody
     read_cb::R
     close_cb::C
     @atomic closed::Bool
 end
 
-"""Create a callback body from read and close callbacks."""
+"""Construct a `CallbackBody` from read and close callbacks."""
 function CallbackBody(read_cb::R, close_cb::C) where {R, C}
     return CallbackBody{R, C}(read_cb, close_cb, false)
 end
@@ -431,7 +546,14 @@ function body_closed(body::CallbackBody)::Bool
     return @atomic :acquire body.closed
 end
 
-"""Generic body read API (returns bytes read, `0` on EOF)."""
+"""
+    body_read!(body, dst) -> Int
+
+Read up to `length(dst)` bytes into `dst`. Returns `0` on EOF.
+
+Concrete body types may throw `ProtocolError`, transport errors, or body-
+specific exceptions if the stream is malformed or the backing connection fails.
+"""
 function body_read!(::EmptyBody, dst::Vector{UInt8})::Int
     _ = dst
     return 0
@@ -456,7 +578,12 @@ function body_read!(body::CallbackBody, dst::Vector{UInt8})::Int
     return n
 end
 
-"""Generic body close API."""
+"""
+    body_close!(body)
+
+Release any resources held by `body`. Implementations should be idempotent so
+callers can safely close in `finally` blocks.
+"""
 function body_close!(::EmptyBody)
     return nothing
 end
@@ -475,9 +602,24 @@ function body_close!(body::CallbackBody)
 end
 
 """
-    Request(method, target; ...)
+    Request(method, target; headers=Headers(), trailers=Headers(), body=EmptyBody(), host=nothing,
+            content_length=-1, proto_major=1, proto_minor=1, close=false,
+            context=RequestContext())
 
-HTTP request object used across client and server stacks.
+HTTP request object shared by the client and server stacks.
+
+Keyword arguments:
+- `headers`, `trailers`: copied into the request.
+- `body`: any `AbstractBody`; ownership stays with the request.
+- `host`: optional authority used for HTTP/1 `Host` and HTTP/2 `:authority`.
+- `content_length`: exact byte length, or `-1` when unknown.
+- `proto_major`, `proto_minor`: protocol version metadata.
+- `close`: request/connection-close hint.
+- `context`: cancellation/deadline metadata consulted by higher layers.
+
+Returns a new `Request{B}` where `B` is the concrete body type. Throws
+`ArgumentError` for invalid protocol numbers, empty method/target, or
+`content_length < -1`.
 """
 mutable struct Request{B <: AbstractBody}
     method::String
@@ -493,7 +635,6 @@ mutable struct Request{B <: AbstractBody}
     context::RequestContext
 end
 
-"""Construct a `Request` with validated metadata and copied headers."""
 function Request(
         method::AbstractString,
         target::AbstractString;
@@ -529,9 +670,18 @@ function Request(
 end
 
 """
-    Response(status_code; ...)
+    Response(status_code; reason="", headers=Headers(), trailers=Headers(), body=EmptyBody(),
+             content_length=-1, proto_major=1, proto_minor=1, close=false,
+             request=nothing)
 
-HTTP response object used across client and server stacks.
+HTTP response object shared by the client and server stacks.
+
+Keyword arguments mirror `Request` closely. `request` optionally links the
+response back to the originating request, which is especially useful in client
+redirect flows and server handler pipelines.
+
+Returns a new `Response{B}` where `B` is the concrete body type. Throws
+`ArgumentError` for invalid status or protocol metadata.
 """
 mutable struct Response{B <: AbstractBody}
     status_code::Int
@@ -546,7 +696,6 @@ mutable struct Response{B <: AbstractBody}
     request::Union{Nothing, Request}
 end
 
-"""Construct a `Response` with validated metadata and copied headers."""
 function Response(
         status_code::Integer;
         reason::AbstractString = "",

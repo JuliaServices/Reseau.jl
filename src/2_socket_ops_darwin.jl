@@ -1,5 +1,9 @@
 # Darwin socket syscall bindings used by `SocketOps`.
-# Wrappers normalize retry/error behavior and expose consistent errno semantics.
+#
+# Darwin lacks Linux's atomic `SOCK_NONBLOCK`/`SOCK_CLOEXEC` and `accept4`
+# convenience flags, so this backend has a few more post-open/post-accept fixup
+# steps. The higher layers still get the same contract: sockets handed to the
+# poller are ready for non-blocking, close-on-exec use.
 const _F_GETFD = Cint(1)
 const _F_SETFD = Cint(2)
 const _F_GETFL = Cint(3)
@@ -104,6 +108,13 @@ end
     open_socket(family, sotype, proto=0)
 
 Create a socket and configure it as close-on-exec and non-blocking.
+
+Darwin requires setting both flags after `socket`, so there is a narrow race
+window compared with Linux. The TODO below mirrors the same concern in Go's
+runtime: ideally the descriptor would be protected from fork/exec inheritance
+even before `fcntl(F_SETFD)` runs.
+
+Returns the new file descriptor or throws `SystemError` on failure.
 """
 function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
     # TODO(go-parity): Go holds a spawn/exec fork lock around `socket` + CLOEXEC on Darwin
@@ -126,6 +137,10 @@ end
 
 Best-effort close that returns `0` for success/consumed close errors and
 `EBADF` when the descriptor is invalid.
+
+On BSD/Darwin, `close` usually consumes the descriptor number even if it reports
+an error. Surfacing only `EBADF` keeps callers from retrying `close` on an fd
+number that may already have been reused for a different socket.
 """
 function close_socket_nothrow(fd::Cint)::Int32
     ret = @ccall close(fd::Cint)::Cint
@@ -198,6 +213,17 @@ function connect_socket(fd::Cint, addr::SockAddrIn6)::Int32
     end
 end
 
+"""
+    connect_socket(fd, addr::Ptr{Cvoid}, addrlen::SockLen) -> Int32
+
+Attempt one non-blocking connect and return the raw errno-style result expected
+by the transport layer.
+
+`0` means the socket connected immediately. `EINPROGRESS` and similar values are
+not treated as exceptional here; they are returned so `TCP.connect_tcp_fd!` can
+switch into the poll-driven "wait writable, then inspect `SO_ERROR`" path used
+by Go as well.
+"""
 function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
     # Exposes raw errno (e.g. EINPROGRESS) so upper layers can drive connect via poll.
     ret = @ccall gc_safe = true connect(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Cint
@@ -222,6 +248,11 @@ end
     try_accept_socket(fd)
 
 Perform one non-blocking `accept` attempt and return `(newfd, peer, errno)`.
+
+Because Darwin does not provide `accept4`, the accepted descriptor must be
+manually marked close-on-exec and non-blocking before it is handed upward. If
+either fixup fails, the child socket is immediately closed and the failure is
+reported through the returned errno.
 """
 function try_accept_socket(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()
@@ -255,6 +286,9 @@ end
     accept_socket(fd)
 
 Accept a connection or throw `SystemError` on failure.
+
+This is the throwing wrapper over `try_accept_socket` for callers that prefer
+exception-based control flow.
 """
 function accept_socket(fd::Cint)::Cint
     newfd, _, errno = try_accept_socket(fd)
@@ -262,6 +296,11 @@ function accept_socket(fd::Cint)::Cint
     _throw_errno("accept", errno)
 end
 
+"""
+    get_sockopt_int(fd, level, optname) -> Int32
+
+Read an integer socket option and return it in host byte order.
+"""
 function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
     value = Ref{Cint}(0)
     optlen = Ref{SockLen}(SockLen(sizeof(Cint)))
@@ -280,6 +319,11 @@ function get_sockopt_int(fd::Cint, level::Cint, optname::Cint)::Int32
     end
 end
 
+"""
+    set_sockopt_int(fd, level, optname, value)
+
+Write an integer socket option.
+"""
 function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     raw = Ref{Cint}(Cint(value))
     while true
@@ -297,6 +341,12 @@ function set_sockopt_int(fd::Cint, level::Cint, optname::Cint, value::Integer)
     end
 end
 
+"""
+    get_socket_error(fd) -> Int32
+
+Read `SO_ERROR`, primarily for completing non-blocking connect attempts after a
+write-readiness notification.
+"""
 function get_socket_error(fd::Cint)::Int32
     return get_sockopt_int(fd, SOL_SOCKET, SO_ERROR)
 end
@@ -349,6 +399,11 @@ function get_peer_name_in6(fd::Cint)::SockAddrIn6
     end
 end
 
+"""
+    shutdown_socket(fd, how)
+
+Half-close or fully close the directions designated by `how`.
+"""
 function shutdown_socket(fd::Cint, how::Integer)
     while true
         ret = @ccall gc_safe = true shutdown(fd::Cint, Cint(how)::Cint)::Cint
@@ -359,6 +414,11 @@ function shutdown_socket(fd::Cint, how::Integer)
     end
 end
 
+"""
+    read_once!(fd, ptr, nbytes) -> Cssize_t
+
+Perform exactly one raw `read(2)` attempt, retrying only `EINTR`.
+"""
 function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     # Single read syscall with EINTR retry; caller owns EAGAIN and short-read handling.
     while true
@@ -370,6 +430,11 @@ function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     end
 end
 
+"""
+    write_once!(fd, ptr, nbytes) -> Cssize_t
+
+Perform exactly one raw `write(2)` attempt, retrying only `EINTR`.
+"""
 function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     # Single write syscall with EINTR retry; caller owns EAGAIN and short-write handling.
     while true

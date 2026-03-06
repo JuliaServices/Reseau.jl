@@ -137,6 +137,10 @@ end
     Framer(io; max_frame_size=16384)
 
 Frame reader/writer for an `IO` stream.
+
+`Framer` is intentionally low-level: it deals only with HTTP/2 frame boundaries
+and per-frame validation, not stream state machines or HPACK. Higher layers are
+responsible for enforcing sequencing rules such as CONTINUATION ownership.
 """
 mutable struct Framer{I <: IO}
     io::I
@@ -147,6 +151,10 @@ end
     Framer(io; max_frame_size=16384)
 
 Construct an HTTP/2 framer with the configured frame-size limit.
+
+`max_frame_size` is the receive/send safety limit enforced by this local
+framer, not necessarily the peer's advertised SETTINGS value. Throws
+`ArgumentError` unless the size is within RFC 7540's legal range.
 """
 function Framer(io::I; max_frame_size::Integer = 16_384) where {I <: IO}
     max_frame_size >= 16_384 || throw(ArgumentError("HTTP/2 max_frame_size must be >= 16384"))
@@ -229,11 +237,21 @@ end
     read_frame!(framer)
 
 Read and decode one HTTP/2 frame from `framer.io`.
+
+Returns a concrete `AbstractFrame` subtype.
+
+Throws:
+- `ParseError` for malformed wire payloads
+- `ProtocolError` for locally enforced invariants such as frame-size overflow
+- `EOFError` or other I/O exceptions from the underlying stream
 """
 function read_frame!(framer::Framer)::AbstractFrame
     header = _read_frame_header!(framer.io)
     header.length <= framer.max_frame_size || throw(ProtocolError("HTTP/2 frame exceeds max_frame_size"))
     payload = _read_exact_bytes!(framer.io, header.length)
+    # This function intentionally validates only frame-local invariants. Stream-
+    # level rules such as "HEADERS must precede DATA" live in the client/server
+    # state machines above the framer.
     if header.type == FRAME_DATA
         return DataFrame(header.stream_id, (header.flags & FLAG_END_STREAM) != 0, payload)
     end
@@ -375,6 +393,10 @@ end
     write_frame!(framer, frame)
 
 Serialize and write one HTTP/2 frame to `framer.io`.
+
+Returns `nothing`. Throws `ProtocolError` or `ArgumentError` for frames that
+cannot be represented legally, plus any exception raised by the underlying
+`IO`.
 """
 function write_frame!(framer::Framer, frame::AbstractFrame)
     header, payload = _serialize_frame(frame)

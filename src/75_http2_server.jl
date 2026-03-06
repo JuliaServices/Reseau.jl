@@ -8,6 +8,16 @@ using ..Reseau.TCP
 using ..Reseau.HostResolvers
 using ..Reseau.IOPoll
 
+"""
+    H2Server
+
+Minimal HTTP/2 server wrapper around a TCP listener and request handler.
+
+The current implementation keeps the concurrency model intentionally simple:
+one connection task reads frames, aggregates a full request per stream, and then
+invokes the handler. That is enough for parity-focused testing even though it is
+not yet a fully general production scheduler.
+"""
 mutable struct H2Server{F}
     network::String
     address::String
@@ -24,6 +34,14 @@ end
     H2Server(; network="tcp", address="127.0.0.1:0", handler)
 
 Create an HTTP/2 server configured with a request handler.
+
+Arguments:
+- `network`: transport network passed to `HostResolvers.listen`
+- `address`: bind address, typically `host:port`
+- `handler`: function taking `Request` and returning `Response`
+
+Returns a new `H2Server`. Handler validation is deferred until requests are
+served.
 """
 function H2Server(; network::AbstractString = "tcp", address::AbstractString = "127.0.0.1:0", handler)
     return H2Server{typeof(handler)}(
@@ -47,6 +65,8 @@ end
     h2_server_addr(server)
 
 Return the bound `host:port` after the server starts listening.
+
+Throws `ProtocolError` if the server has not started listening yet.
 """
 function h2_server_addr(server::H2Server)::String
     lock(server.lock)
@@ -213,8 +233,10 @@ function _serve_h2_conn!(server::H2Server, conn::TCP.Conn)
         client_settings isa SettingsFrame || throw(ProtocolError("expected initial h2 SETTINGS frame"))
         _write_frame_h2_server!(conn, SettingsFrame(false, Pair{UInt16, UInt32}[]))
         _write_frame_h2_server!(conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
-        # Simple per-stream aggregation: collect HEADERS/CONTINUATION and DATA until
-        # both header and body sides complete, then dispatch to the handler.
+        # The server keeps a deliberately simple stream model for now: collect
+        # HEADERS/CONTINUATION fragments and DATA bytes until the full request
+        # is available, then dispatch once. That keeps the implementation easy
+        # to reason about while the lower-level protocol pieces settle.
         headers_block = Dict{UInt32, Vector{UInt8}}()
         body_block = Dict{UInt32, Vector{UInt8}}()
         headers_done = Dict{UInt32, Bool}()
@@ -346,6 +368,9 @@ end
     start_h2_server!(server)
 
 Start accepting HTTP/2 connections on a background task.
+
+Returns the spawned listener `Task`. The server's effective bound address can
+be queried afterwards with `h2_server_addr`.
 """
 function start_h2_server!(server::H2Server)::Task
     listener = HostResolvers.listen(server.network, server.address; backlog = 128)
@@ -374,7 +399,13 @@ end
 """
     shutdown_h2_server!(server; force=true)
 
-Stop listener accept loop and optionally close active connections.
+Stop the listener accept loop and optionally close active connections.
+
+Arguments:
+- `force`: when `true`, immediately closes all currently tracked connections
+
+Returns `nothing`. Shutdown is best-effort; close failures are suppressed so the
+server can continue unwinding other resources.
 """
 function shutdown_h2_server!(server::H2Server; force::Bool = true)
     @atomic :release server.shutting_down = true

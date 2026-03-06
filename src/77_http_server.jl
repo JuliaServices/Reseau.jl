@@ -10,6 +10,15 @@ using ..Reseau.TCP
 using ..Reseau.HostResolvers
 using ..Reseau.IOPoll
 
+"""
+    Server
+
+HTTP/1 server state for one listening endpoint plus its active connection set.
+
+The server is intentionally small and synchronous in the style of Go's early
+`net/http` building blocks: each accepted connection is handled on its own task
+and request parsing/writing is performed directly against the TCP stream.
+"""
 mutable struct Server
     network::String
     address::String
@@ -32,6 +41,18 @@ end
     Server(; network="tcp", address="127.0.0.1:0", handler, ...)
 
 Create an HTTP server with timeouts and parser limits.
+
+Keyword arguments:
+- `network`, `address`: bind information passed to `HostResolvers.listen`
+- `handler`: function taking `Request` and returning `Response`
+- `read_timeout_ns`: whole-request read deadline once a request is underway
+- `read_header_timeout_ns`: stricter deadline while waiting for request headers
+- `write_timeout_ns`: response write deadline
+- `idle_timeout_ns`: keep-alive idle timeout between requests
+- `max_header_bytes`: aggregate request-header size cap
+
+Returns a mutable `Server`. Throws `ArgumentError` for invalid timeout or size
+limits.
 """
 function Server(;
         network::AbstractString = "tcp",
@@ -75,6 +96,8 @@ end
     server_addr(server)
 
 Return the effective bound `host:port` once listening starts.
+
+Throws `ProtocolError` if the server has not started listening yet.
 """
 function server_addr(server::Server)::String
     lock(server.lock)
@@ -225,6 +248,10 @@ end
     serve!(server, listener)
 
 Serve requests from an existing listener until shutdown.
+
+Each accepted connection is handed to a background task that processes
+sequential HTTP/1 requests on that socket until the peer closes, an error
+occurs, or shutdown is requested.
 """
 function serve!(server::Server, listener::TCP.Listener)
     _server_shutting_down(server) && throw(ProtocolError("server is shutting down"))
@@ -269,7 +296,10 @@ end
 """
     listen_and_serve!(server)
 
-Listen then serve using `server.network` and `server.address`.
+Listen and then serve using `server.network` and `server.address`.
+
+Returns `nothing` when serving stops. Listener cleanup is performed in a
+`finally` block so shutdown paths do not leak the bound socket.
 """
 function listen_and_serve!(server::Server)
     listener = HostResolvers.listen(server.network, server.address; backlog = 128)
@@ -288,6 +318,8 @@ end
     start!(server)
 
 Start `listen_and_serve!` on a background task.
+
+Returns the spawned `Task`, which is also stored on `server.serve_task`.
 """
 function start!(server::Server)::Task
     task = errormonitor(Threads.@spawn listen_and_serve!(server))
@@ -343,6 +375,13 @@ end
     shutdown!(server; force=false, timeout_s=5.0)
 
 Request graceful shutdown, optionally force-closing active connections.
+
+Arguments:
+- `force`: when `true`, close active connections after the listener stops
+- `timeout_s`: best-effort waiting budget for listener and connection tasks
+
+Returns `nothing`. Shutdown suppresses close errors so one stuck connection does
+not prevent the rest of the server from unwinding.
 """
 function shutdown!(server::Server; force::Bool = false, timeout_s::Float64 = 5.0)
     @atomic :release server.shutting_down = true

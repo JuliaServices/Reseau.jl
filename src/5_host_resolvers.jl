@@ -2,6 +2,14 @@
     HostResolvers
 
 Address parsing, name resolution, and connect/listen orchestration APIs.
+
+This layer is the bridge between string-oriented user input like
+`"example.com:443"` and the lower-level `TCP` primitives that operate on concrete
+socket addresses. The overall shape intentionally follows Go's `net` package:
+- parse and canonicalize host/port strings
+- resolve hostnames according to a resolver policy
+- attempt connections serially or in a Happy Eyeballs-style race
+- wrap failures in an operation-specific error that preserves context
 """
 module HostResolvers
 
@@ -81,6 +89,14 @@ abstract type AbstractResolver end
     ResolverPolicy
 
 Host-resolution filtering and preference policy.
+
+Fields:
+- `prefer_ipv6`: sort mixed-family results so IPv6 candidates come first for the
+  generic `tcp` network
+- `allow_ipv4`: keep IPv4 candidates in the result set
+- `allow_ipv6`: keep IPv6 candidates in the result set
+
+At least one family must remain enabled.
 """
 struct ResolverPolicy
     prefer_ipv6::Bool
@@ -96,7 +112,9 @@ end
 """
     SystemResolver
 
-Resolver backed by the platform name service (native `getaddrinfo`).
+Resolver backed by the platform name service (`getaddrinfo`).
+
+This is the default resolver used by the convenience APIs.
 """
 struct SystemResolver <: AbstractResolver end
 
@@ -104,6 +122,9 @@ struct SystemResolver <: AbstractResolver end
     StaticResolver
 
 Resolver with fixed host/service mappings and optional fallback resolver.
+
+This is useful in tests and controlled environments where you want deterministic
+name/service lookup without consulting the operating system.
 """
 struct StaticResolver <: AbstractResolver
     hosts::Dict{String, Vector{TCP.SocketEndpoint}}
@@ -457,6 +478,8 @@ end
 
 Join host and port into `host:port`, bracket-quoting IPv6 literals.
 `port` may be numeric or an opaque service string.
+
+Returns the combined string and never performs resolution.
 """
 function join_host_port(host::AbstractString, port::AbstractString)::String
     host_s = String(host)
@@ -475,6 +498,8 @@ end
     split_host_port(hostport)
 
 Split `host:port` or `[host]:port` into `(host, port)`.
+
+Throws `AddressError` if the string is malformed.
 """
 function split_host_port(hostport::AbstractString)::Tuple{String, String}
     s = String(hostport)
@@ -525,7 +550,10 @@ end
 """
     parse_port(service)
 
-Parse decimal service port; returns `(port, needs_lookup)`.
+Parse a decimal service port and return `(port, needs_lookup)`.
+
+If `needs_lookup` is `true`, the caller should treat `service` as a symbolic
+service name such as `"https"` and consult the resolver's service tables.
 """
 function parse_port(service::AbstractString)::Tuple{Int, Bool}
     isempty(service) && return 0, false
@@ -579,6 +607,8 @@ end
     lookup_port(network, service)
 
 Resolve numeric or named service into a port number.
+
+This convenience form uses `DEFAULT_RESOLVER`.
 """
 function lookup_port(network::AbstractString, service::AbstractString)::Int
     return lookup_port(DEFAULT_RESOLVER, network, service)
@@ -746,6 +776,21 @@ end
     resolve_tcp_addrs(resolver, network, address; op=:connect, policy=ResolverPolicy())
 
 Resolve a TCP `host:port` string into concrete socket addresses.
+
+Arguments:
+- `resolver`: resolver implementation used for host and service lookup
+- `network`: one of `"tcp"`, `"tcp4"`, or `"tcp6"`
+- `address`: host/port string
+
+Keyword arguments:
+- `op`: context for wildcard handling, typically `:connect`, `:listen`, or
+  `:resolve`
+- `policy`: address-family filtering and ordering policy
+
+Returns a `Vector{TCP.SocketEndpoint}` in the order that subsequent connection
+logic should attempt.
+
+Throws `AddressError` or `UnknownNetworkError` when parsing or resolution fails.
 """
 function resolve_tcp_addrs(
         resolver::AbstractResolver,
@@ -773,6 +818,11 @@ function resolve_tcp_addrs(
     return out
 end
 
+"""
+    resolve_tcp_addrs(network, address) -> Vector{TCP.SocketEndpoint}
+
+Resolve concrete TCP endpoints using `DEFAULT_RESOLVER`.
+"""
 function resolve_tcp_addrs(network::AbstractString, address::AbstractString)::Vector{TCP.SocketEndpoint}
     return resolve_tcp_addrs(DEFAULT_RESOLVER, network, address)
 end
@@ -781,6 +831,9 @@ end
     resolve_tcp_addr(resolver, network, address; policy=ResolverPolicy())
 
 Resolve and return the first preferred TCP endpoint.
+
+This is a convenience wrapper over `resolve_tcp_addrs` that returns only the
+first candidate after policy ordering is applied.
 """
 function resolve_tcp_addr(
         resolver::AbstractResolver,
@@ -792,6 +845,11 @@ function resolve_tcp_addr(
     return addrs[1]
 end
 
+"""
+    resolve_tcp_addr(network, address) -> TCP.SocketEndpoint
+
+Resolve the first preferred endpoint using `DEFAULT_RESOLVER`.
+"""
 function resolve_tcp_addr(network::AbstractString, address::AbstractString)::TCP.SocketEndpoint
     return resolve_tcp_addr(DEFAULT_RESOLVER, network, address)
 end
@@ -799,7 +857,20 @@ end
 """
     HostResolver
 
-Go-like connect configuration for timeout/deadline/local-bind and resolver injection.
+Go-like connect configuration for timeout/deadline/local-bind and resolver
+injection.
+
+Fields:
+- `timeout_ns`: relative timeout budget for the whole resolve+connect operation
+- `deadline_ns`: absolute monotonic deadline for the whole operation
+- `local_addr`: optional local bind address for outbound connects
+- `fallback_delay_ns`: delay before starting the secondary address-family racer;
+  negative disables the parallel race
+- `resolver`: resolver implementation for host/service lookup
+- `policy`: address ordering/filtering policy
+
+The effective deadline is the earlier of `now + timeout_ns` and `deadline_ns`,
+mirroring Go's "minimum non-zero deadline wins" behavior.
 """
 struct HostResolver{R<:AbstractResolver}
     timeout_ns::Int64
@@ -873,6 +944,9 @@ function _resolve_with_deadline(
     done = Ref(false)
     timed_out = Ref(false)
     result_ref = Ref{Union{Nothing, Vector{TCP.SocketEndpoint}, Exception}}(nothing)
+    # Resolution still relies on Julia tasks + Timer rather than the lower-level
+    # poller timer heap. That is acceptable here because DNS resolution is not
+    # currently driven by the socket event loop itself.
     timer = Timer(timeout_s) do _
         lock(mtx)
         try
@@ -922,6 +996,8 @@ function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining
     deadline_ns == 0 && return Int64(0)
     time_remaining = deadline_ns - now_ns
     time_remaining <= 0 && throw(DNSTimeoutError(""))
+    # Like Go's dialer, we avoid spending the entire remaining budget on the
+    # first address candidate when multiple endpoints remain to be tried.
     timeout = time_remaining ÷ addrs_remaining
     sane_min = Int64(2_000_000_000)
     if timeout < sane_min
@@ -1088,6 +1164,9 @@ function _resolve_parallel(
     end
     _start_racer(true, primaries)
     delay_ns = _effective_fallback_delay_ns(d)
+    # This is the Happy Eyeballs-style stagger: start one address family first,
+    # then launch the fallback family if the primary path has not succeeded
+    # quickly enough.
     fallback_timer = Timer(delay_ns / 1.0e9) do _
         _emit_event!(:fallback_timer)
     end
@@ -1153,6 +1232,14 @@ end
     connect(d, network, address)
 
 Connect a TCP connection from a `host:port` string.
+
+This is the main Go-style dialing entry point. It resolves the address, applies
+deadline and policy rules, optionally runs a dual-stack race, and returns a
+connected `TCP.Conn`.
+
+Throws `DNSOpError` on failure. The wrapped `err` may be an `AddressError`,
+`DNSTimeoutError`, `UnknownNetworkError`, `SystemError`, or a lower-level poll
+error depending on which phase failed.
 """
 function connect(d::HostResolver, network::AbstractString, address::AbstractString)::TCP.Conn
     deadline_ns = _connect_deadline_ns(d)
@@ -1192,14 +1279,29 @@ function connect(d::HostResolver, network::AbstractString, address::AbstractStri
     ))
 end
 
+"""
+    connect(network, address) -> TCP.Conn
+
+Connect using a default `HostResolver`.
+"""
 function connect(network::AbstractString, address::AbstractString)::TCP.Conn
     return connect(HostResolver(), network, address)
 end
 
+"""
+    connect(address) -> TCP.Conn
+
+Convenience shorthand for `connect("tcp", address)`.
+"""
 function connect(address::AbstractString)::TCP.Conn
     return connect(HostResolver(), "tcp", address)
 end
 
+"""
+    connect_timeout(network, address, timeout_ns) -> TCP.Conn
+
+Connect using a default `HostResolver` with a relative timeout budget.
+"""
 function connect_timeout(network::AbstractString, address::AbstractString, timeout_ns::Integer)::TCP.Conn
     return connect(HostResolver(; timeout_ns = Int64(timeout_ns)), network, address)
 end
@@ -1208,6 +1310,15 @@ end
     listen(d, network, address; backlog=128, reuseaddr=true)
 
 Listen on a resolved local endpoint.
+
+The address string is resolved into one or more concrete local endpoints. Each
+candidate is tried in order until one bind/listen succeeds.
+
+Keyword arguments:
+- `backlog`: listen backlog passed to the kernel
+- `reuseaddr`: whether to enable `SO_REUSEADDR` on the underlying socket
+
+Throws `DNSOpError` if resolution fails or no candidate can be bound.
 """
 function listen(
         d::HostResolver,
@@ -1243,6 +1354,11 @@ function listen(
     ))
 end
 
+"""
+    listen(network, address; backlog=128, reuseaddr=true) -> TCP.Listener
+
+Listen using a default `HostResolver`.
+"""
 function listen(
         network::AbstractString,
         address::AbstractString;

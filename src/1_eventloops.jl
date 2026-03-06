@@ -2,7 +2,19 @@
     EventLoops
 
 Cross-platform event loop abstraction for socket readiness polling.
-Current phase targets kqueue on macOS.
+
+This module is Reseau's analogue of Go's runtime netpoll layer:
+- backends translate OS readiness events into a small uniform `PollEvent`
+- one dedicated native poller thread blocks in the platform poll syscall
+- Julia tasks never call `epoll_wait`/`kevent`/`GetQueuedCompletionStatusEx`
+  directly; they instead park on `PollWaiter`s owned by registrations
+- deadlines are treated as part of poller state rather than as independent
+  Julia sleeper tasks, which mirrors how Go folds timer wakeups into the
+  scheduler-driven `netpoll(delay)` loop
+
+The backends differ substantially, but the exported surface aims to keep the
+rest of the runtime working in terms of registrations, waiters, and readiness
+notifications instead of backend-specific handles.
 """
 module EventLoops
 
@@ -26,6 +38,10 @@ end
 Go-style binary wake semaphore for one read waiter and one write waiter per fd.
 It uses the low-level `wait()` + `schedule(task)` ownership protocol documented in
 Julia's scheduler docs.
+
+The important invariant is that a single `PollWaiter` has at most one active
+waiting task. That matches Go's `pollDesc` model, where the runtime keeps one
+read waiter slot and one write waiter slot per descriptor.
 """
 mutable struct PollWaiter
     @atomic state::PollWaiterState.T
@@ -40,12 +56,18 @@ end
 
 Park the current Julia task until the waiter is notified.
 Concurrent waits on the same `PollWaiter` are forbidden.
+
+Returns `nothing`.
+
+Throws `ArgumentError` if two tasks try to wait on the same waiter
+simultaneously, or if the waiter state machine is observed in an invalid state.
 """
 function pollwait!(waiter::PollWaiter)
     task = current_task()
     task.sticky && (task.sticky = false)
     waiter.task = task
     try
+        # Fast path: transition directly from EMPTY -> WAITING and park.
         state, ok = @atomicreplace(waiter.state, PollWaiterState.EMPTY => PollWaiterState.WAITING)
         if ok
             wait()
@@ -53,6 +75,9 @@ function pollwait!(waiter::PollWaiter)
             state == PollWaiterState.NOTIFIED || throw(ArgumentError("concurrent wait on PollWaiter"))
         end
         while true
+            # A notifier can win the race before we actually reach `wait()`, so
+            # we loop until the NOTIFIED token is consumed or a clean EMPTY
+            # state is observed.
             state, ok = @atomicreplace(waiter.state, PollWaiterState.NOTIFIED => PollWaiterState.EMPTY)
             ok && return nothing
             state == PollWaiterState.EMPTY && return nothing
@@ -68,7 +93,11 @@ end
     pollnotify!(waiter)
 
 Mark waiter as notified and wake the waiter task if it has already parked.
-Returns `true` if a parked waiter was woken.
+Returns `true` if a parked waiter was woken and `false` if the waiter was
+already notified or had not yet parked.
+
+Throws `ArgumentError` if the waiter state machine is observed in an invalid
+state.
 """
 function pollnotify!(waiter::PollWaiter)::Bool
     state = @atomic :acquire waiter.state
@@ -78,6 +107,7 @@ function pollnotify!(waiter::PollWaiter)::Bool
         if state == PollWaiterState.WAITING
             task = waiter.task
             task isa Task || throw(ArgumentError("invalid PollWaiter task state"))
+            # `schedule(task)` is the low-level dual of the `wait()` above.
             schedule(task)
             return true
         end
@@ -91,6 +121,13 @@ end
     PollEvent
 
 Readiness event decoded from the platform backend.
+
+Fields:
+- `fd`: OS descriptor/socket identifier
+- `token`: monotonically increasing registration token used to reject stale
+  events after descriptor reuse
+- `mode`: which readiness direction fired
+- `errored`: whether the backend reported an error/hangup condition
 """
 struct PollEvent
     fd::Cint
@@ -99,6 +136,18 @@ struct PollEvent
     errored::Bool
 end
 
+"""
+    PollState(sysfd=-1, token=0)
+
+Descriptor-local state shared between `EventLoops` and `IOPoll`.
+
+This is intentionally close in spirit to Go's runtime `pollDesc`: it holds
+registration identity (`sysfd`, `token`), coarse descriptor state
+(`pollable`, `closing`, `event_err`), and the read/write deadline words plus
+their sequence numbers. The sequence counters are what let the poller heap
+discard stale deadline entries without mutating the heap in place whenever a
+deadline changes.
+"""
 mutable struct PollState
     lock::ReentrantLock
     sysfd::Cint
@@ -130,6 +179,12 @@ end
     Registration
 
 Per-fd registration state stored by the poller.
+
+Each active OS descriptor has one `Registration`, which is the home for:
+- the current token and interest mask known to the backend
+- one read waiter and one write waiter for parked Julia tasks
+- any backend-discovered persistent event error
+- the `PollState` consumed by higher layers
 """
 mutable struct Registration
     fd::Cint
@@ -152,6 +207,23 @@ function Registration(
     return Registration(fd, token, mode, read_waiter, write_waiter, event_err, PollState(fd, token))
 end
 
+"""
+    DeadlineEntry
+
+One scheduled deadline observation in the poller min-heap.
+
+The heap stores immutable snapshots: `(deadline_ns, mode, rseq, wseq)` capture
+the descriptor state at the moment the entry was scheduled. When an entry later
+reaches the top of the heap, `IOPoll.deadline_fire!` compares the saved
+sequence numbers against the current `PollState` to decide whether the timeout
+is still live or whether the entry became stale because the deadline was reset,
+cleared, or the descriptor was closed/re-registered.
+
+If read and write deadlines are equal, we intentionally store a single
+`READWRITE` entry. That is the same optimization Go applies with
+`netpollDeadline`: it reduces heap pressure while keeping the timeout semantics
+identical.
+"""
 struct DeadlineEntry
     deadline_ns::Int64
     pollstate::PollState
@@ -165,6 +237,14 @@ end
 
 Global event loop subsystem state. `lock` is a regular mutex because registration
 updates can run adjacent to syscalls where spin waiting would be wasteful.
+
+Notable fields:
+- `registrations`/`registrations_by_token` let us validate that an event or
+  deadline still belongs to the current occupant of an fd slot
+- `deadline_heap` is the min-heap that drives finite backend poll timeouts
+- `poll_until_ns` records the deadline currently being slept toward so that a
+  newly earlier deadline can call `_backend_wake!`, just like Go uses
+  `netpollBreak()` to shorten a blocking poll
 """
 mutable struct Poller
     lock::ReentrantLock
@@ -237,13 +317,7 @@ function _new_registration(fd::Cint, token::UInt64, mode::PollMode.T)::Registrat
     return Registration(fd, token, mode, PollWaiter(), PollWaiter(), false)
 end
 
-function deadline_fire!(owner, mode::PollMode.T, rseq::UInt64, wseq::UInt64)
-    _ = owner
-    _ = mode
-    _ = rseq
-    _ = wseq
-    return nothing
-end
+function deadline_fire! end
 
 @inline function _deadline_less(a::DeadlineEntry, b::DeadlineEntry)::Bool
     if a.deadline_ns != b.deadline_ns
@@ -326,6 +400,8 @@ end
 function _discard_stale_deadlines_locked!(state::Poller)
     while !isempty(state.deadline_heap)
         entry = state.deadline_heap[1]
+        # Descriptors are reused aggressively by the OS, so liveness must check
+        # both the fd and the monotonically increasing token.
         _registration_active_locked(state, entry.pollstate) && return nothing
         _ = _deadline_pop_locked!(state)
     end
@@ -346,6 +422,9 @@ function _build_deadline_entries(
         wseq::UInt64,
     )::Vector{DeadlineEntry}
     entries = DeadlineEntry[]
+    # Match Go's combined read/write deadline fast path when both deadlines are
+    # identical. Distinct deadlines stay as separate heap entries because they
+    # can expire independently.
     if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
         push!(entries, DeadlineEntry(rd_ns, pd, PollMode.READWRITE, rseq, wseq))
         return entries
@@ -355,6 +434,22 @@ function _build_deadline_entries(
     return entries
 end
 
+"""
+    schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
+
+Publish the current deadline snapshot for `pd` into the poller heap.
+
+Arguments are the already-updated read/write deadline words and their sequence
+counters. Callers should hold any descriptor-local synchronization needed to
+produce a self-consistent snapshot before calling this function; the poller does
+not try to reconstruct that relationship after the fact.
+
+Returns `nothing`.
+
+If the newly scheduled entry becomes earlier than the deadline the poller thread
+is currently sleeping toward, the backend wake mechanism is triggered so the
+poll syscall can be reissued with the shorter timeout.
+"""
 function schedule_deadlines!(
         pd::PollState,
         rd_ns::Int64,
@@ -380,6 +475,10 @@ function schedule_deadlines!(
     end
     if new_earliest > 0
         poll_until_ns = @atomic :acquire state.poll_until_ns
+        # This is the local equivalent of Go's `netpollBreak()`: once the
+        # poller has committed to a sleep horizon, a newly earlier deadline must
+        # actively wake it so the blocking syscall can be retried with a
+        # shorter timeout.
         if poll_until_ns == 0 || new_earliest < poll_until_ns
             errno = _backend_wake!(state)
             errno == Int32(0) || _throw_errno("event loop wake", errno)
@@ -388,6 +487,17 @@ function schedule_deadlines!(
     return nothing
 end
 
+"""
+    _poll_delay_ns(state)
+
+Compute the timeout for the next backend poll call.
+
+Returns:
+- `-1` when no deadlines are pending and the backend may block indefinitely
+- `0` when at least one deadline is already due and the backend should poll
+  without blocking
+- a positive nanosecond timeout otherwise
+"""
 function _poll_delay_ns(state::Poller)::Int64
     deadline_ns = Int64(0)
     lock(state.lock)
@@ -405,6 +515,16 @@ function _poll_delay_ns(state::Poller)::Int64
     return remaining_ns
 end
 
+"""
+    _drain_expired_deadlines!(state, now_ns)
+
+Remove all expired deadline entries from the heap and dispatch them to
+`deadline_fire!`.
+
+The heap lock is not held across `deadline_fire!` calls. That keeps the critical
+section small and avoids lock-ordering problems with descriptor-local locks in
+`IOPoll`.
+"""
 function _drain_expired_deadlines!(state::Poller, now_ns::Int64)
     expired = DeadlineEntry[]
     lock(state.lock)
@@ -423,6 +543,16 @@ function _drain_expired_deadlines!(state::Poller, now_ns::Int64)
     return nothing
 end
 
+"""
+    current_registration(pd)
+
+Return the active `Registration` corresponding to `pd`, or `nothing` if `pd`
+has been deregistered or replaced.
+
+This extra indirection is what lets higher layers validate descriptor identity
+without trusting a cached registration reference through close/re-register
+races.
+"""
 function current_registration(pd::PollState)
     isassigned(POLLER) || return nothing
     state = POLLER[]
@@ -489,7 +619,12 @@ end
 """
     init!()
 
-Initialize the runtime poller state and start the dedicated foreign kqueue thread.
+Initialize the runtime poller state and start the dedicated poller thread.
+
+Returns the live `Poller` singleton.
+
+Throws `ArgumentError` if the current platform is unsupported and `SystemError`
+if backend initialization or thread creation fails.
 """
 function init!()::Poller
     if isassigned(POLLER)
@@ -520,7 +655,12 @@ end
 """
     shutdown!()
 
-Stop the dedicated poller thread and tear down kqueue resources.
+Stop the dedicated poller thread and tear down backend resources.
+
+Returns `nothing`.
+
+Waiting registrations are notified so blocked Julia tasks can observe close or
+shutdown on their next state check instead of remaining parked forever.
 """
 function shutdown!()
     isassigned(POLLER) || return nothing
@@ -552,9 +692,20 @@ function shutdown!()
 end
 
 """
-    register!(fd; mode=PollMode.READWRITE)
+    register!(fd; mode=PollMode.READWRITE, pollstate=nothing)
 
 Register an fd with the runtime poller and return its `Registration`.
+
+Keyword arguments:
+- `mode`: readiness directions to subscribe to
+- `pollstate`: optional pre-existing `PollState` to attach to the registration;
+  `IOPoll` uses this so the poller and the descriptor wrapper share one state
+  object
+
+Returns the created `Registration`.
+
+Throws `ArgumentError` if `mode` is empty, or `SystemError` if the descriptor is
+already registered or the backend registration syscall fails.
 """
 function register!(fd::Integer; mode::PollMode.T = PollMode.READWRITE, pollstate::Union{Nothing, PollState} = nothing)::Registration
     _mode_is_empty(mode) && throw(ArgumentError("register! requires READ and/or WRITE mode"))
@@ -591,6 +742,11 @@ end
     deregister!(fd)
 
 Unregister an fd from the runtime poller.
+
+Returns `nothing`.
+
+Any parked waiters are notified so they can re-check descriptor state and see
+the close/eviction condition promptly.
 """
 function deregister!(fd::Integer)
     isassigned(POLLER) || return nothing
