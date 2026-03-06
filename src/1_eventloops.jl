@@ -99,14 +99,6 @@ struct PollEvent
     errored::Bool
 end
 
-struct DeadlineEntry{R}
-    deadline_ns::Int64
-    registration::R
-    mode::PollMode.T
-    rseq::UInt64
-    wseq::UInt64
-end
-
 """
     Registration
 
@@ -133,6 +125,14 @@ function Registration(
     return Registration(fd, token, mode, read_waiter, write_waiter, event_err, C_NULL)
 end
 
+struct DeadlineEntry
+    deadline_ns::Int64
+    registration::Registration
+    mode::PollMode.T
+    rseq::UInt64
+    wseq::UInt64
+end
+
 """
     Poller
 
@@ -143,7 +143,7 @@ mutable struct Poller
     lock::ReentrantLock
     registrations::Dict{Cint, Registration}
     registrations_by_token::Dict{UInt64, Registration}
-    deadline_heap::Vector{DeadlineEntry{Registration}}
+    deadline_heap::Vector{DeadlineEntry}
     shutdown_event::Base.Threads.Event
     kq::Cint
     wake_ident::UInt
@@ -159,7 +159,7 @@ function Poller()
         ReentrantLock(),
         Dict{Cint, Registration}(),
         Dict{UInt64, Registration}(),
-        DeadlineEntry{Registration}[],
+        DeadlineEntry[],
         Base.Threads.Event(),
         Cint(-1),
         UInt(1),
@@ -224,7 +224,7 @@ function deadline_fire!(owner, registration::Registration, mode::PollMode.T, rse
     return nothing
 end
 
-@inline function _deadline_less(a::DeadlineEntry{Registration}, b::DeadlineEntry{Registration})::Bool
+@inline function _deadline_less(a::DeadlineEntry, b::DeadlineEntry)::Bool
     if a.deadline_ns != b.deadline_ns
         return a.deadline_ns < b.deadline_ns
     end
@@ -246,12 +246,12 @@ end
     return (i << 1) + 1
 end
 
-function _deadline_swap!(heap::Vector{DeadlineEntry{Registration}}, i::Int, j::Int)
+function _deadline_swap!(heap::Vector{DeadlineEntry}, i::Int, j::Int)
     heap[i], heap[j] = heap[j], heap[i]
     return nothing
 end
 
-function _deadline_sift_up!(heap::Vector{DeadlineEntry{Registration}}, i::Int)
+function _deadline_sift_up!(heap::Vector{DeadlineEntry}, i::Int)
     while i > 1
         parent = _heap_parent_index(i)
         _deadline_less(heap[i], heap[parent]) || break
@@ -261,7 +261,7 @@ function _deadline_sift_up!(heap::Vector{DeadlineEntry{Registration}}, i::Int)
     return nothing
 end
 
-function _deadline_sift_down!(heap::Vector{DeadlineEntry{Registration}}, i::Int)
+function _deadline_sift_down!(heap::Vector{DeadlineEntry}, i::Int)
     len = length(heap)
     while true
         left = _heap_left_index(i)
@@ -278,14 +278,14 @@ function _deadline_sift_down!(heap::Vector{DeadlineEntry{Registration}}, i::Int)
     return nothing
 end
 
-function _deadline_push_locked!(state::Poller, entry::DeadlineEntry{Registration})
+function _deadline_push_locked!(state::Poller, entry::DeadlineEntry)
     heap = state.deadline_heap
     push!(heap, entry)
     _deadline_sift_up!(heap, length(heap))
     return nothing
 end
 
-function _deadline_pop_locked!(state::Poller)::DeadlineEntry{Registration}
+function _deadline_pop_locked!(state::Poller)::DeadlineEntry
     heap = state.deadline_heap
     isempty(heap) && throw(ArgumentError("deadline heap is empty"))
     entry = heap[1]
@@ -323,8 +323,8 @@ function _build_deadline_entries(
         wd_ns::Int64,
         rseq::UInt64,
         wseq::UInt64,
-    )::Vector{DeadlineEntry{Registration}}
-    entries = DeadlineEntry{Registration}[]
+    )::Vector{DeadlineEntry}
+    entries = DeadlineEntry[]
     if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
         push!(entries, DeadlineEntry(rd_ns, registration, PollMode.READWRITE, rseq, wseq))
         return entries
@@ -385,7 +385,7 @@ function _poll_delay_ns(state::Poller)::Int64
 end
 
 function _drain_expired_deadlines!(state::Poller, now_ns::Int64)
-    expired = DeadlineEntry{Registration}[]
+    expired = DeadlineEntry[]
     lock(state.lock)
     try
         while true
