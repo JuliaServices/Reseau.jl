@@ -17,7 +17,7 @@ jobs:
         with:
           version: nightly
           arch: x64
-      - name: Run package-backed repro
+      - name: Run package-load repro
         shell: bash
         run: |
           set -euo pipefail
@@ -32,4 +32,4 @@ jobs:
             --startup-file=no \
             --track-allocation=none \
             --code-coverage="@${PWD}" \
-            repro/windows-compiler-issue-package-repro.jl
+            repro/windows-compiler-issue-use-reseau.jl
