@@ -105,7 +105,7 @@ else
                     return err, time_ns() - t0
                 end)
                 sleep(0.03)
-                NP.schedule_deadlines!(registration, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
+                NP.schedule_deadlines!(registration.pollstate, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
                 err, elapsed_ns = fetch(poll_task)
                 @test err == Int32(0)
                 @test elapsed_ns < 500_000_000

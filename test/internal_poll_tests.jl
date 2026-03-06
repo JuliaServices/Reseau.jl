@@ -107,12 +107,12 @@ else
         end
         @testset "combined deadline entry normalization" begin
             registration = EL.Registration(Cint(7), UInt64(11), EL.PollMode.READWRITE, EL.PollWaiter(), EL.PollWaiter(), false)
-            combined = EL._build_deadline_entries(registration, Int64(10), Int64(10), UInt64(3), UInt64(5))
+            combined = EL._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
             @test length(combined) == 1
             @test combined[1].mode == EL.PollMode.READWRITE
             @test combined[1].rseq == UInt64(3)
             @test combined[1].wseq == UInt64(5)
-            split = EL._build_deadline_entries(registration, Int64(10), Int64(11), UInt64(3), UInt64(5))
+            split = EL._build_deadline_entries(registration.pollstate, Int64(10), Int64(11), UInt64(3), UInt64(5))
             @test length(split) == 2
             @test split[1].mode == EL.PollMode.READ
             @test split[2].mode == EL.PollMode.WRITE
@@ -129,7 +129,7 @@ else
                 IP.set_deadline!(ipfd, future_deadline)
                 lock(state.lock)
                 try
-                    entries = filter(x -> (x.registration::EL.Registration).token == ipfd.pd.token, state.deadline_heap)
+                    entries = filter(x -> x.pollstate.token == ipfd.pd.token, state.deadline_heap)
                     @test length(entries) == 1
                     @test entries[1].mode == EL.PollMode.READWRITE
                 finally

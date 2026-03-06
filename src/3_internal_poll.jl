@@ -11,6 +11,8 @@ using ..Reseau.EventLoops
 using ..Reseau.SocketOps
 import ..Reseau.EventLoops: deadline_fire!
 
+const PollState = EventLoops.PollState
+
 # FDLock state bits packed into one atomic word (close flag, lock flags, refs, waiter counts).
 const _MUTEX_CLOSED = UInt64(1) << 0
 const _MUTEX_RLOCK = UInt64(1) << 1
@@ -245,41 +247,6 @@ function _fdlock_rwunlock!(mu::FDLock, read_lock::Bool)::Bool
 end
 
 """
-Per-descriptor poll integration state.
-
-This stores the `EventLoops` registration (`sysfd`, `token`), deadline state,
-and deadline sequence state.
-"""
-mutable struct PollState
-    lock::ReentrantLock
-    sysfd::Cint
-    token::UInt64
-    registration::Union{Nothing, EventLoops.Registration}
-    @atomic pollable::Bool
-    @atomic closing::Bool
-    @atomic event_err::Bool
-    @atomic rd_ns::Int64
-    @atomic wd_ns::Int64
-    @atomic rseq::UInt64
-    @atomic wseq::UInt64
-    function PollState()
-        return new(
-            ReentrantLock(),
-            Cint(-1),
-            UInt64(0),
-            nothing,
-            false,
-            false,
-            false,
-            Int64(0),
-            Int64(0),
-            UInt64(0),
-            UInt64(0),
-        )
-    end
-end
-
-"""
 Internal file descriptor wrapper used by the poll layer.
 
 This coordinates descriptor lifetime, read/write serialization, and integration
@@ -341,10 +308,8 @@ end
 
 function _refresh_event_err!(pd::PollState)
     (@atomic :acquire pd.pollable) || return nothing
-    registration = pd.registration
+    registration = EventLoops.current_registration(pd)
     registration === nothing && return nothing
-    registration.fd == pd.sysfd || return nothing
-    registration.token == pd.token || return nothing
     has_event_error = @atomic :acquire registration.event_err
     @atomic :release pd.event_err = has_event_error
     return nothing
@@ -352,10 +317,8 @@ end
 
 function _wake_waiters!(pd::PollState, mode::PollOp.T)
     (@atomic :acquire pd.pollable) || return nothing
-    registration = pd.registration
+    registration = EventLoops.current_registration(pd)
     registration === nothing && return nothing
-    registration.fd == pd.sysfd || return nothing
-    registration.token == pd.token || return nothing
     event_mode = EventLoops.PollMode.READWRITE
     if mode == PollOp.READ
         event_mode = EventLoops.PollMode.READ
@@ -368,7 +331,6 @@ end
 
 function deadline_fire!(
         pd::PollState,
-        registration::EventLoops.Registration,
         mode::EventLoops.PollMode.T,
         rseq::UInt64,
         wseq::UInt64,
@@ -378,10 +340,7 @@ function deadline_fire!(
     lock(pd.lock)
     try
         (@atomic :acquire pd.closing) && return nothing
-        current = pd.registration
-        current === registration || return nothing
-        current.fd == pd.sysfd || return nothing
-        current.token == pd.token || return nothing
+        EventLoops.current_registration(pd) === nothing && return nothing
         if (UInt8(mode) & UInt8(EventLoops.PollMode.READ)) != 0
             if (@atomic :acquire pd.rseq) == rseq && (@atomic :acquire pd.rd_ns) > 0
                 @atomic :release pd.rd_ns = Int64(-1)
@@ -451,7 +410,6 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
                     @atomic :release pd.wd_ns = deadline
                 end
             end
-            registration = pd.registration
             rd_ns = @atomic :acquire pd.rd_ns
             wd_ns = @atomic :acquire pd.wd_ns
             rseq = @atomic :acquire pd.rseq
@@ -459,7 +417,7 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
         finally
             unlock(pd.lock)
         end
-        registration === nothing || EventLoops.schedule_deadlines!(registration::EventLoops.Registration, rd_ns, wd_ns, rseq, wseq)
+        EventLoops.schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
         if wake_read && wake_write
             _wake_waiters!(pd, PollOp.READWRITE)
         elseif wake_read
@@ -486,11 +444,9 @@ function init!(fd::FD; net::Symbol = :tcp, pollable::Bool = true)
     try
         if pollable
             _set_nonblocking!(fd.sysfd)
-            registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE)
+            registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE, pollstate = pd)
             pd.sysfd = fd.sysfd
             pd.token = registration.token
-            EventLoops.attach_deadline_owner!(registration, pd)
-            pd.registration = registration
             @atomic :release pd.pollable = true
             @atomic :release pd.closing = false
             @atomic :release pd.event_err = false
@@ -513,18 +469,14 @@ Tear down polling state for a descriptor and deregister from `EventLoops`.
 """
 function close!(pd::PollState)
     was_pollable = false
-    registration = nothing
     lock(pd.lock)
     try
         was_pollable = @atomic :acquire pd.pollable
-        registration = pd.registration
         @atomic :release pd.pollable = false
     finally
         unlock(pd.lock)
     end
     was_pollable && pd.sysfd >= 0 && EventLoops.deregister!(pd.sysfd)
-    registration === nothing || EventLoops.attach_deadline_owner!(registration, nothing)
-    pd.registration = nothing
     return nothing
 end
 
@@ -553,8 +505,8 @@ function pollable(pd::PollState)::Bool
 end
 
 @inline function _poll_registration(pd::PollState)::EventLoops.Registration
-    registration = pd.registration
-    (registration === nothing || registration.fd != pd.sysfd || registration.token != pd.token) && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+    registration = EventLoops.current_registration(pd)
+    registration === nothing && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
     return registration
 end
 
@@ -605,11 +557,8 @@ Wait for readiness in a cancellation context (used by close/deadline wake paths)
 """
 function wait_canceled!(pd::PollState, mode::PollOp.T)
     pollable(pd) || return nothing
-    registration = pd.registration
+    registration = EventLoops.current_registration(pd)
     registration === nothing && return nothing
-    if registration.fd != pd.sysfd || registration.token != pd.token
-        return nothing
-    end
     if mode == PollOp.WRITE
         EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
         EventLoops.pollwait!(registration.write_waiter)
