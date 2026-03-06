@@ -496,12 +496,12 @@ end
 
 Execute one HTTP/1 request/response exchange through `transport`.
 """
-@noinline function _roundtrip_impl(
+function roundtrip!(
         transport::Transport,
-        address::String,
-        request::Request,
-        secure::Bool,
-        server_name::Union{Nothing, String},
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
     )
     key = string(secure ? "https://" : "http://", address)
     request_deadline = _request_deadline_ns(request)
@@ -509,7 +509,7 @@ Execute one HTTP/1 request/response exchange through `transport`.
     attempt = 1
     current_request = request
     while true
-        conn = _acquire_conn!(transport, key, address; secure = secure, server_name = server_name)
+        conn = _acquire_conn!(transport, key, String(address); secure = secure, server_name = server_name === nothing ? nothing : String(server_name))
         was_reused = conn.reused
         try
             _apply_conn_deadline!(conn, request_deadline)
@@ -567,22 +567,6 @@ Execute one HTTP/1 request/response exchange through `transport`.
             rethrow(err)
         end
     end
-end
-
-function roundtrip!(
-        transport::Transport,
-        address::AbstractString,
-        request::Request;
-        secure::Bool = false,
-        server_name::Union{Nothing, AbstractString} = nothing,
-    )
-    return _roundtrip_impl(
-        transport,
-        String(address),
-        request,
-        secure,
-        server_name === nothing ? nothing : String(server_name),
-    )
 end
 
 export Client
@@ -1133,7 +1117,7 @@ end
     return nothing
 end
 
-@noinline function _client_roundtrip_h2_or_fallback(
+function _client_roundtrip_h2_or_fallback(
         client::Client,
         address::String,
         send_request::Request,
@@ -1147,19 +1131,19 @@ end
     catch err
         _drop_h2_conn!(client, address, secure)
         if protocol == :auto && _should_fallback_h2_to_h1(err)
-            return _roundtrip_impl(
+            return roundtrip!(
                 client.transport,
                 address,
-                send_request,
-                secure,
-                server_name,
+                send_request;
+                secure = secure,
+                server_name = server_name,
             )
         end
         rethrow(err)
     end
 end
 
-@noinline function _client_roundtrip_response(
+function _client_roundtrip_response(
         client::Client,
         address::String,
         send_request::Request,
@@ -1177,12 +1161,12 @@ end
             protocol,
         )
     end
-    return _roundtrip_impl(
+    return roundtrip!(
         client.transport,
         address,
-        send_request,
-        secure,
-        server_name,
+        send_request;
+        secure = secure,
+        server_name = server_name,
     )
 end
 
@@ -1235,19 +1219,19 @@ end
 
 Send a request with redirect handling and return the final response.
 """
-@noinline function _do_impl(
+function do!(
         client::Client,
-        address::String,
-        request::Request,
-        secure::Bool,
-        server_name::Union{Nothing, String},
-        protocol::Symbol,
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
+        protocol::Symbol = :auto,
     )
-    current_address = address
+    current_address = String(address)
     initial_address = current_address
     current_secure = secure
     explicit_server_name = server_name !== nothing
-    current_server_name = explicit_server_name ? (server_name::String) : _host_for_sni(current_address)
+    current_server_name = explicit_server_name ? String(server_name::AbstractString) : _host_for_sni(current_address)
     current_request = _copy_request_for_send(request; allow_nonreplayable = true)
     for redirect_count in 0:client.max_redirects
         send_request = _copy_request_for_send(current_request; allow_nonreplayable = redirect_count == 0)
@@ -1284,24 +1268,6 @@ Send a request with redirect handling and return the final response.
         current_request = redirect_step.request
     end
     throw(ProtocolError("unexpected redirect loop termination"))
-end
-
-function do!(
-        client::Client,
-        address::AbstractString,
-        request::Request;
-        secure::Bool = false,
-        server_name::Union{Nothing, AbstractString} = nothing,
-        protocol::Symbol = :auto,
-    )
-    return _do_impl(
-        client,
-        String(address),
-        request,
-        secure,
-        server_name === nothing ? nothing : String(server_name),
-        protocol,
-    )
 end
 
 """

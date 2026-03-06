@@ -1007,7 +1007,7 @@ function _serial_attempt_deadline(
     end
 end
 
-@noinline function _attempt_resolve_connect(
+function _attempt_resolve_connect(
         d::HostResolver,
         address::AbstractString,
         remote_addr::TCP.SocketEndpoint,
@@ -1018,11 +1018,11 @@ end
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}, Bool}
     _state_done(state) && return nothing, nothing, false
     try
-        fd = TCP._connect_tcp_fd_impl(
-            remote_addr,
-            d.local_addr,
-            attempt_deadline,
-            state,
+        fd = TCP.connect_tcp_fd!(
+            remote_addr;
+            local_addr = d.local_addr,
+            connect_deadline_ns = attempt_deadline,
+            cancel_state = state,
         )
         conn = TCP.Conn(fd)
         if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
