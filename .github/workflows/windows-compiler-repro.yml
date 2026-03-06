@@ -21,6 +21,9 @@ jobs:
           - case: tcp-connect-kwcall-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-connect-kwcall-layer4.jl
+          - case: standalone-connect
+            max_layer: 0
+            repro_script: repro/windows-compiler-issue-standalone-connect.jl
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -28,7 +31,7 @@ jobs:
           version: nightly
           arch: x64
       - uses: julia-actions/julia-buildpkg@v1
-      - name: Run package-backed repro
+      - name: Run repro
         shell: bash
         env:
           RESEAU_REPRO_MAX_LAYER: ${{ matrix.max_layer }}
