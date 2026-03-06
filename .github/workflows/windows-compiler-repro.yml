@@ -45,6 +45,15 @@ jobs:
           - case: tcp-module-eval-alias-copy-kwcall-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-module-eval-alias-copy-kwcall-layer4.jl
+          - case: tcp-module-eval-open-catch-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-module-eval-open-catch-layer4.jl
+          - case: tcp-module-eval-bind-init-catch-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-module-eval-bind-init-catch-layer4.jl
+          - case: tcp-module-eval-wait-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-module-eval-wait-layer4.jl
           - case: tcp-fresh-module-copy-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-fresh-module-copy-layer4.jl
