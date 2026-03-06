@@ -1,6 +1,9 @@
 name: Windows Compiler Repro
 
 on:
+  push:
+    branches:
+      - windows-nightly-compiler-investigation
   workflow_dispatch:
 
 jobs:
