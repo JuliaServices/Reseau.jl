@@ -16,9 +16,11 @@ jobs:
       matrix:
         include:
           - case: hostresolver-connect
+            max_layer: 5
             repro_script: repro/windows-compiler-issue-hostresolver-connect.jl
-          - case: tcp-connect-kwcall
-            repro_script: repro/windows-compiler-issue-tcp-connect-kwcall.jl
+          - case: tcp-connect-kwcall-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-connect-kwcall-layer4.jl
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -29,7 +31,7 @@ jobs:
       - name: Run package-backed repro
         shell: bash
         env:
-          RESEAU_REPRO_MAX_LAYER: 5
+          RESEAU_REPRO_MAX_LAYER: ${{ matrix.max_layer }}
         run: |
           set -euo pipefail
           echo "[repro] pwd=${PWD}"
