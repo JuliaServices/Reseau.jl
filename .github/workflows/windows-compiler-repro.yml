@@ -33,6 +33,12 @@ jobs:
           - case: tcp-full-copied-kwargs-kwcall-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-full-copied-kwargs-kwcall-layer4.jl
+          - case: tcp-module-eval-copy-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-module-eval-copy-layer4.jl
+          - case: tcp-module-eval-copy-kwcall-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-module-eval-copy-kwcall-layer4.jl
           - case: tcp-full-copied-catch-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-full-copied-catch-layer4.jl
