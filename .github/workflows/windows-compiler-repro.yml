@@ -60,6 +60,12 @@ jobs:
           - case: tcp-module-eval-wait-arg-kwargs-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-module-eval-wait-arg-kwargs-layer4.jl
+          - case: tcp-module-eval-wait-arg-kwargs-elseif-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-module-eval-wait-arg-kwargs-elseif-layer4.jl
+          - case: tcp-module-eval-wait-arg-kwargs-staticif-layer4
+            max_layer: 4
+            repro_script: repro/windows-compiler-issue-tcp-module-eval-wait-arg-kwargs-staticif-layer4.jl
           - case: tcp-fresh-module-copy-layer4
             max_layer: 4
             repro_script: repro/windows-compiler-issue-tcp-fresh-module-copy-layer4.jl
