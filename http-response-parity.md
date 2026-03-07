@@ -35,7 +35,7 @@
   - 2026-03-07: `test/http2_client_tests.jl` passed locally.
   - 2026-03-07: `test/http_trim_safe.jl` loaded and completed successfully under the package test environment.
 
-### [ ] ITEM-002 (P0) Replace `ClientResponse` with the public high-level response type
+### [x] ITEM-002 (P0) Replace `ClientResponse` with the public high-level response type
 - Description: The current public request API returns `ClientResponse`, which duplicates response metadata and diverges from both the existing low-level `Response` model and the desired HTTP parity direction. We want the high-level API to return a single public response type whose `body` field contains the final, user-facing body representation.
 - Desired outcome: `request/get/post/...` return the new public `Response{B}` type, `ClientResponse` is removed, and high-level buffered requests return `Response{Vector{UInt8}}` while preserving current semantics around redirects, status exceptions, cookies, and request metadata.
 - Affected files: `src/70_http_core.jl`, `src/76_http_client.jl`, `src/7_http.jl`, `test/http_client_tests.jl`, `test/http_parity_tests.jl`, `test/http_integration_tests.jl`, `src/8_precompile_workload.jl`
@@ -56,6 +56,11 @@
 - Completion criteria:
   - `ClientResponse` no longer exists.
   - High-level request helpers return the new public response type and targeted request tests pass.
+- Verification evidence:
+  - 2026-03-07: `test/http_core_tests.jl` passed locally.
+  - 2026-03-07: `test/http1_wire_tests.jl` passed locally.
+  - 2026-03-07: `test/http_client_tests.jl` passed locally after the final cleanup rename.
+  - 2026-03-07: `test/http_parity_tests.jl` and `test/http_integration_tests.jl` passed locally.
 
 ### [ ] ITEM-003 (P1) Add `response_stream` and centralize decompression on the consumer pipeline
 - Description: `response_stream` and `decompress` should not be special cases bolted onto `request(...)`. They should be different consumers of one shared response reader built over the internal incoming-response/raw-body path. This item adds high-level response streaming, keeps default buffered reads working, and makes decompression apply uniformly to both modes.

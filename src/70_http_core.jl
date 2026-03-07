@@ -680,10 +680,14 @@ Keyword arguments mirror `Request` closely. `request` optionally links the
 response back to the originating request, which is especially useful in client
 redirect flows and server handler pipelines.
 
-Returns a new `Response{B}` where `B` is the concrete body type. Throws
-`ArgumentError` for invalid status or protocol metadata.
+    Returns a new `Response{B}` where `B` is the concrete body type. `body`
+    may be a low-level streaming `AbstractBody` or a fully materialized
+    high-level payload like `Vector{UInt8}`. `request_url` is optional client
+    metadata used by high-level request helpers.
+
+    Throws `ArgumentError` for invalid status or protocol metadata.
 """
-mutable struct Response{B <: AbstractBody}
+mutable struct Response{B}
     status_code::Int
     reason::String
     headers::Headers
@@ -694,6 +698,7 @@ mutable struct Response{B <: AbstractBody}
     proto_minor::UInt8
     close::Bool
     request::Union{Nothing, Request}
+    request_url::Union{Nothing, String}
 end
 
 function Response(
@@ -707,7 +712,8 @@ function Response(
         proto_minor::Integer = 1,
         close::Bool = false,
         request::Union{Nothing, Request} = nothing,
-    ) where {B <: AbstractBody}
+        request_url::Union{Nothing, AbstractString} = nothing,
+    ) where {B}
     status_code < 0 && throw(ArgumentError("status_code must be >= 0"))
     content_length < -1 && throw(ArgumentError("content_length must be >= -1"))
     (proto_major < 0 || proto_major > typemax(UInt8)) && throw(ArgumentError("proto_major must fit in UInt8"))
@@ -723,5 +729,12 @@ function Response(
         UInt8(proto_minor),
         close,
         request,
+        request_url === nothing ? nothing : String(request_url),
     )
+end
+
+function Base.getproperty(response::Response, field::Symbol)
+    field === :status && return getfield(response, :status_code)
+    field === :url && return getfield(response, :request_url)
+    return getfield(response, field)
 end
