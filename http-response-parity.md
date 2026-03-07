@@ -62,21 +62,20 @@
   - 2026-03-07: `test/http_client_tests.jl` passed locally after the final cleanup rename.
   - 2026-03-07: `test/http_parity_tests.jl` and `test/http_integration_tests.jl` passed locally.
 
-### [ ] ITEM-003 (P1) Add `response_stream` and centralize decompression on the consumer pipeline
+### [x] ITEM-003 (P1) Add `response_stream` and centralize decompression on the consumer pipeline
 - Description: `response_stream` and `decompress` should not be special cases bolted onto `request(...)`. They should be different consumers of one shared response reader built over the internal incoming-response/raw-body path. This item adds high-level response streaming, keeps default buffered reads working, and makes decompression apply uniformly to both modes.
-- Desired outcome: `request(...; response_stream=...)` streams into caller-owned destinations, default requests still buffer into `Vector{UInt8}`, and `decompress=nothing|true|false` works consistently for buffered and streamed responses.
-- Affected files: `src/76_http_client.jl`, `src/70_http_core.jl`, `test/http_client_tests.jl`, `test/http_parity_tests.jl`
+- Desired outcome: `request(...; response_stream=...)` streams into caller-owned destinations, default requests still buffer into `Vector{UInt8}`, and `decompress=nothing|true|false` works consistently for buffered and streamed responses. `IO` sinks return `body === nothing`; byte-buffer sinks return the filled buffer or view.
+- Affected files: `Project.toml`, `Manifest.toml`, `src/76_http_client.jl`, `test/http_client_tests.jl`, `test/http_parity_tests.jl`
 - Implementation notes:
   - Introduce a shared internal `IO`-like wrapper over incoming raw response bodies.
   - Normalize response destinations for `nothing`, writable `IO`, and caller-provided byte buffers.
-  - Decide and document the returned public response shape for streamed responses (`Response{Nothing}` is the working assumption).
+  - Decide and document the returned public response shape for streamed responses, including how caller-provided byte buffers are surfaced without extra copies.
   - Ensure success drains preserve HTTP/1 keep-alive reuse and error paths still close correctly.
   - Keep `decompress` off by explicit request only when `false`; default behavior should auto-decompress gzip.
 - Verification:
   - `julia --startup-file=no --project=/Users/jacob.quinn/.julia/dev/Reseau -e 'include("/Users/jacob.quinn/.julia/dev/Reseau/test/http_client_tests.jl"); include("/Users/jacob.quinn/.julia/dev/Reseau/test/http_parity_tests.jl")'`
 - Assumptions:
   - Supporting `IO` and mutable byte-buffer destinations is enough for the first parity pass; file-path-string convenience is intentionally out of scope.
-  - Returning `Response{Nothing}` for streamed responses is acceptable because the body bytes live in caller-owned destinations.
 - Risks:
   - Too-small user buffers need a clear and stable error behavior.
   - Decompression and streaming interactions can easily double-close or partially drain if the IO wrapper ownership is muddled.
@@ -84,6 +83,10 @@
   - Response streaming works for IO and byte-buffer sinks.
   - Decompression behavior is shared across buffered and streamed request modes.
   - Targeted request/parity tests pass with new regression coverage.
+- Verification evidence:
+  - 2026-03-07: `test/http_client_tests.jl` passed locally with new response-stream and gzip coverage.
+  - 2026-03-07: `test/http_parity_tests.jl` passed locally.
+  - 2026-03-07: `test/http_integration_tests.jl` passed locally.
 
 ### [ ] ITEM-004 (P1) Add `HTTP.open` on the shared client stream model
 - Description: `HTTP.open` should be the one public API that exposes a live request/response stream object. It should sit on top of the same underlying execution and response-reader pipeline as `request(...)`, not duplicate it.

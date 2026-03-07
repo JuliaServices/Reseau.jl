@@ -1,5 +1,6 @@
 using Test
 using Reseau
+using CodecZlib
 
 const HT = Reseau.HTTP
 const NC = Reseau.TCP
@@ -28,12 +29,16 @@ end
 
 function _send_response_client!(conn::NC.Conn, request::HT.Request; status::Int = 200, reason::String = "OK", body_text::String = "", headers::HT.Headers = HT.Headers(), close_conn::Bool = false)::Nothing
     payload = collect(codeunits(body_text))
+    return _send_response_bytes_client!(conn, request; status = status, reason = reason, body_bytes = payload, headers = headers, close_conn = close_conn)
+end
+
+function _send_response_bytes_client!(conn::NC.Conn, request::HT.Request; status::Int = 200, reason::String = "OK", body_bytes::Vector{UInt8}, headers::HT.Headers = HT.Headers(), close_conn::Bool = false)::Nothing
     response = HT.Response(
         status;
         reason = reason,
         headers = headers,
-        body = HT.BytesBody(payload),
-        content_length = length(payload),
+        body = HT.BytesBody(body_bytes),
+        content_length = length(body_bytes),
         close = close_conn,
         request = request,
     )
@@ -41,6 +46,10 @@ function _send_response_client!(conn::NC.Conn, request::HT.Request; status::Int 
     HT.write_response!(io, response)
     _write_all_tcp_client!(conn, take!(io))
     return nothing
+end
+
+function _gzip_bytes_client(text::String)::Vector{UInt8}
+    return transcode(CodecZlib.GzipCompressor, collect(codeunits(text)))
 end
 
 function _wait_task_client!(task::Task; timeout_s::Float64 = 5.0)
@@ -495,6 +504,96 @@ end
         @test "/query?a=1&b=2" in seen_targets
         @test "/encoded?a%20b=c%2Bd&slash=%2Fx" in seen_targets
         @test "/auth" in seen_targets
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP high-level response streaming and decompression" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    server_task = errormonitor(Threads.@spawn begin
+        for _ in 1:6
+            conn = NC.accept!(listener)
+            try
+                req = HT.read_request(HT._ConnReader(conn))
+                if req.target == "/stream"
+                    _send_response_client!(conn, req; body_text = "stream-body", close_conn = true)
+                elseif req.target == "/buffer"
+                    _send_response_client!(conn, req; body_text = "buffer-body", close_conn = true)
+                elseif req.target == "/too-small"
+                    _send_response_client!(conn, req; body_text = "overflow", close_conn = true)
+                elseif req.target == "/gzip-default"
+                    payload = _gzip_bytes_client("gzip-default")
+                    headers = HT.Headers()
+                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
+                elseif req.target == "/gzip-off"
+                    payload = _gzip_bytes_client("gzip-off")
+                    headers = HT.Headers()
+                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
+                elseif req.target == "/gzip-stream"
+                    payload = _gzip_bytes_client("gzip-stream")
+                    headers = HT.Headers()
+                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
+                else
+                    _send_response_client!(conn, req; status = 500, reason = "Unexpected", body_text = req.target, close_conn = true)
+                end
+            finally
+                try
+                    NC.close!(conn)
+                catch
+                end
+            end
+        end
+        return nothing
+    end)
+    try
+        streamed = IOBuffer()
+        resp_stream = HT.get("$(base_url)/stream"; response_stream = streamed)
+        @test resp_stream.status == 200
+        @test resp_stream.body === nothing
+        @test String(take!(streamed)) == "stream-body"
+
+        buffer = Vector{UInt8}(undef, 32)
+        resp_buffer = HT.get("$(base_url)/buffer"; response_stream = buffer)
+        @test resp_buffer.status == 200
+        @test resp_buffer.body === buffer
+        @test String(resp_buffer.body) == "buffer-body"
+
+        small_err = try
+            HT.get("$(base_url)/too-small"; response_stream = Vector{UInt8}(undef, 2))
+            nothing
+        catch err
+            err
+        end
+        @test small_err isa ArgumentError
+        if small_err isa ArgumentError
+            @test occursin("Unable to grow response stream IOBuffer", sprint(showerror, small_err))
+        end
+
+        resp_gzip = HT.get("$(base_url)/gzip-default")
+        @test resp_gzip.status == 200
+        @test String(resp_gzip.body) == "gzip-default"
+
+        resp_gzip_raw = HT.get("$(base_url)/gzip-off"; decompress = false)
+        @test resp_gzip_raw.status == 200
+        @test String(read(CodecZlib.GzipDecompressorStream(IOBuffer(resp_gzip_raw.body)))) == "gzip-off"
+
+        streamed_gzip = IOBuffer()
+        resp_gzip_stream = HT.get("$(base_url)/gzip-stream"; response_body = streamed_gzip, decompress = true)
+        @test resp_gzip_stream.status == 200
+        @test resp_gzip_stream.body === nothing
+        @test String(take!(streamed_gzip)) == "gzip-stream"
+
+        _wait_task_client!(server_task)
     finally
         try
             NC.close!(listener)

@@ -7,6 +7,7 @@ export close_idle_connections!
 export idle_connection_count
 
 using Base64
+using CodecZlib
 using ..Reseau.TCP
 using ..Reseau.HostResolvers
 using ..Reseau.TLS
@@ -1383,22 +1384,137 @@ function _status_throws(resp::Response)::Bool
     return resp.status_code >= 300
 end
 
-function _read_response_body_bytes!(body::AbstractBody)::Vector{UInt8}
+function _read_all_response_bytes(io::IO)::Vector{UInt8}
     out = UInt8[]
+    buf = Vector{UInt8}(undef, 8192)
+    while true
+        n = readbytes!(io, buf, length(buf))
+        n == 0 && return out
+        append!(out, @view(buf[1:n]))
+    end
+end
+
+function _copy_response_bytes!(dest::IO, io::IO)::Int64
+    buf = Vector{UInt8}(undef, 8192)
+    total = Int64(0)
+    while true
+        n = readbytes!(io, buf, length(buf))
+        n == 0 && return total
+        total += n
+        write(dest, view(buf, 1:n))
+    end
+end
+
+function _copy_response_bytes!(dest::AbstractVector{UInt8}, io::IO)::Int64
+    buf = Vector{UInt8}(undef, 8192)
+    total = 0
+    capacity = length(dest)
+    while true
+        n = readbytes!(io, buf, length(buf))
+        n == 0 && break
+        needed = total + n
+        needed <= capacity || throw(ArgumentError("Unable to grow response stream IOBuffer $(capacity) large enough for response body size: $(needed)"))
+        copyto!(dest, total + 1, buf, 1, n)
+        total = needed
+    end
+    dest isa Vector{UInt8} && resize!(dest::Vector{UInt8}, total)
+    return Int64(total)
+end
+
+function _should_decompress_response(headers::Headers, decompress::Union{Nothing, Bool})::Bool
+    decompress === false && return false
+    encoding = get_header(headers, "Content-Encoding")
+    encoding === nothing && return false
+    normalized = lowercase(strip(encoding))
+    return normalized == "gzip" || normalized == "x-gzip"
+end
+
+function _pump_response_body!(stream::Base.BufferStream, body::AbstractBody)::Nothing
     buf = Vector{UInt8}(undef, 8192)
     try
         while true
             n = body_read!(body, buf)
             n == 0 && break
-            append!(out, @view(buf[1:n]))
+            write(stream, view(buf, 1:n))
         end
     finally
         try
             body_close!(body)
         catch
         end
+        try
+            close(stream)
+        catch
+        end
     end
-    return out
+    return nothing
+end
+
+function _response_body_reader(incoming::_IncomingResponse; decompress::Union{Nothing, Bool})::Tuple{IO, Task}
+    raw_stream = Base.BufferStream()
+    reader = if _should_decompress_response(incoming.head.headers, decompress)
+        CodecZlib.GzipDecompressorStream(raw_stream)
+    else
+        raw_stream
+    end
+    producer = errormonitor(Threads.@spawn _pump_response_body!(raw_stream, incoming.rawbody))
+    return reader, producer
+end
+
+function _with_response_reader(f::F, incoming::_IncomingResponse; decompress::Union{Nothing, Bool}) where {F}
+    reader, producer = _response_body_reader(incoming; decompress = decompress)
+    try
+        result = f(reader)
+        wait(producer)
+        return result
+    catch
+        try
+            close(reader)
+        catch
+        end
+        try
+            wait(producer)
+        catch
+        end
+        rethrow()
+    finally
+        try
+            close(reader)
+        catch
+        end
+    end
+end
+
+function _resolve_response_sink(response_stream, response_body)
+    if response_stream !== nothing && response_body !== response_stream
+        throw(ArgumentError("response_stream and response_body must reference the same sink"))
+    end
+    if response_body === nothing || response_body isa IO || response_body isa AbstractVector{UInt8}
+        return response_body
+    end
+    throw(ArgumentError("unsupported response body sink $(typeof(response_body)); expected nothing, IO, or AbstractVector{UInt8}"))
+end
+
+function _consume_incoming_response!(
+        incoming::_IncomingResponse,
+        sink;
+        decompress::Union{Nothing, Bool},
+    )::Tuple{Any, Int64}
+    return _with_response_reader(incoming; decompress = decompress) do reader
+        if sink === nothing
+            body = _read_all_response_bytes(reader)
+            return body, Int64(length(body))
+        end
+        if sink isa IO
+            n = _copy_response_bytes!(sink::IO, reader)
+            return nothing, n
+        end
+        n = _copy_response_bytes!(sink::AbstractVector{UInt8}, reader)
+        if sink isa Vector{UInt8}
+            return sink::Vector{UInt8}, n
+        end
+        return view(sink::AbstractVector{UInt8}, 1:Int(n)), n
+    end
 end
 
 function _add_header_value!(headers::Headers, key, value)
@@ -1459,6 +1575,13 @@ function _normalize_headers_input(headers_input)::Headers
         return headers
     end
     throw(ArgumentError("unsupported headers input type $(typeof(headers_input))"))
+end
+
+function _apply_default_accept_encoding!(headers::Headers, decompress::Union{Nothing, Bool})::Nothing
+    decompress === false && return nothing
+    has_header(headers, "Accept-Encoding") && return nothing
+    set_header!(headers, "Accept-Encoding", "gzip")
+    return nothing
 end
 
 function _normalize_body_input(body_input)::Tuple{AbstractBody, Int64}
@@ -1650,7 +1773,7 @@ function _validate_request_extra_kwargs(kwargs)
             end
             throw(ArgumentError("retry keyword is not implemented yet; pass retry=false"))
         end
-        if k == :verbose || k == :decompress || k == :canonicalize_headers || k == :logerrors || k == :observelayers
+        if k == :verbose || k == :canonicalize_headers || k == :logerrors || k == :observelayers
             continue
         end
         throw(ArgumentError("unsupported keyword argument: $k"))
@@ -1684,6 +1807,9 @@ Keyword arguments:
 - `status_exception`: throw `StatusError` for non-success responses
 - `redirect`: follow redirects through `do!`
 - `query`: optional query string or key/value collection appended to the URL
+- `response_stream`: optional sink `IO` or byte buffer written with the final response body
+- `response_body`: alias for `response_stream`
+- `decompress`: `nothing`/`true` auto-decompress gzip responses, `false` leaves wire bytes untouched
 - `client`: optional explicit `Client`; otherwise a default or ephemeral client
   is created
 - `connect_timeout`: connection timeout in seconds for implicit clients
@@ -1691,10 +1817,15 @@ Keyword arguments:
 - `require_ssl_verification`: disable certificate verification only for testing
 - `protocol`: `:auto`, `:h1`, or `:h2`
 
-Returns a fully materialized `Response{Vector{UInt8}}`. Throws `ArgumentError`
-for unsupported inputs, `StatusError` when `status_exception=true` and the
-response status is considered failing, plus any lower-level transport or
-protocol exception raised during the request.
+Returns a high-level `Response`. When no response sink is provided,
+`response.body` is a fully materialized `Vector{UInt8}`. When `response_stream`
+or `response_body` is provided, the final `Response` contains either the filled
+buffer/view or `nothing` for `IO` sinks.
+
+Throws `ArgumentError` for unsupported inputs or invalid sink combinations,
+`StatusError` when `status_exception=true` and the response status is considered
+failing, plus any lower-level transport or protocol exception raised during the
+request.
 """
 function request(
         method::AbstractString,
@@ -1704,17 +1835,22 @@ function request(
         status_exception::Bool = true,
         redirect::Bool = true,
         query = nothing,
+        response_stream = nothing,
+        response_body = response_stream,
+        decompress::Union{Nothing, Bool} = nothing,
         client::Union{Nothing, Client} = nothing,
         connect_timeout::Real = 0,
         readtimeout::Real = 0,
         require_ssl_verification::Bool = true,
         protocol::Symbol = :auto,
         kwargs...,
-    )::Response{Vector{UInt8}}
+    )
     _validate_request_extra_kwargs(kwargs)
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     parsed = _parse_http_url(url; query = query)
     req_headers = _normalize_headers_input(headers)
+    sink = _resolve_response_sink(response_stream, response_body)
+    _apply_default_accept_encoding!(req_headers, decompress)
     if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
         set_header!(req_headers, "Authorization", parsed.authorization::String)
     end
@@ -1753,15 +1889,15 @@ function request(
             )
         end
         incoming = incoming_response::_IncomingResponse
-        response_body = _read_response_body_bytes!(incoming.rawbody)
+        final_body, final_length = _consume_incoming_response!(incoming, sink; decompress = decompress)
         resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
         response = Response(
             incoming.head.status_code;
             reason = incoming.head.reason,
             headers = incoming.head.headers,
             trailers = incoming.head.trailers,
-            body = response_body,
-            content_length = Int64(length(response_body)),
+            body = final_body,
+            content_length = final_length,
             proto_major = incoming.head.proto_major,
             proto_minor = incoming.head.proto_minor,
             close = incoming.head.close,
