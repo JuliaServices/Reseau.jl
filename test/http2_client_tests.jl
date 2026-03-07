@@ -40,6 +40,31 @@ function _write_frame_to_conn!(conn::NC.Conn, frame::HT.AbstractFrame)
     return nothing
 end
 
+function _write_padded_data_frame_to_conn!(conn::NC.Conn, stream_id::UInt32, data::Vector{UInt8}; end_stream::Bool = false, padding::Int = 1)
+    padding >= 0 || throw(ArgumentError("padding must be >= 0"))
+    payload = UInt8[UInt8(padding)]
+    append!(payload, data)
+    append!(payload, zeros(UInt8, padding))
+    length_bytes = UInt8[
+        UInt8((length(payload) >> 16) & 0xff),
+        UInt8((length(payload) >> 8) & 0xff),
+        UInt8(length(payload) & 0xff),
+    ]
+    flags = HT.FLAG_PADDED
+    end_stream && (flags |= HT.FLAG_END_STREAM)
+    header = UInt8[
+        length_bytes...,
+        HT.FRAME_DATA,
+        flags,
+        UInt8((stream_id >> 24) & 0x7f),
+        UInt8((stream_id >> 16) & 0xff),
+        UInt8((stream_id >> 8) & 0xff),
+        UInt8(stream_id & 0xff),
+    ]
+    _write_all_h2_tcp!(conn, vcat(header, payload))
+    return nothing
+end
+
 function _wait_task_h2!(task::Task; timeout_s::Float64 = 5.0)
     status = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
     status == :timed_out && error("timed out waiting for h2 server task")
@@ -115,6 +140,52 @@ end
         @test String(_read_all_h2_body(response.body)) == "ok"
         _wait_task_h2!(server_task)
         @test seen_paths == ["/h2"]
+    finally
+        close(h2_conn)
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP/2 client strips padded DATA payload bytes" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    server_task = errormonitor(Threads.@spawn begin
+        accepted_conn = NC.accept!(listener)
+        reader = HT.Framer(HT._ConnReader(accepted_conn))
+        server_encoder = HT.Encoder()
+        server_decoder = HT.Decoder()
+        try
+            preface = _read_exact_h2_tcp!(accepted_conn, length(HT._H2_PREFACE))
+            preface == HT._H2_PREFACE || error("invalid h2 preface")
+            _ = HT.read_frame!(reader)
+            _write_frame_to_conn!(accepted_conn, HT.SettingsFrame(false, Pair{UInt16, UInt32}[]))
+            _ = HT.read_frame!(reader)
+            headers_frame = _read_next_headers_frame!(reader)
+            hf = headers_frame::HT.HeadersFrame
+            _ = HT.decode_header_block(server_decoder, hf.header_block_fragment)
+            response_headers = HT.HeaderField[HT.HeaderField(":status", "200", false)]
+            encoded = HT.encode_header_block(server_encoder, response_headers)
+            _write_frame_to_conn!(accepted_conn, HT.HeadersFrame(hf.stream_id, false, true, encoded))
+            _write_padded_data_frame_to_conn!(accepted_conn, hf.stream_id, collect(codeunits("ok")); end_stream = true, padding = 3)
+        finally
+            try
+                NC.close!(accepted_conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    h2_conn = HT.connect_h2!(address; secure = false)
+    try
+        request = HT.Request("GET", "/padded"; host = address, body = HT.EmptyBody(), content_length = 0)
+        response = HT.h2_roundtrip!(h2_conn, request)
+        @test response.status_code == 200
+        @test String(_read_all_h2_body(response.body)) == "ok"
+        _wait_task_h2!(server_task)
     finally
         close(h2_conn)
         try

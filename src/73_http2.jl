@@ -12,6 +12,7 @@ export FRAME_CONTINUATION
 export FLAG_END_STREAM
 export FLAG_END_HEADERS
 export FLAG_ACK
+export FLAG_PADDED
 export FrameHeader
 export AbstractFrame
 export DataFrame
@@ -43,6 +44,8 @@ const FRAME_CONTINUATION = UInt8(0x9)
 const FLAG_END_STREAM = UInt8(0x1)
 const FLAG_END_HEADERS = UInt8(0x4)
 const FLAG_ACK = UInt8(0x1)
+const FLAG_PADDED = UInt8(0x8)
+const _FLAG_HEADERS_PRIORITY = UInt8(0x20)
 
 """
     FrameHeader
@@ -233,6 +236,37 @@ function _serialize_settings_payload(settings::Vector{Pair{UInt16, UInt32}})::Ve
     return payload
 end
 
+function _split_padded_payload(payload::Vector{UInt8}, frame_name::AbstractString)::Tuple{Vector{UInt8}, Int}
+    isempty(payload) && throw(ParseError("HTTP/2 $(frame_name) padded payload must include pad length"))
+    pad_length = Int(payload[1])
+    1 + pad_length <= length(payload) || throw(ParseError("HTTP/2 $(frame_name) padding exceeds payload length"))
+    data_end = length(payload) - pad_length
+    return copy(@view(payload[2:data_end])), pad_length
+end
+
+function _parse_headers_fragment(payload::Vector{UInt8}, flags::UInt8)::Vector{UInt8}
+    working = payload
+    if (flags & FLAG_PADDED) != 0
+        working, _ = _split_padded_payload(working, "HEADERS")
+    end
+    if (flags & _FLAG_HEADERS_PRIORITY) != 0
+        length(working) >= 5 || throw(ParseError("HTTP/2 HEADERS priority payload must be at least 5 bytes"))
+        return copy(@view(working[6:end]))
+    end
+    return working
+end
+
+function _parse_push_promise_payload(payload::Vector{UInt8}, flags::UInt8)::Tuple{UInt32, Vector{UInt8}}
+    working = payload
+    if (flags & FLAG_PADDED) != 0
+        working, _ = _split_padded_payload(working, "PUSH_PROMISE")
+    end
+    length(working) >= 4 || throw(ParseError("HTTP/2 PUSH_PROMISE frame payload must be >= 4 bytes"))
+    promised = _read_u32_be(working, 1) & 0x7fff_ffff
+    fragment = length(working) == 4 ? UInt8[] : copy(@view(working[5:end]))
+    return promised, fragment
+end
+
 """
     read_frame!(framer)
 
@@ -253,14 +287,20 @@ function read_frame!(framer::Framer)::AbstractFrame
     # level rules such as "HEADERS must precede DATA" live in the client/server
     # state machines above the framer.
     if header.type == FRAME_DATA
-        return DataFrame(header.stream_id, (header.flags & FLAG_END_STREAM) != 0, payload)
+        data = if (header.flags & FLAG_PADDED) != 0
+            stripped, _ = _split_padded_payload(payload, "DATA")
+            stripped
+        else
+            payload
+        end
+        return DataFrame(header.stream_id, (header.flags & FLAG_END_STREAM) != 0, data)
     end
     if header.type == FRAME_HEADERS
         return HeadersFrame(
             header.stream_id,
             (header.flags & FLAG_END_STREAM) != 0,
             (header.flags & FLAG_END_HEADERS) != 0,
-            payload,
+            _parse_headers_fragment(payload, header.flags),
         )
     end
     if header.type == FRAME_PRIORITY
@@ -283,9 +323,7 @@ function read_frame!(framer::Framer)::AbstractFrame
         return SettingsFrame(false, _parse_settings_payload(payload))
     end
     if header.type == FRAME_PUSH_PROMISE
-        length(payload) >= 4 || throw(ParseError("HTTP/2 PUSH_PROMISE frame payload must be >= 4 bytes"))
-        promised = _read_u32_be(payload, 1) & 0x7fff_ffff
-        fragment = payload[5:end]
+        promised, fragment = _parse_push_promise_payload(payload, header.flags)
         return PushPromiseFrame(header.stream_id, promised, (header.flags & FLAG_END_HEADERS) != 0, fragment)
     end
     if header.type == FRAME_PING
