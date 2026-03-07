@@ -607,6 +607,7 @@ function roundtrip!(
                 raw_response.proto_minor,
                 raw_response.close,
                 raw_response.request,
+                nothing,
             )
         catch err
             _close_conn!(conn)
@@ -627,7 +628,6 @@ export MemoryCookieJar
 export Cookie
 export do!
 export get!
-export ClientResponse
 export StatusError
 export request
 export get
@@ -638,7 +638,7 @@ export patch
 export delete
 export options
 
-struct _ClientResponseHead
+struct _IncomingResponseHead
     status_code::Int
     reason::String
     headers::Headers
@@ -651,12 +651,12 @@ struct _ClientResponseHead
 end
 
 struct _IncomingResponse{B <: AbstractBody}
-    head::_ClientResponseHead
+    head::_IncomingResponseHead
     rawbody::B
 end
 
 function _response_head(response::Response)
-    return _ClientResponseHead(
+    return _IncomingResponseHead(
         response.status_code,
         response.reason,
         response.headers,
@@ -1340,28 +1340,12 @@ end
 import Base: get
 
 """
-    ClientResponse
-
-Materialized high-level response returned by `request/get/post/...` helpers.
-
-Unlike the lower-level `Response`, the response body has already been fully read
-into memory as `body::Vector{UInt8}`.
-"""
-struct ClientResponse
-    status::Int
-    headers::Vector{Pair{String, String}}
-    body::Vector{UInt8}
-    request::Request
-    url::String
-end
-
-"""
     StatusError
 
 Raised when `status_exception=true` and the response status indicates failure.
 """
 struct StatusError <: Exception
-    response::ClientResponse
+    response::Response
 end
 
 function Base.showerror(io::IO, err::StatusError)
@@ -1395,19 +1379,8 @@ function _default_client!()::Client
     end
 end
 
-function _status_throws(resp::ClientResponse)::Bool
-    return resp.status >= 300
-end
-
-function _header_pairs(headers::Headers)::Vector{Pair{String, String}}
-    out = Pair{String, String}[]
-    for key in header_keys(headers)
-        values = get_headers(headers, key)
-        for value in values
-            push!(out, key => value)
-        end
-    end
-    return out
+function _status_throws(resp::Response)::Bool
+    return resp.status_code >= 300
 end
 
 function _read_response_body_bytes!(body::AbstractBody)::Vector{UInt8}
@@ -1718,10 +1691,10 @@ Keyword arguments:
 - `require_ssl_verification`: disable certificate verification only for testing
 - `protocol`: `:auto`, `:h1`, or `:h2`
 
-Returns a fully materialized `ClientResponse`. Throws `ArgumentError` for
-unsupported inputs, `StatusError` when `status_exception=true` and the response
-status is considered failing, plus any lower-level transport or protocol
-exception raised during the request.
+Returns a fully materialized `Response{Vector{UInt8}}`. Throws `ArgumentError`
+for unsupported inputs, `StatusError` when `status_exception=true` and the
+response status is considered failing, plus any lower-level transport or
+protocol exception raised during the request.
 """
 function request(
         method::AbstractString,
@@ -1737,7 +1710,7 @@ function request(
         require_ssl_verification::Bool = true,
         protocol::Symbol = :auto,
         kwargs...,
-    )::ClientResponse
+    )::Response{Vector{UInt8}}
     _validate_request_extra_kwargs(kwargs)
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     parsed = _parse_http_url(url; query = query)
@@ -1782,12 +1755,18 @@ function request(
         incoming = incoming_response::_IncomingResponse
         response_body = _read_response_body_bytes!(incoming.rawbody)
         resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
-        response = ClientResponse(
-            incoming.head.status_code,
-            _header_pairs(incoming.head.headers),
-            response_body,
-            resolved_request,
-            parsed.url,
+        response = Response(
+            incoming.head.status_code;
+            reason = incoming.head.reason,
+            headers = incoming.head.headers,
+            trailers = incoming.head.trailers,
+            body = response_body,
+            content_length = Int64(length(response_body)),
+            proto_major = incoming.head.proto_major,
+            proto_minor = incoming.head.proto_minor,
+            close = incoming.head.close,
+            request = resolved_request,
+            request_url = parsed.url,
         )
         status_exception && _status_throws(response) && throw(StatusError(response))
         return response
