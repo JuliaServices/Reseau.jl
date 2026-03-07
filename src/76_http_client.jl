@@ -638,6 +638,69 @@ export patch
 export delete
 export options
 
+struct _ClientResponseHead
+    status_code::Int
+    reason::String
+    headers::Headers
+    trailers::Headers
+    content_length::Int64
+    proto_major::UInt8
+    proto_minor::UInt8
+    close::Bool
+    request::Union{Nothing, Request}
+end
+
+struct _IncomingResponse{B <: AbstractBody}
+    head::_ClientResponseHead
+    rawbody::B
+end
+
+function _response_head(response::Response)
+    return _ClientResponseHead(
+        response.status_code,
+        response.reason,
+        response.headers,
+        response.trailers,
+        response.content_length,
+        response.proto_major,
+        response.proto_minor,
+        response.close,
+        response.request,
+    )
+end
+
+function _incoming_response(response::Response{B}) where {B <: AbstractBody}
+    return _IncomingResponse(_response_head(response), response.body)
+end
+
+function _roundtrip_incoming!(
+        transport::Transport,
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
+    )::_IncomingResponse
+    response = roundtrip!(transport, address, request; secure = secure, server_name = server_name)
+    return _incoming_response(response)
+end
+
+function _h2_roundtrip_incoming!(conn::H2Connection, request::Request)::_IncomingResponse
+    response = h2_roundtrip!(conn, request)
+    return _incoming_response(response)
+end
+
+function _do_incoming!(
+        client,
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
+        protocol::Symbol = :auto,
+    )::_IncomingResponse
+    response = do!(client, address, request; secure = secure, server_name = server_name, protocol = protocol)
+    return _incoming_response(response)
+end
+
 abstract type AbstractCookieJar end
 
 """
@@ -1696,10 +1759,10 @@ function request(
         set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
     end
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
-    low_level_response = nothing
+    incoming_response = nothing
     try
         if redirect
-            low_level_response = do!(
+            incoming_response = _do_incoming!(
                 req_client,
                 parsed.address,
                 req;
@@ -1708,7 +1771,7 @@ function request(
                 protocol = protocol,
             )
         else
-            low_level_response = roundtrip!(
+            incoming_response = _roundtrip_incoming!(
                 req_client.transport,
                 parsed.address,
                 req;
@@ -1716,11 +1779,12 @@ function request(
                 server_name = parsed.server_name,
             )
         end
-        response_body = _read_response_body_bytes!((low_level_response::Response).body)
-        resolved_request = low_level_response.request === nothing ? req : low_level_response.request::Request
+        incoming = incoming_response::_IncomingResponse
+        response_body = _read_response_body_bytes!(incoming.rawbody)
+        resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
         response = ClientResponse(
-            low_level_response.status_code,
-            _header_pairs(low_level_response.headers),
+            incoming.head.status_code,
+            _header_pairs(incoming.head.headers),
             response_body,
             resolved_request,
             parsed.url,
