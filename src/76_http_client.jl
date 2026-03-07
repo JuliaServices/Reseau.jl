@@ -1807,6 +1807,18 @@ const _SSE_CR = UInt8('\r')
 const _SSE_COLON = UInt8(':')
 const _SSE_SPACE = UInt8(' ')
 
+"""
+    SSEEvent
+
+Parsed Server-Sent Event delivered to `sse_callback`.
+
+Fields:
+- `data`: concatenated `data:` lines joined by `\n`
+- `event`: optional event name
+- `id`: last event id in effect when the event dispatched
+- `retry`: last valid retry hint in milliseconds
+- `fields`: all observed fields collected into a string dictionary
+"""
 struct SSEEvent
     data::String
     event::Union{Nothing, String}
@@ -2198,6 +2210,15 @@ function _finalize_request_response(
     )
 end
 
+"""
+    Stream <: IO
+
+Client-side request/response stream returned by `HTTP.open`.
+
+Writes append request body bytes until response reading begins. After
+`startread(stream)`, reads consume the response body from the underlying
+connection using the same redirect/decompression machinery as `request(...)`.
+"""
 mutable struct Stream <: IO
     method::String
     parsed::_URLParts
@@ -2344,6 +2365,15 @@ function _start_stream_read!(stream::Stream)::Response
     return stream.response::Response
 end
 
+"""
+    startread(stream) -> Response
+
+Finalize request writes if needed, execute the HTTP exchange, and return the
+response metadata for `stream` without buffering the response body.
+
+Subsequent reads on `stream` consume the response body. Repeated calls return
+the same response object.
+"""
 function startread(stream::Stream)::Response
     return _start_stream_read!(stream)
 end
@@ -2395,6 +2425,15 @@ function eof(stream::Stream)::Bool
     return done
 end
 
+"""
+    closeread(stream) -> Response
+
+Close the readable side of `stream` and return its response metadata.
+
+If the response body has already been fully consumed, this is effectively a
+no-op. If unread response bytes remain, the underlying client connection is not
+reused.
+"""
 function closeread(stream::Stream)::Response
     _start_stream_read!(stream)
     return _finish_stream_read!(stream; suppress_producer_errors = true)
@@ -2412,6 +2451,24 @@ function close(stream::Stream)
     return nothing
 end
 
+"""
+    open(method::Symbol, url, headers=Pair{String,String}[]; kwargs...) -> Stream
+    open(f, method::Symbol, url, headers=Pair{String,String}[]; kwargs...)
+
+Create a streaming HTTP client request/response exchange.
+
+The returned `Stream` buffers request writes locally until `startread(stream)`
+or the end of the `do` block. Once reading starts, `stream` behaves like a
+readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
+including `redirect`, `decompress`, `client`, `connect_timeout`, `readtimeout`,
+`require_ssl_verification`, and `protocol`.
+
+The `do`-block form closes request writes automatically, closes the readable
+side on exit, and returns the final response metadata.
+
+Method is currently a `Symbol` to avoid colliding with Base's file-opening
+`open(::AbstractString, ::AbstractString)` methods during precompilation.
+"""
 function open(
         method::Symbol,
         url::AbstractString,
