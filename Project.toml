@@ -4,6 +4,7 @@ version = "1.1.1"
 
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 EnumX = "4e289a0a-7415-4d19-859d-a7e5c4648b56"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
@@ -14,6 +15,7 @@ ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
+CodecZlib = "0.7.8"
 EnumX = "1"
 OpenSSL_jll = "3"
 PrecompileTools = "1"
