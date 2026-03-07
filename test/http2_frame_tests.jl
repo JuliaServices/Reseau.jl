@@ -62,6 +62,36 @@ end
     @test_throws HT.ProtocolError HT.read_frame!(reader)
 end
 
+@testset "HTTP/2 padded payload parsing" begin
+    padded_data_bytes = UInt8[
+        0x00, 0x00, 0x06,
+        HT.FRAME_DATA,
+        HT.FLAG_PADDED | HT.FLAG_END_STREAM,
+        0x00, 0x00, 0x00, 0x01,
+        0x02,
+        0x61, 0x62, 0x63,
+        0x00, 0x00,
+    ]
+    data_frame = HT.read_frame!(HT.Framer(IOBuffer(padded_data_bytes)))
+    @test data_frame isa HT.DataFrame
+    @test (data_frame::HT.DataFrame).end_stream
+    @test (data_frame::HT.DataFrame).data == collect(codeunits("abc"))
+
+    padded_headers_bytes = UInt8[
+        0x00, 0x00, 0x05,
+        HT.FRAME_HEADERS,
+        HT.FLAG_PADDED | HT.FLAG_END_HEADERS,
+        0x00, 0x00, 0x00, 0x03,
+        0x01,
+        0xaa, 0xbb, 0xcc,
+        0x00,
+    ]
+    headers_frame = HT.read_frame!(HT.Framer(IOBuffer(padded_headers_bytes)))
+    @test headers_frame isa HT.HeadersFrame
+    @test (headers_frame::HT.HeadersFrame).end_headers
+    @test (headers_frame::HT.HeadersFrame).header_block_fragment == UInt8[0xaa, 0xbb, 0xcc]
+end
+
 @testset "HTTP/2 unknown frame passthrough" begin
     header = HT.FrameHeader(3, UInt8(0xfe), UInt8(0x00), UInt32(9))
     frame = HT.UnknownFrame(header, UInt8[0x01, 0x02, 0x03])

@@ -156,6 +156,7 @@
   - 2026-03-07: `julia --startup-file=no --project=/Users/jacob.quinn/.julia/dev/Reseau -e 'using Pkg; Pkg.test()'` passed locally.
   - 2026-03-07: public docstrings were added for `Stream`, `startread`, `closeread`, `open`, and `SSEEvent`.
   - 2026-03-07: `http-master-parity.md` was updated to record the client-surface parity work that landed in this series.
+  - 2026-03-07: fixed HTTP/2 padded DATA parsing so automatic gzip decompression works against live sites like `https://google.com`; reran targeted HTTP/2 suites and full `Pkg.test()` successfully.
 
 ## Compaction Continuity Block
 
