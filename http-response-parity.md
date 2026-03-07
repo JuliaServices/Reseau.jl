@@ -134,7 +134,7 @@
   - 2026-03-07: `test/http_client_tests.jl` passed locally with new SSE coverage.
   - 2026-03-07: `test/http_parity_tests.jl` passed locally.
 
-### [ ] ITEM-006 (P1) Final cleanup, docs, and full-suite verification
+### [x] ITEM-006 (P1) Final cleanup, docs, and full-suite verification
 - Description: After the client redesign lands, we need to remove dead code, tighten docs, update parity tracking, and run the broader suite so the final state is clean and supportable.
 - Desired outcome: The action document and parity notes reflect the new implementation, dead code like old helper paths is gone, and the relevant full test coverage is green.
 - Affected files: `http-response-parity.md`, `http-master-parity.md`, `src/76_http_client.jl`, `src/7_http.jl`, `README.md`, `test/`, `docs/` (if present and needed)
@@ -152,6 +152,10 @@
 - Completion criteria:
   - The action list is fully checked off with brief verification notes.
   - Full package tests pass.
+- Verification evidence:
+  - 2026-03-07: `julia --startup-file=no --project=/Users/jacob.quinn/.julia/dev/Reseau -e 'using Pkg; Pkg.test()'` passed locally.
+  - 2026-03-07: public docstrings were added for `Stream`, `startread`, `closeread`, `open`, and `SSEEvent`.
+  - 2026-03-07: `http-master-parity.md` was updated to record the client-surface parity work that landed in this series.
 
 ## Compaction Continuity Block
 
