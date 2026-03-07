@@ -56,12 +56,12 @@ function run_http_trim_sample()::Nothing
     HT.write_response!(resp_io, resp)
     resp_bytes = take!(resp_io)
     isempty(resp_bytes) && error("expected serialized response bytes")
-    parsed_resp = HT.read_response(IOBuffer(resp_bytes), parsed_req)::HT.Response{HT.ChunkedBody{IOBuffer}}
+    parsed_resp = HT._read_response(IOBuffer(resp_bytes), parsed_req)::HT.Response{HT.ChunkedBody{IOBuffer}}
     resp_body_buf = Vector{UInt8}(undef, 2)
     HT.body_read!(parsed_resp.body, resp_body_buf) == 2 || error("expected parsed response body")
     chunk_conn = _TrimChunkConn(resp_bytes; max_chunk = 3)
     chunk_reader = HT._ConnReader(chunk_conn; buffer_bytes = 16)
-    parsed_resp_chunked = HT.read_response(chunk_reader, parsed_req)::HT.Response{HT.ChunkedBody{HT._ConnReader{_TrimChunkConn}}}
+    parsed_resp_chunked = HT._read_response(chunk_reader, parsed_req)::HT.Response{HT.ChunkedBody{HT._ConnReader{_TrimChunkConn}}}
     chunk_body_buf = Vector{UInt8}(undef, 2)
     HT.body_read!(parsed_resp_chunked.body, chunk_body_buf) == 2 || error("expected parsed chunked response body")
     h2_frame_io = IOBuffer()

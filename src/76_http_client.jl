@@ -462,11 +462,11 @@ end
     return request_buf
 end
 
-@inline function _response_reusable(response::Response, request::Request)::Bool
-    response.close && return false
+@inline function _response_reusable(response::_IncomingResponse, request::Request)::Bool
+    response.head.close && return false
     request.close && return false
-    has_header_token(response.headers, "Connection", "close") && return false
-    response.body isa EOFBody && return false
+    has_header_token(response.head.headers, "Connection", "close") && return false
+    response.rawbody isa EOFBody && return false
     return true
 end
 
@@ -545,7 +545,7 @@ connection can be recycled when the caller finishes consuming it.
 Throws parser, protocol, transport, TLS, and timeout exceptions depending on
 where the exchange fails.
 """
-function roundtrip!(
+function _roundtrip_incoming!(
         transport::Transport,
         address::AbstractString,
         request::Request;
@@ -576,19 +576,19 @@ function roundtrip!(
             n = write(stream, request_io.data, request_bytes)
             n == request_bytes || throw(ProtocolError("transport short write"))
             reader = conn.reader
-            raw_response = read_response(reader, current_request)
+            raw_response = _read_incoming_response(reader, current_request)
             # HTTP/1 informational responses are consumed internally so callers
             # observe the final non-1xx response, matching the behavior of Go's
             # client transport.
-            while (raw_response.status_code >= 100 && raw_response.status_code < 200) && raw_response.status_code != 101
+            while (raw_response.head.status_code >= 100 && raw_response.head.status_code < 200) && raw_response.head.status_code != 101
                 try
-                    body_close!(raw_response.body)
+                    body_close!(raw_response.rawbody)
                 catch
                 end
-                raw_response = read_response(reader, current_request)
+                raw_response = _read_incoming_response(reader, current_request)
             end
             reusable = _response_reusable(raw_response, current_request)
-            if raw_response.body isa EmptyBody
+            if raw_response.rawbody isa EmptyBody
                 if reusable
                     _put_idle_conn!(transport, conn)
                 else
@@ -596,19 +596,10 @@ function roundtrip!(
                 end
                 return raw_response
             end
-            managed = ManagedBody(raw_response.body, transport, conn, reusable, false, false)
-            return Response{typeof(managed)}(
-                raw_response.status_code,
-                raw_response.reason,
-                raw_response.headers,
-                raw_response.trailers,
+            managed = ManagedBody(raw_response.rawbody, transport, conn, reusable, false, false)
+            return _IncomingResponse(
+                raw_response.head,
                 managed,
-                raw_response.content_length,
-                raw_response.proto_major,
-                raw_response.proto_minor,
-                raw_response.close,
-                raw_response.request,
-                nothing,
             )
         catch err
             _close_conn!(conn)
@@ -620,6 +611,16 @@ function roundtrip!(
             rethrow(err)
         end
     end
+end
+
+function roundtrip!(
+        transport::Transport,
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
+    )
+    return _streaming_response(_roundtrip_incoming!(transport, address, request; secure = secure, server_name = server_name))
 end
 
 export Client
@@ -643,69 +644,6 @@ export patch
 export delete
 export options
 export open
-
-struct _IncomingResponseHead
-    status_code::Int
-    reason::String
-    headers::Headers
-    trailers::Headers
-    content_length::Int64
-    proto_major::UInt8
-    proto_minor::UInt8
-    close::Bool
-    request::Union{Nothing, Request}
-end
-
-struct _IncomingResponse{B <: AbstractBody}
-    head::_IncomingResponseHead
-    rawbody::B
-end
-
-function _response_head(response::Response)
-    return _IncomingResponseHead(
-        response.status_code,
-        response.reason,
-        response.headers,
-        response.trailers,
-        response.content_length,
-        response.proto_major,
-        response.proto_minor,
-        response.close,
-        response.request,
-    )
-end
-
-function _incoming_response(response::Response{B}) where {B <: AbstractBody}
-    return _IncomingResponse(_response_head(response), response.body)
-end
-
-function _roundtrip_incoming!(
-        transport::Transport,
-        address::AbstractString,
-        request::Request;
-        secure::Bool = false,
-        server_name::Union{Nothing, AbstractString} = nothing,
-    )::_IncomingResponse
-    response = roundtrip!(transport, address, request; secure = secure, server_name = server_name)
-    return _incoming_response(response)
-end
-
-function _h2_roundtrip_incoming!(conn::H2Connection, request::Request)::_IncomingResponse
-    response = h2_roundtrip!(conn, request)
-    return _incoming_response(response)
-end
-
-function _do_incoming!(
-        client,
-        address::AbstractString,
-        request::Request;
-        secure::Bool = false,
-        server_name::Union{Nothing, AbstractString} = nothing,
-        protocol::Symbol = :auto,
-    )::_IncomingResponse
-    response = do!(client, address, request; secure = secure, server_name = server_name, protocol = protocol)
-    return _incoming_response(response)
-end
 
 abstract type AbstractCookieJar end
 
@@ -1237,7 +1175,7 @@ or closing `response.body`.
 HTTP/2 first for secure requests and fall back to HTTP/1 when negotiation says
 that h2 is unavailable.
 """
-function do!(
+function _do_incoming!(
         client::Client,
         address::AbstractString,
         request::Request;
@@ -1262,11 +1200,11 @@ function do!(
         response = if _use_h2(client, current_secure, protocol)
             try
                 conn = _acquire_h2_conn!(client, current_address, current_secure; server_name = current_server_name)
-                h2_roundtrip!(conn, send_request)
+                _h2_roundtrip_incoming!(conn, send_request)
             catch err
                 _drop_h2_conn!(client, current_address, current_secure)
                 if protocol == :auto && _should_fallback_h2_to_h1(err)
-                    roundtrip!(
+                    _roundtrip_incoming!(
                         client.transport,
                         current_address,
                         send_request;
@@ -1278,7 +1216,7 @@ function do!(
                 end
             end
         else
-            roundtrip!(
+            _roundtrip_incoming!(
                 client.transport,
                 current_address,
                 send_request;
@@ -1288,26 +1226,26 @@ function do!(
         end
         _trace_call(client.trace, :on_got_conn, current_address, current_secure)
         _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
-        _trace_call(client.trace, :on_got_first_response_byte, response.status_code)
+        _trace_call(client.trace, :on_got_first_response_byte, response.head.status_code)
         if client.jar isa MemoryCookieJar
-            set_cookie_values = get_headers(response.headers, "Set-Cookie")
+            set_cookie_values = get_headers(response.head.headers, "Set-Cookie")
             isempty(set_cookie_values) || _store_set_cookies!(client.jar::MemoryCookieJar, host, set_cookie_values)
         end
-        if !_is_redirect_status(response.status_code)
+        if !_is_redirect_status(response.head.status_code)
             return response
         end
-        location = get_header(response.headers, "Location")
+        location = get_header(response.head.headers, "Location")
         location === nothing && return response
         redirect_count == client.max_redirects && throw(ProtocolError("stopped after maximum redirect count ($(client.max_redirects))"))
         if client.check_redirect !== nothing
-            proceed = (client.check_redirect::Function)(response, current_request, location)
+            proceed = (client.check_redirect::Function)(_streaming_response(response), current_request, location)
             proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
             proceed || return response
         end
-        if (response.status_code == 307 || response.status_code == 308) && !_redirect_body_replayable(current_request)
+        if (response.head.status_code == 307 || response.head.status_code == 308) && !_redirect_body_replayable(current_request)
             return response
         end
-        body_close!(response.body)
+        body_close!(response.rawbody)
         previous_secure = current_secure
         previous_address = current_address
         previous_target = current_request.target
@@ -1315,7 +1253,7 @@ function do!(
         if !explicit_server_name
             current_server_name = _host_for_sni(current_address)
         end
-        current_request = _prepare_request_for_redirect(current_request, response.status_code, next_target)
+        current_request = _prepare_request_for_redirect(current_request, response.head.status_code, next_target)
         existing_ref = get_header(current_request.headers, "Referer")
         next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, existing_ref)
         if next_ref === nothing
@@ -1329,6 +1267,17 @@ function do!(
         current_request.host = current_address
     end
     throw(ProtocolError("unexpected redirect loop termination"))
+end
+
+function do!(
+        client::Client,
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
+        protocol::Symbol = :auto,
+    )
+    return _streaming_response(_do_incoming!(client, address, request; secure = secure, server_name = server_name, protocol = protocol))
 end
 
 """

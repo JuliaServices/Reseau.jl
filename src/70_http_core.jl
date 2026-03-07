@@ -701,6 +701,23 @@ mutable struct Response{B}
     request_url::Union{Nothing, String}
 end
 
+struct _IncomingResponseHead
+    status_code::Int
+    reason::String
+    headers::Headers
+    trailers::Headers
+    content_length::Int64
+    proto_major::UInt8
+    proto_minor::UInt8
+    close::Bool
+    request::Union{Nothing, Request}
+end
+
+struct _IncomingResponse{B <: AbstractBody}
+    head::_IncomingResponseHead
+    rawbody::B
+end
+
 function Response(
         status_code::Integer;
         reason::AbstractString = "",
@@ -737,4 +754,23 @@ function Base.getproperty(response::Response, field::Symbol)
     field === :status && return getfield(response, :status_code)
     field === :url && return getfield(response, :request_url)
     return getfield(response, field)
+end
+
+function _streaming_response(incoming::_IncomingResponse)
+    head = incoming.head
+    response = Response{typeof(incoming.rawbody)}(
+        head.status_code,
+        head.reason,
+        head.headers,
+        head.trailers,
+        incoming.rawbody,
+        head.content_length,
+        head.proto_major,
+        head.proto_minor,
+        head.close,
+        head.request,
+        nothing,
+    )
+    response.trailers = head.trailers
+    return response
 end

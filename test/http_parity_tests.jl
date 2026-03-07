@@ -25,11 +25,11 @@ end
 
 @testset "HTTP parity framing guards" begin
     raw_204 = "HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\nignored"
-    response_204 = HT.read_response(IOBuffer(codeunits(raw_204)))
+    response_204 = HT._read_response(IOBuffer(codeunits(raw_204)))
     @test response_204.status_code == 204
     @test _read_all_parity(response_204.body) == UInt8[]
     bad_cl = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nhi"
-    @test_throws HT.ProtocolError HT.read_response(IOBuffer(codeunits(bad_cl)))
+    @test_throws HT.ProtocolError HT._read_response(IOBuffer(codeunits(bad_cl)))
 end
 
 @testset "HTTP parity redirect semantics" begin

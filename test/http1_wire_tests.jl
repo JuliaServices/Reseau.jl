@@ -38,7 +38,7 @@ end
 
 @testset "HTTP/1 response parse/write chunked" begin
     raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: done\r\n\r\n"
-    resp = HT.read_response(IOBuffer(codeunits(raw)))
+    resp = HT._read_response(IOBuffer(codeunits(raw)))
     @test resp.status_code == 200
     @test HT.get_header(resp.headers, "Transfer-Encoding") == "chunked"
     @test _read_all_body_bytes(resp.body) == collect(codeunits("Wikipedia"))
@@ -50,7 +50,7 @@ end
     resp_out = HT.Response(200; reason = "OK", headers = headers, trailers = trailers, body = HT.BytesBody(collect(codeunits("chunked-body"))), content_length = -1)
     io = IOBuffer()
     HT.write_response!(io, resp_out)
-    resp_in = HT.read_response(IOBuffer(take!(io)))
+    resp_in = HT._read_response(IOBuffer(take!(io)))
     @test resp_in.status_code == 200
     @test _read_all_body_bytes(resp_in.body) == collect(codeunits("chunked-body"))
     @test HT.get_header(resp_in.trailers, "X-Checksum") == "abc123"
@@ -62,13 +62,13 @@ end
     bad_cl = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello"
     @test_throws HT.ProtocolError HT.read_request(IOBuffer(codeunits(bad_cl)))
     bad_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nX\r\nabc\r\n0\r\n\r\n"
-    bad_resp = HT.read_response(IOBuffer(codeunits(bad_chunk)))
+    bad_resp = HT._read_response(IOBuffer(codeunits(bad_chunk)))
     @test_throws HT.ParseError _read_all_body_bytes(bad_resp.body)
 end
 
 @testset "HTTP/1 response body suppression" begin
     raw = "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\nhello"
-    resp = HT.read_response(IOBuffer(codeunits(raw)))
+    resp = HT._read_response(IOBuffer(codeunits(raw)))
     @test resp.status_code == 204
     @test _read_all_body_bytes(resp.body) == UInt8[]
 end
@@ -81,13 +81,13 @@ end
     text = String(copy(bytes))
     @test startswith(text, "HTTP/1.1 200 OK\r\n")
 
-    parsed = HT.read_response(IOBuffer(bytes))
+    parsed = HT._read_response(IOBuffer(bytes))
     @test parsed.status_code == 200
     @test parsed.reason == "OK"
 
     # Parser accepts empty reason phrases from peers.
     raw = "HTTP/1.1 299 \r\nContent-Length: 0\r\n\r\n"
-    parsed_raw = HT.read_response(IOBuffer(codeunits(raw)))
+    parsed_raw = HT._read_response(IOBuffer(codeunits(raw)))
     @test parsed_raw.status_code == 299
     @test parsed_raw.reason == ""
 end
