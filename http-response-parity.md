@@ -112,13 +112,13 @@
   - 2026-03-07: `test/http_client_tests.jl` passed locally with new `HTTP.open` coverage.
   - 2026-03-07: `test/http_integration_tests.jl` passed locally.
 
-### [ ] ITEM-005 (P1) Add `sse_callback` on top of the shared response reader
+### [x] ITEM-005 (P1) Add `sse_callback` on top of the shared response reader
 - Description: SSE should be a consumption mode layered on the shared response reader, not a transport-specific special path. The callback API should incrementally parse `text/event-stream` responses, respect decompression, and leave error responses on the regular request path.
-- Desired outcome: `request(...; sse_callback=...)` parses SSE events incrementally, rejects incompatible option combinations like `response_stream`, and returns a normal public response with `body === nothing`.
+- Desired outcome: `request(...; sse_callback=...)` parses SSE events incrementally, rejects incompatible option combinations like `response_stream`, and returns a normal public response with `body === nothing` for successful SSE responses.
 - Affected files: `src/76_http_client.jl`, `src/7_http.jl`, `test/http_client_tests.jl`, `test/http_parity_tests.jl`
 - Implementation notes:
   - Add an internal SSE parser/consumer over generic `IO`.
-  - Support callback signatures compatible with HTTP.jl-style `f(event)` and `f(stream, event)` if practical.
+  - Support callback signatures compatible with `f(event)` and a two-argument variant using the final response metadata when practical.
   - Apply `decompress` before SSE parsing.
   - For non-success responses, bypass SSE parsing and preserve normal `status_exception` behavior.
 - Verification:
@@ -130,6 +130,9 @@
   - SSE should not consume error responses incorrectly or interfere with redirect/status logic.
 - Completion criteria:
   - `sse_callback` works for valid SSE responses, respects decompression, and has dedicated regression tests.
+- Verification evidence:
+  - 2026-03-07: `test/http_client_tests.jl` passed locally with new SSE coverage.
+  - 2026-03-07: `test/http_parity_tests.jl` passed locally.
 
 ### [ ] ITEM-006 (P1) Final cleanup, docs, and full-suite verification
 - Description: After the client redesign lands, we need to remove dead code, tighten docs, update parity tracking, and run the broader suite so the final state is clean and supportable.

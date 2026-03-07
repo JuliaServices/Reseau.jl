@@ -672,6 +672,100 @@ end
     end
 end
 
+@testset "HTTP SSE callback interface" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    sse_headers = HT.Headers()
+    HT.set_header!(sse_headers, "Content-Type", "text/event-stream")
+    server_task = errormonitor(Threads.@spawn begin
+        for _ in 1:4
+            conn = NC.accept!(listener)
+            try
+                req = HT.read_request(HT._ConnReader(conn))
+                if req.target == "/sse"
+                    body = "event: ping\ndata: hello\ndata: world\nid: 1\n\nretry: 1500\ndata: next\n\n"
+                    _send_response_client!(conn, req; body_text = body, headers = sse_headers, close_conn = true)
+                elseif req.target == "/sse-gzip"
+                    payload = _gzip_bytes_client("data: gzip-one\n\n")
+                    headers = copy(sse_headers)
+                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
+                elseif req.target == "/sse-error"
+                    _send_response_client!(conn, req; status = 404, reason = "Not Found", body_text = "missing", close_conn = true)
+                elseif req.target == "/sse-callback-error"
+                    _send_response_client!(conn, req; body_text = "data: boom\n\n", headers = sse_headers, close_conn = true)
+                else
+                    _send_response_client!(conn, req; status = 500, reason = "Unexpected", body_text = req.target, close_conn = true)
+                end
+            finally
+                try
+                    NC.close!(conn)
+                catch
+                end
+            end
+        end
+        return nothing
+    end)
+    try
+        combo_err = try
+            HT.get("$(base_url)/sse"; response_stream = IOBuffer(), sse_callback = event -> event)
+            nothing
+        catch err
+            err
+        end
+        @test combo_err isa ArgumentError
+
+        events = HT.SSEEvent[]
+        seen_status = Ref(0)
+        resp_sse = HT.get("$(base_url)/sse"; sse_callback = (response, event) -> begin
+            seen_status[] = response.status
+            push!(events, event)
+        end)
+        @test resp_sse.status == 200
+        @test resp_sse.body === nothing
+        @test seen_status[] == 200
+        @test length(events) == 2
+        @test events[1].event == "ping"
+        @test events[1].id == "1"
+        @test events[1].data == "hello\nworld"
+        @test events[2].retry == 1500
+        @test events[2].id == "1"
+        @test events[2].data == "next"
+
+        gzip_events = String[]
+        resp_gzip = HT.get("$(base_url)/sse-gzip"; sse_callback = event -> push!(gzip_events, event.data))
+        @test resp_gzip.status == 200
+        @test resp_gzip.body === nothing
+        @test gzip_events == ["gzip-one"]
+
+        error_events = HT.SSEEvent[]
+        resp_error = HT.get("$(base_url)/sse-error"; sse_callback = event -> push!(error_events, event), status_exception = false)
+        @test resp_error.status == 404
+        @test String(resp_error.body) == "missing"
+        @test isempty(error_events)
+
+        callback_err = try
+            HT.get("$(base_url)/sse-callback-error"; sse_callback = event -> error("sse callback error"))
+            nothing
+        catch err
+            err
+        end
+        @test callback_err isa ErrorException
+        if callback_err isa ErrorException
+            @test occursin("sse callback error", callback_err.msg)
+        end
+
+        _wait_task_client!(server_task)
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
 @testset "HTTP high-level readtimeout" begin
     listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
     laddr = NC.addr(listener)::NC.SocketAddrV4
