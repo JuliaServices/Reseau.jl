@@ -602,6 +602,76 @@ end
     end
 end
 
+@testset "HTTP.open streaming interface" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    server_task = errormonitor(Threads.@spawn begin
+        for _ in 1:3
+            conn = NC.accept!(listener)
+            try
+                req = HT.read_request(HT._ConnReader(conn))
+                if req.target == "/open-get"
+                    _send_response_client!(conn, req; body_text = "open-get", close_conn = true)
+                elseif req.target == "/open-post"
+                    payload = String(_read_all_body_bytes_client(req.body))
+                    _send_response_client!(conn, req; body_text = payload, close_conn = true)
+                elseif req.target == "/open-error"
+                    _send_response_client!(conn, req; body_text = "open-error", close_conn = true)
+                else
+                    _send_response_client!(conn, req; status = 500, reason = "Unexpected", body_text = req.target, close_conn = true)
+                end
+            finally
+                try
+                    NC.close!(conn)
+                catch
+                end
+            end
+        end
+        return nothing
+    end)
+    try
+        resp_get = HT.open(:GET, "$(base_url)/open-get") do stream
+            meta = HT.startread(stream)
+            @test meta.status == 200
+            @test String(read(stream)) == "open-get"
+        end
+        @test resp_get.status == 200
+        @test resp_get.body === nothing
+
+        resp_post = HT.open(:POST, "$(base_url)/open-post") do stream
+            write(stream, "payload")
+            meta = HT.startread(stream)
+            @test meta.status == 200
+            @test String(read(stream)) == "payload"
+        end
+        @test resp_post.status == 200
+        @test resp_post.body === nothing
+
+        open_err = try
+            HT.open(:GET, "$(base_url)/open-error") do stream
+                _ = HT.startread(stream)
+                error("open callback error")
+            end
+            nothing
+        catch err
+            err
+        end
+        @test open_err isa ErrorException
+        if open_err isa ErrorException
+            @test occursin("open callback error", open_err.msg)
+        end
+
+        _wait_task_client!(server_task)
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
 @testset "HTTP high-level readtimeout" begin
     listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
     laddr = NC.addr(listener)::NC.SocketAddrV4

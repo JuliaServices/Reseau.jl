@@ -88,7 +88,7 @@
   - 2026-03-07: `test/http_parity_tests.jl` passed locally.
   - 2026-03-07: `test/http_integration_tests.jl` passed locally.
 
-### [ ] ITEM-004 (P1) Add `HTTP.open` on the shared client stream model
+### [x] ITEM-004 (P1) Add `HTTP.open` on the shared client stream model
 - Description: `HTTP.open` should be the one public API that exposes a live request/response stream object. It should sit on top of the same underlying execution and response-reader pipeline as `request(...)`, not duplicate it.
 - Desired outcome: A public `Stream <: IO` exists for request/response streaming, `startread`/read/write/close semantics are defined and tested, and `request(...)` and `open(...)` share the same response reader/decompression machinery where appropriate.
 - Affected files: `src/76_http_client.jl`, `src/7_http.jl`, `test/http_client_tests.jl`, `test/http_integration_tests.jl`, `src/8_precompile_workload.jl`
@@ -101,12 +101,16 @@
   - `julia --startup-file=no --project=/Users/jacob.quinn/.julia/dev/Reseau -e 'include("/Users/jacob.quinn/.julia/dev/Reseau/test/http_client_tests.jl"); include("/Users/jacob.quinn/.julia/dev/Reseau/test/http_integration_tests.jl")'`
 - Assumptions:
   - We can add `open` without yet supporting every HTTP.jl streaming nuance like upgrades or raw-socket escape hatches.
+  - Using `Symbol` methods for `open` is acceptable for now to avoid conflicting with Base file-opening overloads during precompilation.
 - Risks:
   - Read/write lifecycle mistakes can leak connections or deadlock response completion.
   - `open` should not fork the client stack into a second implementation of request execution.
 - Completion criteria:
   - `HTTP.open` exists, can stream reads and request writes, and shares implementation with the request path.
   - Targeted streaming tests pass.
+- Verification evidence:
+  - 2026-03-07: `test/http_client_tests.jl` passed locally with new `HTTP.open` coverage.
+  - 2026-03-07: `test/http_integration_tests.jl` passed locally.
 
 ### [ ] ITEM-005 (P1) Add `sse_callback` on top of the shared response reader
 - Description: SSE should be a consumption mode layered on the shared response reader, not a transport-specific special path. The callback API should incrementally parse `text/event-stream` responses, respect decompression, and leave error responses on the regular request path.
