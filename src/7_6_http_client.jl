@@ -7,6 +7,7 @@ export close_idle_connections!
 export idle_connection_count
 
 using Base64
+using CodecZlib
 using ..Reseau.TCP
 using ..Reseau.HostResolvers
 using ..Reseau.TLS
@@ -461,11 +462,11 @@ end
     return request_buf
 end
 
-@inline function _response_reusable(response::Response, request::Request)::Bool
-    response.close && return false
+@inline function _response_reusable(response::_IncomingResponse, request::Request)::Bool
+    response.head.close && return false
     request.close && return false
-    has_header_token(response.headers, "Connection", "close") && return false
-    response.body isa EOFBody && return false
+    has_header_token(response.head.headers, "Connection", "close") && return false
+    response.rawbody isa EOFBody && return false
     return true
 end
 
@@ -544,7 +545,7 @@ connection can be recycled when the caller finishes consuming it.
 Throws parser, protocol, transport, TLS, and timeout exceptions depending on
 where the exchange fails.
 """
-function roundtrip!(
+function _roundtrip_incoming!(
         transport::Transport,
         address::AbstractString,
         request::Request;
@@ -575,19 +576,19 @@ function roundtrip!(
             n = write(stream, request_io.data, request_bytes)
             n == request_bytes || throw(ProtocolError("transport short write"))
             reader = conn.reader
-            raw_response = read_response(reader, current_request)
+            raw_response = _read_incoming_response(reader, current_request)
             # HTTP/1 informational responses are consumed internally so callers
             # observe the final non-1xx response, matching the behavior of Go's
             # client transport.
-            while (raw_response.status_code >= 100 && raw_response.status_code < 200) && raw_response.status_code != 101
+            while (raw_response.head.status_code >= 100 && raw_response.head.status_code < 200) && raw_response.head.status_code != 101
                 try
-                    body_close!(raw_response.body)
+                    body_close!(raw_response.rawbody)
                 catch
                 end
-                raw_response = read_response(reader, current_request)
+                raw_response = _read_incoming_response(reader, current_request)
             end
             reusable = _response_reusable(raw_response, current_request)
-            if raw_response.body isa EmptyBody
+            if raw_response.rawbody isa EmptyBody
                 if reusable
                     _put_idle_conn!(transport, conn)
                 else
@@ -595,18 +596,10 @@ function roundtrip!(
                 end
                 return raw_response
             end
-            managed = ManagedBody(raw_response.body, transport, conn, reusable, false, false)
-            return Response{typeof(managed)}(
-                raw_response.status_code,
-                raw_response.reason,
-                raw_response.headers,
-                raw_response.trailers,
+            managed = ManagedBody(raw_response.rawbody, transport, conn, reusable, false, false)
+            return _IncomingResponse(
+                raw_response.head,
                 managed,
-                raw_response.content_length,
-                raw_response.proto_major,
-                raw_response.proto_minor,
-                raw_response.close,
-                raw_response.request,
             )
         catch err
             _close_conn!(conn)
@@ -620,6 +613,16 @@ function roundtrip!(
     end
 end
 
+function roundtrip!(
+        transport::Transport,
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
+    )
+    return _streaming_response(_roundtrip_incoming!(transport, address, request; secure = secure, server_name = server_name))
+end
+
 export Client
 export ClientTrace
 export AbstractCookieJar
@@ -627,7 +630,6 @@ export MemoryCookieJar
 export Cookie
 export do!
 export get!
-export ClientResponse
 export StatusError
 export request
 export get
@@ -1168,7 +1170,7 @@ or closing `response.body`.
 HTTP/2 first for secure requests and fall back to HTTP/1 when negotiation says
 that h2 is unavailable.
 """
-function do!(
+function _do_incoming!(
         client::Client,
         address::AbstractString,
         request::Request;
@@ -1193,11 +1195,11 @@ function do!(
         response = if _use_h2(client, current_secure, protocol)
             try
                 conn = _acquire_h2_conn!(client, current_address, current_secure; server_name = current_server_name)
-                h2_roundtrip!(conn, send_request)
+                _h2_roundtrip_incoming!(conn, send_request)
             catch err
                 _drop_h2_conn!(client, current_address, current_secure)
                 if protocol == :auto && _should_fallback_h2_to_h1(err)
-                    roundtrip!(
+                    _roundtrip_incoming!(
                         client.transport,
                         current_address,
                         send_request;
@@ -1209,7 +1211,7 @@ function do!(
                 end
             end
         else
-            roundtrip!(
+            _roundtrip_incoming!(
                 client.transport,
                 current_address,
                 send_request;
@@ -1219,26 +1221,26 @@ function do!(
         end
         _trace_call(client.trace, :on_got_conn, current_address, current_secure)
         _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
-        _trace_call(client.trace, :on_got_first_response_byte, response.status_code)
+        _trace_call(client.trace, :on_got_first_response_byte, response.head.status_code)
         if client.jar isa MemoryCookieJar
-            set_cookie_values = get_headers(response.headers, "Set-Cookie")
+            set_cookie_values = get_headers(response.head.headers, "Set-Cookie")
             isempty(set_cookie_values) || _store_set_cookies!(client.jar::MemoryCookieJar, host, set_cookie_values)
         end
-        if !_is_redirect_status(response.status_code)
+        if !_is_redirect_status(response.head.status_code)
             return response
         end
-        location = get_header(response.headers, "Location")
+        location = get_header(response.head.headers, "Location")
         location === nothing && return response
         redirect_count == client.max_redirects && throw(ProtocolError("stopped after maximum redirect count ($(client.max_redirects))"))
         if client.check_redirect !== nothing
-            proceed = (client.check_redirect::Function)(response, current_request, location)
+            proceed = (client.check_redirect::Function)(_streaming_response(response), current_request, location)
             proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
             proceed || return response
         end
-        if (response.status_code == 307 || response.status_code == 308) && !_redirect_body_replayable(current_request)
+        if (response.head.status_code == 307 || response.head.status_code == 308) && !_redirect_body_replayable(current_request)
             return response
         end
-        body_close!(response.body)
+        body_close!(response.rawbody)
         previous_secure = current_secure
         previous_address = current_address
         previous_target = current_request.target
@@ -1246,7 +1248,7 @@ function do!(
         if !explicit_server_name
             current_server_name = _host_for_sni(current_address)
         end
-        current_request = _prepare_request_for_redirect(current_request, response.status_code, next_target)
+        current_request = _prepare_request_for_redirect(current_request, response.head.status_code, next_target)
         existing_ref = get_header(current_request.headers, "Referer")
         next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, existing_ref)
         if next_ref === nothing
@@ -1260,6 +1262,17 @@ function do!(
         current_request.host = current_address
     end
     throw(ProtocolError("unexpected redirect loop termination"))
+end
+
+function do!(
+        client::Client,
+        address::AbstractString,
+        request::Request;
+        secure::Bool = false,
+        server_name::Union{Nothing, AbstractString} = nothing,
+        protocol::Symbol = :auto,
+    )
+    return _streaming_response(_do_incoming!(client, address, request; secure = secure, server_name = server_name, protocol = protocol))
 end
 
 """
@@ -1277,28 +1290,12 @@ end
 import Base: get
 
 """
-    ClientResponse
-
-Materialized high-level response returned by `request/get/post/...` helpers.
-
-Unlike the lower-level `Response`, the response body has already been fully read
-into memory as `body::Vector{UInt8}`.
-"""
-struct ClientResponse
-    status::Int
-    headers::Vector{Pair{String, String}}
-    body::Vector{UInt8}
-    request::Request
-    url::String
-end
-
-"""
     StatusError
 
 Raised when `status_exception=true` and the response status indicates failure.
 """
 struct StatusError <: Exception
-    response::ClientResponse
+    response::Response
 end
 
 function Base.showerror(io::IO, err::StatusError)
@@ -1332,37 +1329,141 @@ function _default_client!()::Client
     end
 end
 
-function _status_throws(resp::ClientResponse)::Bool
-    return resp.status >= 300
+function _status_throws(resp::Response)::Bool
+    return resp.status_code >= 300
 end
 
-function _header_pairs(headers::Headers)::Vector{Pair{String, String}}
-    out = Pair{String, String}[]
-    for key in header_keys(headers)
-        values = get_headers(headers, key)
-        for value in values
-            push!(out, key => value)
-        end
-    end
-    return out
-end
-
-function _read_response_body_bytes!(body::AbstractBody)::Vector{UInt8}
+function _read_all_response_bytes(io::IO)::Vector{UInt8}
     out = UInt8[]
+    buf = Vector{UInt8}(undef, 8192)
+    while true
+        n = readbytes!(io, buf, length(buf))
+        n == 0 && return out
+        append!(out, @view(buf[1:n]))
+    end
+end
+
+function _copy_response_bytes!(dest::IO, io::IO)::Int64
+    buf = Vector{UInt8}(undef, 8192)
+    total = Int64(0)
+    while true
+        n = readbytes!(io, buf, length(buf))
+        n == 0 && return total
+        total += n
+        write(dest, view(buf, 1:n))
+    end
+end
+
+function _copy_response_bytes!(dest::AbstractVector{UInt8}, io::IO)::Int64
+    buf = Vector{UInt8}(undef, 8192)
+    total = 0
+    capacity = length(dest)
+    while true
+        n = readbytes!(io, buf, length(buf))
+        n == 0 && break
+        needed = total + n
+        needed <= capacity || throw(ArgumentError("Unable to grow response stream IOBuffer $(capacity) large enough for response body size: $(needed)"))
+        copyto!(dest, total + 1, buf, 1, n)
+        total = needed
+    end
+    dest isa Vector{UInt8} && resize!(dest::Vector{UInt8}, total)
+    return Int64(total)
+end
+
+function _should_decompress_response(headers::Headers, decompress::Union{Nothing, Bool})::Bool
+    decompress === false && return false
+    encoding = get_header(headers, "Content-Encoding")
+    encoding === nothing && return false
+    normalized = lowercase(strip(encoding))
+    return normalized == "gzip" || normalized == "x-gzip"
+end
+
+function _pump_response_body!(stream::Base.BufferStream, body::AbstractBody)::Nothing
     buf = Vector{UInt8}(undef, 8192)
     try
         while true
             n = body_read!(body, buf)
             n == 0 && break
-            append!(out, @view(buf[1:n]))
+            write(stream, view(buf, 1:n))
         end
     finally
         try
             body_close!(body)
         catch
         end
+        try
+            close(stream)
+        catch
+        end
     end
-    return out
+    return nothing
+end
+
+function _response_body_reader(incoming::_IncomingResponse; decompress::Union{Nothing, Bool})::Tuple{IO, Task}
+    raw_stream = Base.BufferStream()
+    reader = if _should_decompress_response(incoming.head.headers, decompress)
+        CodecZlib.GzipDecompressorStream(raw_stream)
+    else
+        raw_stream
+    end
+    producer = errormonitor(Threads.@spawn _pump_response_body!(raw_stream, incoming.rawbody))
+    return reader, producer
+end
+
+function _with_response_reader(f::F, incoming::_IncomingResponse; decompress::Union{Nothing, Bool}) where {F}
+    reader, producer = _response_body_reader(incoming; decompress = decompress)
+    try
+        result = f(reader)
+        wait(producer)
+        return result
+    catch
+        try
+            close(reader)
+        catch
+        end
+        try
+            wait(producer)
+        catch
+        end
+        rethrow()
+    finally
+        try
+            close(reader)
+        catch
+        end
+    end
+end
+
+function _resolve_response_sink(response_stream, response_body)
+    if response_stream !== nothing && response_body !== response_stream
+        throw(ArgumentError("response_stream and response_body must reference the same sink"))
+    end
+    if response_body === nothing || response_body isa IO || response_body isa AbstractVector{UInt8}
+        return response_body
+    end
+    throw(ArgumentError("unsupported response body sink $(typeof(response_body)); expected nothing, IO, or AbstractVector{UInt8}"))
+end
+
+function _consume_incoming_response!(
+        incoming::_IncomingResponse,
+        sink;
+        decompress::Union{Nothing, Bool},
+    )::Tuple{Any, Int64}
+    return _with_response_reader(incoming; decompress = decompress) do reader
+        if sink === nothing
+            body = _read_all_response_bytes(reader)
+            return body, Int64(length(body))
+        end
+        if sink isa IO
+            n = _copy_response_bytes!(sink::IO, reader)
+            return nothing, n
+        end
+        n = _copy_response_bytes!(sink::AbstractVector{UInt8}, reader)
+        if sink isa Vector{UInt8}
+            return sink::Vector{UInt8}, n
+        end
+        return view(sink::AbstractVector{UInt8}, 1:Int(n)), n
+    end
 end
 
 function _add_header_value!(headers::Headers, key, value)
@@ -1423,6 +1524,13 @@ function _normalize_headers_input(headers_input)::Headers
         return headers
     end
     throw(ArgumentError("unsupported headers input type $(typeof(headers_input))"))
+end
+
+function _apply_default_accept_encoding!(headers::Headers, decompress::Union{Nothing, Bool})::Nothing
+    decompress === false && return nothing
+    has_header(headers, "Accept-Encoding") && return nothing
+    set_header!(headers, "Accept-Encoding", "gzip")
+    return nothing
 end
 
 function _normalize_body_input(body_input)::Tuple{AbstractBody, Int64}
@@ -1614,7 +1722,7 @@ function _validate_request_extra_kwargs(kwargs)
             end
             throw(ArgumentError("retry keyword is not implemented yet; pass retry=false"))
         end
-        if k == :verbose || k == :decompress || k == :canonicalize_headers || k == :logerrors || k == :observelayers
+        if k == :verbose || k == :canonicalize_headers || k == :logerrors || k == :observelayers
             continue
         end
         throw(ArgumentError("unsupported keyword argument: $k"))
@@ -1648,6 +1756,11 @@ Keyword arguments:
 - `status_exception`: throw `StatusError` for non-success responses
 - `redirect`: follow redirects through `do!`
 - `query`: optional query string or key/value collection appended to the URL
+- `response_stream`: optional sink `IO` or byte buffer written with the final response body
+- `response_body`: alias for `response_stream`
+- `decompress`: `nothing`/`true` auto-decompress gzip responses, `false` leaves wire bytes untouched
+- `sse_callback`: callback receiving `(event)`, `(stream, event)`, or the
+  legacy `(response, event)` form for successful SSE responses
 - `client`: optional explicit `Client`; otherwise a default or ephemeral client
   is created
 - `connect_timeout`: connection timeout in seconds for implicit clients
@@ -1655,10 +1768,15 @@ Keyword arguments:
 - `require_ssl_verification`: disable certificate verification only for testing
 - `protocol`: `:auto`, `:h1`, or `:h2`
 
-Returns a fully materialized `ClientResponse`. Throws `ArgumentError` for
-unsupported inputs, `StatusError` when `status_exception=true` and the response
-status is considered failing, plus any lower-level transport or protocol
-exception raised during the request.
+Returns a high-level `Response`. When no response sink is provided,
+`response.body` is a fully materialized `Vector{UInt8}`. When `response_stream`
+or `response_body` is provided, the final `Response` contains either the filled
+buffer/view or `nothing` for `IO` sinks.
+
+Throws `ArgumentError` for unsupported inputs or invalid sink combinations,
+`StatusError` when `status_exception=true` and the response status is considered
+failing, plus any lower-level transport or protocol exception raised during the
+request.
 """
 function request(
         method::AbstractString,
@@ -1668,17 +1786,24 @@ function request(
         status_exception::Bool = true,
         redirect::Bool = true,
         query = nothing,
+        response_stream = nothing,
+        response_body = response_stream,
+        decompress::Union{Nothing, Bool} = nothing,
+        sse_callback = nothing,
         client::Union{Nothing, Client} = nothing,
         connect_timeout::Real = 0,
         readtimeout::Real = 0,
         require_ssl_verification::Bool = true,
         protocol::Symbol = :auto,
         kwargs...,
-    )::ClientResponse
+    )
     _validate_request_extra_kwargs(kwargs)
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     parsed = _parse_http_url(url; query = query)
     req_headers = _normalize_headers_input(headers)
+    sink = _resolve_response_sink(response_stream, response_body)
+    sse_callback === nothing || sink === nothing || throw(ArgumentError("sse_callback cannot be combined with response_stream or response_body"))
+    _apply_default_accept_encoding!(req_headers, decompress)
     if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
         set_header!(req_headers, "Authorization", parsed.authorization::String)
     end
@@ -1696,10 +1821,10 @@ function request(
         set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
     end
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
-    low_level_response = nothing
+    incoming_response = nothing
     try
         if redirect
-            low_level_response = do!(
+            incoming_response = _do_incoming!(
                 req_client,
                 parsed.address,
                 req;
@@ -1708,7 +1833,7 @@ function request(
                 protocol = protocol,
             )
         else
-            low_level_response = roundtrip!(
+            incoming_response = _roundtrip_incoming!(
                 req_client.transport,
                 parsed.address,
                 req;
@@ -1716,20 +1841,44 @@ function request(
                 server_name = parsed.server_name,
             )
         end
-        response_body = _read_response_body_bytes!((low_level_response::Response).body)
-        resolved_request = low_level_response.request === nothing ? req : low_level_response.request::Request
-        response = ClientResponse(
-            low_level_response.status_code,
-            _header_pairs(low_level_response.headers),
-            response_body,
-            resolved_request,
-            parsed.url,
-        )
+        incoming = incoming_response::_IncomingResponse
+        resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
+        if sse_callback !== nothing
+            sse_response = _finalize_request_response(incoming, nobody, Int64(0), resolved_request, parsed.url)
+            if !_status_throws(sse_response)
+                _consume_incoming_sse!(incoming, sse_response, sse_callback::Function; decompress = decompress)
+                return sse_response
+            end
+        end
+        final_body, final_length = _consume_incoming_response!(incoming, sink; decompress = decompress)
+        response = _finalize_request_response(incoming, final_body, final_length, resolved_request, parsed.url)
         status_exception && _status_throws(response) && throw(StatusError(response))
         return response
     finally
         owns_client && close(req_client)
     end
+end
+
+function _finalize_request_response(
+        incoming::_IncomingResponse,
+        body,
+        body_length::Int64,
+        resolved_request::Request,
+        request_url::String,
+    )::Response
+    return Response(
+        incoming.head.status_code;
+        reason = incoming.head.reason,
+        headers = incoming.head.headers,
+        trailers = incoming.head.trailers,
+        body = body,
+        content_length = body_length,
+        proto_major = incoming.head.proto_major,
+        proto_minor = incoming.head.proto_minor,
+        close = incoming.head.close,
+        request = resolved_request,
+        request_url = request_url,
+    )
 end
 
 function _split_headers_body_args(args::Tuple)

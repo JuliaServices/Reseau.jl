@@ -31,7 +31,7 @@ function run_http_trim_sample()::Nothing
     req = HT.Request("GET", "/health"; headers = headers, context = ctx)
     _ = req
     body = HT.BytesBody(UInt8[0x61, 0x62, 0x63])
-    resp = HT.Response(200; reason = "OK", headers = headers, body = body)
+    resp = HT.Response{HT.BytesBody}(200, "OK", headers, HT.Headers(), body, Int64(-1), UInt8(1), UInt8(1), false, nothing, nothing)
     _ = resp
     dst = Vector{UInt8}(undef, 3)
     n = HT.body_read!(body, dst)
@@ -51,17 +51,17 @@ function run_http_trim_sample()::Nothing
     HT.set_header!(resp_headers, "Transfer-Encoding", "chunked")
     resp_trailers = HT.Headers()
     HT.set_header!(resp_trailers, "X-Trim", "1")
-    resp = HT.Response(200; reason = "OK", headers = resp_headers, trailers = resp_trailers, body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = -1, request = req)
+    resp = HT.Response{HT.BytesBody}(200, "OK", resp_headers, resp_trailers, HT.BytesBody(UInt8[0x6f, 0x6b]), Int64(-1), UInt8(1), UInt8(1), false, req, nothing)
     resp_io = IOBuffer()
     HT.write_response!(resp_io, resp)
     resp_bytes = take!(resp_io)
     isempty(resp_bytes) && error("expected serialized response bytes")
-    parsed_resp = HT.read_response(IOBuffer(resp_bytes), parsed_req)::HT.Response{HT.ChunkedBody{IOBuffer}}
+    parsed_resp = HT._read_response(IOBuffer(resp_bytes), parsed_req)::HT.Response{HT.ChunkedBody{IOBuffer}}
     resp_body_buf = Vector{UInt8}(undef, 2)
     HT.body_read!(parsed_resp.body, resp_body_buf) == 2 || error("expected parsed response body")
     chunk_conn = _TrimChunkConn(resp_bytes; max_chunk = 3)
     chunk_reader = HT._ConnReader(chunk_conn; buffer_bytes = 16)
-    parsed_resp_chunked = HT.read_response(chunk_reader, parsed_req)::HT.Response{HT.ChunkedBody{HT._ConnReader{_TrimChunkConn}}}
+    parsed_resp_chunked = HT._read_response(chunk_reader, parsed_req)::HT.Response{HT.ChunkedBody{HT._ConnReader{_TrimChunkConn}}}
     chunk_body_buf = Vector{UInt8}(undef, 2)
     HT.body_read!(parsed_resp_chunked.body, chunk_body_buf) == 2 || error("expected parsed chunked response body")
     h2_frame_io = IOBuffer()

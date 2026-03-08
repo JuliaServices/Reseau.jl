@@ -847,7 +847,7 @@ function _wait_stream_headers!(state::H2StreamState)
     return nothing
 end
 
-function h2_roundtrip!(conn::H2Connection, request::Request)::Response
+function _h2_roundtrip_incoming!(conn::H2Connection, request::Request)::_IncomingResponse
     stream_state = _register_stream!(conn)
     cleanup_on_exit = true
     try
@@ -883,26 +883,36 @@ function h2_roundtrip!(conn::H2Connection, request::Request)::Response
             if stream_state.stream_done && _stream_available_bytes(stream_state) == 0
                 cleanup_on_exit = false
                 _unregister_stream!(conn, stream_state.stream_id)
-                return Response(
-                    status_code;
-                    headers = response_headers,
-                    body = EmptyBody(),
-                    content_length = 0,
-                    proto_major = 2,
-                    proto_minor = 0,
-                    request = request,
+                return _IncomingResponse(
+                    _IncomingResponseHead(
+                        status_code,
+                        "",
+                        response_headers,
+                        Headers(),
+                        Int64(0),
+                        UInt8(2),
+                        UInt8(0),
+                        false,
+                        request,
+                    ),
+                    EmptyBody(),
                 )
             end
             body = H2Body(conn, stream_state.stream_id, stream_state, false)
             cleanup_on_exit = false
-            return Response(
-                status_code;
-                headers = response_headers,
-                body = body,
-                content_length = -1,
-                proto_major = 2,
-                proto_minor = 0,
-                request = request,
+            return _IncomingResponse(
+                _IncomingResponseHead(
+                    status_code,
+                    "",
+                    response_headers,
+                    Headers(),
+                    Int64(-1),
+                    UInt8(2),
+                    UInt8(0),
+                    false,
+                    request,
+                ),
+                body,
             )
         finally
             unlock(stream_state.lock)
@@ -910,4 +920,8 @@ function h2_roundtrip!(conn::H2Connection, request::Request)::Response
     finally
         cleanup_on_exit && _unregister_stream!(conn, stream_state.stream_id)
     end
+end
+
+function h2_roundtrip!(conn::H2Connection, request::Request)::Response
+    return _streaming_response(_h2_roundtrip_incoming!(conn, request))
 end

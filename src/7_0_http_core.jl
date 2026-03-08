@@ -7,6 +7,7 @@ export AbstractBody
 export EmptyBody
 export BytesBody
 export CallbackBody
+export nobody
 export ParseError
 export ProtocolError
 export CanceledError
@@ -92,6 +93,9 @@ function Base.showerror(io::IO, err::HTTPTimeoutError)
     print(io, "http timeout during ", err.operation, " after ", err.timeout_ns, " ns")
     return nothing
 end
+
+"""Shared empty byte-vector payload used for responses with no buffered body."""
+const nobody = UInt8[]
 
 @inline function _is_ascii_upper(c::Char)::Bool
     return 'A' <= c <= 'Z'
@@ -680,10 +684,17 @@ Keyword arguments mirror `Request` closely. `request` optionally links the
 response back to the originating request, which is especially useful in client
 redirect flows and server handler pipelines.
 
-Returns a new `Response{B}` where `B` is the concrete body type. Throws
-`ArgumentError` for invalid status or protocol metadata.
+    Returns a new `Response{B}` where `B` is the body field type chosen for the
+    public response object. For `AbstractBody` inputs, the constructor widens
+    the field to `AbstractBody` so server handlers can swap in another streaming
+    body later without rebuilding the whole response object. Fully materialized
+    high-level payloads like `Vector{UInt8}` keep their concrete body type.
+    `request_url` is optional client metadata used by high-level request
+    helpers.
+
+    Throws `ArgumentError` for invalid status or protocol metadata.
 """
-mutable struct Response{B <: AbstractBody}
+mutable struct Response{B}
     status_code::Int
     reason::String
     headers::Headers
@@ -694,7 +705,28 @@ mutable struct Response{B <: AbstractBody}
     proto_minor::UInt8
     close::Bool
     request::Union{Nothing, Request}
+    request_url::Union{Nothing, String}
 end
+
+struct _IncomingResponseHead
+    status_code::Int
+    reason::String
+    headers::Headers
+    trailers::Headers
+    content_length::Int64
+    proto_major::UInt8
+    proto_minor::UInt8
+    close::Bool
+    request::Union{Nothing, Request}
+end
+
+struct _IncomingResponse{B <: AbstractBody}
+    head::_IncomingResponseHead
+    rawbody::B
+end
+
+@inline _public_response_body_type(::Type{B}) where {B <: AbstractBody} = AbstractBody
+@inline _public_response_body_type(::Type{B}) where {B} = B
 
 function Response(
         status_code::Integer;
@@ -707,12 +739,14 @@ function Response(
         proto_minor::Integer = 1,
         close::Bool = false,
         request::Union{Nothing, Request} = nothing,
-    ) where {B <: AbstractBody}
+        request_url::Union{Nothing, AbstractString} = nothing,
+    ) where {B}
     status_code < 0 && throw(ArgumentError("status_code must be >= 0"))
     content_length < -1 && throw(ArgumentError("content_length must be >= -1"))
     (proto_major < 0 || proto_major > typemax(UInt8)) && throw(ArgumentError("proto_major must fit in UInt8"))
     (proto_minor < 0 || proto_minor > typemax(UInt8)) && throw(ArgumentError("proto_minor must fit in UInt8"))
-    return Response{B}(
+    BodyT = _public_response_body_type(B)
+    return Response{BodyT}(
         Int(status_code),
         String(reason),
         copy(headers),
@@ -723,5 +757,31 @@ function Response(
         UInt8(proto_minor),
         close,
         request,
+        request_url === nothing ? nothing : String(request_url),
     )
+end
+
+function Base.getproperty(response::Response, field::Symbol)
+    field === :status && return getfield(response, :status_code)
+    field === :url && return getfield(response, :request_url)
+    return getfield(response, field)
+end
+
+function _streaming_response(incoming::_IncomingResponse)
+    head = incoming.head
+    response = Response{typeof(incoming.rawbody)}(
+        head.status_code,
+        head.reason,
+        head.headers,
+        head.trailers,
+        incoming.rawbody,
+        head.content_length,
+        head.proto_major,
+        head.proto_minor,
+        head.close,
+        head.request,
+        nothing,
+    )
+    response.trailers = head.trailers
+    return response
 end

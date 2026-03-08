@@ -1,6 +1,5 @@
 # HTTP/1.1 parser and serializer primitives used by client and server stacks.
 export read_request
-export read_response
 export write_request!
 export write_response!
 export trailers
@@ -453,6 +452,38 @@ function _write_exact_body!(io::IO, body::B, expected_len::Int64) where {B <: Ab
     return nothing
 end
 
+@noinline function _unsupported_serialized_body(body::AbstractBody)
+    throw(ProtocolError("unsupported serialized body type $(typeof(body))"))
+end
+
+function _write_exact_body_dispatch!(io::IO, body::AbstractBody, expected_len::Int64)
+    return _unsupported_serialized_body(body)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::EmptyBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::BytesBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::CallbackBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::FixedLengthBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::ChunkedBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::EOFBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
 function _write_chunked_body!(io::IO, body::B, trailer_values::Headers) where {B <: AbstractBody}
     buf = Vector{UInt8}(undef, 16 * 1024)
     while true
@@ -466,6 +497,34 @@ function _write_chunked_body!(io::IO, body::B, trailer_values::Headers) where {B
     _write_headers!(io, trailer_values)
     write(io, "\r\n")
     return nothing
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::AbstractBody, trailer_values::Headers)
+    return _unsupported_serialized_body(body)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::EmptyBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::BytesBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::CallbackBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::FixedLengthBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::ChunkedBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::EOFBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
 end
 
 function _request_has_body(request::Request)::Bool
@@ -563,11 +622,11 @@ function write_response!(io::IO, response::Response{B}) where {B <: AbstractBody
     write(io, "\r\n")
     allows_body || return nothing
     if use_chunked
-        _write_chunked_body!(io, response.body, response.trailers)
+        _write_chunked_body_dispatch!(io, response.body, response.trailers)
         return nothing
     end
     response.content_length < 0 && return nothing
-    _write_exact_body!(io, response.body, response.content_length)
+    _write_exact_body_dispatch!(io, response.body, response.content_length)
     return nothing
 end
 
@@ -639,6 +698,34 @@ end
     )
 end
 
+@inline function _new_parsed_incoming_response(
+        status_code::Int,
+        reason::String,
+        headers::Headers,
+        trailers::Headers,
+        body::B,
+        content_length::Int64,
+        proto_major::UInt8,
+        proto_minor::UInt8,
+        close::Bool,
+        request::Union{Nothing, Request},
+    )::_IncomingResponse{B} where {B <: AbstractBody}
+    return _IncomingResponse(
+        _IncomingResponseHead(
+            status_code,
+            reason,
+            headers,
+            trailers,
+            content_length,
+            proto_major,
+            proto_minor,
+            close,
+            request,
+        ),
+        body,
+    )
+end
+
 @inline function _new_parsed_response(
         status_code::Int,
         reason::String,
@@ -651,7 +738,7 @@ end
         close::Bool,
         request::Union{Nothing, Request},
     )::Response{B} where {B <: AbstractBody}
-    return Response{B}(
+    response = Response{B}(
         status_code,
         reason,
         headers,
@@ -662,7 +749,10 @@ end
         proto_minor,
         close,
         request,
+        nothing,
     )
+    response.trailers = trailers
+    return response
 end
 
 """
@@ -736,7 +826,7 @@ function read_request(io::IO; max_line_bytes::Integer = _HTTP1_DEFAULT_MAX_LINE_
 end
 
 """
-    read_response(io, request=nothing; max_line_bytes=..., max_header_bytes=...)
+    _read_response(io, request=nothing; max_line_bytes=..., max_header_bytes=...)
 
 Parse one HTTP/1 response from `io`.
 `request` is optional but allows HEAD/no-body response handling parity.
@@ -745,7 +835,93 @@ Returns a `Response` whose body is one of `EmptyBody`, `FixedLengthBody`,
 `ChunkedBody`, or `EOFBody` depending on the status code and framing headers.
 Exception behavior mirrors `read_request`.
 """
-function read_response(
+function _read_incoming_response(
+        io::IO,
+        request::Union{Nothing, Request} = nothing;
+        max_line_bytes::Integer = _HTTP1_DEFAULT_MAX_LINE_BYTES,
+        max_header_bytes::Integer = _HTTP1_DEFAULT_MAX_HEADER_BYTES,
+    )
+    line = _readline_crlf(io, max_line_bytes)
+    proto_major, proto_minor, status_code, reason = _parse_status_line(line)
+    headers = _read_headers(io, max_line_bytes, max_header_bytes)
+    content_length = _parse_content_length(headers)
+    close = _should_close_connection(headers, proto_major, proto_minor)
+    request_is_head = request !== nothing && request.method == "HEAD"
+    if !_body_allowed_for_status(status_code) || request_is_head
+        return _new_parsed_incoming_response(
+            Int(status_code),
+            reason,
+            headers,
+            Headers(),
+            EmptyBody(),
+            Int64(0),
+            UInt8(proto_major),
+            UInt8(proto_minor),
+            close,
+            request,
+        )
+    end
+    if has_header_token(headers, "Transfer-Encoding", "chunked")
+        body = ChunkedBody(io; max_line_bytes = Int(max_line_bytes), max_header_bytes = Int(max_header_bytes))
+        response = _new_parsed_incoming_response(
+            Int(status_code),
+            reason,
+            headers,
+            body.trailers,
+            body,
+            Int64(-1),
+            UInt8(proto_major),
+            UInt8(proto_minor),
+            close,
+            request,
+        )
+        return response
+    end
+    if content_length > 0
+        body = FixedLengthBody(io, content_length)
+        return _new_parsed_incoming_response(
+            Int(status_code),
+            reason,
+            headers,
+            Headers(),
+            body,
+            content_length,
+            UInt8(proto_major),
+            UInt8(proto_minor),
+            close,
+            request,
+        )
+    end
+    if content_length == 0
+        return _new_parsed_incoming_response(
+            Int(status_code),
+            reason,
+            headers,
+            Headers(),
+            EmptyBody(),
+            Int64(0),
+            UInt8(proto_major),
+            UInt8(proto_minor),
+            close,
+            request,
+        )
+    end
+    body = EOFBody(io)
+    return _new_parsed_incoming_response(
+        Int(status_code),
+        reason,
+        headers,
+        Headers(),
+        body,
+        Int64(-1),
+        UInt8(proto_major),
+        UInt8(proto_minor),
+        close,
+        request,
+    )
+end
+
+function _read_response(
         io::IO,
         request::Union{Nothing, Request} = nothing;
         max_line_bytes::Integer = _HTTP1_DEFAULT_MAX_LINE_BYTES,
@@ -773,7 +949,7 @@ function read_response(
     end
     if has_header_token(headers, "Transfer-Encoding", "chunked")
         body = ChunkedBody(io; max_line_bytes = Int(max_line_bytes), max_header_bytes = Int(max_header_bytes))
-        response = _new_parsed_response(
+        return _new_parsed_response(
             Int(status_code),
             reason,
             headers,
@@ -785,8 +961,6 @@ function read_response(
             close,
             request,
         )
-        response.trailers = body.trailers
-        return response
     end
     if content_length > 0
         body = FixedLengthBody(io, content_length)
