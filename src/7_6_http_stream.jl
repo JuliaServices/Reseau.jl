@@ -1,0 +1,330 @@
+# Streaming HTTP client API built on top of the shared client execution path.
+export Stream
+export startread
+export closeread
+export open
+
+import Base: close, closewrite, eof, isopen, open, read, readbytes!, write
+
+"""
+    Stream <: IO
+
+Client-side request/response stream returned by `HTTP.open`.
+
+Writes append request body bytes until response reading begins. After
+`startread(stream)`, reads consume the response body from the underlying
+connection using the same redirect/decompression machinery as `request(...)`.
+"""
+mutable struct Stream <: IO
+    method::String
+    parsed::_URLParts
+    headers::Headers
+    client::Client
+    owns_client::Bool
+    redirect::Bool
+    status_exception::Bool
+    protocol::Symbol
+    decompress::Union{Nothing, Bool}
+    readtimeout::Float64
+    request_buffer::IOBuffer
+    response::Union{Nothing, Response}
+    reader::Union{Nothing, IO}
+    producer::Union{Nothing, Task}
+    @atomic started::Bool
+    @atomic write_closed::Bool
+    @atomic read_closed::Bool
+end
+
+function Stream(
+        method::AbstractString,
+        parsed::_URLParts,
+        headers::Headers,
+        client::Client,
+        owns_client::Bool;
+        redirect::Bool,
+        status_exception::Bool,
+        protocol::Symbol,
+        decompress::Union{Nothing, Bool},
+        readtimeout::Real,
+    )
+    readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
+    return Stream(
+        String(method),
+        parsed,
+        headers,
+        client,
+        owns_client,
+        redirect,
+        status_exception,
+        protocol,
+        decompress,
+        Float64(readtimeout),
+        IOBuffer(),
+        nothing,
+        nothing,
+        nothing,
+        false,
+        false,
+        false,
+    )
+end
+
+function _stream_response(stream::Stream)::Response
+    resp = stream.response
+    resp === nothing && throw(ProtocolError("response has not started yet"))
+    return resp::Response
+end
+
+function _stream_reader(stream::Stream)::IO
+    reader = stream.reader
+    reader === nothing && throw(ProtocolError("response body reader is not available"))
+    return reader::IO
+end
+
+function _finish_stream_read!(stream::Stream; suppress_producer_errors::Bool)::Response
+    was_closed = @atomic :acquire stream.read_closed
+    was_closed && return _stream_response(stream)
+    @atomic :release stream.read_closed = true
+    reader = stream.reader
+    producer = stream.producer
+    try
+        if reader !== nothing
+            close(reader)
+        end
+    catch
+    end
+    if producer !== nothing
+        if suppress_producer_errors
+            try
+                wait(producer)
+            catch
+            end
+        else
+            wait(producer)
+        end
+    end
+    if stream.owns_client
+        close(stream.client)
+    end
+    return _stream_response(stream)
+end
+
+function _start_stream_read!(stream::Stream)::Response
+    started = @atomic :acquire stream.started
+    started && return _stream_response(stream)
+    @atomic :release stream.started = true
+    @atomic :release stream.write_closed = true
+    request_bytes = take!(stream.request_buffer)
+    body_input = isempty(request_bytes) ? nothing : request_bytes
+    req_body, content_length = _normalize_body_input(body_input)
+    req = Request(
+        stream.method,
+        stream.parsed.target;
+        headers = stream.headers,
+        body = req_body,
+        host = stream.parsed.address,
+        content_length = content_length,
+    )
+    if stream.readtimeout > 0
+        timeout_ns = Int64(round(stream.readtimeout * 1.0e9))
+        set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
+    end
+    incoming = if stream.redirect
+        _do_incoming!(
+            stream.client,
+            stream.parsed.address,
+            req;
+            secure = stream.parsed.secure,
+            server_name = stream.parsed.server_name,
+            protocol = stream.protocol,
+        )
+    else
+        _roundtrip_incoming!(
+            stream.client.transport,
+            stream.parsed.address,
+            req;
+            secure = stream.parsed.secure,
+            server_name = stream.parsed.server_name,
+        )
+    end
+    resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
+    stream.response = _finalize_request_response(
+        incoming,
+        nothing,
+        _should_decompress_response(incoming.head.headers, stream.decompress) ? Int64(-1) : incoming.head.content_length,
+        resolved_request,
+        stream.parsed.url,
+    )
+    reader, producer = _response_body_reader(incoming; decompress = stream.decompress)
+    stream.reader = reader
+    stream.producer = producer
+    return stream.response::Response
+end
+
+"""
+    startread(stream) -> Response
+
+Finalize request writes if needed, execute the HTTP exchange, and return the
+response metadata for `stream` without buffering the response body.
+
+Subsequent reads on `stream` consume the response body. Repeated calls return
+the same response object.
+"""
+function startread(stream::Stream)::Response
+    return _start_stream_read!(stream)
+end
+
+function isopen(stream::Stream)::Bool
+    return !(@atomic :acquire stream.read_closed) || !(@atomic :acquire stream.write_closed)
+end
+
+function write(stream::Stream, data::AbstractVector{UInt8})::Int
+    (@atomic :acquire stream.started) && throw(ArgumentError("cannot write request body after response reading has started"))
+    (@atomic :acquire stream.write_closed) && throw(ArgumentError("request body writes are closed"))
+    return write(stream.request_buffer, data)
+end
+
+function write(stream::Stream, data::Union{String, SubString{String}})::Int
+    (@atomic :acquire stream.started) && throw(ArgumentError("cannot write request body after response reading has started"))
+    (@atomic :acquire stream.write_closed) && throw(ArgumentError("request body writes are closed"))
+    return write(stream.request_buffer, data)
+end
+
+function closewrite(stream::Stream)
+    @atomic :release stream.write_closed = true
+    return nothing
+end
+
+function readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
+    nb >= 0 || throw(ArgumentError("nb must be >= 0"))
+    _start_stream_read!(stream)
+    n = readbytes!(_stream_reader(stream), dest, nb)
+    n == 0 && _finish_stream_read!(stream; suppress_producer_errors = false)
+    return n
+end
+
+function read(stream::Stream)::Vector{UInt8}
+    _start_stream_read!(stream)
+    bytes = read(_stream_reader(stream))
+    _finish_stream_read!(stream; suppress_producer_errors = false)
+    return bytes
+end
+
+function read(stream::Stream, ::Type{String})::String
+    return String(read(stream))
+end
+
+function eof(stream::Stream)::Bool
+    _start_stream_read!(stream)
+    done = eof(_stream_reader(stream))
+    done && _finish_stream_read!(stream; suppress_producer_errors = false)
+    return done
+end
+
+"""
+    closeread(stream) -> Response
+
+Close the readable side of `stream` and return its response metadata.
+
+If the response body has already been fully consumed, this is effectively a
+no-op. If unread response bytes remain, the underlying client connection is not
+reused.
+"""
+function closeread(stream::Stream)::Response
+    _start_stream_read!(stream)
+    return _finish_stream_read!(stream; suppress_producer_errors = true)
+end
+
+function close(stream::Stream)
+    try
+        closewrite(stream)
+    catch
+    end
+    try
+        closeread(stream)
+    catch
+    end
+    return nothing
+end
+
+"""
+    open(method::Symbol, url, headers=Pair{String,String}[]; kwargs...) -> Stream
+    open(f, method::Symbol, url, headers=Pair{String,String}[]; kwargs...)
+
+Create a streaming HTTP client request/response exchange.
+
+The returned `Stream` buffers request writes locally until `startread(stream)`
+or the end of the `do` block. Once reading starts, `stream` behaves like a
+readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
+including `redirect`, `decompress`, `client`, `connect_timeout`, `readtimeout`,
+`require_ssl_verification`, and `protocol`.
+
+The `do`-block form closes request writes automatically, closes the readable
+side on exit, and returns the final response metadata.
+
+Method is currently a `Symbol` to avoid colliding with Base's file-opening
+`open(::AbstractString, ::AbstractString)` methods during precompilation.
+"""
+function open(
+        method::Symbol,
+        url::AbstractString,
+        headers = Pair{String, String}[];
+        status_exception::Bool = true,
+        redirect::Bool = true,
+        query = nothing,
+        decompress::Union{Nothing, Bool} = nothing,
+        client::Union{Nothing, Client} = nothing,
+        connect_timeout::Real = 0,
+        readtimeout::Real = 0,
+        require_ssl_verification::Bool = true,
+        protocol::Symbol = :auto,
+        kwargs...,
+    )::Stream
+    _validate_request_extra_kwargs(kwargs)
+    parsed = _parse_http_url(url; query = query)
+    req_headers = _normalize_headers_input(headers)
+    _apply_default_accept_encoding!(req_headers, decompress)
+    if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
+        set_header!(req_headers, "Authorization", parsed.authorization::String)
+    end
+    req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
+    return Stream(
+        _method_upper(String(method)),
+        parsed,
+        req_headers,
+        req_client,
+        owns_client;
+        redirect = redirect,
+        status_exception = status_exception,
+        protocol = protocol,
+        decompress = decompress,
+        readtimeout = readtimeout,
+    )
+end
+
+function open(
+        f::Function,
+        method::Symbol,
+        url::AbstractString,
+        headers = Pair{String, String}[];
+        kwargs...,
+    )
+    stream = open(method, url, headers; kwargs...)
+    callback_error = nothing
+    try
+        f(stream)
+    catch err
+        callback_error = err
+    finally
+        try
+            closewrite(stream)
+        catch
+        end
+    end
+    response = closeread(stream)
+    if stream.status_exception && _status_throws(response)
+        throw(StatusError(response))
+    end
+    callback_error === nothing || throw(callback_error)
+    return response
+end
