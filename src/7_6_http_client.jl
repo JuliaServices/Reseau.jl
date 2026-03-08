@@ -1277,6 +1277,9 @@ or closing `response.body`.
 `protocol` accepts `:auto`, `:h1`, or `:h2`. In `:auto` mode the client may try
 HTTP/2 first for secure requests and fall back to HTTP/1 when negotiation says
 that h2 is unavailable.
+
+Per-call redirect behavior can be overridden with `check_redirect`,
+`redirect_limit`, `redirect_method`, and `forwardheaders`.
 """
 function _do_incoming!(
         client::Client,
@@ -1932,6 +1935,14 @@ methods).
 Keyword arguments:
 - `status_exception`: throw `StatusError` for non-success responses
 - `redirect`: follow redirects through `do!`
+- `redirect_limit`: maximum number of redirects to follow for this call;
+  `0` disables redirect following while still returning the redirect response
+- `redirect_method`: override the method used for `301`/`302` redirects; pass
+  `:same` to preserve the original method
+- `forwardheaders`: whether original request headers are copied onto redirect
+  follow-up requests
+- `check_redirect`: optional callback deciding whether a redirect hop should be
+  followed for this call
 - `query`: optional query string or key/value collection appended to the URL
 - `response_stream`: optional sink `IO` or byte buffer written with the final response body
 - `response_body`: alias for `response_stream`

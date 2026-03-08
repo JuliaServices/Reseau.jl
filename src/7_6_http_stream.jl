@@ -260,8 +260,10 @@ Create a streaming HTTP client request/response exchange.
 The returned `Stream` buffers request writes locally until `startread(stream)`
 or the end of the `do` block. Once reading starts, `stream` behaves like a
 readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
-including `redirect`, `decompress`, `client`, `connect_timeout`, `readtimeout`,
-`require_ssl_verification`, and `protocol`.
+including `redirect`, `redirect_limit`, `redirect_method`,
+`forwardheaders`, `check_redirect`, `decompress`, `client`,
+`connect_timeout`, `readtimeout`, `require_ssl_verification`, and
+`protocol`.
 
 The `do`-block form closes request writes automatically, closes the readable
 side on exit, and returns the final response metadata.

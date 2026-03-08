@@ -56,22 +56,40 @@
   - `2026-03-08`: `RESEAU_TEST_ONLY=http_parity_tests.jl` passed after the redirect error/metadata changes.
   - `2026-03-08`: `RESEAU_TEST_ONLY=http_core_tests.jl` passed after extending `Response` metadata fields.
 
-### [ ] ITEM-003 (P1) Finish verification, docs, and PR handoff
-- Description: After the behavior changes land, we need stable regression coverage, any necessary API docs updates, and a clean PR with green CI.
-- Desired outcome: Redirect behavior is documented where needed, the relevant test suite passes locally, commits are scoped by item, and the PR is opened and monitored until all GitHub checks are green.
-- Affected files: `test/http_client_tests.jl`, `test/http_parity_tests.jl`, `src/7_6_http_client.jl`, `src/7_6_http_stream.jl`, `README.md` or docs only if needed
+### [x] ITEM-003 (P1) Finish docs and local verification
+- Description: After the behavior changes land, we need stable regression coverage, trim-compile compatibility, and any necessary public API docstring updates before we hand the branch to CI.
+- Desired outcome: Redirect behavior is documented where needed, the relevant local suite passes, and the final code/docs delta is committed cleanly for review.
+- Affected files: `test/http_client_tests.jl`, `test/http_parity_tests.jl`, `test/http_trim_safe.jl`, `src/7_6_http_client.jl`, `src/7_6_http_stream.jl`
 - Implementation notes:
   - Add targeted regression coverage for `redirect_limit`, `redirect_method`, `forwardheaders=false`, `Host` stripping, disabled redirect behavior, and redirect metadata.
   - Update any docstrings or public API docs if the new per-request redirect keywords need to be discoverable.
-  - Run broader verification before push, then push the branch, open a PR with `gh`, and monitor Actions/logs until green.
+  - Run the full local suite, including trim compile coverage, before pushing.
 - Verification:
-  - `julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test()'`
+  - `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `git diff --stat origin/main...HEAD`
+- Assumptions:
+  - Existing docs only need focused docstring updates for the new redirect keywords.
+- Completion criteria:
+  - Relevant local tests pass, including trim compile coverage.
+  - Public redirect knobs are documented where callers will discover them.
+ - Verification evidence:
+  - `2026-03-08`: `JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no test/runtests.jl` passed end-to-end.
+  - `2026-03-08`: `RESEAU_TEST_ONLY=trim_compile_tests.jl` passed after updating `test/http_trim_safe.jl` for the extended `Response` metadata fields.
+  - `2026-03-08`: request/open docstrings were updated to describe `redirect_limit`, `redirect_method`, `forwardheaders`, and `check_redirect`.
+
+### [ ] ITEM-004 (P1) Push branch, open PR, and babysit CI
+- Description: With the code and local verification complete, we still need to land the branch in GitHub, open a reviewable PR, and stay on it until CI reports green.
+- Desired outcome: The branch is pushed, the PR clearly describes the redirect changes, and all GitHub Actions checks are green.
+- Affected files: none locally unless CI failures require follow-up fixes
+- Implementation notes:
+  - Push `codex/http-redirect-parity` to `origin`.
+  - Open a PR with `gh pr create` against `main`, summarizing redirect policy overrides, redirect metadata, and the new `TooManyRedirectsError`.
+  - Monitor GitHub Actions with `gh run list` / `gh run view --log-failed`, fix any failures, and re-run until green.
+- Verification:
+  - `gh pr view --json number,title,state,url`
   - `gh run list --branch codex/http-redirect-parity --limit 10`
 - Assumptions:
-  - Existing docs only need focused updates if the new redirect keywords are public API.
-  - CI is available through GitHub Actions on the repository.
+  - GitHub Actions is the authoritative CI surface for this repository.
 - Completion criteria:
-  - Relevant local tests pass.
   - Branch is pushed and a PR exists.
   - GitHub Actions for the PR are green, or any failures have been fixed and re-run to green.
