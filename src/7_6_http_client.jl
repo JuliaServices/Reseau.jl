@@ -1759,7 +1759,8 @@ Keyword arguments:
 - `response_stream`: optional sink `IO` or byte buffer written with the final response body
 - `response_body`: alias for `response_stream`
 - `decompress`: `nothing`/`true` auto-decompress gzip responses, `false` leaves wire bytes untouched
-- `sse_callback`: callback receiving `(event)` or `(response, event)` for successful SSE responses
+- `sse_callback`: callback receiving `(event)`, `(stream, event)`, or the
+  legacy `(response, event)` form for successful SSE responses
 - `client`: optional explicit `Client`; otherwise a default or ephemeral client
   is created
 - `connect_timeout`: connection timeout in seconds for implicit clients
@@ -1843,7 +1844,7 @@ function request(
         incoming = incoming_response::_IncomingResponse
         resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
         if sse_callback !== nothing
-            sse_response = _finalize_request_response(incoming, nothing, Int64(-1), resolved_request, parsed.url)
+            sse_response = _finalize_request_response(incoming, nobody, Int64(0), resolved_request, parsed.url)
             if !_status_throws(sse_response)
                 _consume_incoming_sse!(incoming, sse_response, sse_callback::Function; decompress = decompress)
                 return sse_response

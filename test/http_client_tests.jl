@@ -680,13 +680,17 @@ end
     sse_headers = HT.Headers()
     HT.set_header!(sse_headers, "Content-Type", "text/event-stream")
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:4
+        for _ in 1:6
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
                 if req.target == "/sse"
                     body = "event: ping\ndata: hello\ndata: world\nid: 1\n\nretry: 1500\ndata: next\n\n"
                     _send_response_client!(conn, req; body_text = body, headers = sse_headers, close_conn = true)
+                elseif req.target == "/sse-plain"
+                    headers = HT.Headers()
+                    HT.set_header!(headers, "Content-Type", "text/plain")
+                    _send_response_client!(conn, req; body_text = "data: plain\n\n", headers = headers, close_conn = true)
                 elseif req.target == "/sse-gzip"
                     payload = _gzip_bytes_client("data: gzip-one\n\n")
                     headers = copy(sse_headers)
@@ -696,6 +700,8 @@ end
                     _send_response_client!(conn, req; status = 404, reason = "Not Found", body_text = "missing", close_conn = true)
                 elseif req.target == "/sse-callback-error"
                     _send_response_client!(conn, req; body_text = "data: boom\n\n", headers = sse_headers, close_conn = true)
+                elseif req.target == "/sse-cancel"
+                    _send_response_client!(conn, req; body_text = "data: first\n\ndata: second\n\n", headers = sse_headers, close_conn = true)
                 else
                     _send_response_client!(conn, req; status = 500, reason = "Unexpected", body_text = req.target, close_conn = true)
                 end
@@ -724,7 +730,7 @@ end
             push!(events, event)
         end)
         @test resp_sse.status == 200
-        @test resp_sse.body === nothing
+        @test resp_sse.body === HT.nobody
         @test seen_status[] == 200
         @test length(events) == 2
         @test events[1].event == "ping"
@@ -737,8 +743,25 @@ end
         gzip_events = String[]
         resp_gzip = HT.get("$(base_url)/sse-gzip"; sse_callback = event -> push!(gzip_events, event.data))
         @test resp_gzip.status == 200
-        @test resp_gzip.body === nothing
+        @test resp_gzip.body === HT.nobody
         @test gzip_events == ["gzip-one"]
+
+        plain_events = HT.SSEEvent[]
+        resp_plain = HT.get("$(base_url)/sse-plain"; sse_callback = event -> push!(plain_events, event))
+        @test resp_plain.status == 200
+        @test resp_plain.body === HT.nobody
+        @test length(plain_events) == 1
+        @test plain_events[1].data == "plain"
+
+        cancel_events = HT.SSEEvent[]
+        resp_cancel = HT.get("$(base_url)/sse-cancel"; sse_callback = (stream, event) -> begin
+            push!(cancel_events, event)
+            close(stream)
+        end)
+        @test resp_cancel.status == 200
+        @test resp_cancel.body === HT.nobody
+        @test length(cancel_events) == 1
+        @test cancel_events[1].data == "first"
 
         error_events = HT.SSEEvent[]
         resp_error = HT.get("$(base_url)/sse-error"; sse_callback = event -> push!(error_events, event), status_exception = false)

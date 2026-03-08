@@ -39,6 +39,51 @@ function _run_with_timeout(f::F; timeout_s::Float64 = 5.0, label::String = "oper
     return fetch(task)
 end
 
+@testset "HTTP server SSE helper" begin
+    response = HT.Response(200)
+    stream = HT.sse_stream(response)
+    @test response.body === stream
+    @test HT.get_header(response.headers, "Content-Type") == "text/event-stream"
+    @test HT.get_header(response.headers, "Cache-Control") == "no-cache"
+    close(stream)
+end
+
+@testset "HTTP server SSE roundtrip" begin
+    server = HT.Server(
+        address = "127.0.0.1:0",
+        handler = request -> begin
+            _ = request
+            response = HT.Response(200)
+            HT.sse_stream(response) do stream
+                write(stream, HT.SSEEvent("first"))
+                write(stream, HT.SSEEvent("second"; event = "update", id = "2", retry = 2500))
+                write(stream, HT.SSEEvent("multi\nline\ndata"))
+            end
+            return response
+        end,
+    )
+    task = HT.start!(server)
+    address = _wait_server_addr(server)
+    try
+        events = HT.SSEEvent[]
+        response = HT.get("http://$(address)/"; sse_callback = event -> push!(events, event))
+        @test response.status == 200
+        @test response.body === HT.nobody
+        @test length(events) == 3
+        @test events[1].data == "first"
+        @test events[1].event === nothing
+        @test events[1].id === nothing
+        @test events[2].data == "second"
+        @test events[2].event == "update"
+        @test events[2].id == "2"
+        @test events[2].retry == 2500
+        @test events[3].data == "multi\nline\ndata"
+    finally
+        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
+        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
+    end
+end
+
 @testset "HTTP server basic request handling" begin
     seen_targets = String[]
     server = HT.Server(

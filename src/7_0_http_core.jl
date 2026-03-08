@@ -7,6 +7,7 @@ export AbstractBody
 export EmptyBody
 export BytesBody
 export CallbackBody
+export nobody
 export ParseError
 export ProtocolError
 export CanceledError
@@ -92,6 +93,9 @@ function Base.showerror(io::IO, err::HTTPTimeoutError)
     print(io, "http timeout during ", err.operation, " after ", err.timeout_ns, " ns")
     return nothing
 end
+
+"""Shared empty byte-vector payload used for responses with no buffered body."""
+const nobody = UInt8[]
 
 @inline function _is_ascii_upper(c::Char)::Bool
     return 'A' <= c <= 'Z'
@@ -680,10 +684,13 @@ Keyword arguments mirror `Request` closely. `request` optionally links the
 response back to the originating request, which is especially useful in client
 redirect flows and server handler pipelines.
 
-    Returns a new `Response{B}` where `B` is the concrete body type. `body`
-    may be a low-level streaming `AbstractBody` or a fully materialized
-    high-level payload like `Vector{UInt8}`. `request_url` is optional client
-    metadata used by high-level request helpers.
+    Returns a new `Response{B}` where `B` is the body field type chosen for the
+    public response object. For `AbstractBody` inputs, the constructor widens
+    the field to `AbstractBody` so server handlers can swap in another streaming
+    body later without rebuilding the whole response object. Fully materialized
+    high-level payloads like `Vector{UInt8}` keep their concrete body type.
+    `request_url` is optional client metadata used by high-level request
+    helpers.
 
     Throws `ArgumentError` for invalid status or protocol metadata.
 """
@@ -718,6 +725,9 @@ struct _IncomingResponse{B <: AbstractBody}
     rawbody::B
 end
 
+@inline _public_response_body_type(::Type{B}) where {B <: AbstractBody} = AbstractBody
+@inline _public_response_body_type(::Type{B}) where {B} = B
+
 function Response(
         status_code::Integer;
         reason::AbstractString = "",
@@ -735,7 +745,8 @@ function Response(
     content_length < -1 && throw(ArgumentError("content_length must be >= -1"))
     (proto_major < 0 || proto_major > typemax(UInt8)) && throw(ArgumentError("proto_major must fit in UInt8"))
     (proto_minor < 0 || proto_minor > typemax(UInt8)) && throw(ArgumentError("proto_minor must fit in UInt8"))
-    return Response{B}(
+    BodyT = _public_response_body_type(B)
+    return Response{BodyT}(
         Int(status_code),
         String(reason),
         copy(headers),

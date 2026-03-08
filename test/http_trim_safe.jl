@@ -31,7 +31,7 @@ function run_http_trim_sample()::Nothing
     req = HT.Request("GET", "/health"; headers = headers, context = ctx)
     _ = req
     body = HT.BytesBody(UInt8[0x61, 0x62, 0x63])
-    resp = HT.Response(200; reason = "OK", headers = headers, body = body)
+    resp = HT.Response{HT.BytesBody}(200, "OK", headers, HT.Headers(), body, Int64(-1), UInt8(1), UInt8(1), false, nothing, nothing)
     _ = resp
     dst = Vector{UInt8}(undef, 3)
     n = HT.body_read!(body, dst)
@@ -51,7 +51,7 @@ function run_http_trim_sample()::Nothing
     HT.set_header!(resp_headers, "Transfer-Encoding", "chunked")
     resp_trailers = HT.Headers()
     HT.set_header!(resp_trailers, "X-Trim", "1")
-    resp = HT.Response(200; reason = "OK", headers = resp_headers, trailers = resp_trailers, body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = -1, request = req)
+    resp = HT.Response{HT.BytesBody}(200, "OK", resp_headers, resp_trailers, HT.BytesBody(UInt8[0x6f, 0x6b]), Int64(-1), UInt8(1), UInt8(1), false, req, nothing)
     resp_io = IOBuffer()
     HT.write_response!(resp_io, resp)
     resp_bytes = take!(resp_io)

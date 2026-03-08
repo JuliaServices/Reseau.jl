@@ -452,6 +452,38 @@ function _write_exact_body!(io::IO, body::B, expected_len::Int64) where {B <: Ab
     return nothing
 end
 
+@noinline function _unsupported_serialized_body(body::AbstractBody)
+    throw(ProtocolError("unsupported serialized body type $(typeof(body))"))
+end
+
+function _write_exact_body_dispatch!(io::IO, body::AbstractBody, expected_len::Int64)
+    return _unsupported_serialized_body(body)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::EmptyBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::BytesBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::CallbackBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::FixedLengthBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::ChunkedBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
+function _write_exact_body_dispatch!(io::IO, body::EOFBody, expected_len::Int64)
+    return _write_exact_body!(io, body, expected_len)
+end
+
 function _write_chunked_body!(io::IO, body::B, trailer_values::Headers) where {B <: AbstractBody}
     buf = Vector{UInt8}(undef, 16 * 1024)
     while true
@@ -465,6 +497,34 @@ function _write_chunked_body!(io::IO, body::B, trailer_values::Headers) where {B
     _write_headers!(io, trailer_values)
     write(io, "\r\n")
     return nothing
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::AbstractBody, trailer_values::Headers)
+    return _unsupported_serialized_body(body)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::EmptyBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::BytesBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::CallbackBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::FixedLengthBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::ChunkedBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
+end
+
+function _write_chunked_body_dispatch!(io::IO, body::EOFBody, trailer_values::Headers)
+    return _write_chunked_body!(io, body, trailer_values)
 end
 
 function _request_has_body(request::Request)::Bool
@@ -562,11 +622,11 @@ function write_response!(io::IO, response::Response{B}) where {B <: AbstractBody
     write(io, "\r\n")
     allows_body || return nothing
     if use_chunked
-        _write_chunked_body!(io, response.body, response.trailers)
+        _write_chunked_body_dispatch!(io, response.body, response.trailers)
         return nothing
     end
     response.content_length < 0 && return nothing
-    _write_exact_body!(io, response.body, response.content_length)
+    _write_exact_body_dispatch!(io, response.body, response.content_length)
     return nothing
 end
 
