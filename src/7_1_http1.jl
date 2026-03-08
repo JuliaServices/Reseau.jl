@@ -721,6 +721,9 @@ end
             proto_minor,
             close,
             request,
+            nothing,
+            nothing,
+            0,
         ),
         body,
     )
@@ -750,6 +753,8 @@ end
         close,
         request,
         nothing,
+        nothing,
+        0,
     )
     response.trailers = trailers
     return response

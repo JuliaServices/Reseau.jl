@@ -631,6 +631,7 @@ export Cookie
 export do!
 export get!
 export StatusError
+export TooManyRedirectsError
 export request
 export get
 export head
@@ -1292,6 +1293,7 @@ function _do_incoming!(
     explicit_server_name = server_name !== nothing
     current_server_name = explicit_server_name ? String(server_name::AbstractString) : _host_for_sni(current_address)
     current_request = _copy_request_for_send(request; allow_nonreplayable = true)
+    previous_response = nothing
     for redirect_count in 0:redirect_policy.max_redirects
         send_request = _copy_request_for_send(current_request; allow_nonreplayable = redirect_count == 0)
         host, path = _host_path_from_request(current_address, current_request)
@@ -1327,6 +1329,12 @@ function _do_incoming!(
                 server_name = current_server_name,
             )
         end
+        response = _annotate_incoming_response(
+            response,
+            _request_url(current_secure, current_address, current_request.target),
+            previous_response,
+            redirect_count,
+        )
         _trace_call(client.trace, :on_got_conn, current_address, current_secure)
         _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
         _trace_call(client.trace, :on_got_first_response_byte, response.head.status_code)
@@ -1340,7 +1348,7 @@ function _do_incoming!(
         location = get_header(response.head.headers, "Location")
         (location === nothing || isempty(location::String)) && return response
         redirect_policy.max_redirects == 0 && return response
-        redirect_count == redirect_policy.max_redirects && throw(ProtocolError("stopped after maximum redirect count ($(redirect_policy.max_redirects))"))
+        redirect_count == redirect_policy.max_redirects && throw(TooManyRedirectsError(redirect_policy.max_redirects, _streaming_response(response)))
         if redirect_policy.check_redirect !== nothing
             proceed = (redirect_policy.check_redirect::Function)(_streaming_response(response), current_request, location)
             proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
@@ -1350,6 +1358,7 @@ function _do_incoming!(
         if _redirect_reuses_request_body(next_method) && !_redirect_body_replayable(current_request)
             return response
         end
+        previous_response = _streaming_response(response)
         body_close!(response.rawbody)
         previous_secure = current_secure
         previous_address = current_address
@@ -1425,6 +1434,23 @@ function Base.showerror(io::IO, err::StatusError)
     return nothing
 end
 
+"""
+    TooManyRedirectsError
+
+Raised when redirect following is enabled and the client exceeds the configured
+redirect limit. The final redirect response is attached for inspection.
+"""
+struct TooManyRedirectsError <: Exception
+    limit::Int
+    response::Response
+end
+
+function Base.showerror(io::IO, err::TooManyRedirectsError)
+    resp = err.response
+    print(io, "http too many redirects after ", err.limit, " hops for ", resp.request.method, " ", resp.url)
+    return nothing
+end
+
 struct _URLParts
     secure::Bool
     address::String
@@ -1432,6 +1458,36 @@ struct _URLParts
     server_name::String
     url::String
     authorization::Union{Nothing, String}
+end
+
+@inline function _request_url(secure::Bool, address::String, target::String)::String
+    return string(secure ? "https://" : "http://", address, target)
+end
+
+function _annotate_incoming_response(
+        incoming::_IncomingResponse{B},
+        request_url::String,
+        previous::Union{Nothing, Response},
+        redirect_count::Int,
+    )::_IncomingResponse{B} where {B <: AbstractBody}
+    head = incoming.head
+    return _IncomingResponse(
+        _IncomingResponseHead(
+            head.status_code,
+            head.reason,
+            head.headers,
+            head.trailers,
+            head.content_length,
+            head.proto_major,
+            head.proto_minor,
+            head.close,
+            head.request,
+            request_url,
+            previous,
+            redirect_count,
+        ),
+        incoming.rawbody,
+    )
 end
 
 const _DEFAULT_CLIENT_LOCK = ReentrantLock()
@@ -1451,7 +1507,7 @@ function _default_client!()::Client
 end
 
 function _status_throws(resp::Response)::Bool
-    return resp.status_code >= 300
+    return resp.status_code >= 300 && !_is_redirect_status(resp.status_code)
 end
 
 function _read_all_response_bytes(io::IO)::Vector{UInt8}
@@ -2009,7 +2065,9 @@ function _finalize_request_response(
         proto_minor = incoming.head.proto_minor,
         close = incoming.head.close,
         request = resolved_request,
-        request_url = request_url,
+        request_url = incoming.head.request_url === nothing ? request_url : (incoming.head.request_url::String),
+        previous = incoming.head.previous,
+        redirect_count = incoming.head.redirect_count,
     )
 end
 

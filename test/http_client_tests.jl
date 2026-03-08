@@ -435,6 +435,126 @@ end
     @test_throws HT.ProtocolError HT._resolve_redirect_target("origin.com:80", false, "ftp://example.com/file", "/")
 end
 
+@testset "HTTP high-level request redirect=false and redirect_limit=0 return redirect responses" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    server_task = errormonitor(Threads.@spawn begin
+        for _ in 1:2
+            conn = NC.accept!(listener)
+            try
+                req = HT.read_request(HT._ConnReader(conn))
+                headers = HT.Headers()
+                HT.set_header!(headers, "Location", "/final")
+                HT.set_header!(headers, "Connection", "close")
+                _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "redirect", close_conn = true)
+            finally
+                try
+                    NC.close!(conn)
+                catch
+                end
+            end
+        end
+        return nothing
+    end)
+    try
+        resp_disabled = HT.get("$(base_url)/disabled"; redirect = false)
+        @test resp_disabled.status == 302
+        @test String(resp_disabled.body) == "redirect"
+        @test resp_disabled.url == "$(base_url)/disabled"
+        @test resp_disabled.redirect_count == 0
+        @test resp_disabled.previous === nothing
+
+        resp_limit0 = HT.get("$(base_url)/limit-zero"; redirect_limit = 0)
+        @test resp_limit0.status == 302
+        @test String(resp_limit0.body) == "redirect"
+        @test resp_limit0.url == "$(base_url)/limit-zero"
+        @test resp_limit0.redirect_count == 0
+        @test resp_limit0.previous === nothing
+
+        _wait_task_client!(server_task)
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP client redirect metadata and limit errors" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    server_task = errormonitor(Threads.@spawn begin
+        for _ in 1:4
+            conn = NC.accept!(listener)
+            try
+                req = HT.read_request(HT._ConnReader(conn))
+                headers = HT.Headers()
+                if req.target == "/start"
+                    HT.set_header!(headers, "Location", "/final")
+                    HT.set_header!(headers, "Connection", "close")
+                    _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "hop1", close_conn = true)
+                elseif req.target == "/final"
+                    _send_response_client!(conn, req; body_text = "ok", close_conn = true)
+                elseif req.target == "/limit-start"
+                    HT.set_header!(headers, "Location", "/limit-next")
+                    HT.set_header!(headers, "Connection", "close")
+                    _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "limit1", close_conn = true)
+                elseif req.target == "/limit-next"
+                    HT.set_header!(headers, "Location", "/limit-last")
+                    HT.set_header!(headers, "Connection", "close")
+                    _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "limit2", close_conn = true)
+                else
+                    _send_response_client!(conn, req; status = 500, reason = "Unexpected", body_text = req.target, close_conn = true)
+                end
+            finally
+                try
+                    NC.close!(conn)
+                catch
+                end
+            end
+        end
+        return nothing
+    end)
+    try
+        resp = HT.get("$(base_url)/start")
+        @test resp.status == 200
+        @test String(resp.body) == "ok"
+        @test resp.url == "$(base_url)/final"
+        @test resp.redirect_count == 1
+        @test resp.previous !== nothing
+        @test resp.previous.status == 302
+        @test resp.previous.url == "$(base_url)/start"
+        @test resp.previous.redirect_count == 0
+
+        err = try
+            HT.get("$(base_url)/limit-start"; redirect_limit = 1)
+            nothing
+        catch caught
+            caught
+        end
+        @test err isa HT.TooManyRedirectsError
+        if err isa HT.TooManyRedirectsError
+            @test err.limit == 1
+            @test err.response.status == 302
+            @test err.response.url == "$(base_url)/limit-next"
+            @test err.response.redirect_count == 1
+            @test err.response.previous !== nothing
+            @test err.response.previous.url == "$(base_url)/limit-start"
+        end
+
+        _wait_task_client!(server_task)
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
 @testset "HTTP client cookie jar round-trip" begin
     listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
     laddr = NC.addr(listener)::NC.SocketAddrV4
@@ -731,7 +851,7 @@ end
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
     base_url = "http://$(address)"
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:5
+        for _ in 1:6
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
@@ -748,6 +868,11 @@ end
                 elseif req.target == "/open-redirect-final"
                     payload = String(_read_all_body_bytes_client(req.body))
                     _send_response_client!(conn, req; body_text = payload, close_conn = true)
+                elseif req.target == "/open-limit"
+                    headers = HT.Headers()
+                    HT.set_header!(headers, "Location", "/open-never")
+                    HT.set_header!(headers, "Connection", "close")
+                    _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "open-limit", close_conn = true)
                 elseif req.target == "/open-error"
                     _send_response_client!(conn, req; body_text = "open-error", close_conn = true)
                 else
@@ -787,7 +912,19 @@ end
             @test String(read(stream)) == "redirect-body"
         end
         @test resp_redirect.status == 200
+        @test resp_redirect.redirect_count == 1
+        @test resp_redirect.url == "$(base_url)/open-redirect-final"
         @test resp_redirect.body === nothing
+
+        resp_limit = HT.open(:GET, "$(base_url)/open-limit"; redirect_limit = 0) do stream
+            meta = HT.startread(stream)
+            @test meta.status == 302
+            @test String(read(stream)) == "open-limit"
+        end
+        @test resp_limit.status == 302
+        @test resp_limit.redirect_count == 0
+        @test resp_limit.url == "$(base_url)/open-limit"
+        @test resp_limit.body === nothing
 
         open_err = try
             HT.open(:GET, "$(base_url)/open-error") do stream

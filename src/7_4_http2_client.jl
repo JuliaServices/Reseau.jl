@@ -894,6 +894,9 @@ function _h2_roundtrip_incoming!(conn::H2Connection, request::Request)::_Incomin
                         UInt8(0),
                         false,
                         request,
+                        nothing,
+                        nothing,
+                        0,
                     ),
                     EmptyBody(),
                 )
@@ -911,6 +914,9 @@ function _h2_roundtrip_incoming!(conn::H2Connection, request::Request)::_Incomin
                     UInt8(0),
                     false,
                     request,
+                    nothing,
+                    nothing,
+                    0,
                 ),
                 body,
             )

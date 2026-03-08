@@ -31,7 +31,7 @@
   - `2026-03-08`: `RESEAU_TEST_ONLY=http_client_tests.jl` passed with new request/open redirect override coverage.
   - `2026-03-08`: `RESEAU_TEST_ONLY=http_parity_tests.jl` passed after redirect policy/ref-resolution changes.
 
-### [ ] ITEM-002 (P0) Keep redirect-limit exhaustion as an error and expose redirect metadata
+### [x] ITEM-002 (P0) Keep redirect-limit exhaustion as an error and expose redirect metadata
 - Description: We want auto-follow redirect exhaustion to throw instead of silently returning the last `3xx`, while still returning redirects when redirect following is disabled. At the same time, callers need enough metadata to inspect the final URL/redirect chain.
 - Desired outcome: Redirect-following requests throw a dedicated redirect-limit error path by default, `redirect=false` still returns the original redirect response, and responses expose the final redirected URL plus useful redirect history/count metadata.
 - Affected files: `src/7_0_http_core.jl`, `src/7_6_http_client.jl`, `src/7_6_http_stream.jl`, `test/http_client_tests.jl`, `test/http_parity_tests.jl`
@@ -41,8 +41,9 @@
   - Add response/request metadata for final URL and redirect count, and add redirect parent/history links if needed for a useful inspection story.
   - Make sure streamed/open requests surface the same redirect metadata as buffered requests.
 - Verification:
-  - `julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; test_args=["http_client","http_parity"])'`
-  - `julia --project=. --startup-file=no --history-file=no -e 'using Reseau; using Test; const HT = Reseau.HTTP; @test !HT._status_throws(HT.Response(302))'`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_client_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_parity_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_core_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 - Assumptions:
   - A small new exception type or richer `ProtocolError` message is acceptable if it keeps the API direct and testable.
   - Redirect metadata can be added directly to the request/response model without preserving `HTTP.jl`'s exact ancestry shape.
@@ -50,6 +51,10 @@
   - Redirect exhaustion throws during auto-following.
   - `redirect=false` returns a `3xx` response without `StatusError`.
   - Redirect metadata is observable on final responses and covered by tests.
+ - Verification evidence:
+  - `2026-03-08`: `RESEAU_TEST_ONLY=http_client_tests.jl` passed with redirect-disabled, limit-zero, metadata, and `TooManyRedirectsError` coverage.
+  - `2026-03-08`: `RESEAU_TEST_ONLY=http_parity_tests.jl` passed after the redirect error/metadata changes.
+  - `2026-03-08`: `RESEAU_TEST_ONLY=http_core_tests.jl` passed after extending `Response` metadata fields.
 
 ### [ ] ITEM-003 (P1) Finish verification, docs, and PR handoff
 - Description: After the behavior changes land, we need stable regression coverage, any necessary API docs updates, and a clean PR with green CI.
