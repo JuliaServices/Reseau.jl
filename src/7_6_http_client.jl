@@ -738,6 +738,42 @@ function Client(;
     return Client(transport, check_redirect, jar, Int(max_redirects), trace, prefer_http2, ReentrantLock(), Dict{String, H2Connection}())
 end
 
+struct _UseClientCheckRedirect end
+
+const _USE_CLIENT_CHECK_REDIRECT = _UseClientCheckRedirect()
+
+struct _RedirectPolicy
+    check_redirect::Union{Nothing, Function}
+    max_redirects::Int
+    redirect_method::Union{Nothing, String}
+    preserve_method::Bool
+    forward_headers::Bool
+end
+
+function _normalize_redirect_method_override(redirect_method)::Tuple{Union{Nothing, String}, Bool}
+    redirect_method === nothing && return nothing, false
+    redirect_method == :same && return nothing, true
+    redirect_method isa AbstractString || redirect_method isa Symbol || throw(ArgumentError("redirect_method must be nothing, :same, or an HTTP method String/Symbol"))
+    method = uppercase(String(redirect_method))
+    method in ("GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH") || throw(ArgumentError("redirect_method must be one of GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH, or :same"))
+    return method, false
+end
+
+function _redirect_policy(
+        client::Client;
+        check_redirect = _USE_CLIENT_CHECK_REDIRECT,
+        redirect_limit::Union{Nothing, Integer} = nothing,
+        redirect_method = nothing,
+        forwardheaders::Bool = true,
+    )::_RedirectPolicy
+    max_redirects = redirect_limit === nothing ? client.max_redirects : Int(redirect_limit)
+    max_redirects >= 0 || throw(ArgumentError("redirect_limit must be >= 0"))
+    callback = check_redirect === _USE_CLIENT_CHECK_REDIRECT ? client.check_redirect : check_redirect
+    callback === nothing || callback isa Function || throw(ArgumentError("check_redirect must be a Function or nothing"))
+    method_override, preserve_method = _normalize_redirect_method_override(redirect_method)
+    return _RedirectPolicy(callback, max_redirects, method_override, preserve_method, forwardheaders)
+end
+
 function Base.close(client::Client)
     close(client.transport)
     lock(client.h2_lock)
@@ -979,6 +1015,79 @@ function _is_redirect_status(status_code::Int)::Bool
     return status_code == 301 || status_code == 302 || status_code == 303 || status_code == 307 || status_code == 308
 end
 
+function _split_request_target(target::String)::Tuple{String, String}
+    current = isempty(target) ? "/" : target
+    hash_idx = findfirst('#', current)
+    hash_idx === nothing || (current = String(SubString(current, firstindex(current), prevind(current, hash_idx))))
+    query_idx = findfirst('?', current)
+    if query_idx === nothing
+        return isempty(current) ? "/" : current, ""
+    end
+    path = query_idx == firstindex(current) ? "/" : String(SubString(current, firstindex(current), prevind(current, query_idx)))
+    query = query_idx == lastindex(current) ? "" : String(SubString(current, nextind(current, query_idx), lastindex(current)))
+    return isempty(path) ? "/" : path, query
+end
+
+function _join_request_target(path::String, query::String)::String
+    final_path = isempty(path) ? "/" : path
+    isempty(query) && return final_path
+    return string(final_path, "?", query)
+end
+
+function _merge_redirect_base_path(base_path::String, relative_path::String)::String
+    isempty(relative_path) && return base_path
+    slash = findlast('/', base_path)
+    slash === nothing && return "/" * relative_path
+    return string(SubString(base_path, firstindex(base_path), slash), relative_path)
+end
+
+function _remove_dot_segments(path::String)::String
+    absolute = startswith(path, "/")
+    trailing_slash = endswith(path, "/") || endswith(path, "/.") || endswith(path, "/..")
+    segments = split(path, '/'; keepempty = false)
+    stack = String[]
+    for segment in segments
+        if segment == "."
+            continue
+        elseif segment == ".."
+            isempty(stack) || pop!(stack)
+        else
+            push!(stack, segment)
+        end
+    end
+    normalized = absolute ? "/" : ""
+    normalized *= join(stack, "/")
+    isempty(normalized) && return absolute ? "/" : "."
+    if trailing_slash && normalized != "/"
+        normalized *= "/"
+    end
+    return normalized
+end
+
+function _resolve_relative_redirect_request_target(current_target::String, location::String)::String
+    base_path, base_query = _split_request_target(current_target)
+    startswith(location, "#") && return _join_request_target(base_path, base_query)
+    startswith(location, "?") && return _join_request_target(base_path, String(SubString(location, nextind(location, firstindex(location)), lastindex(location))))
+    reference = location
+    hash_idx = findfirst('#', reference)
+    hash_idx === nothing || (reference = String(SubString(reference, firstindex(reference), prevind(reference, hash_idx))))
+    query = ""
+    query_idx = findfirst('?', reference)
+    if query_idx !== nothing
+        query = query_idx == lastindex(reference) ? "" : String(SubString(reference, nextind(reference, query_idx), lastindex(reference)))
+        reference = query_idx == firstindex(reference) ? "" : String(SubString(reference, firstindex(reference), prevind(reference, query_idx)))
+    end
+    if isempty(reference)
+        return _join_request_target(base_path, query_idx === nothing ? base_query : query)
+    end
+    path = if startswith(reference, "/")
+        _remove_dot_segments(reference)
+    else
+        _remove_dot_segments(_merge_redirect_base_path(base_path, reference))
+    end
+    return _join_request_target(path, query)
+end
+
 @inline function _normalize_redirect_host(host::String)::String
     normalized = lowercase(host)
     while !isempty(normalized) && last(normalized) == '.'
@@ -1047,60 +1156,35 @@ function _normalize_redirect_authority(authority::String, secure::Bool)::String
 end
 
 function _resolve_redirect_target(current_address::String, current_secure::Bool, location::String, current_target::String)
-    startswith(location, "http://") && begin
-        host_path = String(SubString(location, 8))
-        slash = findfirst('/', host_path)
-        if slash === nothing
-            address = _normalize_redirect_authority(host_path, false)
-            return address, false, "/"
-        end
-        authority = String(SubString(host_path, firstindex(host_path), prevind(host_path, slash)))
-        address = _normalize_redirect_authority(authority, false)
-        path = String(SubString(host_path, slash, lastindex(host_path)))
-        return address, false, path
+    scheme_match = match(r"^([A-Za-z][A-Za-z0-9+\\.-]*):", location)
+    if scheme_match !== nothing
+        scheme = lowercase(String(scheme_match.captures[1]))
+        (scheme == "http" || scheme == "https") || throw(ProtocolError("unsupported redirect location scheme '$scheme'"))
+        parsed = _parse_http_url(location)
+        return parsed.address, parsed.secure, parsed.target
     end
-    startswith(location, "https://") && begin
-        host_path = String(SubString(location, 9))
-        slash = findfirst('/', host_path)
-        if slash === nothing
-            address = _normalize_redirect_authority(host_path, true)
-            return address, true, "/"
-        end
-        authority = String(SubString(host_path, firstindex(host_path), prevind(host_path, slash)))
-        address = _normalize_redirect_authority(authority, true)
-        path = String(SubString(host_path, slash, lastindex(host_path)))
-        return address, true, path
+    if startswith(location, "//")
+        parsed = _parse_http_url(string(current_secure ? "https:" : "http:", location))
+        return parsed.address, parsed.secure, parsed.target
     end
-    startswith(location, "//") && begin
-        host_path = String(SubString(location, 3))
-        slash = findfirst('/', host_path)
-        if slash === nothing
-            address = _normalize_redirect_authority(host_path, current_secure)
-            return address, current_secure, "/"
-        end
-        authority = String(SubString(host_path, firstindex(host_path), prevind(host_path, slash)))
-        address = _normalize_redirect_authority(authority, current_secure)
-        path = String(SubString(host_path, slash, lastindex(host_path)))
-        return address, current_secure, path
-    end
-    startswith(location, "/") && return current_address, current_secure, location
-    base_prefix = current_target
-    slash = findlast('/', base_prefix)
-    if slash === nothing
-        return current_address, current_secure, "/$location"
-    end
-    base = String(SubString(base_prefix, firstindex(base_prefix), slash))
-    return current_address, current_secure, string(base, location)
+    return current_address, current_secure, _resolve_relative_redirect_request_target(current_target, location)
 end
 
-function _rewrite_method_for_redirect(method::String, status_code::Int)::String
-    if status_code == 301 || status_code == 302 || status_code == 303
-        if method == "GET" || method == "HEAD"
-            return method
-        end
+function _rewrite_method_for_redirect(method::String, status_code::Int, policy::_RedirectPolicy)::String
+    if status_code == 307 || status_code == 308
+        return method
+    end
+    if status_code == 303
         return "GET"
     end
-    return method
+    if policy.preserve_method
+        return method
+    end
+    if policy.redirect_method !== nothing
+        return policy.redirect_method::String
+    end
+    method == "HEAD" && return method
+    return "GET"
 end
 
 @inline function _redirect_body_replayable(request::Request)::Bool
@@ -1108,6 +1192,10 @@ end
     request.body isa EmptyBody && return true
     request.body isa BytesBody && return true
     return false
+end
+
+@inline function _redirect_reuses_request_body(method::String)::Bool
+    return !(method == "GET" || method == "HEAD")
 end
 
 function _redirect_referer(
@@ -1128,33 +1216,52 @@ function _redirect_referer(
     return string(last_secure ? "https://" : "http://", last_address, target)
 end
 
-function _prepare_request_for_redirect(request::Request, status_code::Int, new_target::String)::Request
-    method = _rewrite_method_for_redirect(request.method, status_code)
+function _prepare_request_for_redirect(request::Request, status_code::Int, new_target::String, policy::_RedirectPolicy)::Request
+    method = _rewrite_method_for_redirect(request.method, status_code, policy)
     if method == request.method
         copied = _copy_request(request)
         copied.target = new_target
+        if !policy.forward_headers
+            copied.headers = Headers()
+            copied.trailers = Headers()
+        end
+        delete_header!(copied.headers, "Host")
         return copied
     end
-    redirected = Request(
-        method,
-        new_target;
-        headers = request.headers,
-        host = request.host,
-        body = EmptyBody(),
-        content_length = 0,
-        proto_major = request.proto_major,
-        proto_minor = request.proto_minor,
-        close = request.close,
-        context = request.context,
-    )
-    # Per Go/HTTP behavior: when method is rewritten to GET/HEAD, entity headers
-    # tied to an old request body must be removed.
-    delete_header!(redirected.headers, "Content-Length")
-    delete_header!(redirected.headers, "Transfer-Encoding")
-    delete_header!(redirected.headers, "Content-Type")
-    delete_header!(redirected.headers, "Content-Encoding")
-    delete_header!(redirected.headers, "Content-Language")
-    delete_header!(redirected.headers, "Content-Location")
+    redirected = if _redirect_reuses_request_body(method)
+        copied = _copy_request(request)
+        copied.method = method
+        copied.target = new_target
+        if !policy.forward_headers
+            copied.headers = Headers()
+            copied.trailers = Headers()
+        end
+        copied
+    else
+        Request(
+            method,
+            new_target;
+            headers = policy.forward_headers ? request.headers : Headers(),
+            host = request.host,
+            body = EmptyBody(),
+            content_length = 0,
+            proto_major = request.proto_major,
+            proto_minor = request.proto_minor,
+            close = request.close,
+            context = request.context,
+        )
+    end
+    delete_header!(redirected.headers, "Host")
+    if !_redirect_reuses_request_body(method)
+        # Per Go/HTTP behavior: when method is rewritten to GET/HEAD, entity headers
+        # tied to an old request body must be removed.
+        delete_header!(redirected.headers, "Content-Length")
+        delete_header!(redirected.headers, "Transfer-Encoding")
+        delete_header!(redirected.headers, "Content-Type")
+        delete_header!(redirected.headers, "Content-Encoding")
+        delete_header!(redirected.headers, "Content-Language")
+        delete_header!(redirected.headers, "Content-Location")
+    end
     return redirected
 end
 
@@ -1177,6 +1284,7 @@ function _do_incoming!(
         secure::Bool = false,
         server_name::Union{Nothing, AbstractString} = nothing,
         protocol::Symbol = :auto,
+        redirect_policy::_RedirectPolicy = _redirect_policy(client),
     )
     current_address = String(address)
     initial_address = current_address
@@ -1184,7 +1292,7 @@ function _do_incoming!(
     explicit_server_name = server_name !== nothing
     current_server_name = explicit_server_name ? String(server_name::AbstractString) : _host_for_sni(current_address)
     current_request = _copy_request_for_send(request; allow_nonreplayable = true)
-    for redirect_count in 0:client.max_redirects
+    for redirect_count in 0:redirect_policy.max_redirects
         send_request = _copy_request_for_send(current_request; allow_nonreplayable = redirect_count == 0)
         host, path = _host_path_from_request(current_address, current_request)
         if client.jar isa MemoryCookieJar
@@ -1230,14 +1338,16 @@ function _do_incoming!(
             return response
         end
         location = get_header(response.head.headers, "Location")
-        location === nothing && return response
-        redirect_count == client.max_redirects && throw(ProtocolError("stopped after maximum redirect count ($(client.max_redirects))"))
-        if client.check_redirect !== nothing
-            proceed = (client.check_redirect::Function)(_streaming_response(response), current_request, location)
+        (location === nothing || isempty(location::String)) && return response
+        redirect_policy.max_redirects == 0 && return response
+        redirect_count == redirect_policy.max_redirects && throw(ProtocolError("stopped after maximum redirect count ($(redirect_policy.max_redirects))"))
+        if redirect_policy.check_redirect !== nothing
+            proceed = (redirect_policy.check_redirect::Function)(_streaming_response(response), current_request, location)
             proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
             proceed || return response
         end
-        if (response.head.status_code == 307 || response.head.status_code == 308) && !_redirect_body_replayable(current_request)
+        next_method = _rewrite_method_for_redirect(current_request.method, response.head.status_code, redirect_policy)
+        if _redirect_reuses_request_body(next_method) && !_redirect_body_replayable(current_request)
             return response
         end
         body_close!(response.rawbody)
@@ -1248,7 +1358,7 @@ function _do_incoming!(
         if !explicit_server_name
             current_server_name = _host_for_sni(current_address)
         end
-        current_request = _prepare_request_for_redirect(current_request, response.head.status_code, next_target)
+        current_request = _prepare_request_for_redirect(current_request, response.head.status_code, next_target, redirect_policy)
         existing_ref = get_header(current_request.headers, "Referer")
         next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, existing_ref)
         if next_ref === nothing
@@ -1271,8 +1381,19 @@ function do!(
         secure::Bool = false,
         server_name::Union{Nothing, AbstractString} = nothing,
         protocol::Symbol = :auto,
+        check_redirect = _USE_CLIENT_CHECK_REDIRECT,
+        redirect_limit::Union{Nothing, Integer} = nothing,
+        redirect_method = nothing,
+        forwardheaders::Bool = true,
     )
-    return _streaming_response(_do_incoming!(client, address, request; secure = secure, server_name = server_name, protocol = protocol))
+    policy = _redirect_policy(
+        client;
+        check_redirect = check_redirect,
+        redirect_limit = redirect_limit,
+        redirect_method = redirect_method,
+        forwardheaders = forwardheaders,
+    )
+    return _streaming_response(_do_incoming!(client, address, request; secure = secure, server_name = server_name, protocol = protocol, redirect_policy = policy))
 end
 
 """
@@ -1785,6 +1906,10 @@ function request(
         body = nothing;
         status_exception::Bool = true,
         redirect::Bool = true,
+        redirect_limit::Union{Nothing, Integer} = nothing,
+        redirect_method = nothing,
+        forwardheaders::Bool = true,
+        check_redirect = _USE_CLIENT_CHECK_REDIRECT,
         query = nothing,
         response_stream = nothing,
         response_body = response_stream,
@@ -1831,6 +1956,13 @@ function request(
                 secure = parsed.secure,
                 server_name = parsed.server_name,
                 protocol = protocol,
+                redirect_policy = _redirect_policy(
+                    req_client;
+                    check_redirect = check_redirect,
+                    redirect_limit = redirect_limit,
+                    redirect_method = redirect_method,
+                    forwardheaders = forwardheaders,
+                ),
             )
         else
             incoming_response = _roundtrip_incoming!(

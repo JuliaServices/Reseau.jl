@@ -118,6 +118,58 @@ end
     end
 end
 
+@testset "HTTP client request redirect_method override preserves replayable body" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    seen_methods = String[]
+    seen_bodies = String[]
+    server_task = errormonitor(Threads.@spawn begin
+        conn1 = NC.accept!(listener)
+        try
+            req1 = HT.read_request(HT._ConnReader(conn1))
+            push!(seen_methods, req1.method)
+            push!(seen_bodies, String(_read_all_body_bytes_client(req1.body)))
+            headers = HT.Headers()
+            HT.set_header!(headers, "Location", "/final")
+            HT.set_header!(headers, "Connection", "close")
+            _send_response_client!(conn1, req1; status = 302, reason = "Found", headers = headers, close_conn = true)
+        finally
+            try
+                NC.close!(conn1)
+            catch
+            end
+        end
+        conn2 = NC.accept!(listener)
+        try
+            req2 = HT.read_request(HT._ConnReader(conn2))
+            push!(seen_methods, req2.method)
+            push!(seen_bodies, String(_read_all_body_bytes_client(req2.body)))
+            _send_response_client!(conn2, req2; body_text = "ok", close_conn = true)
+        finally
+            try
+                NC.close!(conn2)
+            catch
+            end
+        end
+        return nothing
+    end)
+    try
+        response = HT.request("POST", "$(base_url)/start", Pair{String, String}[], "payload"; redirect_method = :same)
+        @test response.status == 200
+        @test String(response.body) == "ok"
+        _wait_task_client!(server_task)
+        @test seen_methods == ["POST", "POST"]
+        @test seen_bodies == ["payload", "payload"]
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
 @testset "HTTP client 307 does not follow non-replayable body redirect" begin
     listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
     laddr = NC.addr(listener)::NC.SocketAddrV4
@@ -289,6 +341,60 @@ end
     end
 end
 
+@testset "HTTP client redirect forwardheaders=false clears original headers and stale Host" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    hop1_host = Ref{Union{Nothing, String}}(nothing)
+    hop2_host = Ref{Union{Nothing, String}}(nothing)
+    hop2_header = Ref{Union{Nothing, String}}(nothing)
+    server_task = errormonitor(Threads.@spawn begin
+        conn1 = NC.accept!(listener)
+        try
+            req1 = HT.read_request(HT._ConnReader(conn1))
+            hop1_host[] = HT.get_header(req1.headers, "Host")
+            headers = HT.Headers()
+            HT.set_header!(headers, "Location", "/final")
+            HT.set_header!(headers, "Connection", "close")
+            _send_response_client!(conn1, req1; status = 302, reason = "Found", headers = headers, close_conn = true)
+        finally
+            try
+                NC.close!(conn1)
+            catch
+            end
+        end
+        conn2 = NC.accept!(listener)
+        try
+            req2 = HT.read_request(HT._ConnReader(conn2))
+            hop2_host[] = HT.get_header(req2.headers, "Host")
+            hop2_header[] = HT.get_header(req2.headers, "X-Test")
+            _send_response_client!(conn2, req2; body_text = "ok", close_conn = true)
+        finally
+            try
+                NC.close!(conn2)
+            catch
+            end
+        end
+        return nothing
+    end)
+    try
+        headers = ["Host" => "stale.example", "X-Test" => "abc"]
+        response = HT.request("GET", "$(base_url)/start", headers; forwardheaders = false)
+        @test response.status == 200
+        @test String(response.body) == "ok"
+        _wait_task_client!(server_task)
+        @test hop1_host[] == "stale.example"
+        @test hop2_host[] == address
+        @test hop2_header[] === nothing
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
 @testset "HTTP client redirect trusted host matching helper" begin
     @test HT._should_copy_sensitive_headers_on_redirect("foo.com:80", "foo.com:443")
     @test HT._should_copy_sensitive_headers_on_redirect("foo.com:80", "sub.foo.com:443")
@@ -310,6 +416,23 @@ end
     @test address_rel == "cdn.example.com:443"
     @test secure_rel
     @test target_rel == "/assets"
+
+    address_dot, secure_dot, target_dot = HT._resolve_redirect_target("origin.com:80", false, "../next", "/a/b/c")
+    @test address_dot == "origin.com:80"
+    @test !secure_dot
+    @test target_dot == "/a/next"
+
+    address_query, secure_query, target_query = HT._resolve_redirect_target("origin.com:80", false, "?q=1", "/a/b/c")
+    @test address_query == "origin.com:80"
+    @test !secure_query
+    @test target_query == "/a/b/c?q=1"
+
+    address_frag, secure_frag, target_frag = HT._resolve_redirect_target("origin.com:80", false, "#frag", "/a/b/c?x=1")
+    @test address_frag == "origin.com:80"
+    @test !secure_frag
+    @test target_frag == "/a/b/c?x=1"
+
+    @test_throws HT.ProtocolError HT._resolve_redirect_target("origin.com:80", false, "ftp://example.com/file", "/")
 end
 
 @testset "HTTP client cookie jar round-trip" begin
@@ -608,13 +731,21 @@ end
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
     base_url = "http://$(address)"
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:3
+        for _ in 1:5
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
                 if req.target == "/open-get"
                     _send_response_client!(conn, req; body_text = "open-get", close_conn = true)
                 elseif req.target == "/open-post"
+                    payload = String(_read_all_body_bytes_client(req.body))
+                    _send_response_client!(conn, req; body_text = payload, close_conn = true)
+                elseif req.target == "/open-redirect"
+                    headers = HT.Headers()
+                    HT.set_header!(headers, "Location", "/open-redirect-final")
+                    HT.set_header!(headers, "Connection", "close")
+                    _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, close_conn = true)
+                elseif req.target == "/open-redirect-final"
                     payload = String(_read_all_body_bytes_client(req.body))
                     _send_response_client!(conn, req; body_text = payload, close_conn = true)
                 elseif req.target == "/open-error"
@@ -648,6 +779,15 @@ end
         end
         @test resp_post.status == 200
         @test resp_post.body === nothing
+
+        resp_redirect = HT.open(:POST, "$(base_url)/open-redirect"; redirect_method = :same) do stream
+            write(stream, "redirect-body")
+            meta = HT.startread(stream)
+            @test meta.status == 200
+            @test String(read(stream)) == "redirect-body"
+        end
+        @test resp_redirect.status == 200
+        @test resp_redirect.body === nothing
 
         open_err = try
             HT.open(:GET, "$(base_url)/open-error") do stream
