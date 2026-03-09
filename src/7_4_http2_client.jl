@@ -572,18 +572,17 @@ Returns a ready-to-use `H2Connection`. Throws `H2NegotiationError` for ALPN
 failures, `ProtocolError` for invalid peer behavior during setup, and any TCP,
 TLS, or I/O exceptions from the underlying transport.
 """
-function connect_h2!(
-        address::AbstractString;
+function _connect_h2_from_tcp!(
+        tcp::TCP.Conn,
+        address::String;
         secure::Bool = false,
-        host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
         tls_config::Union{Nothing, TLS.Config} = nothing,
     )::H2Connection
-    tcp = TCP.connect(host_resolver, "tcp", address)
     tls_conn = nothing
     try
         stream_reader = nothing
         if secure
-            cfg = _make_tls_config_for_h2(tls_config, String(address))
+            cfg = _make_tls_config_for_h2(tls_config, address)
             tls_conn = TLS.client(tcp, cfg)
             TLS.handshake!(tls_conn)
             stream_reader = _ConnReader(tls_conn::TLS.Conn)
@@ -592,7 +591,7 @@ function connect_h2!(
         end
         state_lock = ReentrantLock()
         conn = H2Connection(
-            String(address),
+            address,
             secure,
             tcp,
             tls_conn,
@@ -631,6 +630,25 @@ function connect_h2!(
         end
         rethrow()
     end
+end
+
+function connect_h2!(
+        tcp::TCP.Conn,
+        address::AbstractString;
+        secure::Bool = false,
+        tls_config::Union{Nothing, TLS.Config} = nothing,
+    )::H2Connection
+    return _connect_h2_from_tcp!(tcp, String(address); secure = secure, tls_config = tls_config)
+end
+
+function connect_h2!(
+        address::AbstractString;
+        secure::Bool = false,
+        host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
+        tls_config::Union{Nothing, TLS.Config} = nothing,
+    )::H2Connection
+    tcp = TCP.connect(host_resolver, "tcp", address)
+    return _connect_h2_from_tcp!(tcp, String(address); secure = secure, tls_config = tls_config)
 end
 
 """

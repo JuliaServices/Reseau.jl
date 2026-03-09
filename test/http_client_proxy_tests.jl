@@ -77,6 +77,49 @@ function _bridge_proxy!(src::NC.Conn, dst::NC.Conn)::Nothing
     end
 end
 
+function _reset_default_http_client_proxy!()
+    lock(HT._DEFAULT_CLIENT_LOCK)
+    try
+        existing = HT._DEFAULT_CLIENT[]
+        existing === nothing || close(existing::HT.Client)
+        HT._DEFAULT_CLIENT[] = nothing
+    finally
+        unlock(HT._DEFAULT_CLIENT_LOCK)
+    end
+    return nothing
+end
+
+function _write_all_h2_proxy!(io, bytes::Vector{UInt8})::Nothing
+    total = 0
+    while total < length(bytes)
+        n = write(io, bytes[(total + 1):end])
+        n > 0 || error("expected h2 write progress")
+        total += n
+    end
+    return nothing
+end
+
+function _write_frame_h2_proxy!(io, frame)
+    buf = IOBuffer()
+    framer = HT.Framer(buf)
+    HT.write_frame!(framer, frame)
+    _write_all_h2_proxy!(io, take!(buf))
+    return nothing
+end
+
+function _read_exact_h2_proxy!(io, n::Int)::Vector{UInt8}
+    out = Vector{UInt8}(undef, n)
+    offset = 0
+    while offset < n
+        chunk = Vector{UInt8}(undef, n - offset)
+        nr = read!(io, chunk)
+        nr > 0 || throw(EOFError())
+        copyto!(out, offset + 1, chunk, 1, nr)
+        offset += nr
+    end
+    return out
+end
+
 @testset "HTTP proxy explicit config parsing" begin
     proxy = HT.ProxyURL("http://user:pass@proxy.local:8080")
     @test proxy.url == "http://proxy.local:8080/"
@@ -302,6 +345,210 @@ end
         @test seen_origin_target[] == "/via-proxy"
     finally
         close(client)
+        try
+            TL.close!(origin_listener)
+        catch
+        end
+        try
+            NC.close!(proxy_listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP high-level request and open accept explicit proxy overrides" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    proxy_address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    seen_targets = String[]
+    server_task = errormonitor(Threads.@spawn begin
+        for _ in 1:2
+            conn = NC.accept!(listener)
+            try
+                req = HT.read_request(HT._ConnReader(conn))
+                push!(seen_targets, req.target)
+                if occursin("/open", req.target)
+                    _send_response_proxy!(conn, req; body_text = "open-proxied", close_conn = true)
+                else
+                    _send_response_proxy!(conn, req; body_text = "request-proxied", close_conn = true)
+                end
+            finally
+                try
+                    NC.close!(conn)
+                catch
+                end
+            end
+        end
+        return nothing
+    end)
+    try
+        response = HT.get("http://example.com:80/request"; proxy = "http://$(proxy_address)")
+        @test response.status == 200
+        @test String(response.body) == "request-proxied"
+
+        open_response = HT.open(:GET, "http://example.com:80/open"; proxy = "http://$(proxy_address)") do stream
+            meta = HT.startread(stream)
+            @test meta.status == 200
+            @test String(read(stream)) == "open-proxied"
+        end
+        @test open_response.status == 200
+        @test open_response.body === nothing
+
+        _wait_task_proxy!(server_task)
+        @test seen_targets == [
+            "http://example.com:80/request",
+            "http://example.com:80/open",
+        ]
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP default client uses env proxy configuration" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    proxy_address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    seen_target = Ref{Union{Nothing, String}}(nothing)
+    server_task = errormonitor(Threads.@spawn begin
+        conn = NC.accept!(listener)
+        try
+            req = HT.read_request(HT._ConnReader(conn))
+            seen_target[] = req.target
+            _send_response_proxy!(conn, req; body_text = "env-proxied", close_conn = true)
+        finally
+            try
+                NC.close!(conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    try
+        _reset_default_http_client_proxy!()
+        response = withenv("HTTP_PROXY" => "http://$(proxy_address)", "NO_PROXY" => nothing, "no_proxy" => nothing) do
+            HT.get("http://env.local:80/via-env")
+        end
+        @test response.status == 200
+        @test String(response.body) == "env-proxied"
+        _wait_task_proxy!(server_task)
+        @test seen_target[] == "http://env.local:80/via-env"
+    finally
+        _reset_default_http_client_proxy!()
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP proxy CONNECT supports tunneled H2 requests" begin
+    origin_listener = TL.listen(
+        "tcp",
+        "127.0.0.1:0",
+        TL.Config(
+            verify_peer = false,
+            cert_file = _TLS_CERT_PATH,
+            key_file = _TLS_KEY_PATH,
+            alpn_protocols = ["h2"],
+        );
+        backlog = 8,
+    )
+    origin_addr = TL.addr(origin_listener)::NC.SocketAddrV4
+    origin_address = ND.join_host_port("127.0.0.1", Int(origin_addr.port))
+    proxy_listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    proxy_addr = NC.addr(proxy_listener)::NC.SocketAddrV4
+    proxy_address = ND.join_host_port("127.0.0.1", Int(proxy_addr.port))
+    seen_h2_path = Ref{Union{Nothing, String}}(nothing)
+    origin_task = errormonitor(Threads.@spawn begin
+        conn = TL.accept!(origin_listener)
+        try
+            TL.handshake!(conn)
+            preface = _read_exact_h2_proxy!(conn, length(HT._H2_PREFACE))
+            @test preface == HT._H2_PREFACE
+            reader = HT.Framer(HT._ConnReader(conn))
+            decoder = HT.Decoder()
+            frame = HT.read_frame!(reader)
+            @test frame isa HT.SettingsFrame
+            _write_frame_h2_proxy!(conn, HT.SettingsFrame(false, Pair{UInt16, UInt32}[]))
+            _write_frame_h2_proxy!(conn, HT.SettingsFrame(true, Pair{UInt16, UInt32}[]))
+            request_headers = nothing
+            while request_headers === nothing
+                frame = HT.read_frame!(reader)
+                if frame isa HT.SettingsFrame
+                    continue
+                end
+                if frame isa HT.HeadersFrame
+                    decoded = HT.decode_header_block(decoder, (frame::HT.HeadersFrame).header_block_fragment)
+                    for header in decoded
+                        if header.name == ":path"
+                            seen_h2_path[] = header.value
+                        end
+                    end
+                    request_headers = decoded
+                end
+            end
+            encoder = HT.Encoder()
+            payload = collect(codeunits("h2-proxied"))
+            header_block = HT.encode_header_block(encoder, [
+                HT.HeaderField(":status", "200", false),
+                HT.HeaderField("content-length", string(length(payload)), false),
+            ])
+            _write_frame_h2_proxy!(conn, HT.HeadersFrame(UInt32(1), false, true, header_block))
+            _write_frame_h2_proxy!(conn, HT.DataFrame(UInt32(1), true, payload))
+            sleep(0.1)
+        finally
+            try
+                TL.close!(conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    proxy_task = errormonitor(Threads.@spawn begin
+        client_conn = NC.accept!(proxy_listener)
+        origin_conn = NC.connect(ND.HostResolver(), "tcp", origin_address)
+        bridge1 = nothing
+        bridge2 = nothing
+        try
+            connect_req = HT.read_request(HT._ConnReader(client_conn))
+            @test connect_req.method == "CONNECT"
+            @test connect_req.target == origin_address
+            _send_response_proxy!(client_conn, connect_req; status = 200, reason = "Connection Established", headers = HT.Headers())
+            bridge1 = errormonitor(Threads.@spawn _bridge_proxy!(client_conn, origin_conn))
+            bridge2 = errormonitor(Threads.@spawn _bridge_proxy!(origin_conn, client_conn))
+            _wait_task_proxy!(bridge1; timeout_s = 5.0)
+            _wait_task_proxy!(bridge2; timeout_s = 5.0)
+        finally
+            try
+                NC.close!(client_conn)
+            catch
+            end
+            try
+                NC.close!(origin_conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    try
+        response = HT.get(
+            "https://$(origin_address)/via-h2";
+            proxy = "http://$(proxy_address)",
+            protocol = :h2,
+            require_ssl_verification = false,
+        )
+        @test response.status == 200
+        @test String(response.body) == "h2-proxied"
+        close(HT._default_client!())
+        _reset_default_http_client_proxy!()
+        _wait_task_proxy!(origin_task)
+        _wait_task_proxy!(proxy_task)
+        @test seen_h2_path[] == "/via-h2"
+    finally
+        _reset_default_http_client_proxy!()
         try
             TL.close!(origin_listener)
         catch

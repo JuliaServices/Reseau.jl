@@ -21,6 +21,7 @@ mutable struct Stream <: IO
     headers::Headers
     client::Client
     owns_client::Bool
+    proxy_selector::Union{Nothing, AbstractProxySelector}
     redirect::Bool
     redirect_policy::_RedirectPolicy
     status_exception::Bool
@@ -42,6 +43,7 @@ function Stream(
         headers::Headers,
         client::Client,
         owns_client::Bool;
+        proxy_selector::Union{Nothing, AbstractProxySelector},
         redirect::Bool,
         redirect_policy::_RedirectPolicy,
         status_exception::Bool,
@@ -56,6 +58,7 @@ function Stream(
         headers,
         client,
         owns_client,
+        proxy_selector,
         redirect,
         redirect_policy,
         status_exception,
@@ -141,6 +144,7 @@ function _start_stream_read!(stream::Stream)::Response
             server_name = stream.parsed.server_name,
             protocol = stream.protocol,
             redirect_policy = stream.redirect_policy,
+            proxy_selector = stream.proxy_selector,
         )
     else
         _roundtrip_incoming!(
@@ -149,6 +153,7 @@ function _start_stream_read!(stream::Stream)::Response
             req;
             secure = stream.parsed.secure,
             server_name = stream.parsed.server_name,
+            proxy_selector = stream.proxy_selector,
         )
     end
     resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
@@ -280,6 +285,7 @@ function open(
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
         forwardheaders::Bool = true,
+        proxy = _USE_TRANSPORT_PROXY,
         query = nothing,
         decompress::Union{Nothing, Bool} = nothing,
         client::Union{Nothing, Client} = nothing,
@@ -297,12 +303,15 @@ function open(
         set_header!(req_headers, "Authorization", parsed.authorization::String)
     end
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
+    client === nothing || proxy === _USE_TRANSPORT_PROXY || throw(ArgumentError("proxy override is not supported when passing an explicit Client"))
+    proxy_selector = _proxy_selector_for_request(req_client, proxy)
     return Stream(
         _method_upper(String(method)),
         parsed,
         req_headers,
         req_client,
         owns_client;
+        proxy_selector = proxy_selector,
         redirect = redirect,
         status_exception = status_exception,
         protocol = protocol,
