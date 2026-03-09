@@ -341,8 +341,9 @@ function body_read!(body::ChunkedBody, dst::Vector{UInt8})::Int
     return n
 end
 
-function _write_start_line!(io::IO, request::Request)
-    print(io, request.method, ' ', request.target, " HTTP/", Int(request.proto_major), '.', Int(request.proto_minor), "\r\n")
+function _write_start_line!(io::IO, request::Request; wire_target::Union{Nothing, AbstractString} = nothing)
+    target = wire_target === nothing ? request.target : String(wire_target)
+    print(io, request.method, ' ', target, " HTTP/", Int(request.proto_major), '.', Int(request.proto_minor), "\r\n")
     return nothing
 end
 
@@ -554,8 +555,16 @@ Behavior:
 Returns `nothing`. May throw `ProtocolError` for inconsistent framing or
 propagate exceptions from `io` and the request body.
 """
-function write_request!(io::IO, request::Request{B}) where {B <: AbstractBody}
+function write_request!(
+        io::IO,
+        request::Request{B};
+        wire_target::Union{Nothing, AbstractString} = nothing,
+        proxy_authorization::Union{Nothing, AbstractString} = nothing,
+    ) where {B <: AbstractBody}
     headers = copy(request.headers)
+    if proxy_authorization !== nothing && !has_header(headers, "Proxy-Authorization")
+        set_header!(headers, "Proxy-Authorization", String(proxy_authorization))
+    end
     has_host = has_header(headers, "Host")
     if !has_host && request.host !== nothing
         set_header!(headers, "Host", request.host::String)
@@ -575,7 +584,7 @@ function write_request!(io::IO, request::Request{B}) where {B <: AbstractBody}
         end
     end
     use_chunked && _prepare_trailer_header!(headers, request.trailers)
-    _write_start_line!(io, request)
+    _write_start_line!(io, request; wire_target = wire_target)
     _write_headers!(io, headers)
     write(io, "\r\n")
     if use_chunked
@@ -852,7 +861,8 @@ function _read_incoming_response(
     content_length = _parse_content_length(headers)
     close = _should_close_connection(headers, proto_major, proto_minor)
     request_is_head = request !== nothing && request.method == "HEAD"
-    if !_body_allowed_for_status(status_code) || request_is_head
+    request_is_connect_tunnel = request !== nothing && request.method == "CONNECT" && status_code >= 200 && status_code < 300
+    if !_body_allowed_for_status(status_code) || request_is_head || request_is_connect_tunnel
         return _new_parsed_incoming_response(
             Int(status_code),
             reason,
@@ -938,7 +948,8 @@ function _read_response(
     content_length = _parse_content_length(headers)
     close = _should_close_connection(headers, proto_major, proto_minor)
     request_is_head = request !== nothing && request.method == "HEAD"
-    if !_body_allowed_for_status(status_code) || request_is_head
+    request_is_connect_tunnel = request !== nothing && request.method == "CONNECT" && status_code >= 200 && status_code < 300
+    if !_body_allowed_for_status(status_code) || request_is_head || request_is_connect_tunnel
         return _new_parsed_response(
             Int(status_code),
             reason,

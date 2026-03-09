@@ -3,6 +3,79 @@ using Reseau
 using Base64
 
 const HT = Reseau.HTTP
+const TL = Reseau.TLS
+const NC = Reseau.TCP
+const ND = Reseau.HostResolvers
+
+const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
+const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+
+function _read_all_proxy(body::HT.AbstractBody)::Vector{UInt8}
+    out = UInt8[]
+    buf = Vector{UInt8}(undef, 64)
+    while true
+        n = HT.body_read!(body, buf)
+        n == 0 && break
+        append!(out, @view(buf[1:n]))
+    end
+    return out
+end
+
+function _write_all_proxy!(conn::NC.Conn, bytes::Vector{UInt8})::Nothing
+    total = 0
+    while total < length(bytes)
+        n = write(conn, bytes[(total + 1):end])
+        n > 0 || error("expected write progress")
+        total += n
+    end
+    return nothing
+end
+
+function _send_response_proxy!(conn::NC.Conn, request::HT.Request; status::Int = 200, reason::String = "OK", body_text::String = "", headers::HT.Headers = HT.Headers(), close_conn::Bool = false)::Nothing
+    payload = collect(codeunits(body_text))
+    response = HT.Response(
+        status;
+        reason = reason,
+        headers = headers,
+        body = HT.BytesBody(payload),
+        content_length = length(payload),
+        close = close_conn,
+        request = request,
+    )
+    io = IOBuffer()
+    HT.write_response!(io, response)
+    _write_all_proxy!(conn, take!(io))
+    return nothing
+end
+
+function _wait_task_proxy!(task::Task; timeout_s::Float64 = 5.0)
+    status = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    status == :timed_out && error("timed out waiting for proxy task")
+    fetch(task)
+    return nothing
+end
+
+function _bridge_proxy!(src::NC.Conn, dst::NC.Conn)::Nothing
+    buf = Vector{UInt8}(undef, 4096)
+    while true
+        n = try
+            read!(src, buf)
+        catch
+            0
+        end
+        n == 0 && return nothing
+        total = 0
+        while total < n
+            wrote = try
+                write(dst, buf[(total + 1):n])
+            catch
+                0
+            end
+            wrote > 0 || return nothing
+            total += wrote
+        end
+    end
+end
 
 @testset "HTTP proxy explicit config parsing" begin
     proxy = HT.ProxyURL("http://user:pass@proxy.local:8080")
@@ -38,7 +111,7 @@ end
 @testset "HTTP proxy env selection and all_proxy fallback" begin
     selector = withenv(
             "HTTP_PROXY" => "http://user:pass@http-proxy.local:8080",
-            "HTTPS_PROXY" => "https://https-proxy.local:8443",
+            "HTTPS_PROXY" => "http://https-proxy.local:8443",
             "ALL_PROXY" => "http://fallback-proxy.local:3128",
             "NO_PROXY" => "skip.local,.bypass.local,192.168.0.0/16",
         ) do
@@ -51,7 +124,7 @@ end
 
     https_proxy = HT._proxy_for(selector, true, "secure.local", 443)
     @test https_proxy !== nothing
-    @test (https_proxy::HT.ProxyConfig).secure
+    @test !(https_proxy::HT.ProxyConfig).secure
     @test (https_proxy::HT.ProxyConfig).address == "https-proxy.local:8443"
 
     bypass = HT._proxy_for(selector, true, "api.bypass.local", 443)
@@ -82,9 +155,160 @@ end
     forward = HT._proxy_plan(proxy, false, "origin.local:80")
     @test forward.mode == HT._ProxyPlanMode.HTTP_FORWARD
     @test forward.proxy !== nothing
-    @test forward.first_hop_key == "http://proxy.local:8080/|http://origin.local:80"
+    @test forward.first_hop_address == "proxy.local:8080"
+    @test forward.pool_key == "http://proxy.local:8080/|http://origin.local:80"
 
     tunnel = HT._proxy_plan(proxy, true, "origin.local:443")
     @test tunnel.mode == HT._ProxyPlanMode.HTTP_TUNNEL
-    @test tunnel.first_hop_key == "http://proxy.local:8080/|https://origin.local:443"
+    @test tunnel.first_hop_address == "proxy.local:8080"
+    @test tunnel.pool_key == "http://proxy.local:8080/|https://origin.local:443"
+
+    https_proxy = HT.ProxyURL("https://proxy.local:8443")
+    @test_throws ArgumentError HT._proxy_plan(https_proxy, true, "origin.local:443")
+end
+
+@testset "HTTP proxy forwards plain HTTP requests in absolute-form" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    proxy_address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    seen_target = Ref{Union{Nothing, String}}(nothing)
+    seen_host = Ref{Union{Nothing, String}}(nothing)
+    seen_proxy_auth = Ref{Union{Nothing, String}}(nothing)
+    server_task = errormonitor(Threads.@spawn begin
+        conn = NC.accept!(listener)
+        try
+            req = HT.read_request(HT._ConnReader(conn))
+            seen_target[] = req.target
+            seen_host[] = HT.get_header(req.headers, "Host")
+            seen_proxy_auth[] = HT.get_header(req.headers, "Proxy-Authorization")
+            _send_response_proxy!(conn, req; body_text = "proxied", close_conn = true)
+        finally
+            try
+                NC.close!(conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    client = HT.Client(transport = HT.Transport(proxy = HT.ProxyURL("http://user:pass@$(proxy_address)"), max_idle_per_host = 4, max_idle_total = 4), prefer_http2 = false)
+    try
+        response = HT.get!(client, "example.com:80", "/forward?x=1"; secure = false, protocol = :h1)
+        @test response.status_code == 200
+        @test String(_read_all_proxy(response.body)) == "proxied"
+        _wait_task_proxy!(server_task)
+        @test seen_target[] == "http://example.com:80/forward?x=1"
+        @test seen_host[] == "example.com:80"
+        @test seen_proxy_auth[] == "Basic " * base64encode("user:pass")
+    finally
+        close(client)
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP proxy CONNECT tunnels HTTPS requests over http proxy" begin
+    origin_listener = TL.listen(
+        "tcp",
+        "127.0.0.1:0",
+        TL.Config(
+            verify_peer = false,
+            cert_file = _TLS_CERT_PATH,
+            key_file = _TLS_KEY_PATH,
+            alpn_protocols = ["http/1.1"],
+        );
+        backlog = 8,
+    )
+    origin_addr = TL.addr(origin_listener)::NC.SocketAddrV4
+    origin_address = ND.join_host_port("127.0.0.1", Int(origin_addr.port))
+    proxy_listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    proxy_addr = NC.addr(proxy_listener)::NC.SocketAddrV4
+    proxy_address = ND.join_host_port("127.0.0.1", Int(proxy_addr.port))
+    seen_connect_host = Ref{Union{Nothing, String}}(nothing)
+    seen_proxy_auth = Ref{Union{Nothing, String}}(nothing)
+    seen_origin_target = Ref{Union{Nothing, String}}(nothing)
+    origin_task = errormonitor(Threads.@spawn begin
+        conn = TL.accept!(origin_listener)
+        try
+            TL.handshake!(conn)
+            req = HT.read_request(HT._ConnReader(conn))
+            seen_origin_target[] = req.target
+            payload = collect(codeunits("tls-proxied"))
+            response = HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), request = req)
+            io = IOBuffer()
+            HT.write_response!(io, response)
+            write(conn, take!(io))
+        finally
+            try
+                TL.close!(conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    proxy_task = errormonitor(Threads.@spawn begin
+        client_conn = NC.accept!(proxy_listener)
+        origin_conn = NC.connect(ND.HostResolver(), "tcp", origin_address)
+        bridge1 = nothing
+        bridge2 = nothing
+        try
+            connect_req = HT.read_request(HT._ConnReader(client_conn))
+            seen_connect_host[] = HT.get_header(connect_req.headers, "Host")
+            seen_proxy_auth[] = HT.get_header(connect_req.headers, "Proxy-Authorization")
+            @test connect_req.method == "CONNECT"
+            @test connect_req.target == origin_address
+            headers = HT.Headers()
+            HT.set_header!(headers, "Connection", "keep-alive")
+            _send_response_proxy!(client_conn, connect_req; status = 200, reason = "Connection Established", headers = headers)
+            bridge1 = errormonitor(Threads.@spawn _bridge_proxy!(client_conn, origin_conn))
+            bridge2 = errormonitor(Threads.@spawn _bridge_proxy!(origin_conn, client_conn))
+            _wait_task_proxy!(bridge1; timeout_s = 5.0)
+            _wait_task_proxy!(bridge2; timeout_s = 5.0)
+        finally
+            try
+                NC.close!(client_conn)
+            catch
+            end
+            try
+                NC.close!(origin_conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    client = HT.Client(
+        transport = HT.Transport(
+            proxy = HT.ProxyURL("http://user:pass@$(proxy_address)"),
+            tls_config = TL.Config(
+                verify_peer = false,
+                server_name = "localhost",
+                alpn_protocols = ["http/1.1"],
+            ),
+            max_idle_per_host = 4,
+            max_idle_total = 4,
+        ),
+        prefer_http2 = false,
+    )
+    try
+        response = HT.get!(client, origin_address, "/via-proxy"; secure = true, protocol = :h1)
+        @test response.status_code == 200
+        @test String(_read_all_proxy(response.body)) == "tls-proxied"
+        close(client)
+        _wait_task_proxy!(origin_task)
+        _wait_task_proxy!(proxy_task)
+        @test seen_connect_host[] == origin_address
+        @test seen_proxy_auth[] == "Basic " * base64encode("user:pass")
+        @test seen_origin_target[] == "/via-proxy"
+    finally
+        close(client)
+        try
+            TL.close!(origin_listener)
+        catch
+        end
+        try
+            NC.close!(proxy_listener)
+        catch
+        end
+    end
 end

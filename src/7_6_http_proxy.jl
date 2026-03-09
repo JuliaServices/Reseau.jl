@@ -61,7 +61,8 @@ end
 struct _ProxyPlan
     mode::_ProxyPlanMode.T
     proxy::Union{Nothing, ProxyConfig}
-    first_hop_key::String
+    first_hop_address::String
+    pool_key::String
 end
 
 NoProxy() = NoProxy(false, _NoProxyIPRule{4}[], _NoProxyIPRule{16}[], _NoProxyCIDRRule{4}[], _NoProxyCIDRRule{16}[], _NoProxyDomainRule[])
@@ -327,8 +328,9 @@ function _proxy_plan(
     port === nothing && throw(ArgumentError("invalid address port in proxy planning: $address"))
     proxy = _proxy_for(selector, secure, host, port)
     if proxy === nothing
-        return _ProxyPlan(_ProxyPlanMode.DIRECT, nothing, string(secure ? "https://" : "http://", address))
+        return _ProxyPlan(_ProxyPlanMode.DIRECT, nothing, String(address), string(secure ? "https://" : "http://", address))
     end
+    (proxy::ProxyConfig).secure && throw(ArgumentError("https proxy URLs are not supported yet"))
     mode = secure ? _ProxyPlanMode.HTTP_TUNNEL : _ProxyPlanMode.HTTP_FORWARD
-    return _ProxyPlan(mode, proxy::ProxyConfig, string((proxy::ProxyConfig).url, "|", secure ? "https://" : "http://", address))
+    return _ProxyPlan(mode, proxy::ProxyConfig, (proxy::ProxyConfig).address, string((proxy::ProxyConfig).url, "|", secure ? "https://" : "http://", address))
 end

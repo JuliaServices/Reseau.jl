@@ -107,6 +107,7 @@ closed.
 mutable struct Transport
     host_resolver::HostResolvers.HostResolver
     tls_config::Union{Nothing, TLS.Config}
+    proxy::Union{Nothing, AbstractProxySelector}
     max_idle_per_host::Int
     max_idle_total::Int
     idle_timeout_ns::Int64
@@ -139,6 +140,7 @@ end
 function Transport(;
         host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
         tls_config::Union{Nothing, TLS.Config} = nothing,
+        proxy::Union{Nothing, AbstractProxySelector} = nothing,
         max_idle_per_host::Integer = 2,
         max_idle_total::Integer = 64,
         idle_timeout_ns::Integer = Int64(90_000_000_000),
@@ -149,6 +151,7 @@ function Transport(;
     return Transport(
         host_resolver,
         tls_config,
+        proxy,
         Int(max_idle_per_host),
         Int(max_idle_total),
         Int64(idle_timeout_ns),
@@ -228,15 +231,63 @@ function _effective_tls_config(transport::Transport, address::String, server_nam
     )
 end
 
-function _new_conn!(transport::Transport, key::String, address::String; secure::Bool, server_name::Union{Nothing, String})::ClientConn
-    tcp = TCP.connect(transport.host_resolver, "tcp", address)
+function _write_request_bytes!(stream, request_io::IOBuffer)
+    request_bytes = request_io.size
+    n = write(stream, request_io.data, request_bytes)
+    n == request_bytes || throw(ProtocolError("transport short write"))
+    return nothing
+end
+
+function _perform_http_connect_tunnel!(
+        tcp::TCP.Conn,
+        proxy::ProxyConfig,
+        target_address::String,
+        deadline_ns::Int64,
+    )::Nothing
+    deadline_ns == 0 || TCP.set_deadline!(tcp, deadline_ns)
+    headers = Headers()
+    set_header!(headers, "Host", target_address)
+    proxy.authorization === nothing || set_header!(headers, "Proxy-Authorization", proxy.authorization::String)
+    request = Request(
+        "CONNECT",
+        target_address;
+        headers = headers,
+        host = target_address,
+        content_length = 0,
+    )
+    request_io = IOBuffer()
+    write_request!(request_io, request)
+    _write_request_bytes!(tcp, request_io)
+    response = _read_incoming_response(_ConnReader(tcp), request)
+    try
+        body_close!(response.rawbody)
+    catch
+    end
+    response.head.status_code == 200 || throw(ProtocolError("proxy CONNECT failed with status $(response.head.status_code)"))
+    return nothing
+end
+
+function _new_conn!(
+        transport::Transport,
+        plan::_ProxyPlan,
+        address::String;
+        secure::Bool,
+        server_name::Union{Nothing, String},
+        deadline_ns::Int64 = Int64(0),
+    )::ClientConn
+    tcp = TCP.connect(transport.host_resolver, "tcp", plan.first_hop_address)
+    if plan.mode == _ProxyPlanMode.HTTP_TUNNEL
+        proxy = plan.proxy
+        proxy === nothing && throw(ProtocolError("proxy CONNECT tunnel is missing proxy config"))
+        _perform_http_connect_tunnel!(tcp, proxy::ProxyConfig, address, deadline_ns)
+    end
     if secure
         cfg = _effective_tls_config(transport, address, server_name)
         tls = TLS.client(tcp, cfg)
         TLS.handshake!(tls)
-        return ClientConn(key, address, true, tcp, tls, _ConnReader(tls), IOBuffer(), false, false, time_ns())
+        return ClientConn(plan.pool_key, plan.first_hop_address, true, tcp, tls, _ConnReader(tls), IOBuffer(), false, false, time_ns())
     end
-    return ClientConn(key, address, false, tcp, nothing, _ConnReader(tcp), IOBuffer(), false, false, time_ns())
+    return ClientConn(plan.pool_key, plan.first_hop_address, false, tcp, nothing, _ConnReader(tcp), IOBuffer(), false, false, time_ns())
 end
 
 function _evict_expired_idle_locked!(transport::Transport, key::String, now_ns::Int64)
@@ -260,17 +311,24 @@ function _evict_expired_idle_locked!(transport::Transport, key::String, now_ns::
     return nothing
 end
 
-function _acquire_conn!(transport::Transport, key::String, address::String; secure::Bool, server_name::Union{Nothing, String})::ClientConn
+function _acquire_conn!(
+        transport::Transport,
+        plan::_ProxyPlan,
+        address::String;
+        secure::Bool,
+        server_name::Union{Nothing, String},
+        deadline_ns::Int64 = Int64(0),
+    )::ClientConn
     _transport_closed(transport) && throw(ProtocolError("transport is closed"))
     lock(transport.lock)
     try
         now_ns = Int64(time_ns())
-        _evict_expired_idle_locked!(transport, key, now_ns)
-        idle_list = get(() -> nothing, transport.idle, key)
+        _evict_expired_idle_locked!(transport, plan.pool_key, now_ns)
+        idle_list = get(() -> nothing, transport.idle, plan.pool_key)
         if idle_list !== nothing && !isempty(idle_list::Vector{ClientConn})
             conn = pop!(idle_list::Vector{ClientConn})
             @atomic :acquire_release transport.idle_total -= 1
-            isempty(idle_list::Vector{ClientConn}) && delete!(transport.idle, key)
+            isempty(idle_list::Vector{ClientConn}) && delete!(transport.idle, plan.pool_key)
             if !_conn_closed(conn)
                 conn.reused = true
                 return conn
@@ -280,7 +338,7 @@ function _acquire_conn!(transport::Transport, key::String, address::String; secu
     finally
         unlock(transport.lock)
     end
-    return _new_conn!(transport, key, address; secure = secure, server_name = server_name)
+    return _new_conn!(transport, plan, address; secure = secure, server_name = server_name, deadline_ns = deadline_ns)
 end
 
 function _put_idle_conn!(transport::Transport, conn::ClientConn)
@@ -551,20 +609,30 @@ function _roundtrip_incoming!(
         request::Request;
         secure::Bool = false,
         server_name::Union{Nothing, AbstractString} = nothing,
+        proxy_selector::Union{Nothing, AbstractProxySelector} = transport.proxy,
     )
-    key = string(secure ? "https://" : "http://", address)
     request_deadline = _request_deadline_ns(request)
     retry_template = _retryable_request(request) ? _copy_request(request) : nothing
     attempt = 1
     current_request = request
     while true
-        conn = _acquire_conn!(transport, key, String(address); secure = secure, server_name = server_name === nothing ? nothing : String(server_name))
+        plan = _proxy_plan(proxy_selector, secure, String(address))
+        conn = _acquire_conn!(
+            transport,
+            plan,
+            String(address);
+            secure = secure,
+            server_name = server_name === nothing ? nothing : String(server_name),
+            deadline_ns = request_deadline,
+        )
         was_reused = conn.reused
         try
             _apply_conn_deadline!(conn, request_deadline)
             request_io = _reset_request_buffer!(conn)
             try
-                write_request!(request_io, current_request)
+                wire_target = plan.mode == _ProxyPlanMode.HTTP_FORWARD ? _request_url(false, String(address), current_request.target) : nothing
+                proxy_auth = plan.mode == _ProxyPlanMode.HTTP_FORWARD && plan.proxy !== nothing ? (plan.proxy::ProxyConfig).authorization : nothing
+                write_request!(request_io, current_request; wire_target = wire_target, proxy_authorization = proxy_auth)
             finally
                 try
                     body_close!(current_request.body)
@@ -572,9 +640,7 @@ function _roundtrip_incoming!(
                 end
             end
             stream = _conn_stream(conn)
-            request_bytes = request_io.size
-            n = write(stream, request_io.data, request_bytes)
-            n == request_bytes || throw(ProtocolError("transport short write"))
+            _write_request_bytes!(stream, request_io)
             reader = conn.reader
             raw_response = _read_incoming_response(reader, current_request)
             # HTTP/1 informational responses are consumed internally so callers
