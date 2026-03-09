@@ -52,21 +52,27 @@ mutable struct PollWaiter
 end
 
 """
-    SleepState
+    TimerState
 
-One-shot task sleep state managed by the poller.
+Poller-managed timer state shared by raw one-shot sleeps and future
+resettable/repeating timers.
 
-Unlike fd deadlines, a sleep does not belong to a descriptor registration. It is
-just a latched `PollWaiter` plus a sequence word so stale heap entries can be
-discarded if the sleep is canceled or the state is ever reused.
+Unlike fd deadlines, timers do not belong to descriptor registrations. The
+state is a latched `PollWaiter` plus timer metadata:
+- `deadline_ns`: currently armed monotonic deadline, or `0` when disarmed
+- `interval_ns`: repeat interval in nanoseconds, or `0` for one-shot timers
+- `seq`: generation counter used to reject stale heap entries after rearm/close
+- `closed`: suppresses future fire/rearm after shutdown or explicit close
 """
-mutable struct SleepState
+mutable struct TimerState
+    lock::ReentrantLock
     waiter::PollWaiter
+    @atomic deadline_ns::Int64
+    @atomic interval_ns::Int64
     @atomic seq::UInt64
-    @atomic fired::Bool
-    @atomic canceled::Bool
-    function SleepState()
-        return new(PollWaiter(), UInt64(1), false, false)
+    @atomic closed::Bool
+    function TimerState(deadline_ns::Int64 = Int64(0), interval_ns::Int64 = Int64(0))
+        return new(ReentrantLock(), PollWaiter(), deadline_ns, interval_ns, UInt64(0), false)
     end
 end
 
@@ -252,17 +258,16 @@ struct DeadlineEntry
 end
 
 """
-    SleepEntry
+    TimerEntry
 
-One scheduled one-shot sleep in the poller min-heap.
+One scheduled timer wakeup in the poller min-heap.
 
-The sequence number mirrors `DeadlineEntry`'s stale-entry strategy: if a sleep
-state is canceled, completed, or ever reused, old heap entries are ignored when
-they rise to the top.
+The sequence number mirrors `DeadlineEntry`'s stale-entry strategy: if a timer
+is rearmed or closed, old heap entries are ignored when they rise to the top.
 """
-struct SleepEntry
+struct TimerEntry
     deadline_ns::Int64
-    sleepstate::SleepState
+    timer::TimerState
     seq::UInt64
 end
 
@@ -285,7 +290,7 @@ mutable struct Poller
     registrations::Dict{Cint, Registration}
     registrations_by_token::Dict{UInt64, Registration}
     deadline_heap::Vector{DeadlineEntry}
-    sleep_heap::Vector{SleepEntry}
+    timer_heap::Vector{TimerEntry}
     shutdown_event::Base.Threads.Event
     kq::Cint
     wake_ident::UInt
@@ -302,7 +307,7 @@ function Poller()
         Dict{Cint, Registration}(),
         Dict{UInt64, Registration}(),
         DeadlineEntry[],
-        SleepEntry[],
+        TimerEntry[],
         Base.Threads.Event(),
         Cint(-1),
         UInt(1),
@@ -355,7 +360,7 @@ end
 
 function deadline_fire! end
 
-@inline function _sleep_less(a::SleepEntry, b::SleepEntry)::Bool
+@inline function _timer_less(a::TimerEntry, b::TimerEntry)::Bool
     if a.deadline_ns != b.deadline_ns
         return a.deadline_ns < b.deadline_ns
     end
@@ -389,7 +394,7 @@ function _deadline_swap!(heap::Vector{DeadlineEntry}, i::Int, j::Int)
     return nothing
 end
 
-function _sleep_swap!(heap::Vector{SleepEntry}, i::Int, j::Int)
+function _timer_swap!(heap::Vector{TimerEntry}, i::Int, j::Int)
     heap[i], heap[j] = heap[j], heap[i]
     return nothing
 end
@@ -404,11 +409,11 @@ function _deadline_sift_up!(heap::Vector{DeadlineEntry}, i::Int)
     return nothing
 end
 
-function _sleep_sift_up!(heap::Vector{SleepEntry}, i::Int)
+function _timer_sift_up!(heap::Vector{TimerEntry}, i::Int)
     while i > 1
         parent = _heap_parent_index(i)
-        _sleep_less(heap[i], heap[parent]) || break
-        _sleep_swap!(heap, i, parent)
+        _timer_less(heap[i], heap[parent]) || break
+        _timer_swap!(heap, i, parent)
         i = parent
     end
     return nothing
@@ -431,18 +436,18 @@ function _deadline_sift_down!(heap::Vector{DeadlineEntry}, i::Int)
     return nothing
 end
 
-function _sleep_sift_down!(heap::Vector{SleepEntry}, i::Int)
+function _timer_sift_down!(heap::Vector{TimerEntry}, i::Int)
     len = length(heap)
     while true
         left = _heap_left_index(i)
         left > len && break
         smallest = left
         right = _heap_right_index(i)
-        if right <= len && _sleep_less(heap[right], heap[left])
+        if right <= len && _timer_less(heap[right], heap[left])
             smallest = right
         end
-        _sleep_less(heap[smallest], heap[i]) || break
-        _sleep_swap!(heap, i, smallest)
+        _timer_less(heap[smallest], heap[i]) || break
+        _timer_swap!(heap, i, smallest)
         i = smallest
     end
     return nothing
@@ -455,10 +460,10 @@ function _deadline_push_locked!(state::Poller, entry::DeadlineEntry)
     return nothing
 end
 
-function _sleep_push_locked!(state::Poller, entry::SleepEntry)
-    heap = state.sleep_heap
+function _timer_push_locked!(state::Poller, entry::TimerEntry)
+    heap = state.timer_heap
     push!(heap, entry)
-    _sleep_sift_up!(heap, length(heap))
+    _timer_sift_up!(heap, length(heap))
     return nothing
 end
 
@@ -474,14 +479,14 @@ function _deadline_pop_locked!(state::Poller)::DeadlineEntry
     return entry
 end
 
-function _sleep_pop_locked!(state::Poller)::SleepEntry
-    heap = state.sleep_heap
-    isempty(heap) && throw(ArgumentError("sleep heap is empty"))
+function _timer_pop_locked!(state::Poller)::TimerEntry
+    heap = state.timer_heap
+    isempty(heap) && throw(ArgumentError("timer heap is empty"))
     entry = heap[1]
     last = pop!(heap)
     if !isempty(heap)
         heap[1] = last
-        _sleep_sift_down!(heap, 1)
+        _timer_sift_down!(heap, 1)
     end
     return entry
 end
@@ -502,19 +507,18 @@ function _discard_stale_deadlines_locked!(state::Poller)
     return nothing
 end
 
-@inline function _sleep_entry_live(entry::SleepEntry)::Bool
-    sleepstate = entry.sleepstate
-    (@atomic :acquire sleepstate.seq) == entry.seq || return false
-    (@atomic :acquire sleepstate.fired) && return false
-    (@atomic :acquire sleepstate.canceled) && return false
+@inline function _timer_entry_live(entry::TimerEntry)::Bool
+    timer = entry.timer
+    (@atomic :acquire timer.seq) == entry.seq || return false
+    (@atomic :acquire timer.closed) && return false
     return true
 end
 
-function _discard_stale_sleeps_locked!(state::Poller)
-    while !isempty(state.sleep_heap)
-        entry = state.sleep_heap[1]
-        _sleep_entry_live(entry) && return nothing
-        _ = _sleep_pop_locked!(state)
+function _discard_stale_timers_locked!(state::Poller)
+    while !isempty(state.timer_heap)
+        entry = state.timer_heap[1]
+        _timer_entry_live(entry) && return nothing
+        _ = _timer_pop_locked!(state)
     end
     return nothing
 end
@@ -525,10 +529,10 @@ function _deadline_peek_locked(state::Poller)
     return state.deadline_heap[1]
 end
 
-function _sleep_peek_locked(state::Poller)
-    _discard_stale_sleeps_locked!(state)
-    isempty(state.sleep_heap) && return nothing
-    return state.sleep_heap[1]
+function _timer_peek_locked(state::Poller)
+    _discard_stale_timers_locked!(state)
+    isempty(state.timer_heap) && return nothing
+    return state.timer_heap[1]
 end
 
 @inline function _maybe_wake_for_earlier_deadline!(state::Poller, new_earliest::Int64)
@@ -608,30 +612,52 @@ function schedule_deadlines!(
 end
 
 """
-    schedule_sleep!(sleepstate, deadline_ns)
+    schedule_timer!(timer, deadline_ns)
 
-Publish one one-shot sleep wakeup into the poller heap.
+Publish one timer wakeup into the poller heap.
 
 `deadline_ns` is an absolute monotonic `time_ns()`-style timestamp.
+Returns `true` if the timer was armed and `false` if the poller was already
+stopped.
 """
-function schedule_sleep!(sleepstate::SleepState, deadline_ns::Int64)
-    isassigned(POLLER) || return nothing
-    state = POLLER[]
-    (@atomic :acquire state.running) || return nothing
+function schedule_timer!(timer::TimerState, deadline_ns::Int64)::Bool
+    state = init!()
+    (@atomic :acquire state.running) || return false
     new_earliest = Int64(0)
-    seq = @atomic :acquire sleepstate.seq
-    @atomic :release sleepstate.fired = false
-    @atomic :release sleepstate.canceled = false
+    entry = nothing
+    armed = false
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return false
+        @atomic :release timer.deadline_ns = deadline_ns
+        seq = @atomic timer.seq += UInt64(1)
+        entry = TimerEntry(deadline_ns, timer, seq)
+    finally
+        unlock(timer.lock)
+    end
     lock(state.lock)
     try
-        entry = SleepEntry(deadline_ns, sleepstate, seq)
-        _sleep_push_locked!(state, entry)
-        new_earliest = entry.deadline_ns
+        if @atomic :acquire state.running
+            _timer_push_locked!(state, entry::TimerEntry)
+            new_earliest = entry.deadline_ns
+            armed = true
+        end
     finally
         unlock(state.lock)
     end
+    if !armed
+        lock(timer.lock)
+        try
+            if (@atomic :acquire timer.seq) == (entry::TimerEntry).seq && !(@atomic :acquire timer.closed)
+                @atomic :release timer.deadline_ns = Int64(0)
+            end
+        finally
+            unlock(timer.lock)
+        end
+        return false
+    end
     _maybe_wake_for_earlier_deadline!(state, new_earliest)
-    return nothing
+    return true
 end
 
 """
@@ -650,15 +676,15 @@ function _poll_delay_ns(state::Poller)::Int64
     lock(state.lock)
     try
         deadline_entry = _deadline_peek_locked(state)
-        sleep_entry = _sleep_peek_locked(state)
+        timer_entry = _timer_peek_locked(state)
         fd_deadline_ns = deadline_entry === nothing ? Int64(0) : deadline_entry.deadline_ns
-        sleep_deadline_ns = sleep_entry === nothing ? Int64(0) : sleep_entry.deadline_ns
+        timer_deadline_ns = timer_entry === nothing ? Int64(0) : timer_entry.deadline_ns
         if fd_deadline_ns == 0
-            deadline_ns = sleep_deadline_ns
-        elseif sleep_deadline_ns == 0
+            deadline_ns = timer_deadline_ns
+        elseif timer_deadline_ns == 0
             deadline_ns = fd_deadline_ns
         else
-            deadline_ns = min(fd_deadline_ns, sleep_deadline_ns)
+            deadline_ns = min(fd_deadline_ns, timer_deadline_ns)
         end
         @atomic :release state.poll_until_ns = deadline_ns
     finally
@@ -699,34 +725,47 @@ function _drain_expired_deadlines!(state::Poller, now_ns::Int64)
     return nothing
 end
 
-function _cancel_sleep!(sleepstate::SleepState)
-    @atomic :release sleepstate.canceled = true
-    pollnotify!(sleepstate.waiter)
+function _close_timer!(timer::TimerState)
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return nothing
+        @atomic :release timer.closed = true
+        @atomic :release timer.deadline_ns = Int64(0)
+        _ = @atomic timer.seq += UInt64(1)
+    finally
+        unlock(timer.lock)
+    end
+    pollnotify!(timer.waiter)
     return nothing
 end
 
-function _sleep_fire!(sleepstate::SleepState, seq::UInt64)
-    (@atomic :acquire sleepstate.seq) == seq || return nothing
-    (@atomic :acquire sleepstate.canceled) && return nothing
-    @atomic :release sleepstate.fired = true
-    pollnotify!(sleepstate.waiter)
+function _timer_fire!(timer::TimerState, seq::UInt64)
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return nothing
+        (@atomic :acquire timer.seq) == seq || return nothing
+        @atomic :release timer.deadline_ns = Int64(0)
+    finally
+        unlock(timer.lock)
+    end
+    pollnotify!(timer.waiter)
     return nothing
 end
 
-function _drain_expired_sleeps!(state::Poller, now_ns::Int64)
-    expired = SleepEntry[]
+function _drain_expired_timers!(state::Poller, now_ns::Int64)
+    expired = TimerEntry[]
     lock(state.lock)
     try
         while true
-            entry = _sleep_peek_locked(state)
+            entry = _timer_peek_locked(state)
             (entry === nothing || entry.deadline_ns > now_ns) && break
-            push!(expired, _sleep_pop_locked!(state))
+            push!(expired, _timer_pop_locked!(state))
         end
     finally
         unlock(state.lock)
     end
     for entry in expired
-        _sleep_fire!(entry.sleepstate, entry.seq)
+        _timer_fire!(entry.timer, entry.seq)
     end
     return nothing
 end
@@ -1008,13 +1047,13 @@ end
 
 function _notify_all_waiters!(state::Poller)
     registrations = Registration[]
-    sleeps = SleepState[]
+    timers = TimerState[]
     lock(state.lock)
     try
         append!(registrations, values(state.registrations))
-        _discard_stale_sleeps_locked!(state)
-        for entry in state.sleep_heap
-            push!(sleeps, entry.sleepstate)
+        _discard_stale_timers_locked!(state)
+        for entry in state.timer_heap
+            push!(timers, entry.timer)
         end
     finally
         unlock(state.lock)
@@ -1022,8 +1061,8 @@ function _notify_all_waiters!(state::Poller)
     for registration in registrations
         _notify_registration!(registration, PollMode.READWRITE)
     end
-    for sleepstate in sleeps
-        _cancel_sleep!(sleepstate)
+    for timer in timers
+        _close_timer!(timer)
     end
     return nothing
 end
@@ -1034,7 +1073,7 @@ function _poller_thread_main!(state::Poller)
         errno = _backend_poll_once!(state, delay_ns)
         @atomic :release state.poll_until_ns = Int64(0)
         _drain_expired_deadlines!(state, Int64(time_ns()))
-        _drain_expired_sleeps!(state, Int64(time_ns()))
+        _drain_expired_timers!(state, Int64(time_ns()))
         errno == Int32(0) && continue
         if errno == Int32(Base.Libc.EINTR)
             continue
@@ -1057,12 +1096,12 @@ function sleep_until_ns(deadline_ns::Integer)
     target_ns <= Int64(time_ns()) && return nothing
     state = init!()
     (@atomic :acquire state.running) || return nothing
-    sleepstate = SleepState()
-    schedule_sleep!(sleepstate, target_ns)
+    timer = TimerState(target_ns, Int64(0))
+    schedule_timer!(timer, target_ns) || return nothing
     while true
-        pollwait!(sleepstate.waiter)
-        (@atomic :acquire sleepstate.fired) && return nothing
-        (@atomic :acquire sleepstate.canceled) && return nothing
+        pollwait!(timer.waiter)
+        (@atomic :acquire timer.closed) && return nothing
+        (@atomic :acquire timer.deadline_ns) == 0 && return nothing
     end
 end
 
