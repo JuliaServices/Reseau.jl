@@ -4,11 +4,8 @@ export NoProxy
 export ProxyURL
 export ProxyFromEnvironment
 
-using Base64
 using EnumX
 using ..Reseau.HostResolvers
-
-abstract type AbstractProxySelector end
 
 struct _NoProxyIPRule{N}
     ip::NTuple{N, UInt8}
@@ -35,18 +32,17 @@ mutable struct NoProxy
     domains::Vector{_NoProxyDomainRule}
 end
 
-struct ProxyConfig <: AbstractProxySelector
+struct _ProxyTarget
     url::String
     secure::Bool
     address::String
     authorization::Union{Nothing, String}
-    no_proxy::Union{Nothing, NoProxy}
 end
 
-struct _EnvironmentProxySelector <: AbstractProxySelector
-    http_proxy::Union{Nothing, ProxyConfig}
-    https_proxy::Union{Nothing, ProxyConfig}
-    all_proxy::Union{Nothing, ProxyConfig}
+struct ProxyConfig
+    http::Union{Nothing, _ProxyTarget}
+    https::Union{Nothing, _ProxyTarget}
+    all::Union{Nothing, _ProxyTarget}
     no_proxy::Union{Nothing, NoProxy}
 end
 
@@ -60,7 +56,7 @@ end
 
 struct _ProxyPlan
     mode::_ProxyPlanMode.T
-    proxy::Union{Nothing, ProxyConfig}
+    proxy::Union{Nothing, _ProxyTarget}
     first_hop_address::String
     pool_key::String
 end
@@ -238,7 +234,7 @@ function _matches_no_proxy(matcher::NoProxy, host::AbstractString, port::Integer
     return false
 end
 
-function _parse_proxy_url(url::AbstractString; allow_unsupported::Bool = false)::ProxyConfig
+function _parse_proxy_target(url::AbstractString; allow_unsupported::Bool = false)::_ProxyTarget
     value = strip(String(url))
     isempty(value) && throw(ArgumentError("proxy URL must not be empty"))
     if !occursin("://", value)
@@ -250,21 +246,22 @@ function _parse_proxy_url(url::AbstractString; allow_unsupported::Bool = false):
     if !allow_unsupported && !(scheme == "http" || scheme == "https")
         throw(ArgumentError("unsupported proxy scheme '$scheme'"))
     end
-    return ProxyConfig(parsed.url, secure, parsed.address, parsed.authorization, nothing)
+    return _ProxyTarget(parsed.url, secure, parsed.address, parsed.authorization)
 end
 
-function ProxyURL(url::AbstractString; no_proxy = nothing)::ProxyConfig
-    parsed = _parse_proxy_url(url)
-    matcher = no_proxy === nothing ? nothing : NoProxy(no_proxy)
-    return ProxyConfig(parsed.url, parsed.secure, parsed.address, parsed.authorization, matcher)
+function _proxy_target(value)::Union{Nothing, _ProxyTarget}
+    value === nothing && return nothing
+    value isa _ProxyTarget && return value
+    value isa AbstractString && return _parse_proxy_target(value)
+    throw(ArgumentError("proxy target must be nothing or a proxy URL string"))
 end
 
-function _env_proxy(names::Vararg{String})::Union{Nothing, ProxyConfig}
+function _env_proxy(names::Vararg{String})::Union{Nothing, _ProxyTarget}
     for name in names
-        value = get(ENV, name, "")
+        value = get(() -> "", ENV, name)
         isempty(strip(value)) && continue
         try
-            return _parse_proxy_url(value)
+            return _parse_proxy_target(value)
         catch
             return nothing
         end
@@ -272,65 +269,76 @@ function _env_proxy(names::Vararg{String})::Union{Nothing, ProxyConfig}
     return nothing
 end
 
-function ProxyFromEnvironment()::_EnvironmentProxySelector
-    matcher = let raw = get(ENV, "NO_PROXY", get(ENV, "no_proxy", ""))
-        isempty(strip(raw)) ? nothing : NoProxy(raw)
-    end
-    return _EnvironmentProxySelector(
-        _env_proxy("HTTP_PROXY", "http_proxy"),
-        _env_proxy("HTTPS_PROXY", "https_proxy"),
-        _env_proxy("ALL_PROXY", "all_proxy"),
+function _env_no_proxy()::Union{Nothing, NoProxy}
+    raw = get(() -> get(() -> "", ENV, "no_proxy"), ENV, "NO_PROXY")
+    isempty(strip(raw)) && return nothing
+    return NoProxy(raw)
+end
+
+function ProxyConfig(url::AbstractString; no_proxy = nothing)::ProxyConfig
+    matcher = no_proxy === nothing ? nothing : NoProxy(no_proxy)
+    return ProxyConfig(nothing, nothing, _parse_proxy_target(url), matcher)
+end
+
+function ProxyConfig(;
+        http = nothing,
+        https = nothing,
+        all = nothing,
+        no_proxy = nothing,
+        env::Bool = false,
+    )::ProxyConfig
+    matcher = no_proxy === nothing ? (env ? _env_no_proxy() : nothing) : NoProxy(no_proxy)
+    return ProxyConfig(
+        http === nothing ? (env ? _env_proxy("HTTP_PROXY", "http_proxy") : nothing) : _proxy_target(http),
+        https === nothing ? (env ? _env_proxy("HTTPS_PROXY", "https_proxy") : nothing) : _proxy_target(https),
+        all === nothing ? (env ? _env_proxy("ALL_PROXY", "all_proxy") : nothing) : _proxy_target(all),
         matcher,
     )
 end
 
-function _proxy_for(
-        selector::Nothing,
-        secure::Bool,
-        host::AbstractString,
-        port::Integer,
-    )::Union{Nothing, ProxyConfig}
-    return nothing
+function ProxyURL(url::AbstractString; no_proxy = nothing)::ProxyConfig
+    return ProxyConfig(url; no_proxy = no_proxy)
+end
+
+function ProxyFromEnvironment()::ProxyConfig
+    return ProxyConfig(; env = true)
+end
+
+function _normalize_proxy_config(proxy)::ProxyConfig
+    proxy === nothing && return ProxyConfig()
+    proxy isa ProxyConfig && return proxy
+    proxy isa AbstractString && return ProxyURL(proxy)
+    throw(ArgumentError("proxy must be nothing, a proxy URL string, or ProxyConfig"))
 end
 
 function _proxy_for(
-        selector::ProxyConfig,
+        config::ProxyConfig,
         secure::Bool,
         host::AbstractString,
         port::Integer,
-    )::Union{Nothing, ProxyConfig}
-    selector.no_proxy !== nothing && _matches_no_proxy(selector.no_proxy::NoProxy, host, port) && return nothing
-    return selector
-end
-
-function _proxy_for(
-        selector::_EnvironmentProxySelector,
-        secure::Bool,
-        host::AbstractString,
-        port::Integer,
-    )::Union{Nothing, ProxyConfig}
-    selector.no_proxy !== nothing && _matches_no_proxy(selector.no_proxy::NoProxy, host, port) && return nothing
+    )::Union{Nothing, _ProxyTarget}
+    config.no_proxy !== nothing && _matches_no_proxy(config.no_proxy::NoProxy, host, port) && return nothing
     if secure
-        selector.https_proxy !== nothing && return selector.https_proxy::ProxyConfig
+        config.https !== nothing && return config.https::_ProxyTarget
     else
-        selector.http_proxy !== nothing && return selector.http_proxy::ProxyConfig
+        config.http !== nothing && return config.http::_ProxyTarget
     end
-    return selector.all_proxy
+    return config.all
 end
 
 function _proxy_plan(
-        selector::Union{Nothing, AbstractProxySelector},
+        config::ProxyConfig,
         secure::Bool,
         address::AbstractString,
     )::_ProxyPlan
     host, port_text = HostResolvers.split_host_port(String(address))
     port = tryparse(Int, port_text)
     port === nothing && throw(ArgumentError("invalid address port in proxy planning: $address"))
-    proxy = _proxy_for(selector, secure, host, port)
+    proxy = _proxy_for(config, secure, host, port)
     if proxy === nothing
         return _ProxyPlan(_ProxyPlanMode.DIRECT, nothing, String(address), string(secure ? "https://" : "http://", address))
     end
-    (proxy::ProxyConfig).secure && throw(ArgumentError("https proxy URLs are not supported yet"))
+    (proxy::_ProxyTarget).secure && throw(ArgumentError("https proxy URLs are not supported yet"))
     mode = secure ? _ProxyPlanMode.HTTP_TUNNEL : _ProxyPlanMode.HTTP_FORWARD
-    return _ProxyPlan(mode, proxy::ProxyConfig, (proxy::ProxyConfig).address, string((proxy::ProxyConfig).url, "|", secure ? "https://" : "http://", address))
+    return _ProxyPlan(mode, proxy::_ProxyTarget, (proxy::_ProxyTarget).address, string((proxy::_ProxyTarget).url, "|", secure ? "https://" : "http://", address))
 end

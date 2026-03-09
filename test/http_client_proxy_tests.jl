@@ -122,15 +122,32 @@ end
 
 @testset "HTTP proxy explicit config parsing" begin
     proxy = HT.ProxyURL("http://user:pass@proxy.local:8080")
-    @test proxy.url == "http://proxy.local:8080/"
-    @test !proxy.secure
-    @test proxy.address == "proxy.local:8080"
-    @test proxy.authorization == "Basic " * base64encode("user:pass")
+    @test proxy.http === nothing
+    @test proxy.https === nothing
+    @test proxy.all !== nothing
+    @test (proxy.all::HT._ProxyTarget).url == "http://proxy.local:8080/"
+    @test !(proxy.all::HT._ProxyTarget).secure
+    @test (proxy.all::HT._ProxyTarget).address == "proxy.local:8080"
+    @test (proxy.all::HT._ProxyTarget).authorization == "Basic " * base64encode("user:pass")
 
     default_scheme = HT.ProxyURL("proxy.local:9000")
-    @test default_scheme.url == "http://proxy.local:9000/"
-    @test !default_scheme.secure
-    @test default_scheme.address == "proxy.local:9000"
+    @test default_scheme.all !== nothing
+    @test (default_scheme.all::HT._ProxyTarget).url == "http://proxy.local:9000/"
+    @test !(default_scheme.all::HT._ProxyTarget).secure
+    @test (default_scheme.all::HT._ProxyTarget).address == "proxy.local:9000"
+
+    merged = withenv(
+            "HTTP_PROXY" => "http://env-http.local:8080",
+            "HTTPS_PROXY" => "http://env-https.local:8443",
+            "ALL_PROXY" => "http://env-all.local:3128",
+            "NO_PROXY" => "skip.local",
+        ) do
+        HT.ProxyConfig(; env = true, http = "http://override-http.local:9000")
+    end
+    @test (merged.http::HT._ProxyTarget).address == "override-http.local:9000"
+    @test (merged.https::HT._ProxyTarget).address == "env-https.local:8443"
+    @test (merged.all::HT._ProxyTarget).address == "env-all.local:3128"
+    @test merged.no_proxy !== nothing
 end
 
 @testset "HTTP proxy no_proxy matching" begin
@@ -162,13 +179,13 @@ end
     end
     http_proxy = HT._proxy_for(selector, false, "public.local", 80)
     @test http_proxy !== nothing
-    @test (http_proxy::HT.ProxyConfig).address == "http-proxy.local:8080"
-    @test (http_proxy::HT.ProxyConfig).authorization == "Basic " * base64encode("user:pass")
+    @test (http_proxy::HT._ProxyTarget).address == "http-proxy.local:8080"
+    @test (http_proxy::HT._ProxyTarget).authorization == "Basic " * base64encode("user:pass")
 
     https_proxy = HT._proxy_for(selector, true, "secure.local", 443)
     @test https_proxy !== nothing
-    @test !(https_proxy::HT.ProxyConfig).secure
-    @test (https_proxy::HT.ProxyConfig).address == "https-proxy.local:8443"
+    @test !(https_proxy::HT._ProxyTarget).secure
+    @test (https_proxy::HT._ProxyTarget).address == "https-proxy.local:8443"
 
     bypass = HT._proxy_for(selector, true, "api.bypass.local", 443)
     @test bypass === nothing
@@ -186,11 +203,11 @@ end
     end
     fallback = HT._proxy_for(selector_fallback, false, "origin.local", 80)
     @test fallback !== nothing
-    @test (fallback::HT.ProxyConfig).address == "fallback-proxy.local:3128"
+    @test (fallback::HT._ProxyTarget).address == "fallback-proxy.local:3128"
 end
 
 @testset "HTTP proxy planning chooses direct, forward, and tunnel modes" begin
-    direct = HT._proxy_plan(nothing, false, "origin.local:80")
+    direct = HT._proxy_plan(HT.ProxyConfig(), false, "origin.local:80")
     @test direct.mode == HT._ProxyPlanMode.DIRECT
     @test direct.proxy === nothing
 
