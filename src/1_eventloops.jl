@@ -106,7 +106,7 @@ function pollwait!(waiter::PollWaiter)::PollWakeReason.T
         # Fast path: transition directly from EMPTY -> WAITING and park.
         state, ok = @atomicreplace(waiter.state, PollWaiterState.EMPTY => PollWaiterState.WAITING)
         if ok
-            _ = wait()::PollWakeReason.T
+            wait()
         else
             state == PollWaiterState.NOTIFIED || throw(ArgumentError("concurrent wait on PollWaiter"))
         end
@@ -118,7 +118,7 @@ function pollwait!(waiter::PollWaiter)::PollWakeReason.T
             ok && return @atomic :acquire waiter.reason
             state == PollWaiterState.EMPTY && return @atomic :acquire waiter.reason
             state == PollWaiterState.WAITING || throw(ArgumentError("invalid PollWaiter state"))
-            _ = wait()::PollWakeReason.T
+            wait()
         end
     finally
         waiter.task = nothing
@@ -161,7 +161,7 @@ function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReas
             task = waiter.task
             task isa Task || throw(ArgumentError("invalid PollWaiter task state"))
             # `schedule(task)` is the low-level dual of the `wait()` above.
-            schedule(task, reason)
+            schedule(task)
             return true
         end
         state == PollWaiterState.EMPTY || throw(ArgumentError("invalid PollWaiter state"))
