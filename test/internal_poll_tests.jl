@@ -110,8 +110,8 @@ else
             combined = EL._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
             @test length(combined) == 1
             @test combined[1].mode == EL.PollMode.READWRITE
-            @test combined[1].rseq == UInt64(3)
-            @test combined[1].wseq == UInt64(5)
+            @test combined[1].primary_seq == UInt64(3)
+            @test combined[1].secondary_seq == UInt64(5)
             split = EL._build_deadline_entries(registration.pollstate, Int64(10), Int64(11), UInt64(3), UInt64(5))
             @test length(split) == 2
             @test split[1].mode == EL.PollMode.READ
@@ -129,7 +129,7 @@ else
                 IP.set_deadline!(ipfd, future_deadline)
                 lock(state.lock)
                 try
-                    entries = filter(x -> x.pollstate.token == ipfd.pd.token, state.deadline_heap)
+                    entries = filter(x -> x.kind == EL.TimeEntryKind.DEADLINE && (x.pollstate::EL.PollState).token == ipfd.pd.token, state.time_heap)
                     @test length(entries) == 1
                     @test entries[1].mode == EL.PollMode.READWRITE
                 finally
