@@ -42,6 +42,7 @@ test_files = [
 
 const _WINDOWS_COMPILER_ISSUE_TESTS = Set([
     "http_client_transport_tests.jl",
+    "http_client_proxy_tests.jl",
     "http_client_tests.jl",
     "http_server_http1_tests.jl",
     "http_integration_tests.jl",
