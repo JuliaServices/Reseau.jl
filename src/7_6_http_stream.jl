@@ -122,14 +122,14 @@ function _start_stream_read!(stream::Stream)::Response
     @atomic :release stream.write_closed = true
     request_bytes = take!(stream.request_buffer)
     body_input = isempty(request_bytes) ? nothing : request_bytes
-    req_body, content_length = _normalize_body_input(body_input)
+    normalized_body = _normalize_body_input(body_input)
     req = Request(
         stream.method,
         stream.parsed.target;
         headers = stream.headers,
-        body = req_body,
+        body = normalized_body.body,
         host = stream.parsed.address,
-        content_length = content_length,
+        content_length = normalized_body.content_length,
     )
     if stream.readtimeout > 0
         timeout_ns = Int64(round(stream.readtimeout * 1.0e9))

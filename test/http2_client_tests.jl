@@ -310,6 +310,59 @@ end
     end
 end
 
+@testset "HTTP/2 high-level request supports iterable bodies" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    received = IOBuffer()
+    server_task = errormonitor(Threads.@spawn begin
+        accepted_conn = NC.accept!(listener)
+        reader = HT.Framer(HT._ConnReader(accepted_conn))
+        server_encoder = HT.Encoder()
+        server_decoder = HT.Decoder()
+        try
+            _ = _read_exact_h2_tcp!(accepted_conn, length(HT._H2_PREFACE))
+            _ = HT.read_frame!(reader)
+            _write_frame_to_conn!(accepted_conn, HT.SettingsFrame(false, Pair{UInt16, UInt32}[]))
+            _ = HT.read_frame!(reader)
+            headers_frame = _read_next_headers_frame!(reader)
+            hf = headers_frame::HT.HeadersFrame
+            decoded = HT.decode_header_block(server_decoder, hf.header_block_fragment)
+            @test any(field -> field.name == ":path" && field.value == "/iter", decoded)
+            done = hf.end_stream
+            while !done
+                frame = HT.read_frame!(reader)
+                frame isa HT.DataFrame || continue
+                df = frame::HT.DataFrame
+                df.stream_id == hf.stream_id || continue
+                write(received, df.data)
+                done = df.end_stream
+            end
+            encoded = HT.encode_header_block(server_encoder, HT.HeaderField[HT.HeaderField(":status", "200", false)])
+            _write_frame_to_conn!(accepted_conn, HT.HeadersFrame(hf.stream_id, false, true, encoded))
+            _write_frame_to_conn!(accepted_conn, HT.DataFrame(hf.stream_id, true, collect(codeunits("ok"))))
+        finally
+            try
+                NC.close!(accepted_conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    try
+        response = HT.post("http://$(address)/iter"; body = ["hey", " there ", "sailor"], protocol = :h2)
+        @test response.status == 200
+        @test String(response.body) == "ok"
+        _wait_task_h2!(server_task)
+        @test String(take!(received)) == "hey there sailor"
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
 @testset "HTTP/2 client honors stream-level flow control" begin
     listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
     laddr = NC.addr(listener)::NC.SocketAddrV4

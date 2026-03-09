@@ -845,6 +845,91 @@ end
     end
 end
 
+@testset "HTTP high-level request body inputs" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    seen_bodies = Dict{String, String}()
+    seen_content_types = Dict{String, Union{Nothing, String}}()
+    multipart_parts = Ref{Union{Nothing, Vector{HT.Multipart}}}(nothing)
+    server_task = errormonitor(Threads.@spawn begin
+        for _ in 1:5
+            conn = NC.accept!(listener)
+            try
+                req = HT.read_request(HT._ConnReader(conn))
+                body_bytes = _read_all_body_bytes_client(req.body)
+                seen_content_types[req.target] = HT.get_header(req.headers, "Content-Type")
+                if req.target == "/multipart"
+                    multipart_parts[] = HT.parse_multipart_form(seen_content_types[req.target], body_bytes)
+                    _send_response_client!(conn, req; body_text = "multipart", close_conn = true)
+                else
+                    body_text = String(copy(body_bytes))
+                    seen_bodies[req.target] = body_text
+                    _send_response_client!(conn, req; body_text = body_text, close_conn = true)
+                end
+            finally
+                try
+                    NC.close!(conn)
+                catch
+                end
+            end
+        end
+        return nothing
+    end)
+    try
+        resp_dict = HT.post("$(base_url)/dict"; body = Dict("name" => "value with spaces"))
+        @test resp_dict.status == 200
+        @test String(resp_dict.body) == "name=value%20with%20spaces"
+
+        resp_named = HT.post("$(base_url)/named"; body = (name = "value",))
+        @test resp_named.status == 200
+        @test String(resp_named.body) == "name=value"
+
+        resp_iter = HT.post("$(base_url)/iter"; body = ["hey", " there ", "sailor"])
+        @test resp_iter.status == 200
+        @test String(resp_iter.body) == "hey there sailor"
+
+        producer = Base.BufferStream()
+        producer_task = errormonitor(Threads.@spawn HT.post("$(base_url)/stream"; body = producer))
+        write(producer, "hello")
+        write(producer, " world")
+        close(producer)
+        resp_stream = fetch(producer_task)
+        @test resp_stream.status == 200
+        @test String(resp_stream.body) == "hello world"
+
+        form = HT.Form(Dict(
+            "field" => "value",
+            "upload" => HT.Multipart("file.txt", IOBuffer("multipart-body"), "text/plain"),
+        ))
+        resp_form = HT.post("$(base_url)/multipart"; body = form)
+        @test resp_form.status == 200
+        @test String(resp_form.body) == "multipart"
+
+        _wait_task_client!(server_task)
+        @test seen_bodies["/dict"] == "name=value%20with%20spaces"
+        @test seen_content_types["/dict"] == "application/x-www-form-urlencoded"
+        @test seen_bodies["/named"] == "name=value"
+        @test seen_content_types["/named"] == "application/x-www-form-urlencoded"
+        @test seen_bodies["/iter"] == "hey there sailor"
+        @test seen_content_types["/iter"] === nothing
+        @test seen_bodies["/stream"] == "hello world"
+        @test seen_content_types["/stream"] === nothing
+        @test multipart_parts[] !== nothing
+        @test startswith(seen_content_types["/multipart"]::String, "multipart/form-data; boundary=")
+        parts = multipart_parts[]::Vector{HT.Multipart}
+        @test length(parts) == 2
+        @test any(part -> part.name == "field" && String(read(part)) == "value", parts)
+        @test any(part -> part.name == "upload" && part.filename == "file.txt" && String(read(part)) == "multipart-body", parts)
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
 @testset "HTTP.open streaming interface" begin
     listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
     laddr = NC.addr(listener)::NC.SocketAddrV4

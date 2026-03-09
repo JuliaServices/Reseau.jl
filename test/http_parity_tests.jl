@@ -149,3 +149,97 @@ end
     framer = HT.Framer(io)
     @test_throws HT.ProtocolError HT.read_frame!(framer)
 end
+
+@testset "HTTP parity high-level replayable form body redirect" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    seen_bodies = String[]
+    seen_content_types = Union{Nothing, String}[]
+    server_task = errormonitor(Threads.@spawn begin
+        conn1 = NC.accept!(listener)
+        try
+            req1 = HT.read_request(HT._ConnReader(conn1))
+            push!(seen_bodies, String(_read_all_parity(req1.body)))
+            push!(seen_content_types, HT.get_header(req1.headers, "Content-Type"))
+            headers = HT.Headers()
+            HT.set_header!(headers, "Location", "/next")
+            HT.set_header!(headers, "Connection", "close")
+            resp1 = HT.Response(307; reason = "Temporary Redirect", headers = headers, body = HT.EmptyBody(), content_length = 0, close = true, request = req1)
+            io1 = IOBuffer()
+            HT.write_response!(io1, resp1)
+            write(conn1, take!(io1))
+        finally
+            try
+                NC.close!(conn1)
+            catch
+            end
+        end
+        conn2 = NC.accept!(listener)
+        try
+            req2 = HT.read_request(HT._ConnReader(conn2))
+            push!(seen_bodies, String(_read_all_parity(req2.body)))
+            push!(seen_content_types, HT.get_header(req2.headers, "Content-Type"))
+            resp2 = HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2, request = req2)
+            io2 = IOBuffer()
+            HT.write_response!(io2, resp2)
+            write(conn2, take!(io2))
+        finally
+            try
+                NC.close!(conn2)
+            catch
+            end
+        end
+        return nothing
+    end)
+    try
+        response = HT.post("http://$(address)/start"; body = Dict("name" => "value"))
+        @test response.status == 200
+        @test String(response.body) == "ok"
+        _wait_task_parity!(server_task)
+        @test seen_bodies == ["name=value", "name=value"]
+        @test seen_content_types == ["application/x-www-form-urlencoded", "application/x-www-form-urlencoded"]
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP parity high-level non-replayable iterable redirect" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    server_task = errormonitor(Threads.@spawn begin
+        conn = NC.accept!(listener)
+        try
+            req = HT.read_request(HT._ConnReader(conn))
+            @test String(_read_all_parity(req.body)) == "ab"
+            headers = HT.Headers()
+            HT.set_header!(headers, "Location", "/next")
+            HT.set_header!(headers, "Connection", "close")
+            resp = HT.Response(307; reason = "Temporary Redirect", headers = headers, body = HT.BytesBody(UInt8[0x72]), content_length = 1, close = true, request = req)
+            io = IOBuffer()
+            HT.write_response!(io, resp)
+            write(conn, take!(io))
+        finally
+            try
+                NC.close!(conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    try
+        response = HT.post("http://$(address)/start"; body = ["a", "b"], status_exception = false)
+        @test response.status == 307
+        @test String(response.body) == "r"
+        _wait_task_parity!(server_task)
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end

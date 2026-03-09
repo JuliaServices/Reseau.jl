@@ -1805,29 +1805,6 @@ function _apply_default_accept_encoding!(headers::Headers, decompress::Union{Not
     return nothing
 end
 
-function _normalize_body_input(body_input)::Tuple{AbstractBody, Int64}
-    body_input === nothing && return EmptyBody(), Int64(0)
-    body_input isa EmptyBody && return EmptyBody(), Int64(0)
-    if body_input isa BytesBody
-        cloned = _clone_bytes_body(body_input::BytesBody)
-        remaining = (length(cloned.data) - cloned.next_index) + 1
-        return cloned, Int64(max(0, remaining))
-    end
-    if body_input isa AbstractString
-        bytes = collect(codeunits(String(body_input)))
-        return BytesBody(bytes), Int64(length(bytes))
-    end
-    if body_input isa AbstractVector{UInt8}
-        bytes = Vector{UInt8}(body_input)
-        return BytesBody(bytes), Int64(length(bytes))
-    end
-    if body_input isa IO
-        bytes = read(body_input)
-        return BytesBody(bytes), Int64(length(bytes))
-    end
-    throw(ArgumentError("unsupported request body type $(typeof(body_input)); expected nothing, String, Vector{UInt8}, IO, or HTTP.AbstractBody"))
-end
-
 function _query_string(query)::String
     query === nothing && return ""
     query isa AbstractString && return String(query)
@@ -1989,6 +1966,9 @@ end
 
 function _validate_request_extra_kwargs(kwargs)
     for (k, v) in kwargs
+        if k == :body
+            continue
+        end
         if k == :retry
             if v isa Bool && !v
                 continue
@@ -2001,6 +1981,17 @@ function _validate_request_extra_kwargs(kwargs)
         throw(ArgumentError("unsupported keyword argument: $k"))
     end
     return nothing
+end
+
+struct _NoBodyKeyword end
+
+const _NO_BODY_KEYWORD = _NoBodyKeyword()
+
+function _resolve_request_body_kw(positional_body, kwargs)
+    body_kw = Base.get(() -> _NO_BODY_KEYWORD, kwargs, :body)
+    body_kw === _NO_BODY_KEYWORD && return positional_body
+    positional_body === nothing || throw(ArgumentError("request body may be provided either positionally or via the body keyword, not both"))
+    return body_kw
 end
 
 @inline function _request_deadline_ns(request::Request)::Int64
@@ -2034,6 +2025,10 @@ Keyword arguments:
   `:same` to preserve the original method
 - `forwardheaders`: whether original request headers are copied onto redirect
   follow-up requests
+- request bodies may be passed positionally or, for convenience helpers like
+  `post(url; body=...)`, via the `body` keyword; supported inputs include
+  strings, byte vectors, `IO`, `Dict`/`NamedTuple` form fields, `HTTP.Form`,
+  iterable chunks, and existing `HTTP.AbstractBody` values
 - `proxy`: explicit proxy override for this call; pass a proxy URL string, a
   `ProxyConfig`, or `nothing` to force direct connections
 - `query`: optional query string or key/value collection appended to the URL
@@ -2082,6 +2077,7 @@ function request(
         protocol::Symbol = :auto,
         kwargs...,
     )
+    resolved_body = _resolve_request_body_kw(body, kwargs)
     _validate_request_extra_kwargs(kwargs)
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     parsed = _parse_http_url(url; query = query)
@@ -2092,14 +2088,17 @@ function request(
     if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
         set_header!(req_headers, "Authorization", parsed.authorization::String)
     end
-    req_body, content_length = _normalize_body_input(body)
+    normalized_body = _normalize_body_input(resolved_body)
+    if normalized_body.default_content_type !== nothing && !has_header(req_headers, "Content-Type")
+        set_header!(req_headers, "Content-Type", normalized_body.default_content_type::String)
+    end
     req = Request(
         _method_upper(method),
         parsed.target;
         headers = req_headers,
-        body = req_body,
+        body = normalized_body.body,
         host = parsed.address,
-        content_length = content_length,
+        content_length = normalized_body.content_length,
     )
     if readtimeout > 0
         timeout_ns = Int64(round(readtimeout * 1.0e9))

@@ -160,3 +160,51 @@ function _iterable_body(iterable)
         () -> nothing,
     )
 end
+
+@inline function _body_replayable(body::AbstractBody)::Bool
+    return body isa EmptyBody || body isa BytesBody
+end
+
+@inline function _should_buffer_request_io(io::IO)::Bool
+    return io isa IOStream || io isa IOBuffer
+end
+
+function _normalize_body_input(body_input)
+    body_input === nothing && return _normalized_request_body(EmptyBody(), 0; replayable = true)
+    body_input isa EmptyBody && return _normalized_request_body(EmptyBody(), 0; replayable = true)
+    if body_input isa BytesBody
+        cloned = _clone_bytes_body(body_input::BytesBody)
+        remaining = (length(cloned.data) - cloned.next_index) + 1
+        return _normalized_request_body(cloned, max(0, remaining); replayable = true)
+    end
+    if body_input isa AbstractBody
+        content_length = body_input isa EmptyBody ? 0 : Int64(-1)
+        return _normalized_request_body(body_input::AbstractBody, content_length; replayable = _body_replayable(body_input::AbstractBody))
+    end
+    if body_input isa Form
+        bytes, default_content_type = _materialize_request_body_bytes(body_input::Form)
+        return _normalized_request_body(BytesBody(bytes), length(bytes); default_content_type = default_content_type, replayable = true)
+    end
+    if body_input isa IO && !_should_buffer_request_io(body_input::IO)
+        body = _streaming_io_body(body_input::IO)
+        return _normalized_request_body(body, -1; replayable = false)
+    end
+    if !(body_input isa AbstractString) &&
+       !(body_input isa AbstractVector{UInt8}) &&
+       !(body_input isa AbstractDict) &&
+       !(body_input isa NamedTuple) &&
+       !(body_input isa IO) &&
+       Base.isiterable(typeof(body_input))
+        body = _iterable_body(body_input)
+        return _normalized_request_body(body, -1; replayable = false)
+    end
+    if body_input isa AbstractString ||
+       body_input isa AbstractVector{UInt8} ||
+       body_input isa AbstractDict ||
+       body_input isa NamedTuple ||
+       body_input isa IO
+        bytes, default_content_type = _materialize_request_body_bytes(body_input)
+        return _normalized_request_body(BytesBody(bytes), length(bytes); default_content_type = default_content_type, replayable = true)
+    end
+    throw(ArgumentError("unsupported request body type $(typeof(body_input)); expected nothing, String, Vector{UInt8}, IO, Dict, NamedTuple, HTTP.Form, iterable body chunks, or HTTP.AbstractBody"))
+end
