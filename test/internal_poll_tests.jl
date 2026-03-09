@@ -113,15 +113,15 @@ else
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.init!(ipfd)
-                IP.set_read_deadline!(ipfd, time_ns() + 20_000_000)
+                IP.set_read_deadline!(ipfd, time_ns() + 100_000_000)
                 wait_task = errormonitor(Threads.@spawn begin
                     IP.wait_read!(ipfd.pd, ipfd.is_file)
                     return :ok
                 end)
-                pre = EL.timedwait(() -> istaskdone(wait_task), 0.01; pollint = 0.001)
+                pre = EL.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
                 @test pre == :timed_out
                 IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
-                EL.sleep(0.06)
+                EL.sleep(0.12)
                 stale = EL.timedwait(() -> istaskdone(wait_task), 0.02; pollint = 0.001)
                 @test stale == :timed_out
                 _ip_write_byte(fd1, 0x64)
