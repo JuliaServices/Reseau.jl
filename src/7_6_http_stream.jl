@@ -261,7 +261,7 @@ The returned `Stream` buffers request writes locally until `startread(stream)`
 or the end of the `do` block. Once reading starts, `stream` behaves like a
 readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
 including `redirect`, `redirect_limit`, `redirect_method`,
-`forwardheaders`, `check_redirect`, `decompress`, `client`,
+`forwardheaders`, `decompress`, `client`,
 `connect_timeout`, `readtimeout`, `require_ssl_verification`, and
 `protocol`.
 
@@ -280,7 +280,6 @@ function open(
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
         forwardheaders::Bool = true,
-        check_redirect = _USE_CLIENT_CHECK_REDIRECT,
         query = nothing,
         decompress::Union{Nothing, Bool} = nothing,
         client::Union{Nothing, Client} = nothing,
@@ -311,7 +310,6 @@ function open(
         readtimeout = readtimeout,
         redirect_policy = _redirect_policy(
             req_client;
-            check_redirect = check_redirect,
             redirect_limit = redirect_limit,
             redirect_method = redirect_method,
             forwardheaders = forwardheaders,

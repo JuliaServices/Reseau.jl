@@ -739,10 +739,6 @@ function Client(;
     return Client(transport, check_redirect, jar, Int(max_redirects), trace, prefer_http2, ReentrantLock(), Dict{String, H2Connection}())
 end
 
-struct _UseClientCheckRedirect end
-
-const _USE_CLIENT_CHECK_REDIRECT = _UseClientCheckRedirect()
-
 struct _RedirectPolicy
     check_redirect::Union{Nothing, Function}
     max_redirects::Int
@@ -762,15 +758,13 @@ end
 
 function _redirect_policy(
         client::Client;
-        check_redirect = _USE_CLIENT_CHECK_REDIRECT,
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
         forwardheaders::Bool = true,
     )::_RedirectPolicy
     max_redirects = redirect_limit === nothing ? client.max_redirects : Int(redirect_limit)
     max_redirects >= 0 || throw(ArgumentError("redirect_limit must be >= 0"))
-    callback = check_redirect === _USE_CLIENT_CHECK_REDIRECT ? client.check_redirect : check_redirect
-    callback === nothing || callback isa Function || throw(ArgumentError("check_redirect must be a Function or nothing"))
+    callback = client.check_redirect
     method_override, preserve_method = _normalize_redirect_method_override(redirect_method)
     return _RedirectPolicy(callback, max_redirects, method_override, preserve_method, forwardheaders)
 end
@@ -1278,8 +1272,8 @@ or closing `response.body`.
 HTTP/2 first for secure requests and fall back to HTTP/1 when negotiation says
 that h2 is unavailable.
 
-Per-call redirect behavior can be overridden with `check_redirect`,
-`redirect_limit`, `redirect_method`, and `forwardheaders`.
+Per-call redirect behavior can be overridden with `redirect_limit`,
+`redirect_method`, and `forwardheaders`.
 """
 function _do_incoming!(
         client::Client,
@@ -1393,14 +1387,12 @@ function do!(
         secure::Bool = false,
         server_name::Union{Nothing, AbstractString} = nothing,
         protocol::Symbol = :auto,
-        check_redirect = _USE_CLIENT_CHECK_REDIRECT,
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
         forwardheaders::Bool = true,
     )
     policy = _redirect_policy(
         client;
-        check_redirect = check_redirect,
         redirect_limit = redirect_limit,
         redirect_method = redirect_method,
         forwardheaders = forwardheaders,
@@ -1941,8 +1933,6 @@ Keyword arguments:
   `:same` to preserve the original method
 - `forwardheaders`: whether original request headers are copied onto redirect
   follow-up requests
-- `check_redirect`: optional callback deciding whether a redirect hop should be
-  followed for this call
 - `query`: optional query string or key/value collection appended to the URL
 - `response_stream`: optional sink `IO` or byte buffer written with the final response body
 - `response_body`: alias for `response_stream`
@@ -1976,7 +1966,6 @@ function request(
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
         forwardheaders::Bool = true,
-        check_redirect = _USE_CLIENT_CHECK_REDIRECT,
         query = nothing,
         response_stream = nothing,
         response_body = response_stream,
@@ -2025,7 +2014,6 @@ function request(
                 protocol = protocol,
                 redirect_policy = _redirect_policy(
                     req_client;
-                    check_redirect = check_redirect,
                     redirect_limit = redirect_limit,
                     redirect_method = redirect_method,
                     forwardheaders = forwardheaders,
