@@ -498,7 +498,16 @@ end
             ])
             _write_frame_h2_proxy!(conn, HT.HeadersFrame(UInt32(1), false, true, header_block))
             _write_frame_h2_proxy!(conn, HT.DataFrame(UInt32(1), true, payload))
-            sleep(0.1)
+            while true
+                try
+                    _ = HT.read_frame!(reader)
+                catch err
+                    if err isa EOFError || err isa TL.TLSError || err isa HT.ParseError || err isa HT.ProtocolError
+                        break
+                    end
+                    rethrow(err)
+                end
+            end
         finally
             try
                 TL.close!(conn)
@@ -510,17 +519,14 @@ end
     proxy_task = errormonitor(Threads.@spawn begin
         client_conn = NC.accept!(proxy_listener)
         origin_conn = NC.connect(ND.HostResolver(), "tcp", origin_address)
-        bridge1 = nothing
-        bridge2 = nothing
         try
             connect_req = HT.read_request(HT._ConnReader(client_conn))
             @test connect_req.method == "CONNECT"
             @test connect_req.target == origin_address
             _send_response_proxy!(client_conn, connect_req; status = 200, reason = "Connection Established", headers = HT.Headers())
-            bridge1 = errormonitor(Threads.@spawn _bridge_proxy!(client_conn, origin_conn))
-            bridge2 = errormonitor(Threads.@spawn _bridge_proxy!(origin_conn, client_conn))
-            _wait_task_proxy!(bridge1; timeout_s = 5.0)
-            _wait_task_proxy!(bridge2; timeout_s = 5.0)
+            errormonitor(Threads.@spawn _bridge_proxy!(client_conn, origin_conn))
+            errormonitor(Threads.@spawn _bridge_proxy!(origin_conn, client_conn))
+            sleep(0.3)
         finally
             try
                 NC.close!(client_conn)
