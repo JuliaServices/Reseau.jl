@@ -9,6 +9,7 @@ export shutdown!
 using ..Reseau.TCP
 using ..Reseau.HostResolvers
 using ..Reseau.IOPoll
+using ..Reseau.EventLoops
 
 """
     Server
@@ -355,7 +356,7 @@ function _close_listener_with_timeout!(listener::TCP.Listener; timeout_s::Float6
         end
         return nothing
     end)
-    _ = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    _ = EventLoops.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
     return nothing
 end
 
@@ -367,7 +368,7 @@ function _force_close_conn_with_timeout!(conn::TCP.Conn; timeout_s::Float64 = 1.
         end
         return nothing
     end)
-    _ = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    _ = EventLoops.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
     return nothing
 end
 
@@ -394,7 +395,7 @@ function shutdown!(server::Server; force::Bool = false, timeout_s::Float64 = 5.0
         unlock(server.lock)
     end
     if task !== nothing
-        _ = timedwait(() -> istaskdone(task::Task), timeout_s; pollint = 0.001)
+        _ = EventLoops.timedwait(() -> istaskdone(task::Task), timeout_s; pollint = 0.001)
     end
     conns = TCP.Conn[]
     tasks = Task[]
@@ -417,7 +418,7 @@ function shutdown!(server::Server; force::Bool = false, timeout_s::Float64 = 5.0
     for task_item in tasks
         remaining = deadline - time()
         remaining <= 0 && break
-        _ = timedwait(() -> istaskdone(task_item), remaining; pollint = 0.001)
+        _ = EventLoops.timedwait(() -> istaskdone(task_item), remaining; pollint = 0.001)
     end
     return nothing
 end

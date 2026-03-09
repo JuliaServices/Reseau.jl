@@ -11,7 +11,7 @@ const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
 
 function _tls_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    return EL.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
 end
 
 function _tls_close_quiet!(x)
@@ -633,7 +633,7 @@ else
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept!(listener)
-                    sleep(1.0)
+                    EL.sleep(1.0)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
@@ -676,7 +676,7 @@ else
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept!(listener)
-                    sleep(1.0)
+                    EL.sleep(1.0)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
@@ -717,7 +717,7 @@ else
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept!(listener)
-                    sleep(1.2)
+                    EL.sleep(1.2)
                     NC.close!(conn)
                     return nothing
                 end)
@@ -798,7 +798,7 @@ else
                 hold_task = errormonitor(Threads.@spawn begin
                     conn = TL.accept!(listener)
                     TL.handshake!(conn)
-                    sleep(1.5)
+                    EL.sleep(1.5)
                     TL.close!(conn)
                     return nothing
                 end)

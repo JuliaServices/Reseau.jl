@@ -52,6 +52,25 @@ mutable struct PollWaiter
 end
 
 """
+    SleepState
+
+One-shot task sleep state managed by the poller.
+
+Unlike fd deadlines, a sleep does not belong to a descriptor registration. It is
+just a latched `PollWaiter` plus a sequence word so stale heap entries can be
+discarded if the sleep is canceled or the state is ever reused.
+"""
+mutable struct SleepState
+    waiter::PollWaiter
+    @atomic seq::UInt64
+    @atomic fired::Bool
+    @atomic canceled::Bool
+    function SleepState()
+        return new(PollWaiter(), UInt64(1), false, false)
+    end
+end
+
+"""
     pollwait!(waiter)
 
 Park the current Julia task until the waiter is notified.
@@ -233,6 +252,21 @@ struct DeadlineEntry
 end
 
 """
+    SleepEntry
+
+One scheduled one-shot sleep in the poller min-heap.
+
+The sequence number mirrors `DeadlineEntry`'s stale-entry strategy: if a sleep
+state is canceled, completed, or ever reused, old heap entries are ignored when
+they rise to the top.
+"""
+struct SleepEntry
+    deadline_ns::Int64
+    sleepstate::SleepState
+    seq::UInt64
+end
+
+"""
     Poller
 
 Global event loop subsystem state. `lock` is a regular mutex because registration
@@ -251,6 +285,7 @@ mutable struct Poller
     registrations::Dict{Cint, Registration}
     registrations_by_token::Dict{UInt64, Registration}
     deadline_heap::Vector{DeadlineEntry}
+    sleep_heap::Vector{SleepEntry}
     shutdown_event::Base.Threads.Event
     kq::Cint
     wake_ident::UInt
@@ -267,6 +302,7 @@ function Poller()
         Dict{Cint, Registration}(),
         Dict{UInt64, Registration}(),
         DeadlineEntry[],
+        SleepEntry[],
         Base.Threads.Event(),
         Cint(-1),
         UInt(1),
@@ -319,6 +355,13 @@ end
 
 function deadline_fire! end
 
+@inline function _sleep_less(a::SleepEntry, b::SleepEntry)::Bool
+    if a.deadline_ns != b.deadline_ns
+        return a.deadline_ns < b.deadline_ns
+    end
+    return a.seq < b.seq
+end
+
 @inline function _deadline_less(a::DeadlineEntry, b::DeadlineEntry)::Bool
     if a.deadline_ns != b.deadline_ns
         return a.deadline_ns < b.deadline_ns
@@ -346,11 +389,26 @@ function _deadline_swap!(heap::Vector{DeadlineEntry}, i::Int, j::Int)
     return nothing
 end
 
+function _sleep_swap!(heap::Vector{SleepEntry}, i::Int, j::Int)
+    heap[i], heap[j] = heap[j], heap[i]
+    return nothing
+end
+
 function _deadline_sift_up!(heap::Vector{DeadlineEntry}, i::Int)
     while i > 1
         parent = _heap_parent_index(i)
         _deadline_less(heap[i], heap[parent]) || break
         _deadline_swap!(heap, i, parent)
+        i = parent
+    end
+    return nothing
+end
+
+function _sleep_sift_up!(heap::Vector{SleepEntry}, i::Int)
+    while i > 1
+        parent = _heap_parent_index(i)
+        _sleep_less(heap[i], heap[parent]) || break
+        _sleep_swap!(heap, i, parent)
         i = parent
     end
     return nothing
@@ -373,10 +431,34 @@ function _deadline_sift_down!(heap::Vector{DeadlineEntry}, i::Int)
     return nothing
 end
 
+function _sleep_sift_down!(heap::Vector{SleepEntry}, i::Int)
+    len = length(heap)
+    while true
+        left = _heap_left_index(i)
+        left > len && break
+        smallest = left
+        right = _heap_right_index(i)
+        if right <= len && _sleep_less(heap[right], heap[left])
+            smallest = right
+        end
+        _sleep_less(heap[smallest], heap[i]) || break
+        _sleep_swap!(heap, i, smallest)
+        i = smallest
+    end
+    return nothing
+end
+
 function _deadline_push_locked!(state::Poller, entry::DeadlineEntry)
     heap = state.deadline_heap
     push!(heap, entry)
     _deadline_sift_up!(heap, length(heap))
+    return nothing
+end
+
+function _sleep_push_locked!(state::Poller, entry::SleepEntry)
+    heap = state.sleep_heap
+    push!(heap, entry)
+    _sleep_sift_up!(heap, length(heap))
     return nothing
 end
 
@@ -388,6 +470,18 @@ function _deadline_pop_locked!(state::Poller)::DeadlineEntry
     if !isempty(heap)
         heap[1] = last
         _deadline_sift_down!(heap, 1)
+    end
+    return entry
+end
+
+function _sleep_pop_locked!(state::Poller)::SleepEntry
+    heap = state.sleep_heap
+    isempty(heap) && throw(ArgumentError("sleep heap is empty"))
+    entry = heap[1]
+    last = pop!(heap)
+    if !isempty(heap)
+        heap[1] = last
+        _sleep_sift_down!(heap, 1)
     end
     return entry
 end
@@ -408,10 +502,43 @@ function _discard_stale_deadlines_locked!(state::Poller)
     return nothing
 end
 
+@inline function _sleep_entry_live(entry::SleepEntry)::Bool
+    sleepstate = entry.sleepstate
+    (@atomic :acquire sleepstate.seq) == entry.seq || return false
+    (@atomic :acquire sleepstate.fired) && return false
+    (@atomic :acquire sleepstate.canceled) && return false
+    return true
+end
+
+function _discard_stale_sleeps_locked!(state::Poller)
+    while !isempty(state.sleep_heap)
+        entry = state.sleep_heap[1]
+        _sleep_entry_live(entry) && return nothing
+        _ = _sleep_pop_locked!(state)
+    end
+    return nothing
+end
+
 function _deadline_peek_locked(state::Poller)
     _discard_stale_deadlines_locked!(state)
     isempty(state.deadline_heap) && return nothing
     return state.deadline_heap[1]
+end
+
+function _sleep_peek_locked(state::Poller)
+    _discard_stale_sleeps_locked!(state)
+    isempty(state.sleep_heap) && return nothing
+    return state.sleep_heap[1]
+end
+
+@inline function _maybe_wake_for_earlier_deadline!(state::Poller, new_earliest::Int64)
+    new_earliest > 0 || return nothing
+    poll_until_ns = @atomic :acquire state.poll_until_ns
+    if poll_until_ns == 0 || new_earliest < poll_until_ns
+        errno = _backend_wake!(state)
+        errno == Int32(0) || _throw_errno("event loop wake", errno)
+    end
+    return nothing
 end
 
 function _build_deadline_entries(
@@ -473,17 +600,37 @@ function schedule_deadlines!(
     finally
         unlock(state.lock)
     end
-    if new_earliest > 0
-        poll_until_ns = @atomic :acquire state.poll_until_ns
-        # This is the local equivalent of Go's `netpollBreak()`: once the
-        # poller has committed to a sleep horizon, a newly earlier deadline must
-        # actively wake it so the blocking syscall can be retried with a
-        # shorter timeout.
-        if poll_until_ns == 0 || new_earliest < poll_until_ns
-            errno = _backend_wake!(state)
-            errno == Int32(0) || _throw_errno("event loop wake", errno)
-        end
+    # This is the local equivalent of Go's `netpollBreak()`: once the poller
+    # has committed to a sleep horizon, a newly earlier wakeup must actively
+    # wake it so the blocking syscall can be retried with a shorter timeout.
+    _maybe_wake_for_earlier_deadline!(state, new_earliest)
+    return nothing
+end
+
+"""
+    schedule_sleep!(sleepstate, deadline_ns)
+
+Publish one one-shot sleep wakeup into the poller heap.
+
+`deadline_ns` is an absolute monotonic `time_ns()`-style timestamp.
+"""
+function schedule_sleep!(sleepstate::SleepState, deadline_ns::Int64)
+    isassigned(POLLER) || return nothing
+    state = POLLER[]
+    (@atomic :acquire state.running) || return nothing
+    new_earliest = Int64(0)
+    seq = @atomic :acquire sleepstate.seq
+    @atomic :release sleepstate.fired = false
+    @atomic :release sleepstate.canceled = false
+    lock(state.lock)
+    try
+        entry = SleepEntry(deadline_ns, sleepstate, seq)
+        _sleep_push_locked!(state, entry)
+        new_earliest = entry.deadline_ns
+    finally
+        unlock(state.lock)
     end
+    _maybe_wake_for_earlier_deadline!(state, new_earliest)
     return nothing
 end
 
@@ -502,8 +649,17 @@ function _poll_delay_ns(state::Poller)::Int64
     deadline_ns = Int64(0)
     lock(state.lock)
     try
-        entry = _deadline_peek_locked(state)
-        deadline_ns = entry === nothing ? Int64(0) : entry.deadline_ns
+        deadline_entry = _deadline_peek_locked(state)
+        sleep_entry = _sleep_peek_locked(state)
+        fd_deadline_ns = deadline_entry === nothing ? Int64(0) : deadline_entry.deadline_ns
+        sleep_deadline_ns = sleep_entry === nothing ? Int64(0) : sleep_entry.deadline_ns
+        if fd_deadline_ns == 0
+            deadline_ns = sleep_deadline_ns
+        elseif sleep_deadline_ns == 0
+            deadline_ns = fd_deadline_ns
+        else
+            deadline_ns = min(fd_deadline_ns, sleep_deadline_ns)
+        end
         @atomic :release state.poll_until_ns = deadline_ns
     finally
         unlock(state.lock)
@@ -539,6 +695,38 @@ function _drain_expired_deadlines!(state::Poller, now_ns::Int64)
     end
     for entry in expired
         deadline_fire!(entry.pollstate, entry.mode, entry.rseq, entry.wseq)
+    end
+    return nothing
+end
+
+function _cancel_sleep!(sleepstate::SleepState)
+    @atomic :release sleepstate.canceled = true
+    pollnotify!(sleepstate.waiter)
+    return nothing
+end
+
+function _sleep_fire!(sleepstate::SleepState, seq::UInt64)
+    (@atomic :acquire sleepstate.seq) == seq || return nothing
+    (@atomic :acquire sleepstate.canceled) && return nothing
+    @atomic :release sleepstate.fired = true
+    pollnotify!(sleepstate.waiter)
+    return nothing
+end
+
+function _drain_expired_sleeps!(state::Poller, now_ns::Int64)
+    expired = SleepEntry[]
+    lock(state.lock)
+    try
+        while true
+            entry = _sleep_peek_locked(state)
+            (entry === nothing || entry.deadline_ns > now_ns) && break
+            push!(expired, _sleep_pop_locked!(state))
+        end
+    finally
+        unlock(state.lock)
+    end
+    for entry in expired
+        _sleep_fire!(entry.sleepstate, entry.seq)
     end
     return nothing
 end
@@ -820,14 +1008,22 @@ end
 
 function _notify_all_waiters!(state::Poller)
     registrations = Registration[]
+    sleeps = SleepState[]
     lock(state.lock)
     try
         append!(registrations, values(state.registrations))
+        _discard_stale_sleeps_locked!(state)
+        for entry in state.sleep_heap
+            push!(sleeps, entry.sleepstate)
+        end
     finally
         unlock(state.lock)
     end
     for registration in registrations
         _notify_registration!(registration, PollMode.READWRITE)
+    end
+    for sleepstate in sleeps
+        _cancel_sleep!(sleepstate)
     end
     return nothing
 end
@@ -838,6 +1034,7 @@ function _poller_thread_main!(state::Poller)
         errno = _backend_poll_once!(state, delay_ns)
         @atomic :release state.poll_until_ns = Int64(0)
         _drain_expired_deadlines!(state, Int64(time_ns()))
+        _drain_expired_sleeps!(state, Int64(time_ns()))
         errno == Int32(0) && continue
         if errno == Int32(Base.Libc.EINTR)
             continue
@@ -847,6 +1044,69 @@ function _poller_thread_main!(state::Poller)
     end
     notify(state.shutdown_event)
     return nothing
+end
+
+"""
+    sleep_until_ns(deadline_ns)
+
+Block the current Julia task until the monotonic `time_ns()` deadline is
+reached, or until the poller is shut down.
+"""
+function sleep_until_ns(deadline_ns::Integer)
+    target_ns = Int64(deadline_ns)
+    target_ns <= Int64(time_ns()) && return nothing
+    state = init!()
+    (@atomic :acquire state.running) || return nothing
+    sleepstate = SleepState()
+    schedule_sleep!(sleepstate, target_ns)
+    while true
+        pollwait!(sleepstate.waiter)
+        (@atomic :acquire sleepstate.fired) && return nothing
+        (@atomic :acquire sleepstate.canceled) && return nothing
+    end
+end
+
+"""
+    sleep_ns(delay_ns)
+
+Block the current Julia task for `delay_ns` nanoseconds using the poller-owned
+sleep heap.
+"""
+function sleep_ns(delay_ns::Integer)
+    delay = Int64(delay_ns)
+    delay <= 0 && return nothing
+    return sleep_until_ns(Int64(time_ns()) + delay)
+end
+
+"""
+    sleep(seconds)
+
+Block the current Julia task for `seconds` wall-clock seconds using the
+poller-owned sleep heap.
+"""
+function sleep(sec::Real)
+    sec >= 0 || throw(ArgumentError("cannot sleep for $sec seconds"))
+    return sleep_ns(ceil(Int64, sec * 1.0e9))
+end
+
+"""
+    timedwait(testcb, timeout_s; pollint=0.1)
+
+Poll `testcb()` until it returns `true` or `timeout_s` seconds elapse.
+"""
+function timedwait(testcb, timeout_s::Real; pollint::Real = 0.1)
+    pollint >= 1.0e-3 || throw(ArgumentError("pollint must be ≥ 1 millisecond"))
+    start_ns = Int64(time_ns())
+    timeout_ns = ceil(Int64, timeout_s * 1.0e9)
+    testcb() && return :ok
+    step_ns = ceil(Int64, pollint * 1.0e9)
+    while true
+        elapsed_ns = Int64(time_ns()) - start_ns
+        elapsed_ns > timeout_ns && return :timed_out
+        remaining_ns = timeout_ns - elapsed_ns
+        sleep_ns(min(step_ns, remaining_ns))
+        testcb() && return :ok
+    end
 end
 
 function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
