@@ -26,10 +26,20 @@ using EnumX
     READWRITE = 0x03
 end
 
+@enumx TimeEntryKind::UInt8 begin
+    DEADLINE = 0x01
+    TIMER = 0x02
+end
+
 @enumx PollWaiterState::UInt8 begin
     EMPTY = 0x00
     WAITING = 0x01
     NOTIFIED = 0x02
+end
+
+@enumx PollWakeReason::UInt8 begin
+    READY = 0x01
+    CANCELED = 0x02
 end
 
 """
@@ -45,9 +55,35 @@ read waiter slot and one write waiter slot per descriptor.
 """
 mutable struct PollWaiter
     @atomic state::PollWaiterState.T
+    @atomic reason::PollWakeReason.T
     task::Union{Nothing, Task}
     function PollWaiter()
-        return new(PollWaiterState.EMPTY, nothing)
+        return new(PollWaiterState.EMPTY, PollWakeReason.READY, nothing)
+    end
+end
+
+"""
+    TimerState
+
+Poller-managed timer state shared by raw one-shot sleeps and future
+resettable/repeating timers.
+
+Unlike fd deadlines, timers do not belong to descriptor registrations. The
+state is a latched `PollWaiter` plus timer metadata:
+- `deadline_ns`: currently armed monotonic deadline, or `0` when disarmed
+- `interval_ns`: repeat interval in nanoseconds, or `0` for one-shot timers
+- `seq`: generation counter used to reject stale heap entries after rearm/close
+- `closed`: suppresses future fire/rearm after shutdown or explicit close
+"""
+mutable struct TimerState
+    lock::ReentrantLock
+    waiter::PollWaiter
+    @atomic deadline_ns::Int64
+    @atomic interval_ns::Int64
+    @atomic seq::UInt64
+    @atomic closed::Bool
+    function TimerState(deadline_ns::Int64 = Int64(0), interval_ns::Int64 = Int64(0))
+        return new(ReentrantLock(), PollWaiter(), deadline_ns, interval_ns, UInt64(0), false)
     end
 end
 
@@ -57,12 +93,12 @@ end
 Park the current Julia task until the waiter is notified.
 Concurrent waits on the same `PollWaiter` are forbidden.
 
-Returns `nothing`.
+Returns the `PollWakeReason` that woke the waiter.
 
 Throws `ArgumentError` if two tasks try to wait on the same waiter
 simultaneously, or if the waiter state machine is observed in an invalid state.
 """
-function pollwait!(waiter::PollWaiter)
+function pollwait!(waiter::PollWaiter)::PollWakeReason.T
     task = current_task()
     task.sticky && (task.sticky = false)
     waiter.task = task
@@ -79,8 +115,8 @@ function pollwait!(waiter::PollWaiter)
             # we loop until the NOTIFIED token is consumed or a clean EMPTY
             # state is observed.
             state, ok = @atomicreplace(waiter.state, PollWaiterState.NOTIFIED => PollWaiterState.EMPTY)
-            ok && return nothing
-            state == PollWaiterState.EMPTY && return nothing
+            ok && return @atomic :acquire waiter.reason
+            state == PollWaiterState.EMPTY && return @atomic :acquire waiter.reason
             state == PollWaiterState.WAITING || throw(ArgumentError("invalid PollWaiter state"))
             wait()
         end
@@ -90,20 +126,37 @@ function pollwait!(waiter::PollWaiter)
 end
 
 """
-    pollnotify!(waiter)
+    pollnotify!(waiter, reason=PollWakeReason.READY)
 
 Mark waiter as notified and wake the waiter task if it has already parked.
 Returns `true` if a parked waiter was woken and `false` if the waiter was
-already notified or had not yet parked.
+already notified or had not yet parked. `PollWakeReason.READY` dominates a
+pending `PollWakeReason.CANCELED`, which matches Go's "ready beats cancel"
+behavior once readiness has already been latched.
 
 Throws `ArgumentError` if the waiter state machine is observed in an invalid
 state.
 """
-function pollnotify!(waiter::PollWaiter)::Bool
+@inline function _merge_wake_reason(
+        current::PollWakeReason.T,
+        incoming::PollWakeReason.T,
+    )::PollWakeReason.T
+    return current == PollWakeReason.READY ? current : incoming
+end
+
+function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReason.READY)::Bool
     state = @atomic :acquire waiter.state
-    while state != PollWaiterState.NOTIFIED
+    while true
+        if state == PollWaiterState.NOTIFIED
+            current = @atomic :acquire waiter.reason
+            merged = _merge_wake_reason(current, reason)
+            merged == current && return false
+            @atomic :release waiter.reason = merged
+            return false
+        end
         state, ok = @atomicreplace(waiter.state, state => PollWaiterState.NOTIFIED)
         ok || continue
+        @atomic :release waiter.reason = reason
         if state == PollWaiterState.WAITING
             task = waiter.task
             task isa Task || throw(ArgumentError("invalid PollWaiter task state"))
@@ -114,7 +167,6 @@ function pollnotify!(waiter::PollWaiter)::Bool
         state == PollWaiterState.EMPTY || throw(ArgumentError("invalid PollWaiter state"))
         return false
     end
-    return false
 end
 
 """
@@ -208,28 +260,27 @@ function Registration(
 end
 
 """
-    DeadlineEntry
+    TimeEntry
 
-One scheduled deadline observation in the poller min-heap.
+One scheduled time event in the poller min-heap.
 
-The heap stores immutable snapshots: `(deadline_ns, mode, rseq, wseq)` capture
-the descriptor state at the moment the entry was scheduled. When an entry later
-reaches the top of the heap, `IOPoll.deadline_fire!` compares the saved
-sequence numbers against the current `PollState` to decide whether the timeout
-is still live or whether the entry became stale because the deadline was reset,
-cleared, or the descriptor was closed/re-registered.
+`TimeEntryKind.DEADLINE` entries are immutable snapshots of descriptor timeout
+state. `mode`, `primary_seq`, and `secondary_seq` capture the read/write
+deadline generation at the moment the entry was scheduled, and `pollstate`
+points at the descriptor-local state that will eventually consume the timeout.
 
-If read and write deadlines are equal, we intentionally store a single
-`READWRITE` entry. That is the same optimization Go applies with
-`netpollDeadline`: it reduces heap pressure while keeping the timeout semantics
-identical.
+`TimeEntryKind.TIMER` entries are object-owned timer wakeups. `primary_seq`
+stores the timer generation captured when the entry was armed, and `timer`
+points at the `TimerState` that will eventually be notified.
 """
-struct DeadlineEntry
+struct TimeEntry
     deadline_ns::Int64
-    pollstate::PollState
+    kind::TimeEntryKind.T
+    pollstate::Union{Nothing, PollState}
+    timer::Union{Nothing, TimerState}
     mode::PollMode.T
-    rseq::UInt64
-    wseq::UInt64
+    primary_seq::UInt64
+    secondary_seq::UInt64
 end
 
 """
@@ -240,8 +291,8 @@ updates can run adjacent to syscalls where spin waiting would be wasteful.
 
 Notable fields:
 - `registrations`/`registrations_by_token` let us validate that an event or
-  deadline still belongs to the current occupant of an fd slot
-- `deadline_heap` is the min-heap that drives finite backend poll timeouts
+  time entry still belongs to the current occupant of an fd slot
+- `time_heap` is the min-heap that drives finite backend poll timeouts
 - `poll_until_ns` records the deadline currently being slept toward so that a
   newly earlier deadline can call `_backend_wake!`, just like Go uses
   `netpollBreak()` to shorten a blocking poll
@@ -250,7 +301,7 @@ mutable struct Poller
     lock::ReentrantLock
     registrations::Dict{Cint, Registration}
     registrations_by_token::Dict{UInt64, Registration}
-    deadline_heap::Vector{DeadlineEntry}
+    time_heap::Vector{TimeEntry}
     shutdown_event::Base.Threads.Event
     kq::Cint
     wake_ident::UInt
@@ -266,7 +317,7 @@ function Poller()
         ReentrantLock(),
         Dict{Cint, Registration}(),
         Dict{UInt64, Registration}(),
-        DeadlineEntry[],
+        TimeEntry[],
         Base.Threads.Event(),
         Cint(-1),
         UInt(1),
@@ -319,14 +370,22 @@ end
 
 function deadline_fire! end
 
-@inline function _deadline_less(a::DeadlineEntry, b::DeadlineEntry)::Bool
+@inline function _time_less(a::TimeEntry, b::TimeEntry)::Bool
     if a.deadline_ns != b.deadline_ns
         return a.deadline_ns < b.deadline_ns
     end
-    if a.pollstate.token != b.pollstate.token
-        return a.pollstate.token < b.pollstate.token
+    if a.kind != b.kind
+        return UInt8(a.kind) < UInt8(b.kind)
     end
-    return UInt8(a.mode) < UInt8(b.mode)
+    if a.kind == TimeEntryKind.DEADLINE
+        apd = a.pollstate::PollState
+        bpd = b.pollstate::PollState
+        if apd.token != bpd.token
+            return apd.token < bpd.token
+        end
+        return UInt8(a.mode) < UInt8(b.mode)
+    end
+    return a.primary_seq < b.primary_seq
 end
 
 @inline function _heap_parent_index(i::Int)::Int
@@ -341,53 +400,53 @@ end
     return (i << 1) + 1
 end
 
-function _deadline_swap!(heap::Vector{DeadlineEntry}, i::Int, j::Int)
+function _time_swap!(heap::Vector{TimeEntry}, i::Int, j::Int)
     heap[i], heap[j] = heap[j], heap[i]
     return nothing
 end
 
-function _deadline_sift_up!(heap::Vector{DeadlineEntry}, i::Int)
+function _time_sift_up!(heap::Vector{TimeEntry}, i::Int)
     while i > 1
         parent = _heap_parent_index(i)
-        _deadline_less(heap[i], heap[parent]) || break
-        _deadline_swap!(heap, i, parent)
+        _time_less(heap[i], heap[parent]) || break
+        _time_swap!(heap, i, parent)
         i = parent
     end
     return nothing
 end
 
-function _deadline_sift_down!(heap::Vector{DeadlineEntry}, i::Int)
+function _time_sift_down!(heap::Vector{TimeEntry}, i::Int)
     len = length(heap)
     while true
         left = _heap_left_index(i)
         left > len && break
         smallest = left
         right = _heap_right_index(i)
-        if right <= len && _deadline_less(heap[right], heap[left])
+        if right <= len && _time_less(heap[right], heap[left])
             smallest = right
         end
-        _deadline_less(heap[smallest], heap[i]) || break
-        _deadline_swap!(heap, i, smallest)
+        _time_less(heap[smallest], heap[i]) || break
+        _time_swap!(heap, i, smallest)
         i = smallest
     end
     return nothing
 end
 
-function _deadline_push_locked!(state::Poller, entry::DeadlineEntry)
-    heap = state.deadline_heap
+function _time_push_locked!(state::Poller, entry::TimeEntry)
+    heap = state.time_heap
     push!(heap, entry)
-    _deadline_sift_up!(heap, length(heap))
+    _time_sift_up!(heap, length(heap))
     return nothing
 end
 
-function _deadline_pop_locked!(state::Poller)::DeadlineEntry
-    heap = state.deadline_heap
-    isempty(heap) && throw(ArgumentError("deadline heap is empty"))
+function _time_pop_locked!(state::Poller)::TimeEntry
+    heap = state.time_heap
+    isempty(heap) && throw(ArgumentError("time heap is empty"))
     entry = heap[1]
     last = pop!(heap)
     if !isempty(heap)
         heap[1] = last
-        _deadline_sift_down!(heap, 1)
+        _time_sift_down!(heap, 1)
     end
     return entry
 end
@@ -397,21 +456,56 @@ end
     return current !== nothing && current.fd == pd.sysfd && current.pollstate === pd
 end
 
-function _discard_stale_deadlines_locked!(state::Poller)
-    while !isempty(state.deadline_heap)
-        entry = state.deadline_heap[1]
+@inline function _entry_live_locked(state::Poller, entry::TimeEntry)::Bool
+    if entry.kind == TimeEntryKind.DEADLINE
+        pd = entry.pollstate::PollState
         # Descriptors are reused aggressively by the OS, so liveness must check
         # both the fd and the monotonically increasing token.
-        _registration_active_locked(state, entry.pollstate) && return nothing
-        _ = _deadline_pop_locked!(state)
+        return _registration_active_locked(state, pd)
+    end
+    timer = entry.timer::TimerState
+    (@atomic :acquire timer.seq) == entry.primary_seq || return false
+    (@atomic :acquire timer.closed) && return false
+    return true
+end
+
+function _discard_stale_time_entries_locked!(state::Poller)
+    while !isempty(state.time_heap)
+        entry = state.time_heap[1]
+        _entry_live_locked(state, entry) && return nothing
+        _ = _time_pop_locked!(state)
     end
     return nothing
 end
 
-function _deadline_peek_locked(state::Poller)
-    _discard_stale_deadlines_locked!(state)
-    isempty(state.deadline_heap) && return nothing
-    return state.deadline_heap[1]
+function _time_peek_locked(state::Poller)
+    _discard_stale_time_entries_locked!(state)
+    isempty(state.time_heap) && return nothing
+    return state.time_heap[1]
+end
+
+@inline function _maybe_wake_for_earlier_time!(state::Poller, new_earliest::Int64)
+    new_earliest > 0 || return nothing
+    poll_until_ns = @atomic :acquire state.poll_until_ns
+    if poll_until_ns == 0 || new_earliest < poll_until_ns
+        errno = _backend_wake!(state)
+        errno == Int32(0) || _throw_errno("event loop wake", errno)
+    end
+    return nothing
+end
+
+@inline function _deadline_entry(
+        deadline_ns::Int64,
+        pd::PollState,
+        mode::PollMode.T,
+        rseq::UInt64,
+        wseq::UInt64,
+    )::TimeEntry
+    return TimeEntry(deadline_ns, TimeEntryKind.DEADLINE, pd, nothing, mode, rseq, wseq)
+end
+
+@inline function _timer_entry(deadline_ns::Int64, timer::TimerState, seq::UInt64)::TimeEntry
+    return TimeEntry(deadline_ns, TimeEntryKind.TIMER, nothing, timer, PollMode.READ, seq, UInt64(0))
 end
 
 function _build_deadline_entries(
@@ -420,17 +514,17 @@ function _build_deadline_entries(
         wd_ns::Int64,
         rseq::UInt64,
         wseq::UInt64,
-    )::Vector{DeadlineEntry}
-    entries = DeadlineEntry[]
+    )::Vector{TimeEntry}
+    entries = TimeEntry[]
     # Match Go's combined read/write deadline fast path when both deadlines are
     # identical. Distinct deadlines stay as separate heap entries because they
     # can expire independently.
     if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
-        push!(entries, DeadlineEntry(rd_ns, pd, PollMode.READWRITE, rseq, wseq))
+        push!(entries, _deadline_entry(rd_ns, pd, PollMode.READWRITE, rseq, wseq))
         return entries
     end
-    rd_ns > 0 && push!(entries, DeadlineEntry(rd_ns, pd, PollMode.READ, rseq, UInt64(0)))
-    wd_ns > 0 && push!(entries, DeadlineEntry(wd_ns, pd, PollMode.WRITE, UInt64(0), wseq))
+    rd_ns > 0 && push!(entries, _deadline_entry(rd_ns, pd, PollMode.READ, rseq, UInt64(0)))
+    wd_ns > 0 && push!(entries, _deadline_entry(wd_ns, pd, PollMode.WRITE, UInt64(0), wseq))
     return entries
 end
 
@@ -465,7 +559,7 @@ function schedule_deadlines!(
     try
         _registration_active_locked(state, pd) || return nothing
         for entry in _build_deadline_entries(pd, rd_ns, wd_ns, rseq, wseq)
-            _deadline_push_locked!(state, entry)
+            _time_push_locked!(state, entry)
             if new_earliest == 0 || entry.deadline_ns < new_earliest
                 new_earliest = entry.deadline_ns
             end
@@ -473,18 +567,60 @@ function schedule_deadlines!(
     finally
         unlock(state.lock)
     end
-    if new_earliest > 0
-        poll_until_ns = @atomic :acquire state.poll_until_ns
-        # This is the local equivalent of Go's `netpollBreak()`: once the
-        # poller has committed to a sleep horizon, a newly earlier deadline must
-        # actively wake it so the blocking syscall can be retried with a
-        # shorter timeout.
-        if poll_until_ns == 0 || new_earliest < poll_until_ns
-            errno = _backend_wake!(state)
-            errno == Int32(0) || _throw_errno("event loop wake", errno)
-        end
-    end
+    # This is the local equivalent of Go's `netpollBreak()`: once the poller
+    # has committed to a sleep horizon, a newly earlier wakeup must actively
+    # wake it so the blocking syscall can be retried with a shorter timeout.
+    _maybe_wake_for_earlier_time!(state, new_earliest)
     return nothing
+end
+
+"""
+    schedule_timer!(timer, deadline_ns)
+
+Publish one timer wakeup into the poller heap.
+
+`deadline_ns` is an absolute monotonic `time_ns()`-style timestamp.
+Returns `true` if the timer was armed and `false` if the poller was already
+stopped.
+"""
+function schedule_timer!(timer::TimerState, deadline_ns::Int64)::Bool
+    state = init!()
+    (@atomic :acquire state.running) || return false
+    new_earliest = Int64(0)
+    entry = nothing
+    armed = false
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return false
+        @atomic :release timer.deadline_ns = deadline_ns
+        seq = @atomic timer.seq += UInt64(1)
+        entry = _timer_entry(deadline_ns, timer, seq)
+    finally
+        unlock(timer.lock)
+    end
+    lock(state.lock)
+    try
+        if @atomic :acquire state.running
+            _time_push_locked!(state, entry::TimeEntry)
+            new_earliest = entry.deadline_ns
+            armed = true
+        end
+    finally
+        unlock(state.lock)
+    end
+    if !armed
+        lock(timer.lock)
+        try
+            if (@atomic :acquire timer.seq) == (entry::TimeEntry).primary_seq && !(@atomic :acquire timer.closed)
+                @atomic :release timer.deadline_ns = Int64(0)
+            end
+        finally
+            unlock(timer.lock)
+        end
+        return false
+    end
+    _maybe_wake_for_earlier_time!(state, new_earliest)
+    return true
 end
 
 """
@@ -493,8 +629,8 @@ end
 Compute the timeout for the next backend poll call.
 
 Returns:
-- `-1` when no deadlines are pending and the backend may block indefinitely
-- `0` when at least one deadline is already due and the backend should poll
+- `-1` when no time entries are pending and the backend may block indefinitely
+- `0` when at least one time entry is already due and the backend should poll
   without blocking
 - a positive nanosecond timeout otherwise
 """
@@ -502,7 +638,7 @@ function _poll_delay_ns(state::Poller)::Int64
     deadline_ns = Int64(0)
     lock(state.lock)
     try
-        entry = _deadline_peek_locked(state)
+        entry = _time_peek_locked(state)
         deadline_ns = entry === nothing ? Int64(0) : entry.deadline_ns
         @atomic :release state.poll_until_ns = deadline_ns
     finally
@@ -515,30 +651,71 @@ function _poll_delay_ns(state::Poller)::Int64
     return remaining_ns
 end
 
+function _close_timer!(timer::TimerState)
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return nothing
+        @atomic :release timer.closed = true
+        @atomic :release timer.deadline_ns = Int64(0)
+        _ = @atomic timer.seq += UInt64(1)
+    finally
+        unlock(timer.lock)
+    end
+    pollnotify!(timer.waiter, PollWakeReason.CANCELED)
+    return nothing
+end
+
+function _timer_fire!(timer::TimerState, seq::UInt64)
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return nothing
+        (@atomic :acquire timer.seq) == seq || return nothing
+        @atomic :release timer.deadline_ns = Int64(0)
+    finally
+        unlock(timer.lock)
+    end
+    pollnotify!(timer.waiter, PollWakeReason.READY)
+    return nothing
+end
+
+@inline function _fire_time_entry!(entry::TimeEntry)
+    if entry.kind == TimeEntryKind.DEADLINE
+        deadline_fire!(
+            entry.pollstate::PollState,
+            entry.mode,
+            entry.primary_seq,
+            entry.secondary_seq,
+        )
+    else
+        _timer_fire!(entry.timer::TimerState, entry.primary_seq)
+    end
+    return nothing
+end
+
 """
-    _drain_expired_deadlines!(state, now_ns)
+    _drain_expired_time_entries!(state, now_ns)
 
-Remove all expired deadline entries from the heap and dispatch them to
-`deadline_fire!`.
+Remove all expired time entries from the heap and dispatch them to their
+deadline or timer fire path.
 
-The heap lock is not held across `deadline_fire!` calls. That keeps the critical
+The heap lock is not held across fire callbacks. That keeps the critical
 section small and avoids lock-ordering problems with descriptor-local locks in
 `IOPoll`.
 """
-function _drain_expired_deadlines!(state::Poller, now_ns::Int64)
-    expired = DeadlineEntry[]
+function _drain_expired_time_entries!(state::Poller, now_ns::Int64)
+    expired = TimeEntry[]
     lock(state.lock)
     try
         while true
-            entry = _deadline_peek_locked(state)
+            entry = _time_peek_locked(state)
             (entry === nothing || entry.deadline_ns > now_ns) && break
-            push!(expired, _deadline_pop_locked!(state))
+            push!(expired, _time_pop_locked!(state))
         end
     finally
         unlock(state.lock)
     end
     for entry in expired
-        deadline_fire!(entry.pollstate, entry.mode, entry.rseq, entry.wseq)
+        _fire_time_entry!(entry)
     end
     return nothing
 end
@@ -570,12 +747,16 @@ function current_registration(pd::PollState)
     end
 end
 
-function _notify_registration!(registration::Registration, mode::PollMode.T)
+function _notify_registration!(
+        registration::Registration,
+        mode::PollMode.T,
+        reason::PollWakeReason.T = PollWakeReason.READY,
+    )
     if _mode_has_read(mode) && _mode_has_read(registration.mode)
-        pollnotify!(registration.read_waiter)
+        pollnotify!(registration.read_waiter, reason)
     end
     if _mode_has_write(mode) && _mode_has_write(registration.mode)
-        pollnotify!(registration.write_waiter)
+        pollnotify!(registration.write_waiter, reason)
     end
     return nothing
 end
@@ -680,7 +861,7 @@ function shutdown!()
         unlock(state.lock)
     end
     for registration in registrations
-        _notify_registration!(registration, PollMode.READWRITE)
+        _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
     end
     if stop_requested
         wake_errno = _backend_wake!(state)
@@ -764,7 +945,7 @@ function deregister!(fd::Integer)
     finally
         unlock(state.lock)
     end
-    registration === nothing || _notify_registration!(registration::Registration, PollMode.READWRITE)
+    registration === nothing || _notify_registration!(registration::Registration, PollMode.READWRITE, PollWakeReason.CANCELED)
     errno == Int32(0) || _throw_errno("event loop deregister", errno)
     return nothing
 end
@@ -814,20 +995,29 @@ function _dispatch_ready_event!(state::Poller, event::PollEvent)
     finally
         unlock(state.lock)
     end
-    _notify_registration!(registration::Registration, event.mode)
+    _notify_registration!(registration::Registration, event.mode, PollWakeReason.READY)
     return nothing
 end
 
 function _notify_all_waiters!(state::Poller)
     registrations = Registration[]
+    timers = TimerState[]
     lock(state.lock)
     try
         append!(registrations, values(state.registrations))
+        _discard_stale_time_entries_locked!(state)
+        for entry in state.time_heap
+            entry.kind == TimeEntryKind.TIMER || continue
+            push!(timers, entry.timer::TimerState)
+        end
     finally
         unlock(state.lock)
     end
     for registration in registrations
-        _notify_registration!(registration, PollMode.READWRITE)
+        _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+    end
+    for timer in timers
+        _close_timer!(timer)
     end
     return nothing
 end
@@ -837,7 +1027,7 @@ function _poller_thread_main!(state::Poller)
         delay_ns = _poll_delay_ns(state)
         errno = _backend_poll_once!(state, delay_ns)
         @atomic :release state.poll_until_ns = Int64(0)
-        _drain_expired_deadlines!(state, Int64(time_ns()))
+        _drain_expired_time_entries!(state, Int64(time_ns()))
         errno == Int32(0) && continue
         if errno == Int32(Base.Libc.EINTR)
             continue
@@ -847,6 +1037,70 @@ function _poller_thread_main!(state::Poller)
     end
     notify(state.shutdown_event)
     return nothing
+end
+
+"""
+    sleep_until_ns(deadline_ns)
+
+Block the current Julia task until the monotonic `time_ns()` deadline is
+reached, or until the poller is shut down.
+"""
+function sleep_until_ns(deadline_ns::Integer)
+    target_ns = Int64(deadline_ns)
+    target_ns <= Int64(time_ns()) && return nothing
+    state = init!()
+    (@atomic :acquire state.running) || return nothing
+    timer = TimerState(target_ns, Int64(0))
+    schedule_timer!(timer, target_ns) || return nothing
+    while true
+        reason = pollwait!(timer.waiter)
+        reason == PollWakeReason.READY && return nothing
+        (@atomic :acquire timer.closed) && return nothing
+        (@atomic :acquire timer.deadline_ns) == 0 && return nothing
+    end
+end
+
+"""
+    sleep_ns(delay_ns)
+
+Block the current Julia task for `delay_ns` nanoseconds using the poller-owned
+sleep heap.
+"""
+function sleep_ns(delay_ns::Integer)
+    delay = Int64(delay_ns)
+    delay <= 0 && return nothing
+    return sleep_until_ns(Int64(time_ns()) + delay)
+end
+
+"""
+    sleep(seconds)
+
+Block the current Julia task for `seconds` wall-clock seconds using the
+poller-owned sleep heap.
+"""
+function sleep(sec::Real)
+    sec >= 0 || throw(ArgumentError("cannot sleep for $sec seconds"))
+    return sleep_ns(ceil(Int64, sec * 1.0e9))
+end
+
+"""
+    timedwait(testcb, timeout_s; pollint=0.1)
+
+Poll `testcb()` until it returns `true` or `timeout_s` seconds elapse.
+"""
+function timedwait(testcb, timeout_s::Real; pollint::Real = 0.1)
+    pollint >= 1.0e-3 || throw(ArgumentError("pollint must be ≥ 1 millisecond"))
+    start_ns = Int64(time_ns())
+    timeout_ns = ceil(Int64, timeout_s * 1.0e9)
+    testcb() && return :ok
+    step_ns = ceil(Int64, pollint * 1.0e9)
+    while true
+        elapsed_ns = Int64(time_ns()) - start_ns
+        elapsed_ns > timeout_ns && return :timed_out
+        remaining_ns = timeout_ns - elapsed_ns
+        sleep_ns(min(step_ns, remaining_ns))
+        testcb() && return :ok
+    end
 end
 
 function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}

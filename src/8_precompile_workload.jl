@@ -325,7 +325,7 @@ function _pc_run_tls_workload!()
             min_version = client_cfg.min_version,
             max_version = client_cfg.max_version,
         )
-        status = timedwait(() -> istaskdone(accept_task), 2.0; pollint = 0.001)
+        status = EL.timedwait(() -> istaskdone(accept_task), 2.0; pollint = 0.001)
         status == :timed_out && throw(ArgumentError("TLS precompile workload timed out during accept"))
         server = fetch(accept_task)
         payload = UInt8[0x54, 0x4c, 0x53]
@@ -428,7 +428,7 @@ function _pc_run_http_transport_workload!()
         body_buf = Vector{UInt8}(undef, 2)
         read_n = HT.body_read!(response.body, body_buf)
         read_n == 2 || throw(ArgumentError("HTTP transport precompile workload expected two-byte response body"))
-        status = timedwait(() -> istaskdone(server_task::Task), 2.0; pollint = 0.001)
+        status = EL.timedwait(() -> istaskdone(server_task::Task), 2.0; pollint = 0.001)
         status == :timed_out && throw(ArgumentError("HTTP transport precompile workload timed out waiting for server task"))
         accepted = fetch(server_task::Task)
     finally
@@ -482,7 +482,7 @@ function _pc_run_http_client_workload!()
         body_buf = Vector{UInt8}(undef, 2)
         read_n = HT.body_read!(response.body, body_buf)
         read_n == 2 || throw(ArgumentError("HTTP client precompile workload expected two-byte response body"))
-        status = timedwait(() -> istaskdone(server_task::Task), 2.0; pollint = 0.001)
+        status = EL.timedwait(() -> istaskdone(server_task::Task), 2.0; pollint = 0.001)
         status == :timed_out && throw(ArgumentError("HTTP client precompile workload timed out waiting for server task"))
         fetch(server_task::Task)
     finally
@@ -517,7 +517,7 @@ function _pc_run_http_server_workload!()
             try
                 address = HT.server_addr(server)
             catch
-                sleep(0.01)
+                EL.sleep(0.01)
             end
         end
         address === nothing && throw(ArgumentError("HTTP server precompile workload timed out waiting for address"))
@@ -535,7 +535,7 @@ function _pc_run_http_server_workload!()
             client === nothing || close(client.transport)
         catch
         end
-        status = timedwait(() -> istaskdone(task), 2.0; pollint = 0.001)
+        status = EL.timedwait(() -> istaskdone(task), 2.0; pollint = 0.001)
         status == :timed_out || fetch(task)
     end
     return nothing
@@ -620,7 +620,7 @@ function _pc_run_http2_client_workload!()
         request = HT.Request("GET", "/ready"; host = address, body = HT.EmptyBody(), content_length = 0)
         response = HT.h2_roundtrip!(conn::HT.H2Connection, request)
         response.status_code == 200 || throw(ArgumentError("HTTP/2 client precompile workload expected status 200"))
-        status = timedwait(() -> istaskdone(server_task::Task), 2.0; pollint = 0.001)
+        status = EL.timedwait(() -> istaskdone(server_task::Task), 2.0; pollint = 0.001)
         status == :timed_out && throw(ArgumentError("HTTP/2 client precompile workload timed out waiting for server task"))
         fetch(server_task::Task)
     finally
@@ -655,7 +655,7 @@ function _pc_run_http2_server_workload!()
             try
                 address = HT.h2_server_addr(server)
             catch
-                sleep(0.01)
+                EL.sleep(0.01)
             end
         end
         address === nothing && throw(ArgumentError("HTTP/2 server precompile workload timed out waiting for address"))
@@ -672,7 +672,7 @@ function _pc_run_http2_server_workload!()
             HT.shutdown_h2_server!(server)
         catch
         end
-        _ = timedwait(() -> istaskdone(task), 2.0; pollint = 0.001)
+        _ = EL.timedwait(() -> istaskdone(task), 2.0; pollint = 0.001)
     end
     return nothing
 end
@@ -702,7 +702,7 @@ function _pc_run_http_unified_workload!()
             try
                 h1_address = HT.server_addr(h1_server)
             catch
-                sleep(0.01)
+                EL.sleep(0.01)
             end
         end
         h1_address === nothing && throw(ArgumentError("HTTP unified precompile workload timed out waiting for h1 address"))
@@ -722,7 +722,7 @@ function _pc_run_http_unified_workload!()
             try
                 h2_address = HT.h2_server_addr(h2_server::HT.H2Server)
             catch
-                sleep(0.01)
+                EL.sleep(0.01)
             end
         end
         h2_address === nothing && throw(ArgumentError("HTTP unified precompile workload timed out waiting for h2 address"))
@@ -737,7 +737,7 @@ function _pc_run_http_unified_workload!()
             HT.shutdown!(h1_server; force = true)
         catch
         end
-        _ = timedwait(() -> istaskdone(h1_task), 2.0; pollint = 0.001)
+        _ = EL.timedwait(() -> istaskdone(h1_task), 2.0; pollint = 0.001)
         try
             h2_client === nothing || close(h2_client::HT.Client)
         catch
@@ -749,7 +749,7 @@ function _pc_run_http_unified_workload!()
             end
         end
         if h2_task !== nothing
-            _ = timedwait(() -> istaskdone(h2_task::Task), 2.0; pollint = 0.001)
+            _ = EL.timedwait(() -> istaskdone(h2_task::Task), 2.0; pollint = 0.001)
         end
     end
     return nothing

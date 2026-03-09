@@ -437,7 +437,7 @@ function _wake_waiters!(pd::PollState, mode::PollOp.T)
     elseif mode == PollOp.WRITE
         event_mode = EventLoops.PollMode.WRITE
     end
-    EventLoops._notify_registration!(registration, event_mode)
+    EventLoops._notify_registration!(registration, event_mode, EventLoops.PollWakeReason.CANCELED)
     return nothing
 end
 
@@ -685,7 +685,8 @@ function prepare_write!(pd::PollState, is_file::Bool = false)
 end
 
 """
-Block until read readiness, then re-check for close/timeout/not-pollable errors.
+Block until read readiness, retrying internally if a canceled wake becomes
+stale before the waiter task resumes.
 
 Returns `nothing`.
 
@@ -696,28 +697,37 @@ Throws:
 - `NotPollableError` if the backend reports a permanent readiness error
 """
 function wait_read!(pd::PollState, is_file::Bool = false)
-    _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
-    pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
-    registration = _poll_registration(pd)
-    EventLoops.arm_waiter!(registration, EventLoops.PollMode.READ)
-    EventLoops.pollwait!(registration.read_waiter)
-    _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
-    return nothing
+    while true
+        _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
+        pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
+        registration = _poll_registration(pd)
+        EventLoops.arm_waiter!(registration, EventLoops.PollMode.READ)
+        reason = EventLoops.pollwait!(registration.read_waiter)
+        reason == EventLoops.PollWakeReason.READY && return nothing
+        err = _check_error(pd, PollOp.READ)
+        err == _POLL_NO_ERROR && continue
+        _convert_poll_error!(err, is_file)
+    end
 end
 
 """
-Block until write readiness, then re-check for close/timeout/not-pollable errors.
+Block until write readiness, retrying internally if a canceled wake becomes
+stale before the waiter task resumes.
 
 Returns `nothing`.
 """
 function wait_write!(pd::PollState, is_file::Bool = false)
-    _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
-    pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
-    registration = _poll_registration(pd)
-    EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
-    EventLoops.pollwait!(registration.write_waiter)
-    _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
-    return nothing
+    while true
+        _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
+        pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
+        registration = _poll_registration(pd)
+        EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
+        reason = EventLoops.pollwait!(registration.write_waiter)
+        reason == EventLoops.PollWakeReason.READY && return nothing
+        err = _check_error(pd, PollOp.WRITE)
+        err == _POLL_NO_ERROR && continue
+        _convert_poll_error!(err, is_file)
+    end
 end
 
 """

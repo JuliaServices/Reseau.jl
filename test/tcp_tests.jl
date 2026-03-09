@@ -7,7 +7,7 @@ const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 function _nc_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    return EL.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
 end
 
 function _read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int

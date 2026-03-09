@@ -7,6 +7,7 @@ export shutdown_h2_server!
 using ..Reseau.TCP
 using ..Reseau.HostResolvers
 using ..Reseau.IOPoll
+using ..Reseau.EventLoops
 
 """
     H2Server
@@ -440,6 +441,6 @@ function shutdown_h2_server!(server::H2Server; force::Bool = true)
     finally
         unlock(server.lock)
     end
-    task === nothing || timedwait(() -> istaskdone(task::Task), 3.0; pollint = 0.001)
+    task === nothing || EventLoops.timedwait(() -> istaskdone(task::Task), 3.0; pollint = 0.001)
     return nothing
 end
