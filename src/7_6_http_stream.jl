@@ -22,6 +22,7 @@ mutable struct Stream <: IO
     client::Client
     owns_client::Bool
     redirect::Bool
+    redirect_policy::_RedirectPolicy
     status_exception::Bool
     protocol::Symbol
     decompress::Union{Nothing, Bool}
@@ -42,6 +43,7 @@ function Stream(
         client::Client,
         owns_client::Bool;
         redirect::Bool,
+        redirect_policy::_RedirectPolicy,
         status_exception::Bool,
         protocol::Symbol,
         decompress::Union{Nothing, Bool},
@@ -55,6 +57,7 @@ function Stream(
         client,
         owns_client,
         redirect,
+        redirect_policy,
         status_exception,
         protocol,
         decompress,
@@ -137,6 +140,7 @@ function _start_stream_read!(stream::Stream)::Response
             secure = stream.parsed.secure,
             server_name = stream.parsed.server_name,
             protocol = stream.protocol,
+            redirect_policy = stream.redirect_policy,
         )
     else
         _roundtrip_incoming!(
@@ -256,8 +260,10 @@ Create a streaming HTTP client request/response exchange.
 The returned `Stream` buffers request writes locally until `startread(stream)`
 or the end of the `do` block. Once reading starts, `stream` behaves like a
 readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
-including `redirect`, `decompress`, `client`, `connect_timeout`, `readtimeout`,
-`require_ssl_verification`, and `protocol`.
+including `redirect`, `redirect_limit`, `redirect_method`,
+`forwardheaders`, `decompress`, `client`,
+`connect_timeout`, `readtimeout`, `require_ssl_verification`, and
+`protocol`.
 
 The `do`-block form closes request writes automatically, closes the readable
 side on exit, and returns the final response metadata.
@@ -271,6 +277,9 @@ function open(
         headers = Pair{String, String}[];
         status_exception::Bool = true,
         redirect::Bool = true,
+        redirect_limit::Union{Nothing, Integer} = nothing,
+        redirect_method = nothing,
+        forwardheaders::Bool = true,
         query = nothing,
         decompress::Union{Nothing, Bool} = nothing,
         client::Union{Nothing, Client} = nothing,
@@ -299,6 +308,12 @@ function open(
         protocol = protocol,
         decompress = decompress,
         readtimeout = readtimeout,
+        redirect_policy = _redirect_policy(
+            req_client;
+            redirect_limit = redirect_limit,
+            redirect_method = redirect_method,
+            forwardheaders = forwardheaders,
+        ),
     )
 end
 

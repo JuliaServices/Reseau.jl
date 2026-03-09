@@ -706,6 +706,8 @@ mutable struct Response{B}
     close::Bool
     request::Union{Nothing, Request}
     request_url::Union{Nothing, String}
+    previous::Union{Nothing, Response}
+    redirect_count::Int
 end
 
 struct _IncomingResponseHead
@@ -718,6 +720,9 @@ struct _IncomingResponseHead
     proto_minor::UInt8
     close::Bool
     request::Union{Nothing, Request}
+    request_url::Union{Nothing, String}
+    previous::Union{Nothing, Response}
+    redirect_count::Int
 end
 
 struct _IncomingResponse{B <: AbstractBody}
@@ -740,9 +745,12 @@ function Response(
         close::Bool = false,
         request::Union{Nothing, Request} = nothing,
         request_url::Union{Nothing, AbstractString} = nothing,
+        previous::Union{Nothing, Response} = nothing,
+        redirect_count::Integer = 0,
     ) where {B}
     status_code < 0 && throw(ArgumentError("status_code must be >= 0"))
     content_length < -1 && throw(ArgumentError("content_length must be >= -1"))
+    redirect_count < 0 && throw(ArgumentError("redirect_count must be >= 0"))
     (proto_major < 0 || proto_major > typemax(UInt8)) && throw(ArgumentError("proto_major must fit in UInt8"))
     (proto_minor < 0 || proto_minor > typemax(UInt8)) && throw(ArgumentError("proto_minor must fit in UInt8"))
     BodyT = _public_response_body_type(B)
@@ -758,6 +766,8 @@ function Response(
         close,
         request,
         request_url === nothing ? nothing : String(request_url),
+        previous,
+        Int(redirect_count),
     )
 end
 
@@ -780,7 +790,9 @@ function _streaming_response(incoming::_IncomingResponse)
         head.proto_minor,
         head.close,
         head.request,
-        nothing,
+        head.request_url,
+        head.previous,
+        head.redirect_count,
     )
     response.trailers = head.trailers
     return response
