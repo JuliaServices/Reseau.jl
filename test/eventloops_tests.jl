@@ -60,6 +60,17 @@ else
             status == :timed_out || take!(wake_ch)
             wait(wake_task)
         end
+        @testset "pollwait wake reason precedence" begin
+            waiter = NP.PollWaiter()
+            @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
+
+            waiter = NP.PollWaiter()
+            @test !NP.pollnotify!(waiter, NP.PollWakeReason.READY)
+            @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
+            @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
+        end
         @testset "backend delay semantics" begin
             state = NP.Poller()
             errno = NP._backend_init!(state)

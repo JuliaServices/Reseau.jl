@@ -105,6 +105,38 @@ else
                 EL.shutdown!()
             end
         end
+        @testset "wait_read retries stale canceled wake internally" begin
+            fd0, fd1 = _ip_socketpair_stream()
+            ipfd = IP.FD(fd0)
+            wait_task = nothing
+            fd0 = Cint(-1)
+            try
+                IP._set_nonblocking!(ipfd.sysfd)
+                IP.init!(ipfd)
+                IP.set_read_deadline!(ipfd, time_ns() + 20_000_000)
+                wait_task = errormonitor(Threads.@spawn begin
+                    IP.wait_read!(ipfd.pd, ipfd.is_file)
+                    return :ok
+                end)
+                pre = EL.timedwait(() -> istaskdone(wait_task), 0.01; pollint = 0.001)
+                @test pre == :timed_out
+                IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
+                EL.sleep(0.06)
+                stale = EL.timedwait(() -> istaskdone(wait_task), 0.02; pollint = 0.001)
+                @test stale == :timed_out
+                _ip_write_byte(fd1, 0x64)
+                status = EL.timedwait(() -> istaskdone(wait_task), 2.0; pollint = 0.001)
+                @test status != :timed_out
+                status == :timed_out || @test fetch(wait_task) == :ok
+            finally
+                if wait_task isa Task && !istaskdone(wait_task)
+                    IP.close!(ipfd)
+                end
+                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                _ip_close_fd(fd1)
+                EL.shutdown!()
+            end
+        end
         @testset "combined deadline entry normalization" begin
             registration = EL.Registration(Cint(7), UInt64(11), EL.PollMode.READWRITE, EL.PollWaiter(), EL.PollWaiter(), false)
             combined = EL._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))

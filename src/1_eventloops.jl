@@ -37,6 +37,11 @@ end
     NOTIFIED = 0x02
 end
 
+@enumx PollWakeReason::UInt8 begin
+    READY = 0x01
+    CANCELED = 0x02
+end
+
 """
     PollWaiter
 
@@ -50,9 +55,10 @@ read waiter slot and one write waiter slot per descriptor.
 """
 mutable struct PollWaiter
     @atomic state::PollWaiterState.T
+    @atomic reason::PollWakeReason.T
     task::Union{Nothing, Task}
     function PollWaiter()
-        return new(PollWaiterState.EMPTY, nothing)
+        return new(PollWaiterState.EMPTY, PollWakeReason.READY, nothing)
     end
 end
 
@@ -87,12 +93,12 @@ end
 Park the current Julia task until the waiter is notified.
 Concurrent waits on the same `PollWaiter` are forbidden.
 
-Returns `nothing`.
+Returns the `PollWakeReason` that woke the waiter.
 
 Throws `ArgumentError` if two tasks try to wait on the same waiter
 simultaneously, or if the waiter state machine is observed in an invalid state.
 """
-function pollwait!(waiter::PollWaiter)
+function pollwait!(waiter::PollWaiter)::PollWakeReason.T
     task = current_task()
     task.sticky && (task.sticky = false)
     waiter.task = task
@@ -100,7 +106,7 @@ function pollwait!(waiter::PollWaiter)
         # Fast path: transition directly from EMPTY -> WAITING and park.
         state, ok = @atomicreplace(waiter.state, PollWaiterState.EMPTY => PollWaiterState.WAITING)
         if ok
-            wait()
+            _ = wait()::PollWakeReason.T
         else
             state == PollWaiterState.NOTIFIED || throw(ArgumentError("concurrent wait on PollWaiter"))
         end
@@ -109,10 +115,10 @@ function pollwait!(waiter::PollWaiter)
             # we loop until the NOTIFIED token is consumed or a clean EMPTY
             # state is observed.
             state, ok = @atomicreplace(waiter.state, PollWaiterState.NOTIFIED => PollWaiterState.EMPTY)
-            ok && return nothing
-            state == PollWaiterState.EMPTY && return nothing
+            ok && return @atomic :acquire waiter.reason
+            state == PollWaiterState.EMPTY && return @atomic :acquire waiter.reason
             state == PollWaiterState.WAITING || throw(ArgumentError("invalid PollWaiter state"))
-            wait()
+            _ = wait()::PollWakeReason.T
         end
     finally
         waiter.task = nothing
@@ -120,31 +126,47 @@ function pollwait!(waiter::PollWaiter)
 end
 
 """
-    pollnotify!(waiter)
+    pollnotify!(waiter, reason=PollWakeReason.READY)
 
 Mark waiter as notified and wake the waiter task if it has already parked.
 Returns `true` if a parked waiter was woken and `false` if the waiter was
-already notified or had not yet parked.
+already notified or had not yet parked. `PollWakeReason.READY` dominates a
+pending `PollWakeReason.CANCELED`, which matches Go's "ready beats cancel"
+behavior once readiness has already been latched.
 
 Throws `ArgumentError` if the waiter state machine is observed in an invalid
 state.
 """
-function pollnotify!(waiter::PollWaiter)::Bool
+@inline function _merge_wake_reason(
+        current::PollWakeReason.T,
+        incoming::PollWakeReason.T,
+    )::PollWakeReason.T
+    return current == PollWakeReason.READY ? current : incoming
+end
+
+function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReason.READY)::Bool
     state = @atomic :acquire waiter.state
-    while state != PollWaiterState.NOTIFIED
+    while true
+        if state == PollWaiterState.NOTIFIED
+            current = @atomic :acquire waiter.reason
+            merged = _merge_wake_reason(current, reason)
+            merged == current && return false
+            @atomic :release waiter.reason = merged
+            return false
+        end
         state, ok = @atomicreplace(waiter.state, state => PollWaiterState.NOTIFIED)
         ok || continue
+        @atomic :release waiter.reason = reason
         if state == PollWaiterState.WAITING
             task = waiter.task
             task isa Task || throw(ArgumentError("invalid PollWaiter task state"))
             # `schedule(task)` is the low-level dual of the `wait()` above.
-            schedule(task)
+            schedule(task, reason)
             return true
         end
         state == PollWaiterState.EMPTY || throw(ArgumentError("invalid PollWaiter state"))
         return false
     end
-    return false
 end
 
 """
@@ -639,7 +661,7 @@ function _close_timer!(timer::TimerState)
     finally
         unlock(timer.lock)
     end
-    pollnotify!(timer.waiter)
+    pollnotify!(timer.waiter, PollWakeReason.CANCELED)
     return nothing
 end
 
@@ -652,7 +674,7 @@ function _timer_fire!(timer::TimerState, seq::UInt64)
     finally
         unlock(timer.lock)
     end
-    pollnotify!(timer.waiter)
+    pollnotify!(timer.waiter, PollWakeReason.READY)
     return nothing
 end
 
@@ -725,12 +747,16 @@ function current_registration(pd::PollState)
     end
 end
 
-function _notify_registration!(registration::Registration, mode::PollMode.T)
+function _notify_registration!(
+        registration::Registration,
+        mode::PollMode.T,
+        reason::PollWakeReason.T = PollWakeReason.READY,
+    )
     if _mode_has_read(mode) && _mode_has_read(registration.mode)
-        pollnotify!(registration.read_waiter)
+        pollnotify!(registration.read_waiter, reason)
     end
     if _mode_has_write(mode) && _mode_has_write(registration.mode)
-        pollnotify!(registration.write_waiter)
+        pollnotify!(registration.write_waiter, reason)
     end
     return nothing
 end
@@ -835,7 +861,7 @@ function shutdown!()
         unlock(state.lock)
     end
     for registration in registrations
-        _notify_registration!(registration, PollMode.READWRITE)
+        _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
     end
     if stop_requested
         wake_errno = _backend_wake!(state)
@@ -919,7 +945,7 @@ function deregister!(fd::Integer)
     finally
         unlock(state.lock)
     end
-    registration === nothing || _notify_registration!(registration::Registration, PollMode.READWRITE)
+    registration === nothing || _notify_registration!(registration::Registration, PollMode.READWRITE, PollWakeReason.CANCELED)
     errno == Int32(0) || _throw_errno("event loop deregister", errno)
     return nothing
 end
@@ -969,7 +995,7 @@ function _dispatch_ready_event!(state::Poller, event::PollEvent)
     finally
         unlock(state.lock)
     end
-    _notify_registration!(registration::Registration, event.mode)
+    _notify_registration!(registration::Registration, event.mode, PollWakeReason.READY)
     return nothing
 end
 
@@ -988,7 +1014,7 @@ function _notify_all_waiters!(state::Poller)
         unlock(state.lock)
     end
     for registration in registrations
-        _notify_registration!(registration, PollMode.READWRITE)
+        _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
     end
     for timer in timers
         _close_timer!(timer)
@@ -1027,7 +1053,8 @@ function sleep_until_ns(deadline_ns::Integer)
     timer = TimerState(target_ns, Int64(0))
     schedule_timer!(timer, target_ns) || return nothing
     while true
-        pollwait!(timer.waiter)
+        reason = pollwait!(timer.waiter)
+        reason == PollWakeReason.READY && return nothing
         (@atomic :acquire timer.closed) && return nothing
         (@atomic :acquire timer.deadline_ns) == 0 && return nothing
     end
