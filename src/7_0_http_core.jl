@@ -505,19 +505,19 @@ end
 """
     BytesBody(data)
 
-Simple in-memory body backed by a copied `Vector{UInt8}`. Reads advance an
-internal cursor until EOF; closing marks the body closed but does not free or
-truncate the stored bytes.
+Simple in-memory body backed by a retained `AbstractVector{UInt8}`. Reads
+advance an internal cursor until EOF; closing marks the body closed but does
+not free or truncate the stored bytes.
 """
-mutable struct BytesBody <: AbstractBody
-    data::Vector{UInt8}
+mutable struct BytesBody{T <: AbstractVector{UInt8}} <: AbstractBody
+    data::T
     next_index::Int
     @atomic closed::Bool
 end
 
-"""Copy `data` into a new `BytesBody` and reset the read cursor to the start."""
-function BytesBody(data::AbstractVector{UInt8})
-    return BytesBody(copy(data), 1, false)
+"""Retain `data` in a new `BytesBody` and reset the read cursor to the start."""
+function BytesBody(data::T) where {T <: AbstractVector{UInt8}}
+    return BytesBody{T}(data, 1, false)
 end
 
 """

@@ -72,6 +72,17 @@ end
 end
 
 @testset "HTTP request body helpers" begin
+    string_bytes, string_content_type = HT._materialize_request_body_bytes("hello")
+    @test string_bytes isa Base.CodeUnits{UInt8, String}
+    @test String(string_bytes) == "hello"
+    @test string_content_type === nothing
+
+    raw = UInt8[0x61, 0x62, 0x63]
+    raw_view = @view(raw[2:3])
+    view_bytes, view_content_type = HT._materialize_request_body_bytes(raw_view)
+    @test view_bytes === raw_view
+    @test view_content_type === nothing
+
     bytes, content_type = HT._materialize_request_body_bytes(Dict("name" => "value with spaces"))
     @test String(bytes) == "name=value%20with%20spaces"
     @test content_type == "application/x-www-form-urlencoded"
@@ -90,6 +101,12 @@ end
 
     io_body = HT._streaming_io_body(IOBuffer("stream body"))
     @test String(_read_all_form_body(io_body)) == "stream body"
+
+    normalized_view = HT._normalize_body_input(raw_view)
+    @test normalized_view.body isa HT.BytesBody
+    @test normalized_view.body.data === raw_view
+    @test normalized_view.content_length == 2
+    @test normalized_view.replayable
 
     normalized = HT._normalized_request_body(HT.BytesBody(UInt8[0x61]), 1; default_content_type = "text/plain", replayable = true)
     @test normalized.body isa HT.BytesBody

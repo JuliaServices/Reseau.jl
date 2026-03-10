@@ -66,14 +66,14 @@ function _remaining_bytes_body(body::BytesBody)::Vector{UInt8}
     return copied
 end
 
-function _materialize_request_body_bytes(body_input)::Tuple{Vector{UInt8}, Union{Nothing, String}}
+function _materialize_request_body_bytes(body_input)
     body_input isa EmptyBody && return UInt8[], nothing
     body_input isa BytesBody && return _remaining_bytes_body(body_input::BytesBody), nothing
     if body_input isa AbstractString
-        return collect(codeunits(String(body_input))), nothing
+        return codeunits(String(body_input)), nothing
     end
     if body_input isa AbstractVector{UInt8}
-        return Vector{UInt8}(body_input), nothing
+        return body_input, nothing
     end
     if body_input isa AbstractDict || body_input isa NamedTuple
         return _form_urlencode(body_input), "application/x-www-form-urlencoded"
@@ -88,13 +88,13 @@ function _materialize_request_body_bytes(body_input)::Tuple{Vector{UInt8}, Union
     throw(ArgumentError("unsupported request body type $(typeof(body_input))"))
 end
 
-function _normalize_body_chunk(chunk)::Vector{UInt8}
+function _normalize_body_chunk(chunk)
     chunk === nothing && return UInt8[]
     if chunk isa AbstractString
-        return collect(codeunits(String(chunk)))
+        return codeunits(String(chunk))
     end
     if chunk isa AbstractVector{UInt8}
-        return Vector{UInt8}(chunk)
+        return chunk
     end
     if chunk isa AbstractDict || chunk isa NamedTuple || chunk isa Form || chunk isa IO || chunk isa EmptyBody || chunk isa BytesBody
         bytes, _ = _materialize_request_body_bytes(chunk)
@@ -116,7 +116,7 @@ end
 function _iterable_body(iterable)
     started = Ref(false)
     state = Ref{Any}(nothing)
-    current = Ref(UInt8[])
+    current = Ref{AbstractVector{UInt8}}(UInt8[])
     next_index = Ref(1)
     done = Ref(false)
     return CallbackBody(
