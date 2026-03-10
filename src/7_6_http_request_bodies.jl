@@ -45,17 +45,10 @@ function _percent_encode_form_component(value)::String
     return String(take!(encoded))
 end
 
-function _pair_iter(body_input)
-    if body_input isa NamedTuple
-        return pairs(body_input)
-    end
-    return pairs(body_input)
-end
-
 function _form_urlencode(body_input)::Vector{UInt8}
     encoded = IOBuffer()
     first_pair = true
-    for (k, v) in _pair_iter(body_input)
+    for (k, v) in pairs(body_input)
         first_pair || write(encoded, '&')
         first_pair = false
         write(encoded, _percent_encode_form_component(k))
@@ -169,6 +162,11 @@ end
     return io isa IOStream || io isa IOBuffer
 end
 
+function _buffered_request_body(body_input)
+    bytes, default_content_type = _materialize_request_body_bytes(body_input)
+    return _normalized_request_body(BytesBody(bytes), length(bytes); default_content_type = default_content_type, replayable = true)
+end
+
 function _normalize_body_input(body_input)
     body_input === nothing && return _normalized_request_body(EmptyBody(), 0; replayable = true)
     body_input isa EmptyBody && return _normalized_request_body(EmptyBody(), 0; replayable = true)
@@ -177,34 +175,24 @@ function _normalize_body_input(body_input)
         remaining = (length(cloned.data) - cloned.next_index) + 1
         return _normalized_request_body(cloned, max(0, remaining); replayable = true)
     end
-    if body_input isa AbstractBody
-        content_length = body_input isa EmptyBody ? 0 : Int64(-1)
-        return _normalized_request_body(body_input::AbstractBody, content_length; replayable = _body_replayable(body_input::AbstractBody))
-    end
-    if body_input isa Form
-        bytes, default_content_type = _materialize_request_body_bytes(body_input::Form)
-        return _normalized_request_body(BytesBody(bytes), length(bytes); default_content_type = default_content_type, replayable = true)
-    end
-    if body_input isa IO && !_should_buffer_request_io(body_input::IO)
-        body = _streaming_io_body(body_input::IO)
-        return _normalized_request_body(body, -1; replayable = false)
-    end
-    if !(body_input isa AbstractString) &&
-       !(body_input isa AbstractVector{UInt8}) &&
-       !(body_input isa AbstractDict) &&
-       !(body_input isa NamedTuple) &&
-       !(body_input isa IO) &&
-       Base.isiterable(typeof(body_input))
-        body = _iterable_body(body_input)
-        return _normalized_request_body(body, -1; replayable = false)
-    end
     if body_input isa AbstractString ||
        body_input isa AbstractVector{UInt8} ||
        body_input isa AbstractDict ||
        body_input isa NamedTuple ||
-       body_input isa IO
-        bytes, default_content_type = _materialize_request_body_bytes(body_input)
-        return _normalized_request_body(BytesBody(bytes), length(bytes); default_content_type = default_content_type, replayable = true)
+       body_input isa Form
+        return _buffered_request_body(body_input)
+    end
+    if body_input isa IO
+        if _should_buffer_request_io(body_input::IO)
+            return _buffered_request_body(body_input::IO)
+        end
+        return _normalized_request_body(_streaming_io_body(body_input::IO), -1; replayable = false)
+    end
+    if !(body_input isa AbstractBody) && Base.isiterable(typeof(body_input))
+        return _normalized_request_body(_iterable_body(body_input), -1; replayable = false)
+    end
+    if body_input isa AbstractBody
+        return _normalized_request_body(body_input::AbstractBody, Int64(-1); replayable = _body_replayable(body_input::AbstractBody))
     end
     throw(ArgumentError("unsupported request body type $(typeof(body_input)); expected nothing, String, Vector{UInt8}, IO, Dict, NamedTuple, HTTP.Form, iterable body chunks, or HTTP.AbstractBody"))
 end
