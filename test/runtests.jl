@@ -29,6 +29,7 @@ test_files = [
     "http1_wire_tests.jl",
     "http_cookie_tests.jl",
     "http_forms_tests.jl",
+    "http_websocket_codec_tests.jl",
     "http_client_transport_tests.jl",
     "http_client_proxy_tests.jl",
     "http_client_tests.jl",
