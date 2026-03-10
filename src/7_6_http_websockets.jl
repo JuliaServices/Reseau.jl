@@ -809,10 +809,10 @@ function open(
     end
 end
 
-mutable struct Server
+mutable struct Server{F}
     network::String
     address::String
-    handler::Function
+    handler::F
     tls_config::Union{Nothing, TLS.Config}
     subprotocols::Vector{String}
     check_origin::Union{Nothing, Function}
@@ -832,14 +832,14 @@ end
 function Server(;
         network::AbstractString = "tcp",
         address::AbstractString = "127.0.0.1:0",
-        handler::Function,
+        handler::F,
         tls_config::Union{Nothing, TLS.Config} = nothing,
         subprotocols::AbstractVector{<:AbstractString} = String[],
         check_origin::Union{Nothing, Function} = nothing,
         maxframesize::Integer = typemax(Int),
         maxfragmentation::Integer = DEFAULT_MAX_FRAG,
         read_buffer_bytes::Integer = DEFAULT_READ_BUFFER_BYTES,
-    )
+    ) where {F}
     maxframesize > 0 || throw(ArgumentError("maxframesize must be > 0"))
     maxfragmentation > 0 || throw(ArgumentError("maxfragmentation must be > 0"))
     read_buffer_bytes > 0 || throw(ArgumentError("read_buffer_bytes must be > 0"))
