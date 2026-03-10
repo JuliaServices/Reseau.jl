@@ -27,6 +27,7 @@ test_files = [
     "tls_tests.jl",
     "http_core_tests.jl",
     "http1_wire_tests.jl",
+    "http_cookie_tests.jl",
     "http_forms_tests.jl",
     "http_client_transport_tests.jl",
     "http_client_proxy_tests.jl",

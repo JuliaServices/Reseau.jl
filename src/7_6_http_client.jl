@@ -691,9 +691,8 @@ end
 
 export Client
 export ClientTrace
-export AbstractCookieJar
-export MemoryCookieJar
 export Cookie
+export CookieJar
 export do!
 export get!
 export StatusError
@@ -706,37 +705,6 @@ export put
 export patch
 export delete
 export options
-
-abstract type AbstractCookieJar end
-
-"""
-    Cookie
-
-Minimal in-memory cookie representation used by `MemoryCookieJar`.
-
-Only the subset of attributes the current client uses is modeled here: name,
-value, path, and whether the cookie requires a secure transport.
-"""
-struct Cookie
-    name::String
-    value::String
-    path::String
-    secure::Bool
-end
-
-"""
-    MemoryCookieJar()
-
-Simple host-keyed cookie jar for client redirect/session flows.
-
-This is intentionally small and conservative. It stores cookies per host, uses
-prefix path matching, and ignores advanced attributes such as expiry, domain
-wildcards, and SameSite.
-"""
-mutable struct MemoryCookieJar <: AbstractCookieJar
-    lock::ReentrantLock
-    by_host::Dict{String, Dict{String, Cookie}}
-end
 
 """
     ClientTrace(; ...)
@@ -764,7 +732,7 @@ Keyword arguments:
 - `transport`: lower-level HTTP/1 transport/pool implementation
 - `check_redirect`: optional callback deciding whether a redirect should be
   followed
-- `jar`: cookie jar implementation, or `nothing` to disable cookies
+- `cookiejar`: cookie jar implementation, or `nothing` to disable cookies
 - `max_redirects`: maximum redirect hops before failing
 - `trace`: optional lifecycle callback bundle
 - `prefer_http2`: whether secure requests should try HTTP/2 when available
@@ -772,16 +740,12 @@ Keyword arguments:
 mutable struct Client
     transport::Transport
     check_redirect::Union{Nothing, Function}
-    jar::Union{Nothing, AbstractCookieJar}
+    cookiejar::Union{Nothing, CookieJar}
     max_redirects::Int
     trace::Union{Nothing, ClientTrace}
     prefer_http2::Bool
     h2_lock::ReentrantLock
     h2_conns::Dict{String, H2Connection}
-end
-
-function MemoryCookieJar()
-    return MemoryCookieJar(ReentrantLock(), Dict{String, Dict{String, Cookie}}())
 end
 
 function ClientTrace(;
@@ -796,13 +760,13 @@ end
 function Client(;
         transport::Transport = Transport(proxy = ProxyFromEnvironment()),
         check_redirect::Union{Nothing, Function} = nothing,
-        jar::Union{Nothing, AbstractCookieJar} = MemoryCookieJar(),
+        cookiejar::Union{Nothing, CookieJar} = CookieJar(),
         max_redirects::Integer = 10,
         trace::Union{Nothing, ClientTrace} = nothing,
         prefer_http2::Bool = true,
     )
     max_redirects >= 0 || throw(ArgumentError("max_redirects must be >= 0"))
-    return Client(transport, check_redirect, jar, Int(max_redirects), trace, prefer_http2, ReentrantLock(), Dict{String, H2Connection}())
+    return Client(transport, check_redirect, cookiejar, Int(max_redirects), trace, prefer_http2, ReentrantLock(), Dict{String, H2Connection}())
 end
 
 struct _UseTransportProxy end
@@ -976,56 +940,16 @@ function _host_path_from_request(address::String, request::Request)::Tuple{Strin
     return host, "/$target"
 end
 
-function _cookie_header(jar::MemoryCookieJar, host::String, path::String, secure::Bool)::Union{Nothing, String}
-    lock(jar.lock)
-    try
-        host_map = get(() -> nothing, jar.by_host, host)
-        host_map === nothing && return nothing
-        parts = String[]
-        for (_, cookie) in host_map::Dict{String, Cookie}
-            cookie.secure && !secure && continue
-            startswith(path, cookie.path) || continue
-            push!(parts, "$(cookie.name)=$(cookie.value)")
-        end
-        isempty(parts) && return nothing
-        return join(parts, "; ")
-    finally
-        unlock(jar.lock)
-    end
+function _cookie_header(jar::CookieJar, secure::Bool, host::String, path::String)::Union{Nothing, String}
+    scheme = secure ? "https" : "http"
+    cookie_values = getcookies!(jar, scheme, host, path)
+    isempty(cookie_values) && return nothing
+    return stringify("", cookie_values)
 end
 
-function _store_set_cookies!(jar::MemoryCookieJar, host::String, set_cookie_values::Vector{String})
-    lock(jar.lock)
-    try
-        host_map = get(() -> Dict{String, Cookie}(), jar.by_host, host)
-        for value in set_cookie_values
-            parts = split(value, ';')
-            isempty(parts) && continue
-            name_value = split(_trim_http_ows(parts[1]), '='; limit = 2)
-            length(name_value) == 2 || continue
-            name = _trim_http_ows(name_value[1])
-            cookie_value = _trim_http_ows(name_value[2])
-            isempty(name) && continue
-            cookie_path = "/"
-            secure = false
-            for attr_raw in parts[2:end]
-                attr = _trim_http_ows(attr_raw)
-                isempty(attr) && continue
-                kv = split(attr, '='; limit = 2)
-                attr_name = lowercase(_trim_http_ows(kv[1]))
-                if attr_name == "path" && length(kv) == 2
-                    parsed_path = _trim_http_ows(kv[2])
-                    !isempty(parsed_path) && (cookie_path = parsed_path)
-                elseif attr_name == "secure"
-                    secure = true
-                end
-            end
-            host_map[name] = Cookie(name, cookie_value, cookie_path, secure)
-        end
-        jar.by_host[host] = host_map
-    finally
-        unlock(jar.lock)
-    end
+function _store_set_cookies!(jar::CookieJar, secure::Bool, host::String, path::String, headers::Headers)
+    scheme = secure ? "https" : "http"
+    setcookies!(jar, scheme, host, path, headers)
     return nothing
 end
 
@@ -1390,8 +1314,8 @@ function _do_incoming!(
         send_request = _copy_request_for_send(current_request; allow_nonreplayable = redirect_count == 0)
         proxy_plan = _proxy_plan(proxy_config, current_secure, current_address)
         host, path = _host_path_from_request(current_address, current_request)
-        if client.jar isa MemoryCookieJar
-            cookie_value = _cookie_header(client.jar::MemoryCookieJar, host, path, current_secure)
+        if client.cookiejar !== nothing
+            cookie_value = _cookie_header(client.cookiejar::CookieJar, current_secure, host, path)
             cookie_value === nothing || set_header!(send_request.headers, "Cookie", cookie_value)
         end
         _trace_call(client.trace, :on_get_conn, current_address, current_secure)
@@ -1433,9 +1357,8 @@ function _do_incoming!(
         _trace_call(client.trace, :on_got_conn, current_address, current_secure)
         _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
         _trace_call(client.trace, :on_got_first_response_byte, response.head.status_code)
-        if client.jar isa MemoryCookieJar
-            set_cookie_values = get_headers(response.head.headers, "Set-Cookie")
-            isempty(set_cookie_values) || _store_set_cookies!(client.jar::MemoryCookieJar, host, set_cookie_values)
+        if client.cookiejar !== nothing
+            _store_set_cookies!(client.cookiejar::CookieJar, current_secure, host, path, response.head.headers)
         end
         if !_is_redirect_status(response.head.status_code)
             return response
