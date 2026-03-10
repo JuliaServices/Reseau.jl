@@ -216,6 +216,30 @@ end
     end
 end
 
+@testset "HTTP server internal shutdown hooks run once" begin
+    calls = Ref(0)
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+        _ = request
+        return HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2)
+    end
+    address = _wait_server_addr(server)
+    try
+        _ = HT.get("http://$(address)/")
+        HT._register_on_shutdown!(server, () -> (calls[] += 1))
+        HT._register_on_shutdown!(server, () -> error("ignore"))
+        _run_with_timeout(() -> close(server); label = "server close")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+        @test calls[] == 1
+        HT.forceclose(server)
+        @test calls[] == 1
+    finally
+        if isopen(server)
+            _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+            _run_with_timeout(() -> wait(server); label = "server task completion")
+        end
+    end
+end
+
 @testset "HTTP server stream handler request and response flow" begin
     server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
             _ = HT.startread(stream)

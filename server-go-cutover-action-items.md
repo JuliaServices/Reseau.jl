@@ -104,7 +104,7 @@
   - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
   - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-005 (P1) Integrate future-proof Go-style lifecycle hooks and prune dead code
+### [x] ITEM-005 (P1) Integrate future-proof Go-style lifecycle hooks and prune dead code
 - Description: Shape the new server internals so they are ready for later router/middleware, upgraded connections, and richer server functionality, while also pruning the now-obsolete old server code and stale tests. This item should add internal hook points and state plumbing without exposing extra public API yet.
 - Desired outcome: The server kernel includes internal support for connection state tracking, graceful-shutdown hooks for future upgraded connections, and clean listener/connection bookkeeping suitable for later HTTP/2 and websocket shutdown integration. Any dead code left over from the old server or the old separate H2 server path should be deleted or isolated.
 - Affected files: `src/7_7_http_server.jl`, `src/7_5_http2_server.jl`, `src/7_6_http_websockets.jl`, `test/http2_server_tests.jl`, `test/http_websocket_server_tests.jl`, `src/8_precompile_workload.jl`
@@ -123,6 +123,11 @@
   - The new kernel has the internal lifecycle shape we want for future work.
   - Dead code from the old server implementation is removed.
   - All affected tests still pass.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_websocket_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
 ### [ ] ITEM-006 (P1) Final polish, docs/precompile updates, PR, and green CI
 - Description: Do the final full-suite verification, update any needed docs or precompile workload references for the new server APIs, open the PR, and babysit CI until all checks are green.

@@ -63,6 +63,7 @@ mutable struct Server{F}
     listener::Union{Nothing, TCP.Listener}
     serve_task::Union{Nothing, Task}
     active_conns::Set{_ServerConn}
+    shutdown_hooks::Vector{Function}
     bound_address::Union{Nothing, String}
     bound_port::Int
     @atomic state::_ServerState.T
@@ -105,6 +106,7 @@ function Server(;
         nothing,
         nothing,
         Set{_ServerConn}(),
+        Function[],
         nothing,
         0,
         _ServerState.INITIAL,
@@ -330,9 +332,52 @@ function _close_idle_conns!(server::Server)::Bool
     return isempty(_server_conns(server))
 end
 
+function _register_on_shutdown!(server::Server, fn::Function)::Nothing
+    lock(server.lock)
+    try
+        push!(server.shutdown_hooks, fn)
+    finally
+        unlock(server.lock)
+    end
+    return nothing
+end
+
+function _run_shutdown_hooks!(server::Server)::Nothing
+    hooks = Function[]
+    lock(server.lock)
+    try
+        append!(hooks, server.shutdown_hooks)
+        empty!(server.shutdown_hooks)
+    finally
+        unlock(server.lock)
+    end
+    for hook in hooks
+        try
+            hook()
+        catch
+        end
+    end
+    return nothing
+end
+
+function _begin_shutdown!(server::Server)::Bool
+    lock(server.lock)
+    try
+        state = _server_state(server)
+        if state == _ServerState.CLOSING || state == _ServerState.CLOSED
+            return false
+        end
+        _set_server_state!(server, _ServerState.CLOSING)
+        return true
+    finally
+        unlock(server.lock)
+    end
+end
+
 function forceclose(server::Server)::Nothing
-    _set_server_state!(server, _ServerState.CLOSING)
+    initiated = _begin_shutdown!(server)
     _close_listener!(server)
+    initiated && _run_shutdown_hooks!(server)
     for tracked in _server_conns(server)
         _close_server_conn!(tracked)
     end
@@ -344,8 +389,9 @@ end
 function Base.close(server::Server)::Nothing
     state = _server_state(server)
     state == _ServerState.CLOSED && return nothing
-    _set_server_state!(server, _ServerState.CLOSING)
+    initiated = _begin_shutdown!(server)
     _close_listener!(server)
+    initiated && _run_shutdown_hooks!(server)
     _wait_serve_task!(server)
     poll_s = 0.001
     while true
