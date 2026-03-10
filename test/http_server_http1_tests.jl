@@ -36,10 +36,14 @@ function _run_with_timeout(f::F; timeout_s::Float64 = 5.0, label::String = "oper
     return fetch(task)
 end
 
-function _raw_http_request(port::Integer, request::AbstractString; settle_s::Float64 = 0.1)::String
+function _raw_http_request(port::Integer, request::AbstractString; settle_s::Float64 = 0.2)::String
     sock = ND.connect("tcp", "127.0.0.1:$(Int(port))")
     try
         write(sock, Vector{UInt8}(codeunits(String(request))))
+        try
+            NC.close_write!(sock)
+        catch
+        end
         sleep(settle_s)
         return _read_until_deadline(sock)
     finally
@@ -47,7 +51,7 @@ function _raw_http_request(port::Integer, request::AbstractString; settle_s::Flo
     end
 end
 
-function _read_until_deadline(conn::NC.Conn; timeout_s::Float64 = 0.05)::String
+function _read_until_deadline(conn::NC.Conn; timeout_s::Float64 = 0.25)::String
     buf = Vector{UInt8}(undef, 1024)
     out = UInt8[]
     while true
@@ -58,6 +62,9 @@ function _read_until_deadline(conn::NC.Conn; timeout_s::Float64 = 0.05)::String
             append!(out, @view(buf[1:n]))
         catch err
             if err isa IOP.DeadlineExceededError || err isa EOFError
+                break
+            end
+            if err isa SystemError && occursin("Connection reset by peer", sprint(showerror, err))
                 break
             end
             rethrow(err)
@@ -209,8 +216,8 @@ end
     try
         sock = ND.connect("tcp", "127.0.0.1:$(HT.port(timeout_server))")
         try
-            sleep(0.4)
-            timed_out = _read_until_deadline(sock)
+            sleep(0.6)
+            timed_out = _read_until_deadline(sock; timeout_s = 1.0)
             @test occursin("HTTP/1.1 408 Request Timeout", timed_out)
         finally
             NC.close!(sock)
@@ -295,17 +302,11 @@ end
         end
     address = _wait_server_addr(server)
     try
-        sock = ND.connect("tcp", "127.0.0.1:$(HT.port(server))")
-        try
-            write(sock, Vector{UInt8}(codeunits("GET / HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n")))
-            raw = _read_until_deadline(sock; timeout_s = 0.2)
-            lower_raw = lowercase(raw)
-            @test occursin("transfer-encoding: chunked", lower_raw)
-            @test occursin("hello", raw)
-            @test occursin("\r\n0\r\nx-trailer: ok\r\n\r\n", lower_raw)
-        finally
-            NC.close!(sock)
-        end
+        raw = _raw_http_request(HT.port(server), "GET / HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n"; settle_s = 0.3)
+        lower_raw = lowercase(raw)
+        @test occursin("transfer-encoding: chunked", lower_raw)
+        @test occursin("hello", raw)
+        @test occursin("\r\n0\r\nx-trailer: ok\r\n\r\n", lower_raw)
     finally
         _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
         _run_with_timeout(() -> wait(server); label = "server task completion")

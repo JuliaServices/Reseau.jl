@@ -308,6 +308,15 @@ function _close_server_transport!(conn::Union{TCP.Conn, TLS.Conn})::Nothing
     return nothing
 end
 
+function _close_server_write!(conn::Union{TCP.Conn, TLS.Conn})::Nothing
+    if conn isa TLS.Conn
+        TLS.close_write!(conn::TLS.Conn)
+    else
+        TCP.close_write!(conn::TCP.Conn)
+    end
+    return nothing
+end
+
 function _close_server_listener!(listener::Union{TCP.Listener, TLS.Listener})::Nothing
     if listener isa TLS.Listener
         TLS.close!(listener::TLS.Listener)
@@ -609,6 +618,10 @@ function _try_write_server_error!(conn::Union{TCP.Conn, TLS.Conn}, request::Unio
     )
     try
         _write_all_response!(conn, response)
+    catch
+    end
+    try
+        _close_server_write!(conn)
     catch
     end
     return nothing
@@ -1249,6 +1262,10 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
         end
         return _serve_h1_conn!(server, tracked, reader_source)
     catch err
+        if err isa IOPoll.DeadlineExceededError
+            _try_write_server_error!(tracked.conn, nothing, 408)
+            return nothing
+        end
         if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError || err isa TLS.TLSError || err isa TLS.TLSHandshakeTimeoutError
             return nothing
         end

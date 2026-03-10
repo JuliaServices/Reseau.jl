@@ -245,7 +245,7 @@
   - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-011 (P1) Re-polish the PR and restore all-green CI after the corrective pass
+### [x] ITEM-011 (P1) Re-polish the PR and restore all-green CI after the corrective pass
 - Description: After the corrective work lands, rerun the full verification suite, refresh the PR summary if needed, and babysit CI back to green so the branch reflects the corrected final state rather than the premature “done” state.
 - Desired outcome: PR `#71` accurately reflects the finished server rewrite, the tracker is fully checked off again, and all CI jobs are green on the updated commits.
 - Affected files: `server-go-cutover-action-items.md`, PR metadata/body if needed
@@ -263,6 +263,10 @@
 - Completion criteria:
   - All new items in this file are checked off.
   - PR `#71` is current and all CI checks are green again.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. -e 'using Pkg; Pkg.test()'`
 
 ## Continuity
 
