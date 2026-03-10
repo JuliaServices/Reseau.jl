@@ -619,7 +619,7 @@ function _open_client_websocket(
         connect_timeout::Real = 0,
         require_ssl_verification::Bool = true,
         kwargs...,
-    )::Tuple{WebSocket, Client, Bool}
+    )::WebSocket
     _validate_request_extra_kwargs(kwargs)
     parsed = _parse_websocket_url(url; query = query)
     req_headers = _normalize_headers_input(headers)
@@ -696,7 +696,7 @@ function _open_client_websocket(
                 _flush_ws_output!(ws)
             end
             _start_read_task!(ws)
-            return ws, req_client, owns_client
+            return ws
         end
         if !_is_redirect_status(response.status_code) || redirect_policy.max_redirects == 0
             owns_client && close(req_client)
@@ -760,7 +760,7 @@ function open(
         require_ssl_verification::Bool = true,
         kwargs...,
     )
-    ws, _, _ = _open_client_websocket(
+    ws = _open_client_websocket(
         url;
         headers = headers,
         maxframesize = maxframesize,
