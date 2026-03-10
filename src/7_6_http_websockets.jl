@@ -8,6 +8,9 @@ import ..Headers
 import ..HostResolvers
 import ..Request
 import ..Response
+import ..TCP
+import ..TLS
+import ..BytesBody
 import ..EmptyBody
 import ..ProtocolError
 import ..TooManyRedirectsError
@@ -56,6 +59,8 @@ import ..has_header
 import ..set_header!
 import ..delete_header!
 import ..body_close!
+import ..read_request
+import ..write_response!
 import ..write_request!
 import ..WsOpcode
 import ..WsDecodedFrame
@@ -71,6 +76,7 @@ import ..ws_random_handshake_key
 import ..ws_compute_accept_key
 import ..ws_decode_close_payload
 import ..ws_is_valid_close_status
+import ..ws_get_request_sec_websocket_key
 import ..ws_select_subprotocol
 import ..ws_is_websocket_request
 import ..WebSocketProtocolError
@@ -83,6 +89,12 @@ export send
 export receive
 export ping
 export pong
+export Server
+export serve!
+export listen!
+export listen
+export server_addr
+export shutdown!
 
 const DEFAULT_MAX_FRAG = 1024
 const DEFAULT_READ_BUFFER_BYTES = 16 * 1024
@@ -394,9 +406,9 @@ function _ws_read_loop!(ws::WebSocket; buffer_bytes::Int = DEFAULT_READ_BUFFER_B
     return nothing
 end
 
-function _start_read_task!(ws::WebSocket)::Nothing
+function _start_read_task!(ws::WebSocket; buffer_bytes::Int = DEFAULT_READ_BUFFER_BYTES)::Nothing
     ws.readtask !== nothing && return nothing
-    ws.readtask = errormonitor(Threads.@spawn _ws_read_loop!(ws))
+    ws.readtask = errormonitor(Threads.@spawn _ws_read_loop!(ws; buffer_bytes = buffer_bytes))
     return nothing
 end
 
@@ -838,6 +850,373 @@ function open(
             end
         end
     end
+end
+
+mutable struct Server
+    network::String
+    address::String
+    handler::Function
+    tls_config::Union{Nothing, TLS.Config}
+    subprotocols::Vector{String}
+    check_origin::Union{Nothing, Function}
+    maxframesize::Int
+    maxfragmentation::Int
+    read_buffer_bytes::Int
+    lock::ReentrantLock
+    listener::Union{Nothing, TCP.Listener, TLS.Listener}
+    serve_task::Union{Nothing, Task}
+    active_tcp_conns::Set{TCP.Conn}
+    active_tls_conns::Set{TLS.Conn}
+    active_tasks::Set{Task}
+    bound_address::Union{Nothing, String}
+    @atomic shutting_down::Bool
+end
+
+function Server(;
+        network::AbstractString = "tcp",
+        address::AbstractString = "127.0.0.1:0",
+        handler::Function,
+        tls_config::Union{Nothing, TLS.Config} = nothing,
+        subprotocols::AbstractVector{<:AbstractString} = String[],
+        check_origin::Union{Nothing, Function} = nothing,
+        maxframesize::Integer = typemax(Int),
+        maxfragmentation::Integer = DEFAULT_MAX_FRAG,
+        read_buffer_bytes::Integer = DEFAULT_READ_BUFFER_BYTES,
+    )
+    maxframesize > 0 || throw(ArgumentError("maxframesize must be > 0"))
+    maxfragmentation > 0 || throw(ArgumentError("maxfragmentation must be > 0"))
+    read_buffer_bytes > 0 || throw(ArgumentError("read_buffer_bytes must be > 0"))
+    return Server(
+        String(network),
+        String(address),
+        handler,
+        tls_config,
+        String.(subprotocols),
+        check_origin,
+        Int(maxframesize),
+        Int(maxfragmentation),
+        Int(read_buffer_bytes),
+        ReentrantLock(),
+        nothing,
+        nothing,
+        Set{TCP.Conn}(),
+        Set{TLS.Conn}(),
+        Set{Task}(),
+        nothing,
+        false,
+    )
+end
+
+@inline function _server_shutting_down(server::Server)::Bool
+    return @atomic :acquire server.shutting_down
+end
+
+function server_addr(server::Server)::String
+    lock(server.lock)
+    try
+        server.bound_address === nothing && throw(ProtocolError("websocket server is not listening"))
+        return server.bound_address::String
+    finally
+        unlock(server.lock)
+    end
+end
+
+function _listener_bound_address(listener)::String
+    if listener isa TLS.Listener
+        laddr = TLS.addr(listener::TLS.Listener)
+    else
+        laddr = TCP.addr(listener::TCP.Listener)
+    end
+    if laddr isa TCP.SocketAddrV4
+        return HostResolvers.join_host_port("127.0.0.1", Int((laddr::TCP.SocketAddrV4).port))
+    end
+    return HostResolvers.join_host_port("::1", Int((laddr::TCP.SocketAddrV6).port))
+end
+
+function _track_conn!(server::Server, conn, task::Task)::Nothing
+    lock(server.lock)
+    try
+        if conn isa TCP.Conn
+            push!(server.active_tcp_conns, conn::TCP.Conn)
+        else
+            push!(server.active_tls_conns, conn::TLS.Conn)
+        end
+        push!(server.active_tasks, task)
+    finally
+        unlock(server.lock)
+    end
+    return nothing
+end
+
+function _untrack_conn!(server::Server, conn, task::Task)::Nothing
+    lock(server.lock)
+    try
+        if conn isa TCP.Conn
+            delete!(server.active_tcp_conns, conn::TCP.Conn)
+        else
+            delete!(server.active_tls_conns, conn::TLS.Conn)
+        end
+        delete!(server.active_tasks, task)
+    finally
+        unlock(server.lock)
+    end
+    return nothing
+end
+
+function _close_ws_server_conn!(conn)::Nothing
+    try
+        if conn isa TLS.Conn
+            TLS.close!(conn::TLS.Conn)
+        else
+            TCP.close!(conn::TCP.Conn)
+        end
+    catch
+    end
+    return nothing
+end
+
+function _write_ws_response!(conn, response::Response)::Nothing
+    io = IOBuffer()
+    write_response!(io, response)
+    bytes = take!(io)
+    write(conn, bytes)
+    return nothing
+end
+
+function _origin_allowed_default(request::Request)::Bool
+    origin = get_header(request.headers, "Origin")
+    origin === nothing && return true
+    parsed = try
+        _parse_http_url(origin::String)
+    catch
+        return false
+    end
+    request_host = request.host === nothing ? get_header(request.headers, "Host") : request.host
+    request_host === nothing && return false
+    origin_host, origin_port = HostResolvers.split_host_port(parsed.address)
+    if occursin(':', request_host::String)
+        req_host, req_port = HostResolvers.split_host_port(request_host::String)
+        return lowercase(origin_host) == lowercase(req_host) && origin_port == req_port
+    end
+    return lowercase(origin_host) == lowercase(request_host::String)
+end
+
+function _origin_allowed(server::Server, request::Request)::Bool
+    checker = server.check_origin
+    checker === nothing && return _origin_allowed_default(request)
+    origin = get_header(request.headers, "Origin")
+    if applicable(checker, request, origin)
+        result = checker(request, origin)
+    elseif applicable(checker, request)
+        result = checker(request)
+    else
+        throw(ArgumentError("check_origin callback must accept (request) or (request, origin)"))
+    end
+    result isa Bool || throw(ArgumentError("check_origin callback must return Bool"))
+    return result
+end
+
+function _upgrade_response(request::Request, server::Server)::Response
+    ws_is_websocket_request(request) || return Response(400; body = BytesBody(Vector{UInt8}("websocket upgrade required")), content_length = 26, headers = Headers())
+    _origin_allowed(server, request) || return Response(403; body = BytesBody(Vector{UInt8}("websocket origin rejected")), content_length = 25, headers = Headers())
+    key = ws_get_request_sec_websocket_key(request)
+    key === nothing && return Response(400; body = BytesBody(Vector{UInt8}("missing websocket key")), content_length = 21, headers = Headers())
+    headers = Headers()
+    set_header!(headers, "Upgrade", "websocket")
+    set_header!(headers, "Connection", "Upgrade")
+    set_header!(headers, "Sec-WebSocket-Accept", ws_compute_accept_key(key::String))
+    selected = isempty(server.subprotocols) ? nothing : ws_select_subprotocol(request, server.subprotocols)
+    selected === nothing || set_header!(headers, "Sec-WebSocket-Protocol", selected::String)
+    return Response(101; headers = headers, body = EmptyBody(), content_length = 0, request = request)
+end
+
+function _serve_ws_session!(server::Server, conn, request::Request, response::Response)::Nothing
+    close_transport! = () -> begin
+        _close_ws_server_conn!(conn)
+        return nothing
+    end
+    request_host = request.host === nothing ? get_header(request.headers, "Host") : request.host
+    request_host === nothing && (request_host = "")
+    ws = WebSocket(
+        conn,
+        close_transport!,
+        request_host::String,
+        request.target;
+        subprotocol = get_header(response.headers, "Sec-WebSocket-Protocol"),
+        maxframesize = server.maxframesize,
+        maxfragmentation = server.maxfragmentation,
+        is_client = false,
+    )
+    ws.handshake_request = request
+    ws.handshake_response = response
+    _start_read_task!(ws; buffer_bytes = server.read_buffer_bytes)
+    try
+        server.handler(ws)
+    catch err
+        if !isclosed(ws)
+            if err isa WebSocketError
+                close(ws, (err::WebSocketError).message)
+            else
+                close(ws, CloseFrameBody(1011, "unexpected server websocket error"))
+            end
+        end
+        isok(err) || rethrow(err)
+    finally
+        if !isclosed(ws)
+            try
+                close(ws, CloseFrameBody(1000, ""))
+            catch
+            end
+        end
+    end
+    return nothing
+end
+
+function _serve_ws_conn!(server::Server, conn)::Nothing
+    task = current_task()
+    _track_conn!(server, conn, task)
+    try
+        request = read_request(_ConnReader(conn))
+        response = _upgrade_response(request, server)
+        _write_ws_response!(conn, response)
+        response.status_code == 101 || return nothing
+        _serve_ws_session!(server, conn, request, response)
+    finally
+        _close_ws_server_conn!(conn)
+        _untrack_conn!(server, conn, task)
+    end
+    return nothing
+end
+
+function serve!(server::Server, listener)::Server
+    _server_shutting_down(server) && throw(ProtocolError("websocket server is shutting down"))
+    lock(server.lock)
+    try
+        server.listener = listener
+        server.bound_address = _listener_bound_address(listener)
+    finally
+        unlock(server.lock)
+    end
+    while !_server_shutting_down(server)
+        conn = try
+            if listener isa TLS.Listener
+                TLS.accept!(listener::TLS.Listener)
+            else
+                TCP.accept!(listener::TCP.Listener)
+            end
+        catch err
+            _server_shutting_down(server) && return server
+            err isa EOFError && return server
+            rethrow(err)
+        end
+        errormonitor(Threads.@spawn _serve_ws_conn!(server, conn))
+    end
+    return server
+end
+
+function _listen_ws(server::Server)
+    listener = server.tls_config === nothing ?
+        TCP.listen(server.network, server.address; backlog = 128) :
+        TLS.listen(server.network, server.address, server.tls_config::TLS.Config; backlog = 128)
+    try
+        serve!(server, listener)
+    finally
+        try
+            if listener isa TLS.Listener
+                TLS.close!(listener::TLS.Listener)
+            else
+                TCP.close!(listener::TCP.Listener)
+            end
+        catch
+        end
+    end
+    return server
+end
+
+function shutdown!(server::Server; force::Bool = false)::Nothing
+    @atomic :release server.shutting_down = true
+    listener = nothing
+    lock(server.lock)
+    try
+        listener = server.listener
+        server.listener = nothing
+    finally
+        unlock(server.lock)
+    end
+    if listener !== nothing
+        try
+            if listener isa TLS.Listener
+                TLS.close!(listener::TLS.Listener)
+            else
+                TCP.close!(listener::TCP.Listener)
+            end
+        catch
+        end
+    end
+    if force
+        lock(server.lock)
+        try
+            for conn in server.active_tcp_conns
+                _close_ws_server_conn!(conn)
+            end
+            for conn in server.active_tls_conns
+                _close_ws_server_conn!(conn)
+            end
+        finally
+            unlock(server.lock)
+        end
+    end
+    return nothing
+end
+
+function Base.close(server::Server)
+    shutdown!(server; force = true)
+    return nothing
+end
+
+function Base.wait(server::Server)
+    lock(server.lock)
+    try
+        server.serve_task === nothing && return nothing
+        wait(server.serve_task::Task)
+    finally
+        unlock(server.lock)
+    end
+    return nothing
+end
+
+function listen!(
+        handler::Function,
+        host::AbstractString = "127.0.0.1",
+        port::Integer = 8080;
+        tls_config::Union{Nothing, TLS.Config} = nothing,
+        subprotocols::AbstractVector{<:AbstractString} = String[],
+        check_origin::Union{Nothing, Function} = nothing,
+        maxframesize::Integer = typemax(Int),
+        maxfragmentation::Integer = DEFAULT_MAX_FRAG,
+        read_buffer_bytes::Integer = DEFAULT_READ_BUFFER_BYTES,
+    )::Server
+    server = Server(
+        network = "tcp",
+        address = HostResolvers.join_host_port(host, Int(port)),
+        handler = handler,
+        tls_config = tls_config,
+        subprotocols = subprotocols,
+        check_origin = check_origin,
+        maxframesize = maxframesize,
+        maxfragmentation = maxfragmentation,
+        read_buffer_bytes = read_buffer_bytes,
+    )
+    server.serve_task = errormonitor(Threads.@spawn _listen_ws(server))
+    return server
+end
+
+serve!(handler::Function, host::AbstractString = "127.0.0.1", port::Integer = 8080; kwargs...) = listen!(handler, host, port; kwargs...)
+
+function listen(handler::Function, host::AbstractString = "127.0.0.1", port::Integer = 8080; kwargs...)
+    server = listen!(handler, host, port; kwargs...)
+    wait(server)
+    return server
 end
 
 end
