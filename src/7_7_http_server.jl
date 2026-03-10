@@ -5,7 +5,6 @@ export listen
 export listen!
 export serve
 export serve!
-export streamhandler
 export forceclose
 export port
 
@@ -69,7 +68,6 @@ mutable struct Server{F}
     listener::Union{Nothing, TCP.Listener, TLS.Listener}
     serve_task::Union{Nothing, Task}
     active_conns::Set{_ServerConn}
-    shutdown_hooks::Vector{Function}
     bound_address::Union{Nothing, String}
     bound_port::Int
     @atomic state::_ServerState.T
@@ -112,7 +110,6 @@ function Server(;
         nothing,
         nothing,
         Set{_ServerConn}(),
-        Function[],
         nothing,
         0,
         _ServerState.INITIAL,
@@ -131,7 +128,6 @@ mutable struct Stream <: IO
     cookiejar::Union{Nothing, CookieJar}
     redirect::Bool
     redirect_policy::Union{Nothing, _RedirectPolicy}
-    status_exception::Bool
     protocol::Symbol
     decompress::Union{Nothing, Bool}
     readtimeout::Float64
@@ -171,7 +167,6 @@ function Stream(server::Server, tracked::_ServerConn, request::Request)
         nothing,
         false,
         nothing,
-        false,
         :auto,
         nothing,
         0.0,
@@ -222,15 +217,6 @@ function _require_server_stream(stream::Stream)::Nothing
     throw(ArgumentError("operation is only valid for server-side HTTP streams"))
 end
 
-function _configured_port(address::AbstractString)::Int
-    try
-        _, port = HostResolvers.split_host_port(address)
-        return port
-    catch
-        return 0
-    end
-end
-
 function server_addr(server::Server)::String
     lock(server.lock)
     try
@@ -247,7 +233,12 @@ function port(server::Server)::Int
         if server.bound_port != 0
             return server.bound_port
         end
-        return _configured_port(server.address)
+        try
+            _, port_num = HostResolvers.split_host_port(server.address)
+            return port_num
+        catch
+            return 0
+        end
     finally
         unlock(server.lock)
     end
@@ -416,19 +407,6 @@ function _close_listener!(server::Server)::Nothing
     return nothing
 end
 
-function _wait_serve_task!(server::Server)::Nothing
-    task = nothing
-    lock(server.lock)
-    try
-        task = server.serve_task
-    finally
-        unlock(server.lock)
-    end
-    task === nothing && return nothing
-    wait(task::Task)
-    return nothing
-end
-
 function _close_idle_conns!(server::Server)::Bool
     tracked_conns = _server_conns(server)
     isempty(tracked_conns) && return true
@@ -449,34 +427,6 @@ function _close_idle_conns!(server::Server)::Bool
     return isempty(_server_conns(server))
 end
 
-function _register_on_shutdown!(server::Server, fn::Function)::Nothing
-    lock(server.lock)
-    try
-        push!(server.shutdown_hooks, fn)
-    finally
-        unlock(server.lock)
-    end
-    return nothing
-end
-
-function _run_shutdown_hooks!(server::Server)::Nothing
-    hooks = Function[]
-    lock(server.lock)
-    try
-        append!(hooks, server.shutdown_hooks)
-        empty!(server.shutdown_hooks)
-    finally
-        unlock(server.lock)
-    end
-    for hook in hooks
-        try
-            hook()
-        catch
-        end
-    end
-    return nothing
-end
-
 function _begin_shutdown!(server::Server)::Bool
     lock(server.lock)
     try
@@ -494,11 +444,10 @@ end
 function forceclose(server::Server)::Nothing
     initiated = _begin_shutdown!(server)
     _close_listener!(server)
-    initiated && _run_shutdown_hooks!(server)
     for tracked in _server_conns(server)
         _close_server_conn!(tracked)
     end
-    _wait_serve_task!(server)
+    wait(server)
     _set_server_state!(server, _ServerState.CLOSED)
     return nothing
 end
@@ -508,8 +457,7 @@ function Base.close(server::Server)::Nothing
     state == _ServerState.CLOSED && return nothing
     initiated = _begin_shutdown!(server)
     _close_listener!(server)
-    initiated && _run_shutdown_hooks!(server)
-    _wait_serve_task!(server)
+    wait(server)
     poll_s = 0.001
     while true
         _close_idle_conns!(server) && break
@@ -905,41 +853,6 @@ function _write_response_body_to_stream!(stream::Stream, body)::Nothing
         return nothing
     end
     throw(ProtocolError("unsupported stream response body type $(typeof(body))"))
-end
-
-function streamhandler(handler::F) where {F}
-    return function(stream::Stream)
-        request = startread(stream)
-        body = read(stream)
-        materialized = Request(
-            request.method,
-            request.target;
-            headers = request.headers,
-            trailers = request.trailers,
-            body = BytesBody(body),
-            host = request.host,
-            content_length = length(body),
-            proto_major = Int(request.proto_major),
-            proto_minor = Int(request.proto_minor),
-            close = request.close,
-            context = request.context,
-        )
-        response = handler(materialized)
-        response isa Response || throw(ProtocolError("server handler must return HTTP.Response"))
-        response_obj = response::Response
-        response_obj.request = materialized
-        stream.response.status_code = response_obj.status_code
-        stream.response.reason = response_obj.reason
-        stream.response.headers = copy(response_obj.headers)
-        stream.response.content_length = response_obj.content_length
-        stream.response.close = response_obj.close
-        startwrite(stream)
-        _write_response_body_to_stream!(stream, response_obj.body)
-        addtrailer(stream, response_obj.trailers)
-        closewrite(stream)
-        closeread(stream)
-        return nothing
-    end
 end
 
 const _H2_SERVER_MAX_DATA_FRAME_SIZE = 16_384

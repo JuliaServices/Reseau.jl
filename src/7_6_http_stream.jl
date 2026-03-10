@@ -25,7 +25,6 @@ function Stream(
         cookiejar::Union{Nothing, CookieJar},
         redirect::Bool,
         redirect_policy::_RedirectPolicy,
-        status_exception::Bool,
         protocol::Symbol,
         decompress::Union{Nothing, Bool},
         readtimeout::Real,
@@ -43,7 +42,6 @@ function Stream(
         cookiejar,
         redirect,
         redirect_policy,
-        status_exception,
         protocol,
         decompress,
         Float64(readtimeout),
@@ -67,10 +65,6 @@ end
 
 @inline function _stream_is_client(stream::Stream)::Bool
     return stream.side == _StreamType.CLIENT
-end
-
-@inline function _stream_is_server(stream::Stream)::Bool
-    return stream.side == _StreamType.SERVER
 end
 
 function _require_client_stream(stream::Stream)::Nothing
@@ -315,7 +309,6 @@ function open(
         method::Symbol,
         url::AbstractString,
         headers = Pair{String, String}[];
-        status_exception::Bool = true,
         redirect::Bool = true,
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
@@ -354,7 +347,6 @@ function open(
         cookies = normalized_cookies,
         cookiejar = effective_cookiejar,
         redirect = redirect,
-        status_exception = status_exception,
         protocol = protocol,
         decompress = decompress,
         readtimeout = readtimeout,
@@ -372,6 +364,7 @@ function open(
         method::Symbol,
         url::AbstractString,
         headers = Pair{String, String}[];
+        status_exception::Bool = true,
         kwargs...,
     )
     stream = open(method, url, headers; kwargs...)
@@ -387,7 +380,7 @@ function open(
         end
     end
     response = closeread(stream)
-    if stream.status_exception && _status_throws(response)
+    if status_exception && _status_throws(response)
         throw(StatusError(response))
     end
     callback_error === nothing || throw(callback_error)
