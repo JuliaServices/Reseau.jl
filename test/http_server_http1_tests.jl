@@ -15,7 +15,7 @@ function _read_all_server_bytes(body::HT.AbstractBody)::Vector{UInt8}
     return out
 end
 
-function _wait_server_addr(server::HT.Server; timeout_s::Float64 = 5.0)::String
+function _wait_server_addr(server; timeout_s::Float64 = 5.0)::String
     deadline = time() + timeout_s
     while time() < deadline
         try
@@ -44,9 +44,7 @@ end
 end
 
 @testset "HTTP server SSE roundtrip" begin
-    server = HT.Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             response = HT.Response(200)
             HT.sse_stream(response) do stream
@@ -55,9 +53,7 @@ end
                 write(stream, HT.SSEEvent("multi\nline\ndata"))
             end
             return response
-        end,
-    )
-    HT.start!(server)
+        end
     address = _wait_server_addr(server)
     try
         @test isopen(server)
@@ -84,16 +80,11 @@ end
 
 @testset "HTTP server basic request handling" begin
     seen_targets = String[]
-    server = HT.Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             push!(seen_targets, request.target)
             payload = collect(codeunits("echo:" * request.target))
             return HT.Response(200; reason = "OK", body = HT.BytesBody(payload), content_length = length(payload))
-        end,
-        idle_timeout_ns = 1_000_000_000,
-    )
-    HT.start!(server)
+        end
     address = _wait_server_addr(server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try
@@ -115,10 +106,7 @@ end
 end
 
 @testset "HTTP server stream handler request and response flow" begin
-    server = HT.Server(
-        address = "127.0.0.1:0",
-        stream = true,
-        handler = stream -> begin
+    server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
             _ = HT.startread(stream)
             body = String(read(stream))
             HT.setstatus(stream, 200)
@@ -126,9 +114,7 @@ end
             HT.startwrite(stream)
             write(stream, isempty(body) ? "ping" : body)
             return nothing
-        end,
-    )
-    HT.start!(server)
+        end
     address = _wait_server_addr(server)
     try
         resp1 = HT.get("http://$(address)/")
@@ -145,10 +131,7 @@ end
 end
 
 @testset "HTTP server stream handler emits chunked trailers" begin
-    server = HT.Server(
-        address = "127.0.0.1:0",
-        stream = true,
-        handler = stream -> begin
+    server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
             _ = HT.startread(stream)
             _ = read(stream)
             HT.setstatus(stream, 200)
@@ -156,9 +139,7 @@ end
             write(stream, "hello")
             HT.addtrailer(stream, "X-Trailer" => "ok")
             return nothing
-        end,
-    )
-    HT.start!(server)
+        end
     address = _wait_server_addr(server)
     try
         sock = Sockets.connect("127.0.0.1", HT.port(server))
@@ -180,14 +161,10 @@ end
 end
 
 @testset "HTTP server shutdown rejects new requests" begin
-    server = HT.Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             return HT.Response(200; reason = "OK", body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2)
-        end,
-    )
-    HT.start!(server)
+        end
     address = _wait_server_addr(server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try
@@ -208,14 +185,14 @@ end
 end
 
 @testset "HTTP server closes keep-alive when request body is unread" begin
-    server = HT.Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
+            request = HT.startread(stream)
             payload = collect(codeunits("ok:" * request.target))
-            return HT.Response(200; reason = "OK", body = HT.BytesBody(payload), content_length = length(payload))
-        end,
-    )
-    HT.start!(server)
+            HT.setstatus(stream, 200)
+            HT.startwrite(stream)
+            write(stream, payload)
+            return nothing
+        end
     address = _wait_server_addr(server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try

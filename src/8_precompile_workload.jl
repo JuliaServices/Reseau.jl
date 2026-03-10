@@ -501,14 +501,10 @@ end
 function _pc_run_http_server_workload!()
     _pc_is_generating_output() && return nothing
     _pc_runtime_supported() || return nothing
-    server = HT.Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             return HT.Response(200; reason = "OK", body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2)
-        end,
-    )
-    task = HT.start!(server)
+        end
     client = nothing
     try
         deadline = time() + 2.0
@@ -535,8 +531,10 @@ function _pc_run_http_server_workload!()
             client === nothing || close(client.transport)
         catch
         end
-        status = EL.timedwait(() -> istaskdone(task), 2.0; pollint = 0.001)
-        status == :timed_out || fetch(task)
+        try
+            wait(server)
+        catch
+        end
     end
     return nothing
 end
@@ -683,14 +681,10 @@ Run end-to-end HTTP/1 + HTTP/2 client/server requests through top-level APIs.
 function _pc_run_http_unified_workload!()
     _pc_is_generating_output() && return nothing
     _pc_runtime_supported() || return nothing
-    h1_server = HT.Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    h1_server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             return HT.Response(200; body = HT.BytesBody(UInt8[0x68, 0x31]), content_length = 2)
-        end,
-    )
-    h1_task = HT.start!(h1_server)
+        end
     h1_client = nothing
     h2_server = nothing
     h2_task = nothing
@@ -737,7 +731,10 @@ function _pc_run_http_unified_workload!()
             HT.forceclose(h1_server)
         catch
         end
-        _ = EL.timedwait(() -> istaskdone(h1_task), 2.0; pollint = 0.001)
+        try
+            wait(h1_server)
+        catch
+        end
         try
             h2_client === nothing || close(h2_client::HT.Client)
         catch

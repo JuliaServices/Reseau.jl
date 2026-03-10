@@ -1,9 +1,11 @@
 # HTTP/1 server implementation built on `TCP`.
 export Server
-export server_addr
+export Stream
+export listen
+export listen!
+export serve
 export serve!
-export listen_and_serve!
-export start!
+export streamhandler
 export forceclose
 export port
 
@@ -109,7 +111,7 @@ function Server(;
     )
 end
 
-mutable struct ServerStream <: IO
+mutable struct Stream <: IO
     server::Server
     tracked::_ServerConn
     request::Request
@@ -122,14 +124,14 @@ mutable struct ServerStream <: IO
     written_bytes::Int64
 end
 
-function ServerStream(server::Server, tracked::_ServerConn, request::Request)
+function Stream(server::Server, tracked::_ServerConn, request::Request)
     response = Response(
         200;
         proto_major = Int(request.proto_major),
         proto_minor = Int(request.proto_minor),
         request = request,
     )
-    return ServerStream(
+    return Stream(
         server,
         tracked,
         request,
@@ -425,13 +427,13 @@ function _write_all_response!(conn::TCP.Conn, response::Response)::Nothing
     return nothing
 end
 
-function _server_stream_allows_body(stream::ServerStream)::Bool
+function _server_stream_allows_body(stream::Stream)::Bool
     _body_allowed_for_status(stream.response.status_code) || return false
     stream.request.method == "HEAD" && return false
     return true
 end
 
-function _server_stream_write_mode(stream::ServerStream)::_ServerStreamWriteMode.T
+function _server_stream_write_mode(stream::Stream)::_ServerStreamWriteMode.T
     allows_body = _server_stream_allows_body(stream)
     allows_body || return _ServerStreamWriteMode.NONE
     has_header_token(stream.response.headers, "Transfer-Encoding", "chunked") && return _ServerStreamWriteMode.CHUNKED
@@ -445,7 +447,7 @@ function _server_stream_write_mode(stream::ServerStream)::_ServerStreamWriteMode
     return _ServerStreamWriteMode.CHUNKED
 end
 
-function _write_server_stream_bytes!(stream::ServerStream, bytes::AbstractVector{UInt8})::Nothing
+function _write_server_stream_bytes!(stream::Stream, bytes::AbstractVector{UInt8})::Nothing
     isempty(bytes) && return nothing
     _set_write_deadline!(stream.server, stream.tracked.conn)
     total = 0
@@ -457,7 +459,7 @@ function _write_server_stream_bytes!(stream::ServerStream, bytes::AbstractVector
     return nothing
 end
 
-function _write_server_stream_head!(stream::ServerStream)::Nothing
+function _write_server_stream_head!(stream::Stream)::Nothing
     headers = copy(stream.response.headers)
     response_close = stream.response.close || _should_close_connection(headers, stream.response.proto_major, stream.response.proto_minor)
     response_close && set_header!(headers, "Connection", "close")
@@ -487,19 +489,19 @@ function _write_server_stream_head!(stream::ServerStream)::Nothing
     return nothing
 end
 
-function startread(stream::ServerStream)::Request
+function startread(stream::Stream)::Request
     return stream.request
 end
 
-function Base.isopen(stream::ServerStream)::Bool
+function Base.isopen(stream::Stream)::Bool
     return !(@atomic :acquire stream.read_closed) || !(@atomic :acquire stream.write_closed)
 end
 
-function Base.eof(stream::ServerStream)::Bool
+function Base.eof(stream::Stream)::Bool
     return _request_body_fully_consumed(stream.request)
 end
 
-function Base.readbytes!(stream::ServerStream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
+function Base.readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
     nb >= 0 || throw(ArgumentError("nb must be >= 0"))
     nb == 0 && return 0
     nb <= length(dest) || throw(ArgumentError("nb must be <= length(dest)"))
@@ -511,7 +513,7 @@ function Base.readbytes!(stream::ServerStream, dest::AbstractVector{UInt8}, nb::
     return n
 end
 
-function Base.read(stream::ServerStream)::Vector{UInt8}
+function Base.read(stream::Stream)::Vector{UInt8}
     out = UInt8[]
     buf = Vector{UInt8}(undef, 16 * 1024)
     while true
@@ -523,27 +525,27 @@ function Base.read(stream::ServerStream)::Vector{UInt8}
     return out
 end
 
-function Base.read(stream::ServerStream, ::Type{String})::String
+function Base.read(stream::Stream, ::Type{String})::String
     return String(read(stream))
 end
 
-function setstatus(stream::ServerStream, status::Integer)::Nothing
+function setstatus(stream::Stream, status::Integer)::Nothing
     (@atomic :acquire stream.response_started) && throw(ArgumentError("cannot change status after response writing has started"))
     stream.response.status_code = Int(status)
     return nothing
 end
 
-function setheader(stream::ServerStream, key::AbstractString, value::AbstractString)::Nothing
+function setheader(stream::Stream, key::AbstractString, value::AbstractString)::Nothing
     (@atomic :acquire stream.response_started) && throw(ArgumentError("cannot change headers after response writing has started"))
     set_header!(stream.response.headers, key, value)
     return nothing
 end
 
-function setheader(stream::ServerStream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
+function setheader(stream::Stream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
     return setheader(stream, header.first, header.second)
 end
 
-function addtrailer(stream::ServerStream, trailers::Headers)::Nothing
+function addtrailer(stream::Stream, trailers::Headers)::Nothing
     for key in header_keys(trailers)
         values = get_headers(trailers, key)
         for value in values
@@ -553,27 +555,28 @@ function addtrailer(stream::ServerStream, trailers::Headers)::Nothing
     return nothing
 end
 
-function addtrailer(stream::ServerStream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
+function addtrailer(stream::Stream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
     add_header!(stream.response.trailers, header.first, header.second)
     return nothing
 end
 
-function addtrailer(stream::ServerStream, headers::AbstractVector{<:Pair})::Nothing
+function addtrailer(stream::Stream, headers::AbstractVector{<:Pair})::Nothing
     for header in headers
         addtrailer(stream, header)
     end
     return nothing
 end
 
-function startwrite(stream::ServerStream)::Response
+function startwrite(stream::Stream)::Response
     started = @atomic :acquire stream.response_started
     started && return stream.response
+    !_request_body_fully_consumed(stream.request) && (stream.response.close = true)
     !_server_stream_allows_body(stream) && (stream.ignore_writes = true)
     _write_server_stream_head!(stream)
     return stream.response
 end
 
-function _write_server_stream_data!(stream::ServerStream, data::AbstractVector{UInt8})::Int
+function _write_server_stream_data!(stream::Stream, data::AbstractVector{UInt8})::Int
     (@atomic :acquire stream.write_closed) && throw(ArgumentError("response writes are closed"))
     startwrite(stream)
     stream.ignore_writes && return length(data)
@@ -590,19 +593,23 @@ function _write_server_stream_data!(stream::ServerStream, data::AbstractVector{U
     return length(data)
 end
 
-function Base.write(stream::ServerStream, data::Vector{UInt8})::Int
+function Base.write(stream::Stream, data::Vector{UInt8})::Int
     return _write_server_stream_data!(stream, data)
 end
 
-function Base.write(stream::ServerStream, data::AbstractVector{UInt8})::Int
+function Base.write(stream::Stream, data::StridedVector{UInt8})::Int
+    return _write_server_stream_data!(stream, data)
+end
+
+function Base.write(stream::Stream, data::AbstractVector{UInt8})::Int
     return _write_server_stream_data!(stream, Vector{UInt8}(data))
 end
 
-function Base.write(stream::ServerStream, data::Union{String, SubString{String}})::Int
+function Base.write(stream::Stream, data::Union{String, SubString{String}})::Int
     return write(stream, Vector{UInt8}(codeunits(String(data))))
 end
 
-function closewrite(stream::ServerStream)::Nothing
+function closewrite(stream::Stream)::Nothing
     was_closed = @atomic :acquire stream.write_closed
     was_closed && return nothing
     startwrite(stream)
@@ -621,7 +628,7 @@ function closewrite(stream::ServerStream)::Nothing
     return nothing
 end
 
-function closeread(stream::ServerStream)::Response
+function closeread(stream::Stream)::Response
     already_closed = @atomic :acquire stream.read_closed
     already_closed && return stream.response
     if !_request_body_fully_consumed(stream.request)
@@ -635,7 +642,7 @@ function closeread(stream::ServerStream)::Response
     return stream.response
 end
 
-function Base.close(stream::ServerStream)::Nothing
+function Base.close(stream::Stream)::Nothing
     try
         closewrite(stream)
     catch
@@ -645,6 +652,73 @@ function Base.close(stream::ServerStream)::Nothing
     catch
     end
     return nothing
+end
+
+function _write_response_body_to_stream!(stream::Stream, body)::Nothing
+    body === nothing && return nothing
+    if body isa EmptyBody
+        return nothing
+    end
+    if body isa AbstractString
+        write(stream, body::AbstractString)
+        return nothing
+    end
+    if body isa AbstractVector{UInt8}
+        write(stream, body::AbstractVector{UInt8})
+        return nothing
+    end
+    if body isa AbstractBody
+        buf = Vector{UInt8}(undef, 16 * 1024)
+        try
+            while true
+                n = body_read!(body::AbstractBody, buf)
+                n == 0 && break
+                write(stream, @view(buf[1:n]))
+            end
+        finally
+            try
+                body_close!(body::AbstractBody)
+            catch
+            end
+        end
+        return nothing
+    end
+    throw(ProtocolError("unsupported stream response body type $(typeof(body))"))
+end
+
+function streamhandler(handler::F) where {F}
+    return function(stream::Stream)
+        request = startread(stream)
+        body = read(stream)
+        materialized = Request(
+            request.method,
+            request.target;
+            headers = request.headers,
+            trailers = request.trailers,
+            body = BytesBody(body),
+            host = request.host,
+            content_length = length(body),
+            proto_major = Int(request.proto_major),
+            proto_minor = Int(request.proto_minor),
+            close = request.close,
+            context = request.context,
+        )
+        response = handler(materialized)
+        response isa Response || throw(ProtocolError("server handler must return HTTP.Response"))
+        response_obj = response::Response
+        response_obj.request = materialized
+        stream.response.status_code = response_obj.status_code
+        stream.response.reason = response_obj.reason
+        stream.response.headers = copy(response_obj.headers)
+        stream.response.content_length = response_obj.content_length
+        stream.response.close = response_obj.close
+        startwrite(stream)
+        _write_response_body_to_stream!(stream, response_obj.body)
+        addtrailer(stream, response_obj.trailers)
+        closewrite(stream)
+        closeread(stream)
+        return nothing
+    end
 end
 
 function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
@@ -664,7 +738,7 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
             _set_conn_state!(tracked, _ConnState.ACTIVE)
             _set_read_deadline_for_body!(server, tracked.conn)
             if server.stream
-                stream = ServerStream(server, tracked, request)
+                stream = Stream(server, tracked, request)
                 try
                     server.handler(stream)
                     if !(@atomic :acquire stream.write_closed)
@@ -782,4 +856,162 @@ function start!(server::Server)::Task
         unlock(server.lock)
     end
     return task
+end
+
+function _build_server(
+        handler::F,
+        host::AbstractString,
+        port_num::Integer;
+        stream::Bool,
+        listenany::Bool,
+        reuseaddr::Bool,
+        backlog::Integer,
+    ) where {F}
+    return Server(
+        network = "tcp",
+        address = HostResolvers.join_host_port(host, Int(port_num)),
+        handler = handler,
+        stream = stream,
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
+end
+
+function listen!(
+        handler::F,
+        host::AbstractString = "127.0.0.1",
+        port_num::Integer = 8080;
+        listenany::Bool = false,
+        reuseaddr::Bool = true,
+        backlog::Integer = 128,
+    ) where {F}
+    server = _build_server(
+        handler,
+        host,
+        port_num;
+        stream = true,
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
+    start!(server)
+    return server
+end
+
+function listen!(
+        handler::F,
+        port_num::Integer;
+        listenany::Bool = false,
+        reuseaddr::Bool = true,
+        backlog::Integer = 128,
+    ) where {F}
+    return listen!(
+        handler,
+        "127.0.0.1",
+        port_num;
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
+end
+
+function listen!(
+        handler::F,
+        listener::TCP.Listener;
+        listenany::Bool = false,
+        reuseaddr::Bool = true,
+        backlog::Integer = 128,
+    ) where {F}
+    listenany && throw(ArgumentError("listenany is not valid when passing an existing listener"))
+    _ = reuseaddr
+    _ = backlog
+    bound_address, bound_port = _listener_bound_address(listener)
+    server = Server(
+        network = "tcp",
+        address = bound_address,
+        handler = handler,
+        stream = true,
+        listenany = false,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
+    server.bound_address = bound_address
+    server.bound_port = bound_port
+    task = errormonitor(Threads.@spawn serve!(server, listener))
+    lock(server.lock)
+    try
+        server.serve_task = task
+    finally
+        unlock(server.lock)
+    end
+    return server
+end
+
+function listen(
+        handler::F,
+        args...;
+        kwargs...,
+    ) where {F}
+    server = listen!(handler, args...; kwargs...)
+    try
+        wait(server)
+    finally
+        try
+            close(server)
+        catch
+        end
+    end
+    return server
+end
+
+function serve!(
+        handler::F,
+        args...;
+        stream::Bool = false,
+        listenany::Bool = false,
+        reuseaddr::Bool = true,
+        backlog::Integer = 128,
+    ) where {F}
+    stream && return listen!(
+        handler,
+        args...;
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
+    return listen!(
+        streamhandler(handler),
+        args...;
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
+end
+
+function serve(
+        handler::F,
+        args...;
+        stream::Bool = false,
+        listenany::Bool = false,
+        reuseaddr::Bool = true,
+        backlog::Integer = 128,
+    ) where {F}
+    server = serve!(
+        handler,
+        args...;
+        stream = stream,
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
+    try
+        wait(server)
+    finally
+        try
+            close(server)
+        catch
+        end
+    end
+    return server
 end

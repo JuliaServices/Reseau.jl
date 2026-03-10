@@ -56,7 +56,7 @@
   - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
   - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-003 (P0) Expose HTTP.jl-style `listen` / `listen!` / `serve` / `serve!` APIs
+### [x] ITEM-003 (P0) Expose HTTP.jl-style `listen` / `listen!` / `serve` / `serve!` APIs
 - Description: Add the top-level user-facing server APIs modeled on `HTTP.jl origin/master`, while wiring them into the new Go-inspired server kernel rather than copying HTTP.jl internals.
 - Desired outcome: `listen`, `listen!`, `serve`, and `serve!` exist with the intended split: `listen*` for stream handlers and `serve*` for request handlers, with `streamhandler` bridging request handlers onto the stream layer. The supported initial keyword surface should be exactly `listenany`, `reuseaddr`, `backlog`, and `stream`.
 - Affected files: `src/7_7_http_server.jl`, `src/7_http.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`, `src/8_precompile_workload.jl`
@@ -76,6 +76,10 @@
   - The new top-level server APIs exist and are covered by tests.
   - The request-handler and stream-handler split matches the intended `HTTP.jl` semantics.
   - The supported keywords behave correctly.
+- Verification evidence:
+  - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
 ### [ ] ITEM-004 (P0) Match core HTTP/1 server correctness behavior
 - Description: Add the HTTP/1 correctness behavior that `HTTP.jl` and Go both expect from a production server loop: malformed-request handling, header-size enforcement responses, `Expect: 100-continue`, timeouts, keep-alive decisions, unread-request-body handling, HEAD behavior, and proper response framing.

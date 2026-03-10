@@ -109,14 +109,10 @@ function _wait_h2_addr(server::HT.H2Server; timeout_s::Float64 = 5.0)
 end
 
 @testset "HTTP integration protocol selection" begin
-    h1_server = HT.Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    h1_server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             payload = collect(codeunits("h1:" * request.target))
             return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload))
-        end,
-    )
-    h1_task = HT.start!(h1_server)
+        end
     h1_address = _wait_http_addr(h1_server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4), prefer_http2 = true)
     try
@@ -126,7 +122,7 @@ end
     finally
         close(client)
         HT.forceclose(h1_server)
-        @test timedwait(() -> istaskdone(h1_task), 3.0; pollint = 0.001) != :timed_out
+        wait(h1_server)
     end
 
     h2_server = HT.H2Server(
