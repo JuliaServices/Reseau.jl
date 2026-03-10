@@ -198,7 +198,7 @@
   - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-009 (P0) Finish TLS server support inside the unified `Server` kernel
+### [x] ITEM-009 (P0) Finish TLS server support inside the unified `Server` kernel
 - Description: The new `Server` kernel currently only owns TCP listener/connection paths. TLS servering still lives outside the cut-over in other modules, which means the original “all phases” server rewrite was not actually completed.
 - Desired outcome: The unified `Server` kernel can serve over either `TCP.Listener` or `TLS.Listener`, track `TCP.Conn` and `TLS.Conn` connections in the same lifecycle model, and keep graceful/forceful shutdown semantics coherent across both transports.
 - Affected files: `src/7_7_http_server.jl`, `src/6_tls.jl`, `test/http_integration_tests.jl`, `test/http_server_http1_tests.jl`, `src/8_precompile_workload.jl`
@@ -217,6 +217,9 @@
   - The unified `Server` kernel can accept and serve TLS connections.
   - Shutdown and conn tracking work for both TCP and TLS listeners.
   - Integration tests cover the TLS path through the new server kernel.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_websocket_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
 ### [ ] ITEM-010 (P0) Fold HTTP/2 server handling into the unified `Server` kernel and delete `H2Server`
 - Description: HTTP/2 servering still lives in the standalone `H2Server` sidecar. That breaks the hard cut-over goal and leaves server protocol handling split across two implementations.

@@ -11,6 +11,7 @@ export port
 
 using EnumX: @enumx
 using ..Reseau.TCP
+using ..Reseau.TLS
 using ..Reseau.HostResolvers
 using ..Reseau.IOPoll
 
@@ -43,7 +44,7 @@ end
 end
 
 mutable struct _ServerConn
-    conn::TCP.Conn
+    conn::Union{TCP.Conn, TLS.Conn}
     @atomic state::_ConnState.T
     @atomic state_unix_sec::Int64
 end
@@ -65,7 +66,7 @@ mutable struct Server{F}
     reuseaddr::Bool
     backlog::Int
     lock::ReentrantLock
-    listener::Union{Nothing, TCP.Listener}
+    listener::Union{Nothing, TCP.Listener, TLS.Listener}
     serve_task::Union{Nothing, Task}
     active_conns::Set{_ServerConn}
     shutdown_hooks::Vector{Function}
@@ -278,10 +279,69 @@ function Base.wait(server::Server)::Nothing
     return nothing
 end
 
-function _listener_bound_address(listener::TCP.Listener)::Tuple{String, Int}
-    laddr = TCP.addr(listener)
+function _listener_addr(listener::Union{TCP.Listener, TLS.Listener})
+    if listener isa TLS.Listener
+        return TLS.addr(listener::TLS.Listener)
+    end
+    return TCP.addr(listener::TCP.Listener)
+end
+
+function _listener_bound_address(listener::Union{TCP.Listener, TLS.Listener})::Tuple{String, Int}
+    laddr = _listener_addr(listener)
     laddr === nothing && return ("", 0)
     return (sprint(show, laddr), Int(laddr.port))
+end
+
+function _accept_server_conn!(listener::Union{TCP.Listener, TLS.Listener})
+    if listener isa TLS.Listener
+        return TLS.accept!(listener::TLS.Listener)
+    end
+    return TCP.accept!(listener::TCP.Listener)
+end
+
+function _close_server_transport!(conn::Union{TCP.Conn, TLS.Conn})::Nothing
+    if conn isa TLS.Conn
+        TLS.close!(conn::TLS.Conn)
+    else
+        TCP.close!(conn::TCP.Conn)
+    end
+    return nothing
+end
+
+function _close_server_listener!(listener::Union{TCP.Listener, TLS.Listener})::Nothing
+    if listener isa TLS.Listener
+        TLS.close!(listener::TLS.Listener)
+    else
+        TCP.close!(listener::TCP.Listener)
+    end
+    return nothing
+end
+
+function _set_read_deadline!(conn::Union{TCP.Conn, TLS.Conn}, deadline_ns::Int64)::Nothing
+    if conn isa TLS.Conn
+        TLS.set_read_deadline!(conn::TLS.Conn, deadline_ns)
+    else
+        TCP.set_read_deadline!(conn::TCP.Conn, deadline_ns)
+    end
+    return nothing
+end
+
+function _set_write_deadline!(conn::Union{TCP.Conn, TLS.Conn}, deadline_ns::Int64)::Nothing
+    if conn isa TLS.Conn
+        TLS.set_write_deadline!(conn::TLS.Conn, deadline_ns)
+    else
+        TCP.set_write_deadline!(conn::TCP.Conn, deadline_ns)
+    end
+    return nothing
+end
+
+function _set_deadline!(conn::Union{TCP.Conn, TLS.Conn}, deadline_ns::Int64)::Nothing
+    if conn isa TLS.Conn
+        TLS.set_deadline!(conn::TLS.Conn, deadline_ns)
+    else
+        TCP.set_deadline!(conn::TCP.Conn, deadline_ns)
+    end
+    return nothing
 end
 
 function _listen_address(server::Server)::String
@@ -324,7 +384,7 @@ end
 function _close_server_conn!(tracked::_ServerConn)::Nothing
     _set_conn_state!(tracked, _ConnState.CLOSED)
     try
-        TCP.close!(tracked.conn)
+        _close_server_transport!(tracked.conn)
     catch
     end
     return nothing
@@ -341,7 +401,7 @@ function _close_listener!(server::Server)::Nothing
     end
     listener === nothing && return nothing
     try
-        TCP.close!(listener::TCP.Listener)
+        _close_server_listener!(listener::Union{TCP.Listener, TLS.Listener})
     catch
     end
     return nothing
@@ -451,37 +511,37 @@ function Base.close(server::Server)::Nothing
     return nothing
 end
 
-function _set_read_deadline_for_header!(server::Server, conn::TCP.Conn)::Nothing
+function _set_read_deadline_for_header!(server::Server, conn::Union{TCP.Conn, TLS.Conn})::Nothing
     timeout = server.read_header_timeout_ns > 0 ? server.read_header_timeout_ns : server.read_timeout_ns
     timeout <= 0 && return nothing
-    TCP.set_read_deadline!(conn, Int64(time_ns()) + timeout)
+    _set_read_deadline!(conn, Int64(time_ns()) + timeout)
     return nothing
 end
 
-function _set_read_deadline_for_body!(server::Server, conn::TCP.Conn)::Nothing
+function _set_read_deadline_for_body!(server::Server, conn::Union{TCP.Conn, TLS.Conn})::Nothing
     timeout = server.read_timeout_ns
     timeout <= 0 && return nothing
-    TCP.set_read_deadline!(conn, Int64(time_ns()) + timeout)
+    _set_read_deadline!(conn, Int64(time_ns()) + timeout)
     return nothing
 end
 
-function _set_idle_deadline!(server::Server, conn::TCP.Conn)::Nothing
+function _set_idle_deadline!(server::Server, conn::Union{TCP.Conn, TLS.Conn})::Nothing
     timeout = server.idle_timeout_ns > 0 ? server.idle_timeout_ns : server.read_timeout_ns
     timeout <= 0 && return nothing
-    TCP.set_read_deadline!(conn, Int64(time_ns()) + timeout)
+    _set_read_deadline!(conn, Int64(time_ns()) + timeout)
     return nothing
 end
 
-function _set_write_deadline!(server::Server, conn::TCP.Conn)::Nothing
+function _set_write_deadline!(server::Server, conn::Union{TCP.Conn, TLS.Conn})::Nothing
     timeout = server.write_timeout_ns
     timeout <= 0 && return nothing
-    TCP.set_write_deadline!(conn, Int64(time_ns()) + timeout)
+    _set_write_deadline!(conn, Int64(time_ns()) + timeout)
     return nothing
 end
 
-function _clear_deadlines!(conn::TCP.Conn)::Nothing
+function _clear_deadlines!(conn::Union{TCP.Conn, TLS.Conn})::Nothing
     try
-        TCP.set_deadline!(conn, Int64(0))
+        _set_deadline!(conn, Int64(0))
     catch
     end
     return nothing
@@ -510,7 +570,7 @@ end
     return false
 end
 
-function _write_all_response!(conn::TCP.Conn, response::Response)::Nothing
+function _write_all_response!(conn::Union{TCP.Conn, TLS.Conn}, response::Response)::Nothing
     io = IOBuffer()
     write_response!(io, response)
     bytes = take!(io)
@@ -540,7 +600,7 @@ function _server_error_status(err::Exception)::Union{Nothing, Int}
     return nothing
 end
 
-function _try_write_server_error!(conn::TCP.Conn, request::Union{Nothing, Request}, status_code::Int)::Nothing
+function _try_write_server_error!(conn::Union{TCP.Conn, TLS.Conn}, request::Union{Nothing, Request}, status_code::Int)::Nothing
     response = Response(
         status_code;
         close = true,
@@ -880,7 +940,7 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
             catch err
                 status_code = _server_error_status(err::Exception)
                 status_code === nothing || _try_write_server_error!(tracked.conn, nothing, status_code::Int)
-                if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError
+                if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError || err isa TLS.TLSError || err isa TLS.TLSHandshakeTimeoutError
                     return nothing
                 end
                 rethrow(err)
@@ -955,7 +1015,7 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
     return nothing
 end
 
-function serve!(server::Server, listener::TCP.Listener)
+function serve!(server::Server, listener::Union{TCP.Listener, TLS.Listener})
     _server_shutting_down(server) && throw(ProtocolError("server is shutting down"))
     lock(server.lock)
     try
@@ -968,7 +1028,7 @@ function serve!(server::Server, listener::TCP.Listener)
     while true
         _server_shutting_down(server) && return nothing
         conn = try
-            TCP.accept!(listener)
+            _accept_server_conn!(listener)
         catch err
             if _server_shutting_down(server)
                 return nothing
@@ -1077,7 +1137,7 @@ end
 
 function listen!(
         handler::F,
-        listener::TCP.Listener;
+        listener::Union{TCP.Listener, TLS.Listener};
         listenany::Bool = false,
         reuseaddr::Bool = true,
         backlog::Integer = 128,

@@ -34,33 +34,10 @@ end
     )
     laddr = TL.addr(listener)::NC.SocketAddrV4
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
-    server_task = errormonitor(Threads.@spawn begin
-        handled = false
-        for _ in 1:2
-            conn = TL.accept!(listener)
-            try
-                TL.handshake!(conn)
-                request = HT.read_request(HT._ConnReader(conn))
-                payload = collect(codeunits("tls-h1:" * request.target))
-                response = HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), request = request)
-                io = IOBuffer()
-                HT.write_response!(io, response)
-                write(conn, take!(io))
-                handled = true
-                return nothing
-            catch err
-                if err isa TL.TLSError || err isa TL.TLSHandshakeTimeoutError || err isa EOFError || err isa HT.ParseError || err isa HT.ProtocolError
-                    # First ALPN-mismatched h2 attempt may connect and close before sending h1 bytes.
-                    continue
-                end
-                rethrow(err)
-            finally
-                TL.close!(conn)
-            end
-        end
-        handled || error("expected one fallback HTTP/1 request")
-        return nothing
-    end)
+    server = HT.serve!(listener) do request
+        payload = collect(codeunits("tls-h1:" * request.target))
+        return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload))
+    end
     client = HT.Client(
         transport = HT.Transport(
             tls_config = TL.Config(
@@ -79,8 +56,8 @@ end
         @test String(_read_all_integration(response.body)) == "tls-h1:/auto-tls"
     finally
         close(client)
-        TL.close!(listener)
-        @test timedwait(() -> istaskdone(server_task), 3.0; pollint = 0.001) != :timed_out
+        HT.forceclose(server)
+        wait(server)
     end
 end
 
