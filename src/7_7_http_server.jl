@@ -4,73 +4,79 @@ export server_addr
 export serve!
 export listen_and_serve!
 export start!
-export shutdown!
+export forceclose
+export port
 
+using EnumX: @enumx
 using ..Reseau.TCP
 using ..Reseau.HostResolvers
 using ..Reseau.IOPoll
-using ..Reseau.EventLoops
 
-"""
-    Server
+@enumx _ServerState::UInt8 begin
+    INITIAL = 0
+    RUNNING = 1
+    CLOSING = 2
+    CLOSED = 3
+end
 
-HTTP/1 server state for one listening endpoint plus its active connection set.
+@enumx _ConnState::UInt8 begin
+    NEW = 0
+    ACTIVE = 1
+    IDLE = 2
+    HIJACKED = 3
+    CLOSED = 4
+end
 
-The server is intentionally small and synchronous in the style of Go's early
-`net/http` building blocks: each accepted connection is handled on its own task
-and request parsing/writing is performed directly against the TCP stream.
-"""
-mutable struct Server
+mutable struct _ServerConn
+    conn::TCP.Conn
+    @atomic state::_ConnState.T
+    @atomic state_unix_sec::Int64
+end
+
+Base.hash(conn::_ServerConn, h::UInt) = hash(objectid(conn), h)
+Base.:(==)(a::_ServerConn, b::_ServerConn) = a === b
+
+mutable struct Server{F}
     network::String
     address::String
-    handler::Function
+    handler::F
     read_timeout_ns::Int64
     read_header_timeout_ns::Int64
     write_timeout_ns::Int64
     idle_timeout_ns::Int64
     max_header_bytes::Int
+    listenany::Bool
+    reuseaddr::Bool
+    backlog::Int
     lock::ReentrantLock
     listener::Union{Nothing, TCP.Listener}
     serve_task::Union{Nothing, Task}
-    active_conns::Set{TCP.Conn}
-    active_tasks::Set{Task}
+    active_conns::Set{_ServerConn}
     bound_address::Union{Nothing, String}
-    @atomic shutting_down::Bool
+    bound_port::Int
+    @atomic state::_ServerState.T
 end
 
-"""
-    Server(; network="tcp", address="127.0.0.1:0", handler, ...)
-
-Create an HTTP server with timeouts and parser limits.
-
-Keyword arguments:
-- `network`, `address`: bind information passed to `TCP.listen`
-- `handler`: function taking `Request` and returning `Response`
-- `read_timeout_ns`: whole-request read deadline once a request is underway
-- `read_header_timeout_ns`: stricter deadline while waiting for request headers
-- `write_timeout_ns`: response write deadline
-- `idle_timeout_ns`: keep-alive idle timeout between requests
-- `max_header_bytes`: aggregate request-header size cap
-
-Returns a mutable `Server`. Throws `ArgumentError` for invalid timeout or size
-limits.
-"""
 function Server(;
         network::AbstractString = "tcp",
         address::AbstractString = "127.0.0.1:0",
-        handler::Function,
+        handler::F,
         read_timeout_ns::Integer = Int64(0),
         read_header_timeout_ns::Integer = Int64(0),
         write_timeout_ns::Integer = Int64(0),
         idle_timeout_ns::Integer = Int64(0),
         max_header_bytes::Integer = 1 * 1024 * 1024,
-    )
+        listenany::Bool = false,
+        reuseaddr::Bool = true,
+        backlog::Integer = 128,
+    ) where {F}
     read_timeout_ns >= 0 || throw(ArgumentError("read_timeout_ns must be >= 0"))
     read_header_timeout_ns >= 0 || throw(ArgumentError("read_header_timeout_ns must be >= 0"))
     write_timeout_ns >= 0 || throw(ArgumentError("write_timeout_ns must be >= 0"))
     idle_timeout_ns >= 0 || throw(ArgumentError("idle_timeout_ns must be >= 0"))
     max_header_bytes > 0 || throw(ArgumentError("max_header_bytes must be > 0"))
-    return Server(
+    backlog > 0 || throw(ArgumentError("backlog must be > 0"))
+    return Server{F}(
         String(network),
         String(address),
         handler,
@@ -79,27 +85,52 @@ function Server(;
         Int64(write_timeout_ns),
         Int64(idle_timeout_ns),
         Int(max_header_bytes),
+        listenany,
+        reuseaddr,
+        Int(backlog),
         ReentrantLock(),
         nothing,
         nothing,
-        Set{TCP.Conn}(),
-        Set{Task}(),
+        Set{_ServerConn}(),
         nothing,
-        false,
+        0,
+        _ServerState.INITIAL,
     )
 end
 
-@inline function _server_shutting_down(server::Server)::Bool
-    return @atomic :acquire server.shutting_down
+@inline function _server_state(server::Server)::_ServerState.T
+    return @atomic :acquire server.state
 end
 
-"""
-    server_addr(server)
+@inline function _set_server_state!(server::Server, state::_ServerState.T)::Nothing
+    @atomic :release server.state = state
+    return nothing
+end
 
-Return the effective bound `host:port` once listening starts.
+@inline function _conn_state(conn::_ServerConn)::_ConnState.T
+    return @atomic :acquire conn.state
+end
 
-Throws `ProtocolError` if the server has not started listening yet.
-"""
+@inline function _set_conn_state!(conn::_ServerConn, state::_ConnState.T)::Nothing
+    @atomic :release conn.state = state
+    @atomic :release conn.state_unix_sec = floor(Int64, time())
+    return nothing
+end
+
+@inline function _server_shutting_down(server::Server)::Bool
+    state = _server_state(server)
+    return state == _ServerState.CLOSING || state == _ServerState.CLOSED
+end
+
+function _configured_port(address::AbstractString)::Int
+    try
+        _, port = HostResolvers.split_host_port(address)
+        return port
+    catch
+        return 0
+    end
+end
+
 function server_addr(server::Server)::String
     lock(server.lock)
     try
@@ -110,66 +141,205 @@ function server_addr(server::Server)::String
     end
 end
 
-function _track_conn!(server::Server, conn::TCP.Conn, task::Task)
+function port(server::Server)::Int
     lock(server.lock)
     try
-        push!(server.active_conns, conn)
-        push!(server.active_tasks, task)
+        if server.bound_port != 0
+            return server.bound_port
+        end
+        return _configured_port(server.address)
+    finally
+        unlock(server.lock)
+    end
+end
+
+function Base.isopen(server::Server)::Bool
+    state = _server_state(server)
+    state == _ServerState.CLOSED && return false
+    lock(server.lock)
+    try
+        listener = server.listener
+        listener === nothing && return state == _ServerState.INITIAL
+        return state == _ServerState.RUNNING
+    finally
+        unlock(server.lock)
+    end
+end
+
+function Base.wait(server::Server)::Nothing
+    task = nothing
+    lock(server.lock)
+    try
+        task = server.serve_task
+    finally
+        unlock(server.lock)
+    end
+    task === nothing && return nothing
+    wait(task::Task)
+    return nothing
+end
+
+function _listener_bound_address(listener::TCP.Listener)::Tuple{String, Int}
+    laddr = TCP.addr(listener)
+    laddr === nothing && return ("", 0)
+    return (sprint(show, laddr), Int(laddr.port))
+end
+
+function _listen_address(server::Server)::String
+    !server.listenany && return server.address
+    host, _ = HostResolvers.split_host_port(server.address)
+    return HostResolvers.join_host_port(host, 0)
+end
+
+function _track_conn!(server::Server, tracked::_ServerConn)::Nothing
+    lock(server.lock)
+    try
+        push!(server.active_conns, tracked)
     finally
         unlock(server.lock)
     end
     return nothing
 end
 
-function _untrack_conn!(server::Server, conn::TCP.Conn, task::Task)
+function _untrack_conn!(server::Server, tracked::_ServerConn)::Nothing
     lock(server.lock)
     try
-        delete!(server.active_conns, conn)
-        delete!(server.active_tasks, task)
+        delete!(server.active_conns, tracked)
     finally
         unlock(server.lock)
     end
     return nothing
 end
 
-function _set_read_deadline_for_header!(server::Server, conn::TCP.Conn)
+function _server_conns(server::Server)::Vector{_ServerConn}
+    tracked = _ServerConn[]
+    lock(server.lock)
+    try
+        append!(tracked, server.active_conns)
+    finally
+        unlock(server.lock)
+    end
+    return tracked
+end
+
+function _close_server_conn!(tracked::_ServerConn)::Nothing
+    _set_conn_state!(tracked, _ConnState.CLOSED)
+    try
+        TCP.close!(tracked.conn)
+    catch
+    end
+    return nothing
+end
+
+function _close_listener!(server::Server)::Nothing
+    listener = nothing
+    lock(server.lock)
+    try
+        listener = server.listener
+        server.listener = nothing
+    finally
+        unlock(server.lock)
+    end
+    listener === nothing && return nothing
+    try
+        TCP.close!(listener::TCP.Listener)
+    catch
+    end
+    return nothing
+end
+
+function _wait_serve_task!(server::Server)::Nothing
+    task = nothing
+    lock(server.lock)
+    try
+        task = server.serve_task
+    finally
+        unlock(server.lock)
+    end
+    task === nothing && return nothing
+    wait(task::Task)
+    return nothing
+end
+
+function _close_idle_conns!(server::Server)::Bool
+    tracked_conns = _server_conns(server)
+    isempty(tracked_conns) && return true
+    now_sec = floor(Int64, time())
+    for tracked in tracked_conns
+        state = _conn_state(tracked)
+        if state == _ConnState.IDLE
+            _close_server_conn!(tracked)
+            continue
+        end
+        if state == _ConnState.NEW
+            state_sec = @atomic :acquire tracked.state_unix_sec
+            if state_sec != 0 && state_sec < now_sec - 5
+                _close_server_conn!(tracked)
+            end
+        end
+    end
+    return isempty(_server_conns(server))
+end
+
+function forceclose(server::Server)::Nothing
+    _set_server_state!(server, _ServerState.CLOSING)
+    _close_listener!(server)
+    for tracked in _server_conns(server)
+        _close_server_conn!(tracked)
+    end
+    _wait_serve_task!(server)
+    _set_server_state!(server, _ServerState.CLOSED)
+    return nothing
+end
+
+function Base.close(server::Server)::Nothing
+    state = _server_state(server)
+    state == _ServerState.CLOSED && return nothing
+    _set_server_state!(server, _ServerState.CLOSING)
+    _close_listener!(server)
+    _wait_serve_task!(server)
+    poll_s = 0.001
+    while true
+        _close_idle_conns!(server) && break
+        sleep(poll_s)
+        poll_s < 0.5 && (poll_s = min(poll_s * 2, 0.5))
+    end
+    _set_server_state!(server, _ServerState.CLOSED)
+    return nothing
+end
+
+function _set_read_deadline_for_header!(server::Server, conn::TCP.Conn)::Nothing
     timeout = server.read_header_timeout_ns > 0 ? server.read_header_timeout_ns : server.read_timeout_ns
     timeout <= 0 && return nothing
     TCP.set_read_deadline!(conn, Int64(time_ns()) + timeout)
     return nothing
 end
 
-function _set_idle_deadline!(server::Server, conn::TCP.Conn)
-    timeout = server.idle_timeout_ns
+function _set_read_deadline_for_body!(server::Server, conn::TCP.Conn)::Nothing
+    timeout = server.read_timeout_ns
     timeout <= 0 && return nothing
     TCP.set_read_deadline!(conn, Int64(time_ns()) + timeout)
     return nothing
 end
 
-function _set_write_deadline!(server::Server, conn::TCP.Conn)
+function _set_idle_deadline!(server::Server, conn::TCP.Conn)::Nothing
+    timeout = server.idle_timeout_ns > 0 ? server.idle_timeout_ns : server.read_timeout_ns
+    timeout <= 0 && return nothing
+    TCP.set_read_deadline!(conn, Int64(time_ns()) + timeout)
+    return nothing
+end
+
+function _set_write_deadline!(server::Server, conn::TCP.Conn)::Nothing
     timeout = server.write_timeout_ns
     timeout <= 0 && return nothing
     TCP.set_write_deadline!(conn, Int64(time_ns()) + timeout)
     return nothing
 end
 
-function _clear_deadlines!(conn::TCP.Conn)
+function _clear_deadlines!(conn::TCP.Conn)::Nothing
     try
         TCP.set_deadline!(conn, Int64(0))
     catch
-    end
-    return nothing
-end
-
-function _write_all_response!(conn::TCP.Conn, response::Response)
-    io = IOBuffer()
-    write_response!(io, response)
-    payload = take!(io)
-    total = 0
-    while total < length(payload)
-        n = write(conn, payload[(total + 1):end])
-        n > 0 || throw(ProtocolError("server write made no progress"))
-        total += n
     end
     return nothing
 end
@@ -197,14 +367,25 @@ end
     return false
 end
 
-function _serve_conn!(server::Server, conn::TCP.Conn)
-    task = current_task()
-    _track_conn!(server, conn, task)
-    reader = _ConnReader(conn)
+function _write_all_response!(conn::TCP.Conn, response::Response)::Nothing
+    io = IOBuffer()
+    write_response!(io, response)
+    bytes = take!(io)
+    total = 0
+    while total < length(bytes)
+        n = write(conn, bytes[(total + 1):end])
+        n > 0 || throw(ProtocolError("server write made no progress"))
+        total += n
+    end
+    return nothing
+end
+
+function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
+    reader = _ConnReader(tracked.conn)
     try
         while true
             _server_shutting_down(server) && return nothing
-            _set_read_deadline_for_header!(server, conn)
+            _set_read_deadline_for_header!(server, tracked.conn)
             request = try
                 read_request(reader; max_header_bytes = server.max_header_bytes)
             catch err
@@ -213,12 +394,12 @@ function _serve_conn!(server::Server, conn::TCP.Conn)
                 end
                 rethrow(err)
             end
-            _clear_deadlines!(conn)
+            _set_conn_state!(tracked, _ConnState.ACTIVE)
+            _set_read_deadline_for_body!(server, tracked.conn)
             response = server.handler(request)
             response isa Response || throw(ProtocolError("server handler must return HTTP.Response"))
             response_obj = response::Response
             response_obj.request = request
-            # Preserve HTTP/1 safety: unread request bodies disable keep-alive reuse.
             if !_request_body_fully_consumed(request)
                 response_obj.close = true
                 try
@@ -226,52 +407,36 @@ function _serve_conn!(server::Server, conn::TCP.Conn)
                 catch
                 end
             end
-            _set_write_deadline!(server, conn)
-            _write_all_response!(conn, response_obj)
-            _clear_deadlines!(conn)
+            _set_write_deadline!(server, tracked.conn)
+            _write_all_response!(tracked.conn, response_obj)
+            _clear_deadlines!(tracked.conn)
+            _server_shutting_down(server) && return nothing
             if _request_wants_close(request) || _response_wants_close(response_obj)
                 return nothing
             end
-            _set_idle_deadline!(server, conn)
+            _set_conn_state!(tracked, _ConnState.IDLE)
+            _set_idle_deadline!(server, tracked.conn)
         end
     finally
-        _clear_deadlines!(conn)
-        try
-            TCP.close!(conn)
-        catch
-        end
-        _untrack_conn!(server, conn, task)
+        _clear_deadlines!(tracked.conn)
+        _close_server_conn!(tracked)
+        _untrack_conn!(server, tracked)
     end
     return nothing
 end
 
-"""
-    serve!(server, listener)
-
-Serve requests from an existing listener until shutdown.
-
-Each accepted connection is handed to a background task that processes
-sequential HTTP/1 requests on that socket until the peer closes, an error
-occurs, or shutdown is requested.
-"""
 function serve!(server::Server, listener::TCP.Listener)
     _server_shutting_down(server) && throw(ProtocolError("server is shutting down"))
     lock(server.lock)
     try
         server.listener = listener
-        laddr = TCP.addr(listener)
-        if laddr isa TCP.SocketAddrV4
-            server.bound_address = HostResolvers.join_host_port("127.0.0.1", Int((laddr::TCP.SocketAddrV4).port))
-        elseif laddr isa TCP.SocketAddrV6
-            server.bound_address = HostResolvers.join_host_port("::1", Int((laddr::TCP.SocketAddrV6).port))
-        end
+        server.bound_address, server.bound_port = _listener_bound_address(listener)
     finally
         unlock(server.lock)
     end
+    _set_server_state!(server, _ServerState.RUNNING)
     while true
-        if _server_shutting_down(server)
-            return nothing
-        end
+        _server_shutting_down(server) && return nothing
         conn = try
             TCP.accept!(listener)
         catch err
@@ -283,27 +448,20 @@ function serve!(server::Server, listener::TCP.Listener)
             end
             rethrow(err)
         end
-        conn_task = errormonitor(Threads.@spawn _serve_conn!(server, conn))
-        lock(server.lock)
-        try
-            push!(server.active_tasks, conn_task)
-        finally
-            unlock(server.lock)
-        end
+        tracked = _ServerConn(conn, _ConnState.NEW, floor(Int64, time()))
+        _track_conn!(server, tracked)
+        errormonitor(Threads.@spawn _serve_conn!(server, tracked))
     end
     return nothing
 end
 
-"""
-    listen_and_serve!(server)
-
-Listen and then serve using `server.network` and `server.address`.
-
-Returns `nothing` when serving stops. Listener cleanup is performed in a
-`finally` block so shutdown paths do not leak the bound socket.
-"""
 function listen_and_serve!(server::Server)
-    listener = TCP.listen(server.network, server.address; backlog = 128)
+    listener = TCP.listen(
+        server.network,
+        _listen_address(server);
+        backlog = server.backlog,
+        reuseaddr = server.reuseaddr,
+    )
     try
         serve!(server, listener)
     finally
@@ -315,14 +473,10 @@ function listen_and_serve!(server::Server)
     return nothing
 end
 
-"""
-    start!(server)
-
-Start `listen_and_serve!` on a background task.
-
-Returns the spawned `Task`, which is also stored on `server.serve_task`.
-"""
 function start!(server::Server)::Task
+    state = _server_state(server)
+    state == _ServerState.CLOSED && throw(ProtocolError("closed servers cannot be restarted"))
+    state == _ServerState.RUNNING && throw(ProtocolError("server is already running"))
     task = errormonitor(Threads.@spawn listen_and_serve!(server))
     lock(server.lock)
     try
@@ -331,94 +485,4 @@ function start!(server::Server)::Task
         unlock(server.lock)
     end
     return task
-end
-
-function _close_listener!(server::Server)
-    listener = nothing
-    lock(server.lock)
-    try
-        listener = server.listener
-        server.listener = nothing
-    finally
-        unlock(server.lock)
-    end
-    if listener !== nothing
-        _close_listener_with_timeout!(listener::TCP.Listener)
-    end
-    return nothing
-end
-
-function _close_listener_with_timeout!(listener::TCP.Listener; timeout_s::Float64 = 1.0)
-    task = errormonitor(Threads.@spawn begin
-        try
-            TCP.close!(listener)
-        catch
-        end
-        return nothing
-    end)
-    _ = EventLoops.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
-    return nothing
-end
-
-function _force_close_conn_with_timeout!(conn::TCP.Conn; timeout_s::Float64 = 1.0)
-    task = errormonitor(Threads.@spawn begin
-        try
-            TCP.close!(conn)
-        catch
-        end
-        return nothing
-    end)
-    _ = EventLoops.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
-    return nothing
-end
-
-"""
-    shutdown!(server; force=false, timeout_s=5.0)
-
-Request graceful shutdown, optionally force-closing active connections.
-
-Arguments:
-- `force`: when `true`, close active connections after the listener stops
-- `timeout_s`: best-effort waiting budget for listener and connection tasks
-
-Returns `nothing`. Shutdown suppresses close errors so one stuck connection does
-not prevent the rest of the server from unwinding.
-"""
-function shutdown!(server::Server; force::Bool = false, timeout_s::Float64 = 5.0)
-    @atomic :release server.shutting_down = true
-    _close_listener!(server)
-    task = nothing
-    lock(server.lock)
-    try
-        task = server.serve_task
-    finally
-        unlock(server.lock)
-    end
-    if task !== nothing
-        _ = EventLoops.timedwait(() -> istaskdone(task::Task), timeout_s; pollint = 0.001)
-    end
-    conns = TCP.Conn[]
-    tasks = Task[]
-    lock(server.lock)
-    try
-        append!(conns, server.active_conns)
-        append!(tasks, server.active_tasks)
-    finally
-        unlock(server.lock)
-    end
-    if force
-        close_deadline = time() + timeout_s
-        for conn in conns
-            remaining = close_deadline - time()
-            remaining <= 0 && break
-            _force_close_conn_with_timeout!(conn; timeout_s = min(remaining, 1.0))
-        end
-    end
-    deadline = time() + timeout_s
-    for task_item in tasks
-        remaining = deadline - time()
-        remaining <= 0 && break
-        _ = EventLoops.timedwait(() -> istaskdone(task_item), remaining; pollint = 0.001)
-    end
-    return nothing
 end

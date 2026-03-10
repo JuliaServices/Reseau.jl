@@ -125,7 +125,7 @@ end
         @test String(_read_all_integration(h1_response.body)) == "h1:/auto-h1"
     finally
         close(client)
-        HT.shutdown!(h1_server; force = true)
+        HT.forceclose(h1_server)
         @test timedwait(() -> istaskdone(h1_task), 3.0; pollint = 0.001) != :timed_out
     end
 

@@ -528,7 +528,7 @@ function _pc_run_http_server_workload!()
         read_n == 2 || throw(ArgumentError("HTTP server precompile workload expected two-byte response body"))
     finally
         try
-            HT.shutdown!(server; force = true)
+            HT.forceclose(server)
         catch
         end
         try
@@ -734,7 +734,7 @@ function _pc_run_http_unified_workload!()
         catch
         end
         try
-            HT.shutdown!(h1_server; force = true)
+            HT.forceclose(h1_server)
         catch
         end
         _ = EL.timedwait(() -> istaskdone(h1_task), 2.0; pollint = 0.001)

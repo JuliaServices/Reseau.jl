@@ -26,14 +26,8 @@ function _wait_server_addr(server::HT.Server; timeout_s::Float64 = 5.0)::String
     error("timed out waiting for server address")
 end
 
-function _wait_task_done(task::Task; timeout_s::Float64 = 5.0)
-    status = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
-    status == :timed_out && error("timed out waiting for task")
-    return fetch(task)
-end
-
 function _run_with_timeout(f::F; timeout_s::Float64 = 5.0, label::String = "operation") where {F <: Function}
-    task = errormonitor(Threads.@spawn f())
+    task = Threads.@spawn f()
     status = timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
     status == :timed_out && error("timed out waiting for $label")
     return fetch(task)
@@ -62,9 +56,11 @@ end
             return response
         end,
     )
-    task = HT.start!(server)
+    HT.start!(server)
     address = _wait_server_addr(server)
     try
+        @test isopen(server)
+        @test HT.port(server) > 0
         events = HT.SSEEvent[]
         response = HT.get("http://$(address)/"; sse_callback = event -> push!(events, event))
         @test response.status == 200
@@ -79,8 +75,9 @@ end
         @test events[2].retry == 2500
         @test events[3].data == "multi\nline\ndata"
     finally
-        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
-        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+        @test !isopen(server)
     end
 end
 
@@ -95,10 +92,12 @@ end
         end,
         idle_timeout_ns = 1_000_000_000,
     )
-    task = HT.start!(server)
+    HT.start!(server)
     address = _wait_server_addr(server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try
+        @test isopen(server)
+        @test HT.port(server) > 0
         response1 = HT.get!(client, address, "/one")
         @test response1.status_code == 200
         @test String(_read_all_server_bytes(response1.body)) == "echo:/one"
@@ -108,8 +107,9 @@ end
         @test seen_targets == ["/one", "/two"]
     finally
         close(client.transport)
-        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
-        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
+        _run_with_timeout(() -> close(server); label = "server close")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+        @test !isopen(server)
     end
 end
 
@@ -121,15 +121,16 @@ end
             return HT.Response(200; reason = "OK", body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2)
         end,
     )
-    task = HT.start!(server)
+    HT.start!(server)
     address = _wait_server_addr(server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try
         response = _run_with_timeout(() -> HT.get!(client, address, "/live"); label = "live request")
         @test response.status_code == 200
         @test String(_read_all_server_bytes(response.body)) == "ok"
-        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
-        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
+        _run_with_timeout(() -> close(server); label = "server close")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+        @test !isopen(server)
         # Bound the post-shutdown probe so Windows CI cannot hang indefinitely
         # if a stale keep-alive conn does not surface close immediately.
         probe = HT.Request("GET", "/after-shutdown"; host = address, body = HT.EmptyBody(), content_length = 0)
@@ -148,7 +149,7 @@ end
             return HT.Response(200; reason = "OK", body = HT.BytesBody(payload), content_length = length(payload))
         end,
     )
-    task = HT.start!(server)
+    HT.start!(server)
     address = _wait_server_addr(server)
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try
@@ -164,7 +165,8 @@ end
         @test String(_read_all_server_bytes(response2.body)) == "ok:/two"
     finally
         close(client.transport)
-        _run_with_timeout(() -> HT.shutdown!(server; force = true); label = "server shutdown")
-        _run_with_timeout(() -> _wait_task_done(task); label = "server task completion")
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+        @test !isopen(server)
     end
 end
