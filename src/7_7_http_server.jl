@@ -27,6 +27,14 @@ end
     CLOSED = 4
 end
 
+@enumx _ServerStreamWriteMode::UInt8 begin
+    UNDECIDED = 0
+    NONE = 1
+    FIXED = 2
+    CHUNKED = 3
+    IDENTITY = 4
+end
+
 mutable struct _ServerConn
     conn::TCP.Conn
     @atomic state::_ConnState.T
@@ -40,6 +48,7 @@ mutable struct Server{F}
     network::String
     address::String
     handler::F
+    stream::Bool
     read_timeout_ns::Int64
     read_header_timeout_ns::Int64
     write_timeout_ns::Int64
@@ -61,6 +70,7 @@ function Server(;
         network::AbstractString = "tcp",
         address::AbstractString = "127.0.0.1:0",
         handler::F,
+        stream::Bool = false,
         read_timeout_ns::Integer = Int64(0),
         read_header_timeout_ns::Integer = Int64(0),
         write_timeout_ns::Integer = Int64(0),
@@ -80,6 +90,7 @@ function Server(;
         String(network),
         String(address),
         handler,
+        stream,
         Int64(read_timeout_ns),
         Int64(read_header_timeout_ns),
         Int64(write_timeout_ns),
@@ -95,6 +106,40 @@ function Server(;
         nothing,
         0,
         _ServerState.INITIAL,
+    )
+end
+
+mutable struct ServerStream <: IO
+    server::Server
+    tracked::_ServerConn
+    request::Request
+    response::Response
+    @atomic read_closed::Bool
+    @atomic response_started::Bool
+    @atomic write_closed::Bool
+    ignore_writes::Bool
+    write_mode::_ServerStreamWriteMode.T
+    written_bytes::Int64
+end
+
+function ServerStream(server::Server, tracked::_ServerConn, request::Request)
+    response = Response(
+        200;
+        proto_major = Int(request.proto_major),
+        proto_minor = Int(request.proto_minor),
+        request = request,
+    )
+    return ServerStream(
+        server,
+        tracked,
+        request,
+        response,
+        false,
+        false,
+        false,
+        false,
+        _ServerStreamWriteMode.UNDECIDED,
+        Int64(0),
     )
 end
 
@@ -380,6 +425,228 @@ function _write_all_response!(conn::TCP.Conn, response::Response)::Nothing
     return nothing
 end
 
+function _server_stream_allows_body(stream::ServerStream)::Bool
+    _body_allowed_for_status(stream.response.status_code) || return false
+    stream.request.method == "HEAD" && return false
+    return true
+end
+
+function _server_stream_write_mode(stream::ServerStream)::_ServerStreamWriteMode.T
+    allows_body = _server_stream_allows_body(stream)
+    allows_body || return _ServerStreamWriteMode.NONE
+    has_header_token(stream.response.headers, "Transfer-Encoding", "chunked") && return _ServerStreamWriteMode.CHUNKED
+    if has_header(stream.response.headers, "Content-Length") || stream.response.content_length >= 0
+        return _ServerStreamWriteMode.FIXED
+    end
+    if stream.response.proto_major == UInt8(1) && stream.response.proto_minor == UInt8(0)
+        stream.response.close = true
+        return _ServerStreamWriteMode.IDENTITY
+    end
+    return _ServerStreamWriteMode.CHUNKED
+end
+
+function _write_server_stream_bytes!(stream::ServerStream, bytes::AbstractVector{UInt8})::Nothing
+    isempty(bytes) && return nothing
+    _set_write_deadline!(stream.server, stream.tracked.conn)
+    total = 0
+    while total < length(bytes)
+        n = write(stream.tracked.conn, bytes[(total + 1):end])
+        n > 0 || throw(ProtocolError("server stream write made no progress"))
+        total += n
+    end
+    return nothing
+end
+
+function _write_server_stream_head!(stream::ServerStream)::Nothing
+    headers = copy(stream.response.headers)
+    response_close = stream.response.close || _should_close_connection(headers, stream.response.proto_major, stream.response.proto_minor)
+    response_close && set_header!(headers, "Connection", "close")
+    mode = _server_stream_write_mode(stream)
+    stream.write_mode = mode
+    if mode == _ServerStreamWriteMode.NONE
+        delete_header!(headers, "Content-Length")
+        delete_header!(headers, "Transfer-Encoding")
+    elseif mode == _ServerStreamWriteMode.FIXED
+        if stream.response.content_length >= 0
+            set_header!(headers, "Content-Length", string(stream.response.content_length))
+        end
+    elseif mode == _ServerStreamWriteMode.CHUNKED
+        delete_header!(headers, "Content-Length")
+        set_header!(headers, "Transfer-Encoding", "chunked")
+        _prepare_trailer_header!(headers, stream.response.trailers)
+    else
+        delete_header!(headers, "Content-Length")
+        delete_header!(headers, "Transfer-Encoding")
+    end
+    io = IOBuffer()
+    _write_status_line!(io, stream.response)
+    _write_headers!(io, headers)
+    write(io, "\r\n")
+    _write_server_stream_bytes!(stream, take!(io))
+    @atomic :release stream.response_started = true
+    return nothing
+end
+
+function startread(stream::ServerStream)::Request
+    return stream.request
+end
+
+function Base.isopen(stream::ServerStream)::Bool
+    return !(@atomic :acquire stream.read_closed) || !(@atomic :acquire stream.write_closed)
+end
+
+function Base.eof(stream::ServerStream)::Bool
+    return _request_body_fully_consumed(stream.request)
+end
+
+function Base.readbytes!(stream::ServerStream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
+    nb >= 0 || throw(ArgumentError("nb must be >= 0"))
+    nb == 0 && return 0
+    nb <= length(dest) || throw(ArgumentError("nb must be <= length(dest)"))
+    buf = Vector{UInt8}(undef, nb)
+    n = body_read!(stream.request.body, buf)
+    n == 0 && (@atomic :release stream.read_closed = true)
+    n > 0 && copyto!(dest, 1, buf, 1, n)
+    _request_body_fully_consumed(stream.request) && (@atomic :release stream.read_closed = true)
+    return n
+end
+
+function Base.read(stream::ServerStream)::Vector{UInt8}
+    out = UInt8[]
+    buf = Vector{UInt8}(undef, 16 * 1024)
+    while true
+        n = body_read!(stream.request.body, buf)
+        n == 0 && break
+        append!(out, @view(buf[1:n]))
+    end
+    @atomic :release stream.read_closed = true
+    return out
+end
+
+function Base.read(stream::ServerStream, ::Type{String})::String
+    return String(read(stream))
+end
+
+function setstatus(stream::ServerStream, status::Integer)::Nothing
+    (@atomic :acquire stream.response_started) && throw(ArgumentError("cannot change status after response writing has started"))
+    stream.response.status_code = Int(status)
+    return nothing
+end
+
+function setheader(stream::ServerStream, key::AbstractString, value::AbstractString)::Nothing
+    (@atomic :acquire stream.response_started) && throw(ArgumentError("cannot change headers after response writing has started"))
+    set_header!(stream.response.headers, key, value)
+    return nothing
+end
+
+function setheader(stream::ServerStream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
+    return setheader(stream, header.first, header.second)
+end
+
+function addtrailer(stream::ServerStream, trailers::Headers)::Nothing
+    for key in header_keys(trailers)
+        values = get_headers(trailers, key)
+        for value in values
+            add_header!(stream.response.trailers, key, value)
+        end
+    end
+    return nothing
+end
+
+function addtrailer(stream::ServerStream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
+    add_header!(stream.response.trailers, header.first, header.second)
+    return nothing
+end
+
+function addtrailer(stream::ServerStream, headers::AbstractVector{<:Pair})::Nothing
+    for header in headers
+        addtrailer(stream, header)
+    end
+    return nothing
+end
+
+function startwrite(stream::ServerStream)::Response
+    started = @atomic :acquire stream.response_started
+    started && return stream.response
+    !_server_stream_allows_body(stream) && (stream.ignore_writes = true)
+    _write_server_stream_head!(stream)
+    return stream.response
+end
+
+function _write_server_stream_data!(stream::ServerStream, data::AbstractVector{UInt8})::Int
+    (@atomic :acquire stream.write_closed) && throw(ArgumentError("response writes are closed"))
+    startwrite(stream)
+    stream.ignore_writes && return length(data)
+    if stream.write_mode == _ServerStreamWriteMode.CHUNKED
+        io = IOBuffer()
+        print(io, string(length(data), base = 16), "\r\n")
+        write(io, data)
+        write(io, "\r\n")
+        _write_server_stream_bytes!(stream, take!(io))
+    else
+        _write_server_stream_bytes!(stream, data)
+    end
+    stream.written_bytes += length(data)
+    return length(data)
+end
+
+function Base.write(stream::ServerStream, data::Vector{UInt8})::Int
+    return _write_server_stream_data!(stream, data)
+end
+
+function Base.write(stream::ServerStream, data::AbstractVector{UInt8})::Int
+    return _write_server_stream_data!(stream, Vector{UInt8}(data))
+end
+
+function Base.write(stream::ServerStream, data::Union{String, SubString{String}})::Int
+    return write(stream, Vector{UInt8}(codeunits(String(data))))
+end
+
+function closewrite(stream::ServerStream)::Nothing
+    was_closed = @atomic :acquire stream.write_closed
+    was_closed && return nothing
+    startwrite(stream)
+    if stream.write_mode == _ServerStreamWriteMode.CHUNKED
+        io = IOBuffer()
+        write(io, "0\r\n")
+        _write_headers!(io, stream.response.trailers)
+        write(io, "\r\n")
+        _write_server_stream_bytes!(stream, take!(io))
+    elseif stream.write_mode == _ServerStreamWriteMode.FIXED
+        if stream.response.content_length >= 0 && stream.written_bytes != stream.response.content_length
+            throw(ProtocolError("response body bytes did not match Content-Length"))
+        end
+    end
+    @atomic :release stream.write_closed = true
+    return nothing
+end
+
+function closeread(stream::ServerStream)::Response
+    already_closed = @atomic :acquire stream.read_closed
+    already_closed && return stream.response
+    if !_request_body_fully_consumed(stream.request)
+        stream.response.close = true
+        try
+            body_close!(stream.request.body)
+        catch
+        end
+    end
+    @atomic :release stream.read_closed = true
+    return stream.response
+end
+
+function Base.close(stream::ServerStream)::Nothing
+    try
+        closewrite(stream)
+    catch
+    end
+    try
+        closeread(stream)
+    catch
+    end
+    return nothing
+end
+
 function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
     reader = _ConnReader(tracked.conn)
     try
@@ -396,23 +663,53 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
             end
             _set_conn_state!(tracked, _ConnState.ACTIVE)
             _set_read_deadline_for_body!(server, tracked.conn)
-            response = server.handler(request)
-            response isa Response || throw(ProtocolError("server handler must return HTTP.Response"))
-            response_obj = response::Response
-            response_obj.request = request
-            if !_request_body_fully_consumed(request)
-                response_obj.close = true
+            if server.stream
+                stream = ServerStream(server, tracked, request)
                 try
-                    body_close!(request.body)
+                    server.handler(stream)
+                    if !(@atomic :acquire stream.write_closed)
+                        closewrite(stream)
+                    end
+                    closeread(stream)
+                    _clear_deadlines!(tracked.conn)
+                    _server_shutting_down(server) && return nothing
+                    if _request_wants_close(request) || _response_wants_close(stream.response)
+                        return nothing
+                    end
                 catch
+                    if !(@atomic :acquire stream.response_started)
+                        try
+                            setstatus(stream, 500)
+                            startwrite(stream)
+                        catch
+                        end
+                    end
+                    try
+                        stream.response.close = true
+                        close(stream)
+                    catch
+                    end
+                    rethrow()
                 end
-            end
-            _set_write_deadline!(server, tracked.conn)
-            _write_all_response!(tracked.conn, response_obj)
-            _clear_deadlines!(tracked.conn)
-            _server_shutting_down(server) && return nothing
-            if _request_wants_close(request) || _response_wants_close(response_obj)
-                return nothing
+            else
+                response = server.handler(request)
+                response isa Response || throw(ProtocolError("server handler must return HTTP.Response"))
+                response_obj = response::Response
+                response_obj.request = request
+                if !_request_body_fully_consumed(request)
+                    response_obj.close = true
+                    try
+                        body_close!(request.body)
+                    catch
+                    end
+                end
+                _set_write_deadline!(server, tracked.conn)
+                _write_all_response!(tracked.conn, response_obj)
+                _clear_deadlines!(tracked.conn)
+                _server_shutting_down(server) && return nothing
+                if _request_wants_close(request) || _response_wants_close(response_obj)
+                    return nothing
+                end
             end
             _set_conn_state!(tracked, _ConnState.IDLE)
             _set_idle_deadline!(server, tracked.conn)

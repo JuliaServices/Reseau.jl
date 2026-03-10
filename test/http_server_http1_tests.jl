@@ -1,5 +1,6 @@
 using Test
 using Reseau
+import Sockets
 
 const HT = Reseau.HTTP
 
@@ -110,6 +111,71 @@ end
         _run_with_timeout(() -> close(server); label = "server close")
         _run_with_timeout(() -> wait(server); label = "server task completion")
         @test !isopen(server)
+    end
+end
+
+@testset "HTTP server stream handler request and response flow" begin
+    server = HT.Server(
+        address = "127.0.0.1:0",
+        stream = true,
+        handler = stream -> begin
+            _ = HT.startread(stream)
+            body = String(read(stream))
+            HT.setstatus(stream, 200)
+            HT.setheader(stream, "Content-Type", "text/plain")
+            HT.startwrite(stream)
+            write(stream, isempty(body) ? "ping" : body)
+            return nothing
+        end,
+    )
+    HT.start!(server)
+    address = _wait_server_addr(server)
+    try
+        resp1 = HT.get("http://$(address)/")
+        @test resp1.status == 200
+        @test String(resp1.body) == "ping"
+
+        resp2 = HT.post("http://$(address)/"; body = "echo")
+        @test resp2.status == 200
+        @test String(resp2.body) == "echo"
+    finally
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
+@testset "HTTP server stream handler emits chunked trailers" begin
+    server = HT.Server(
+        address = "127.0.0.1:0",
+        stream = true,
+        handler = stream -> begin
+            _ = HT.startread(stream)
+            _ = read(stream)
+            HT.setstatus(stream, 200)
+            HT.startwrite(stream)
+            write(stream, "hello")
+            HT.addtrailer(stream, "X-Trailer" => "ok")
+            return nothing
+        end,
+    )
+    HT.start!(server)
+    address = _wait_server_addr(server)
+    try
+        sock = Sockets.connect("127.0.0.1", HT.port(server))
+        try
+            write(sock, "GET / HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n")
+            flush(sock)
+            raw = String(read(sock))
+            lower_raw = lowercase(raw)
+            @test occursin("transfer-encoding: chunked", lower_raw)
+            @test occursin("hello", raw)
+            @test occursin("\r\n0\r\nx-trailer: ok\r\n\r\n", lower_raw)
+        finally
+            close(sock)
+        end
+    finally
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
     end
 end
 

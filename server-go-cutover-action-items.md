@@ -31,7 +31,7 @@
   - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
   - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-002 (P0) Add the new server-side stream machinery
+### [x] ITEM-002 (P0) Add the new server-side stream machinery
 - Description: Implement a fresh server-side `HTTP.Stream`-style abstraction that allows incremental request-body reads and incremental response writes on top of the new server kernel. This is required to support HTTP.jl-style `listen`/`listen!` semantics and request-handler adaptation via `streamhandler`.
 - Desired outcome: There is a server stream type and related helpers for `startread`, `closeread`, `startwrite`, `closewrite`, `setstatus`, `setheader`, chunked response writes, and trailer emission, all implemented natively on Reseau's HTTP/1 parser/serializer/body abstractions.
 - Affected files: `src/7_7_http_server.jl`, `src/7_1_http1.jl`, `src/7_0_http_core.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`
@@ -51,6 +51,10 @@
   - Stream-mode request/response exchange works end-to-end in tests.
   - Chunked writes and trailer support have regression coverage.
   - No old dead stream/server helpers remain referenced.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
 ### [ ] ITEM-003 (P0) Expose HTTP.jl-style `listen` / `listen!` / `serve` / `serve!` APIs
 - Description: Add the top-level user-facing server APIs modeled on `HTTP.jl origin/master`, while wiring them into the new Go-inspired server kernel rather than copying HTTP.jl internals.
