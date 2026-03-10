@@ -129,7 +129,7 @@
   - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
   - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-006 (P1) Final polish, docs/precompile updates, PR, and green CI
+### [x] ITEM-006 (P1) Final polish, docs/precompile updates, PR, and green CI
 - Description: Do the final full-suite verification, update any needed docs or precompile workload references for the new server APIs, open the PR, and babysit CI until all checks are green.
 - Desired outcome: The branch is reviewable, the action-item file is fully checked off, the full local suite passes, the PR is open with a clear description, and Ubuntu/macOS/Windows CI are all green.
 - Affected files: `server-go-cutover-action-items.md`, `src/8_precompile_workload.jl`, `README.md`, `docs/` if needed, `.github` metadata only if strictly required
@@ -148,6 +148,11 @@
   - All items are checked off in this file.
   - The PR is open and all CI checks are green.
   - The branch is in a clean, reviewable state.
+- Verification evidence:
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. -e 'using Pkg; Pkg.test()'`
+  - PR: `https://github.com/JuliaServices/Reseau.jl/pull/71`
+  - CI: `https://github.com/JuliaServices/Reseau.jl/actions/runs/22920036666`
 
 ## Continuity
 
