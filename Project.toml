@@ -27,8 +27,7 @@ julia = "1.11"
 [extras]
 JuliaC = "acedd4c2-ced6-4a15-accc-2607eb759ba2"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
-Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "Libdl", "JuliaC", "Sockets"]
+test = ["Test", "Libdl", "JuliaC"]

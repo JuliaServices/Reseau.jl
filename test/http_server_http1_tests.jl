@@ -1,8 +1,10 @@
 using Test
 using Reseau
-using Sockets
 
 const HT = Reseau.HTTP
+const NC = Reseau.TCP
+const ND = Reseau.HostResolvers
+const IOP = Reseau.IOPoll
 
 function _read_all_server_bytes(body::HT.AbstractBody)::Vector{UInt8}
     out = UInt8[]
@@ -35,15 +37,33 @@ function _run_with_timeout(f::F; timeout_s::Float64 = 5.0, label::String = "oper
 end
 
 function _raw_http_request(port::Integer, request::AbstractString; settle_s::Float64 = 0.1)::String
-    sock = Sockets.connect("127.0.0.1", Int(port))
+    sock = ND.connect("tcp", "127.0.0.1:$(Int(port))")
     try
-        write(sock, request)
-        flush(sock)
+        write(sock, Vector{UInt8}(codeunits(String(request))))
         sleep(settle_s)
-        return String(readavailable(sock))
+        return _read_until_deadline(sock)
     finally
-        close(sock)
+        NC.close!(sock)
     end
+end
+
+function _read_until_deadline(conn::NC.Conn; timeout_s::Float64 = 0.05)::String
+    buf = Vector{UInt8}(undef, 1024)
+    out = UInt8[]
+    while true
+        NC.set_read_deadline!(conn, Int64(time_ns()) + round(Int64, timeout_s * 1.0e9))
+        try
+            n = read!(conn, buf)
+            n == 0 && break
+            append!(out, @view(buf[1:n]))
+        catch err
+            if err isa IOP.DeadlineExceededError || err isa EOFError
+                break
+            end
+            rethrow(err)
+        end
+    end
+    return String(out)
 end
 
 @testset "HTTP server SSE helper" begin
@@ -151,22 +171,20 @@ end
         no_target_resp = _raw_http_request(port_num, "SOMEMETHOD HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
         @test occursin("HTTP/1.1 400 Bad Request", no_target_resp)
 
-        sock = Sockets.connect("127.0.0.1", port_num)
+        sock = ND.connect("tcp", "127.0.0.1:$(port_num)")
         try
-            write(sock, "POST / HTTP/1.1\r\nHost: $(address)\r\nContent-Length: 15\r\nExpect: 100-continue\r\n\r\n")
-            flush(sock)
+            write(sock, Vector{UInt8}(codeunits("POST / HTTP/1.1\r\nHost: $(address)\r\nContent-Length: 15\r\nExpect: 100-continue\r\n\r\n")))
             sleep(0.1)
-            interim = String(readavailable(sock))
+            interim = _read_until_deadline(sock)
             @test interim == "HTTP/1.1 100 Continue\r\n\r\n"
-            write(sock, "Body of Request")
-            flush(sock)
+            write(sock, Vector{UInt8}(codeunits("Body of Request")))
             sleep(0.1)
-            final = String(readavailable(sock))
+            final = _read_until_deadline(sock)
             @test occursin("HTTP/1.1 200 OK\r\n", final)
             @test occursin("Transfer-Encoding: chunked\r\n", final)
             @test occursin("Body of Request", final)
         finally
-            close(sock)
+            NC.close!(sock)
         end
     finally
         _run_with_timeout(() -> HT.forceclose(small_header_server); label = "small header server forceclose")
@@ -189,13 +207,13 @@ end
     HT.start!(timeout_server)
     timeout_address = _wait_server_addr(timeout_server)
     try
-        sock = Sockets.connect("127.0.0.1", HT.port(timeout_server))
+        sock = ND.connect("tcp", "127.0.0.1:$(HT.port(timeout_server))")
         try
             sleep(0.4)
-            timed_out = String(readavailable(sock))
+            timed_out = _read_until_deadline(sock)
             @test occursin("HTTP/1.1 408 Request Timeout", timed_out)
         finally
-            close(sock)
+            NC.close!(sock)
         end
     finally
         _run_with_timeout(() -> HT.forceclose(timeout_server); label = "timeout server forceclose")
@@ -277,17 +295,16 @@ end
         end
     address = _wait_server_addr(server)
     try
-        sock = Sockets.connect("127.0.0.1", HT.port(server))
+        sock = ND.connect("tcp", "127.0.0.1:$(HT.port(server))")
         try
-            write(sock, "GET / HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n")
-            flush(sock)
-            raw = String(read(sock))
+            write(sock, Vector{UInt8}(codeunits("GET / HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n")))
+            raw = _read_until_deadline(sock; timeout_s = 0.2)
             lower_raw = lowercase(raw)
             @test occursin("transfer-encoding: chunked", lower_raw)
             @test occursin("hello", raw)
             @test occursin("\r\n0\r\nx-trailer: ok\r\n\r\n", lower_raw)
         finally
-            close(sock)
+            NC.close!(sock)
         end
     finally
         _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")

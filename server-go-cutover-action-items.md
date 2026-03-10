@@ -154,6 +154,105 @@
   - PR: `https://github.com/JuliaServices/Reseau.jl/pull/71`
   - CI: `https://github.com/JuliaServices/Reseau.jl/actions/runs/22920036666`
 
+### [x] ITEM-007 (P0) Remove all `Sockets` stdlib dependency and use native TCP paths in tests
+- Description: The previous final-polish pass introduced a `Sockets` stdlib dependency in `Project.toml` and rewired raw server tests in `test/http_server_http1_tests.jl` to use `Sockets.connect`. That violates the repo rewrite rules and must be removed entirely. The raw-wire server tests should use Reseau's own lower-level `TCP` and/or `HostResolvers.connect` primitives instead.
+- Desired outcome: `Project.toml` no longer mentions `Sockets`, no tests import `Sockets`, and all raw server tests exercise the same behavior using native `TCP.Conn` paths.
+- Affected files: `Project.toml`, `test/http_server_http1_tests.jl`
+- Implementation notes:
+  - Remove `Sockets` from `[extras]` and `[targets].test`.
+  - Replace `using Sockets` in `test/http_server_http1_tests.jl` with the already-available `Reseau.TCP` / `Reseau.HostResolvers` paths.
+  - Preserve the existing wire-level coverage for malformed requests, `100 Continue`, timeouts, and keep-alive shutdown; only the client connection mechanism should change.
+- Verification:
+  - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. -e 'using Pkg; Pkg.test()'`
+- Assumptions:
+  - The existing raw-wire assertions remain valid if the test client uses `TCP.Conn` directly.
+- Completion criteria:
+  - No `Sockets` import or dependency remains anywhere in the repo.
+  - The targeted server tests and `Pkg.test()` pass without `Sockets` present.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. -e 'using Pkg; Pkg.test()'`
+
+### [ ] ITEM-008 (P1) Unify client and server streaming into one shared `HTTP.Stream`
+- Description: The current cut-over left `src/7_6_http_stream.jl` and `src/7_7_http_server.jl` defining parallel `ClientStream` and `Stream` types with overlapping IO semantics and duplicated lifecycle code. The package should expose a single shared `HTTP.Stream` type used by both client-side `open` flows and server-side stream handlers.
+- Desired outcome: There is one `HTTP.Stream <: IO` type shared across client and server functionality. Client-side `HTTP.open` and server-side `listen!/serve!(...; stream=true)` both operate on this type, with constructors and helpers filling in whichever fields are relevant for that side.
+- Affected files: `src/7_6_http_stream.jl`, `src/7_7_http_server.jl`, `src/7_http.jl`, `test/http_client_tests.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`, any websocket or precompile call sites that reference stream types
+- Implementation notes:
+  - Move the single `Stream` struct definition into the shared stream file and delete the separate server-local struct plus the `ClientStream` name.
+  - Use either a small stream-kind discriminator or nullable role-specific fields inside one concrete type; prefer a direct layout over speculative abstractions.
+  - Keep the shared public IO surface (`startread`, `read`, `readbytes!`, `write`, `closewrite`, `closeread`, `close`, `isopen`, `eof`) on the unified type.
+  - Preserve server-only helpers like `setstatus`, `setheader`, and `addtrailer` on the same shared type, throwing when misused from a client-mode stream.
+- Verification:
+  - `RESEAU_TEST_ONLY=http_client_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+- Assumptions:
+  - A few extra fields that are only used on one side are acceptable if they let us delete the split types cleanly.
+- Completion criteria:
+  - `ClientStream` no longer exists.
+  - Both client and server stream tests pass using one shared `Stream` type.
+  - Duplicate stream lifecycle code has been aggressively pruned.
+
+### [ ] ITEM-009 (P0) Finish TLS server support inside the unified `Server` kernel
+- Description: The new `Server` kernel currently only owns TCP listener/connection paths. TLS servering still lives outside the cut-over in other modules, which means the original “all phases” server rewrite was not actually completed.
+- Desired outcome: The unified `Server` kernel can serve over either `TCP.Listener` or `TLS.Listener`, track `TCP.Conn` and `TLS.Conn` connections in the same lifecycle model, and keep graceful/forceful shutdown semantics coherent across both transports.
+- Affected files: `src/7_7_http_server.jl`, `src/6_tls.jl`, `test/http_integration_tests.jl`, `test/http_server_http1_tests.jl`, `src/8_precompile_workload.jl`
+- Implementation notes:
+  - Generalize the server listener/connection fields away from TCP-only assumptions to small fixed unions of `TCP`/`TLS`.
+  - Add transport helpers for accept, close, read/write deadlines, and bound-address inspection so the server kernel stops branching ad hoc on transport type.
+  - Keep the public API surface narrow: no new top-level server kwargs are required; existing-listener overloads should be enough to expose TLS serving.
+  - Preserve Go-like lifecycle semantics for graceful close vs force close across both transport types.
+- Verification:
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_websocket_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+- Assumptions:
+  - TLS should be exposed through existing-listener flows rather than broadening the high-level server keyword surface right now.
+- Completion criteria:
+  - The unified `Server` kernel can accept and serve TLS connections.
+  - Shutdown and conn tracking work for both TCP and TLS listeners.
+  - Integration tests cover the TLS path through the new server kernel.
+
+### [ ] ITEM-010 (P0) Fold HTTP/2 server handling into the unified `Server` kernel and delete `H2Server`
+- Description: HTTP/2 servering still lives in the standalone `H2Server` sidecar. That breaks the hard cut-over goal and leaves server protocol handling split across two implementations.
+- Desired outcome: The unified `Server` kernel owns HTTP/1 and HTTP/2 serving. Cleartext H2 prior-knowledge connections and TLS+ALPN `h2` connections are dispatched through the same lifecycle machinery, and the standalone `H2Server` API/code is deleted.
+- Affected files: `src/7_7_http_server.jl`, `src/7_5_http2_server.jl`, `src/7_4_http2_client.jl`, `src/7_http.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`, `src/8_precompile_workload.jl`
+- Implementation notes:
+  - Reuse the existing HTTP/2 frame/request/response machinery, but route connection ownership, shutdown, and task lifecycle through `Server`.
+  - Detect protocol at the connection boundary: ALPN-selected `h2` for TLS connections and HTTP/2 client preface for cleartext prior-knowledge connections.
+  - Update tests and precompile workloads to stop constructing `H2Server`; they should use the unified server APIs or lower-level internal helpers built on the new kernel.
+  - Delete `H2Server`, `start_h2_server!`, `shutdown_h2_server!`, and related sidecar helpers once the unified server path is working.
+- Verification:
+  - `RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+- Assumptions:
+  - The cleartext HTTP/2 server path should follow the existing prior-knowledge model already used by the client.
+- Completion criteria:
+  - `H2Server` and its sidecar lifecycle helpers are removed.
+  - HTTP/2 server tests pass against the unified server kernel.
+  - TLS+ALPN and cleartext prior-knowledge H2 both work through the new server machinery.
+
+### [ ] ITEM-011 (P1) Re-polish the PR and restore all-green CI after the corrective pass
+- Description: After the corrective work lands, rerun the full verification suite, refresh the PR summary if needed, and babysit CI back to green so the branch reflects the corrected final state rather than the premature “done” state.
+- Desired outcome: PR `#71` accurately reflects the finished server rewrite, the tracker is fully checked off again, and all CI jobs are green on the updated commits.
+- Affected files: `server-go-cutover-action-items.md`, PR metadata/body if needed
+- Implementation notes:
+  - Update completion notes as each new item lands.
+  - Re-run targeted and full verification after the final code item.
+  - Update the PR description/commentary to mention stream unification, `Sockets` removal, and unified TLS/H2 servering if the current summary is stale.
+  - Babysit Ubuntu/macOS/Windows CI until all checks are green.
+- Verification:
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `julia --project=. -e 'using Pkg; Pkg.test()'`
+  - CI checks on PR `#71`
+- Assumptions:
+  - The existing PR can remain open and be updated rather than replaced.
+- Completion criteria:
+  - All new items in this file are checked off.
+  - PR `#71` is current and all CI checks are green again.
+
 ## Continuity
 
 ```text
