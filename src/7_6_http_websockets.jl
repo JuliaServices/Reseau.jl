@@ -121,7 +121,7 @@ mutable struct WebSocket{S, C}
     codec::Conn
     maxframesize::Int
     maxfragmentation::Int
-    readchannel::Channel{Union{String, Vector{UInt8}, WebSocketError}}
+    readchannel::Channel{Union{String, Vector{UInt8}}}
     readtask::Union{Nothing, Task}
     readclosed::Bool
     writeclosed::Bool
@@ -145,7 +145,7 @@ function WebSocket(
     ) where {S, C}
     maxframesize > 0 || throw(ArgumentError("maxframesize must be > 0"))
     maxfragmentation > 0 || throw(ArgumentError("maxfragmentation must be > 0"))
-    channel = Channel{Union{String, Vector{UInt8}, WebSocketError}}(Inf)
+    channel = Channel{Union{String, Vector{UInt8}}}(Inf)
     codec = Conn(is_client = is_client)
     ws = WebSocket(
         subprotocol === nothing ? nothing : String(subprotocol),
@@ -177,12 +177,12 @@ struct _ClientHandshake
     request::Request
 end
 
-isbinary(x) = return x isa AbstractVector{UInt8}
-istext(x) = return x isa AbstractString
-opcode(x) = return isbinary(x) ? WsOpcode.BINARY : WsOpcode.TEXT
-_to_bytes(x::AbstractVector{UInt8}) = return x
-_to_bytes(x::AbstractString) = return codeunits(String(x))
-_to_bytes(x) = return codeunits(string(x))
+isbinary(x) = x isa AbstractVector{UInt8}
+istext(x) = x isa AbstractString
+opcode(x) = isbinary(x) ? WsOpcode.BINARY : WsOpcode.TEXT
+_to_bytes(x::AbstractVector{UInt8}) = x
+_to_bytes(x::AbstractString) = codeunits(String(x))
+_to_bytes(x) = codeunits(string(x))
 
 function isclosed(ws::WebSocket)::Bool
     return ws.readclosed && ws.writeclosed
@@ -215,11 +215,7 @@ function _queue_close!(ws::WebSocket, body::CloseFrameBody)::Nothing
     ws.closebody = body
     ws.readclosed = true
     if isopen(ws.readchannel)
-        try
-            put!(ws.readchannel, WebSocketError(body))
-        catch
-        end
-        close(ws.readchannel)
+        close(ws.readchannel, WebSocketError(body))
     end
     return nothing
 end
@@ -443,17 +439,13 @@ function pong(ws::WebSocket, data = UInt8[])
 end
 
 function receive(ws::WebSocket)
-    if isready(ws.readchannel)
-        msg = take!(ws.readchannel)
-        msg isa WebSocketError && throw(msg)
-        return msg
-    end
     if ws.readclosed || !isopen(ws.readchannel)
+        if isready(ws.readchannel)
+            return take!(ws.readchannel)
+        end
         throw(WebSocketError(ws.closebody === nothing ? CloseFrameBody(1006, "") : ws.closebody::CloseFrameBody))
     end
-    msg = take!(ws.readchannel)
-    msg isa WebSocketError && throw(msg)
-    return msg
+    return take!(ws.readchannel)
 end
 
 function Base.iterate(ws::WebSocket, st = nothing)
