@@ -1,5 +1,4 @@
 # Streaming HTTP client API built on top of the shared client execution path.
-export ClientStream
 export startread
 export closeread
 export open
@@ -7,7 +6,7 @@ export open
 import Base: close, closewrite, eof, isopen, open, read, readbytes!, write
 
 """
-    ClientStream <: IO
+    Stream <: IO
 
 Client-side request/response stream returned by `HTTP.open`.
 
@@ -15,31 +14,7 @@ Writes append request body bytes until response reading begins. After
 `startread(stream)`, reads consume the response body from the underlying
 connection using the same redirect/decompression machinery as `request(...)`.
 """
-mutable struct ClientStream <: IO
-    method::String
-    parsed::_URLParts
-    headers::Headers
-    client::Client
-    owns_client::Bool
-    proxy_config::ProxyConfig
-    cookies::Union{Bool, Vector{Cookie}}
-    cookiejar::Union{Nothing, CookieJar}
-    redirect::Bool
-    redirect_policy::_RedirectPolicy
-    status_exception::Bool
-    protocol::Symbol
-    decompress::Union{Nothing, Bool}
-    readtimeout::Float64
-    request_buffer::IOBuffer
-    response::Union{Nothing, Response}
-    reader::Union{Nothing, IO}
-    producer::Union{Nothing, Task}
-    @atomic started::Bool
-    @atomic write_closed::Bool
-    @atomic read_closed::Bool
-end
-
-function ClientStream(
+function Stream(
         method::AbstractString,
         parsed::_URLParts,
         headers::Headers,
@@ -56,7 +31,8 @@ function ClientStream(
         readtimeout::Real,
     )
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
-    return ClientStream(
+    return Stream(
+        _StreamSide.CLIENT,
         String(method),
         parsed,
         headers,
@@ -75,25 +51,47 @@ function ClientStream(
         nothing,
         nothing,
         nothing,
+        nothing,
+        nothing,
+        nothing,
         false,
         false,
         false,
+        false,
+        false,
+        false,
+        _ServerStreamWriteMode.UNDECIDED,
+        Int64(0),
     )
 end
 
-function _stream_response(stream::ClientStream)::Response
+@inline function _stream_is_client(stream::Stream)::Bool
+    return stream.side == _StreamSide.CLIENT
+end
+
+@inline function _stream_is_server(stream::Stream)::Bool
+    return stream.side == _StreamSide.SERVER
+end
+
+function _require_client_stream(stream::Stream)::Nothing
+    _stream_is_client(stream) && return nothing
+    throw(ArgumentError("operation is only valid for client-side HTTP streams"))
+end
+
+function _stream_response(stream::Stream)::Response
     resp = stream.response
     resp === nothing && throw(ProtocolError("response has not started yet"))
     return resp::Response
 end
 
-function _stream_reader(stream::ClientStream)::IO
+function _stream_reader(stream::Stream)::IO
     reader = stream.reader
     reader === nothing && throw(ProtocolError("response body reader is not available"))
     return reader::IO
 end
 
-function _finish_stream_read!(stream::ClientStream; suppress_producer_errors::Bool)::Response
+function _client_finish_stream_read!(stream::Stream; suppress_producer_errors::Bool)::Response
+    _require_client_stream(stream)
     was_closed = @atomic :acquire stream.read_closed
     was_closed && return _stream_response(stream)
     @atomic :release stream.read_closed = true
@@ -121,7 +119,8 @@ function _finish_stream_read!(stream::ClientStream; suppress_producer_errors::Bo
     return _stream_response(stream)
 end
 
-function _start_stream_read!(stream::ClientStream)::Response
+function _client_start_stream_read!(stream::Stream)::Response
+    _require_client_stream(stream)
     started = @atomic :acquire stream.started
     started && return _stream_response(stream)
     @atomic :release stream.started = true
@@ -176,55 +175,88 @@ response metadata for `stream` without buffering the response body.
 Subsequent reads on `stream` consume the response body. Repeated calls return
 the same response object.
 """
-function startread(stream::ClientStream)::Response
-    return _start_stream_read!(stream)
+function startread(stream::Stream)
+    if _stream_is_client(stream)
+        return _client_start_stream_read!(stream)
+    end
+    return _server_startread(stream)
 end
 
-function isopen(stream::ClientStream)::Bool
-    return !(@atomic :acquire stream.read_closed) || !(@atomic :acquire stream.write_closed)
+function isopen(stream::Stream)::Bool
+    if _stream_is_client(stream)
+        return !(@atomic :acquire stream.read_closed) || !(@atomic :acquire stream.write_closed)
+    end
+    return _server_isopen(stream)
 end
 
-function write(stream::ClientStream, data::AbstractVector{UInt8})::Int
-    (@atomic :acquire stream.started) && throw(ArgumentError("cannot write request body after response reading has started"))
-    (@atomic :acquire stream.write_closed) && throw(ArgumentError("request body writes are closed"))
-    return write(stream.request_buffer, data)
+function write(stream::Stream, data::StridedVector{UInt8})::Int
+    if _stream_is_client(stream)
+        (@atomic :acquire stream.started) && throw(ArgumentError("cannot write request body after response reading has started"))
+        (@atomic :acquire stream.write_closed) && throw(ArgumentError("request body writes are closed"))
+        return write(stream.request_buffer, data)
+    end
+    return _server_write(stream, data)
 end
 
-function write(stream::ClientStream, data::Union{String, SubString{String}})::Int
-    (@atomic :acquire stream.started) && throw(ArgumentError("cannot write request body after response reading has started"))
-    (@atomic :acquire stream.write_closed) && throw(ArgumentError("request body writes are closed"))
-    return write(stream.request_buffer, data)
+function write(stream::Stream, data::AbstractVector{UInt8})::Int
+    if _stream_is_client(stream)
+        (@atomic :acquire stream.started) && throw(ArgumentError("cannot write request body after response reading has started"))
+        (@atomic :acquire stream.write_closed) && throw(ArgumentError("request body writes are closed"))
+        return write(stream.request_buffer, Vector{UInt8}(data))
+    end
+    return _server_write(stream, data)
 end
 
-function closewrite(stream::ClientStream)
-    @atomic :release stream.write_closed = true
-    return nothing
+function write(stream::Stream, data::Union{String, SubString{String}})::Int
+    if _stream_is_client(stream)
+        (@atomic :acquire stream.started) && throw(ArgumentError("cannot write request body after response reading has started"))
+        (@atomic :acquire stream.write_closed) && throw(ArgumentError("request body writes are closed"))
+        return write(stream.request_buffer, data)
+    end
+    return _server_write(stream, data)
 end
 
-function readbytes!(stream::ClientStream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
+function closewrite(stream::Stream)
+    if _stream_is_client(stream)
+        @atomic :release stream.write_closed = true
+        return nothing
+    end
+    return _server_closewrite(stream)
+end
+
+function readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
     nb >= 0 || throw(ArgumentError("nb must be >= 0"))
-    _start_stream_read!(stream)
-    n = readbytes!(_stream_reader(stream), dest, nb)
-    n == 0 && _finish_stream_read!(stream; suppress_producer_errors = false)
-    return n
+    if _stream_is_client(stream)
+        _client_start_stream_read!(stream)
+        n = readbytes!(_stream_reader(stream), dest, nb)
+        n == 0 && _client_finish_stream_read!(stream; suppress_producer_errors = false)
+        return n
+    end
+    return _server_readbytes!(stream, dest, nb)
 end
 
-function read(stream::ClientStream)::Vector{UInt8}
-    _start_stream_read!(stream)
-    bytes = read(_stream_reader(stream))
-    _finish_stream_read!(stream; suppress_producer_errors = false)
-    return bytes
+function read(stream::Stream)::Vector{UInt8}
+    if _stream_is_client(stream)
+        _client_start_stream_read!(stream)
+        bytes = read(_stream_reader(stream))
+        _client_finish_stream_read!(stream; suppress_producer_errors = false)
+        return bytes
+    end
+    return _server_read(stream)
 end
 
-function read(stream::ClientStream, ::Type{String})::String
+function read(stream::Stream, ::Type{String})::String
     return String(read(stream))
 end
 
-function eof(stream::ClientStream)::Bool
-    _start_stream_read!(stream)
-    done = eof(_stream_reader(stream))
-    done && _finish_stream_read!(stream; suppress_producer_errors = false)
-    return done
+function eof(stream::Stream)::Bool
+    if _stream_is_client(stream)
+        _client_start_stream_read!(stream)
+        done = eof(_stream_reader(stream))
+        done && _client_finish_stream_read!(stream; suppress_producer_errors = false)
+        return done
+    end
+    return _server_eof(stream)
 end
 
 """
@@ -236,30 +268,36 @@ If the response body has already been fully consumed, this is effectively a
 no-op. If unread response bytes remain, the underlying client connection is not
 reused.
 """
-function closeread(stream::ClientStream)::Response
-    _start_stream_read!(stream)
-    return _finish_stream_read!(stream; suppress_producer_errors = true)
+function closeread(stream::Stream)
+    if _stream_is_client(stream)
+        _client_start_stream_read!(stream)
+        return _client_finish_stream_read!(stream; suppress_producer_errors = true)
+    end
+    return _server_closeread(stream)
 end
 
-function close(stream::ClientStream)
-    try
-        closewrite(stream)
-    catch
+function close(stream::Stream)
+    if _stream_is_client(stream)
+        try
+            closewrite(stream)
+        catch
+        end
+        try
+            closeread(stream)
+        catch
+        end
+        return nothing
     end
-    try
-        closeread(stream)
-    catch
-    end
-    return nothing
+    return _server_close(stream)
 end
 
 """
-    open(method::Symbol, url, headers=Pair{String,String}[]; kwargs...) -> ClientStream
+    open(method::Symbol, url, headers=Pair{String,String}[]; kwargs...) -> Stream
     open(f, method::Symbol, url, headers=Pair{String,String}[]; kwargs...)
 
 Create a streaming HTTP client request/response exchange.
 
-The returned `ClientStream` buffers request writes locally until `startread(stream)`
+The returned `Stream` buffers request writes locally until `startread(stream)`
 or the end of the `do` block. Once reading starts, `stream` behaves like a
 readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
 including `redirect`, `redirect_limit`, `redirect_method`,
@@ -293,7 +331,7 @@ function open(
         require_ssl_verification::Bool = true,
         protocol::Symbol = :auto,
         kwargs...,
-    )::ClientStream
+    )::Stream
     _validate_request_extra_kwargs(kwargs)
     parsed = _parse_http_url(url; query = query)
     req_headers = _normalize_headers_input(headers)
@@ -306,7 +344,7 @@ function open(
     client === nothing || proxy === _USE_TRANSPORT_PROXY || throw(ArgumentError("proxy override is not supported when passing an explicit Client"))
     proxy_config = _proxy_config_for_request(req_client, proxy)
     effective_cookiejar = _effective_cookiejar(client, cookiejar)
-    return ClientStream(
+    return Stream(
         _method_upper(String(method)),
         parsed,
         req_headers,

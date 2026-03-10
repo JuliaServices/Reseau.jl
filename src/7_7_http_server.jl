@@ -29,6 +29,11 @@ end
     CLOSED = 4
 end
 
+@enumx _StreamSide::UInt8 begin
+    CLIENT = 0
+    SERVER = 1
+end
+
 @enumx _ServerStreamWriteMode::UInt8 begin
     UNDECIDED = 0
     NONE = 1
@@ -114,13 +119,32 @@ function Server(;
 end
 
 mutable struct Stream <: IO
-    server::Server
-    tracked::_ServerConn
-    request::Request
-    response::Response
+    side::_StreamSide.T
+    method::Union{Nothing, String}
+    parsed::Union{Nothing, _URLParts}
+    headers::Union{Nothing, Headers}
+    client::Union{Nothing, Client}
+    owns_client::Bool
+    proxy_config::ProxyConfig
+    cookies::Union{Bool, Vector{Cookie}}
+    cookiejar::Union{Nothing, CookieJar}
+    redirect::Bool
+    redirect_policy::Union{Nothing, _RedirectPolicy}
+    status_exception::Bool
+    protocol::Symbol
+    decompress::Union{Nothing, Bool}
+    readtimeout::Float64
+    request_buffer::IOBuffer
+    response::Union{Nothing, Response}
+    reader::Union{Nothing, IO}
+    producer::Union{Nothing, Task}
+    server::Union{Nothing, Server}
+    tracked::Union{Nothing, _ServerConn}
+    request::Union{Nothing, Request}
+    @atomic started::Bool
+    @atomic write_closed::Bool
     @atomic read_closed::Bool
     @atomic response_started::Bool
-    @atomic write_closed::Bool
     @atomic continue_sent::Bool
     ignore_writes::Bool
     write_mode::_ServerStreamWriteMode.T
@@ -135,10 +159,29 @@ function Stream(server::Server, tracked::_ServerConn, request::Request)
         request = request,
     )
     return Stream(
+        _StreamSide.SERVER,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        false,
+        ProxyConfig(),
+        true,
+        nothing,
+        false,
+        nothing,
+        false,
+        :auto,
+        nothing,
+        0.0,
+        IOBuffer(),
+        response,
+        nothing,
+        nothing,
         server,
         tracked,
         request,
-        response,
+        false,
         false,
         false,
         false,
@@ -171,6 +214,11 @@ end
 @inline function _server_shutting_down(server::Server)::Bool
     state = _server_state(server)
     return state == _ServerState.CLOSING || state == _ServerState.CLOSED
+end
+
+function _require_server_stream(stream::Stream)::Nothing
+    stream.side == _StreamSide.SERVER && return nothing
+    throw(ArgumentError("operation is only valid for server-side HTTP streams"))
 end
 
 function _configured_port(address::AbstractString)::Int
@@ -507,6 +555,7 @@ function _try_write_server_error!(conn::TCP.Conn, request::Union{Nothing, Reques
 end
 
 function _server_stream_allows_body(stream::Stream)::Bool
+    _require_server_stream(stream)
     _body_allowed_for_status(stream.response.status_code) || return false
     stream.request.method == "HEAD" && return false
     return true
@@ -528,10 +577,12 @@ end
 
 function _write_server_stream_bytes!(stream::Stream, bytes::AbstractVector{UInt8})::Nothing
     isempty(bytes) && return nothing
+    data = bytes isa Vector{UInt8} ? bytes : Vector{UInt8}(bytes)
     _set_write_deadline!(stream.server, stream.tracked.conn)
     total = 0
-    while total < length(bytes)
-        n = write(stream.tracked.conn, bytes[(total + 1):end])
+    while total < length(data)
+        chunk = total == 0 ? data : data[(total + 1):end]
+        n = write(stream.tracked.conn, chunk)
         n > 0 || throw(ProtocolError("server stream write made no progress"))
         total += n
     end
@@ -568,11 +619,13 @@ function _write_server_stream_head!(stream::Stream)::Nothing
     return nothing
 end
 
-function startread(stream::Stream)::Request
+function _server_startread(stream::Stream)::Request
+    _require_server_stream(stream)
     return stream.request
 end
 
 function _maybe_write_continue!(stream::Stream)::Nothing
+    _require_server_stream(stream)
     already_sent = @atomic :acquire stream.continue_sent
     already_sent && return nothing
     has_header_token(stream.request.headers, "Expect", "100-continue") || return nothing
@@ -589,15 +642,18 @@ function _maybe_write_continue!(stream::Stream)::Nothing
     return nothing
 end
 
-function Base.isopen(stream::Stream)::Bool
+function _server_isopen(stream::Stream)::Bool
+    _require_server_stream(stream)
     return !(@atomic :acquire stream.read_closed) || !(@atomic :acquire stream.write_closed)
 end
 
-function Base.eof(stream::Stream)::Bool
+function _server_eof(stream::Stream)::Bool
+    _require_server_stream(stream)
     return _request_body_fully_consumed(stream.request)
 end
 
-function Base.readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
+function _server_readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Integer = length(dest))
+    _require_server_stream(stream)
     nb >= 0 || throw(ArgumentError("nb must be >= 0"))
     nb == 0 && return 0
     nb <= length(dest) || throw(ArgumentError("nb must be <= length(dest)"))
@@ -610,7 +666,8 @@ function Base.readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Intege
     return n
 end
 
-function Base.read(stream::Stream)::Vector{UInt8}
+function _server_read(stream::Stream)::Vector{UInt8}
+    _require_server_stream(stream)
     _maybe_write_continue!(stream)
     out = UInt8[]
     buf = Vector{UInt8}(undef, 16 * 1024)
@@ -623,17 +680,15 @@ function Base.read(stream::Stream)::Vector{UInt8}
     return out
 end
 
-function Base.read(stream::Stream, ::Type{String})::String
-    return String(read(stream))
-end
-
 function setstatus(stream::Stream, status::Integer)::Nothing
+    _require_server_stream(stream)
     (@atomic :acquire stream.response_started) && throw(ArgumentError("cannot change status after response writing has started"))
     stream.response.status_code = Int(status)
     return nothing
 end
 
 function setheader(stream::Stream, key::AbstractString, value::AbstractString)::Nothing
+    _require_server_stream(stream)
     (@atomic :acquire stream.response_started) && throw(ArgumentError("cannot change headers after response writing has started"))
     set_header!(stream.response.headers, key, value)
     return nothing
@@ -644,6 +699,7 @@ function setheader(stream::Stream, header::Pair{<:AbstractString, <:AbstractStri
 end
 
 function addtrailer(stream::Stream, trailers::Headers)::Nothing
+    _require_server_stream(stream)
     for key in header_keys(trailers)
         values = get_headers(trailers, key)
         for value in values
@@ -654,6 +710,7 @@ function addtrailer(stream::Stream, trailers::Headers)::Nothing
 end
 
 function addtrailer(stream::Stream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
+    _require_server_stream(stream)
     add_header!(stream.response.trailers, header.first, header.second)
     return nothing
 end
@@ -666,6 +723,7 @@ function addtrailer(stream::Stream, headers::AbstractVector{<:Pair})::Nothing
 end
 
 function startwrite(stream::Stream)::Response
+    _require_server_stream(stream)
     started = @atomic :acquire stream.response_started
     started && return stream.response
     !_request_body_fully_consumed(stream.request) && (stream.response.close = true)
@@ -674,7 +732,8 @@ function startwrite(stream::Stream)::Response
     return stream.response
 end
 
-function _write_server_stream_data!(stream::Stream, data::AbstractVector{UInt8})::Int
+function _server_write(stream::Stream, data::AbstractVector{UInt8})::Int
+    _require_server_stream(stream)
     (@atomic :acquire stream.write_closed) && throw(ArgumentError("response writes are closed"))
     startwrite(stream)
     stream.ignore_writes && return length(data)
@@ -691,23 +750,12 @@ function _write_server_stream_data!(stream::Stream, data::AbstractVector{UInt8})
     return length(data)
 end
 
-function Base.write(stream::Stream, data::Vector{UInt8})::Int
-    return _write_server_stream_data!(stream, data)
+function _server_write(stream::Stream, data::Union{String, SubString{String}})::Int
+    return _server_write(stream, Vector{UInt8}(codeunits(String(data))))
 end
 
-function Base.write(stream::Stream, data::StridedVector{UInt8})::Int
-    return _write_server_stream_data!(stream, data)
-end
-
-function Base.write(stream::Stream, data::AbstractVector{UInt8})::Int
-    return _write_server_stream_data!(stream, Vector{UInt8}(data))
-end
-
-function Base.write(stream::Stream, data::Union{String, SubString{String}})::Int
-    return write(stream, Vector{UInt8}(codeunits(String(data))))
-end
-
-function closewrite(stream::Stream)::Nothing
+function _server_closewrite(stream::Stream)::Nothing
+    _require_server_stream(stream)
     was_closed = @atomic :acquire stream.write_closed
     was_closed && return nothing
     startwrite(stream)
@@ -726,7 +774,8 @@ function closewrite(stream::Stream)::Nothing
     return nothing
 end
 
-function closeread(stream::Stream)::Response
+function _server_closeread(stream::Stream)::Response
+    _require_server_stream(stream)
     already_closed = @atomic :acquire stream.read_closed
     already_closed && return stream.response
     if !_request_body_fully_consumed(stream.request)
@@ -740,13 +789,14 @@ function closeread(stream::Stream)::Response
     return stream.response
 end
 
-function Base.close(stream::Stream)::Nothing
+function _server_close(stream::Stream)::Nothing
+    _require_server_stream(stream)
     try
-        closewrite(stream)
+        _server_closewrite(stream)
     catch
     end
     try
-        closeread(stream)
+        _server_closeread(stream)
     catch
     end
     return nothing

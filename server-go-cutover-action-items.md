@@ -174,7 +174,7 @@
   - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `julia --project=. -e 'using Pkg; Pkg.test()'`
 
-### [ ] ITEM-008 (P1) Unify client and server streaming into one shared `HTTP.Stream`
+### [x] ITEM-008 (P1) Unify client and server streaming into one shared `HTTP.Stream`
 - Description: The current cut-over left `src/7_6_http_stream.jl` and `src/7_7_http_server.jl` defining parallel `ClientStream` and `Stream` types with overlapping IO semantics and duplicated lifecycle code. The package should expose a single shared `HTTP.Stream` type used by both client-side `open` flows and server-side stream handlers.
 - Desired outcome: There is one `HTTP.Stream <: IO` type shared across client and server functionality. Client-side `HTTP.open` and server-side `listen!/serve!(...; stream=true)` both operate on this type, with constructors and helpers filling in whichever fields are relevant for that side.
 - Affected files: `src/7_6_http_stream.jl`, `src/7_7_http_server.jl`, `src/7_http.jl`, `test/http_client_tests.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`, any websocket or precompile call sites that reference stream types
@@ -193,6 +193,10 @@
   - `ClientStream` no longer exists.
   - Both client and server stream tests pass using one shared `Stream` type.
   - Duplicate stream lifecycle code has been aggressively pruned.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http_client_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
 ### [ ] ITEM-009 (P0) Finish TLS server support inside the unified `Server` kernel
 - Description: The new `Server` kernel currently only owns TCP listener/connection paths. TLS servering still lives outside the cut-over in other modules, which means the original “all phases” server rewrite was not actually completed.
