@@ -940,16 +940,56 @@ function _host_path_from_request(address::String, request::Request)::Tuple{Strin
     return host, "/$target"
 end
 
-function _cookie_header(jar::CookieJar, secure::Bool, host::String, path::String)::Union{Nothing, String}
-    scheme = secure ? "https" : "http"
-    cookie_values = getcookies!(jar, scheme, host, path)
-    isempty(cookie_values) && return nothing
-    return stringify("", cookie_values)
+function _normalize_cookies_input(cookies)
+    if cookies isa Bool
+        return cookies
+    end
+    cookies isa AbstractDict || throw(ArgumentError("cookies must be true, false, or an AbstractDict of cookie name/value pairs"))
+    normalized = Cookie[]
+    for (name, value) in pairs(cookies)
+        push!(normalized, Cookie(name, value))
+    end
+    return normalized
 end
 
-function _store_set_cookies!(jar::CookieJar, secure::Bool, host::String, path::String, headers::Headers)
+function _effective_cookiejar(client::Union{Nothing, Client}, cookiejar::Union{Nothing, CookieJar})::Union{Nothing, CookieJar}
+    cookiejar !== nothing && return cookiejar
+    client === nothing && return COOKIEJAR
+    return (client::Client).cookiejar
+end
+
+function _cookie_header(
+        cookiejar::Union{Nothing, CookieJar},
+        cookies::Union{Bool, Vector{Cookie}},
+        secure::Bool,
+        host::String,
+        path::String,
+    )::Union{Nothing, String}
+    cookies === false && return nothing
+    merged = Cookie[]
+    if cookiejar !== nothing
+        scheme = secure ? "https" : "http"
+        append!(merged, getcookies!(cookiejar, scheme, host, path))
+    end
+    if cookies !== true
+        append!(merged, cookies::Vector{Cookie})
+    end
+    isempty(merged) && return nothing
+    return stringify("", merged)
+end
+
+function _store_set_cookies!(
+        cookiejar::Union{Nothing, CookieJar},
+        cookies::Union{Bool, Vector{Cookie}},
+        secure::Bool,
+        host::String,
+        path::String,
+        headers::Headers,
+    )
+    cookies === false && return nothing
+    cookiejar === nothing && return nothing
     scheme = secure ? "https" : "http"
-    setcookies!(jar, scheme, host, path, headers)
+    setcookies!(cookiejar::CookieJar, scheme, host, path, headers)
     return nothing
 end
 
@@ -1302,6 +1342,8 @@ function _do_incoming!(
         protocol::Symbol = :auto,
         redirect_policy::_RedirectPolicy = _redirect_policy(client),
         proxy_config::ProxyConfig = client.transport.proxy,
+        cookies::Union{Bool, Vector{Cookie}} = true,
+        cookiejar::Union{Nothing, CookieJar} = client.cookiejar,
     )
     current_address = String(address)
     initial_address = current_address
@@ -1314,10 +1356,8 @@ function _do_incoming!(
         send_request = _copy_request_for_send(current_request; allow_nonreplayable = redirect_count == 0)
         proxy_plan = _proxy_plan(proxy_config, current_secure, current_address)
         host, path = _host_path_from_request(current_address, current_request)
-        if client.cookiejar !== nothing
-            cookie_value = _cookie_header(client.cookiejar::CookieJar, current_secure, host, path)
-            cookie_value === nothing || set_header!(send_request.headers, "Cookie", cookie_value)
-        end
+        cookie_value = _cookie_header(cookiejar, cookies, current_secure, host, path)
+        cookie_value === nothing || set_header!(send_request.headers, "Cookie", cookie_value)
         _trace_call(client.trace, :on_get_conn, current_address, current_secure)
         response = if _use_h2(client, current_secure, protocol) && proxy_plan.mode != _ProxyPlanMode.HTTP_FORWARD
             try
@@ -1357,9 +1397,7 @@ function _do_incoming!(
         _trace_call(client.trace, :on_got_conn, current_address, current_secure)
         _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
         _trace_call(client.trace, :on_got_first_response_byte, response.head.status_code)
-        if client.cookiejar !== nothing
-            _store_set_cookies!(client.cookiejar::CookieJar, current_secure, host, path, response.head.headers)
-        end
+        _store_set_cookies!(cookiejar, cookies, current_secure, host, path, response.head.headers)
         if !_is_redirect_status(response.head.status_code)
             return response
         end
@@ -1412,7 +1450,10 @@ function do!(
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
         forwardheaders::Bool = true,
+        cookies = true,
+        cookiejar::Union{Nothing, CookieJar} = nothing,
     )
+    normalized_cookies = _normalize_cookies_input(cookies)
     policy = _redirect_policy(
         client;
         redirect_limit = redirect_limit,
@@ -1420,7 +1461,19 @@ function do!(
         forwardheaders = forwardheaders,
     )
     proxy_config = _proxy_config_for_request(client, proxy)
-    return _streaming_response(_do_incoming!(client, address, request; secure = secure, server_name = server_name, protocol = protocol, redirect_policy = policy, proxy_config = proxy_config))
+    effective_cookiejar = _effective_cookiejar(client, cookiejar)
+    return _streaming_response(_do_incoming!(
+        client,
+        address,
+        request;
+        secure = secure,
+        server_name = server_name,
+        protocol = protocol,
+        redirect_policy = policy,
+        proxy_config = proxy_config,
+        cookies = normalized_cookies,
+        cookiejar = effective_cookiejar,
+    ))
 end
 
 """
@@ -1430,9 +1483,9 @@ Convenience GET request using an existing `Client`.
 
 Returns the same low-level `Response` shape as `do!`.
 """
-function get!(client::Client, address::AbstractString, target::AbstractString; secure::Bool = false, protocol::Symbol = :auto)
+function get!(client::Client, address::AbstractString, target::AbstractString; secure::Bool = false, protocol::Symbol = :auto, kwargs...)
     request = Request("GET", target; host = String(address), body = EmptyBody(), content_length = 0)
-    return do!(client, address, request; secure = secure, protocol = protocol)
+    return do!(client, address, request; secure = secure, protocol = protocol, kwargs...)
 end
 
 import Base: get
@@ -1510,6 +1563,7 @@ end
 
 const _DEFAULT_CLIENT_LOCK = ReentrantLock()
 const _DEFAULT_CLIENT = Ref{Union{Nothing, Client}}(nothing)
+const COOKIEJAR = CookieJar()
 
 function _default_client!()::Client
     lock(_DEFAULT_CLIENT_LOCK)
@@ -1940,6 +1994,12 @@ Keyword arguments:
   iterable chunks, and existing `HTTP.AbstractBody` values
 - `proxy`: explicit proxy override for this call; pass a proxy URL string, a
   `ProxyConfig`, or `nothing` to force direct connections
+- `cookies`: `true` to use the effective cookie jar, `false` to disable cookie
+  send/store for this call, or a dictionary of extra cookie name/value pairs to
+  append to jar-derived cookies
+- `cookiejar`: optional cookie jar override for this call; explicit clients
+  default to `client.cookiejar`, while implicit convenience calls default to the
+  shared `HTTP.COOKIEJAR`
 - `query`: optional query string or key/value collection appended to the URL
 - `response_stream`: optional sink `IO` or byte buffer written with the final response body
 - `response_body`: alias for `response_stream`
@@ -1976,6 +2036,8 @@ function request(
         redirect_method = nothing,
         forwardheaders::Bool = true,
         proxy = _USE_TRANSPORT_PROXY,
+        cookies = true,
+        cookiejar::Union{Nothing, CookieJar} = nothing,
         query = nothing,
         response_stream = nothing,
         response_body = response_stream,
@@ -1992,6 +2054,7 @@ function request(
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     parsed = _parse_http_url(url; query = query)
     req_headers = _normalize_headers_input(headers)
+    normalized_cookies = _normalize_cookies_input(cookies)
     sink = _resolve_response_sink(response_stream, response_body)
     sse_callback === nothing || sink === nothing || throw(ArgumentError("sse_callback cannot be combined with response_stream or response_body"))
     _apply_default_accept_encoding!(req_headers, decompress)
@@ -2017,34 +2080,26 @@ function request(
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
     client === nothing || proxy === _USE_TRANSPORT_PROXY || throw(ArgumentError("proxy override is not supported when passing an explicit Client"))
     proxy_config = _proxy_config_for_request(req_client, proxy)
+    effective_cookiejar = _effective_cookiejar(client, cookiejar)
     incoming_response = nothing
     try
-        if redirect
-            incoming_response = _do_incoming!(
-                req_client,
-                parsed.address,
-                req;
-                secure = parsed.secure,
-                server_name = parsed.server_name,
-                protocol = protocol,
-                redirect_policy = _redirect_policy(
-                    req_client;
-                    redirect_limit = redirect_limit,
-                    redirect_method = redirect_method,
-                    forwardheaders = forwardheaders,
-                ),
-                proxy_config = proxy_config,
-            )
-        else
-            incoming_response = _roundtrip_incoming!(
-                req_client.transport,
-                parsed.address,
-                req;
-                secure = parsed.secure,
-                server_name = parsed.server_name,
-                proxy_config = proxy_config,
-            )
-        end
+        incoming_response = _do_incoming!(
+            req_client,
+            parsed.address,
+            req;
+            secure = parsed.secure,
+            server_name = parsed.server_name,
+            protocol = protocol,
+            redirect_policy = _redirect_policy(
+                req_client;
+                redirect_limit = redirect ? redirect_limit : 0,
+                redirect_method = redirect_method,
+                forwardheaders = forwardheaders,
+            ),
+            proxy_config = proxy_config,
+            cookies = normalized_cookies,
+            cookiejar = effective_cookiejar,
+        )
         incoming = incoming_response::_IncomingResponse
         resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
         if sse_callback !== nothing

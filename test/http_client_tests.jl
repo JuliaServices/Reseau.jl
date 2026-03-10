@@ -313,7 +313,7 @@ end
         end
         return nothing
     end)
-    client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4), jar = nothing)
+    client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4), cookiejar = nothing)
     try
         headers = HT.Headers()
         HT.set_header!(headers, "Authorization", "Bearer abc")
@@ -588,7 +588,7 @@ end
         end
         return nothing
     end)
-    client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4), jar = HT.MemoryCookieJar())
+    client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4), cookiejar = HT.CookieJar())
     try
         r1 = HT.get!(client, address, "/set")
         @test String(_read_all_body_bytes_client(r1.body)) == "set"
@@ -598,6 +598,126 @@ end
         @test cookie_header_seen[] == "session=abc"
     finally
         close(client.transport)
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP high-level request cookiejar and cookies kwargs" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    cookie_header_seen = Ref{Union{Nothing, String}}(nothing)
+    cookie_header_disabled = Ref{Union{Nothing, String}}(nothing)
+    server_task = errormonitor(Threads.@spawn begin
+        conn1 = NC.accept!(listener)
+        try
+            req1 = HT.read_request(HT._ConnReader(conn1))
+            headers1 = HT.Headers()
+            HT.add_header!(headers1, "Set-Cookie", "session=abc; Path=/")
+            HT.set_header!(headers1, "Connection", "close")
+            _send_response_client!(conn1, req1; body_text = "set", headers = headers1, close_conn = true)
+        finally
+            try
+                NC.close!(conn1)
+            catch
+            end
+        end
+        conn2 = NC.accept!(listener)
+        try
+            req2 = HT.read_request(HT._ConnReader(conn2))
+            cookie_header_seen[] = HT.get_header(req2.headers, "Cookie")
+            _send_response_client!(conn2, req2; body_text = "check", close_conn = true)
+        finally
+            try
+                NC.close!(conn2)
+            catch
+            end
+        end
+        conn3 = NC.accept!(listener)
+        try
+            req3 = HT.read_request(HT._ConnReader(conn3))
+            cookie_header_disabled[] = HT.get_header(req3.headers, "Cookie")
+            _send_response_client!(conn3, req3; body_text = "disabled", close_conn = true)
+        finally
+            try
+                NC.close!(conn3)
+            catch
+            end
+        end
+        return nothing
+    end)
+    jar = HT.CookieJar()
+    try
+        r1 = HT.get("$(base_url)/set"; cookiejar = jar)
+        @test String(r1.body) == "set"
+
+        r2 = HT.get("$(base_url)/check"; cookiejar = jar, cookies = Dict("extra" => "1"))
+        @test String(r2.body) == "check"
+
+        r3 = HT.get("$(base_url)/disabled"; cookiejar = jar, cookies = false)
+        @test String(r3.body) == "disabled"
+
+        _wait_task_client!(server_task)
+        @test cookie_header_seen[] == "session=abc; extra=1"
+        @test cookie_header_disabled[] === nothing
+    finally
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP.open respects cookiejar kwargs" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    cookie_header_seen = Ref{Union{Nothing, String}}(nothing)
+    server_task = errormonitor(Threads.@spawn begin
+        conn1 = NC.accept!(listener)
+        try
+            req1 = HT.read_request(HT._ConnReader(conn1))
+            headers1 = HT.Headers()
+            HT.add_header!(headers1, "Set-Cookie", "streamcookie=abc; Path=/")
+            HT.set_header!(headers1, "Connection", "close")
+            _send_response_client!(conn1, req1; body_text = "set", headers = headers1, close_conn = true)
+        finally
+            try
+                NC.close!(conn1)
+            catch
+            end
+        end
+        conn2 = NC.accept!(listener)
+        try
+            req2 = HT.read_request(HT._ConnReader(conn2))
+            cookie_header_seen[] = HT.get_header(req2.headers, "Cookie")
+            _send_response_client!(conn2, req2; body_text = "stream", close_conn = true)
+        finally
+            try
+                NC.close!(conn2)
+            catch
+            end
+        end
+        return nothing
+    end)
+    jar = HT.CookieJar()
+    try
+        r1 = HT.get("$(base_url)/set"; cookiejar = jar)
+        @test String(r1.body) == "set"
+
+        r2 = HT.open(:GET, "$(base_url)/stream"; cookiejar = jar) do stream
+            @test String(read(stream)) == "stream"
+        end
+        @test r2.status == 200
+
+        _wait_task_client!(server_task)
+        @test cookie_header_seen[] == "streamcookie=abc"
+    finally
         try
             NC.close!(listener)
         catch

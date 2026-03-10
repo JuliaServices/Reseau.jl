@@ -22,6 +22,8 @@ mutable struct Stream <: IO
     client::Client
     owns_client::Bool
     proxy_config::ProxyConfig
+    cookies::Union{Bool, Vector{Cookie}}
+    cookiejar::Union{Nothing, CookieJar}
     redirect::Bool
     redirect_policy::_RedirectPolicy
     status_exception::Bool
@@ -44,6 +46,8 @@ function Stream(
         client::Client,
         owns_client::Bool;
         proxy_config::ProxyConfig,
+        cookies::Union{Bool, Vector{Cookie}},
+        cookiejar::Union{Nothing, CookieJar},
         redirect::Bool,
         redirect_policy::_RedirectPolicy,
         status_exception::Bool,
@@ -59,6 +63,8 @@ function Stream(
         client,
         owns_client,
         proxy_config,
+        cookies,
+        cookiejar,
         redirect,
         redirect_policy,
         status_exception,
@@ -135,27 +141,18 @@ function _start_stream_read!(stream::Stream)::Response
         timeout_ns = Int64(round(stream.readtimeout * 1.0e9))
         set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
     end
-    incoming = if stream.redirect
-        _do_incoming!(
-            stream.client,
-            stream.parsed.address,
-            req;
-            secure = stream.parsed.secure,
-            server_name = stream.parsed.server_name,
-            protocol = stream.protocol,
-            redirect_policy = stream.redirect_policy,
-            proxy_config = stream.proxy_config,
-        )
-    else
-        _roundtrip_incoming!(
-            stream.client.transport,
-            stream.parsed.address,
-            req;
-            secure = stream.parsed.secure,
-            server_name = stream.parsed.server_name,
-            proxy_config = stream.proxy_config,
-        )
-    end
+    incoming = _do_incoming!(
+        stream.client,
+        stream.parsed.address,
+        req;
+        secure = stream.parsed.secure,
+        server_name = stream.parsed.server_name,
+        protocol = stream.protocol,
+        redirect_policy = stream.redirect ? stream.redirect_policy : _redirect_policy(stream.client; redirect_limit = 0),
+        proxy_config = stream.proxy_config,
+        cookies = stream.cookies,
+        cookiejar = stream.cookiejar,
+    )
     resolved_request = incoming.head.request === nothing ? req : incoming.head.request::Request
     stream.response = _finalize_request_response(
         incoming,
@@ -266,7 +263,7 @@ The returned `Stream` buffers request writes locally until `startread(stream)`
 or the end of the `do` block. Once reading starts, `stream` behaves like a
 readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
 including `redirect`, `redirect_limit`, `redirect_method`,
-`forwardheaders`, `decompress`, `client`,
+`forwardheaders`, `cookies`, `cookiejar`, `decompress`, `client`,
 `connect_timeout`, `readtimeout`, `require_ssl_verification`, and
 `protocol`.
 
@@ -286,6 +283,8 @@ function open(
         redirect_method = nothing,
         forwardheaders::Bool = true,
         proxy = _USE_TRANSPORT_PROXY,
+        cookies = true,
+        cookiejar::Union{Nothing, CookieJar} = nothing,
         query = nothing,
         decompress::Union{Nothing, Bool} = nothing,
         client::Union{Nothing, Client} = nothing,
@@ -298,6 +297,7 @@ function open(
     _validate_request_extra_kwargs(kwargs)
     parsed = _parse_http_url(url; query = query)
     req_headers = _normalize_headers_input(headers)
+    normalized_cookies = _normalize_cookies_input(cookies)
     _apply_default_accept_encoding!(req_headers, decompress)
     if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
         set_header!(req_headers, "Authorization", parsed.authorization::String)
@@ -305,6 +305,7 @@ function open(
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
     client === nothing || proxy === _USE_TRANSPORT_PROXY || throw(ArgumentError("proxy override is not supported when passing an explicit Client"))
     proxy_config = _proxy_config_for_request(req_client, proxy)
+    effective_cookiejar = _effective_cookiejar(client, cookiejar)
     return Stream(
         _method_upper(String(method)),
         parsed,
@@ -312,6 +313,8 @@ function open(
         req_client,
         owns_client;
         proxy_config = proxy_config,
+        cookies = normalized_cookies,
+        cookiejar = effective_cookiejar,
         redirect = redirect,
         status_exception = status_exception,
         protocol = protocol,
