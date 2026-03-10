@@ -9,7 +9,7 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     env:
       RESEAU_RUN_TLS_TESTS: ${{ matrix.run_tls_tests }}
       RESEAU_RUN_NETWORK_TESTS: ${{ matrix.run_network_tests }}
@@ -22,18 +22,21 @@ jobs:
           - os: ubuntu-latest
             arch: x64
             version: '1.12'
+            timeout_minutes: 15
             run_tls_tests: '1'
             run_network_tests: '1'
             trim_bundle: '0'
           - os: macOS-latest
             arch: aarch64
             version: '1.12'
+            timeout_minutes: 15
             run_tls_tests: '1'
             run_network_tests: '1'
             trim_bundle: '0'
           - os: windows-latest
             arch: x64
             version: '1.12'
+            timeout_minutes: 20
             run_tls_tests: '1'
             run_network_tests: '1'
             trim_bundle: '1'
