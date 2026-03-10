@@ -929,8 +929,341 @@ function streamhandler(handler::F) where {F}
     end
 end
 
+const _H2_SERVER_MAX_DATA_FRAME_SIZE = 16_384
+
+mutable struct _ServerPrefaceConn{C} <: IO
+    prefix::Vector{UInt8}
+    next::Int
+    conn::C
+end
+
+function _ServerPrefaceConn(prefix::Vector{UInt8}, conn::C) where {C}
+    return _ServerPrefaceConn{C}(prefix, 1, conn)
+end
+
+function Base.read!(conn::_ServerPrefaceConn, dst::Vector{UInt8})::Int
+    isempty(dst) && return 0
+    available = (length(conn.prefix) - conn.next) + 1
+    if available > 0
+        n = min(length(dst), available)
+        copyto!(dst, 1, conn.prefix, conn.next, n)
+        conn.next += n
+        return n
+    end
+    return read!(conn.conn, dst)
+end
+
+function _h2_preface_prefix_matches(prefix::Vector{UInt8})::Bool
+    @inbounds for i in 1:length(prefix)
+        prefix[i] == _H2_PREFACE[i] || return false
+    end
+    return true
+end
+
+function _probe_h2_preface!(server::Server, conn::TCP.Conn)::Tuple{Bool, _ServerPrefaceConn{TCP.Conn}}
+    _set_read_deadline_for_header!(server, conn)
+    prefix = UInt8[]
+    while length(prefix) < length(_H2_PREFACE)
+        chunk = Vector{UInt8}(undef, length(_H2_PREFACE) - length(prefix))
+        n = read!(conn, chunk)
+        n > 0 || break
+        append!(prefix, @view(chunk[1:n]))
+        _h2_preface_prefix_matches(prefix) || return false, _ServerPrefaceConn(prefix, conn)
+        length(prefix) == length(_H2_PREFACE) && return true, _ServerPrefaceConn(prefix, conn)
+    end
+    return false, _ServerPrefaceConn(prefix, conn)
+end
+
+function _write_all_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, bytes::Vector{UInt8})::Nothing
+    total = 0
+    while total < length(bytes)
+        chunk = total == 0 ? bytes : bytes[(total + 1):end]
+        n = write(conn, chunk)
+        n > 0 || throw(ProtocolError("h2 server write made no progress"))
+        total += n
+    end
+    return nothing
+end
+
+function _write_frame_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, frame::AbstractFrame)::Nothing
+    io = IOBuffer()
+    framer = Framer(io)
+    write_frame!(framer, frame)
+    _write_all_h2_server!(conn, take!(io))
+    return nothing
+end
+
+function _write_data_frames_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, data::Vector{UInt8}; end_stream::Bool)::Nothing
+    isempty(data) && return nothing
+    offset = 1
+    total_len = length(data)
+    while offset <= total_len
+        remaining = total_len - offset + 1
+        chunk_len = min(_H2_SERVER_MAX_DATA_FRAME_SIZE, remaining)
+        chunk = Vector{UInt8}(undef, chunk_len)
+        copyto!(chunk, 1, data, offset, chunk_len)
+        final_chunk = (offset + chunk_len - 1) == total_len
+        _write_frame_h2_server!(conn, DataFrame(stream_id, end_stream && final_chunk, chunk))
+        offset += chunk_len
+    end
+    return nothing
+end
+
+function _read_exact_h2_server!(io::IO, n::Int)::Vector{UInt8}
+    out = Vector{UInt8}(undef, n)
+    offset = 0
+    while offset < n
+        chunk = Vector{UInt8}(undef, n - offset)
+        nr = read!(io, chunk)
+        nr > 0 || throw(EOFError())
+        copyto!(out, offset + 1, chunk, 1, nr)
+        offset += nr
+    end
+    return out
+end
+
+function _decode_h2_request(headers::Vector{HeaderField}, body::Vector{UInt8})::Request
+    method = "GET"
+    path = "/"
+    host = nothing
+    out_headers = Headers()
+    for header in headers
+        if header.name == ":method"
+            method = header.value
+            continue
+        end
+        if header.name == ":path"
+            path = header.value
+            continue
+        end
+        if header.name == ":authority"
+            host = header.value
+            continue
+        end
+        add_header!(out_headers, header.name, header.value)
+    end
+    return Request(
+        method,
+        path;
+        headers = out_headers,
+        body = BytesBody(body),
+        host = host,
+        content_length = length(body),
+        proto_major = 2,
+        proto_minor = 0,
+    )
+end
+
+function _encode_h2_response_headers(response::Response)::Vector{UInt8}
+    header_fields = HeaderField[HeaderField(":status", string(response.status_code), false)]
+    for key in header_keys(response.headers)
+        values = get_headers(response.headers, key)
+        for value in values
+            push!(header_fields, HeaderField(lowercase(key), value, false))
+        end
+    end
+    encoder = Encoder()
+    return encode_header_block(encoder, header_fields)
+end
+
+function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, response::Response)::Nothing
+    response.body isa EmptyBody && return nothing
+    buf = Vector{UInt8}(undef, 16 * 1024)
+    pending = UInt8[]
+    have_pending = false
+    try
+        while true
+            n = body_read!(response.body, buf)
+            if n == 0
+                if have_pending
+                    _write_data_frames_h2_server!(conn, stream_id, pending; end_stream = true)
+                else
+                    _write_frame_h2_server!(conn, DataFrame(stream_id, true, UInt8[]))
+                end
+                return nothing
+            end
+            current = Vector{UInt8}(undef, n)
+            copyto!(current, 1, buf, 1, n)
+            if have_pending
+                _write_data_frames_h2_server!(conn, stream_id, pending; end_stream = false)
+            end
+            pending = current
+            have_pending = true
+        end
+    finally
+        try
+            body_close!(response.body)
+        catch
+        end
+    end
+end
+
+function _handle_h2_stream!(server::Server, conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, header_block::Vector{UInt8}, body::Vector{UInt8}, decoder::Decoder)::Nothing
+    decoded_headers = decode_header_block(decoder, header_block)
+    request = _decode_h2_request(decoded_headers, body)
+    response = server.handler(request)
+    response isa Response || throw(ProtocolError("h2 server handler must return HTTP.Response"))
+    response_obj = response::Response
+    response_obj.request = request
+    response_header_block = _encode_h2_response_headers(response_obj)
+    end_stream = response_obj.body isa EmptyBody
+    _write_frame_h2_server!(conn, HeadersFrame(stream_id, end_stream, true, response_header_block))
+    end_stream || _write_response_body_h2_server!(conn, stream_id, response_obj)
+    return nothing
+end
+
+function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::Nothing
+    conn = tracked.conn
+    reader = Framer(_ConnReader(reader_source))
+    decoder = Decoder()
+    try
+        preface = _read_exact_h2_server!(reader_source, length(_H2_PREFACE))
+        preface == _H2_PREFACE || throw(ProtocolError("invalid h2 client preface"))
+        client_settings = read_frame!(reader)
+        client_settings isa SettingsFrame || throw(ProtocolError("expected initial h2 SETTINGS frame"))
+        _write_frame_h2_server!(conn, SettingsFrame(false, Pair{UInt16, UInt32}[]))
+        _write_frame_h2_server!(conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
+        headers_block = Dict{UInt32, Vector{UInt8}}()
+        body_block = Dict{UInt32, Vector{UInt8}}()
+        headers_done = Dict{UInt32, Bool}()
+        body_done = Dict{UInt32, Bool}()
+        continuation_stream = UInt32(0)
+        max_stream_id = UInt32(0)
+        while !_server_shutting_down(server)
+            frame = try
+                read_frame!(reader)
+            catch err
+                if err isa EOFError || err isa IOPoll.NetClosingError || err isa ParseError || err isa TLS.TLSError
+                    return nothing
+                end
+                rethrow(err)
+            end
+            if continuation_stream != UInt32(0)
+                if !(frame isa ContinuationFrame && (frame::ContinuationFrame).stream_id == continuation_stream)
+                    throw(ProtocolError("expected CONTINUATION for stream $(continuation_stream)"))
+                end
+            elseif frame isa ContinuationFrame
+                throw(ProtocolError("unexpected CONTINUATION frame"))
+            end
+            if frame isa SettingsFrame
+                sf = frame::SettingsFrame
+                sf.ack || _write_frame_h2_server!(conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
+                continue
+            end
+            if frame isa PingFrame
+                ping = frame::PingFrame
+                ping.ack || _write_frame_h2_server!(conn, PingFrame(true, ping.opaque_data))
+                continue
+            end
+            if frame isa HeadersFrame
+                hf = frame::HeadersFrame
+                hf.stream_id == UInt32(0) && throw(ProtocolError("HEADERS stream id must be non-zero"))
+                iseven(hf.stream_id) && throw(ProtocolError("HEADERS stream id must be odd for client-initiated streams"))
+                if hf.stream_id < max_stream_id && !haskey(headers_block, hf.stream_id)
+                    throw(ProtocolError("HEADERS stream id must increase monotonically"))
+                end
+                hf.stream_id > max_stream_id && (max_stream_id = hf.stream_id)
+                headers_block[hf.stream_id] = get(() -> UInt8[], headers_block, hf.stream_id)
+                append!(headers_block[hf.stream_id], hf.header_block_fragment)
+                headers_done[hf.stream_id] = hf.end_headers
+                !hf.end_headers && (continuation_stream = hf.stream_id)
+                body_done[hf.stream_id] = hf.end_stream
+                if get(() -> false, headers_done, hf.stream_id) && get(() -> false, body_done, hf.stream_id)
+                    _handle_h2_stream!(server, conn, hf.stream_id, headers_block[hf.stream_id], get(() -> UInt8[], body_block, hf.stream_id), decoder)
+                    delete!(headers_block, hf.stream_id)
+                    delete!(headers_done, hf.stream_id)
+                    haskey(body_block, hf.stream_id) && delete!(body_block, hf.stream_id)
+                    haskey(body_done, hf.stream_id) && delete!(body_done, hf.stream_id)
+                end
+                continue
+            end
+            if frame isa ContinuationFrame
+                cf = frame::ContinuationFrame
+                cf.stream_id == UInt32(0) && throw(ProtocolError("CONTINUATION stream id must be non-zero"))
+                existing = get(() -> UInt8[], headers_block, cf.stream_id)
+                append!(existing, cf.header_block_fragment)
+                headers_block[cf.stream_id] = existing
+                headers_done[cf.stream_id] = cf.end_headers
+                continuation_stream = cf.end_headers ? UInt32(0) : cf.stream_id
+                if get(() -> false, headers_done, cf.stream_id) && get(() -> false, body_done, cf.stream_id)
+                    _handle_h2_stream!(server, conn, cf.stream_id, headers_block[cf.stream_id], get(() -> UInt8[], body_block, cf.stream_id), decoder)
+                    delete!(headers_block, cf.stream_id)
+                    delete!(headers_done, cf.stream_id)
+                    haskey(body_block, cf.stream_id) && delete!(body_block, cf.stream_id)
+                    haskey(body_done, cf.stream_id) && delete!(body_done, cf.stream_id)
+                end
+                continue
+            end
+            if frame isa DataFrame
+                df = frame::DataFrame
+                df.stream_id == UInt32(0) && throw(ProtocolError("DATA stream id must be non-zero"))
+                iseven(df.stream_id) && throw(ProtocolError("DATA stream id must be odd for client-initiated streams"))
+                haskey(headers_block, df.stream_id) || throw(ProtocolError("DATA frame received before HEADERS"))
+                existing = get(() -> UInt8[], body_block, df.stream_id)
+                append!(existing, df.data)
+                body_block[df.stream_id] = existing
+                _write_frame_h2_server!(conn, WindowUpdateFrame(UInt32(0), UInt32(length(df.data))))
+                _write_frame_h2_server!(conn, WindowUpdateFrame(df.stream_id, UInt32(length(df.data))))
+                body_done[df.stream_id] = df.end_stream
+                if get(() -> false, headers_done, df.stream_id) && get(() -> false, body_done, df.stream_id)
+                    _handle_h2_stream!(server, conn, df.stream_id, headers_block[df.stream_id], body_block[df.stream_id], decoder)
+                    delete!(headers_block, df.stream_id)
+                    delete!(headers_done, df.stream_id)
+                    delete!(body_block, df.stream_id)
+                    delete!(body_done, df.stream_id)
+                end
+                continue
+            end
+        end
+    catch err
+        if err isa ProtocolError || err isa ParseError || err isa EOFError || err isa IOPoll.NetClosingError || err isa TLS.TLSError
+            return nothing
+        end
+        rethrow(err)
+    finally
+        _clear_deadlines!(conn)
+        _close_server_conn!(tracked)
+        _untrack_conn!(server, tracked)
+    end
+    return nothing
+end
+
 function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
-    reader = _ConnReader(tracked.conn)
+    entered_helper = false
+    try
+        conn = tracked.conn
+        if conn isa TLS.Conn
+            _set_read_deadline_for_header!(server, conn::TLS.Conn)
+            TLS.handshake!(conn::TLS.Conn)
+            proto = TLS.connection_state(conn::TLS.Conn).alpn_protocol
+            entered_helper = true
+            if proto == "h2"
+                return _serve_h2_conn!(server, tracked, conn::TLS.Conn)
+            end
+            return _serve_h1_conn!(server, tracked, conn::TLS.Conn)
+        end
+        use_h2, reader_source = _probe_h2_preface!(server, conn::TCP.Conn)
+        entered_helper = true
+        if use_h2
+            return _serve_h2_conn!(server, tracked, reader_source)
+        end
+        return _serve_h1_conn!(server, tracked, reader_source)
+    catch err
+        if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError || err isa TLS.TLSError || err isa TLS.TLSHandshakeTimeoutError
+            return nothing
+        end
+        rethrow(err)
+    finally
+        if !entered_helper
+            _clear_deadlines!(tracked.conn)
+            _close_server_conn!(tracked)
+            _untrack_conn!(server, tracked)
+        end
+    end
+end
+
+function _serve_h1_conn!(server::Server, tracked::_ServerConn, reader_source)::Nothing
+    reader = _ConnReader(reader_source)
     try
         while true
             _server_shutting_down(server) && return nothing
@@ -1192,20 +1525,63 @@ function serve!(
         reuseaddr::Bool = true,
         backlog::Integer = 128,
     ) where {F}
-    stream && return listen!(
-        handler,
-        args...;
-        listenany = listenany,
-        reuseaddr = reuseaddr,
-        backlog = backlog,
-    )
-    return listen!(
-        streamhandler(handler),
-        args...;
-        listenany = listenany,
-        reuseaddr = reuseaddr,
-        backlog = backlog,
-    )
+    if stream
+        return listen!(
+            handler,
+            args...;
+            listenany = listenany,
+            reuseaddr = reuseaddr,
+            backlog = backlog,
+        )
+    end
+    if length(args) == 1 && args[1] isa Union{TCP.Listener, TLS.Listener}
+        listener = args[1]::Union{TCP.Listener, TLS.Listener}
+        bound_address, bound_port = _listener_bound_address(listener)
+        server = Server(
+            network = "tcp",
+            address = bound_address,
+            handler = handler,
+            stream = false,
+            listenany = false,
+            reuseaddr = reuseaddr,
+            backlog = backlog,
+        )
+        server.bound_address = bound_address
+        server.bound_port = bound_port
+        task = errormonitor(Threads.@spawn serve!(server, listener))
+        lock(server.lock)
+        try
+            server.serve_task = task
+        finally
+            unlock(server.lock)
+        end
+        return server
+    end
+    server = if length(args) == 1 && args[1] isa Integer
+        _build_server(
+            handler,
+            "127.0.0.1",
+            args[1]::Integer;
+            stream = false,
+            listenany = listenany,
+            reuseaddr = reuseaddr,
+            backlog = backlog,
+        )
+    elseif length(args) == 2 && args[1] isa AbstractString && args[2] isa Integer
+        _build_server(
+            handler,
+            args[1]::AbstractString,
+            args[2]::Integer;
+            stream = false,
+            listenany = listenany,
+            reuseaddr = reuseaddr,
+            backlog = backlog,
+        )
+    else
+        throw(ArgumentError("serve! expects host/port, port, or existing listener"))
+    end
+    start!(server)
+    return server
 end
 
 function serve(

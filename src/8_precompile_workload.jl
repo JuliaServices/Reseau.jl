@@ -637,40 +637,39 @@ end
 function _pc_run_http2_server_workload!()
     _pc_is_generating_output() && return nothing
     _pc_runtime_supported() || return nothing
-    server = HT.H2Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             return HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2, proto_major = 2, proto_minor = 0)
-        end,
-    )
-    task = HT.start_h2_server!(server)
+        end
     conn = nothing
     try
         deadline = time() + 2.0
         address = nothing
         while address === nothing && time() < deadline
             try
-                address = HT.h2_server_addr(server)
+                address = HT.server_addr(server)
             catch
                 EL.sleep(0.01)
             end
         end
-        address === nothing && throw(ArgumentError("HTTP/2 server precompile workload timed out waiting for address"))
+        address === nothing && throw(ArgumentError("HTTP/2 unified server precompile workload timed out waiting for address"))
         conn = HT.connect_h2!(address::String; secure = false)
         request = HT.Request("GET", "/ready"; host = address::String, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
         response = HT.h2_roundtrip!(conn::HT.H2Connection, request)
-        response.status_code == 200 || throw(ArgumentError("HTTP/2 server precompile workload expected status 200"))
+        response.status_code == 200 || throw(ArgumentError("HTTP/2 unified server precompile workload expected status 200"))
     finally
         try
             conn === nothing || close(conn::HT.H2Connection)
         catch
         end
         try
-            HT.shutdown_h2_server!(server)
+            HT.forceclose(server)
         catch
         end
-        _ = EL.timedwait(() -> istaskdone(task), 2.0; pollint = 0.001)
+        try
+            wait(server)
+        catch
+        end
     end
     return nothing
 end
@@ -687,7 +686,6 @@ function _pc_run_http_unified_workload!()
         end
     h1_client = nothing
     h2_server = nothing
-    h2_task = nothing
     h2_client = nothing
     try
         deadline = time() + 2.0
@@ -702,19 +700,15 @@ function _pc_run_http_unified_workload!()
         h1_address === nothing && throw(ArgumentError("HTTP unified precompile workload timed out waiting for h1 address"))
         h1_client = HT.Client(transport = HT.Transport(max_idle_per_host = 2, max_idle_total = 4), prefer_http2 = true)
         _ = HT.get!(h1_client::HT.Client, h1_address::String, "/auto"; protocol = :auto)
-        h2_server = HT.H2Server(
-            address = "127.0.0.1:0",
-            handler = request -> begin
+        h2_server = HT.serve!("127.0.0.1", 0; listenany = true) do request
                 _ = request
                 return HT.Response(200; body = HT.BytesBody(UInt8[0x68, 0x32]), content_length = 2, proto_major = 2, proto_minor = 0)
-            end,
-        )
-        h2_task = HT.start_h2_server!(h2_server::HT.H2Server)
+            end
         h2_deadline = time() + 2.0
         h2_address = nothing
         while h2_address === nothing && time() < h2_deadline
             try
-                h2_address = HT.h2_server_addr(h2_server::HT.H2Server)
+                h2_address = HT.server_addr(h2_server)
             catch
                 EL.sleep(0.01)
             end
@@ -741,12 +735,15 @@ function _pc_run_http_unified_workload!()
         end
         if h2_server !== nothing
             try
-                HT.shutdown_h2_server!(h2_server::HT.H2Server)
+                HT.forceclose(h2_server)
             catch
             end
         end
-        if h2_task !== nothing
-            _ = EL.timedwait(() -> istaskdone(h2_task::Task), 2.0; pollint = 0.001)
+        if h2_server !== nothing
+            try
+                wait(h2_server)
+            catch
+            end
         end
     end
     return nothing

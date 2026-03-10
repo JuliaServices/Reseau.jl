@@ -221,7 +221,7 @@
   - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `RESEAU_TEST_ONLY=http_websocket_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-010 (P0) Fold HTTP/2 server handling into the unified `Server` kernel and delete `H2Server`
+### [x] ITEM-010 (P0) Fold HTTP/2 server handling into the unified `Server` kernel and delete `H2Server`
 - Description: HTTP/2 servering still lives in the standalone `H2Server` sidecar. That breaks the hard cut-over goal and leaves server protocol handling split across two implementations.
 - Desired outcome: The unified `Server` kernel owns HTTP/1 and HTTP/2 serving. Cleartext H2 prior-knowledge connections and TLS+ALPN `h2` connections are dispatched through the same lifecycle machinery, and the standalone `H2Server` API/code is deleted.
 - Affected files: `src/7_7_http_server.jl`, `src/7_5_http2_server.jl`, `src/7_4_http2_client.jl`, `src/7_http.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`, `src/8_precompile_workload.jl`
@@ -240,6 +240,10 @@
   - `H2Server` and its sidecar lifecycle helpers are removed.
   - HTTP/2 server tests pass against the unified server kernel.
   - TLS+ALPN and cleartext prior-knowledge H2 both work through the new server machinery.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
 ### [ ] ITEM-011 (P1) Re-polish the PR and restore all-green CI after the corrective pass
 - Description: After the corrective work lands, rerun the full verification suite, refresh the PR summary if needed, and babysit CI back to green so the branch reflects the corrected final state rather than the premature “done” state.

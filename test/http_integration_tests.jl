@@ -73,18 +73,6 @@ function _wait_http_addr(server::HT.Server; timeout_s::Float64 = 5.0)
     error("timed out waiting for HTTP/1 server addr")
 end
 
-function _wait_h2_addr(server::HT.H2Server; timeout_s::Float64 = 5.0)
-    deadline = time() + timeout_s
-    while time() < deadline
-        try
-            return HT.h2_server_addr(server)
-        catch
-            sleep(0.01)
-        end
-    end
-    error("timed out waiting for HTTP/2 server addr")
-end
-
 @testset "HTTP integration protocol selection" begin
     h1_server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             payload = collect(codeunits("h1:" * request.target))
@@ -102,15 +90,11 @@ end
         wait(h1_server)
     end
 
-    h2_server = HT.H2Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    h2_server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             payload = collect(codeunits("h2:" * request.target))
             return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
-        end,
-    )
-    h2_task = HT.start_h2_server!(h2_server)
-    h2_address = _wait_h2_addr(h2_server)
+        end
+    h2_address = _wait_http_addr(h2_server)
     client2 = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4), prefer_http2 = true)
     try
         h2_response = HT.get!(client2, h2_address, "/explicit-h2"; secure = false, protocol = :h2)
@@ -119,7 +103,7 @@ end
         @test_throws ArgumentError HT.get!(client2, h2_address, "/bad"; protocol = :bad)
     finally
         close(client2)
-        HT.shutdown_h2_server!(h2_server)
-        @test timedwait(() -> istaskdone(h2_task), 3.0; pollint = 0.001) != :timed_out
+        HT.forceclose(h2_server)
+        wait(h2_server)
     end
 end

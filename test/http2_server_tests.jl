@@ -5,16 +5,16 @@ const HT = Reseau.HTTP
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
 
-function _wait_h2_server_addr(server::HT.H2Server; timeout_s::Float64 = 5.0)::String
+function _wait_http_server_addr(server::HT.Server; timeout_s::Float64 = 5.0)::String
     deadline = time() + timeout_s
     while time() < deadline
         try
-            return HT.h2_server_addr(server)
+            return HT.server_addr(server)
         catch
             sleep(0.01)
         end
     end
-    error("timed out waiting for h2 server address")
+    error("timed out waiting for server address")
 end
 
 function _read_all_h2_server(body::HT.AbstractBody)::Vector{UInt8}
@@ -47,15 +47,11 @@ function _write_frame_h2_server_raw!(conn::NC.Conn, frame::HT.AbstractFrame)
 end
 
 @testset "HTTP/2 server request handling" begin
-    server = HT.H2Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             payload = collect(codeunits("h2:" * request.target))
             return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
-        end,
-    )
-    task = HT.start_h2_server!(server)
-    address = _wait_h2_server_addr(server)
+        end
+    address = _wait_http_server_addr(server)
     conn = HT.connect_h2!(address; secure = false)
     try
         req1 = HT.Request("GET", "/one"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
@@ -68,15 +64,13 @@ end
         @test String(_read_all_h2_server(res2.body)) == "h2:/two"
     finally
         close(conn)
-        HT.shutdown_h2_server!(server)
-        _ = timedwait(() -> istaskdone(task), 3.0; pollint = 0.001)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
     end
 end
 
 @testset "HTTP/2 server request flow control for large uploads" begin
-    server = HT.H2Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             total = 0
             buf = Vector{UInt8}(undef, 16 * 1024)
             while true
@@ -86,10 +80,8 @@ end
             end
             payload = collect(codeunits(string(total)))
             return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
-        end,
-    )
-    task = HT.start_h2_server!(server)
-    address = _wait_h2_server_addr(server)
+        end
+    address = _wait_http_server_addr(server)
     conn = HT.connect_h2!(address; secure = false)
     try
         payload = fill(UInt8('u'), 70_000)
@@ -99,21 +91,17 @@ end
         @test String(_read_all_h2_server(res.body)) == "70000"
     finally
         close(conn)
-        HT.shutdown_h2_server!(server)
-        _ = timedwait(() -> istaskdone(task), 3.0; pollint = 0.001)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
     end
 end
 
 @testset "HTTP/2 server shutdown closes listener" begin
-    server = HT.H2Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             return HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2, proto_major = 2, proto_minor = 0)
-        end,
-    )
-    task = HT.start_h2_server!(server)
-    address = _wait_h2_server_addr(server)
+        end
+    address = _wait_http_server_addr(server)
     conn = HT.connect_h2!(address; secure = false)
     try
         req = HT.Request("GET", "/ok"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
@@ -122,23 +110,19 @@ end
     finally
         close(conn)
     end
-    HT.shutdown_h2_server!(server)
-    _ = timedwait(() -> istaskdone(task), 3.0; pollint = 0.001)
+    HT.forceclose(server)
+    _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
     fail_fast_resolver = ND.HostResolver(timeout_ns = Int64(1_000_000_000))
     @test_throws Exception HT.connect_h2!(address; secure = false, host_resolver = fail_fast_resolver)
 end
 
 @testset "HTTP/2 server splits large response bodies into valid DATA frames" begin
     large_payload = fill(UInt8('z'), 70_000)
-    server = HT.H2Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             return HT.Response(200; body = HT.BytesBody(large_payload), content_length = length(large_payload), proto_major = 2, proto_minor = 0)
-        end,
-    )
-    task = HT.start_h2_server!(server)
-    address = _wait_h2_server_addr(server)
+        end
+    address = _wait_http_server_addr(server)
     conn = HT.connect_h2!(address; secure = false)
     try
         req = HT.Request("GET", "/large"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
@@ -149,21 +133,17 @@ end
         @test body == large_payload
     finally
         close(conn)
-        HT.shutdown_h2_server!(server)
-        _ = timedwait(() -> istaskdone(task), 3.0; pollint = 0.001)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
     end
 end
 
 @testset "HTTP/2 server rejects invalid continuation sequencing" begin
-    server = HT.H2Server(
-        address = "127.0.0.1:0",
-        handler = request -> begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             return HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2, proto_major = 2, proto_minor = 0)
-        end,
-    )
-    task = HT.start_h2_server!(server)
-    address = _wait_h2_server_addr(server)
+        end
+    address = _wait_http_server_addr(server)
     conn = ND.connect("tcp", address)
     reader = HT.Framer(HT._ConnReader(conn))
     try
@@ -191,7 +171,7 @@ end
             NC.close!(conn)
         catch
         end
-        HT.shutdown_h2_server!(server)
-        _ = timedwait(() -> istaskdone(task), 3.0; pollint = 0.001)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
     end
 end
