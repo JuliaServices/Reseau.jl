@@ -35,6 +35,7 @@ include("7_6_http_client.jl")
 include("7_6_http_stream.jl")
 include("7_6_http_sse.jl")
 include("7_6_http_websocket_codec.jl")
+include("7_6_http_websockets.jl")
 include("7_7_http_server.jl")
 
 end
