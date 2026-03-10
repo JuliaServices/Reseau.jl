@@ -156,7 +156,7 @@ end
             return nothing
         end,
     )
-    HT.start!(small_header_server)
+    HT.listen!(small_header_server)
     server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
         _ = HT.startread(stream)
         body = read(stream)
@@ -211,7 +211,7 @@ end
             return nothing
         end,
     )
-    HT.start!(timeout_server)
+    HT.listen!(timeout_server)
     timeout_address = _wait_server_addr(timeout_server)
     try
         sock = ND.connect("tcp", "127.0.0.1:$(HT.port(timeout_server))")

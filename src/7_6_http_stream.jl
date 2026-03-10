@@ -32,7 +32,7 @@ function Stream(
     )
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     return Stream(
-        _StreamSide.CLIENT,
+        _StreamType.CLIENT,
         String(method),
         parsed,
         headers,
@@ -66,11 +66,11 @@ function Stream(
 end
 
 @inline function _stream_is_client(stream::Stream)::Bool
-    return stream.side == _StreamSide.CLIENT
+    return stream.side == _StreamType.CLIENT
 end
 
 @inline function _stream_is_server(stream::Stream)::Bool
-    return stream.side == _StreamSide.SERVER
+    return stream.side == _StreamType.SERVER
 end
 
 function _require_client_stream(stream::Stream)::Nothing

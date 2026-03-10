@@ -1,4 +1,4 @@
-# HTTP/1 server implementation built on `TCP`.
+# Shared HTTP server kernel for HTTP/1, TLS, and HTTP/2.
 export Server
 export Stream
 export listen
@@ -30,7 +30,7 @@ end
     CLOSED = 4
 end
 
-@enumx _StreamSide::UInt8 begin
+@enumx _StreamType::UInt8 begin
     CLIENT = 0
     SERVER = 1
 end
@@ -120,7 +120,7 @@ function Server(;
 end
 
 mutable struct Stream <: IO
-    side::_StreamSide.T
+    side::_StreamType.T
     method::Union{Nothing, String}
     parsed::Union{Nothing, _URLParts}
     headers::Union{Nothing, Headers}
@@ -160,7 +160,7 @@ function Stream(server::Server, tracked::_ServerConn, request::Request)
         request = request,
     )
     return Stream(
-        _StreamSide.SERVER,
+        _StreamType.SERVER,
         nothing,
         nothing,
         nothing,
@@ -218,7 +218,7 @@ end
 end
 
 function _require_server_stream(stream::Stream)::Nothing
-    stream.side == _StreamSide.SERVER && return nothing
+    stream.side == _StreamType.SERVER && return nothing
     throw(ArgumentError("operation is only valid for server-side HTTP streams"))
 end
 
@@ -1365,7 +1365,7 @@ function _serve_h1_conn!(server::Server, tracked::_ServerConn, reader_source)::N
     return nothing
 end
 
-function serve!(server::Server, listener::Union{TCP.Listener, TLS.Listener})
+function _serve_listener!(server::Server, listener::Union{TCP.Listener, TLS.Listener})
     _server_shutting_down(server) && throw(ProtocolError("server is shutting down"))
     lock(server.lock)
     try
@@ -1395,15 +1395,12 @@ function serve!(server::Server, listener::Union{TCP.Listener, TLS.Listener})
     return nothing
 end
 
-function listen_and_serve!(server::Server)
+function _run_server!(server::Server)
     listener = TCP.listen(
-        server.network,
-        _listen_address(server);
-        backlog = server.backlog,
-        reuseaddr = server.reuseaddr,
+        server.network, _listen_address(server); backlog = server.backlog, reuseaddr = server.reuseaddr,
     )
     try
-        serve!(server, listener)
+        _serve_listener!(server, listener)
     finally
         try
             TCP.close!(listener)
@@ -1413,85 +1410,45 @@ function listen_and_serve!(server::Server)
     return nothing
 end
 
-function start!(server::Server)::Task
+function listen!(server::Server)::Server
     state = _server_state(server)
     state == _ServerState.CLOSED && throw(ProtocolError("closed servers cannot be restarted"))
     state == _ServerState.RUNNING && throw(ProtocolError("server is already running"))
-    task = errormonitor(Threads.@spawn listen_and_serve!(server))
+    task = errormonitor(Threads.@spawn _run_server!(server))
     lock(server.lock)
     try
         server.serve_task = task
     finally
         unlock(server.lock)
     end
-    return task
-end
-
-function _build_server(
-        handler::F,
-        host::AbstractString,
-        port_num::Integer;
-        stream::Bool,
-        listenany::Bool,
-        reuseaddr::Bool,
-        backlog::Integer,
-    ) where {F}
-    return Server(
-        network = "tcp",
-        address = HostResolvers.join_host_port(host, Int(port_num)),
-        handler = handler,
-        stream = stream,
-        listenany = listenany,
-        reuseaddr = reuseaddr,
-        backlog = backlog,
-    )
-end
-
-function listen!(
-        handler::F,
-        host::AbstractString = "127.0.0.1",
-        port_num::Integer = 8080;
-        listenany::Bool = false,
-        reuseaddr::Bool = true,
-        backlog::Integer = 128,
-    ) where {F}
-    server = _build_server(
-        handler,
-        host,
-        port_num;
-        stream = true,
-        listenany = listenany,
-        reuseaddr = reuseaddr,
-        backlog = backlog,
-    )
-    start!(server)
     return server
 end
 
 function listen!(
-        handler::F,
-        port_num::Integer;
-        listenany::Bool = false,
-        reuseaddr::Bool = true,
-        backlog::Integer = 128,
-    ) where {F}
-    return listen!(
-        handler,
-        "127.0.0.1",
-        port_num;
+    handler::F, host::AbstractString = "127.0.0.1", port_num::Integer = 8080;
+    listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+) where {F}
+    return listen!(Server(
+        network = "tcp",
+        address = HostResolvers.join_host_port(host, Int(port_num)),
+        handler = handler,
+        stream = true,
         listenany = listenany,
         reuseaddr = reuseaddr,
         backlog = backlog,
-    )
+    ))
 end
 
 function listen!(
-        handler::F,
-        listener::Union{TCP.Listener, TLS.Listener};
-        listenany::Bool = false,
-        reuseaddr::Bool = true,
-        backlog::Integer = 128,
-    ) where {F}
+    handler::F, port_num::Integer; listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+) where {F}
+    return listen!(handler, "127.0.0.1", port_num; listenany = listenany, reuseaddr = reuseaddr, backlog = backlog)
+end
+
+function listen!(
+    handler::F, listener::Union{TCP.Listener, TLS.Listener};
+    listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+) where {F}
     listenany && throw(ArgumentError("listenany is not valid when passing an existing listener"))
     _ = reuseaddr
     _ = backlog
@@ -1507,7 +1464,7 @@ function listen!(
     )
     server.bound_address = bound_address
     server.bound_port = bound_port
-    task = errormonitor(Threads.@spawn serve!(server, listener))
+    task = errormonitor(Threads.@spawn _serve_listener!(server, listener))
     lock(server.lock)
     try
         server.serve_task = task
@@ -1517,11 +1474,7 @@ function listen!(
     return server
 end
 
-function listen(
-        handler::F,
-        args...;
-        kwargs...,
-    ) where {F}
+function listen(handler::F, args...; kwargs...) where {F}
     server = listen!(handler, args...; kwargs...)
     try
         wait(server)
@@ -1535,21 +1488,10 @@ function listen(
 end
 
 function serve!(
-        handler::F,
-        args...;
-        stream::Bool = false,
-        listenany::Bool = false,
-        reuseaddr::Bool = true,
-        backlog::Integer = 128,
-    ) where {F}
+    handler::F, args...; stream::Bool = false, listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+) where {F}
     if stream
-        return listen!(
-            handler,
-            args...;
-            listenany = listenany,
-            reuseaddr = reuseaddr,
-            backlog = backlog,
-        )
+        return listen!(handler, args...; listenany = listenany, reuseaddr = reuseaddr, backlog = backlog)
     end
     if length(args) == 1 && args[1] isa Union{TCP.Listener, TLS.Listener}
         listener = args[1]::Union{TCP.Listener, TLS.Listener}
@@ -1565,7 +1507,7 @@ function serve!(
         )
         server.bound_address = bound_address
         server.bound_port = bound_port
-        task = errormonitor(Threads.@spawn serve!(server, listener))
+        task = errormonitor(Threads.@spawn _serve_listener!(server, listener))
         lock(server.lock)
         try
             server.serve_task = task
@@ -1574,49 +1516,26 @@ function serve!(
         end
         return server
     end
-    server = if length(args) == 1 && args[1] isa Integer
-        _build_server(
-            handler,
-            "127.0.0.1",
-            args[1]::Integer;
-            stream = false,
-            listenany = listenany,
-            reuseaddr = reuseaddr,
-            backlog = backlog,
-        )
+    host, port_num = if length(args) == 1 && args[1] isa Integer
+        ("127.0.0.1", Int(args[1]::Integer))
     elseif length(args) == 2 && args[1] isa AbstractString && args[2] isa Integer
-        _build_server(
-            handler,
-            args[1]::AbstractString,
-            args[2]::Integer;
-            stream = false,
-            listenany = listenany,
-            reuseaddr = reuseaddr,
-            backlog = backlog,
-        )
+        (args[1]::AbstractString, Int(args[2]::Integer))
     else
         throw(ArgumentError("serve! expects host/port, port, or existing listener"))
     end
-    start!(server)
-    return server
-end
-
-function serve(
-        handler::F,
-        args...;
-        stream::Bool = false,
-        listenany::Bool = false,
-        reuseaddr::Bool = true,
-        backlog::Integer = 128,
-    ) where {F}
-    server = serve!(
-        handler,
-        args...;
-        stream = stream,
+    return listen!(Server(
+        network = "tcp",
+        address = HostResolvers.join_host_port(host, port_num),
+        handler = handler,
+        stream = false,
         listenany = listenany,
         reuseaddr = reuseaddr,
         backlog = backlog,
-    )
+    ))
+end
+
+function serve(handler::F, args...; stream::Bool = false, listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128) where {F}
+    server = serve!(handler, args...; stream = stream, listenany = listenany, reuseaddr = reuseaddr, backlog = backlog)
     try
         wait(server)
     finally
