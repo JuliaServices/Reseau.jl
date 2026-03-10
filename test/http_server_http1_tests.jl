@@ -1,6 +1,6 @@
 using Test
 using Reseau
-import Sockets
+using Sockets
 
 const HT = Reseau.HTTP
 
