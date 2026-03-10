@@ -34,6 +34,18 @@ function _run_with_timeout(f::F; timeout_s::Float64 = 5.0, label::String = "oper
     return fetch(task)
 end
 
+function _raw_http_request(port::Integer, request::AbstractString; settle_s::Float64 = 0.1)::String
+    sock = Sockets.connect("127.0.0.1", Int(port))
+    try
+        write(sock, request)
+        flush(sock)
+        sleep(settle_s)
+        return String(readavailable(sock))
+    finally
+        close(sock)
+    end
+end
+
 @testset "HTTP server SSE helper" begin
     response = HT.Response(200)
     stream = HT.sse_stream(response)
@@ -102,6 +114,105 @@ end
         _run_with_timeout(() -> close(server); label = "server close")
         _run_with_timeout(() -> wait(server); label = "server task completion")
         @test !isopen(server)
+    end
+end
+
+@testset "HTTP server wire-level parse and continue behavior" begin
+    small_header_server = HT.Server(
+        address = "127.0.0.1:0",
+        stream = true,
+        max_header_bytes = 512,
+        handler = stream -> begin
+            _ = HT.startread(stream)
+            HT.setstatus(stream, 200)
+            HT.startwrite(stream)
+            return nothing
+        end,
+    )
+    HT.start!(small_header_server)
+    server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
+        _ = HT.startread(stream)
+        body = read(stream)
+        HT.setstatus(stream, 200)
+        HT.startwrite(stream)
+        isempty(body) || write(stream, body)
+        return nothing
+    end
+    address = _wait_server_addr(server)
+    small_header_address = _wait_server_addr(small_header_server)
+    try
+        port_num = HT.port(server)
+        large_header_resp = _raw_http_request(HT.port(small_header_server), "GET / HTTP/1.1\r\nHost: $(small_header_address)\r\n$(repeat("Foo: Bar\r\n", 200))\r\n")
+        @test occursin("HTTP/1.1 431 Request Header Fields Too Large", large_header_resp)
+
+        invalid_resp = _raw_http_request(port_num, "GET / HTP/1.1\r\n\r\n")
+        @test occursin("HTTP/1.1 400 Bad Request", invalid_resp)
+
+        no_target_resp = _raw_http_request(port_num, "SOMEMETHOD HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        @test occursin("HTTP/1.1 400 Bad Request", no_target_resp)
+
+        sock = Sockets.connect("127.0.0.1", port_num)
+        try
+            write(sock, "POST / HTTP/1.1\r\nHost: $(address)\r\nContent-Length: 15\r\nExpect: 100-continue\r\n\r\n")
+            flush(sock)
+            sleep(0.1)
+            interim = String(readavailable(sock))
+            @test interim == "HTTP/1.1 100 Continue\r\n\r\n"
+            write(sock, "Body of Request")
+            flush(sock)
+            sleep(0.1)
+            final = String(readavailable(sock))
+            @test occursin("HTTP/1.1 200 OK\r\n", final)
+            @test occursin("Transfer-Encoding: chunked\r\n", final)
+            @test occursin("Body of Request", final)
+        finally
+            close(sock)
+        end
+    finally
+        _run_with_timeout(() -> HT.forceclose(small_header_server); label = "small header server forceclose")
+        _run_with_timeout(() -> wait(small_header_server); label = "small header server task completion")
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
+@testset "HTTP server timeout and handler error responses" begin
+    timeout_server = HT.Server(
+        address = "127.0.0.1:0",
+        stream = true,
+        read_header_timeout_ns = 200_000_000,
+        handler = stream -> begin
+            _ = stream
+            return nothing
+        end,
+    )
+    HT.start!(timeout_server)
+    timeout_address = _wait_server_addr(timeout_server)
+    try
+        sock = Sockets.connect("127.0.0.1", HT.port(timeout_server))
+        try
+            sleep(0.4)
+            timed_out = String(readavailable(sock))
+            @test occursin("HTTP/1.1 408 Request Timeout", timed_out)
+        finally
+            close(sock)
+        end
+    finally
+        _run_with_timeout(() -> HT.forceclose(timeout_server); label = "timeout server forceclose")
+        _run_with_timeout(() -> wait(timeout_server); label = "timeout server task completion")
+    end
+
+    error_server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+        _ = request
+        error("boom")
+    end
+    error_address = _wait_server_addr(error_server)
+    try
+        response = HT.get("http://$(error_address)/"; status_exception = false)
+        @test response.status == 500
+    finally
+        _run_with_timeout(() -> HT.forceclose(error_server); label = "error server forceclose")
+        _run_with_timeout(() -> wait(error_server); label = "error server task completion")
     end
 end
 

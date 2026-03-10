@@ -119,6 +119,7 @@ mutable struct Stream <: IO
     @atomic read_closed::Bool
     @atomic response_started::Bool
     @atomic write_closed::Bool
+    @atomic continue_sent::Bool
     ignore_writes::Bool
     write_mode::_ServerStreamWriteMode.T
     written_bytes::Int64
@@ -136,6 +137,7 @@ function Stream(server::Server, tracked::_ServerConn, request::Request)
         tracked,
         request,
         response,
+        false,
         false,
         false,
         false,
@@ -427,6 +429,37 @@ function _write_all_response!(conn::TCP.Conn, response::Response)::Nothing
     return nothing
 end
 
+function _server_error_status(err::Exception)::Union{Nothing, Int}
+    if err isa ParseError
+        return 400
+    end
+    if err isa ProtocolError
+        message = sprint(showerror, err)
+        if occursin("max_header_bytes", message) || occursin("max_line_bytes", message)
+            return 431
+        end
+        return 400
+    end
+    if err isa IOPoll.DeadlineExceededError
+        return 408
+    end
+    return nothing
+end
+
+function _try_write_server_error!(conn::TCP.Conn, request::Union{Nothing, Request}, status_code::Int)::Nothing
+    response = Response(
+        status_code;
+        close = true,
+        content_length = 0,
+        request = request,
+    )
+    try
+        _write_all_response!(conn, response)
+    catch
+    end
+    return nothing
+end
+
 function _server_stream_allows_body(stream::Stream)::Bool
     _body_allowed_for_status(stream.response.status_code) || return false
     stream.request.method == "HEAD" && return false
@@ -493,6 +526,23 @@ function startread(stream::Stream)::Request
     return stream.request
 end
 
+function _maybe_write_continue!(stream::Stream)::Nothing
+    already_sent = @atomic :acquire stream.continue_sent
+    already_sent && return nothing
+    has_header_token(stream.request.headers, "Expect", "100-continue") || return nothing
+    _request_body_fully_consumed(stream.request) && return nothing
+    response = Response(
+        100;
+        proto_major = Int(stream.request.proto_major),
+        proto_minor = Int(stream.request.proto_minor),
+        content_length = 0,
+        request = stream.request,
+    )
+    _write_all_response!(stream.tracked.conn, response)
+    @atomic :release stream.continue_sent = true
+    return nothing
+end
+
 function Base.isopen(stream::Stream)::Bool
     return !(@atomic :acquire stream.read_closed) || !(@atomic :acquire stream.write_closed)
 end
@@ -505,6 +555,7 @@ function Base.readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Intege
     nb >= 0 || throw(ArgumentError("nb must be >= 0"))
     nb == 0 && return 0
     nb <= length(dest) || throw(ArgumentError("nb must be <= length(dest)"))
+    _maybe_write_continue!(stream)
     buf = Vector{UInt8}(undef, nb)
     n = body_read!(stream.request.body, buf)
     n == 0 && (@atomic :release stream.read_closed = true)
@@ -514,6 +565,7 @@ function Base.readbytes!(stream::Stream, dest::AbstractVector{UInt8}, nb::Intege
 end
 
 function Base.read(stream::Stream)::Vector{UInt8}
+    _maybe_write_continue!(stream)
     out = UInt8[]
     buf = Vector{UInt8}(undef, 16 * 1024)
     while true
@@ -730,6 +782,8 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
             request = try
                 read_request(reader; max_header_bytes = server.max_header_bytes)
             catch err
+                status_code = _server_error_status(err::Exception)
+                status_code === nothing || _try_write_server_error!(tracked.conn, nothing, status_code::Int)
                 if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError
                     return nothing
                 end
@@ -750,11 +804,14 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
                     if _request_wants_close(request) || _response_wants_close(stream.response)
                         return nothing
                     end
-                catch
+                catch err
+                    status_code = _server_error_status(err::Exception)
                     if !(@atomic :acquire stream.response_started)
                         try
-                            setstatus(stream, 500)
+                            setstatus(stream, status_code === nothing ? 500 : status_code::Int)
+                            stream.response.close = true
                             startwrite(stream)
+                            closewrite(stream)
                         catch
                         end
                     end
@@ -763,10 +820,16 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
                         close(stream)
                     catch
                     end
-                    rethrow()
+                    return nothing
                 end
             else
-                response = server.handler(request)
+                response = try
+                    server.handler(request)
+                catch err
+                    status_code = _server_error_status(err::Exception)
+                    _try_write_server_error!(tracked.conn, request, status_code === nothing ? 500 : status_code::Int)
+                    return nothing
+                end
                 response isa Response || throw(ProtocolError("server handler must return HTTP.Response"))
                 response_obj = response::Response
                 response_obj.request = request

@@ -81,7 +81,7 @@
   - `RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
-### [ ] ITEM-004 (P0) Match core HTTP/1 server correctness behavior
+### [x] ITEM-004 (P0) Match core HTTP/1 server correctness behavior
 - Description: Add the HTTP/1 correctness behavior that `HTTP.jl` and Go both expect from a production server loop: malformed-request handling, header-size enforcement responses, `Expect: 100-continue`, timeouts, keep-alive decisions, unread-request-body handling, HEAD behavior, and proper response framing.
 - Desired outcome: The new server loop returns `400`, `431`, and `408` when appropriate, sends `100 Continue` when required, handles keep-alive vs close correctly, closes or avoids reusing connections when request bodies are unread, and frames responses correctly for fixed-length and chunked bodies.
 - Affected files: `src/7_7_http_server.jl`, `src/7_1_http1.jl`, `src/7_0_http_core.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`
@@ -100,6 +100,9 @@
   - Raw protocol behavior matches the intended status codes and connection semantics.
   - Timeout, keep-alive, and unread-body regressions are covered in tests.
   - Full suite stays green.
+- Verification evidence:
+  - `julia --project=. --startup-file=no --history-file=no test/http_server_http1_tests.jl`
+  - `julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 
 ### [ ] ITEM-005 (P1) Integrate future-proof Go-style lifecycle hooks and prune dead code
 - Description: Shape the new server internals so they are ready for later router/middleware, upgraded connections, and richer server functionality, while also pruning the now-obsolete old server code and stale tests. This item should add internal hook points and state plumbing without exposing extra public API yet.
