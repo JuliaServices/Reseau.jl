@@ -51,6 +51,7 @@ const _WINDOWS_COMPILER_ISSUE_TESTS = Set([
     "http_client_proxy_tests.jl",
     "http_client_tests.jl",
     "http_server_http1_tests.jl",
+    "http2_server_tests.jl",
     "http_integration_tests.jl",
     "http_parity_tests.jl",
 ])
