@@ -109,10 +109,10 @@ function _write_ws_frame!(conn, opcode::UInt8, payload::AbstractVector{UInt8}; f
     return nothing
 end
 
-function _read_ws_frames(conn, ws::HT.WsConnection)
+function _read_ws_frames(conn, ws::W.Conn)
     buf = Vector{UInt8}(undef, 8192)
     n = read!(conn, buf)
-    n == 0 && return HT.WsDecodedFrame[]
+    n == 0 && return HT.WsFrame{Vector{UInt8}}[]
     return HT.ws_on_incoming_data!(ws, @view buf[1:n])
 end
 
@@ -126,7 +126,7 @@ end
             @test W.isupgrade(request)
             _accept_ws_request!(conn, request)
             _write_ws_frame!(conn, UInt8(HT.WsOpcode.TEXT), Vector{UInt8}("hello"))
-            server_ws = HT.ws_connection_new(is_client = false)
+            server_ws = W.Conn(is_client = false)
             frames = _read_ws_frames(conn, server_ws)
             @test length(frames) == 1
             @test frames[1].opcode == UInt8(HT.WsOpcode.TEXT)
@@ -161,7 +161,7 @@ end
             request = _read_ws_request(conn)
             _accept_ws_request!(conn, request)
             _write_ws_frame!(conn, UInt8(HT.WsOpcode.TEXT), Vector{UInt8}("secure"))
-            server_ws = HT.ws_connection_new(is_client = false)
+            server_ws = W.Conn(is_client = false)
             HT.ws_close!(server_ws; status_code = UInt16(1000), reason = UInt8[])
             write(conn, HT.ws_get_outgoing_data!(server_ws))
         end
@@ -183,7 +183,7 @@ end
             request = _read_ws_request(conn)
             @test HT.ws_select_subprotocol(request, ["chat", "superchat"]) == "chat"
             _accept_ws_request!(conn, request; subprotocol = "chat")
-            server_ws = HT.ws_connection_new(is_client = false)
+            server_ws = W.Conn(is_client = false)
             HT.ws_close!(server_ws; status_code = UInt16(1000), reason = UInt8[])
             write(conn, HT.ws_get_outgoing_data!(server_ws))
         end
@@ -207,7 +207,7 @@ end
             request = _read_ws_request(conn)
             @test HT.get_header(request.headers, "Cookie") == "session=abc"
             _accept_ws_request!(conn, request)
-            server_ws = HT.ws_connection_new(is_client = false)
+            server_ws = W.Conn(is_client = false)
             HT.ws_close!(server_ws; status_code = UInt16(1000), reason = UInt8[])
             write(conn, HT.ws_get_outgoing_data!(server_ws))
         end

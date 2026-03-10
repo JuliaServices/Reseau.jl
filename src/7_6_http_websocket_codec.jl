@@ -28,10 +28,6 @@ struct WebSocketInvalidPayloadError <: Exception
     message::String
 end
 
-struct WebSocketCallbackError <: Exception
-    message::String
-end
-
 function Base.showerror(io::IO, err::WebSocketProtocolError)
     print(io, err.message)
     return nothing
@@ -42,12 +38,7 @@ function Base.showerror(io::IO, err::WebSocketInvalidPayloadError)
     return nothing
 end
 
-function Base.showerror(io::IO, err::WebSocketCallbackError)
-    print(io, err.message)
-    return nothing
-end
-
-mutable struct WsFrame{P <: AbstractVector{UInt8}}
+struct WsFrame{P <: AbstractVector{UInt8}}
     fin::Bool
     rsv::NTuple{3, Bool}
     opcode::UInt8
@@ -128,27 +119,6 @@ function ws_encode_frame(frame::WsFrame)::Memory{UInt8}
     return buf
 end
 
-function ws_frame_encoded_size(frame::WsFrame)::UInt64
-    size = UInt64(2)
-    if frame.payload_length >= 65536
-        size += 8
-    elseif frame.payload_length >= 126
-        size += 2
-    end
-    frame.masked && (size += 4)
-    return size + frame.payload_length
-end
-
-struct WsDecodedFrame
-    fin::Bool
-    rsv::NTuple{3, Bool}
-    opcode::UInt8
-    masked::Bool
-    masking_key::NTuple{4, UInt8}
-    payload_length::UInt64
-    payload::Vector{UInt8}
-end
-
 @enumx WsDecoderState::UInt8 begin
     OPCODE_BYTE = 0
     LENGTH_BYTE = 1
@@ -158,9 +128,8 @@ end
     DONE = 5
 end
 
-mutable struct WsDecoder{FF, FP, UD}
+mutable struct WsDecoder
     state::WsDecoderState.T
-    state_bytes_processed::UInt64
     fin::Bool
     rsv::NTuple{3, Bool}
     opcode::UInt8
@@ -174,21 +143,11 @@ mutable struct WsDecoder{FF, FP, UD}
     expecting_continuation::Bool
     fragment_opcode::UInt8
     text_fragment_payload::Vector{UInt8}
-    on_frame::FF
-    on_payload::FP
-    user_data::UD
 end
 
-@inline function _ws_callback_success(result)::Bool
-    result === nothing && return true
-    result isa Bool && return result
-    return false
-end
-
-function ws_decoder_new(; on_frame = nothing, on_payload = nothing, user_data = nothing)::WsDecoder
+function ws_decoder_new()::WsDecoder
     return WsDecoder(
         WsDecoderState.OPCODE_BYTE,
-        UInt64(0),
         false,
         (false, false, false),
         UInt8(0),
@@ -202,15 +161,11 @@ function ws_decoder_new(; on_frame = nothing, on_payload = nothing, user_data = 
         false,
         UInt8(0),
         UInt8[],
-        on_frame,
-        on_payload,
-        user_data,
     )
 end
 
 function _ws_decoder_reset!(dec::WsDecoder)::Nothing
     dec.state = WsDecoderState.OPCODE_BYTE
-    dec.state_bytes_processed = UInt64(0)
     dec.fin = false
     dec.rsv = (false, false, false)
     dec.opcode = UInt8(0)
@@ -232,19 +187,8 @@ end
     throw(WebSocketInvalidPayloadError(String(message)))
 end
 
-function _ws_decoder_invoke_payload_callback(dec::WsDecoder, payload::Vector{UInt8})::Nothing
-    dec.on_payload === nothing && return nothing
-    isempty(payload) && return nothing
-    if applicable(dec.on_payload, payload, dec.user_data)
-        _ws_callback_success(dec.on_payload(payload, dec.user_data)) || throw(WebSocketCallbackError("websocket payload callback failed"))
-        return nothing
-    end
-    _ws_callback_success(dec.on_payload(payload)) || throw(WebSocketCallbackError("websocket payload callback failed"))
-    return nothing
-end
-
-function ws_decoder_process!(dec::WsDecoder, data::AbstractVector{UInt8}; on_frame_header = nothing)::Vector{WsDecodedFrame}
-    frames = WsDecodedFrame[]
+function ws_decoder_process!(f::Union{Nothing, Function}, dec::WsDecoder, data::AbstractVector{UInt8}; on_frame_header = nothing)::Vector{WsFrame{Vector{UInt8}}}
+    frames = WsFrame{Vector{UInt8}}[]
     pos = firstindex(data)
     while pos <= lastindex(data)
         if dec.state == WsDecoderState.OPCODE_BYTE
@@ -278,18 +222,15 @@ function ws_decoder_process!(dec::WsDecoder, data::AbstractVector{UInt8}; on_fra
                 dec.extended_length_size = 0
                 on_frame_header === nothing || on_frame_header(dec.opcode, dec.fin, dec.payload_length)
                 dec.state = dec.masked ? WsDecoderState.MASKING_KEY : WsDecoderState.PAYLOAD
-                dec.state_bytes_processed = UInt64(0)
                 dec.payload_length == 0 && !dec.masked && (dec.state = WsDecoderState.DONE)
             elseif len7 == 126
                 dec.extended_length_size = 2
                 empty!(dec.length_cache)
                 dec.state = WsDecoderState.EXTENDED_LENGTH
-                dec.state_bytes_processed = UInt64(0)
             else
                 dec.extended_length_size = 8
                 empty!(dec.length_cache)
                 dec.state = WsDecoderState.EXTENDED_LENGTH
-                dec.state_bytes_processed = UInt64(0)
             end
         elseif dec.state == WsDecoderState.EXTENDED_LENGTH
             needed = dec.extended_length_size - length(dec.length_cache)
@@ -311,7 +252,6 @@ function ws_decoder_process!(dec::WsDecoder, data::AbstractVector{UInt8}; on_fra
                 end
                 on_frame_header === nothing || on_frame_header(dec.opcode, dec.fin, dec.payload_length)
                 dec.state = dec.masked ? WsDecoderState.MASKING_KEY : WsDecoderState.PAYLOAD
-                dec.state_bytes_processed = UInt64(0)
                 dec.payload_length == 0 && !dec.masked && (dec.state = WsDecoderState.DONE)
             end
         elseif dec.state == WsDecoderState.MASKING_KEY
@@ -322,7 +262,6 @@ function ws_decoder_process!(dec::WsDecoder, data::AbstractVector{UInt8}; on_fra
             if length(dec.key_cache) == 4
                 dec.masking_key = (dec.key_cache[1], dec.key_cache[2], dec.key_cache[3], dec.key_cache[4])
                 dec.state = dec.payload_length > 0 ? WsDecoderState.PAYLOAD : WsDecoderState.DONE
-                dec.state_bytes_processed = UInt64(0)
             end
         elseif dec.state == WsDecoderState.PAYLOAD
             dec.payload_length > WS_MAX_PAYLOAD_LENGTH && _ws_throw_protocol_error("websocket payload length exceeds maximum")
@@ -368,7 +307,7 @@ function ws_decoder_process!(dec::WsDecoder, data::AbstractVector{UInt8}; on_fra
                     dec.fragment_opcode = UInt8(0)
                 end
             end
-            frame = WsDecodedFrame(
+            frame = WsFrame(
                 dec.fin,
                 dec.rsv,
                 dec.opcode,
@@ -377,28 +316,17 @@ function ws_decoder_process!(dec::WsDecoder, data::AbstractVector{UInt8}; on_fra
                 dec.payload_length,
                 copy(dec.payload_buf),
             )
-            _ws_decoder_invoke_payload_callback(dec, frame.payload)
             push!(frames, frame)
-            if dec.on_frame !== nothing
-                _ws_callback_success(dec.on_frame(frame)) || throw(WebSocketCallbackError("websocket frame callback failed"))
-            end
+            f === nothing || f(frame)
             _ws_decoder_reset!(dec)
         end
     end
     return frames
 end
 
-const WS_CLOSE_STATUS_NORMAL = UInt16(1000)
-const WS_CLOSE_STATUS_GOING_AWAY = UInt16(1001)
-const WS_CLOSE_STATUS_PROTOCOL_ERROR = UInt16(1002)
-const WS_CLOSE_STATUS_UNSUPPORTED_DATA = UInt16(1003)
-const WS_CLOSE_STATUS_NO_STATUS = UInt16(1005)
-const WS_CLOSE_STATUS_ABNORMAL = UInt16(1006)
-const WS_CLOSE_STATUS_INVALID_PAYLOAD = UInt16(1007)
-const WS_CLOSE_STATUS_POLICY_VIOLATION = UInt16(1008)
-const WS_CLOSE_STATUS_MESSAGE_TOO_BIG = UInt16(1009)
-const WS_CLOSE_STATUS_EXTENSIONS_NEEDED = UInt16(1010)
-const WS_CLOSE_STATUS_INTERNAL_ERROR = UInt16(1011)
+function ws_decoder_process!(dec::WsDecoder, data::AbstractVector{UInt8}; on_frame_header = nothing)::Vector{WsFrame{Vector{UInt8}}}
+    return ws_decoder_process!(nothing, dec, data; on_frame_header = on_frame_header)
+end
 
 function ws_is_valid_close_status(code::UInt16)::Bool
     code < 1000 && return false
@@ -438,47 +366,35 @@ function ws_decode_close_payload(payload::AbstractVector{UInt8})::Tuple{UInt16, 
     return code, reason
 end
 
-mutable struct WsConnection{UD, Dec <: WsDecoder, FBegin, FPayload, FComplete}
+mutable struct Conn
     is_client::Bool
     is_open::Bool
     close_sent::Bool
     close_received::Bool
-    user_data::UD
-    decoder::Dec
+    decoder::WsDecoder
     outgoing_frames::Vector{Memory{UInt8}}
     max_incoming_payload_length::UInt64
     incoming_message_payload_total::UInt64
-    on_incoming_frame_begin::FBegin
-    on_incoming_frame_payload::FPayload
-    on_incoming_frame_complete::FComplete
 end
 
-function ws_connection_new(;
+function Conn(;
         is_client::Bool = true,
-        user_data = nothing,
         max_incoming_payload_length::UInt64 = UInt64(0),
-        on_incoming_frame_begin = nothing,
-        on_incoming_frame_payload = nothing,
-        on_incoming_frame_complete = nothing,
-    )::WsConnection
+    )::Conn
     decoder = ws_decoder_new()
-    return WsConnection(
+    return Conn(
         is_client,
         true,
         false,
         false,
-        user_data,
         decoder,
         Memory{UInt8}[],
         max_incoming_payload_length,
         UInt64(0),
-        on_incoming_frame_begin,
-        on_incoming_frame_payload,
-        on_incoming_frame_complete,
     )
 end
 
-function ws_send_frame!(ws::WsConnection, opcode::UInt8, payload::AbstractVector{UInt8}; fin::Bool = true)::Nothing
+function ws_send_frame!(ws::Conn, opcode::UInt8, payload::AbstractVector{UInt8}; fin::Bool = true)::Nothing
     ws.is_open || throw(ProtocolError("websocket connection is closed"))
     if ws_is_control_frame(opcode)
         !fin && throw(ArgumentError("control frames must not be fragmented"))
@@ -501,27 +417,17 @@ function ws_send_frame!(ws::WsConnection, opcode::UInt8, payload::AbstractVector
     return nothing
 end
 
-function ws_send_text!(ws::WsConnection, payload::AbstractVector{UInt8})::Nothing
-    ws_send_frame!(ws, UInt8(WsOpcode.TEXT), payload)
-    return nothing
-end
-
-function ws_send_binary!(ws::WsConnection, payload::AbstractVector{UInt8})::Nothing
-    ws_send_frame!(ws, UInt8(WsOpcode.BINARY), payload)
-    return nothing
-end
-
-function ws_send_ping!(ws::WsConnection, payload::AbstractVector{UInt8} = UInt8[])::Nothing
+function ws_send_ping!(ws::Conn, payload::AbstractVector{UInt8} = UInt8[])::Nothing
     ws_send_frame!(ws, UInt8(WsOpcode.PING), payload)
     return nothing
 end
 
-function ws_send_pong!(ws::WsConnection, payload::AbstractVector{UInt8} = UInt8[])::Nothing
+function ws_send_pong!(ws::Conn, payload::AbstractVector{UInt8} = UInt8[])::Nothing
     ws_send_frame!(ws, UInt8(WsOpcode.PONG), payload)
     return nothing
 end
 
-function ws_close!(ws::WsConnection; status_code::UInt16 = WS_CLOSE_STATUS_NORMAL, reason::AbstractVector{UInt8} = UInt8[])::Nothing
+function ws_close!(ws::Conn; status_code::UInt16 = UInt16(1000), reason::AbstractVector{UInt8} = UInt8[])::Nothing
     ws.close_sent && return nothing
     ws_is_valid_close_status(status_code) || throw(ArgumentError("invalid websocket close status"))
     isempty(reason) || isvalid(String, reason) || throw(ArgumentError("websocket close reason must be valid UTF-8"))
@@ -532,19 +438,11 @@ function ws_close!(ws::WsConnection; status_code::UInt16 = WS_CLOSE_STATUS_NORMA
     return nothing
 end
 
-function _ws_connection_invoke_callback(callback, args...)::Nothing
-    callback === nothing && return nothing
-    if applicable(callback, args...)
-        _ws_callback_success(callback(args...)) || throw(WebSocketCallbackError("websocket frame callback failed"))
-        return nothing
-    end
-    throw(WebSocketCallbackError("websocket frame callback arity mismatch"))
-end
-
-function ws_on_incoming_data!(ws::WsConnection, data::AbstractVector{UInt8})::Vector{WsDecodedFrame}
+function ws_on_incoming_data!(f::Union{Nothing, Function}, ws::Conn, data::AbstractVector{UInt8})::Vector{WsFrame{Vector{UInt8}}}
     frames = if ws.max_incoming_payload_length > 0
         incoming_total = ws.incoming_message_payload_total
         ws_decoder_process!(
+            f,
             ws.decoder,
             data;
             on_frame_header = (opcode::UInt8, fin::Bool, payload_length::UInt64) -> begin
@@ -562,7 +460,7 @@ function ws_on_incoming_data!(ws::WsConnection, data::AbstractVector{UInt8})::Ve
             end,
         )
     else
-        ws_decoder_process!(ws.decoder, data)
+        ws_decoder_process!(f, ws.decoder, data)
     end
     for (i, frame) in pairs(frames)
         if ws.is_client
@@ -581,12 +479,6 @@ function ws_on_incoming_data!(ws::WsConnection, data::AbstractVector{UInt8})::Ve
                 frame.payload_length > ws.max_incoming_payload_length && _ws_throw_protocol_error("incoming websocket control frame exceeds configured maximum")
             end
         end
-        frame_info = (payload_length = frame.payload_length, opcode = frame.opcode, fin = frame.fin)
-        _ws_connection_invoke_callback(ws.on_incoming_frame_begin, ws, frame_info, ws.user_data)
-        if !isempty(frame.payload)
-            _ws_connection_invoke_callback(ws.on_incoming_frame_payload, ws, frame_info, frame.payload, ws.user_data)
-        end
-        _ws_connection_invoke_callback(ws.on_incoming_frame_complete, ws, frame_info, 0, ws.user_data)
         if frame.opcode == UInt8(WsOpcode.PING)
             ws_send_pong!(ws, frame.payload)
         end
@@ -607,7 +499,11 @@ function ws_on_incoming_data!(ws::WsConnection, data::AbstractVector{UInt8})::Ve
     return frames
 end
 
-function ws_get_outgoing_data!(ws::WsConnection)::Vector{UInt8}
+function ws_on_incoming_data!(ws::Conn, data::AbstractVector{UInt8})::Vector{WsFrame{Vector{UInt8}}}
+    return ws_on_incoming_data!(nothing, ws, data)
+end
+
+function ws_get_outgoing_data!(ws::Conn)::Vector{UInt8}
     total = 0
     for frame in ws.outgoing_frames
         total += length(frame)

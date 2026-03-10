@@ -1,7 +1,5 @@
 module WebSockets
 
-using Random
-
 import Base: close, iterate
 
 import ..Headers
@@ -16,7 +14,6 @@ import ..ProtocolError
 import ..TooManyRedirectsError
 import ..Client
 import ..ClientConn
-import ..Cookie
 import ..CookieJar
 import ..COOKIEJAR
 import .._ConnReader
@@ -63,9 +60,8 @@ import ..read_request
 import ..write_response!
 import ..write_request!
 import ..WsOpcode
-import ..WsDecodedFrame
-import ..WsConnection
-import ..ws_connection_new
+import ..WsFrame
+import ..Conn
 import ..ws_send_frame!
 import ..ws_send_ping!
 import ..ws_send_pong!
@@ -89,6 +85,7 @@ export send
 export receive
 export ping
 export pong
+export Conn
 export Server
 export serve!
 export listen!
@@ -117,17 +114,13 @@ function Base.showerror(io::IO, err::WebSocketError)
     return nothing
 end
 
-mutable struct WebSocket{S, C, W <: WsConnection}
-    id::String
-    host::String
-    path::String
+mutable struct WebSocket{S, C}
     subprotocol::Union{Nothing, String}
     stream::S
     close_transport!::C
-    codec::W
+    codec::Conn
     maxframesize::Int
     maxfragmentation::Int
-    is_client::Bool
     readchannel::Channel{Union{String, Vector{UInt8}, WebSocketError}}
     readtask::Union{Nothing, Task}
     readclosed::Bool
@@ -144,9 +137,7 @@ end
 
 function WebSocket(
         stream::S,
-        close_transport!::C,
-        host::AbstractString,
-        path::AbstractString;
+        close_transport!::C;
         subprotocol::Union{Nothing, AbstractString} = nothing,
         maxframesize::Integer = typemax(Int),
         maxfragmentation::Integer = DEFAULT_MAX_FRAG,
@@ -155,18 +146,14 @@ function WebSocket(
     maxframesize > 0 || throw(ArgumentError("maxframesize must be > 0"))
     maxfragmentation > 0 || throw(ArgumentError("maxfragmentation must be > 0"))
     channel = Channel{Union{String, Vector{UInt8}, WebSocketError}}(Inf)
-    codec = ws_connection_new(is_client = is_client)
+    codec = Conn(is_client = is_client)
     ws = WebSocket(
-        string(rand(UInt32); base = 58),
-        String(host),
-        String(path),
         subprotocol === nothing ? nothing : String(subprotocol),
         stream,
         close_transport!,
         codec,
         Int(maxframesize),
         Int(maxfragmentation),
-        is_client,
         channel,
         nothing,
         false,
@@ -196,10 +183,6 @@ opcode(x) = return isbinary(x) ? WsOpcode.BINARY : WsOpcode.TEXT
 _to_bytes(x::AbstractVector{UInt8}) = return x
 _to_bytes(x::AbstractString) = return codeunits(String(x))
 _to_bytes(x) = return codeunits(string(x))
-
-function getresponse(ws::WebSocket)
-    return ws.handshake_response
-end
 
 function isclosed(ws::WebSocket)::Bool
     return ws.readclosed && ws.writeclosed
@@ -285,7 +268,7 @@ function _flush_ws_output!(ws::WebSocket)::Nothing
     return nothing
 end
 
-function _process_incoming_frame!(ws::WebSocket, frame::WsDecodedFrame)::Nothing
+function _process_incoming_frame!(ws::WebSocket, frame::WsFrame)::Nothing
     frame.payload_length <= ws.maxframesize || begin
         close_body = CloseFrameBody(1009, "frame too large")
         _queue_close!(ws, close_body)
@@ -368,10 +351,7 @@ function _ws_read_loop!(ws::WebSocket; buffer_bytes::Int = DEFAULT_READ_BUFFER_B
         while true
             n = read!(ws.stream, buf)
             n == 0 && break
-            frames = ws_on_incoming_data!(ws.codec, @view buf[1:n])
-            for frame in frames
-                _process_incoming_frame!(ws, frame)
-            end
+            ws_on_incoming_data!(frame -> _process_incoming_frame!(ws, frame), ws.codec, @view buf[1:n])
             _flush_ws_output!(ws)
             ws.readclosed && break
         end
@@ -410,15 +390,6 @@ function _start_read_task!(ws::WebSocket; buffer_bytes::Int = DEFAULT_READ_BUFFE
     ws.readtask !== nothing && return nothing
     ws.readtask = errormonitor(Threads.@spawn _ws_read_loop!(ws; buffer_bytes = buffer_bytes))
     return nothing
-end
-
-function writeframe(ws::WebSocket, fin::Bool, op::WsOpcode.T, payload::AbstractVector{UInt8})::Int
-    @lock ws.sendlock begin
-        ws.writeclosed && throw(WebSocketError(CloseFrameBody(1006, "websocket is closed")))
-        ws_send_frame!(ws.codec, UInt8(op), payload; fin = fin)
-        _flush_ws_output_locked!(ws)
-    end
-    return length(payload)
 end
 
 function send(ws::WebSocket, x)
@@ -718,12 +689,9 @@ function _open_client_websocket(
                     return nothing
                 end
             end
-            host_name, _ = HostResolvers.split_host_port(current_address)
             ws = WebSocket(
                 _conn_stream(conn),
                 close_transport!,
-                host_name,
-                current_request.target;
                 subprotocol = negotiated,
                 maxframesize = maxframesize,
                 maxfragmentation = maxfragmentation,
@@ -732,10 +700,7 @@ function _open_client_websocket(
             ws.handshake_request = send_request
             ws.handshake_response = response
             if !isempty(attempt.buffered)
-                frames = ws_on_incoming_data!(ws.codec, attempt.buffered)
-                for frame in frames
-                    _process_incoming_frame!(ws, frame)
-                end
+                ws_on_incoming_data!(frame -> _process_incoming_frame!(ws, frame), ws.codec, attempt.buffered)
                 _flush_ws_output!(ws)
             end
             _start_read_task!(ws)
@@ -1035,13 +1000,9 @@ function _serve_ws_session!(server::Server, conn, request::Request, response::Re
         _close_ws_server_conn!(conn)
         return nothing
     end
-    request_host = request.host === nothing ? get_header(request.headers, "Host") : request.host
-    request_host === nothing && (request_host = "")
     ws = WebSocket(
         conn,
         close_transport!,
-        request_host::String,
-        request.target;
         subprotocol = get_header(response.headers, "Sec-WebSocket-Protocol"),
         maxframesize = server.maxframesize,
         maxfragmentation = server.maxfragmentation,

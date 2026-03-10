@@ -4,6 +4,7 @@ using Test
 using Reseau
 
 const HT = Reseau.HTTP
+const W = HT.WebSockets
 
 @testset "HTTP websocket opcode helpers" begin
     @test UInt8(HT.WsOpcode.CONTINUATION) == 0x00
@@ -39,7 +40,7 @@ end
     masked_encoded = HT.ws_encode_frame(masked)
     @test (masked_encoded[2] & 0x80) != 0
     @test collect(masked_encoded[3:6]) == UInt8[0x37, 0xfa, 0x21, 0x3d]
-    @test HT.ws_frame_encoded_size(masked) == UInt64(8)
+    @test length(masked_encoded) == 8
 end
 
 @testset "HTTP websocket decoder" begin
@@ -93,9 +94,9 @@ end
 end
 
 @testset "HTTP websocket connection state machine" begin
-    ws = HT.ws_connection_new(is_client = false)
-    HT.ws_send_text!(ws, Vector{UInt8}("A"))
-    HT.ws_send_binary!(ws, UInt8[0x42])
+    ws = W.Conn(is_client = false)
+    HT.ws_send_frame!(ws, UInt8(HT.WsOpcode.TEXT), Vector{UInt8}("A"))
+    HT.ws_send_frame!(ws, UInt8(HT.WsOpcode.BINARY), UInt8[0x42])
     outgoing = HT.ws_get_outgoing_data!(ws)
     @test isempty(ws.outgoing_frames)
     frames = HT.ws_decoder_process!(HT.ws_decoder_new(), outgoing)
@@ -103,7 +104,7 @@ end
     @test frames[1].opcode == UInt8(HT.WsOpcode.TEXT)
     @test frames[2].opcode == UInt8(HT.WsOpcode.BINARY)
 
-    server_ws = HT.ws_connection_new(is_client = false)
+    server_ws = W.Conn(is_client = false)
     ping_frame = HT.WsFrame(
         opcode = UInt8(HT.WsOpcode.PING),
         payload = Vector{UInt8}("ok"),
@@ -121,7 +122,7 @@ end
     @test pong_frames[1].opcode == UInt8(HT.WsOpcode.PONG)
     @test pong_frames[1].payload == Vector{UInt8}("ok")
 
-    close_ws = HT.ws_connection_new(is_client = false)
+    close_ws = W.Conn(is_client = false)
     close_frame = HT.WsFrame(
         opcode = UInt8(HT.WsOpcode.CLOSE),
         payload = HT.ws_encode_close_payload(UInt16(1000)),
@@ -136,12 +137,12 @@ end
     @test close_ws.close_sent
     @test !close_ws.is_open
 
-    @test_throws HT.WebSocketProtocolError HT.ws_on_incoming_data!(HT.ws_connection_new(is_client = false), HT.ws_encode_frame(HT.WsFrame(opcode = UInt8(HT.WsOpcode.TEXT), payload = UInt8[0x41], fin = true)))
-    @test_throws HT.WebSocketProtocolError HT.ws_on_incoming_data!(HT.ws_connection_new(is_client = true), HT.ws_encode_frame(HT.WsFrame(opcode = UInt8(HT.WsOpcode.TEXT), payload = UInt8[0x41], fin = true, masked = true, masking_key = (0x01, 0x02, 0x03, 0x04))))
+    @test_throws HT.WebSocketProtocolError HT.ws_on_incoming_data!(W.Conn(is_client = false), HT.ws_encode_frame(HT.WsFrame(opcode = UInt8(HT.WsOpcode.TEXT), payload = UInt8[0x41], fin = true)))
+    @test_throws HT.WebSocketProtocolError HT.ws_on_incoming_data!(W.Conn(is_client = true), HT.ws_encode_frame(HT.WsFrame(opcode = UInt8(HT.WsOpcode.TEXT), payload = UInt8[0x41], fin = true, masked = true, masking_key = (0x01, 0x02, 0x03, 0x04))))
 end
 
 @testset "HTTP websocket payload limits" begin
-    ws = HT.ws_connection_new(is_client = false, max_incoming_payload_length = UInt64(4))
+    ws = W.Conn(is_client = false, max_incoming_payload_length = UInt64(4))
     frame = HT.WsFrame(
         opcode = UInt8(HT.WsOpcode.TEXT),
         payload = Vector{UInt8}("hello"),
