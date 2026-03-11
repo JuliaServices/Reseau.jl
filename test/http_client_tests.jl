@@ -790,7 +790,7 @@ end
     seen_header = Ref{Union{Nothing, String}}(nothing)
     seen_auth = Union{Nothing, String}[]
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:9
+        for _ in 1:10
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
@@ -805,7 +805,7 @@ end
                     _send_response_client!(conn, req; body_text = payload, close_conn = true)
                 elseif startswith(req.target, "/encoded?")
                     _send_response_client!(conn, req; body_text = req.target, close_conn = true)
-                elseif req.target == "/auth" || req.target == "/auth-disabled"
+                elseif req.target == "/auth" || req.target == "/auth-url" || req.target == "/auth-header"
                     push!(seen_auth, HT.header(req.headers, "Authorization", nothing))
                     _send_response_client!(conn, req; body_text = "auth-ok", close_conn = true)
                 elseif req.target == "/missing"
@@ -844,14 +844,20 @@ end
         @test String(resp_echo.body) == "payload"
         @test seen_header[] == "abc123"
 
-        resp_auth = HT.get("http://alice:secret@$(address)/auth")
+        resp_auth = HT.get("$(base_url)/auth"; basicauth = ("alice", "secret"))
         @test resp_auth.status == 200
         @test String(resp_auth.body) == "auth-ok"
 
-        resp_auth_disabled = HT.get("http://alice:secret@$(address)/auth-disabled"; basicauth = false)
-        @test resp_auth_disabled.status == 200
-        @test String(resp_auth_disabled.body) == "auth-ok"
-        @test seen_auth == ["Basic YWxpY2U6c2VjcmV0", nothing]
+        resp_auth_url = HT.get("http://alice:secret@$(address)/auth-url")
+        @test resp_auth_url.status == 200
+        @test String(resp_auth_url.body) == "auth-ok"
+
+        override_headers = HT.Headers()
+        HT.setheader(override_headers, "Authorization", "Bearer override")
+        resp_auth_header = HT.get("http://ignored:ignored@$(address)/auth-header", override_headers; basicauth = ("alice", "secret"))
+        @test resp_auth_header.status == 200
+        @test String(resp_auth_header.body) == "auth-ok"
+        @test seen_auth == ["Basic YWxpY2U6c2VjcmV0", "Basic YWxpY2U6c2VjcmV0", "Bearer override"]
 
         resp_missing = HT.get("$(base_url)/missing"; status_exception = false)
         @test resp_missing.status == 404
@@ -875,7 +881,8 @@ end
         @test "/query?a=1&b=2" in seen_targets
         @test "/encoded?a%20b=c%2Bd&slash=%2Fx" in seen_targets
         @test "/auth" in seen_targets
-        @test "/auth-disabled" in seen_targets
+        @test "/auth-url" in seen_targets
+        @test "/auth-header" in seen_targets
     finally
         try
             NC.close!(listener)
@@ -1146,14 +1153,14 @@ end
         @test resp_limit.url == "$(base_url)/open-limit"
         @test resp_limit.body === nothing
 
-        resp_auth = HT.open(:GET, "http://alice:secret@$(address)/open-auth"; basicauth = false) do stream
+        resp_auth = HT.open(:GET, "$(base_url)/open-auth"; basicauth = ("alice", "secret")) do stream
             meta = HT.startread(stream)
             @test meta.status == 200
             @test !HT.isaborted(stream)
             @test String(read(stream)) == "open-auth"
         end
         @test resp_auth.status == 200
-        @test seen_open_auth[] === nothing
+        @test seen_open_auth[] == "Basic YWxpY2U6c2VjcmV0"
 
         resp_abort = HT.open(:GET, "$(base_url)/open-abort"; status_exception = false) do stream
             meta = HT.startread(stream)

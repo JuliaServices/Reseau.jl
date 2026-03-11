@@ -1921,6 +1921,34 @@ function _method_upper(method::Union{AbstractString, Symbol})::String
     return uppercase(String(method))
 end
 
+@inline function _basic_auth_header(username::AbstractString, password::AbstractString)::String
+    return "Basic " * base64encode(string(username, ":", password))
+end
+
+function _basic_auth_header(basicauth)::String
+    if basicauth isa Tuple && length(basicauth) == 2
+        return _basic_auth_header(String(basicauth[1]), String(basicauth[2]))
+    end
+    if basicauth isa Pair
+        return _basic_auth_header(String(basicauth.first), String(basicauth.second))
+    end
+    throw(ArgumentError("basicauth must be `nothing`, `(username, password)`, or `username => password`"))
+end
+
+function _apply_request_authorization!(
+        headers::Headers,
+        basicauth,
+        url_authorization::Union{Nothing, String},
+    )::Nothing
+    hasheader(headers, "Authorization") && return nothing
+    if basicauth !== nothing
+        setheader(headers, "Authorization", _basic_auth_header(basicauth))
+        return nothing
+    end
+    url_authorization === nothing || setheader(headers, "Authorization", url_authorization::String)
+    return nothing
+end
+
 function _client_for_request(
         client::Union{Nothing, Client};
         connect_timeout::Real,
@@ -1989,9 +2017,10 @@ High-level one-shot HTTP request API (similar shape to HTTP.jl convenience
 methods).
 
 Keyword arguments:
-- `basicauth`: when `true`, automatically synthesize `Authorization: Basic ...`
-  from `userinfo` embedded in the request URL unless an explicit
-  `Authorization` header is already present
+- `basicauth`: optional basic-auth credentials supplied as
+  `(username, password)` or `username => password`; explicit
+  `Authorization` headers take precedence, and URL `userinfo` is only used as a
+  fallback when neither is provided
 - `status_exception`: throw `StatusError` for non-success responses
 - `redirect`: follow redirects through `do!`
 - `redirect_limit`: maximum number of redirects to follow for this call;
@@ -2042,7 +2071,7 @@ function request(
         b = nothing;
         headers = h,
         body = b,
-        basicauth::Bool = true,
+        basicauth = nothing,
         status_exception::Bool = true,
         redirect::Bool = true,
         redirect_limit::Union{Nothing, Integer} = nothing,
@@ -2071,9 +2100,7 @@ function request(
     sink = _resolve_response_sink(response_stream, response_body)
     sse_callback === nothing || sink === nothing || throw(ArgumentError("sse_callback cannot be combined with response_stream or response_body"))
     _apply_default_accept_encoding!(req_headers, decompress)
-    if basicauth && parsed.authorization !== nothing && !hasheader(req_headers, "Authorization")
-        setheader(req_headers, "Authorization", parsed.authorization::String)
-    end
+    _apply_request_authorization!(req_headers, basicauth, parsed.authorization)
     normalized_body = _normalize_body_input(body)
     if normalized_body.default_content_type !== nothing && !hasheader(req_headers, "Content-Type")
         setheader(req_headers, "Content-Type", normalized_body.default_content_type::String)
