@@ -69,6 +69,41 @@ end
     end
 end
 
+@testset "HTTP/2 server stream handlers work and suppress HEAD bodies" begin
+    server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
+            request = HT.startread(stream)
+            body = String(read(stream))
+            HT.setstatus(stream, 200)
+            HT.setheader(stream, "Content-Type", "text/plain")
+            HT.startwrite(stream)
+            write(stream, isempty(body) ? "ok" : body)
+            return nothing
+        end
+    address = _wait_http_server_addr(server)
+    conn = HT.connect_h2!(address; secure = false)
+    try
+        get_req = HT.Request("GET", "/stream"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        get_res = HT.h2_roundtrip!(conn, get_req)
+        @test get_res.status_code == 200
+        @test String(_read_all_h2_server(get_res.body)) == "ok"
+
+        post_payload = collect(codeunits("echo"))
+        post_req = HT.Request("POST", "/echo"; host = address, body = HT.BytesBody(post_payload), content_length = length(post_payload), proto_major = 2, proto_minor = 0)
+        post_res = HT.h2_roundtrip!(conn, post_req)
+        @test post_res.status_code == 200
+        @test String(_read_all_h2_server(post_res.body)) == "echo"
+
+        head_req = HT.Request("HEAD", "/head"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        head_res = HT.h2_roundtrip!(conn, head_req)
+        @test head_res.status_code == 200
+        @test isempty(_read_all_h2_server(head_res.body))
+    finally
+        close(conn)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
 @testset "HTTP/2 server request flow control for large uploads" begin
     server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             total = 0
@@ -131,6 +166,33 @@ end
         body = _read_all_h2_server(res.body)
         @test length(body) == 70_000
         @test body == large_payload
+    finally
+        close(conn)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
+@testset "HTTP/2 server suppresses bodies for 204 and 304 responses" begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            payload = collect(codeunits("oops"))
+            if request.target == "/nocontent"
+                return HT.Response(204; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+            end
+            return HT.Response(304; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    conn = HT.connect_h2!(address; secure = false)
+    try
+        no_content_req = HT.Request("GET", "/nocontent"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        no_content_res = HT.h2_roundtrip!(conn, no_content_req)
+        @test no_content_res.status_code == 204
+        @test isempty(_read_all_h2_server(no_content_res.body))
+
+        not_modified_req = HT.Request("GET", "/not-modified"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        not_modified_res = HT.h2_roundtrip!(conn, not_modified_req)
+        @test not_modified_res.status_code == 304
+        @test isempty(_read_all_h2_server(not_modified_res.body))
     finally
         close(conn)
         HT.forceclose(server)

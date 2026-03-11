@@ -188,6 +188,46 @@ function Stream(server::Server, tracked::_ServerConn, request::Request)
     )
 end
 
+function Stream(request::Request)
+    response = Response(
+        200;
+        proto_major = Int(request.proto_major),
+        proto_minor = Int(request.proto_minor),
+        request = request,
+    )
+    return Stream(
+        _StreamType.SERVER,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        false,
+        ProxyConfig(),
+        true,
+        nothing,
+        false,
+        nothing,
+        :auto,
+        nothing,
+        0.0,
+        IOBuffer(),
+        response,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        request,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        _ServerStreamWriteMode.UNDECIDED,
+        Int64(0),
+    )
+end
+
 @inline function _server_state(server::Server)::_ServerState.T
     return @atomic :acquire server.state
 end
@@ -215,6 +255,12 @@ end
 function _require_server_stream(stream::Stream)::Nothing
     stream.side == _StreamType.SERVER && return nothing
     throw(ArgumentError("operation is only valid for server-side HTTP streams"))
+end
+
+@inline function _server_stream_buffered_h2(stream::Stream)::Bool
+    _require_server_stream(stream)
+    request = stream.request
+    return stream.server === nothing && stream.tracked === nothing && request !== nothing && (request::Request).proto_major == UInt8(2)
 end
 
 """
@@ -633,6 +679,10 @@ end
 function _write_server_stream_bytes!(stream::Stream, bytes::AbstractVector{UInt8})::Nothing
     isempty(bytes) && return nothing
     data = bytes isa Vector{UInt8} ? bytes : Vector{UInt8}(bytes)
+    if _server_stream_buffered_h2(stream)
+        write(stream.request_buffer, data)
+        return nothing
+    end
     _set_write_deadline!(stream.server, stream.tracked.conn)
     total = 0
     while total < length(data)
@@ -785,6 +835,10 @@ function startwrite(stream::Stream)::Response
     started && return stream.response
     !_request_body_fully_consumed(stream.request) && (stream.response.close = true)
     !_server_stream_allows_body(stream) && (stream.ignore_writes = true)
+    if _server_stream_buffered_h2(stream)
+        @atomic :release stream.response_started = true
+        return stream.response
+    end
     _write_server_stream_head!(stream)
     return stream.response
 end
@@ -794,6 +848,14 @@ function _server_write(stream::Stream, data::AbstractVector{UInt8})::Int
     (@atomic :acquire stream.write_closed) && throw(ArgumentError("response writes are closed"))
     startwrite(stream)
     stream.ignore_writes && return length(data)
+    if _server_stream_buffered_h2(stream)
+        if stream.response.content_length >= 0 && (stream.written_bytes + length(data)) > stream.response.content_length
+            throw(ProtocolError("response body bytes exceeded Content-Length"))
+        end
+        _write_server_stream_bytes!(stream, data)
+        stream.written_bytes += length(data)
+        return length(data)
+    end
     if stream.write_mode == _ServerStreamWriteMode.CHUNKED
         io = IOBuffer()
         print(io, string(length(data), base = 16), "\r\n")
@@ -816,6 +878,13 @@ function _server_closewrite(stream::Stream)::Nothing
     was_closed = @atomic :acquire stream.write_closed
     was_closed && return nothing
     startwrite(stream)
+    if _server_stream_buffered_h2(stream)
+        if stream.response.content_length >= 0 && stream.written_bytes != stream.response.content_length
+            throw(ProtocolError("response body bytes did not match Content-Length"))
+        end
+        @atomic :release stream.write_closed = true
+        return nothing
+    end
     if stream.write_mode == _ServerStreamWriteMode.CHUNKED
         io = IOBuffer()
         write(io, "0\r\n")
@@ -889,6 +958,33 @@ function _write_response_body_to_stream!(stream::Stream, body)::Nothing
         return nothing
     end
     throw(ProtocolError("unsupported stream response body type $(typeof(body))"))
+end
+
+@inline function _h2_response_allows_body(request::Request, response::Response)::Bool
+    _body_allowed_for_status(response.status_code) || return false
+    request.method == "HEAD" && return false
+    return true
+end
+
+@inline function _skip_h2_header(name::AbstractString)::Bool
+    lower = lowercase(name)
+    return lower == "connection" ||
+        lower == "proxy-connection" ||
+        lower == "keep-alive" ||
+        lower == "transfer-encoding" ||
+        lower == "upgrade" ||
+        lower == "trailer"
+end
+
+function _append_h2_headers!(out::Vector{HeaderField}, headers::Headers)::Nothing
+    for key in header_keys(headers)
+        _skip_h2_header(key) && continue
+        values = get_headers(headers, key)
+        for value in values
+            push!(out, HeaderField(lowercase(key), value, false))
+        end
+    end
+    return nothing
 end
 
 const _H2_SERVER_MAX_DATA_FRAME_SIZE = 16_384
@@ -1020,17 +1116,25 @@ end
 
 function _encode_h2_response_headers(response::Response)::Vector{UInt8}
     header_fields = HeaderField[HeaderField(":status", string(response.status_code), false)]
-    for key in header_keys(response.headers)
-        values = get_headers(response.headers, key)
-        for value in values
-            push!(header_fields, HeaderField(lowercase(key), value, false))
-        end
-    end
+    _append_h2_headers!(header_fields, response.headers)
     encoder = Encoder()
     return encode_header_block(encoder, header_fields)
 end
 
-function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, response::Response)::Nothing
+function _encode_h2_trailer_headers(trailers::Headers)::Vector{UInt8}
+    header_fields = HeaderField[]
+    _append_h2_headers!(header_fields, trailers)
+    encoder = Encoder()
+    return encode_header_block(encoder, header_fields)
+end
+
+function _write_h2_trailers!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, trailers::Headers)::Nothing
+    isempty(trailers) && return nothing
+    _write_frame_h2_server!(conn, HeadersFrame(stream_id, true, true, _encode_h2_trailer_headers(trailers)))
+    return nothing
+end
+
+function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, response::Response; end_stream::Bool = true)::Nothing
     response.body isa EmptyBody && return nothing
     buf = Vector{UInt8}(undef, 16 * 1024)
     pending = UInt8[]
@@ -1040,8 +1144,8 @@ function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream
             n = body_read!(response.body, buf)
             if n == 0
                 if have_pending
-                    _write_data_frames_h2_server!(conn, stream_id, pending; end_stream = true)
-                else
+                    _write_data_frames_h2_server!(conn, stream_id, pending; end_stream = end_stream)
+                elseif end_stream
                     _write_frame_h2_server!(conn, DataFrame(stream_id, true, UInt8[]))
                 end
                 return nothing
@@ -1062,17 +1166,78 @@ function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream
     end
 end
 
+function _write_h2_response!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, request::Request, response::Response)::Nothing
+    response.request = request
+    allows_body = _h2_response_allows_body(request, response)
+    has_trailers = !isempty(response.trailers)
+    if !allows_body
+        try
+            body_close!(response.body)
+        catch
+        end
+        _write_frame_h2_server!(conn, HeadersFrame(stream_id, !has_trailers, true, _encode_h2_response_headers(response)))
+        has_trailers && _write_h2_trailers!(conn, stream_id, response.trailers)
+        return nothing
+    end
+    body_empty = response.body isa EmptyBody
+    end_stream = body_empty && !has_trailers
+    _write_frame_h2_server!(conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
+    body_empty || _write_response_body_h2_server!(conn, stream_id, response; end_stream = !has_trailers)
+    has_trailers && _write_h2_trailers!(conn, stream_id, response.trailers)
+    return nothing
+end
+
+function _write_h2_buffered_stream_response!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, request::Request, stream::Stream)::Nothing
+    response = stream.response::Response
+    response.request = request
+    allows_body = _h2_response_allows_body(request, response)
+    body_bytes = take!(stream.request_buffer)
+    if !allows_body
+        empty!(body_bytes)
+    elseif response.content_length >= 0 && length(body_bytes) != response.content_length
+        throw(ProtocolError("response body bytes did not match Content-Length"))
+    end
+    has_body = !isempty(body_bytes)
+    has_trailers = !isempty(response.trailers)
+    end_stream = !has_body && !has_trailers
+    _write_frame_h2_server!(conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
+    has_body && _write_data_frames_h2_server!(conn, stream_id, body_bytes; end_stream = !has_trailers)
+    has_trailers && _write_h2_trailers!(conn, stream_id, response.trailers)
+    return nothing
+end
+
 function _handle_h2_stream!(server::Server, conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, header_block::Vector{UInt8}, body::Vector{UInt8}, decoder::Decoder)::Nothing
     decoded_headers = decode_header_block(decoder, header_block)
     request = _decode_h2_request(decoded_headers, body)
+    if server.stream
+        stream = Stream(request)
+        try
+            server.handler(stream)
+            if !(@atomic :acquire stream.write_closed)
+                closewrite(stream)
+            end
+            closeread(stream)
+        catch err
+            status_code = _server_error_status(err::Exception)
+            stream.request_buffer = IOBuffer()
+            stream.response = Response(
+                status_code === nothing ? 500 : status_code::Int;
+                proto_major = 2,
+                proto_minor = 0,
+                request = request,
+            )
+            @atomic :release stream.response_started = false
+            @atomic :release stream.write_closed = false
+            @atomic :release stream.read_closed = false
+            closewrite(stream)
+            closeread(stream)
+        end
+        return _write_h2_buffered_stream_response!(conn, stream_id, request, stream)
+    end
     response = server.handler(request)
     response isa Response || throw(ProtocolError("h2 server handler must return HTTP.Response"))
     response_obj = response::Response
-    response_obj.request = request
-    response_header_block = _encode_h2_response_headers(response_obj)
-    end_stream = response_obj.body isa EmptyBody
-    _write_frame_h2_server!(conn, HeadersFrame(stream_id, end_stream, true, response_header_block))
-    end_stream || _write_response_body_h2_server!(conn, stream_id, response_obj)
+    _write_h2_response!(conn, stream_id, request, response_obj)
     return nothing
 end
 
