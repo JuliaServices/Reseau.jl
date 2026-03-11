@@ -73,6 +73,34 @@ function _read_until_deadline(conn::NC.Conn; timeout_s::Float64 = 1.0)::String
     return String(out)
 end
 
+function _read_until_quiet(conn::NC.Conn; timeout_s::Float64 = 1.0, quiet_timeout_s::Float64 = 0.1)::String
+    buf = Vector{UInt8}(undef, 1024)
+    out = UInt8[]
+    deadline_ns = Int64(time_ns()) + round(Int64, timeout_s * 1.0e9)
+    saw_bytes = false
+    while true
+        remaining_ns = deadline_ns - Int64(time_ns())
+        remaining_ns <= 0 && break
+        read_timeout_s = saw_bytes ? min(quiet_timeout_s, remaining_ns / 1.0e9) : (remaining_ns / 1.0e9)
+        NC.set_read_deadline!(conn, Int64(time_ns()) + round(Int64, read_timeout_s * 1.0e9))
+        try
+            n = read!(conn, buf)
+            n == 0 && break
+            append!(out, @view(buf[1:n]))
+            saw_bytes = true
+        catch err
+            if err isa IOP.DeadlineExceededError || err isa EOFError
+                break
+            end
+            if err isa SystemError && occursin("Connection reset by peer", sprint(showerror, err))
+                break
+            end
+            rethrow(err)
+        end
+    end
+    return String(out)
+end
+
 @testset "HTTP server SSE helper" begin
     response = HT.Response(200)
     stream = HT.sse_stream(response)
@@ -310,15 +338,13 @@ end
     sock = ND.connect("tcp", "127.0.0.1:$(HT.port(server))")
     try
         write(sock, Vector{UInt8}(codeunits("GET /one HTTP/1.1\r\nHost: $(address)\r\n\r\n")))
-        sleep(0.1)
-        first = _read_until_deadline(sock)
+        first = _read_until_quiet(sock; timeout_s = 2.0, quiet_timeout_s = 0.1)
         @test occursin("HTTP/1.1 200 OK", first)
-        sleep(0.5)
+        sleep(1.0)
         closed_after_idle = false
         try
             write(sock, Vector{UInt8}(codeunits("GET /two HTTP/1.1\r\nHost: $(address)\r\n\r\n")))
-            sleep(0.1)
-            second = _read_until_deadline(sock; timeout_s = 0.3)
+            second = _read_until_quiet(sock; timeout_s = 0.5, quiet_timeout_s = 0.1)
             closed_after_idle = !occursin("HTTP/1.1 200 OK", second)
         catch err
             closed_after_idle = err isa EOFError || err isa SystemError || err isa IOP.DeadlineExceededError
