@@ -38,6 +38,16 @@ end
     ctx = HT.RequestContext()
     @test !HT.canceled(ctx)
     @test !HT.expired(ctx)
+    @test !haskey(ctx, :route)
+    @test get(ctx, :route, nothing) === nothing
+    ctx[:route] = "/health"
+    ctx[:params] = Dict("id" => "7")
+    @test haskey(ctx, :route)
+    @test ctx[:route] == "/health"
+    @test get(ctx, :params, nothing) == Dict("id" => "7")
+    @test get(() -> "fallback", ctx, :missing) == "fallback"
+    empty!(ctx)
+    @test !haskey(ctx, :route)
     HT.set_deadline!(ctx, time_ns() + 50_000_000)
     @test !HT.expired(ctx)
     HT.set_deadline!(ctx, 1)
