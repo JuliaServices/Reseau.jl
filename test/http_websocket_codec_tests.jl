@@ -162,11 +162,11 @@ end
     @test HT.ws_compute_accept_key("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
 
     headers = HT.Headers()
-    HT.set_header!(headers, "Upgrade", "websocket")
-    HT.set_header!(headers, "Connection", "keep-alive, Upgrade")
-    HT.set_header!(headers, "Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-    HT.set_header!(headers, "Sec-WebSocket-Version", "13")
-    HT.set_header!(headers, "Sec-WebSocket-Protocol", "chat, superchat")
+    HT.setheader(headers, "Upgrade", "websocket")
+    HT.setheader(headers, "Connection", "keep-alive, Upgrade")
+    HT.setheader(headers, "Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+    HT.setheader(headers, "Sec-WebSocket-Version", "13")
+    HT.setheader(headers, "Sec-WebSocket-Protocol", "chat, superchat")
     request = HT.Request("GET", "/ws"; headers = headers, host = "example.com", content_length = 0)
     @test HT.ws_is_websocket_request(request)
     @test HT.ws_get_request_sec_websocket_key(request) == "dGhlIHNhbXBsZSBub25jZQ=="
@@ -174,10 +174,10 @@ end
     @test HT.ws_select_subprotocol(request, ["mqtt"]) === nothing
 
     bad_headers = HT.Headers()
-    HT.set_header!(bad_headers, "Upgrade", "websocket")
-    HT.set_header!(bad_headers, "Connection", "x-upgrade-token")
-    HT.set_header!(bad_headers, "Sec-WebSocket-Key", "abc")
-    HT.set_header!(bad_headers, "Sec-WebSocket-Version", "13")
+    HT.setheader(bad_headers, "Upgrade", "websocket")
+    HT.setheader(bad_headers, "Connection", "x-upgrade-token")
+    HT.setheader(bad_headers, "Sec-WebSocket-Key", "abc")
+    HT.setheader(bad_headers, "Sec-WebSocket-Version", "13")
     bad_request = HT.Request("GET", "/ws"; headers = bad_headers, host = "example.com", content_length = 0)
     @test !HT.ws_is_websocket_request(bad_request)
 end

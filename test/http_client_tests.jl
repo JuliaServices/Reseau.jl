@@ -73,8 +73,8 @@ end
             push!(seen_methods, req1.method)
             push!(seen_targets, req1.target)
             headers1 = HT.Headers()
-            HT.set_header!(headers1, "Location", "/final")
-            HT.set_header!(headers1, "Connection", "close")
+            HT.setheader(headers1, "Location", "/final")
+            HT.setheader(headers1, "Connection", "close")
             _send_response_client!(conn1, req1; status = 302, reason = "Found", headers = headers1, close_conn = true)
         finally
             try
@@ -87,7 +87,7 @@ end
             req2 = HT.read_request(HT._ConnReader(conn2))
             push!(seen_methods, req2.method)
             push!(seen_targets, req2.target)
-            redirected_content_type[] = HT.get_header(req2.headers, "Content-Type")
+            redirected_content_type[] = HT.header(req2.headers, "Content-Type", nothing)
             _send_response_client!(conn2, req2; body_text = "final")
         finally
             try
@@ -100,7 +100,7 @@ end
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
     try
         headers = HT.Headers()
-        HT.set_header!(headers, "Content-Type", "application/json")
+        HT.setheader(headers, "Content-Type", "application/json")
         req = HT.Request("POST", "/start"; host = address, headers = headers, body = HT.BytesBody(collect(codeunits("abc"))), content_length = 3)
         resp = HT.do!(client, address, req)
         @test resp.status_code == 200
@@ -132,8 +132,8 @@ end
             push!(seen_methods, req1.method)
             push!(seen_bodies, String(_read_all_body_bytes_client(req1.body)))
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "/final")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "/final")
+            HT.setheader(headers, "Connection", "close")
             _send_response_client!(conn1, req1; status = 302, reason = "Found", headers = headers, close_conn = true)
         finally
             try
@@ -190,8 +190,8 @@ end
             push!(seen_methods, req.method)
             _ = _read_all_body_bytes_client(req.body)
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "/final")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "/final")
+            HT.setheader(headers, "Connection", "close")
             _send_response_client!(conn, req; status = 307, reason = "Temporary Redirect", headers = headers, body_text = "redirect", close_conn = true)
         finally
             try
@@ -228,8 +228,8 @@ end
         try
             req1 = HT.read_request(HT._ConnReader(conn1))
             headers1 = HT.Headers()
-            HT.set_header!(headers1, "Location", "/next")
-            HT.set_header!(headers1, "Connection", "close")
+            HT.setheader(headers1, "Location", "/next")
+            HT.setheader(headers1, "Connection", "close")
             _send_response_client!(conn1, req1; status = 302, reason = "Found", headers = headers1, close_conn = true)
         finally
             try
@@ -240,7 +240,7 @@ end
         conn2 = NC.accept!(listener)
         try
             req2 = HT.read_request(HT._ConnReader(conn2))
-            seen_referer[] = HT.get_header(req2.headers, "Referer")
+            seen_referer[] = HT.header(req2.headers, "Referer", nothing)
             _send_response_client!(conn2, req2; body_text = "ok", close_conn = true)
         finally
             try
@@ -284,11 +284,11 @@ end
         conn = NC.accept!(listener1)
         try
             req = HT.read_request(HT._ConnReader(conn))
-            seen_auth_hop1[] = HT.get_header(req.headers, "Authorization")
-            seen_cookie_hop1[] = HT.get_header(req.headers, "Cookie")
+            seen_auth_hop1[] = HT.header(req.headers, "Authorization", nothing)
+            seen_cookie_hop1[] = HT.header(req.headers, "Cookie", nothing)
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "http://$(address2)/final")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "http://$(address2)/final")
+            HT.setheader(headers, "Connection", "close")
             _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, close_conn = true)
         finally
             try
@@ -302,8 +302,8 @@ end
         conn = NC.accept!(listener2)
         try
             req = HT.read_request(HT._ConnReader(conn))
-            seen_auth_hop2[] = HT.get_header(req.headers, "Authorization")
-            seen_cookie_hop2[] = HT.get_header(req.headers, "Cookie")
+            seen_auth_hop2[] = HT.header(req.headers, "Authorization", nothing)
+            seen_cookie_hop2[] = HT.header(req.headers, "Cookie", nothing)
             _send_response_client!(conn, req; body_text = "ok", close_conn = true)
         finally
             try
@@ -316,8 +316,8 @@ end
     client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4), cookiejar = nothing)
     try
         headers = HT.Headers()
-        HT.set_header!(headers, "Authorization", "Bearer abc")
-        HT.set_header!(headers, "Cookie", "session=abc")
+        HT.setheader(headers, "Authorization", "Bearer abc")
+        HT.setheader(headers, "Cookie", "session=abc")
         req = HT.Request("GET", "/start"; host = address1, headers = headers, body = HT.EmptyBody(), content_length = 0)
         response = HT.do!(client, address1, req)
         @test response.status_code == 200
@@ -353,10 +353,10 @@ end
         conn1 = NC.accept!(listener)
         try
             req1 = HT.read_request(HT._ConnReader(conn1))
-            hop1_host[] = HT.get_header(req1.headers, "Host")
+            hop1_host[] = HT.header(req1.headers, "Host", nothing)
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "/final")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "/final")
+            HT.setheader(headers, "Connection", "close")
             _send_response_client!(conn1, req1; status = 302, reason = "Found", headers = headers, close_conn = true)
         finally
             try
@@ -367,8 +367,8 @@ end
         conn2 = NC.accept!(listener)
         try
             req2 = HT.read_request(HT._ConnReader(conn2))
-            hop2_host[] = HT.get_header(req2.headers, "Host")
-            hop2_header[] = HT.get_header(req2.headers, "X-Test")
+            hop2_host[] = HT.header(req2.headers, "Host", nothing)
+            hop2_header[] = HT.header(req2.headers, "X-Test", nothing)
             _send_response_client!(conn2, req2; body_text = "ok", close_conn = true)
         finally
             try
@@ -446,8 +446,8 @@ end
             try
                 req = HT.read_request(HT._ConnReader(conn))
                 headers = HT.Headers()
-                HT.set_header!(headers, "Location", "/final")
-                HT.set_header!(headers, "Connection", "close")
+                HT.setheader(headers, "Location", "/final")
+                HT.setheader(headers, "Connection", "close")
                 _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "redirect", close_conn = true)
             finally
                 try
@@ -494,18 +494,18 @@ end
                 req = HT.read_request(HT._ConnReader(conn))
                 headers = HT.Headers()
                 if req.target == "/start"
-                    HT.set_header!(headers, "Location", "/final")
-                    HT.set_header!(headers, "Connection", "close")
+                    HT.setheader(headers, "Location", "/final")
+                    HT.setheader(headers, "Connection", "close")
                     _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "hop1", close_conn = true)
                 elseif req.target == "/final"
                     _send_response_client!(conn, req; body_text = "ok", close_conn = true)
                 elseif req.target == "/limit-start"
-                    HT.set_header!(headers, "Location", "/limit-next")
-                    HT.set_header!(headers, "Connection", "close")
+                    HT.setheader(headers, "Location", "/limit-next")
+                    HT.setheader(headers, "Connection", "close")
                     _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "limit1", close_conn = true)
                 elseif req.target == "/limit-next"
-                    HT.set_header!(headers, "Location", "/limit-last")
-                    HT.set_header!(headers, "Connection", "close")
+                    HT.setheader(headers, "Location", "/limit-last")
+                    HT.setheader(headers, "Connection", "close")
                     _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "limit2", close_conn = true)
                 else
                     _send_response_client!(conn, req; status = 500, reason = "Unexpected", body_text = req.target, close_conn = true)
@@ -566,8 +566,8 @@ end
             req1 = HT.read_request(HT._ConnReader(conn1))
             _ = req1
             headers1 = HT.Headers()
-            HT.add_header!(headers1, "Set-Cookie", "session=abc; Path=/")
-            HT.set_header!(headers1, "Connection", "close")
+            HT.appendheader(headers1, "Set-Cookie", "session=abc; Path=/")
+            HT.setheader(headers1, "Connection", "close")
             _send_response_client!(conn1, req1; body_text = "set", headers = headers1, close_conn = true)
         finally
             try
@@ -578,7 +578,7 @@ end
         conn2 = NC.accept!(listener)
         try
             req2 = HT.read_request(HT._ConnReader(conn2))
-            cookie_header_seen[] = HT.get_header(req2.headers, "Cookie")
+            cookie_header_seen[] = HT.header(req2.headers, "Cookie", nothing)
             _send_response_client!(conn2, req2; body_text = "ok")
         finally
             try
@@ -617,8 +617,8 @@ end
         try
             req1 = HT.read_request(HT._ConnReader(conn1))
             headers1 = HT.Headers()
-            HT.add_header!(headers1, "Set-Cookie", "session=abc; Path=/")
-            HT.set_header!(headers1, "Connection", "close")
+            HT.appendheader(headers1, "Set-Cookie", "session=abc; Path=/")
+            HT.setheader(headers1, "Connection", "close")
             _send_response_client!(conn1, req1; body_text = "set", headers = headers1, close_conn = true)
         finally
             try
@@ -629,7 +629,7 @@ end
         conn2 = NC.accept!(listener)
         try
             req2 = HT.read_request(HT._ConnReader(conn2))
-            cookie_header_seen[] = HT.get_header(req2.headers, "Cookie")
+            cookie_header_seen[] = HT.header(req2.headers, "Cookie", nothing)
             _send_response_client!(conn2, req2; body_text = "check", close_conn = true)
         finally
             try
@@ -640,7 +640,7 @@ end
         conn3 = NC.accept!(listener)
         try
             req3 = HT.read_request(HT._ConnReader(conn3))
-            cookie_header_disabled[] = HT.get_header(req3.headers, "Cookie")
+            cookie_header_disabled[] = HT.header(req3.headers, "Cookie", nothing)
             _send_response_client!(conn3, req3; body_text = "disabled", close_conn = true)
         finally
             try
@@ -683,8 +683,8 @@ end
         try
             req1 = HT.read_request(HT._ConnReader(conn1))
             headers1 = HT.Headers()
-            HT.add_header!(headers1, "Set-Cookie", "streamcookie=abc; Path=/")
-            HT.set_header!(headers1, "Connection", "close")
+            HT.appendheader(headers1, "Set-Cookie", "streamcookie=abc; Path=/")
+            HT.setheader(headers1, "Connection", "close")
             _send_response_client!(conn1, req1; body_text = "set", headers = headers1, close_conn = true)
         finally
             try
@@ -695,7 +695,7 @@ end
         conn2 = NC.accept!(listener)
         try
             req2 = HT.read_request(HT._ConnReader(conn2))
-            cookie_header_seen[] = HT.get_header(req2.headers, "Cookie")
+            cookie_header_seen[] = HT.header(req2.headers, "Cookie", nothing)
             _send_response_client!(conn2, req2; body_text = "stream", close_conn = true)
         finally
             try
@@ -788,9 +788,9 @@ end
     base_url = "http://$(address)"
     seen_targets = String[]
     seen_header = Ref{Union{Nothing, String}}(nothing)
-    seen_auth = Ref{Union{Nothing, String}}(nothing)
+    seen_auth = Union{Nothing, String}[]
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:7
+        for _ in 1:9
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
@@ -800,13 +800,13 @@ end
                 elseif startswith(req.target, "/query?")
                     _send_response_client!(conn, req; body_text = req.target, close_conn = true)
                 elseif req.target == "/echo"
-                    seen_header[] = HT.get_header(req.headers, "X-Token")
+                    seen_header[] = HT.header(req.headers, "X-Token", nothing)
                     payload = String(_read_all_body_bytes_client(req.body))
                     _send_response_client!(conn, req; body_text = payload, close_conn = true)
                 elseif startswith(req.target, "/encoded?")
                     _send_response_client!(conn, req; body_text = req.target, close_conn = true)
-                elseif req.target == "/auth"
-                    seen_auth[] = HT.get_header(req.headers, "Authorization")
+                elseif req.target == "/auth" || req.target == "/auth-disabled"
+                    push!(seen_auth, HT.header(req.headers, "Authorization", nothing))
                     _send_response_client!(conn, req; body_text = "auth-ok", close_conn = true)
                 elseif req.target == "/missing"
                     _send_response_client!(conn, req; status = 404, reason = "Not Found", body_text = "missing", close_conn = true)
@@ -827,6 +827,10 @@ end
         @test resp_hello.status == 200
         @test String(resp_hello.body) == "hello"
 
+        resp_symbol = HT.request(:GET, "$(base_url)/hello")
+        @test resp_symbol.status == 200
+        @test String(resp_symbol.body) == "hello"
+
         resp_query = HT.get("$(base_url)/query"; query = Dict("a" => 1, "b" => 2))
         @test resp_query.status == 200
         @test String(resp_query.body) == "/query?a=1&b=2"
@@ -843,7 +847,11 @@ end
         resp_auth = HT.get("http://alice:secret@$(address)/auth")
         @test resp_auth.status == 200
         @test String(resp_auth.body) == "auth-ok"
-        @test seen_auth[] == "Basic YWxpY2U6c2VjcmV0"
+
+        resp_auth_disabled = HT.get("http://alice:secret@$(address)/auth-disabled"; basicauth = false)
+        @test resp_auth_disabled.status == 200
+        @test String(resp_auth_disabled.body) == "auth-ok"
+        @test seen_auth == ["Basic YWxpY2U6c2VjcmV0", nothing]
 
         resp_missing = HT.get("$(base_url)/missing"; status_exception = false)
         @test resp_missing.status == 404
@@ -867,6 +875,7 @@ end
         @test "/query?a=1&b=2" in seen_targets
         @test "/encoded?a%20b=c%2Bd&slash=%2Fx" in seen_targets
         @test "/auth" in seen_targets
+        @test "/auth-disabled" in seen_targets
     finally
         try
             NC.close!(listener)
@@ -894,17 +903,17 @@ end
                 elseif req.target == "/gzip-default"
                     payload = _gzip_bytes_client("gzip-default")
                     headers = HT.Headers()
-                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    HT.setheader(headers, "Content-Encoding", "gzip")
                     _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
                 elseif req.target == "/gzip-off"
                     payload = _gzip_bytes_client("gzip-off")
                     headers = HT.Headers()
-                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    HT.setheader(headers, "Content-Encoding", "gzip")
                     _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
                 elseif req.target == "/gzip-stream"
                     payload = _gzip_bytes_client("gzip-stream")
                     headers = HT.Headers()
-                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    HT.setheader(headers, "Content-Encoding", "gzip")
                     _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
                 else
                     _send_response_client!(conn, req; status = 500, reason = "Unexpected", body_text = req.target, close_conn = true)
@@ -979,7 +988,7 @@ end
             try
                 req = HT.read_request(HT._ConnReader(conn))
                 body_bytes = _read_all_body_bytes_client(req.body)
-                seen_content_types[req.target] = HT.get_header(req.headers, "Content-Type")
+                seen_content_types[req.target] = HT.header(req.headers, "Content-Type", nothing)
                 if req.target == "/multipart"
                     multipart_parts[] = HT.parse_multipart_form(seen_content_types[req.target], body_bytes)
                     _send_response_client!(conn, req; body_text = "multipart", close_conn = true)
@@ -1055,8 +1064,9 @@ end
     laddr = NC.addr(listener)::NC.SocketAddrV4
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
     base_url = "http://$(address)"
+    seen_open_auth = Ref{Union{Nothing, String}}(nothing)
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:6
+        for _ in 1:8
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
@@ -1067,17 +1077,22 @@ end
                     _send_response_client!(conn, req; body_text = payload, close_conn = true)
                 elseif req.target == "/open-redirect"
                     headers = HT.Headers()
-                    HT.set_header!(headers, "Location", "/open-redirect-final")
-                    HT.set_header!(headers, "Connection", "close")
+                    HT.setheader(headers, "Location", "/open-redirect-final")
+                    HT.setheader(headers, "Connection", "close")
                     _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, close_conn = true)
                 elseif req.target == "/open-redirect-final"
                     payload = String(_read_all_body_bytes_client(req.body))
                     _send_response_client!(conn, req; body_text = payload, close_conn = true)
                 elseif req.target == "/open-limit"
                     headers = HT.Headers()
-                    HT.set_header!(headers, "Location", "/open-never")
-                    HT.set_header!(headers, "Connection", "close")
+                    HT.setheader(headers, "Location", "/open-never")
+                    HT.setheader(headers, "Connection", "close")
                     _send_response_client!(conn, req; status = 302, reason = "Found", headers = headers, body_text = "open-limit", close_conn = true)
+                elseif req.target == "/open-auth"
+                    seen_open_auth[] = HT.header(req.headers, "Authorization", nothing)
+                    _send_response_client!(conn, req; body_text = "open-auth", close_conn = true)
+                elseif req.target == "/open-abort"
+                    _send_response_client!(conn, req; status = 500, reason = "Abort", body_text = "open-abort", close_conn = true)
                 elseif req.target == "/open-error"
                     _send_response_client!(conn, req; body_text = "open-error", close_conn = true)
                 else
@@ -1131,6 +1146,23 @@ end
         @test resp_limit.url == "$(base_url)/open-limit"
         @test resp_limit.body === nothing
 
+        resp_auth = HT.open(:GET, "http://alice:secret@$(address)/open-auth"; basicauth = false) do stream
+            meta = HT.startread(stream)
+            @test meta.status == 200
+            @test !HT.isaborted(stream)
+            @test String(read(stream)) == "open-auth"
+        end
+        @test resp_auth.status == 200
+        @test seen_open_auth[] === nothing
+
+        resp_abort = HT.open(:GET, "$(base_url)/open-abort"; status_exception = false) do stream
+            meta = HT.startread(stream)
+            @test meta.status == 500
+            @test HT.isaborted(stream)
+            @test String(read(stream)) == "open-abort"
+        end
+        @test resp_abort.status == 500
+
         open_err = try
             HT.open(:GET, "$(base_url)/open-error") do stream
                 _ = HT.startread(stream)
@@ -1160,9 +1192,9 @@ end
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
     base_url = "http://$(address)"
     sse_headers = HT.Headers()
-    HT.set_header!(sse_headers, "Content-Type", "text/event-stream")
+    HT.setheader(sse_headers, "Content-Type", "text/event-stream")
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:6
+        for _ in 1:7
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
@@ -1171,12 +1203,12 @@ end
                     _send_response_client!(conn, req; body_text = body, headers = sse_headers, close_conn = true)
                 elseif req.target == "/sse-plain"
                     headers = HT.Headers()
-                    HT.set_header!(headers, "Content-Type", "text/plain")
+                    HT.setheader(headers, "Content-Type", "text/plain")
                     _send_response_client!(conn, req; body_text = "data: plain\n\n", headers = headers, close_conn = true)
                 elseif req.target == "/sse-gzip"
                     payload = _gzip_bytes_client("data: gzip-one\n\n")
                     headers = copy(sse_headers)
-                    HT.set_header!(headers, "Content-Encoding", "gzip")
+                    HT.setheader(headers, "Content-Encoding", "gzip")
                     _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
                 elseif req.target == "/sse-error"
                     _send_response_client!(conn, req; status = 404, reason = "Not Found", body_text = "missing", close_conn = true)
@@ -1205,15 +1237,22 @@ end
         end
         @test combo_err isa ArgumentError
 
+        signature_err = try
+            response_callback(response::HT.Response, event) = begin
+                _ = (response, event)
+                nothing
+            end
+            HT.get("$(base_url)/sse"; sse_callback = response_callback)
+            nothing
+        catch err
+            err
+        end
+        @test signature_err isa ArgumentError
+
         events = HT.SSEEvent[]
-        seen_status = Ref(0)
-        resp_sse = HT.get("$(base_url)/sse"; sse_callback = (response, event) -> begin
-            seen_status[] = response.status
-            push!(events, event)
-        end)
+        resp_sse = HT.get("$(base_url)/sse"; sse_callback = event -> push!(events, event))
         @test resp_sse.status == 200
         @test resp_sse.body === HT.nobody
-        @test seen_status[] == 200
         @test length(events) == 2
         @test events[1].event == "ping"
         @test events[1].id == "1"

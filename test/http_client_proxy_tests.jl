@@ -239,8 +239,8 @@ end
         try
             req = HT.read_request(HT._ConnReader(conn))
             seen_target[] = req.target
-            seen_host[] = HT.get_header(req.headers, "Host")
-            seen_proxy_auth[] = HT.get_header(req.headers, "Proxy-Authorization")
+            seen_host[] = HT.header(req.headers, "Host")
+            seen_proxy_auth[] = HT.header(req.headers, "Proxy-Authorization")
             _send_response_proxy!(conn, req; body_text = "proxied", close_conn = true)
         finally
             try
@@ -314,12 +314,12 @@ end
         bridge2 = nothing
         try
             connect_req = HT.read_request(HT._ConnReader(client_conn))
-            seen_connect_host[] = HT.get_header(connect_req.headers, "Host")
-            seen_proxy_auth[] = HT.get_header(connect_req.headers, "Proxy-Authorization")
+            seen_connect_host[] = HT.header(connect_req.headers, "Host")
+            seen_proxy_auth[] = HT.header(connect_req.headers, "Proxy-Authorization")
             @test connect_req.method == "CONNECT"
             @test connect_req.target == origin_address
             headers = HT.Headers()
-            HT.set_header!(headers, "Connection", "keep-alive")
+            HT.setheader(headers, "Connection", "keep-alive")
             _send_response_proxy!(client_conn, connect_req; status = 200, reason = "Connection Established", headers = headers)
             bridge1 = errormonitor(Threads.@spawn _bridge_proxy!(client_conn, origin_conn))
             bridge2 = errormonitor(Threads.@spawn _bridge_proxy!(origin_conn, client_conn))

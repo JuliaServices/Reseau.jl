@@ -147,9 +147,9 @@ function sse_stream(response::Response; max_len::Integer = _DEFAULT_SSE_STREAM_M
     stream = response.body isa SSEStream ? response.body::SSEStream : SSEStream(; max_len = max_len)
     response.body = stream
     response.content_length = Int64(-1)
-    set_header!(response.headers, "Content-Type", "text/event-stream")
-    set_header!(response.headers, "Cache-Control", "no-cache")
-    delete_header!(response.headers, "Content-Length")
+    setheader(response.headers, "Content-Type", "text/event-stream")
+    setheader(response.headers, "Cache-Control", "no-cache")
+    removeheader(response.headers, "Content-Length")
     return stream
 end
 
@@ -231,13 +231,8 @@ function _wrap_sse_callback(callback::Function, stream::_SSEClientStream, respon
             return nothing
         end
     end
-    if applicable(callback, response, dummy)
-        return event -> begin
-            callback(response, event)
-            return nothing
-        end
-    end
-    applicable(callback, dummy) || throw(ArgumentError("sse_callback must accept (event), (stream, event), or (response, event)"))
+    _ = response
+    applicable(callback, dummy) || throw(ArgumentError("sse_callback must accept (event) or (stream, event)"))
     return event -> begin
         callback(event)
         return nothing

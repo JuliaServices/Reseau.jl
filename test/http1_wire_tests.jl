@@ -21,10 +21,10 @@ end
     @test req.target == "/upload"
     @test req.host == "example.com"
     @test req.content_length == 5
-    @test HT.get_headers(req.headers, "X-Test") == ["one", "two"]
+    @test HT.headers(req.headers, "X-Test") == ["one, two"]
     @test _read_all_body_bytes(req.body) == collect(codeunits("hello"))
     headers = HT.Headers()
-    HT.set_header!(headers, "host", "example.com")
+    HT.setheader(headers, "host", "example.com")
     body = HT.BytesBody(collect(codeunits("ping")))
     outbound = HT.Request("PUT", "/v1"; headers = headers, body = body, content_length = 4)
     io = IOBuffer()
@@ -40,27 +40,27 @@ end
     raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: done\r\n\r\n"
     resp = HT._read_response(IOBuffer(codeunits(raw)))
     @test resp.status_code == 200
-    @test HT.get_header(resp.headers, "Transfer-Encoding") == "chunked"
+    @test HT.header(resp.headers, "Transfer-Encoding") == "chunked"
     @test _read_all_body_bytes(resp.body) == collect(codeunits("Wikipedia"))
-    @test HT.get_header(resp.trailers, "X-Trailer") == "done"
+    @test HT.header(resp.trailers, "X-Trailer") == "done"
     headers = HT.Headers()
-    HT.set_header!(headers, "Transfer-Encoding", "chunked")
+    HT.setheader(headers, "Transfer-Encoding", "chunked")
     trailers = HT.Headers()
-    HT.set_header!(trailers, "X-Checksum", "abc123")
+    HT.setheader(trailers, "X-Checksum", "abc123")
     resp_out = HT.Response(200; reason = "OK", headers = headers, trailers = trailers, body = HT.BytesBody(collect(codeunits("chunked-body"))), content_length = -1)
     io = IOBuffer()
     HT.write_response!(io, resp_out)
     resp_in = HT._read_response(IOBuffer(take!(io)))
     @test resp_in.status_code == 200
     @test _read_all_body_bytes(resp_in.body) == collect(codeunits("chunked-body"))
-    @test HT.get_header(resp_in.trailers, "X-Checksum") == "abc123"
+    @test HT.header(resp_in.trailers, "X-Checksum") == "abc123"
 end
 
 @testset "HTTP/1 parse and framing errors" begin
     bad_header = "GET / HTTP/1.1\r\nHost example.com\r\n\r\n"
     @test_throws HT.ParseError HT.read_request(IOBuffer(codeunits(bad_header)))
     bad_cl = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello"
-    @test_throws HT.ProtocolError HT.read_request(IOBuffer(codeunits(bad_cl)))
+    @test_throws HT.ParseError HT.read_request(IOBuffer(codeunits(bad_cl)))
     bad_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nX\r\nabc\r\n0\r\n\r\n"
     bad_resp = HT._read_response(IOBuffer(codeunits(bad_chunk)))
     @test_throws HT.ParseError _read_all_body_bytes(bad_resp.body)

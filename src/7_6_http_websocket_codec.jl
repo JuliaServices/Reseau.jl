@@ -541,8 +541,8 @@ end
     return false
 end
 
-@inline function _ws_headers_have_token(headers::Headers, name::AbstractString, token::AbstractString; case_sensitive::Bool = false)::Bool
-    values = get_headers(headers, name)
+@inline function _ws_headers_have_token(hdrs::Headers, name::AbstractString, token::AbstractString; case_sensitive::Bool = false)::Bool
+    values = headers(hdrs, name)
     isempty(values) && return false
     for value in values
         _ws_header_value_has_token(value, token; case_sensitive = case_sensitive) && return true
@@ -554,21 +554,21 @@ function ws_is_websocket_request(request::Request)::Bool
     uppercase(request.method) == "GET" || return false
     _ws_headers_have_token(request.headers, "Upgrade", "websocket"; case_sensitive = false) || return false
     _ws_headers_have_token(request.headers, "Connection", "upgrade"; case_sensitive = false) || return false
-    get_header(request.headers, "Sec-WebSocket-Key") === nothing && return false
-    version = get_header(request.headers, "Sec-WebSocket-Version")
+    header(request.headers, "Sec-WebSocket-Key", nothing) === nothing && return false
+    version = header(request.headers, "Sec-WebSocket-Version", nothing)
     version === nothing && return false
     strip(version) == "13" || return false
     return true
 end
 
 function ws_get_request_sec_websocket_key(request::Request)::Union{Nothing, String}
-    key = get_header(request.headers, "Sec-WebSocket-Key")
+    key = header(request.headers, "Sec-WebSocket-Key", nothing)
     key === nothing && return nothing
     return strip(key)
 end
 
 function ws_select_subprotocol(request::Request, server_protocols::AbstractVector{<:AbstractString})::Union{Nothing, String}
-    values = get_headers(request.headers, "Sec-WebSocket-Protocol")
+    values = headers(request.headers, "Sec-WebSocket-Protocol")
     isempty(values) && return nothing
     requested = String[]
     for value in values

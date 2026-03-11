@@ -14,8 +14,8 @@ import Base: ==, copy, empty!, hash, isequal
 import ..Headers
 import ..Request
 import ..Response
-import ..add_header!
-import ..get_headers
+import ..appendheader
+import ..headers
 
 @enum SameSite SameSiteDefaultMode=1 SameSiteLaxMode SameSiteStrictMode SameSiteNoneMode
 
@@ -132,12 +132,12 @@ end
 function addcookie! end
 
 function addcookie!(r::Request, c::Cookie)
-    add_header!(r.headers, "Cookie", stringify(c))
+    appendheader(r.headers, "Cookie", stringify(c))
     return r
 end
 
 function addcookie!(r::Response, c::Cookie)
-    add_header!(r.headers, "Set-Cookie", stringify(c, false))
+    appendheader(r.headers, "Set-Cookie", stringify(c, false))
     return r
 end
 
@@ -160,9 +160,9 @@ gmtformat(::DateFormat{S, T}) where {S, T} = Dates.DateFormat(string(S, " G\\MT"
 const AlternateRFC1123GMTFormat = gmtformat(dateformat"e, dd-uuu-yyyy HH:MM:SS")
 const RFC1123GMTFormat = gmtformat(Dates.RFC1123Format)
 
-function readsetcookies(headers::Headers)::Vector{Cookie}
+function readsetcookies(hdrs::Headers)::Vector{Cookie}
     result = Cookie[]
-    for line in get_headers(headers, "Set-Cookie")
+    for line in headers(hdrs, "Set-Cookie")
         isempty(line) && continue
         parts = split(strip(line), ';'; keepempty = false)
         length(parts) == 1 && parts[1] == "" && continue
@@ -262,9 +262,9 @@ function cookies end
 cookies(r::Response) = readsetcookies(r.headers)
 cookies(r::Request) = readcookies(r.headers, "")
 
-function readcookies(headers::Headers, filter::String = "")::Vector{Cookie}
+function readcookies(hdrs::Headers, filter::String = "")::Vector{Cookie}
     result = Cookie[]
-    for line in get_headers(headers, "Cookie")
+    for line in headers(hdrs, "Cookie")
         for part in split(strip(line), ';'; keepempty = false)
             part = strip(part)
             length(part) <= 1 && continue

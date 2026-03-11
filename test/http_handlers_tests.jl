@@ -116,7 +116,7 @@ end
 
 @testset "HTTP handlers cookie middleware" begin
     headers = HT.Headers()
-    HT.set_header!(headers, "Cookie", "abc=def; mode=test")
+    HT.setheader(headers, "Cookie", "abc=def; mode=test")
     req = HT.Request("GET", "/"; headers = headers)
     cookies = HT.Handlers.cookie_middleware(req -> HT.getcookies(req))(req)
     @test length(cookies) == 2

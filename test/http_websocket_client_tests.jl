@@ -92,12 +92,12 @@ end
 
 function _accept_ws_request!(conn, request::HT.Request; subprotocol::Union{Nothing, String} = nothing)
     headers = HT.Headers()
-    HT.set_header!(headers, "Upgrade", "websocket")
-    HT.set_header!(headers, "Connection", "Upgrade")
+    HT.setheader(headers, "Upgrade", "websocket")
+    HT.setheader(headers, "Connection", "Upgrade")
     key = HT.ws_get_request_sec_websocket_key(request)
     key === nothing && error("missing websocket key")
-    HT.set_header!(headers, "Sec-WebSocket-Accept", HT.ws_compute_accept_key(key))
-    subprotocol === nothing || HT.set_header!(headers, "Sec-WebSocket-Protocol", subprotocol)
+    HT.setheader(headers, "Sec-WebSocket-Accept", HT.ws_compute_accept_key(key))
+    subprotocol === nothing || HT.setheader(headers, "Sec-WebSocket-Protocol", subprotocol)
     _write_response_all!(conn, HT.Response(101; headers = headers, body = HT.EmptyBody(), content_length = 0))
     return nothing
 end
@@ -205,7 +205,7 @@ end
     try
         target_listener, target_task, target_address = _ws_server() do conn
             request = _read_ws_request(conn)
-            @test HT.get_header(request.headers, "Cookie") == "session=abc"
+            @test HT.header(request.headers, "Cookie") == "session=abc"
             _accept_ws_request!(conn, request)
             server_ws = W.Conn(is_client = false)
             HT.ws_close!(server_ws; status_code = UInt16(1000), reason = UInt8[])
@@ -214,8 +214,8 @@ end
         redirect_listener, redirect_task, redirect_address = _ws_server() do conn
             request = _read_ws_request(conn)
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "ws://$target_address/final")
-            HT.set_header!(headers, "Set-Cookie", "session=abc; Path=/")
+            HT.setheader(headers, "Location", "ws://$target_address/final")
+            HT.setheader(headers, "Set-Cookie", "session=abc; Path=/")
             _write_response_all!(conn, HT.Response(302; headers = headers, body = HT.EmptyBody(), content_length = 0))
         end
         ws = W.open("ws://$redirect_address/start"; cookiejar = HT.CookieJar())

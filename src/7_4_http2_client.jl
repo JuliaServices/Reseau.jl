@@ -729,7 +729,7 @@ function _request_headers_for_h2(address::String, request::Request, secure::Bool
     ]
     for key in header_keys(request.headers)
         startswith(key, ":") && continue
-        values = get_headers(request.headers, key)
+        values = headers(request.headers, key)
         for value in values
             push!(fields, HeaderField(lowercase(key), value, false))
         end
@@ -745,7 +745,7 @@ function _decode_response_headers(headers::Vector{HeaderField})::Tuple{Int, Head
             status = parse(Int, header.value)
             continue
         end
-        add_header!(out, header.name, header.value)
+        appendheader(out, header.name, header.value)
     end
     return status, out
 end
