@@ -92,7 +92,7 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - Added `HTTP/2 server starts handling request bodies before upload completion` regression coverage in `test/http2_server_tests.jl`
 
-### [ ] ITEM-004 (P0) Implement missing HTTP/2 frame/state validation and flow-control behavior
+### [x] ITEM-004 (P0) Implement missing HTTP/2 frame/state validation and flow-control behavior
 - Description: The server currently only type-checks the initial `SETTINGS`, ACKs later `SETTINGS`, ignores `WINDOW_UPDATE`, `RST_STREAM`, and `GOAWAY`, and accepts malformed header sets too permissively. That is a correctness and hardening gap against Go.
 - Desired outcome: The h2 server validates pseudo-headers and forbidden headers, applies relevant peer settings, processes frame types needed for stable interop, and maintains flow-control state closely enough to behave correctly against stricter peers.
 - Affected files: `src/7_7_http_server.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`
@@ -117,6 +117,11 @@
   - The server handles the required frame/state transitions without obvious protocol violations.
   - Illegal request/response header patterns are rejected or stripped correctly.
   - Tests cover the new validation behavior.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - Added raw h2 regression coverage for invalid request headers, `GOAWAY` on protocol errors, response-header filtering, peer `SETTINGS_INITIAL_WINDOW_SIZE`, connection-level `WINDOW_UPDATE`, and `RST_STREAM` continuation of later streams
 
 ### [ ] ITEM-005 (P1) Restore Go-style shutdown and upgraded-connection lifecycle behavior
 - Description: Shutdown behavior is not yet production-ready for h2 or future upgraded/hijacked connections. The current lifecycle does not send `GOAWAY`, h2 connections do not participate in conn-state transitions the same way as h1, and the internal upgraded-connection shutdown path needs to be coherent.

@@ -1001,6 +1001,31 @@ function _H2ServerStreamState(stream_id::UInt32)
     )
 end
 
+mutable struct _H2SendWindowState
+    state_lock::ReentrantLock
+    window_condition::Threads.Condition
+    conn_send_window::Int64
+    initial_stream_send_window::Int64
+    peer_max_send_frame_size::Int
+    stream_send_window::Dict{UInt32, Int64}
+    conn_error::Union{Nothing, Exception}
+    @atomic closed::Bool
+end
+
+function _H2SendWindowState()
+    lock = ReentrantLock()
+    return _H2SendWindowState(
+        lock,
+        Threads.Condition(lock),
+        Int64(65_535),
+        Int64(65_535),
+        16_384,
+        Dict{UInt32, Int64}(),
+        nothing,
+        false,
+    )
+end
+
 mutable struct _H2ServerBody{C} <: AbstractBody
     conn::C
     write_lock::ReentrantLock
@@ -1008,8 +1033,11 @@ mutable struct _H2ServerBody{C} <: AbstractBody
     states::Dict{UInt32, _H2ServerStreamState}
     stream_id::UInt32
     state::_H2ServerStreamState
+    send_state::_H2SendWindowState
     @atomic closed::Bool
 end
+
+const _H2_FLOW_CONTROL_MAX_WINDOW = Int64(0x7fff_ffff)
 
 @inline function _h2_server_available_bytes(state::_H2ServerStreamState)::Int
     available = (length(state.body) - state.body_read_index) + 1
@@ -1033,6 +1061,129 @@ function _compact_h2_server_body_buffer!(state::_H2ServerStreamState)::Nothing
         state.body_read_index = 1
     end
     return nothing
+end
+
+function _fail_h2_send_window_state!(send_state::_H2SendWindowState, err::Exception)::Nothing
+    lock(send_state.state_lock)
+    try
+        send_state.conn_error === nothing && (send_state.conn_error = err)
+        @atomic :release send_state.closed = true
+        notify(send_state.window_condition; all = true)
+    finally
+        unlock(send_state.state_lock)
+    end
+    return nothing
+end
+
+function _register_h2_send_window!(send_state::_H2SendWindowState, stream_id::UInt32)::Nothing
+    lock(send_state.state_lock)
+    try
+        send_state.stream_send_window[stream_id] = send_state.initial_stream_send_window
+        notify(send_state.window_condition; all = true)
+    finally
+        unlock(send_state.state_lock)
+    end
+    return nothing
+end
+
+function _unregister_h2_send_window!(send_state::_H2SendWindowState, stream_id::UInt32)::Nothing
+    lock(send_state.state_lock)
+    try
+        delete!(send_state.stream_send_window, stream_id)
+        notify(send_state.window_condition; all = true)
+    finally
+        unlock(send_state.state_lock)
+    end
+    return nothing
+end
+
+function _apply_h2_peer_settings!(send_state::_H2SendWindowState, settings::Vector{Pair{UInt16, UInt32}})::Nothing
+    seen_ids = Set{UInt16}()
+    lock(send_state.state_lock)
+    try
+        for setting in settings
+            id = setting.first
+            in(id, seen_ids) && throw(ProtocolError("duplicate HTTP/2 SETTINGS entry"))
+            push!(seen_ids, id)
+            value = setting.second
+            if id == UInt16(0x4)
+                value > UInt32(0x7fff_ffff) && throw(ProtocolError("HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE too large"))
+                new_window = Int64(value)
+                delta = new_window - send_state.initial_stream_send_window
+                send_state.initial_stream_send_window = new_window
+                for stream_id in keys(send_state.stream_send_window)
+                    updated = send_state.stream_send_window[stream_id] + delta
+                    updated > _H2_FLOW_CONTROL_MAX_WINDOW && throw(ProtocolError("HTTP/2 stream send window overflow"))
+                    send_state.stream_send_window[stream_id] = updated
+                end
+            elseif id == UInt16(0x2)
+                value > UInt32(1) && throw(ProtocolError("HTTP/2 SETTINGS_ENABLE_PUSH must be 0 or 1"))
+            elseif id == UInt16(0x5)
+                value < UInt32(16_384) && throw(ProtocolError("HTTP/2 SETTINGS_MAX_FRAME_SIZE too small"))
+                value > UInt32(16_777_215) && throw(ProtocolError("HTTP/2 SETTINGS_MAX_FRAME_SIZE too large"))
+                send_state.peer_max_send_frame_size = Int(value)
+            end
+        end
+        notify(send_state.window_condition; all = true)
+    finally
+        unlock(send_state.state_lock)
+    end
+    return nothing
+end
+
+function _apply_h2_window_update!(send_state::_H2SendWindowState, frame::WindowUpdateFrame)::Nothing
+    lock(send_state.state_lock)
+    try
+        increment = Int64(frame.window_size_increment)
+        if frame.stream_id == UInt32(0)
+            updated = send_state.conn_send_window + increment
+            updated > _H2_FLOW_CONTROL_MAX_WINDOW && throw(ProtocolError("HTTP/2 connection send window overflow"))
+            send_state.conn_send_window = updated
+        elseif haskey(send_state.stream_send_window, frame.stream_id)
+            updated = send_state.stream_send_window[frame.stream_id] + increment
+            updated > _H2_FLOW_CONTROL_MAX_WINDOW && throw(ProtocolError("HTTP/2 stream send window overflow"))
+            send_state.stream_send_window[frame.stream_id] = updated
+        else
+            return nothing
+        end
+        notify(send_state.window_condition; all = true)
+    finally
+        unlock(send_state.state_lock)
+    end
+    return nothing
+end
+
+function _reserve_h2_send_window!(send_state::_H2SendWindowState, stream_id::UInt32, wanted::Int)::Int
+    wanted > 0 || throw(ArgumentError("wanted send window must be > 0"))
+    lock(send_state.state_lock)
+    try
+        while true
+            (@atomic :acquire send_state.closed) && throw(ProtocolError("HTTP/2 connection is closed"))
+            send_state.conn_error === nothing || throw(send_state.conn_error::Exception)
+            haskey(send_state.stream_send_window, stream_id) || throw(ProtocolError("HTTP/2 stream send window is closed"))
+            stream_window = send_state.stream_send_window[stream_id]
+            if stream_window <= 0 || send_state.conn_send_window <= 0
+                wait(send_state.window_condition)
+                continue
+            end
+            allowed = min(
+                Int64(wanted),
+                send_state.conn_send_window,
+                stream_window,
+                Int64(send_state.peer_max_send_frame_size),
+                Int64(_H2_SERVER_MAX_DATA_FRAME_SIZE),
+            )
+            if allowed <= 0
+                wait(send_state.window_condition)
+                continue
+            end
+            send_state.conn_send_window -= allowed
+            send_state.stream_send_window[stream_id] = stream_window - allowed
+            return Int(allowed)
+        end
+    finally
+        unlock(send_state.state_lock)
+    end
 end
 
 function _send_h2_server_window_updates!(
@@ -1060,6 +1211,7 @@ function _maybe_cleanup_h2_server_state!(
         states_lock::ReentrantLock,
         states::Dict{UInt32, _H2ServerStreamState},
         state::_H2ServerStreamState,
+        send_state::_H2SendWindowState,
     )::Nothing
     should_delete = false
     lock(state.lock)
@@ -1069,12 +1221,61 @@ function _maybe_cleanup_h2_server_state!(
         unlock(state.lock)
     end
     should_delete || return nothing
+    removed = false
     lock(states_lock)
     try
         current = get(() -> nothing, states, state.stream_id)
-        current === state && delete!(states, state.stream_id)
+        if current === state
+            delete!(states, state.stream_id)
+            removed = true
+        end
     finally
         unlock(states_lock)
+    end
+    removed && _unregister_h2_send_window!(send_state, state.stream_id)
+    return nothing
+end
+
+function _set_h2_server_stream_error!(
+        state::_H2ServerStreamState,
+        err::Exception;
+        aborted::Bool = true,
+        discard_body::Bool = true,
+        finish_if_unstarted::Bool = false,
+    )::Nothing
+    lock(state.lock)
+    try
+        state.error === nothing && (state.error = err)
+        aborted && (state.aborted = true)
+        state.stream_done = true
+        if discard_body
+            empty!(state.body)
+            state.body_read_index = 1
+        end
+        finish_if_unstarted && !state.handler_started && (state.handler_finished = true)
+        notify(state.condition)
+    finally
+        unlock(state.lock)
+    end
+    return nothing
+end
+
+function _fail_h2_server_streams!(
+        states_lock::ReentrantLock,
+        states::Dict{UInt32, _H2ServerStreamState},
+        send_state::_H2SendWindowState,
+        err::Exception,
+    )::Nothing
+    snapshot = _H2ServerStreamState[]
+    lock(states_lock)
+    try
+        append!(snapshot, values(states))
+    finally
+        unlock(states_lock)
+    end
+    for state in snapshot
+        _set_h2_server_stream_error!(state, err; finish_if_unstarted = true)
+        _unregister_h2_send_window!(send_state, state.stream_id)
     end
     return nothing
 end
@@ -1123,7 +1324,7 @@ function body_read!(body::_H2ServerBody, dst::Vector{UInt8})::Int
         end
         if done
             @atomic :release body.closed = true
-            _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state)
+            _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state, body.send_state)
             return 0
         end
     end
@@ -1154,7 +1355,7 @@ function body_close!(body::_H2ServerBody)::Nothing
         catch
         end
     end
-    _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state)
+    _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state, body.send_state)
     return nothing
 end
 
@@ -1169,6 +1370,7 @@ end
     return lower == "connection" ||
         lower == "proxy-connection" ||
         lower == "keep-alive" ||
+        lower == "te" ||
         lower == "transfer-encoding" ||
         lower == "upgrade" ||
         lower == "trailer"
@@ -1261,13 +1463,20 @@ function _write_frame_h2_server_threadsafe!(write_lock::ReentrantLock, conn::Uni
     return nothing
 end
 
-function _write_data_frames_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, data::Vector{UInt8}; end_stream::Bool)::Nothing
+function _write_data_frames_h2_server!(
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        send_state::_H2SendWindowState,
+        stream_id::UInt32,
+        data::Vector{UInt8};
+        end_stream::Bool,
+    )::Nothing
     isempty(data) && return nothing
     offset = 1
     total_len = length(data)
     while offset <= total_len
         remaining = total_len - offset + 1
-        chunk_len = min(_H2_SERVER_MAX_DATA_FRAME_SIZE, remaining)
+        chunk_len = _reserve_h2_send_window!(send_state, stream_id, remaining)
         chunk = Vector{UInt8}(undef, chunk_len)
         copyto!(chunk, 1, data, offset, chunk_len)
         final_chunk = (offset + chunk_len - 1) == total_len
@@ -1290,26 +1499,64 @@ function _read_exact_h2_server!(io, n::Int)::Vector{UInt8}
     return out
 end
 
-function _decode_h2_request(headers::Vector{HeaderField}, body::AbstractBody; stream_done::Bool = false)::Request
-    method = "GET"
-    path = "/"
-    host = nothing
+function _validate_h2_request_headers!(headers::Vector{HeaderField})::Tuple{String, Union{Nothing, String}, Union{Nothing, String}, Union{Nothing, String}, Headers}
+    method = nothing
+    scheme = nothing
+    path = nothing
+    authority = nothing
+    saw_regular = false
     out_headers = Headers()
     for header in headers
-        if header.name == ":method"
-            method = header.value
+        name = header.name
+        value = header.value
+        name == lowercase(name) || throw(ProtocolError("HTTP/2 header field names must be lowercase"))
+        if startswith(name, ':')
+            saw_regular && throw(ProtocolError("HTTP/2 pseudo-headers must precede regular headers"))
+            if name == ":method"
+                method === nothing || throw(ProtocolError("duplicate HTTP/2 :method pseudo-header"))
+                method = value
+            elseif name == ":scheme"
+                scheme === nothing || throw(ProtocolError("duplicate HTTP/2 :scheme pseudo-header"))
+                scheme = value
+            elseif name == ":path"
+                path === nothing || throw(ProtocolError("duplicate HTTP/2 :path pseudo-header"))
+                path = value
+            elseif name == ":authority"
+                authority === nothing || throw(ProtocolError("duplicate HTTP/2 :authority pseudo-header"))
+                authority = value
+            else
+                throw(ProtocolError("unsupported HTTP/2 pseudo-header $(repr(name))"))
+            end
             continue
         end
-        if header.name == ":path"
-            path = header.value
-            continue
+        saw_regular = true
+        if name == "connection" || name == "proxy-connection" || name == "keep-alive" || name == "upgrade"
+            throw(ProtocolError("forbidden HTTP/2 connection-specific header $(repr(name))"))
         end
-        if header.name == ":authority"
-            host = header.value
-            continue
+        if name == "transfer-encoding"
+            throw(ProtocolError("forbidden HTTP/2 transfer-encoding header"))
         end
-        add_header!(out_headers, header.name, header.value)
+        if name == "te"
+            lowercase(_trim_http_ows(value)) == "trailers" || throw(ProtocolError("HTTP/2 TE header may only contain trailers"))
+        end
+        add_header!(out_headers, name, value)
     end
+    method === nothing && throw(ProtocolError("missing HTTP/2 :method pseudo-header"))
+    if method == "CONNECT"
+        authority === nothing && throw(ProtocolError("CONNECT requests require :authority"))
+        scheme === nothing || throw(ProtocolError("CONNECT requests must not include :scheme"))
+        path === nothing || throw(ProtocolError("CONNECT requests must not include :path"))
+    else
+        scheme === nothing && throw(ProtocolError("missing HTTP/2 :scheme pseudo-header"))
+        path === nothing && throw(ProtocolError("missing HTTP/2 :path pseudo-header"))
+    end
+    return method::String, scheme, path, authority, out_headers
+end
+
+function _decode_h2_request(headers::Vector{HeaderField}, body::AbstractBody; stream_done::Bool = false)::Request
+    method, _scheme, path, authority, out_headers = _validate_h2_request_headers!(headers)
+    target = method == "CONNECT" ? authority::String : (path::String)
+    host = authority === nothing ? get_header(out_headers, "Host") : authority
     content_length = _parse_content_length(out_headers)
     if content_length < 0
         if body isa BytesBody
@@ -1320,7 +1567,7 @@ function _decode_h2_request(headers::Vector{HeaderField}, body::AbstractBody; st
     end
     return Request(
         method,
-        path;
+        target;
         headers = out_headers,
         body = body,
         host = host,
@@ -1355,7 +1602,14 @@ function _write_h2_trailers!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::Reentr
     return nothing
 end
 
-function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, response::Response; end_stream::Bool = true)::Nothing
+function _write_response_body_h2_server!(
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        send_state::_H2SendWindowState,
+        stream_id::UInt32,
+        response::Response;
+        end_stream::Bool = true,
+    )::Nothing
     response.body isa EmptyBody && return nothing
     buf = Vector{UInt8}(undef, 16 * 1024)
     pending = UInt8[]
@@ -1365,7 +1619,7 @@ function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, write_
             n = body_read!(response.body, buf)
             if n == 0
                 if have_pending
-                    _write_data_frames_h2_server!(conn, write_lock, stream_id, pending; end_stream = end_stream)
+                    _write_data_frames_h2_server!(conn, write_lock, send_state, stream_id, pending; end_stream = end_stream)
                 elseif end_stream
                     _write_frame_h2_server_threadsafe!(write_lock, conn, DataFrame(stream_id, true, UInt8[]))
                 end
@@ -1374,7 +1628,7 @@ function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, write_
             current = Vector{UInt8}(undef, n)
             copyto!(current, 1, buf, 1, n)
             if have_pending
-                _write_data_frames_h2_server!(conn, write_lock, stream_id, pending; end_stream = false)
+                _write_data_frames_h2_server!(conn, write_lock, send_state, stream_id, pending; end_stream = false)
             end
             pending = current
             have_pending = true
@@ -1387,7 +1641,14 @@ function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, write_
     end
 end
 
-function _write_h2_response!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, request::Request, response::Response)::Nothing
+function _write_h2_response!(
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        send_state::_H2SendWindowState,
+        stream_id::UInt32,
+        request::Request,
+        response::Response,
+    )::Nothing
     response.request = request
     allows_body = _h2_response_allows_body(request, response)
     has_trailers = !isempty(response.trailers)
@@ -1403,12 +1664,19 @@ function _write_h2_response!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::Reentr
     body_empty = response.body isa EmptyBody
     end_stream = body_empty && !has_trailers
     _write_frame_h2_server_threadsafe!(write_lock, conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
-    body_empty || _write_response_body_h2_server!(conn, write_lock, stream_id, response; end_stream = !has_trailers)
+    body_empty || _write_response_body_h2_server!(conn, write_lock, send_state, stream_id, response; end_stream = !has_trailers)
     has_trailers && _write_h2_trailers!(conn, write_lock, stream_id, response.trailers)
     return nothing
 end
 
-function _write_h2_buffered_stream_response!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, request::Request, stream::Stream)::Nothing
+function _write_h2_buffered_stream_response!(
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        send_state::_H2SendWindowState,
+        stream_id::UInt32,
+        request::Request,
+        stream::Stream,
+    )::Nothing
     response = stream.response::Response
     response.request = request
     allows_body = _h2_response_allows_body(request, response)
@@ -1422,7 +1690,7 @@ function _write_h2_buffered_stream_response!(conn::Union{TCP.Conn, TLS.Conn}, wr
     has_trailers = !isempty(response.trailers)
     end_stream = !has_body && !has_trailers
     _write_frame_h2_server_threadsafe!(write_lock, conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
-    has_body && _write_data_frames_h2_server!(conn, write_lock, stream_id, body_bytes; end_stream = !has_trailers)
+    has_body && _write_data_frames_h2_server!(conn, write_lock, send_state, stream_id, body_bytes; end_stream = !has_trailers)
     has_trailers && _write_h2_trailers!(conn, write_lock, stream_id, response.trailers)
     return nothing
 end
@@ -1431,6 +1699,7 @@ function _handle_h2_stream!(
         server::Server,
         conn::Union{TCP.Conn, TLS.Conn},
         write_lock::ReentrantLock,
+        send_state::_H2SendWindowState,
         states_lock::ReentrantLock,
         states::Dict{UInt32, _H2ServerStreamState},
         stream_id::UInt32,
@@ -1445,71 +1714,77 @@ function _handle_h2_stream!(
         if state.stream_done && _h2_server_available_bytes(state) == 0
             request_body = EmptyBody()
         else
-            request_body = _H2ServerBody(conn, write_lock, states_lock, states, stream_id, state, false)
+            request_body = _H2ServerBody(conn, write_lock, states_lock, states, stream_id, state, send_state, false)
         end
     finally
         unlock(state.lock)
     end
-    request = _decode_h2_request(decoded_headers, request_body::AbstractBody; stream_done = stream_done)
-    if server.stream
-        stream = Stream(request)
-        try
-            server.handler(stream)
-            if !(@atomic :acquire stream.write_closed)
-                closewrite(stream)
-            end
-            closeread(stream)
-        catch err
-            status_code = _server_error_status(err::Exception)
-            stream.request_buffer = IOBuffer()
-            stream.response = Response(
-                status_code === nothing ? 500 : status_code::Int;
-                proto_major = 2,
-                proto_minor = 0,
-                request = request,
-            )
-            @atomic :release stream.response_started = false
-            @atomic :release stream.write_closed = false
-            @atomic :release stream.read_closed = false
-            closewrite(stream)
-            closeread(stream)
-        end
-        _write_h2_buffered_stream_response!(conn, write_lock, stream_id, request, stream)
-    else
-        response = try
-            server.handler(request)
-        catch err
-            status_code = _server_error_status(err::Exception)
-            _write_h2_response!(
-                conn,
-                write_lock,
-                stream_id,
-                request,
-                Response(
+    try
+        request = _decode_h2_request(decoded_headers, request_body::AbstractBody; stream_done = stream_done)
+        if server.stream
+            stream = Stream(request)
+            try
+                server.handler(stream)
+                if !(@atomic :acquire stream.write_closed)
+                    closewrite(stream)
+                end
+                closeread(stream)
+            catch err
+                status_code = _server_error_status(err::Exception)
+                stream.request_buffer = IOBuffer()
+                stream.response = Response(
                     status_code === nothing ? 500 : status_code::Int;
                     proto_major = 2,
                     proto_minor = 0,
                     request = request,
-                ),
-            )
-            return nothing
+                )
+                @atomic :release stream.response_started = false
+                @atomic :release stream.write_closed = false
+                @atomic :release stream.read_closed = false
+                closewrite(stream)
+                closeread(stream)
+            end
+            _write_h2_buffered_stream_response!(conn, write_lock, send_state, stream_id, request, stream)
+        else
+            response = try
+                server.handler(request)
+            catch err
+                status_code = _server_error_status(err::Exception)
+                _write_h2_response!(
+                    conn,
+                    write_lock,
+                    send_state,
+                    stream_id,
+                    request,
+                    Response(
+                        status_code === nothing ? 500 : status_code::Int;
+                        proto_major = 2,
+                        proto_minor = 0,
+                        request = request,
+                    ),
+                )
+                return nothing
+            end
+            response isa Response || throw(ProtocolError("h2 server handler must return HTTP.Response"))
+            response_obj = response::Response
+            _write_h2_response!(conn, write_lock, send_state, stream_id, request, response_obj)
         end
-        response isa Response || throw(ProtocolError("h2 server handler must return HTTP.Response"))
-        response_obj = response::Response
-        _write_h2_response!(conn, write_lock, stream_id, request, response_obj)
-    end
-    if request.body isa _H2ServerBody
-        body = request.body::_H2ServerBody
-        _request_body_fully_consumed(request) || body_close!(body)
-        lock(body.state.lock)
+        if request.body isa _H2ServerBody
+            body = request.body::_H2ServerBody
+            _request_body_fully_consumed(request) || body_close!(body)
+        end
+    catch err
+        stream_cancelled = false
+        lock(state.lock)
         try
-            body.state.handler_finished = true
-            notify(body.state.condition)
+            stream_cancelled = state.error !== nothing || state.aborted
         finally
-            unlock(body.state.lock)
+            unlock(state.lock)
         end
-        _maybe_cleanup_h2_server_state!(states_lock, states, body.state)
-    else
+        if !(stream_cancelled || (@atomic :acquire send_state.closed))
+            rethrow(err)
+        end
+    finally
         lock(state.lock)
         try
             state.handler_finished = true
@@ -1517,7 +1792,7 @@ function _handle_h2_stream!(
         finally
             unlock(state.lock)
         end
-        _maybe_cleanup_h2_server_state!(states_lock, states, state)
+        _maybe_cleanup_h2_server_state!(states_lock, states, state, send_state)
     end
     return nothing
 end
@@ -1526,6 +1801,7 @@ function _dispatch_h2_stream!(
         server::Server,
         conn::Union{TCP.Conn, TLS.Conn},
         write_lock::ReentrantLock,
+        send_state::_H2SendWindowState,
         states_lock::ReentrantLock,
         states::Dict{UInt32, _H2ServerStreamState},
         state::_H2ServerStreamState,
@@ -1536,12 +1812,32 @@ function _dispatch_h2_stream!(
         state.handler_started && return nothing
         state.headers_complete || return nothing
         state.decoded_headers === nothing && throw(ProtocolError("HTTP/2 request missing decoded headers"))
-        state.handler_started = true
         decoded_headers = copy(state.decoded_headers::Vector{HeaderField})
     finally
         unlock(state.lock)
     end
-    errormonitor(Threads.@spawn _handle_h2_stream!(server, conn, write_lock, states_lock, states, state.stream_id, state, decoded_headers::Vector{HeaderField}))
+    _validate_h2_request_headers!(decoded_headers::Vector{HeaderField})
+    lock(state.lock)
+    try
+        state.handler_started && return nothing
+        state.handler_started = true
+    finally
+        unlock(state.lock)
+    end
+    errormonitor(Threads.@spawn _handle_h2_stream!(server, conn, write_lock, send_state, states_lock, states, state.stream_id, state, decoded_headers::Vector{HeaderField}))
+    return nothing
+end
+
+function _try_write_h2_goaway!(
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        last_stream_id::UInt32,
+        error_code::UInt32,
+    )::Nothing
+    try
+        _write_frame_h2_server_threadsafe!(write_lock, conn, GoAwayFrame(last_stream_id, error_code, UInt8[]))
+    catch
+    end
     return nothing
 end
 
@@ -1551,21 +1847,27 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
     decoder = Decoder()
     write_lock = ReentrantLock()
     states_lock = ReentrantLock()
+    send_state = _H2SendWindowState()
+    states = Dict{UInt32, _H2ServerStreamState}()
+    continuation_stream = UInt32(0)
+    max_stream_id = UInt32(0)
+    peer_goaway_last_stream_id = typemax(UInt32)
+    close_err = nothing
+    goaway_error_code = nothing
     try
         preface = _read_exact_h2_server!(reader_source, length(_H2_PREFACE))
         preface == _H2_PREFACE || throw(ProtocolError("invalid h2 client preface"))
         client_settings = read_frame!(reader)
         client_settings isa SettingsFrame || throw(ProtocolError("expected initial h2 SETTINGS frame"))
-        _write_frame_h2_server!(conn, SettingsFrame(false, Pair{UInt16, UInt32}[]))
-        _write_frame_h2_server!(conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
-        states = Dict{UInt32, _H2ServerStreamState}()
-        continuation_stream = UInt32(0)
-        max_stream_id = UInt32(0)
+        (client_settings::SettingsFrame).ack && throw(ProtocolError("initial h2 SETTINGS frame must not be ACK"))
+        _apply_h2_peer_settings!(send_state, (client_settings::SettingsFrame).settings)
+        _write_frame_h2_server_threadsafe!(write_lock, conn, SettingsFrame(false, Pair{UInt16, UInt32}[]))
+        _write_frame_h2_server_threadsafe!(write_lock, conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
         while !_server_shutting_down(server)
             frame = try
                 read_frame!(reader)
             catch err
-                if err isa EOFError || err isa IOPoll.NetClosingError || err isa ParseError || err isa TLS.TLSError
+                if err isa EOFError || err isa IOPoll.NetClosingError || err isa TLS.TLSError
                     return nothing
                 end
                 rethrow(err)
@@ -1579,34 +1881,67 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
             end
             if frame isa SettingsFrame
                 sf = frame::SettingsFrame
-                sf.ack || _write_frame_h2_server!(conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
+                if !sf.ack
+                    _apply_h2_peer_settings!(send_state, sf.settings)
+                    _write_frame_h2_server_threadsafe!(write_lock, conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
+                end
                 continue
             end
             if frame isa PingFrame
                 ping = frame::PingFrame
-                ping.ack || _write_frame_h2_server!(conn, PingFrame(true, ping.opaque_data))
+                ping.ack || _write_frame_h2_server_threadsafe!(write_lock, conn, PingFrame(true, ping.opaque_data))
+                continue
+            end
+            if frame isa WindowUpdateFrame
+                _apply_h2_window_update!(send_state, frame::WindowUpdateFrame)
+                continue
+            end
+            if frame isa RSTStreamFrame
+                rst = frame::RSTStreamFrame
+                rst.stream_id == UInt32(0) && throw(ProtocolError("RST_STREAM stream id must be non-zero"))
+                lock(states_lock)
+                state = try
+                    get(() -> nothing, states, rst.stream_id)
+                finally
+                    unlock(states_lock)
+                end
+                state === nothing && continue
+                _set_h2_server_stream_error!(state, ProtocolError("HTTP/2 stream reset by peer"); finish_if_unstarted = true)
+                _unregister_h2_send_window!(send_state, rst.stream_id)
+                _maybe_cleanup_h2_server_state!(states_lock, states, state, send_state)
+                continue
+            end
+            if frame isa GoAwayFrame
+                goaway = frame::GoAwayFrame
+                peer_goaway_last_stream_id = min(peer_goaway_last_stream_id, goaway.last_stream_id)
+                goaway.error_code == UInt32(0) || throw(ProtocolError("HTTP/2 peer sent GOAWAY"))
                 continue
             end
             if frame isa HeadersFrame
                 hf = frame::HeadersFrame
                 hf.stream_id == UInt32(0) && throw(ProtocolError("HEADERS stream id must be non-zero"))
                 iseven(hf.stream_id) && throw(ProtocolError("HEADERS stream id must be odd for client-initiated streams"))
+                hf.stream_id > peer_goaway_last_stream_id && throw(ProtocolError("client opened stream after GOAWAY"))
                 lock(states_lock)
                 state = try
                     if hf.stream_id < max_stream_id && !haskey(states, hf.stream_id)
                         throw(ProtocolError("HEADERS stream id must increase monotonically"))
                     end
                     hf.stream_id > max_stream_id && (max_stream_id = hf.stream_id)
-                    get(() -> begin
+                    if haskey(states, hf.stream_id)
+                        states[hf.stream_id]
+                    else
                         created = _H2ServerStreamState(hf.stream_id)
                         states[hf.stream_id] = created
+                        _register_h2_send_window!(send_state, hf.stream_id)
                         created
-                    end, states, hf.stream_id)
+                    end
                 finally
                     unlock(states_lock)
                 end
                 lock(state.lock)
                 try
+                    state.headers_complete && throw(ProtocolError("unexpected additional HTTP/2 HEADERS on request stream"))
                     append!(state.header_block, hf.header_block_fragment)
                     if hf.end_headers
                         state.decoded_headers = decode_header_block(decoder, state.header_block)
@@ -1621,7 +1956,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 end
                 if hf.end_headers
                     continuation_stream = UInt32(0)
-                    _dispatch_h2_stream!(server, conn, write_lock, states_lock, states, state)
+                    _dispatch_h2_stream!(server, conn, write_lock, send_state, states_lock, states, state)
                 end
                 continue
             end
@@ -1649,7 +1984,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 finally
                     unlock(state.lock)
                 end
-                cf.end_headers && _dispatch_h2_stream!(server, conn, write_lock, states_lock, states, state)
+                cf.end_headers && _dispatch_h2_stream!(server, conn, write_lock, send_state, states_lock, states, state)
                 continue
             end
             if frame isa DataFrame
@@ -1680,17 +2015,28 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 end
                 if state.aborted
                     _send_h2_server_window_updates!(conn, write_lock, df.stream_id, length(df.data); stream_level = false)
-                    _maybe_cleanup_h2_server_state!(states_lock, states, state)
+                    _maybe_cleanup_h2_server_state!(states_lock, states, state, send_state)
                 end
                 continue
             end
         end
     catch err
-        if err isa ProtocolError || err isa ParseError || err isa EOFError || err isa IOPoll.NetClosingError || err isa TLS.TLSError
+        if err isa ProtocolError || err isa ParseError
+            close_err = err
+            goaway_error_code = UInt32(0x1)
             return nothing
         end
+        if err isa EOFError || err isa IOPoll.NetClosingError || err isa TLS.TLSError
+            close_err = err isa EOFError ? ProtocolError("HTTP/2 connection is closed") : err
+            return nothing
+        end
+        close_err = err
         rethrow(err)
     finally
+        fail_err = close_err === nothing ? ProtocolError("HTTP/2 connection is closed") : (close_err::Exception)
+        goaway_error_code === nothing || _try_write_h2_goaway!(conn, write_lock, max_stream_id, goaway_error_code::UInt32)
+        _fail_h2_send_window_state!(send_state, fail_err)
+        _fail_h2_server_streams!(states_lock, states, send_state, fail_err)
         _clear_deadlines!(conn)
         _close_server_conn!(tracked)
         _untrack_conn!(server, tracked)

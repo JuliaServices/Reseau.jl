@@ -46,6 +46,40 @@ function _write_frame_h2_server_raw!(conn::NC.Conn, frame::HT.AbstractFrame)
     return nothing
 end
 
+function _open_raw_h2_server_conn(address::String; settings::Vector{Pair{UInt16, UInt32}} = Pair{UInt16, UInt32}[])
+    conn = ND.connect("tcp", address)
+    reader = HT.Framer(HT._ConnReader(conn))
+    _write_all_h2_server_raw!(conn, HT._H2_PREFACE)
+    _write_frame_h2_server_raw!(conn, HT.SettingsFrame(false, settings))
+    first = HT.read_frame!(reader)
+    second = HT.read_frame!(reader)
+    frames = (first, second)
+    count(frame -> frame isa HT.SettingsFrame && !(frame::HT.SettingsFrame).ack, frames) == 1 || error("expected server SETTINGS frame")
+    count(frame -> frame isa HT.SettingsFrame && (frame::HT.SettingsFrame).ack, frames) == 1 || error("expected server SETTINGS ACK frame")
+    return conn, reader
+end
+
+function _write_h2_server_request_headers!(
+        conn::NC.Conn,
+        encoder::HT.Encoder,
+        stream_id::UInt32,
+        address::String,
+        path::String;
+        method::String = "GET",
+        headers::Vector{HT.HeaderField} = HT.HeaderField[],
+        end_stream::Bool = true,
+    )
+    fields = HT.HeaderField[
+        HT.HeaderField(":method", method, false),
+        HT.HeaderField(":scheme", "http", false),
+        HT.HeaderField(":authority", address, false),
+        HT.HeaderField(":path", path, false),
+    ]
+    append!(fields, headers)
+    _write_frame_h2_server_raw!(conn, HT.HeadersFrame(stream_id, end_stream, true, HT.encode_header_block(encoder, fields)))
+    return nothing
+end
+
 @testset "HTTP/2 server request handling" begin
     server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             payload = collect(codeunits("h2:" * request.target))
@@ -323,10 +357,222 @@ end
         _write_frame_h2_server_raw!(conn, HT.HeadersFrame(UInt32(1), false, false, header_block[1:split_idx]))
         _write_frame_h2_server_raw!(conn, HT.DataFrame(UInt32(1), true, UInt8[]))
         NC.set_deadline!(conn, Int64(time_ns() + 1_000_000_000))
-        @test_throws Exception HT.read_frame!(reader)
+        frame_or_err = try
+            HT.read_frame!(reader)
+        catch err
+            err
+        finally
+            NC.set_deadline!(conn, Int64(0))
+        end
+        @test frame_or_err isa HT.GoAwayFrame || frame_or_err isa Exception
+        if frame_or_err isa HT.GoAwayFrame
+            @test (frame_or_err::HT.GoAwayFrame).error_code == UInt32(0x1)
+        end
     finally
         try
             NC.close!(conn)
+        catch
+        end
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
+@testset "HTTP/2 server rejects invalid request headers" begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            _ = request
+            return HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2, proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    invalid_cases = (
+        HT.HeaderField[
+            HT.HeaderField(":method", "GET", false),
+            HT.HeaderField(":scheme", "http", false),
+            HT.HeaderField("x-test", "1", false),
+            HT.HeaderField(":authority", address, false),
+            HT.HeaderField(":path", "/bad-order", false),
+        ],
+        HT.HeaderField[
+            HT.HeaderField(":method", "GET", false),
+            HT.HeaderField(":scheme", "http", false),
+            HT.HeaderField(":authority", address, false),
+            HT.HeaderField(":path", "/bad-connection", false),
+            HT.HeaderField("connection", "close", false),
+        ],
+    )
+    try
+        for header_fields in invalid_cases
+            conn = nothing
+            try
+                conn, reader = _open_raw_h2_server_conn(address)
+                _write_frame_h2_server_raw!(conn::NC.Conn, HT.HeadersFrame(UInt32(1), true, true, HT.encode_header_block(HT.Encoder(), header_fields)))
+                NC.set_deadline!(conn::NC.Conn, Int64(time_ns() + 1_000_000_000))
+                frame_or_err = try
+                    HT.read_frame!(reader)
+                catch err
+                    err
+                finally
+                    NC.set_deadline!(conn::NC.Conn, Int64(0))
+                end
+                @test frame_or_err isa HT.GoAwayFrame || frame_or_err isa Exception
+                if frame_or_err isa HT.GoAwayFrame
+                    @test (frame_or_err::HT.GoAwayFrame).error_code == UInt32(0x1)
+                end
+            finally
+                conn === nothing || try
+                    NC.close!(conn::NC.Conn)
+                catch
+                end
+            end
+        end
+    finally
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
+@testset "HTTP/2 server honors peer response-header filtering and stream flow control" begin
+    payload = fill(UInt8('x'), 128)
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            _ = request
+            headers = HT.Headers()
+            HT.add_header!(headers, "Connection", "keep-alive")
+            HT.add_header!(headers, "Keep-Alive", "timeout=5")
+            HT.add_header!(headers, "Transfer-Encoding", "chunked")
+            HT.add_header!(headers, "TE", "trailers")
+            HT.add_header!(headers, "Trailer", "x-drop-me")
+            HT.add_header!(headers, "X-Extra", "ok")
+            return HT.Response(200; headers = headers, body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    conn = nothing
+    try
+        conn, reader = _open_raw_h2_server_conn(address; settings = Pair{UInt16, UInt32}[UInt16(0x4) => UInt32(32)])
+        decoder = HT.Decoder()
+        _write_h2_server_request_headers!(conn::NC.Conn, HT.Encoder(), UInt32(1), address, "/windowed")
+        headers_frame = HT.read_frame!(reader)
+        @test headers_frame isa HT.HeadersFrame
+        decoded_headers = HT.decode_header_block(decoder, (headers_frame::HT.HeadersFrame).header_block_fragment)
+        @test any(field -> field.name == ":status" && field.value == "200", decoded_headers)
+        @test any(field -> field.name == "x-extra" && field.value == "ok", decoded_headers)
+        @test all(field -> !(field.name in ("connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade")), decoded_headers)
+
+        first_data = HT.read_frame!(reader)
+        @test first_data isa HT.DataFrame
+        @test length((first_data::HT.DataFrame).data) == 32
+        @test !((first_data::HT.DataFrame).end_stream)
+
+        _write_frame_h2_server_raw!(conn::NC.Conn, HT.WindowUpdateFrame(UInt32(1), UInt32(96)))
+        received = length((first_data::HT.DataFrame).data)
+        while received < length(payload)
+            frame = HT.read_frame!(reader)
+            frame isa HT.DataFrame || continue
+            received += length((frame::HT.DataFrame).data)
+            (frame::HT.DataFrame).end_stream && break
+        end
+        @test received == length(payload)
+    finally
+        conn === nothing || try
+            NC.close!(conn::NC.Conn)
+        catch
+        end
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
+@testset "HTTP/2 server honors connection-level flow control on responses" begin
+    payload = fill(UInt8('z'), 70_000)
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            _ = request
+            return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    conn = nothing
+    try
+        conn, reader = _open_raw_h2_server_conn(address)
+        _write_h2_server_request_headers!(conn::NC.Conn, HT.Encoder(), UInt32(1), address, "/conn-window")
+        headers_frame = HT.read_frame!(reader)
+        @test headers_frame isa HT.HeadersFrame
+        received = 0
+        while received < 65_535
+            frame = HT.read_frame!(reader)
+            frame isa HT.DataFrame || continue
+            received += length((frame::HT.DataFrame).data)
+        end
+        @test received == 65_535
+        NC.set_deadline!(conn::NC.Conn, Int64(time_ns() + 250_000_000))
+        stalled = try
+            HT.read_frame!(reader)
+            false
+        catch
+            true
+        finally
+            NC.set_deadline!(conn::NC.Conn, Int64(0))
+        end
+        @test stalled
+
+        remaining = length(payload) - received
+        _write_frame_h2_server_raw!(conn::NC.Conn, HT.WindowUpdateFrame(UInt32(0), UInt32(remaining)))
+        _write_frame_h2_server_raw!(conn::NC.Conn, HT.WindowUpdateFrame(UInt32(1), UInt32(remaining)))
+        while received < length(payload)
+            frame = HT.read_frame!(reader)
+            frame isa HT.DataFrame || continue
+            received += length((frame::HT.DataFrame).data)
+            (frame::HT.DataFrame).end_stream && break
+        end
+        @test received == length(payload)
+    finally
+        conn === nothing || try
+            NC.close!(conn::NC.Conn)
+        catch
+        end
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
+@testset "HTTP/2 server keeps the connection usable after stream resets" begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            if request.target == "/cancel"
+                sleep(0.3)
+                return HT.Response(200; body = HT.BytesBody(collect(codeunits("cancel"))), content_length = 6, proto_major = 2, proto_minor = 0)
+            end
+            return HT.Response(200; body = HT.BytesBody(collect(codeunits("ok"))), content_length = 2, proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    conn = nothing
+    try
+        conn, reader = _open_raw_h2_server_conn(address)
+        encoder = HT.Encoder()
+        decoder = HT.Decoder()
+        _write_h2_server_request_headers!(conn::NC.Conn, encoder, UInt32(1), address, "/cancel")
+        _write_frame_h2_server_raw!(conn::NC.Conn, HT.RSTStreamFrame(UInt32(1), UInt32(0x8)))
+        _write_h2_server_request_headers!(conn::NC.Conn, encoder, UInt32(3), address, "/ok")
+
+        response_body = UInt8[]
+        saw_headers = false
+        while true
+            frame = HT.read_frame!(reader)
+            if frame isa HT.HeadersFrame
+                headers_frame = frame::HT.HeadersFrame
+                headers_frame.stream_id == UInt32(3) || continue
+                decoded = HT.decode_header_block(decoder, headers_frame.header_block_fragment)
+                @test any(field -> field.name == ":status" && field.value == "200", decoded)
+                saw_headers = true
+                continue
+            end
+            frame isa HT.DataFrame || continue
+            data_frame = frame::HT.DataFrame
+            data_frame.stream_id == UInt32(3) || continue
+            append!(response_body, data_frame.data)
+            data_frame.end_stream && break
+        end
+        @test saw_headers
+        @test String(response_body) == "ok"
+    finally
+        try
+            NC.close!(conn::NC.Conn)
         catch
         end
         HT.forceclose(server)
