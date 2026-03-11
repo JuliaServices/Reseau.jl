@@ -75,7 +75,7 @@
   - The new handlers test file passes on its own and from the full runner.
   - The test runner includes the new suite in the normal HTTP path.
 
-### [ ] ITEM-004 (P1) Update documentation and parity tracking for the new server surface
+### [x] ITEM-004 (P1) Update documentation and parity tracking for the new server surface
 - Description: The README currently documents outdated server APIs, and the parity notes still list router/middleware as missing. The public docs need to match the shipped behavior after the port.
 - Desired outcome: README examples use the current `serve!`/`listen!` lifecycle, the new router/middleware surface is documented accurately, and `http-master-parity.md` reflects the reduced gap.
 - Affected files: `README.md`, `http-master-parity.md`, `src/7_7_http_handlers.jl`, `src/7_7_http_server.jl`
@@ -88,6 +88,10 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_handlers_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 - Assumptions:
   - Repo documentation for this work is primarily README plus in-source docstrings and parity notes; there is no separate Documenter site to update in this repo.
+- Verification evidence:
+  - README now uses `serve!`/`close`/`wait` instead of the stale `start!`/`shutdown!` flow.
+  - `RESEAU_TEST_ONLY=http_handlers_tests.jl` passed after the documentation pass.
+  - The router/middleware parity section in `http-master-parity.md` was updated without disturbing unrelated edits elsewhere in that file.
 - Completion criteria:
   - README examples match real public APIs in the current tree.
   - `http-master-parity.md` no longer describes router/middleware as missing.

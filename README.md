@@ -160,18 +160,38 @@ close(client)
 using Reseau
 const HTTP = Reseau.HTTP
 
-server = HTTP.Server(; address = "127.0.0.1:8080", handler = req -> begin
+server = HTTP.serve!("127.0.0.1", 8080) do req
     body = HTTP.BytesBody(collect(codeunits("hello from reseau")))
-    return HTTP.Response(200; reason = "OK", body = body, content_length = 17)
+    return HTTP.Response(200; body = body, content_length = 17)
 end)
 
-task = HTTP.start!(server)
 println(HTTP.server_addr(server))
 
 # ... run requests ...
 
-HTTP.shutdown!(server)
-wait(task)
+close(server)
+wait(server)
+```
+
+Router-style handlers are available too:
+
+```julia
+using Reseau
+const HTTP = Reseau.HTTP
+
+router = HTTP.Router()
+HTTP.register!(router, "GET", "/hello/{name}") do req
+    payload = "hello " * HTTP.getparam(req, "name")
+    bytes = collect(codeunits(payload))
+    return HTTP.Response(200; body = HTTP.BytesBody(bytes), content_length = length(bytes))
+end
+
+server = HTTP.serve!(router, "127.0.0.1", 8080)
+
+# cookie parsing middleware is available as HTTP.Handlers.cookie_middleware
+
+close(server)
+wait(server)
 ```
 
 ## Notes on Lower Layers

@@ -212,9 +212,9 @@ entry-point shape.
 
 ### 5. Router / Middleware / Handler Framework
 
-This is one of the biggest `HTTP.jl`-only public surface areas.
+This gap is now largely closed.
 
-`HTTP.jl` exposes:
+`Reseau.HTTP` now exposes the same core surface users expect from `HTTP.jl`:
 
 - `Handler`
 - `Middleware`
@@ -224,9 +224,10 @@ This is one of the biggest `HTTP.jl`-only public surface areas.
 - `getroute`
 - `getparams`
 - `getparam`
-- cookie middleware and `getcookies`
+- `getcookies`
+- `HTTP.Handlers.cookie_middleware`
 
-The router supports:
+The router now supports the same matching shapes we called out above:
 
 - exact routes
 - `*` segment wildcards
@@ -234,10 +235,11 @@ The router supports:
 - regex params like `{id:[0-9]+}`
 - trailing `/**`
 
-`Reseau.HTTP` currently has none of this on its public surface.
+It also works through both the request-handler and stream-handler server entry
+points, with dedicated HTTP/1 and HTTP/2 coverage in `Reseau`'s test suite.
 
-This is not just sugar. For many HTTP.jl users, this is the public server
-interface they actually interact with.
+The remaining parity work in this area is mostly about higher-level polish and
+future middleware conveniences, not the core router/handler framework itself.
 
 ### 6. Cookies
 

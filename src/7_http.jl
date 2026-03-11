@@ -10,8 +10,8 @@ supporting wire-format packages are split:
 - `7_1_http1.jl` implements HTTP/1.1 parsing and serialization.
 - `7_2_hpack.jl` and `7_3_http2.jl` implement the HPACK and HTTP/2 wire layers.
 - `7_4_http2_client.jl`, `7_5_http2_server.jl`, `7_6_http_client.jl`,
-  `7_6_http_stream.jl`, `7_6_http_sse.jl`, and `7_7_http_server.jl` build
-  higher-level client/server behavior on top.
+  `7_6_http_stream.jl`, `7_6_http_sse.jl`, `7_7_http_server.jl`, and
+  `7_7_http_handlers.jl` build higher-level client/server behavior on top.
 
 This module exports both the low-level wire APIs and the convenience client and
 server entry points. Most public functions either return one of the shared
