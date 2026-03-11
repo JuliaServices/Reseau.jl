@@ -432,12 +432,13 @@ mutable struct RequestContext
     deadline_ns::Int64
     @atomic canceled_flag::Bool
     cancel_message::Union{Nothing, String}
+    metadata::Union{Nothing, Dict{Symbol, Any}}
 end
 
 """Construct a `RequestContext`; throws `ArgumentError` when `deadline_ns < 0`."""
 function RequestContext(; deadline_ns::Integer = Int64(0))
     deadline_ns < 0 && throw(ArgumentError("deadline_ns must be >= 0"))
-    return RequestContext(Int64(deadline_ns), false, nothing)
+    return RequestContext(Int64(deadline_ns), false, nothing, nothing)
 end
 
 """
@@ -481,6 +482,51 @@ function expired(ctx::RequestContext, now_ns::Integer = time_ns())::Bool
     deadline = ctx.deadline_ns
     deadline <= 0 && return false
     return Int64(now_ns) >= deadline
+end
+
+@inline function _request_context_metadata!(
+        ctx::RequestContext)::Dict{Symbol, Any}
+    metadata = ctx.metadata
+    metadata !== nothing && return metadata::Dict{Symbol, Any}
+    metadata = Dict{Symbol, Any}()
+    ctx.metadata = metadata
+    return metadata
+end
+
+function Base.haskey(ctx::RequestContext, key::Symbol)::Bool
+    metadata = ctx.metadata
+    metadata === nothing && return false
+    return haskey(metadata::Dict{Symbol, Any}, key)
+end
+
+function Base.getindex(ctx::RequestContext, key::Symbol)
+    metadata = ctx.metadata
+    metadata === nothing && throw(KeyError(key))
+    return (metadata::Dict{Symbol, Any})[key]
+end
+
+function Base.setindex!(ctx::RequestContext, value, key::Symbol)
+    _request_context_metadata!(ctx)[key] = value
+    return value
+end
+
+function Base.get(default::Function, ctx::RequestContext, key::Symbol)
+    metadata = ctx.metadata
+    metadata === nothing && return default()
+    return get(default, metadata::Dict{Symbol, Any}, key)
+end
+
+function Base.get(ctx::RequestContext, key::Symbol, default)
+    metadata = ctx.metadata
+    metadata === nothing && return default
+    return get(metadata::Dict{Symbol, Any}, key, default)
+end
+
+function Base.empty!(ctx::RequestContext)
+    metadata = ctx.metadata
+    metadata === nothing && return ctx
+    empty!(metadata::Dict{Symbol, Any})
+    return ctx
 end
 
 """
