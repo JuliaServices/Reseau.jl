@@ -131,6 +131,67 @@ end
     end
 end
 
+@testset "HTTP/2 server starts handling request bodies before upload completion" begin
+    first_chunk_seen = Channel{String}(1)
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            buf = Vector{UInt8}(undef, 5)
+            n = HT.body_read!(request.body, buf)
+            put!(first_chunk_seen, String(buf[1:n]))
+            total = n
+            while true
+                n = HT.body_read!(request.body, buf)
+                n == 0 && break
+                total += n
+            end
+            payload = collect(codeunits(string(total)))
+            return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    conn = HT.connect_h2!(address; secure = false)
+    try
+        stage = Ref(1)
+        request_body = HT.CallbackBody(
+            dst -> begin
+                if stage[] == 1
+                    bytes = collect(codeunits("hello"))
+                    copyto!(dst, 1, bytes, 1, length(bytes))
+                    stage[] = 2
+                    return length(bytes)
+                end
+                if stage[] == 2
+                    bytes = collect(codeunits("!"))
+                    copyto!(dst, 1, bytes, 1, length(bytes))
+                    stage[] = 3
+                    return length(bytes)
+                end
+                if stage[] == 3
+                    sleep(1.0)
+                    bytes = collect(codeunits("world"))
+                    copyto!(dst, 1, bytes, 1, length(bytes))
+                    stage[] = 4
+                    return length(bytes)
+                end
+                return 0
+            end,
+            () -> nothing,
+        )
+        request = HT.Request("POST", "/stream-body"; host = address, body = request_body, content_length = 11, proto_major = 2, proto_minor = 0)
+        started = time()
+        response_task = Threads.@spawn HT.h2_roundtrip!(conn, request)
+        first_chunk = take!(first_chunk_seen)
+        elapsed = time() - started
+        @test first_chunk == "hello"
+        @test elapsed < 0.75
+        response = fetch(response_task)
+        @test response.status_code == 200
+        @test String(_read_all_h2_server(response.body)) == "11"
+    finally
+        close(conn)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
 @testset "HTTP/2 server handles concurrent streams on one connection" begin
     server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             sleep(1.0)

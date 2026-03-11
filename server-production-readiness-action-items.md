@@ -64,7 +64,7 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - Added `HTTP/2 server handles concurrent streams on one connection` regression coverage in `test/http2_server_tests.jl`
 
-### [ ] ITEM-003 (P0) Replace full HTTP/2 request buffering with bounded streaming request-body handling
+### [x] ITEM-003 (P0) Replace full HTTP/2 request buffering with bounded streaming request-body handling
 - Description: The current h2 path still accumulates full request bodies in memory before handler execution. That is both a DoS risk and a major parity miss against Go’s body/flow-control behavior.
 - Desired outcome: h2 request bodies are consumed through a bounded streaming body reader, and read-side `WINDOW_UPDATE` credits are tied to actual body consumption instead of unconditional frame receipt.
 - Affected files: `src/7_7_http_server.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`
@@ -80,11 +80,17 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
 - Assumptions:
   - We do not need to implement full HTTP/2 priority or push support to fix the request-body path responsibly.
+  - Bounding the server-side request-body buffer and returning `WINDOW_UPDATE` on application reads is an acceptable production step even before ITEM-004 tightens the rest of the frame/state machine.
 - Risks:
   - Flow-control mistakes here can cause deadlocks or stalls that only show up under stressed tests.
 - Completion criteria:
   - Request bodies are not fully materialized before the handler starts.
   - Read-side buffering is bounded and covered by tests.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - Added `HTTP/2 server starts handling request bodies before upload completion` regression coverage in `test/http2_server_tests.jl`
 
 ### [ ] ITEM-004 (P0) Implement missing HTTP/2 frame/state validation and flow-control behavior
 - Description: The server currently only type-checks the initial `SETTINGS`, ACKs later `SETTINGS`, ignores `WINDOW_UPDATE`, `RST_STREAM`, and `GOAWAY`, and accepts malformed header sets too permissively. That is a correctness and hardening gap against Go.

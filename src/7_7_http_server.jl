@@ -595,6 +595,9 @@ end
 @inline function _request_body_fully_consumed(request::Request)::Bool
     body = request.body
     body isa EmptyBody && return true
+    if body isa _H2ServerBody
+        return _h2_server_body_fully_consumed(body::_H2ServerBody)
+    end
     if body isa FixedLengthBody
         return (body::FixedLengthBody).remaining == 0
     end
@@ -731,6 +734,7 @@ end
 
 function _maybe_write_continue!(stream::Stream)::Nothing
     _require_server_stream(stream)
+    stream.request.proto_major == UInt8(2) && return nothing
     already_sent = @atomic :acquire stream.continue_sent
     already_sent && return nothing
     # We only acknowledge `Expect: 100-continue` once the handler actually tries
@@ -960,6 +964,200 @@ function _write_response_body_to_stream!(stream::Stream, body)::Nothing
     throw(ProtocolError("unsupported stream response body type $(typeof(body))"))
 end
 
+mutable struct _H2ServerStreamState
+    stream_id::UInt32
+    lock::ReentrantLock
+    condition::Threads.Condition
+    header_block::Vector{UInt8}
+    decoded_headers::Union{Nothing, Vector{HeaderField}}
+    body::Vector{UInt8}
+    body_read_index::Int
+    max_buffered_bytes::Int
+    headers_complete::Bool
+    stream_done::Bool
+    handler_started::Bool
+    handler_finished::Bool
+    aborted::Bool
+    error::Union{Nothing, Exception}
+end
+
+function _H2ServerStreamState(stream_id::UInt32)
+    lock = ReentrantLock()
+    return _H2ServerStreamState(
+        stream_id,
+        lock,
+        Threads.Condition(lock),
+        UInt8[],
+        nothing,
+        UInt8[],
+        1,
+        256 * 1024,
+        false,
+        false,
+        false,
+        false,
+        false,
+        nothing,
+    )
+end
+
+mutable struct _H2ServerBody{C} <: AbstractBody
+    conn::C
+    write_lock::ReentrantLock
+    states_lock::ReentrantLock
+    states::Dict{UInt32, _H2ServerStreamState}
+    stream_id::UInt32
+    state::_H2ServerStreamState
+    @atomic closed::Bool
+end
+
+@inline function _h2_server_available_bytes(state::_H2ServerStreamState)::Int
+    available = (length(state.body) - state.body_read_index) + 1
+    return available > 0 ? available : 0
+end
+
+function _compact_h2_server_body_buffer!(state::_H2ServerStreamState)::Nothing
+    if state.body_read_index <= 1
+        return nothing
+    end
+    if state.body_read_index > length(state.body)
+        empty!(state.body)
+        state.body_read_index = 1
+        return nothing
+    end
+    if state.body_read_index > 4096 && state.body_read_index > (length(state.body) >>> 1)
+        remaining = (length(state.body) - state.body_read_index) + 1
+        compacted = Vector{UInt8}(undef, remaining)
+        copyto!(compacted, 1, state.body, state.body_read_index, remaining)
+        state.body = compacted
+        state.body_read_index = 1
+    end
+    return nothing
+end
+
+function _send_h2_server_window_updates!(
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        stream_id::UInt32,
+        nbytes::Int;
+        stream_level::Bool = true,
+    )::Nothing
+    nbytes <= 0 && return nothing
+    increment = UInt32(nbytes)
+    try
+        _write_frame_h2_server_threadsafe!(write_lock, conn, WindowUpdateFrame(UInt32(0), increment))
+        stream_level && _write_frame_h2_server_threadsafe!(write_lock, conn, WindowUpdateFrame(stream_id, increment))
+    catch err
+        if err isa EOFError || err isa IOPoll.NetClosingError || err isa SystemError
+            return nothing
+        end
+        rethrow(err)
+    end
+    return nothing
+end
+
+function _maybe_cleanup_h2_server_state!(
+        states_lock::ReentrantLock,
+        states::Dict{UInt32, _H2ServerStreamState},
+        state::_H2ServerStreamState,
+    )::Nothing
+    should_delete = false
+    lock(state.lock)
+    try
+        should_delete = state.handler_finished && state.stream_done && _h2_server_available_bytes(state) == 0
+    finally
+        unlock(state.lock)
+    end
+    should_delete || return nothing
+    lock(states_lock)
+    try
+        current = get(() -> nothing, states, state.stream_id)
+        current === state && delete!(states, state.stream_id)
+    finally
+        unlock(states_lock)
+    end
+    return nothing
+end
+
+function body_closed(body::_H2ServerBody)::Bool
+    return @atomic :acquire body.closed
+end
+
+function _h2_server_body_fully_consumed(body::_H2ServerBody)::Bool
+    lock(body.state.lock)
+    try
+        return body.state.stream_done && _h2_server_available_bytes(body.state) == 0 && !body.state.aborted
+    finally
+        unlock(body.state.lock)
+    end
+end
+
+function body_read!(body::_H2ServerBody, dst::Vector{UInt8})::Int
+    isempty(dst) && return 0
+    body_closed(body) && return 0
+    while true
+        nread = 0
+        done = false
+        lock(body.state.lock)
+        try
+            body.state.error === nothing || throw(body.state.error::Exception)
+            available = _h2_server_available_bytes(body.state)
+            if available > 0
+                nread = min(length(dst), available)
+                copyto!(dst, 1, body.state.body, body.state.body_read_index, nread)
+                body.state.body_read_index += nread
+                _compact_h2_server_body_buffer!(body.state)
+                notify(body.state.condition)
+            elseif body.state.stream_done
+                done = true
+            else
+                wait(body.state.condition)
+                continue
+            end
+        finally
+            unlock(body.state.lock)
+        end
+        if nread > 0
+            _send_h2_server_window_updates!(body.conn, body.write_lock, body.stream_id, nread)
+            return nread
+        end
+        if done
+            @atomic :release body.closed = true
+            _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state)
+            return 0
+        end
+    end
+end
+
+function body_close!(body::_H2ServerBody)::Nothing
+    was_closed = body_closed(body)
+    was_closed && return nothing
+    @atomic :release body.closed = true
+    should_reset = false
+    lock(body.state.lock)
+    try
+        if !body.state.stream_done && !body.state.aborted
+            body.state.aborted = true
+            should_reset = true
+        elseif body.state.stream_done && _h2_server_available_bytes(body.state) > 0
+            body.state.aborted = true
+            empty!(body.state.body)
+            body.state.body_read_index = 1
+        end
+        notify(body.state.condition)
+    finally
+        unlock(body.state.lock)
+    end
+    if should_reset
+        try
+            _write_frame_h2_server_threadsafe!(body.write_lock, body.conn, RSTStreamFrame(body.stream_id, UInt32(0x8)))
+        catch
+        end
+    end
+    _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state)
+    return nothing
+end
+
 @inline function _h2_response_allows_body(request::Request, response::Response)::Bool
     _body_allowed_for_status(response.status_code) || return false
     request.method == "HEAD" && return false
@@ -1092,7 +1290,7 @@ function _read_exact_h2_server!(io, n::Int)::Vector{UInt8}
     return out
 end
 
-function _decode_h2_request(headers::Vector{HeaderField}, body::Vector{UInt8})::Request
+function _decode_h2_request(headers::Vector{HeaderField}, body::AbstractBody; stream_done::Bool = false)::Request
     method = "GET"
     path = "/"
     host = nothing
@@ -1112,16 +1310,29 @@ function _decode_h2_request(headers::Vector{HeaderField}, body::Vector{UInt8})::
         end
         add_header!(out_headers, header.name, header.value)
     end
+    content_length = _parse_content_length(out_headers)
+    if content_length < 0
+        if body isa BytesBody
+            content_length = Int64(length((body::BytesBody).data))
+        elseif body isa EmptyBody && stream_done
+            content_length = Int64(0)
+        end
+    end
     return Request(
         method,
         path;
         headers = out_headers,
-        body = BytesBody(body),
+        body = body,
         host = host,
-        content_length = length(body),
+        content_length = content_length,
         proto_major = 2,
         proto_minor = 0,
     )
+end
+
+function _decode_h2_request(headers::Vector{HeaderField}, body::Vector{UInt8})::Request
+    request_body = isempty(body) ? EmptyBody() : BytesBody(body)
+    return _decode_h2_request(headers, request_body; stream_done = true)
 end
 
 function _encode_h2_response_headers(response::Response)::Vector{UInt8}
@@ -1216,8 +1427,30 @@ function _write_h2_buffered_stream_response!(conn::Union{TCP.Conn, TLS.Conn}, wr
     return nothing
 end
 
-function _handle_h2_stream!(server::Server, conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, decoded_headers::Vector{HeaderField}, body::Vector{UInt8})::Nothing
-    request = _decode_h2_request(decoded_headers, body)
+function _handle_h2_stream!(
+        server::Server,
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        states_lock::ReentrantLock,
+        states::Dict{UInt32, _H2ServerStreamState},
+        stream_id::UInt32,
+        state::_H2ServerStreamState,
+        decoded_headers::Vector{HeaderField},
+    )::Nothing
+    stream_done = false
+    request_body = nothing
+    lock(state.lock)
+    try
+        stream_done = state.stream_done
+        if state.stream_done && _h2_server_available_bytes(state) == 0
+            request_body = EmptyBody()
+        else
+            request_body = _H2ServerBody(conn, write_lock, states_lock, states, stream_id, state, false)
+        end
+    finally
+        unlock(state.lock)
+    end
+    request = _decode_h2_request(decoded_headers, request_body::AbstractBody; stream_done = stream_done)
     if server.stream
         stream = Stream(request)
         try
@@ -1241,28 +1474,51 @@ function _handle_h2_stream!(server::Server, conn::Union{TCP.Conn, TLS.Conn}, wri
             closewrite(stream)
             closeread(stream)
         end
-        return _write_h2_buffered_stream_response!(conn, write_lock, stream_id, request, stream)
+        _write_h2_buffered_stream_response!(conn, write_lock, stream_id, request, stream)
+    else
+        response = try
+            server.handler(request)
+        catch err
+            status_code = _server_error_status(err::Exception)
+            _write_h2_response!(
+                conn,
+                write_lock,
+                stream_id,
+                request,
+                Response(
+                    status_code === nothing ? 500 : status_code::Int;
+                    proto_major = 2,
+                    proto_minor = 0,
+                    request = request,
+                ),
+            )
+            return nothing
+        end
+        response isa Response || throw(ProtocolError("h2 server handler must return HTTP.Response"))
+        response_obj = response::Response
+        _write_h2_response!(conn, write_lock, stream_id, request, response_obj)
     end
-    response = try
-        server.handler(request)
-    catch err
-        status_code = _server_error_status(err::Exception)
-        return _write_h2_response!(
-            conn,
-            write_lock,
-            stream_id,
-            request,
-            Response(
-                status_code === nothing ? 500 : status_code::Int;
-                proto_major = 2,
-                proto_minor = 0,
-                request = request,
-            ),
-        )
+    if request.body isa _H2ServerBody
+        body = request.body::_H2ServerBody
+        _request_body_fully_consumed(request) || body_close!(body)
+        lock(body.state.lock)
+        try
+            body.state.handler_finished = true
+            notify(body.state.condition)
+        finally
+            unlock(body.state.lock)
+        end
+        _maybe_cleanup_h2_server_state!(states_lock, states, body.state)
+    else
+        lock(state.lock)
+        try
+            state.handler_finished = true
+            notify(state.condition)
+        finally
+            unlock(state.lock)
+        end
+        _maybe_cleanup_h2_server_state!(states_lock, states, state)
     end
-    response isa Response || throw(ProtocolError("h2 server handler must return HTTP.Response"))
-    response_obj = response::Response
-    _write_h2_response!(conn, write_lock, stream_id, request, response_obj)
     return nothing
 end
 
@@ -1270,13 +1526,22 @@ function _dispatch_h2_stream!(
         server::Server,
         conn::Union{TCP.Conn, TLS.Conn},
         write_lock::ReentrantLock,
-        stream_id::UInt32,
-        header_block::Vector{UInt8},
-        body::Vector{UInt8},
-        decoder::Decoder,
+        states_lock::ReentrantLock,
+        states::Dict{UInt32, _H2ServerStreamState},
+        state::_H2ServerStreamState,
     )::Nothing
-    decoded_headers = decode_header_block(decoder, header_block)
-    errormonitor(Threads.@spawn _handle_h2_stream!(server, conn, write_lock, stream_id, decoded_headers, body))
+    decoded_headers = nothing
+    lock(state.lock)
+    try
+        state.handler_started && return nothing
+        state.headers_complete || return nothing
+        state.decoded_headers === nothing && throw(ProtocolError("HTTP/2 request missing decoded headers"))
+        state.handler_started = true
+        decoded_headers = copy(state.decoded_headers::Vector{HeaderField})
+    finally
+        unlock(state.lock)
+    end
+    errormonitor(Threads.@spawn _handle_h2_stream!(server, conn, write_lock, states_lock, states, state.stream_id, state, decoded_headers::Vector{HeaderField}))
     return nothing
 end
 
@@ -1285,6 +1550,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
     reader = Framer(_ConnReader(reader_source))
     decoder = Decoder()
     write_lock = ReentrantLock()
+    states_lock = ReentrantLock()
     try
         preface = _read_exact_h2_server!(reader_source, length(_H2_PREFACE))
         preface == _H2_PREFACE || throw(ProtocolError("invalid h2 client preface"))
@@ -1292,10 +1558,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
         client_settings isa SettingsFrame || throw(ProtocolError("expected initial h2 SETTINGS frame"))
         _write_frame_h2_server!(conn, SettingsFrame(false, Pair{UInt16, UInt32}[]))
         _write_frame_h2_server!(conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
-        headers_block = Dict{UInt32, Vector{UInt8}}()
-        body_block = Dict{UInt32, Vector{UInt8}}()
-        headers_done = Dict{UInt32, Bool}()
-        body_done = Dict{UInt32, Bool}()
+        states = Dict{UInt32, _H2ServerStreamState}()
         continuation_stream = UInt32(0)
         max_stream_id = UInt32(0)
         while !_server_shutting_down(server)
@@ -1328,58 +1591,96 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 hf = frame::HeadersFrame
                 hf.stream_id == UInt32(0) && throw(ProtocolError("HEADERS stream id must be non-zero"))
                 iseven(hf.stream_id) && throw(ProtocolError("HEADERS stream id must be odd for client-initiated streams"))
-                if hf.stream_id < max_stream_id && !haskey(headers_block, hf.stream_id)
-                    throw(ProtocolError("HEADERS stream id must increase monotonically"))
+                lock(states_lock)
+                state = try
+                    if hf.stream_id < max_stream_id && !haskey(states, hf.stream_id)
+                        throw(ProtocolError("HEADERS stream id must increase monotonically"))
+                    end
+                    hf.stream_id > max_stream_id && (max_stream_id = hf.stream_id)
+                    get(() -> begin
+                        created = _H2ServerStreamState(hf.stream_id)
+                        states[hf.stream_id] = created
+                        created
+                    end, states, hf.stream_id)
+                finally
+                    unlock(states_lock)
                 end
-                hf.stream_id > max_stream_id && (max_stream_id = hf.stream_id)
-                headers_block[hf.stream_id] = get(() -> UInt8[], headers_block, hf.stream_id)
-                append!(headers_block[hf.stream_id], hf.header_block_fragment)
-                headers_done[hf.stream_id] = hf.end_headers
-                !hf.end_headers && (continuation_stream = hf.stream_id)
-                body_done[hf.stream_id] = hf.end_stream
-                if get(() -> false, headers_done, hf.stream_id) && get(() -> false, body_done, hf.stream_id)
-                    _dispatch_h2_stream!(server, conn, write_lock, hf.stream_id, headers_block[hf.stream_id], get(() -> UInt8[], body_block, hf.stream_id), decoder)
-                    delete!(headers_block, hf.stream_id)
-                    delete!(headers_done, hf.stream_id)
-                    haskey(body_block, hf.stream_id) && delete!(body_block, hf.stream_id)
-                    haskey(body_done, hf.stream_id) && delete!(body_done, hf.stream_id)
+                lock(state.lock)
+                try
+                    append!(state.header_block, hf.header_block_fragment)
+                    if hf.end_headers
+                        state.decoded_headers = decode_header_block(decoder, state.header_block)
+                        state.headers_complete = true
+                        empty!(state.header_block)
+                    end
+                    hf.end_headers || (continuation_stream = hf.stream_id)
+                    hf.end_stream && (state.stream_done = true)
+                    notify(state.condition)
+                finally
+                    unlock(state.lock)
+                end
+                if hf.end_headers
+                    continuation_stream = UInt32(0)
+                    _dispatch_h2_stream!(server, conn, write_lock, states_lock, states, state)
                 end
                 continue
             end
             if frame isa ContinuationFrame
                 cf = frame::ContinuationFrame
                 cf.stream_id == UInt32(0) && throw(ProtocolError("CONTINUATION stream id must be non-zero"))
-                existing = get(() -> UInt8[], headers_block, cf.stream_id)
-                append!(existing, cf.header_block_fragment)
-                headers_block[cf.stream_id] = existing
-                headers_done[cf.stream_id] = cf.end_headers
-                continuation_stream = cf.end_headers ? UInt32(0) : cf.stream_id
-                if get(() -> false, headers_done, cf.stream_id) && get(() -> false, body_done, cf.stream_id)
-                    _dispatch_h2_stream!(server, conn, write_lock, cf.stream_id, headers_block[cf.stream_id], get(() -> UInt8[], body_block, cf.stream_id), decoder)
-                    delete!(headers_block, cf.stream_id)
-                    delete!(headers_done, cf.stream_id)
-                    haskey(body_block, cf.stream_id) && delete!(body_block, cf.stream_id)
-                    haskey(body_done, cf.stream_id) && delete!(body_done, cf.stream_id)
+                lock(states_lock)
+                state = try
+                    get(() -> throw(ProtocolError("CONTINUATION received for unknown stream")), states, cf.stream_id)
+                finally
+                    unlock(states_lock)
                 end
+                lock(state.lock)
+                try
+                    append!(state.header_block, cf.header_block_fragment)
+                    if cf.end_headers
+                        state.decoded_headers = decode_header_block(decoder, state.header_block)
+                        state.headers_complete = true
+                        empty!(state.header_block)
+                        continuation_stream = UInt32(0)
+                    else
+                        continuation_stream = cf.stream_id
+                    end
+                    notify(state.condition)
+                finally
+                    unlock(state.lock)
+                end
+                cf.end_headers && _dispatch_h2_stream!(server, conn, write_lock, states_lock, states, state)
                 continue
             end
             if frame isa DataFrame
                 df = frame::DataFrame
                 df.stream_id == UInt32(0) && throw(ProtocolError("DATA stream id must be non-zero"))
                 iseven(df.stream_id) && throw(ProtocolError("DATA stream id must be odd for client-initiated streams"))
-                haskey(headers_block, df.stream_id) || throw(ProtocolError("DATA frame received before HEADERS"))
-                existing = get(() -> UInt8[], body_block, df.stream_id)
-                append!(existing, df.data)
-                body_block[df.stream_id] = existing
-                _write_frame_h2_server_threadsafe!(write_lock, conn, WindowUpdateFrame(UInt32(0), UInt32(length(df.data))))
-                _write_frame_h2_server_threadsafe!(write_lock, conn, WindowUpdateFrame(df.stream_id, UInt32(length(df.data))))
-                body_done[df.stream_id] = df.end_stream
-                if get(() -> false, headers_done, df.stream_id) && get(() -> false, body_done, df.stream_id)
-                    _dispatch_h2_stream!(server, conn, write_lock, df.stream_id, headers_block[df.stream_id], body_block[df.stream_id], decoder)
-                    delete!(headers_block, df.stream_id)
-                    delete!(headers_done, df.stream_id)
-                    delete!(body_block, df.stream_id)
-                    delete!(body_done, df.stream_id)
+                lock(states_lock)
+                state = try
+                    get(() -> throw(ProtocolError("DATA frame received before HEADERS")), states, df.stream_id)
+                finally
+                    unlock(states_lock)
+                end
+                lock(state.lock)
+                try
+                    state.headers_complete || throw(ProtocolError("DATA frame received before END_HEADERS"))
+                    if state.aborted
+                        df.end_stream && (state.stream_done = true)
+                        notify(state.condition)
+                    else
+                        available_after = _h2_server_available_bytes(state) + length(df.data)
+                        available_after <= state.max_buffered_bytes || throw(ProtocolError("HTTP/2 request body exceeded buffered server limit"))
+                        append!(state.body, df.data)
+                        df.end_stream && (state.stream_done = true)
+                        notify(state.condition)
+                    end
+                finally
+                    unlock(state.lock)
+                end
+                if state.aborted
+                    _send_h2_server_window_updates!(conn, write_lock, df.stream_id, length(df.data); stream_level = false)
+                    _maybe_cleanup_h2_server_state!(states_lock, states, state)
                 end
                 continue
             end
