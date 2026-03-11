@@ -181,7 +181,7 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - Added explicit regressions for unsupported `Expect`, `HEAD` / `204` / `304` no-body stream responses, idle timeout, write timeout, and fixed `Content-Length` overflow / underflow handling
 
-### [ ] ITEM-007 (P2) Expand platform and parity verification to production-ready confidence
+### [x] ITEM-007 (P2) Expand platform and parity verification to production-ready confidence
 - Description: Even after the server fixes land, the branch still needs broader confidence: key server suites are skipped on Windows, h2 TLS+ALPN servering is not covered, and the parity docs should reflect the actual remaining gap set.
 - Desired outcome: The server-focused suites are credible across supported environments, TLS+ALPN h2 serving has regression coverage, and the parity/action-item docs reflect the post-hardening state honestly.
 - Affected files: `test/runtests.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`, `.github/workflows/ci.yml`, `server-production-readiness-action-items.md`, `http-master-parity.md`
@@ -199,6 +199,13 @@
 - Completion criteria:
   - The remaining parity gaps are documented accurately.
   - The production-readiness story includes meaningful platform and TLS coverage, not just local happy paths.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - Updated `http-master-parity.md` to reflect the current server, SSE, and websocket parity state instead of the stale pre-hardening gap list
+  - Documented that the remaining Windows server-suite skips in `test/runtests.jl` are a separate compiler issue, not an unresolved server regression
+  - GitHub Actions run `22934318567` on PR `#71` completed green on `ubuntu-latest`, `macOS-latest`, and `windows-latest`
 
 ## Continuity
 
