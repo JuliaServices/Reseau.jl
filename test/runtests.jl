@@ -46,6 +46,9 @@ test_files = [
     "trim_compile_tests.jl",
 ]
 
+# These suites are passing on macOS/Linux after the current server hardening
+# work, but they remain skipped on Windows pending the separate compiler issue
+# already documented in the repo notes.
 const _WINDOWS_COMPILER_ISSUE_TESTS = Set([
     "http_client_transport_tests.jl",
     "http_client_proxy_tests.jl",
