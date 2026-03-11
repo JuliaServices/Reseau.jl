@@ -131,6 +131,41 @@ end
     end
 end
 
+@testset "HTTP/2 server handles concurrent streams on one connection" begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            sleep(1.0)
+            payload = collect(codeunits(request.target))
+            return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    conn = HT.connect_h2!(address; secure = false)
+    try
+        req1 = HT.Request("GET", "/one"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        req2 = HT.Request("GET", "/two"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        started = time()
+        task1 = Threads.@spawn begin
+            response = HT.h2_roundtrip!(conn, req1)
+            return (response.status_code, String(_read_all_h2_server(response.body)))
+        end
+        sleep(0.1)
+        task2 = Threads.@spawn begin
+            response = HT.h2_roundtrip!(conn, req2)
+            return (response.status_code, String(_read_all_h2_server(response.body)))
+        end
+        res1 = fetch(task1)
+        res2 = fetch(task2)
+        elapsed = time() - started
+        @test res1[1] == 200
+        @test res2[1] == 200
+        @test Set((res1[2], res2[2])) == Set(("/one", "/two"))
+        @test elapsed < 1.75
+    finally
+        close(conn)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
 @testset "HTTP/2 server shutdown closes listener" begin
     server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request

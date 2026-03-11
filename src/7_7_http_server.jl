@@ -1053,7 +1053,17 @@ function _write_frame_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, frame::Abstrac
     return nothing
 end
 
-function _write_data_frames_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, data::Vector{UInt8}; end_stream::Bool)::Nothing
+function _write_frame_h2_server_threadsafe!(write_lock::ReentrantLock, conn::Union{TCP.Conn, TLS.Conn}, frame::AbstractFrame)::Nothing
+    lock(write_lock)
+    try
+        _write_frame_h2_server!(conn, frame)
+    finally
+        unlock(write_lock)
+    end
+    return nothing
+end
+
+function _write_data_frames_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, data::Vector{UInt8}; end_stream::Bool)::Nothing
     isempty(data) && return nothing
     offset = 1
     total_len = length(data)
@@ -1063,7 +1073,7 @@ function _write_data_frames_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_i
         chunk = Vector{UInt8}(undef, chunk_len)
         copyto!(chunk, 1, data, offset, chunk_len)
         final_chunk = (offset + chunk_len - 1) == total_len
-        _write_frame_h2_server!(conn, DataFrame(stream_id, end_stream && final_chunk, chunk))
+        _write_frame_h2_server_threadsafe!(write_lock, conn, DataFrame(stream_id, end_stream && final_chunk, chunk))
         offset += chunk_len
     end
     return nothing
@@ -1128,13 +1138,13 @@ function _encode_h2_trailer_headers(trailers::Headers)::Vector{UInt8}
     return encode_header_block(encoder, header_fields)
 end
 
-function _write_h2_trailers!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, trailers::Headers)::Nothing
+function _write_h2_trailers!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, trailers::Headers)::Nothing
     isempty(trailers) && return nothing
-    _write_frame_h2_server!(conn, HeadersFrame(stream_id, true, true, _encode_h2_trailer_headers(trailers)))
+    _write_frame_h2_server_threadsafe!(write_lock, conn, HeadersFrame(stream_id, true, true, _encode_h2_trailer_headers(trailers)))
     return nothing
 end
 
-function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, response::Response; end_stream::Bool = true)::Nothing
+function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, response::Response; end_stream::Bool = true)::Nothing
     response.body isa EmptyBody && return nothing
     buf = Vector{UInt8}(undef, 16 * 1024)
     pending = UInt8[]
@@ -1144,16 +1154,16 @@ function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream
             n = body_read!(response.body, buf)
             if n == 0
                 if have_pending
-                    _write_data_frames_h2_server!(conn, stream_id, pending; end_stream = end_stream)
+                    _write_data_frames_h2_server!(conn, write_lock, stream_id, pending; end_stream = end_stream)
                 elseif end_stream
-                    _write_frame_h2_server!(conn, DataFrame(stream_id, true, UInt8[]))
+                    _write_frame_h2_server_threadsafe!(write_lock, conn, DataFrame(stream_id, true, UInt8[]))
                 end
                 return nothing
             end
             current = Vector{UInt8}(undef, n)
             copyto!(current, 1, buf, 1, n)
             if have_pending
-                _write_data_frames_h2_server!(conn, stream_id, pending; end_stream = false)
+                _write_data_frames_h2_server!(conn, write_lock, stream_id, pending; end_stream = false)
             end
             pending = current
             have_pending = true
@@ -1166,7 +1176,7 @@ function _write_response_body_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream
     end
 end
 
-function _write_h2_response!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, request::Request, response::Response)::Nothing
+function _write_h2_response!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, request::Request, response::Response)::Nothing
     response.request = request
     allows_body = _h2_response_allows_body(request, response)
     has_trailers = !isempty(response.trailers)
@@ -1175,19 +1185,19 @@ function _write_h2_response!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32,
             body_close!(response.body)
         catch
         end
-        _write_frame_h2_server!(conn, HeadersFrame(stream_id, !has_trailers, true, _encode_h2_response_headers(response)))
-        has_trailers && _write_h2_trailers!(conn, stream_id, response.trailers)
+        _write_frame_h2_server_threadsafe!(write_lock, conn, HeadersFrame(stream_id, !has_trailers, true, _encode_h2_response_headers(response)))
+        has_trailers && _write_h2_trailers!(conn, write_lock, stream_id, response.trailers)
         return nothing
     end
     body_empty = response.body isa EmptyBody
     end_stream = body_empty && !has_trailers
-    _write_frame_h2_server!(conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
-    body_empty || _write_response_body_h2_server!(conn, stream_id, response; end_stream = !has_trailers)
-    has_trailers && _write_h2_trailers!(conn, stream_id, response.trailers)
+    _write_frame_h2_server_threadsafe!(write_lock, conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
+    body_empty || _write_response_body_h2_server!(conn, write_lock, stream_id, response; end_stream = !has_trailers)
+    has_trailers && _write_h2_trailers!(conn, write_lock, stream_id, response.trailers)
     return nothing
 end
 
-function _write_h2_buffered_stream_response!(conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, request::Request, stream::Stream)::Nothing
+function _write_h2_buffered_stream_response!(conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, request::Request, stream::Stream)::Nothing
     response = stream.response::Response
     response.request = request
     allows_body = _h2_response_allows_body(request, response)
@@ -1200,14 +1210,13 @@ function _write_h2_buffered_stream_response!(conn::Union{TCP.Conn, TLS.Conn}, st
     has_body = !isempty(body_bytes)
     has_trailers = !isempty(response.trailers)
     end_stream = !has_body && !has_trailers
-    _write_frame_h2_server!(conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
-    has_body && _write_data_frames_h2_server!(conn, stream_id, body_bytes; end_stream = !has_trailers)
-    has_trailers && _write_h2_trailers!(conn, stream_id, response.trailers)
+    _write_frame_h2_server_threadsafe!(write_lock, conn, HeadersFrame(stream_id, end_stream, true, _encode_h2_response_headers(response)))
+    has_body && _write_data_frames_h2_server!(conn, write_lock, stream_id, body_bytes; end_stream = !has_trailers)
+    has_trailers && _write_h2_trailers!(conn, write_lock, stream_id, response.trailers)
     return nothing
 end
 
-function _handle_h2_stream!(server::Server, conn::Union{TCP.Conn, TLS.Conn}, stream_id::UInt32, header_block::Vector{UInt8}, body::Vector{UInt8}, decoder::Decoder)::Nothing
-    decoded_headers = decode_header_block(decoder, header_block)
+function _handle_h2_stream!(server::Server, conn::Union{TCP.Conn, TLS.Conn}, write_lock::ReentrantLock, stream_id::UInt32, decoded_headers::Vector{HeaderField}, body::Vector{UInt8})::Nothing
     request = _decode_h2_request(decoded_headers, body)
     if server.stream
         stream = Stream(request)
@@ -1232,12 +1241,42 @@ function _handle_h2_stream!(server::Server, conn::Union{TCP.Conn, TLS.Conn}, str
             closewrite(stream)
             closeread(stream)
         end
-        return _write_h2_buffered_stream_response!(conn, stream_id, request, stream)
+        return _write_h2_buffered_stream_response!(conn, write_lock, stream_id, request, stream)
     end
-    response = server.handler(request)
+    response = try
+        server.handler(request)
+    catch err
+        status_code = _server_error_status(err::Exception)
+        return _write_h2_response!(
+            conn,
+            write_lock,
+            stream_id,
+            request,
+            Response(
+                status_code === nothing ? 500 : status_code::Int;
+                proto_major = 2,
+                proto_minor = 0,
+                request = request,
+            ),
+        )
+    end
     response isa Response || throw(ProtocolError("h2 server handler must return HTTP.Response"))
     response_obj = response::Response
-    _write_h2_response!(conn, stream_id, request, response_obj)
+    _write_h2_response!(conn, write_lock, stream_id, request, response_obj)
+    return nothing
+end
+
+function _dispatch_h2_stream!(
+        server::Server,
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        stream_id::UInt32,
+        header_block::Vector{UInt8},
+        body::Vector{UInt8},
+        decoder::Decoder,
+    )::Nothing
+    decoded_headers = decode_header_block(decoder, header_block)
+    errormonitor(Threads.@spawn _handle_h2_stream!(server, conn, write_lock, stream_id, decoded_headers, body))
     return nothing
 end
 
@@ -1245,6 +1284,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
     conn = tracked.conn
     reader = Framer(_ConnReader(reader_source))
     decoder = Decoder()
+    write_lock = ReentrantLock()
     try
         preface = _read_exact_h2_server!(reader_source, length(_H2_PREFACE))
         preface == _H2_PREFACE || throw(ProtocolError("invalid h2 client preface"))
@@ -1298,7 +1338,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 !hf.end_headers && (continuation_stream = hf.stream_id)
                 body_done[hf.stream_id] = hf.end_stream
                 if get(() -> false, headers_done, hf.stream_id) && get(() -> false, body_done, hf.stream_id)
-                    _handle_h2_stream!(server, conn, hf.stream_id, headers_block[hf.stream_id], get(() -> UInt8[], body_block, hf.stream_id), decoder)
+                    _dispatch_h2_stream!(server, conn, write_lock, hf.stream_id, headers_block[hf.stream_id], get(() -> UInt8[], body_block, hf.stream_id), decoder)
                     delete!(headers_block, hf.stream_id)
                     delete!(headers_done, hf.stream_id)
                     haskey(body_block, hf.stream_id) && delete!(body_block, hf.stream_id)
@@ -1315,7 +1355,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 headers_done[cf.stream_id] = cf.end_headers
                 continuation_stream = cf.end_headers ? UInt32(0) : cf.stream_id
                 if get(() -> false, headers_done, cf.stream_id) && get(() -> false, body_done, cf.stream_id)
-                    _handle_h2_stream!(server, conn, cf.stream_id, headers_block[cf.stream_id], get(() -> UInt8[], body_block, cf.stream_id), decoder)
+                    _dispatch_h2_stream!(server, conn, write_lock, cf.stream_id, headers_block[cf.stream_id], get(() -> UInt8[], body_block, cf.stream_id), decoder)
                     delete!(headers_block, cf.stream_id)
                     delete!(headers_done, cf.stream_id)
                     haskey(body_block, cf.stream_id) && delete!(body_block, cf.stream_id)
@@ -1331,11 +1371,11 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 existing = get(() -> UInt8[], body_block, df.stream_id)
                 append!(existing, df.data)
                 body_block[df.stream_id] = existing
-                _write_frame_h2_server!(conn, WindowUpdateFrame(UInt32(0), UInt32(length(df.data))))
-                _write_frame_h2_server!(conn, WindowUpdateFrame(df.stream_id, UInt32(length(df.data))))
+                _write_frame_h2_server_threadsafe!(write_lock, conn, WindowUpdateFrame(UInt32(0), UInt32(length(df.data))))
+                _write_frame_h2_server_threadsafe!(write_lock, conn, WindowUpdateFrame(df.stream_id, UInt32(length(df.data))))
                 body_done[df.stream_id] = df.end_stream
                 if get(() -> false, headers_done, df.stream_id) && get(() -> false, body_done, df.stream_id)
-                    _handle_h2_stream!(server, conn, df.stream_id, headers_block[df.stream_id], body_block[df.stream_id], decoder)
+                    _dispatch_h2_stream!(server, conn, write_lock, df.stream_id, headers_block[df.stream_id], body_block[df.stream_id], decoder)
                     delete!(headers_block, df.stream_id)
                     delete!(headers_done, df.stream_id)
                     delete!(body_block, df.stream_id)

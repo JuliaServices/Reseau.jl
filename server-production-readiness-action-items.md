@@ -39,35 +39,59 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `julia --project=. --startup-file=no --history-file=no -e 'using Reseau; ...'` direct h2 stream roundtrip returned `(200, "ok")`
 
-### [ ] ITEM-002 (P0) Make the HTTP/2 server actually multiplexed and bounded
-- Description: The current h2 path buffers entire request bodies in memory, runs handlers inline on the connection task, and effectively serializes all streams on a connection. That is not production-ready and is materially short of Go’s server behavior.
-- Desired outcome: The h2 server can handle multiple streams concurrently on one connection, request bodies are not unboundedly buffered before handler execution, and read-side flow control is tied to actual body consumption instead of naive unconditional `WINDOW_UPDATE`s.
+### [x] ITEM-002 (P0) Make HTTP/2 stream handling concurrent and connection-safe
+- Description: The current h2 path still runs handlers inline on the connection task, so one slow request stalls unrelated streams. That breaks the core multiplexing benefit of h2 even after ITEM-001 fixed stream-handler dispatch.
+- Desired outcome: The h2 server can execute multiple request handlers concurrently on one connection, and shared connection writes remain safe when those handlers emit responses at the same time.
 - Affected files: `src/7_7_http_server.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`
 - Implementation notes:
-  - Study the current h2 client/body abstractions and Go’s `h2_bundle.go` stream/body flow to choose a minimal direct design.
-  - Replace the per-stream `body_block` accumulation model with a streaming request-body path.
   - Decouple frame-read progression from handler execution so one slow stream does not stall unrelated streams.
-  - Add or adapt synchronization for response writes once stream handlers run concurrently.
-  - Add regression tests for concurrent h2 streams and large/slow request bodies.
+  - Add or adapt synchronization for response writes once handlers run concurrently.
+  - Keep the design direct; do not introduce a speculative scheduler.
+  - Add regression tests for concurrent h2 streams on one connection.
 - Verification:
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - Add a targeted concurrency regression test and run it through `test/runtests.jl`
 - Assumptions:
-  - We should prioritize direct correctness and boundedness over perfect feature completeness in the first pass.
+  - Full request-body streaming and receive-side buffering improvements are allowed to land in the next item rather than being forced into the same commit.
 - Risks:
   - Once streams run concurrently, response write ordering and shared connection state become much easier to get wrong.
 - Completion criteria:
   - Two concurrent h2 requests on one connection no longer serialize behind one another.
-  - Request bodies are not fully buffered before the handler starts.
-  - Tests cover the new concurrency and boundedness guarantees.
+  - Tests cover the new concurrency behavior.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - Added `HTTP/2 server handles concurrent streams on one connection` regression coverage in `test/http2_server_tests.jl`
 
-### [ ] ITEM-003 (P0) Implement missing HTTP/2 frame/state validation and flow-control behavior
-- Description: The server currently only type-checks the initial `SETTINGS`, ACKs later `SETTINGS`, ignores `WINDOW_UPDATE`, `RST_STREAM`, and `GOAWAY`, and accepts malformed header sets far too permissively. That is a correctness and hardening gap against Go.
+### [ ] ITEM-003 (P0) Replace full HTTP/2 request buffering with bounded streaming request-body handling
+- Description: The current h2 path still accumulates full request bodies in memory before handler execution. That is both a DoS risk and a major parity miss against Go’s body/flow-control behavior.
+- Desired outcome: h2 request bodies are consumed through a bounded streaming body reader, and read-side `WINDOW_UPDATE` credits are tied to actual body consumption instead of unconditional frame receipt.
+- Affected files: `src/7_7_http_server.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`
+- Implementation notes:
+  - Study the current h2 client body/stream abstractions and Go’s server-side body flow to choose the most direct reusable model.
+  - Replace the `body_block` accumulation model with a bounded buffer and a server-side streaming body implementation.
+  - Ensure the frame loop does not block the whole connection waiting on one application body read.
+  - Add regression tests for:
+    - large uploads without pre-buffering the whole request
+    - slow request-body consumption without unbounded growth
+- Verification:
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+- Assumptions:
+  - We do not need to implement full HTTP/2 priority or push support to fix the request-body path responsibly.
+- Risks:
+  - Flow-control mistakes here can cause deadlocks or stalls that only show up under stressed tests.
+- Completion criteria:
+  - Request bodies are not fully materialized before the handler starts.
+  - Read-side buffering is bounded and covered by tests.
+
+### [ ] ITEM-004 (P0) Implement missing HTTP/2 frame/state validation and flow-control behavior
+- Description: The server currently only type-checks the initial `SETTINGS`, ACKs later `SETTINGS`, ignores `WINDOW_UPDATE`, `RST_STREAM`, and `GOAWAY`, and accepts malformed header sets too permissively. That is a correctness and hardening gap against Go.
 - Desired outcome: The h2 server validates pseudo-headers and forbidden headers, applies relevant peer settings, processes frame types needed for stable interop, and maintains flow-control state closely enough to behave correctly against stricter peers.
 - Affected files: `src/7_7_http_server.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`
 - Implementation notes:
-  - Audit the existing frame loop against Go’s `processSettings`, `processWindowUpdate`, `processResetStream`, `processGoAway`, and request validation paths.
+  - Audit the frame loop against Go’s `processSettings`, `processWindowUpdate`, `processResetStream`, `processGoAway`, and request validation paths.
   - Implement only the frame/state machinery needed for production-safe serving now; avoid speculative support for priority or push unless required.
   - Reject invalid pseudo-header shapes and connection-specific headers on requests.
   - Ensure response encoding does not emit illegal h2 headers.
@@ -88,7 +112,7 @@
   - Illegal request/response header patterns are rejected or stripped correctly.
   - Tests cover the new validation behavior.
 
-### [ ] ITEM-004 (P1) Restore Go-style shutdown and upgraded-connection lifecycle behavior
+### [ ] ITEM-005 (P1) Restore Go-style shutdown and upgraded-connection lifecycle behavior
 - Description: Shutdown behavior is not yet production-ready for h2 or future upgraded/hijacked connections. The current lifecycle does not send `GOAWAY`, h2 connections do not participate in conn-state transitions the same way as h1, and the internal upgraded-connection shutdown path needs to be coherent.
 - Desired outcome: `close(server)` behaves as a real graceful shutdown for both h1 and h2, `forceclose(server)` remains the immediate path, h2 connections participate in state tracking, and upgraded/future hijacked connections have a clear shutdown notification path.
 - Affected files: `src/7_7_http_server.jl`, `src/7_6_http_websockets.jl`, `test/http2_server_tests.jl`, `test/http_server_http1_tests.jl`, `test/http_websocket_server_tests.jl`, `test/http_websocket_integration_tests.jl`
@@ -111,7 +135,7 @@
   - h2 shutdown sends the right connection-level signal and drains correctly.
   - Relevant websocket/upgraded connection tests remain green.
 
-### [ ] ITEM-005 (P1) Harden remaining HTTP/1 server edge cases and fill coverage gaps
+### [ ] ITEM-006 (P1) Harden remaining HTTP/1 server edge cases and fill coverage gaps
 - Description: HTTP/1 coverage is solid on several paths, but important production edges remain untested or under-implemented, including unsupported `Expect`, no-body response rules, fixed-length response mismatches, and timeout coverage beyond the current happy-path checks.
 - Desired outcome: The HTTP/1 server correctly handles the remaining core edge cases expected from a production loop, and the test suite exercises those paths directly.
 - Affected files: `src/7_7_http_server.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`
@@ -134,7 +158,7 @@
   - Remaining core h1 edge cases are explicitly tested.
   - Invalid fixed-length writes are caught before corrupting responses on the wire.
 
-### [ ] ITEM-006 (P2) Expand platform and parity verification to production-ready confidence
+### [ ] ITEM-007 (P2) Expand platform and parity verification to production-ready confidence
 - Description: Even after the server fixes land, the branch still needs broader confidence: key server suites are skipped on Windows, h2 TLS+ALPN servering is not covered, and the parity docs should reflect the actual remaining gap set.
 - Desired outcome: The server-focused suites are credible across supported environments, TLS+ALPN h2 serving has regression coverage, and the parity/action-item docs reflect the post-hardening state honestly.
 - Affected files: `test/runtests.jl`, `test/http2_server_tests.jl`, `test/http_integration_tests.jl`, `.github/workflows/ci.yml`, `server-production-readiness-action-items.md`, `http-master-parity.md`
