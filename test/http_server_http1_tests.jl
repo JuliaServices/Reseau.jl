@@ -36,7 +36,7 @@ function _run_with_timeout(f::F; timeout_s::Float64 = 5.0, label::String = "oper
     return fetch(task)
 end
 
-function _raw_http_request(port::Integer, request::AbstractString; settle_s::Float64 = 0.3)::String
+function _raw_http_request(port::Integer, request::AbstractString; settle_s::Float64 = 0.5)::String
     sock = ND.connect("tcp", "127.0.0.1:$(Int(port))")
     try
         write(sock, Vector{UInt8}(codeunits(String(request))))
@@ -51,7 +51,7 @@ function _raw_http_request(port::Integer, request::AbstractString; settle_s::Flo
     end
 end
 
-function _read_until_deadline(conn::NC.Conn; timeout_s::Float64 = 0.5)::String
+function _read_until_deadline(conn::NC.Conn; timeout_s::Float64 = 1.0)::String
     buf = Vector{UInt8}(undef, 1024)
     out = UInt8[]
     while true
