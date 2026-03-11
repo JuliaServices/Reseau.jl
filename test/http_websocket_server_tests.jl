@@ -142,3 +142,41 @@ end
         close(server)
     end
 end
+
+@testset "HTTP.WebSockets server close notifies active sessions" begin
+    started = Channel{Nothing}(1)
+    finished = Channel{Nothing}(1)
+    server = W.listen!("127.0.0.1", 0) do ws
+        put!(started, nothing)
+        try
+            while true
+                W.receive(ws)
+            end
+        catch
+        finally
+            put!(finished, nothing)
+        end
+    end
+    ws = nothing
+    try
+        address = _wait_server_addr(server)
+        ws = W.open("ws://$address/shutdown")
+        take!(started)
+        close(server)
+        @test isready(finished)
+        take!(finished)
+        err = try
+            W.receive(ws::W.WebSocket)
+            nothing
+        catch err
+            err
+        end
+        @test err isa W.WebSocketError
+        @test (err::W.WebSocketError).message.code == 1001
+    finally
+        ws === nothing || try
+            close(ws::W.WebSocket)
+        catch
+        end
+    end
+end

@@ -281,6 +281,67 @@ end
     @test_throws Exception HT.connect_h2!(address; secure = false, host_resolver = fail_fast_resolver)
 end
 
+@testset "HTTP/2 server close sends GOAWAY and drains active streams" begin
+    started = Channel{Nothing}(1)
+    release = Channel{Nothing}(1)
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            put!(started, nothing)
+            take!(release)
+            payload = collect(codeunits("ok"))
+            return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        end
+    address = _wait_http_server_addr(server)
+    conn = nothing
+    close_task = nothing
+    try
+        conn, reader = _open_raw_h2_server_conn(address)
+        decoder = HT.Decoder()
+        _write_h2_server_request_headers!(conn::NC.Conn, HT.Encoder(), UInt32(1), address, "/slow")
+        take!(started)
+        close_task = Threads.@spawn close(server)
+        goaway = HT.read_frame!(reader)
+        @test goaway isa HT.GoAwayFrame
+        @test (goaway::HT.GoAwayFrame).error_code == UInt32(0)
+        @test (goaway::HT.GoAwayFrame).last_stream_id == UInt32(1)
+
+        put!(release, nothing)
+        saw_headers = false
+        response_body = UInt8[]
+        while true
+            frame = HT.read_frame!(reader)
+            if frame isa HT.HeadersFrame
+                headers_frame = frame::HT.HeadersFrame
+                headers_frame.stream_id == UInt32(1) || continue
+                decoded = HT.decode_header_block(decoder, headers_frame.header_block_fragment)
+                @test any(field -> field.name == ":status" && field.value == "200", decoded)
+                saw_headers = true
+                continue
+            end
+            frame isa HT.DataFrame || continue
+            data_frame = frame::HT.DataFrame
+            data_frame.stream_id == UInt32(1) || continue
+            append!(response_body, data_frame.data)
+            data_frame.end_stream && break
+        end
+        @test saw_headers
+        @test String(response_body) == "ok"
+        close_task === nothing || fetch(close_task::Task)
+        fail_fast_resolver = ND.HostResolver(timeout_ns = Int64(1_000_000_000))
+        @test_throws Exception HT.connect_h2!(address; secure = false, host_resolver = fail_fast_resolver)
+    finally
+        conn === nothing || try
+            NC.close!(conn::NC.Conn)
+        catch
+        end
+        close_task === nothing || try
+            fetch(close_task::Task)
+        catch
+        end
+        isopen(server) && HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
 @testset "HTTP/2 server splits large response bodies into valid DATA frames" begin
     large_payload = fill(UInt8('z'), 70_000)
     server = HT.serve!("127.0.0.1", 0; listenany = true) do request

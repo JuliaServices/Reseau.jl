@@ -825,6 +825,7 @@ mutable struct Server{F}
     active_tcp_conns::Set{TCP.Conn}
     active_tls_conns::Set{TLS.Conn}
     active_tasks::Set{Task}
+    active_sessions::IdDict{Any, Nothing}
     bound_address::Union{Nothing, String}
     @atomic shutting_down::Bool
 end
@@ -859,6 +860,7 @@ function Server(;
         Set{TCP.Conn}(),
         Set{TLS.Conn}(),
         Set{Task}(),
+        IdDict{Any, Nothing}(),
         nothing,
         false,
     )
@@ -918,6 +920,48 @@ function _untrack_conn!(server::Server, conn, task::Task)::Nothing
         unlock(server.lock)
     end
     return nothing
+end
+
+function _track_session!(server::Server, ws::WebSocket)::Nothing
+    lock(server.lock)
+    try
+        server.active_sessions[ws] = nothing
+    finally
+        unlock(server.lock)
+    end
+    return nothing
+end
+
+function _untrack_session!(server::Server, ws::WebSocket)::Nothing
+    lock(server.lock)
+    try
+        delete!(server.active_sessions, ws)
+    finally
+        unlock(server.lock)
+    end
+    return nothing
+end
+
+function _active_sessions(server::Server)::Vector{Any}
+    sessions = []
+    lock(server.lock)
+    try
+        append!(sessions, keys(server.active_sessions))
+    finally
+        unlock(server.lock)
+    end
+    return sessions
+end
+
+function _active_ws_tasks(server::Server)::Vector{Task}
+    tasks = Task[]
+    lock(server.lock)
+    try
+        append!(tasks, server.active_tasks)
+    finally
+        unlock(server.lock)
+    end
+    return tasks
 end
 
 function _close_ws_server_conn!(conn)::Nothing
@@ -1003,6 +1047,7 @@ function _serve_ws_session!(server::Server, conn, request::Request, response::Re
     ws.handshake_request = request
     ws.handshake_response = response
     _start_read_task!(ws; buffer_bytes = server.read_buffer_bytes)
+    _track_session!(server, ws)
     try
         server.handler(ws)
     catch err
@@ -1021,6 +1066,7 @@ function _serve_ws_session!(server::Server, conn, request::Request, response::Re
             catch
             end
         end
+        _untrack_session!(server, ws)
     end
     return nothing
 end
@@ -1106,6 +1152,13 @@ function shutdown!(server::Server; force::Bool = false)::Nothing
         catch
         end
     end
+    sessions = _active_sessions(server)
+    for session in sessions
+        try
+            close(session::WebSocket, CloseFrameBody(1001, "server shutting down"))
+        catch
+        end
+    end
     if force
         lock(server.lock)
         try
@@ -1124,16 +1177,22 @@ end
 
 function Base.close(server::Server)
     shutdown!(server; force = true)
+    wait(server)
     return nothing
 end
 
 function Base.wait(server::Server)
+    serve_task = nothing
     lock(server.lock)
     try
-        server.serve_task === nothing && return nothing
-        wait(server.serve_task::Task)
+        serve_task = server.serve_task
     finally
         unlock(server.lock)
+    end
+    serve_task === nothing || wait(serve_task::Task)
+    for task in _active_ws_tasks(server)
+        task === current_task() && continue
+        wait(task)
     end
     return nothing
 end

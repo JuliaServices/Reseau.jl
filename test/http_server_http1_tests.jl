@@ -313,6 +313,41 @@ end
     end
 end
 
+@testset "HTTP server close waits for active requests to finish" begin
+    started = Channel{Nothing}(1)
+    release = Channel{Nothing}(1)
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            _ = request
+            put!(started, nothing)
+            take!(release)
+            return HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2)
+        end
+    address = _wait_server_addr(server)
+    client = HT.Client(transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4))
+    close_task = nothing
+    try
+        response_task = Threads.@spawn HT.get!(client, address, "/slow")
+        take!(started)
+        close_task = Threads.@spawn close(server)
+        sleep(0.1)
+        @test !istaskdone(close_task::Task)
+        put!(release, nothing)
+        response = fetch(response_task)
+        @test response.status_code == 200
+        @test String(_read_all_server_bytes(response.body)) == "ok"
+        _run_with_timeout(() -> fetch(close_task::Task); label = "graceful close task")
+        @test !isopen(server)
+    finally
+        close(client.transport)
+        close_task === nothing || try
+            fetch(close_task::Task)
+        catch
+        end
+        isopen(server) && HT.forceclose(server)
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
 @testset "HTTP server closes keep-alive when request body is unread" begin
     server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
             request = HT.startread(stream)

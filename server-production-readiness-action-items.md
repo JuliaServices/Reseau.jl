@@ -123,7 +123,7 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - Added raw h2 regression coverage for invalid request headers, `GOAWAY` on protocol errors, response-header filtering, peer `SETTINGS_INITIAL_WINDOW_SIZE`, connection-level `WINDOW_UPDATE`, and `RST_STREAM` continuation of later streams
 
-### [ ] ITEM-005 (P1) Restore Go-style shutdown and upgraded-connection lifecycle behavior
+### [x] ITEM-005 (P1) Restore Go-style shutdown and upgraded-connection lifecycle behavior
 - Description: Shutdown behavior is not yet production-ready for h2 or future upgraded/hijacked connections. The current lifecycle does not send `GOAWAY`, h2 connections do not participate in conn-state transitions the same way as h1, and the internal upgraded-connection shutdown path needs to be coherent.
 - Desired outcome: `close(server)` behaves as a real graceful shutdown for both h1 and h2, `forceclose(server)` remains the immediate path, h2 connections participate in state tracking, and upgraded/future hijacked connections have a clear shutdown notification path.
 - Affected files: `src/7_7_http_server.jl`, `src/7_6_http_websockets.jl`, `test/http2_server_tests.jl`, `test/http_server_http1_tests.jl`, `test/http_websocket_server_tests.jl`, `test/http_websocket_integration_tests.jl`
@@ -145,6 +145,13 @@
   - Graceful shutdown no longer relies on h1-only assumptions.
   - h2 shutdown sends the right connection-level signal and drains correctly.
   - Relevant websocket/upgraded connection tests remain green.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_websocket_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_websocket_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - Added graceful-drain coverage for active h1 requests, h2 `GOAWAY` + active-stream drain, and websocket server close notification / handler cleanup
 
 ### [ ] ITEM-006 (P1) Harden remaining HTTP/1 server edge cases and fill coverage gaps
 - Description: HTTP/1 coverage is solid on several paths, but important production edges remain untested or under-implemented, including unsupported `Expect`, no-body response rules, fixed-length response mismatches, and timeout coverage beyond the current happy-path checks.

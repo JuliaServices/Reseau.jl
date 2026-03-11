@@ -44,6 +44,8 @@ end
 
 mutable struct _ServerConn
     conn::Union{TCP.Conn, TLS.Conn}
+    lock::ReentrantLock
+    shutdown_hook::Union{Nothing, Function}
     @atomic state::_ConnState.T
     @atomic state_unix_sec::Int64
 end
@@ -244,6 +246,29 @@ end
 @inline function _set_conn_state!(conn::_ServerConn, state::_ConnState.T)::Nothing
     @atomic :release conn.state = state
     @atomic :release conn.state_unix_sec = floor(Int64, time())
+    return nothing
+end
+
+function _set_conn_shutdown_hook!(conn::_ServerConn, hook::Union{Nothing, Function})::Nothing
+    lock(conn.lock)
+    try
+        conn.shutdown_hook = hook
+    finally
+        unlock(conn.lock)
+    end
+    return nothing
+end
+
+function _notify_conn_shutdown!(conn::_ServerConn)::Nothing
+    hook = nothing
+    lock(conn.lock)
+    try
+        hook = conn.shutdown_hook
+    finally
+        unlock(conn.lock)
+    end
+    hook === nothing && return nothing
+    hook()
     return nothing
 end
 
@@ -448,6 +473,13 @@ function _server_conns(server::Server)::Vector{_ServerConn}
     return tracked
 end
 
+function _request_conn_shutdowns!(server::Server)::Nothing
+    for tracked in _server_conns(server)
+        _notify_conn_shutdown!(tracked)
+    end
+    return nothing
+end
+
 function _close_server_conn!(tracked::_ServerConn)::Nothing
     _set_conn_state!(tracked, _ConnState.CLOSED)
     try
@@ -535,9 +567,11 @@ function Base.close(server::Server)::Nothing
     state == _ServerState.CLOSED && return nothing
     initiated = _begin_shutdown!(server)
     _close_listener!(server)
+    _request_conn_shutdowns!(server)
     wait(server)
     poll_s = 0.001
     while true
+        _request_conn_shutdowns!(server)
         _close_idle_conns!(server) && break
         sleep(poll_s)
         poll_s < 0.5 && (poll_s = min(poll_s * 2, 0.5))
@@ -1026,12 +1060,23 @@ function _H2SendWindowState()
     )
 end
 
+mutable struct _H2ServerConnControl
+    @atomic shutdown_requested::Bool
+    @atomic goaway_sent::Bool
+    @atomic graceful_last_stream_id::UInt32
+end
+
+function _H2ServerConnControl()
+    return _H2ServerConnControl(false, false, UInt32(0))
+end
+
 mutable struct _H2ServerBody{C} <: AbstractBody
     conn::C
     write_lock::ReentrantLock
     states_lock::ReentrantLock
     states::Dict{UInt32, _H2ServerStreamState}
     stream_id::UInt32
+    tracked::_ServerConn
     state::_H2ServerStreamState
     send_state::_H2SendWindowState
     @atomic closed::Bool
@@ -1208,6 +1253,7 @@ function _send_h2_server_window_updates!(
 end
 
 function _maybe_cleanup_h2_server_state!(
+        tracked::_ServerConn,
         states_lock::ReentrantLock,
         states::Dict{UInt32, _H2ServerStreamState},
         state::_H2ServerStreamState,
@@ -1233,6 +1279,7 @@ function _maybe_cleanup_h2_server_state!(
         unlock(states_lock)
     end
     removed && _unregister_h2_send_window!(send_state, state.stream_id)
+    _update_h2_server_conn_state!(tracked, states_lock, states)
     return nothing
 end
 
@@ -1324,7 +1371,7 @@ function body_read!(body::_H2ServerBody, dst::Vector{UInt8})::Int
         end
         if done
             @atomic :release body.closed = true
-            _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state, body.send_state)
+            _maybe_cleanup_h2_server_state!(body.tracked, body.states_lock, body.states, body.state, body.send_state)
             return 0
         end
     end
@@ -1355,7 +1402,7 @@ function body_close!(body::_H2ServerBody)::Nothing
         catch
         end
     end
-    _maybe_cleanup_h2_server_state!(body.states_lock, body.states, body.state, body.send_state)
+    _maybe_cleanup_h2_server_state!(body.tracked, body.states_lock, body.states, body.state, body.send_state)
     return nothing
 end
 
@@ -1482,6 +1529,26 @@ function _write_data_frames_h2_server!(
         final_chunk = (offset + chunk_len - 1) == total_len
         _write_frame_h2_server_threadsafe!(write_lock, conn, DataFrame(stream_id, end_stream && final_chunk, chunk))
         offset += chunk_len
+    end
+    return nothing
+end
+
+function _h2_server_has_active_streams(states_lock::ReentrantLock, states::Dict{UInt32, _H2ServerStreamState})::Bool
+    lock(states_lock)
+    try
+        return !isempty(states)
+    finally
+        unlock(states_lock)
+    end
+end
+
+function _update_h2_server_conn_state!(tracked::_ServerConn, states_lock::ReentrantLock, states::Dict{UInt32, _H2ServerStreamState})::Nothing
+    state = _conn_state(tracked)
+    state == _ConnState.CLOSED && return nothing
+    if _h2_server_has_active_streams(states_lock, states)
+        state == _ConnState.ACTIVE || _set_conn_state!(tracked, _ConnState.ACTIVE)
+    else
+        state == _ConnState.IDLE || _set_conn_state!(tracked, _ConnState.IDLE)
     end
     return nothing
 end
@@ -1697,6 +1764,7 @@ end
 
 function _handle_h2_stream!(
         server::Server,
+        tracked::_ServerConn,
         conn::Union{TCP.Conn, TLS.Conn},
         write_lock::ReentrantLock,
         send_state::_H2SendWindowState,
@@ -1714,7 +1782,7 @@ function _handle_h2_stream!(
         if state.stream_done && _h2_server_available_bytes(state) == 0
             request_body = EmptyBody()
         else
-            request_body = _H2ServerBody(conn, write_lock, states_lock, states, stream_id, state, send_state, false)
+            request_body = _H2ServerBody(conn, write_lock, states_lock, states, stream_id, tracked, state, send_state, false)
         end
     finally
         unlock(state.lock)
@@ -1792,13 +1860,14 @@ function _handle_h2_stream!(
         finally
             unlock(state.lock)
         end
-        _maybe_cleanup_h2_server_state!(states_lock, states, state, send_state)
+        _maybe_cleanup_h2_server_state!(tracked, states_lock, states, state, send_state)
     end
     return nothing
 end
 
 function _dispatch_h2_stream!(
         server::Server,
+        tracked::_ServerConn,
         conn::Union{TCP.Conn, TLS.Conn},
         write_lock::ReentrantLock,
         send_state::_H2SendWindowState,
@@ -1824,7 +1893,7 @@ function _dispatch_h2_stream!(
     finally
         unlock(state.lock)
     end
-    errormonitor(Threads.@spawn _handle_h2_stream!(server, conn, write_lock, send_state, states_lock, states, state.stream_id, state, decoded_headers::Vector{HeaderField}))
+    errormonitor(Threads.@spawn _handle_h2_stream!(server, tracked, conn, write_lock, send_state, states_lock, states, state.stream_id, state, decoded_headers::Vector{HeaderField}))
     return nothing
 end
 
@@ -1841,6 +1910,19 @@ function _try_write_h2_goaway!(
     return nothing
 end
 
+function _request_h2_conn_shutdown!(
+        conn::Union{TCP.Conn, TLS.Conn},
+        write_lock::ReentrantLock,
+        control::_H2ServerConnControl,
+    )::Nothing
+    @atomic :release control.shutdown_requested = true
+    (@atomic :acquire control.goaway_sent) && return nothing
+    last_stream_id = @atomic :acquire control.graceful_last_stream_id
+    _try_write_h2_goaway!(conn, write_lock, last_stream_id, UInt32(0))
+    @atomic :release control.goaway_sent = true
+    return nothing
+end
+
 function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::Nothing
     conn = tracked.conn
     reader = Framer(_ConnReader(reader_source))
@@ -1848,6 +1930,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
     write_lock = ReentrantLock()
     states_lock = ReentrantLock()
     send_state = _H2SendWindowState()
+    conn_control = _H2ServerConnControl()
     states = Dict{UInt32, _H2ServerStreamState}()
     continuation_stream = UInt32(0)
     max_stream_id = UInt32(0)
@@ -1863,7 +1946,9 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
         _apply_h2_peer_settings!(send_state, (client_settings::SettingsFrame).settings)
         _write_frame_h2_server_threadsafe!(write_lock, conn, SettingsFrame(false, Pair{UInt16, UInt32}[]))
         _write_frame_h2_server_threadsafe!(write_lock, conn, SettingsFrame(true, Pair{UInt16, UInt32}[]))
-        while !_server_shutting_down(server)
+        _set_conn_shutdown_hook!(tracked, () -> _request_h2_conn_shutdown!(conn, write_lock, conn_control))
+        _set_conn_state!(tracked, _ConnState.IDLE)
+        while true
             frame = try
                 read_frame!(reader)
             catch err
@@ -1908,7 +1993,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 state === nothing && continue
                 _set_h2_server_stream_error!(state, ProtocolError("HTTP/2 stream reset by peer"); finish_if_unstarted = true)
                 _unregister_h2_send_window!(send_state, rst.stream_id)
-                _maybe_cleanup_h2_server_state!(states_lock, states, state, send_state)
+                _maybe_cleanup_h2_server_state!(tracked, states_lock, states, state, send_state)
                 continue
             end
             if frame isa GoAwayFrame
@@ -1922,12 +2007,18 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 hf.stream_id == UInt32(0) && throw(ProtocolError("HEADERS stream id must be non-zero"))
                 iseven(hf.stream_id) && throw(ProtocolError("HEADERS stream id must be odd for client-initiated streams"))
                 hf.stream_id > peer_goaway_last_stream_id && throw(ProtocolError("client opened stream after GOAWAY"))
+                if (@atomic :acquire conn_control.shutdown_requested) && hf.stream_id > (@atomic :acquire conn_control.graceful_last_stream_id)
+                    throw(ProtocolError("client opened stream after server GOAWAY"))
+                end
                 lock(states_lock)
                 state = try
                     if hf.stream_id < max_stream_id && !haskey(states, hf.stream_id)
                         throw(ProtocolError("HEADERS stream id must increase monotonically"))
                     end
-                    hf.stream_id > max_stream_id && (max_stream_id = hf.stream_id)
+                    if hf.stream_id > max_stream_id
+                        max_stream_id = hf.stream_id
+                        @atomic :release conn_control.graceful_last_stream_id = max_stream_id
+                    end
                     if haskey(states, hf.stream_id)
                         states[hf.stream_id]
                     else
@@ -1954,9 +2045,10 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 finally
                     unlock(state.lock)
                 end
+                _update_h2_server_conn_state!(tracked, states_lock, states)
                 if hf.end_headers
                     continuation_stream = UInt32(0)
-                    _dispatch_h2_stream!(server, conn, write_lock, send_state, states_lock, states, state)
+                    _dispatch_h2_stream!(server, tracked, conn, write_lock, send_state, states_lock, states, state)
                 end
                 continue
             end
@@ -1984,7 +2076,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 finally
                     unlock(state.lock)
                 end
-                cf.end_headers && _dispatch_h2_stream!(server, conn, write_lock, send_state, states_lock, states, state)
+                cf.end_headers && _dispatch_h2_stream!(server, tracked, conn, write_lock, send_state, states_lock, states, state)
                 continue
             end
             if frame isa DataFrame
@@ -2015,7 +2107,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
                 end
                 if state.aborted
                     _send_h2_server_window_updates!(conn, write_lock, df.stream_id, length(df.data); stream_level = false)
-                    _maybe_cleanup_h2_server_state!(states_lock, states, state, send_state)
+                    _maybe_cleanup_h2_server_state!(tracked, states_lock, states, state, send_state)
                 end
                 continue
             end
@@ -2037,6 +2129,7 @@ function _serve_h2_conn!(server::Server, tracked::_ServerConn, reader_source)::N
         goaway_error_code === nothing || _try_write_h2_goaway!(conn, write_lock, max_stream_id, goaway_error_code::UInt32)
         _fail_h2_send_window_state!(send_state, fail_err)
         _fail_h2_server_streams!(states_lock, states, send_state, fail_err)
+        _set_conn_shutdown_hook!(tracked, nothing)
         _clear_deadlines!(conn)
         _close_server_conn!(tracked)
         _untrack_conn!(server, tracked)
@@ -2193,7 +2286,7 @@ function _serve_listener!(server::Server, listener::Union{TCP.Listener, TLS.List
             end
             rethrow(err)
         end
-        tracked = _ServerConn(conn, _ConnState.NEW, floor(Int64, time()))
+        tracked = _ServerConn(conn, ReentrantLock(), nothing, _ConnState.NEW, floor(Int64, time()))
         _track_conn!(server, tracked)
         errormonitor(Threads.@spawn _serve_conn!(server, tracked))
     end
