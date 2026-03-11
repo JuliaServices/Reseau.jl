@@ -29,7 +29,7 @@
   - `using Reseau; Reseau.HTTP.Router` and related handler symbols load successfully.
   - Router metadata storage works without regressing request-context deadline/cancel behavior.
 
-### [ ] ITEM-002 (P0) Finish router, middleware, streamhandler, and cookie semantics against server behavior
+### [x] ITEM-002 (P0) Finish router, middleware, streamhandler, and cookie semantics against server behavior
 - Description: Even with the module in place, the port still needs careful integration against `Reseau`’s server pipeline so request handlers, stream handlers, wildcard/regex routing, 404/405 handling, and cookie middleware all behave like HTTP.jl instead of just compiling.
 - Desired outcome: Router matching covers exact, `*`, `{name}`, `{name:regex}`, and trailing `/**` patterns; request handlers and stream handlers both work; and cookie middleware plus parameter helpers behave correctly for real requests.
 - Affected files: `src/7_7_http_handlers.jl`, `src/7_6_http_stream.jl`, `src/7_7_http_server.jl`
@@ -45,6 +45,10 @@
 - Assumptions:
   - Route matching should operate on the request path only, ignoring the query string exactly as `HTTP.jl` does.
   - No separate legacy compatibility layer is needed for older server helper names; the current `serve`/`serve!`/`listen`/`listen!` surface is the integration target.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http_handlers_tests.jl` passed with live request-handler and stream-handler router coverage, including 404/405 and query-string-insensitive matching.
+  - `RESEAU_TEST_ONLY=http_server_http1_tests.jl` passed after the adapter review.
+  - `RESEAU_TEST_ONLY=http2_server_tests.jl` passed after adding router coverage to the shared HTTP/2 server path.
 - Completion criteria:
   - Live server requests can pass through `streamhandler` and `Router` successfully.
   - Query strings do not break route matching, and 404/405 behavior is covered.

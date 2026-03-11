@@ -103,6 +103,35 @@ end
     end
 end
 
+@testset "HTTP/2 server router request handlers work" begin
+    router = HT.Router()
+    HT.register!(router, "GET", "/router/{name}", req -> begin
+            payload = collect(codeunits("router:" * HT.getparam(req, "name")))
+            return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        end)
+    server = HT.serve!(router, "127.0.0.1", 0; listenany = true)
+    address = _wait_http_server_addr(server)
+    conn = HT.connect_h2!(address; secure = false)
+    try
+        ok_req = HT.Request("GET", "/router/alex?debug=1"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        ok_res = HT.h2_roundtrip!(conn, ok_req)
+        @test ok_res.status_code == 200
+        @test String(_read_all_h2_server(ok_res.body)) == "router:alex"
+
+        wrong_method = HT.Request("POST", "/router/alex"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        wrong_method_res = HT.h2_roundtrip!(conn, wrong_method)
+        @test wrong_method_res.status_code == 405
+
+        missing_req = HT.Request("GET", "/missing"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        missing_res = HT.h2_roundtrip!(conn, missing_req)
+        @test missing_res.status_code == 404
+    finally
+        close(conn)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
 @testset "HTTP/2 server stream handlers work and suppress HEAD bodies" begin
     server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
             request = HT.startread(stream)
@@ -131,6 +160,36 @@ end
         head_res = HT.h2_roundtrip!(conn, head_req)
         @test head_res.status_code == 200
         @test isempty(_read_all_h2_server(head_res.body))
+    finally
+        close(conn)
+        HT.forceclose(server)
+        _ = timedwait(() -> istaskdone(server.serve_task::Task), 3.0; pollint = 0.001)
+    end
+end
+
+@testset "HTTP/2 server router stream handlers work" begin
+    router = HT.Router()
+    HT.register!(router, "POST", "/stream/{name}", stream -> begin
+            request = HT.startread(stream)
+            body = String(read(stream))
+            HT.setstatus(stream, 200)
+            HT.setheader(stream, "Content-Type", "text/plain")
+            write(stream, "router-stream:" * HT.getparam(request, "name") * ":" * body)
+            return nothing
+        end)
+    server = HT.listen!(router, "127.0.0.1", 0; listenany = true)
+    address = _wait_http_server_addr(server)
+    conn = HT.connect_h2!(address; secure = false)
+    try
+        payload = collect(codeunits("echo"))
+        req = HT.Request("POST", "/stream/sam?debug=1"; host = address, body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+        res = HT.h2_roundtrip!(conn, req)
+        @test res.status_code == 200
+        @test String(_read_all_h2_server(res.body)) == "router-stream:sam:echo"
+
+        wrong_method = HT.Request("GET", "/stream/sam"; host = address, body = HT.EmptyBody(), content_length = 0, proto_major = 2, proto_minor = 0)
+        wrong_method_res = HT.h2_roundtrip!(conn, wrong_method)
+        @test wrong_method_res.status_code == 405
     finally
         close(conn)
         HT.forceclose(server)
