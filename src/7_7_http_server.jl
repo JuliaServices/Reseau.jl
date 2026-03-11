@@ -288,6 +288,11 @@ end
     return stream.server === nothing && stream.tracked === nothing && request !== nothing && (request::Request).proto_major == UInt8(2)
 end
 
+@inline function _server_stream_buffered_fixed_h1(stream::Stream)::Bool
+    _require_server_stream(stream)
+    return !_server_stream_buffered_h2(stream) && stream.write_mode == _ServerStreamWriteMode.FIXED
+end
+
 """
     server_addr(server) -> String
 
@@ -655,6 +660,28 @@ function _write_all_response!(conn::Union{TCP.Conn, TLS.Conn}, response::Respons
     return nothing
 end
 
+function _request_has_unsupported_expect(request::Request)::Bool
+    values = get_headers(request.headers, "Expect")
+    isempty(values) && return false
+    saw_supported = false
+    for value in values
+        for token in eachsplit(value, ',')
+            trimmed = lowercase(strip(token))
+            isempty(trimmed) && return true
+            if trimmed == "100-continue"
+                saw_supported = true
+                continue
+            end
+            return true
+        end
+    end
+    return !saw_supported
+end
+
+@inline function _is_connection_reset_error(err::Exception)::Bool
+    return err isa SystemError && occursin("Connection reset by peer", sprint(showerror, err))
+end
+
 function _server_error_status(err::Exception)::Union{Nothing, Int}
     if err isa ParseError
         return 400
@@ -713,10 +740,10 @@ function _server_stream_write_mode(stream::Stream)::_ServerStreamWriteMode.T
     return _ServerStreamWriteMode.CHUNKED
 end
 
-function _write_server_stream_bytes!(stream::Stream, bytes::AbstractVector{UInt8})::Nothing
+function _write_server_stream_bytes!(stream::Stream, bytes::AbstractVector{UInt8}; buffer::Bool = true)::Nothing
     isempty(bytes) && return nothing
     data = bytes isa Vector{UInt8} ? bytes : Vector{UInt8}(bytes)
-    if _server_stream_buffered_h2(stream)
+    if buffer && (_server_stream_buffered_h2(stream) || _server_stream_buffered_fixed_h1(stream))
         write(stream.request_buffer, data)
         return nothing
     end
@@ -756,7 +783,7 @@ function _write_server_stream_head!(stream::Stream)::Nothing
     _write_status_line!(io, stream.response)
     _write_headers!(io, headers)
     write(io, "\r\n")
-    _write_server_stream_bytes!(stream, take!(io))
+    _write_server_stream_bytes!(stream, take!(io); buffer = false)
     @atomic :release stream.response_started = true
     return nothing
 end
@@ -877,6 +904,16 @@ function startwrite(stream::Stream)::Response
         @atomic :release stream.response_started = true
         return stream.response
     end
+    stream.write_mode = _server_stream_write_mode(stream)
+    if stream.write_mode == _ServerStreamWriteMode.FIXED
+        if stream.response.content_length < 0
+            expected = _parse_content_length(stream.response.headers)
+            expected >= 0 || throw(ProtocolError("fixed-length stream response is missing Content-Length"))
+            stream.response.content_length = expected
+        end
+        @atomic :release stream.response_started = true
+        return stream.response
+    end
     _write_server_stream_head!(stream)
     return stream.response
 end
@@ -886,7 +923,7 @@ function _server_write(stream::Stream, data::AbstractVector{UInt8})::Int
     (@atomic :acquire stream.write_closed) && throw(ArgumentError("response writes are closed"))
     startwrite(stream)
     stream.ignore_writes && return length(data)
-    if _server_stream_buffered_h2(stream)
+    if _server_stream_buffered_h2(stream) || stream.write_mode == _ServerStreamWriteMode.FIXED
         if stream.response.content_length >= 0 && (stream.written_bytes + length(data)) > stream.response.content_length
             throw(ProtocolError("response body bytes exceeded Content-Length"))
         end
@@ -923,16 +960,19 @@ function _server_closewrite(stream::Stream)::Nothing
         @atomic :release stream.write_closed = true
         return nothing
     end
-    if stream.write_mode == _ServerStreamWriteMode.CHUNKED
+    if stream.write_mode == _ServerStreamWriteMode.FIXED
+        if stream.response.content_length >= 0 && stream.written_bytes != stream.response.content_length
+            throw(ProtocolError("response body bytes did not match Content-Length"))
+        end
+        _write_server_stream_head!(stream)
+        body_bytes = take!(stream.request_buffer)
+        _write_server_stream_bytes!(stream, body_bytes; buffer = false)
+    elseif stream.write_mode == _ServerStreamWriteMode.CHUNKED
         io = IOBuffer()
         write(io, "0\r\n")
         _write_headers!(io, stream.response.trailers)
         write(io, "\r\n")
         _write_server_stream_bytes!(stream, take!(io))
-    elseif stream.write_mode == _ServerStreamWriteMode.FIXED
-        if stream.response.content_length >= 0 && stream.written_bytes != stream.response.content_length
-            throw(ProtocolError("response body bytes did not match Content-Length"))
-        end
     end
     @atomic :release stream.write_closed = true
     return nothing
@@ -2164,7 +2204,7 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
             _try_write_server_error!(tracked.conn, nothing, 408)
             return nothing
         end
-        if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError || err isa TLS.TLSError || err isa TLS.TLSHandshakeTimeoutError
+        if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError || err isa TLS.TLSError || err isa TLS.TLSHandshakeTimeoutError || _is_connection_reset_error(err::Exception)
             return nothing
         end
         rethrow(err)
@@ -2188,12 +2228,16 @@ function _serve_h1_conn!(server::Server, tracked::_ServerConn, reader_source)::N
             catch err
                 status_code = _server_error_status(err::Exception)
                 status_code === nothing || _try_write_server_error!(tracked.conn, nothing, status_code::Int)
-                if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError || err isa TLS.TLSError || err isa TLS.TLSHandshakeTimeoutError
+                if err isa ParseError || err isa ProtocolError || err isa EOFError || err isa IOPoll.DeadlineExceededError || err isa IOPoll.NetClosingError || err isa TLS.TLSError || err isa TLS.TLSHandshakeTimeoutError || _is_connection_reset_error(err::Exception)
                     return nothing
                 end
                 rethrow(err)
             end
             _set_conn_state!(tracked, _ConnState.ACTIVE)
+            if _request_has_unsupported_expect(request)
+                _try_write_server_error!(tracked.conn, request, 417)
+                return nothing
+            end
             _set_read_deadline_for_body!(server, tracked.conn)
             if server.stream
                 stream = Stream(server, tracked, request)

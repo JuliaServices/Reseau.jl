@@ -153,7 +153,7 @@
   - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
   - Added graceful-drain coverage for active h1 requests, h2 `GOAWAY` + active-stream drain, and websocket server close notification / handler cleanup
 
-### [ ] ITEM-006 (P1) Harden remaining HTTP/1 server edge cases and fill coverage gaps
+### [x] ITEM-006 (P1) Harden remaining HTTP/1 server edge cases and fill coverage gaps
 - Description: HTTP/1 coverage is solid on several paths, but important production edges remain untested or under-implemented, including unsupported `Expect`, no-body response rules, fixed-length response mismatches, and timeout coverage beyond the current happy-path checks.
 - Desired outcome: The HTTP/1 server correctly handles the remaining core edge cases expected from a production loop, and the test suite exercises those paths directly.
 - Affected files: `src/7_7_http_server.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`
@@ -175,6 +175,11 @@
 - Completion criteria:
   - Remaining core h1 edge cases are explicitly tested.
   - Invalid fixed-length writes are caught before corrupting responses on the wire.
+- Verification evidence:
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_server_http1_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http2_server_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - `JULIA_NUM_THREADS=1 RESEAU_TEST_ONLY=http_integration_tests.jl julia --project=. --startup-file=no --history-file=no test/runtests.jl`
+  - Added explicit regressions for unsupported `Expect`, `HEAD` / `204` / `304` no-body stream responses, idle timeout, write timeout, and fixed `Content-Length` overflow / underflow handling
 
 ### [ ] ITEM-007 (P2) Expand platform and parity verification to production-ready confidence
 - Description: Even after the server fixes land, the branch still needs broader confidence: key server suites are skipped on Windows, h2 TLS+ALPN servering is not covered, and the parity docs should reflect the actual remaining gap set.

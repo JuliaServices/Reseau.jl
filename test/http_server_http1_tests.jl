@@ -201,6 +201,57 @@ end
     end
 end
 
+@testset "HTTP server rejects unsupported Expect headers" begin
+    server = HT.serve!("127.0.0.1", 0; listenany = true) do request
+            _ = request
+            return HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2)
+        end
+    address = _wait_server_addr(server)
+    try
+        raw = _raw_http_request(HT.port(server), "POST / HTTP/1.1\r\nHost: $(address)\r\nContent-Length: 0\r\nExpect: fancy-feature\r\nConnection: close\r\n\r\n"; settle_s = 0.3)
+        @test occursin("HTTP/1.1 417", raw)
+    finally
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
+@testset "HTTP server stream handlers suppress bodies for HEAD, 204, and 304" begin
+    server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
+            request = HT.startread(stream)
+            if request.target == "/nocontent"
+                HT.setstatus(stream, 204)
+            elseif request.target == "/notmodified"
+                HT.setstatus(stream, 304)
+            else
+                HT.setstatus(stream, 200)
+            end
+            HT.startwrite(stream)
+            write(stream, "oops")
+            return nothing
+        end
+    address = _wait_server_addr(server)
+    try
+        head_raw = _raw_http_request(HT.port(server), "HEAD /head HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n"; settle_s = 0.3)
+        @test occursin("HTTP/1.1 200 OK", head_raw)
+        @test !occursin("oops", head_raw)
+        @test !occursin("transfer-encoding: chunked", lowercase(head_raw))
+
+        no_content_raw = _raw_http_request(HT.port(server), "GET /nocontent HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n"; settle_s = 0.3)
+        @test occursin("HTTP/1.1 204 No Content", no_content_raw)
+        @test !occursin("oops", no_content_raw)
+        @test !occursin("transfer-encoding: chunked", lowercase(no_content_raw))
+
+        not_modified_raw = _raw_http_request(HT.port(server), "GET /notmodified HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n"; settle_s = 0.3)
+        @test occursin("HTTP/1.1 304 Not Modified", not_modified_raw)
+        @test !occursin("oops", not_modified_raw)
+        @test !occursin("transfer-encoding: chunked", lowercase(not_modified_raw))
+    finally
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
 @testset "HTTP server timeout and handler error responses" begin
     timeout_server = HT.Server(
         address = "127.0.0.1:0",
@@ -241,6 +292,87 @@ end
     end
 end
 
+@testset "HTTP server idle timeout closes keep-alive connections" begin
+    server = HT.Server(
+        address = "127.0.0.1:0",
+        stream = true,
+        idle_timeout_ns = 200_000_000,
+        handler = stream -> begin
+            _ = HT.startread(stream)
+            HT.setstatus(stream, 200)
+            HT.startwrite(stream)
+            write(stream, "ok")
+            return nothing
+        end,
+    )
+    HT.listen!(server)
+    address = _wait_server_addr(server)
+    sock = ND.connect("tcp", "127.0.0.1:$(HT.port(server))")
+    try
+        write(sock, Vector{UInt8}(codeunits("GET /one HTTP/1.1\r\nHost: $(address)\r\n\r\n")))
+        sleep(0.1)
+        first = _read_until_deadline(sock)
+        @test occursin("HTTP/1.1 200 OK", first)
+        sleep(0.5)
+        closed_after_idle = false
+        try
+            write(sock, Vector{UInt8}(codeunits("GET /two HTTP/1.1\r\nHost: $(address)\r\n\r\n")))
+            sleep(0.1)
+            second = _read_until_deadline(sock; timeout_s = 0.3)
+            closed_after_idle = !occursin("HTTP/1.1 200 OK", second)
+        catch err
+            closed_after_idle = err isa EOFError || err isa SystemError || err isa IOP.DeadlineExceededError
+        end
+        @test closed_after_idle
+    finally
+        try
+            NC.close!(sock)
+        catch
+        end
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
+@testset "HTTP server write timeout aborts stalled responses" begin
+    timeout_seen = Channel{Bool}(1)
+    server = HT.Server(
+        address = "127.0.0.1:0",
+        stream = true,
+        write_timeout_ns = 200_000_000,
+        handler = stream -> begin
+            _ = HT.startread(stream)
+            HT.setstatus(stream, 200)
+            HT.startwrite(stream)
+            chunk = fill(UInt8('x'), 64 * 1024)
+            try
+                while true
+                    write(stream, chunk)
+                end
+            catch err
+                put!(timeout_seen, err isa IOP.DeadlineExceededError)
+            end
+            return nothing
+        end,
+    )
+    HT.listen!(server)
+    address = _wait_server_addr(server)
+    sock = ND.connect("tcp", "127.0.0.1:$(HT.port(server))")
+    try
+        write(sock, Vector{UInt8}(codeunits("GET / HTTP/1.1\r\nHost: $(address)\r\n\r\n")))
+        status = timedwait(() -> isready(timeout_seen), 5.0; pollint = 0.001)
+        @test status != :timed_out
+        @test take!(timeout_seen)
+    finally
+        try
+            NC.close!(sock)
+        catch
+        end
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
 @testset "HTTP server stream handler request and response flow" begin
     server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
             _ = HT.startread(stream)
@@ -260,6 +392,35 @@ end
         resp2 = HT.post("http://$(address)/"; body = "echo")
         @test resp2.status == 200
         @test String(resp2.body) == "echo"
+    finally
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
+    end
+end
+
+@testset "HTTP server stream handlers reject fixed-length mismatches before writing malformed bodies" begin
+    server = HT.listen!("127.0.0.1", 0; listenany = true) do stream
+            request = HT.startread(stream)
+            if request.target == "/overflow"
+                HT.setheader(stream, "Content-Length", "2")
+                HT.startwrite(stream)
+                write(stream, "toolong")
+                return nothing
+            end
+            HT.setheader(stream, "Content-Length", "5")
+            HT.startwrite(stream)
+            write(stream, "hi")
+            return nothing
+        end
+    address = _wait_server_addr(server)
+    try
+        overflow_raw = _raw_http_request(HT.port(server), "GET /overflow HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n"; settle_s = 0.3)
+        @test !occursin("toolong", overflow_raw)
+        @test !occursin("content-length: 2", lowercase(overflow_raw))
+
+        underflow_raw = _raw_http_request(HT.port(server), "GET /underflow HTTP/1.1\r\nHost: $(address)\r\nConnection: close\r\n\r\n"; settle_s = 0.3)
+        @test !occursin("hi", underflow_raw)
+        @test !occursin("content-length: 5", lowercase(underflow_raw))
     finally
         _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
         _run_with_timeout(() -> wait(server); label = "server task completion")
