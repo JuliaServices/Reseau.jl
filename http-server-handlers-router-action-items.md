@@ -53,7 +53,7 @@
   - Live server requests can pass through `streamhandler` and `Router` successfully.
   - Query strings do not break route matching, and 404/405 behavior is covered.
 
-### [ ] ITEM-003 (P0) Port and adapt upstream handlers/router tests into Reseau’s test suite
+### [x] ITEM-003 (P0) Port and adapt upstream handlers/router tests into Reseau’s test suite
 - Description: `Reseau` currently has no dedicated router/middleware test coverage, so the upstream `HTTP.jl` handlers tests and relevant server-side handler coverage need to be ported and adapted to current request/response/body APIs.
 - Desired outcome: `Reseau` has a focused `http_handlers_tests.jl` suite plus any necessary integration assertions for `streamhandler` and router behavior, and the suite is wired into `test/runtests.jl`.
 - Affected files: `test/http_handlers_tests.jl`, `test/http_server_http1_tests.jl`, `test/http_integration_tests.jl`, `test/runtests.jl`
@@ -67,6 +67,10 @@
 - Assumptions:
   - A standalone `test/http_handlers_tests.jl` file is the clearest home for the direct upstream router coverage.
   - Existing server tests may still need a few additions where handler behavior only makes sense over a live socket.
+- Verification evidence:
+  - `RESEAU_TEST_ONLY=http_core_tests.jl` passed after adding request-context metadata coverage.
+  - `RESEAU_TEST_ONLY=http_handlers_tests.jl` passed with direct router, middleware, streamhandler, and live HTTP/1 server coverage.
+  - `RESEAU_TEST_ONLY=trim_compile_tests.jl` passed after leaving the trim workload on static-friendly coverage.
 - Completion criteria:
   - The new handlers test file passes on its own and from the full runner.
   - The test runner includes the new suite in the normal HTTP path.
