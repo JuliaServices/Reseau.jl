@@ -61,6 +61,47 @@ end
     end
 end
 
+@testset "HTTP integration TLS selects h2 via ALPN" begin
+    listener = TL.listen(
+        "tcp",
+        "127.0.0.1:0",
+        TL.Config(
+            verify_peer = false,
+            cert_file = _TLS_CERT_PATH,
+            key_file = _TLS_KEY_PATH,
+            alpn_protocols = ["h2"],
+        );
+        backlog = 8,
+    )
+    laddr = TL.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    server = HT.serve!(listener) do request
+        payload = collect(codeunits("tls-h2:" * request.target))
+        return HT.Response(200; body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
+    end
+    client = HT.Client(
+        transport = HT.Transport(
+            tls_config = TL.Config(
+                verify_peer = false,
+                server_name = "localhost",
+                alpn_protocols = ["h2"],
+            ),
+            max_idle_per_host = 4,
+            max_idle_total = 4,
+        ),
+        prefer_http2 = true,
+    )
+    try
+        response = HT.get!(client, address, "/secure-h2"; secure = true, protocol = :h2)
+        @test response.status_code == 200
+        @test String(_read_all_integration(response.body)) == "tls-h2:/secure-h2"
+    finally
+        close(client)
+        HT.forceclose(server)
+        wait(server)
+    end
+end
+
 function _wait_http_addr(server::HT.Server; timeout_s::Float64 = 5.0)
     deadline = time() + timeout_s
     while time() < deadline

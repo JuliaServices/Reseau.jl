@@ -217,6 +217,11 @@ function _require_server_stream(stream::Stream)::Nothing
     throw(ArgumentError("operation is only valid for server-side HTTP streams"))
 end
 
+"""
+    server_addr(server) -> String
+
+Return the bound `host:port` address for a listening server.
+"""
 function server_addr(server::Server)::String
     lock(server.lock)
     try
@@ -227,6 +232,12 @@ function server_addr(server::Server)::String
     end
 end
 
+"""
+    port(server) -> Int
+
+Return the bound port for `server`, or the configured port if it has not started
+listening yet.
+"""
 function port(server::Server)::Int
     lock(server.lock)
     try
@@ -244,6 +255,11 @@ function port(server::Server)::Int
     end
 end
 
+"""
+    isopen(server) -> Bool
+
+Return `true` while `server` can still accept or finish serving connections.
+"""
 function Base.isopen(server::Server)::Bool
     state = _server_state(server)
     state == _ServerState.CLOSED && return false
@@ -257,6 +273,11 @@ function Base.isopen(server::Server)::Bool
     end
 end
 
+"""
+    wait(server)
+
+Block until the server task exits.
+"""
 function Base.wait(server::Server)::Nothing
     task = nothing
     lock(server.lock)
@@ -441,6 +462,11 @@ function _begin_shutdown!(server::Server)::Bool
     end
 end
 
+"""
+    forceclose(server)
+
+Immediately stop accepting new connections and close all tracked connections.
+"""
 function forceclose(server::Server)::Nothing
     initiated = _begin_shutdown!(server)
     _close_listener!(server)
@@ -452,6 +478,12 @@ function forceclose(server::Server)::Nothing
     return nothing
 end
 
+"""
+    close(server)
+
+Gracefully stop accepting new connections, wait for active work to quiesce, and
+then close the remaining tracked connections.
+"""
 function Base.close(server::Server)::Nothing
     state = _server_state(server)
     state == _ServerState.CLOSED && return nothing
@@ -583,6 +615,8 @@ function _server_stream_allows_body(stream::Stream)::Bool
 end
 
 function _server_stream_write_mode(stream::Stream)::_ServerStreamWriteMode.T
+    # Framing is chosen late so explicit response headers win, while unread
+    # request bodies still force connection close independently of write mode.
     allows_body = _server_stream_allows_body(stream)
     allows_body || return _ServerStreamWriteMode.NONE
     has_header_token(stream.response.headers, "Transfer-Encoding", "chunked") && return _ServerStreamWriteMode.CHUNKED
@@ -649,6 +683,8 @@ function _maybe_write_continue!(stream::Stream)::Nothing
     _require_server_stream(stream)
     already_sent = @atomic :acquire stream.continue_sent
     already_sent && return nothing
+    # We only acknowledge `Expect: 100-continue` once the handler actually tries
+    # to consume the request body.
     has_header_token(stream.request.headers, "Expect", "100-continue") || return nothing
     _request_body_fully_consumed(stream.request) && return nothing
     response = Response(
@@ -887,6 +923,8 @@ function _h2_preface_prefix_matches(prefix::Vector{UInt8})::Bool
 end
 
 function _probe_h2_preface!(server::Server, conn::TCP.Conn)::Tuple{Bool, _ServerPrefaceConn{TCP.Conn}}
+    # Cleartext HTTP/2 has no ALPN, so we sniff enough of the connection preface
+    # to choose h2 and replay the same bytes into the h1 parser otherwise.
     _set_read_deadline_for_header!(server, conn)
     prefix = UInt8[]
     while length(prefix) < length(_H2_PREFACE)
@@ -935,7 +973,7 @@ function _write_data_frames_h2_server!(conn::Union{TCP.Conn, TLS.Conn}, stream_i
     return nothing
 end
 
-function _read_exact_h2_server!(io::IO, n::Int)::Vector{UInt8}
+function _read_exact_h2_server!(io, n::Int)::Vector{UInt8}
     out = Vector{UInt8}(undef, n)
     offset = 0
     while offset < n
@@ -1160,6 +1198,8 @@ function _serve_conn!(server::Server, tracked::_ServerConn)::Nothing
         conn = tracked.conn
         if conn isa TLS.Conn
             _set_read_deadline_for_header!(server, conn::TLS.Conn)
+            # TLS needs an explicit handshake here so ALPN can pick h2 vs h1
+            # before any HTTP parser commits to a protocol.
             TLS.handshake!(conn::TLS.Conn)
             proto = TLS.connection_state(conn::TLS.Conn).alpn_protocol
             entered_helper = true
@@ -1323,6 +1363,11 @@ function _run_server!(server::Server)
     return nothing
 end
 
+"""
+    listen!(server) -> Server
+
+Start a configured `Server` asynchronously and return it.
+"""
 function listen!(server::Server)::Server
     state = _server_state(server)
     state == _ServerState.CLOSED && throw(ProtocolError("closed servers cannot be restarted"))
@@ -1337,6 +1382,16 @@ function listen!(server::Server)::Server
     return server
 end
 
+"""
+    listen!(handler, host="127.0.0.1", port=8080; listenany=false, reuseaddr=true, backlog=128) -> Server
+    listen!(handler, port; kwargs...) -> Server
+    listen!(handler, listener; kwargs...) -> Server
+
+Start a streaming HTTP server and return the running `Server`.
+
+`handler` is called with an `HTTP.Stream` and is responsible for reading the
+request and writing the response.
+"""
 function listen!(
     handler::F, host::AbstractString = "127.0.0.1", port_num::Integer = 8080;
     listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
@@ -1387,6 +1442,11 @@ function listen!(
     return server
 end
 
+"""
+    listen(handler, args...; kwargs...)
+
+Run `listen!` in the foreground, blocking until the server is closed.
+"""
 function listen(handler::F, args...; kwargs...) where {F}
     server = listen!(handler, args...; kwargs...)
     try
@@ -1400,6 +1460,17 @@ function listen(handler::F, args...; kwargs...) where {F}
     return server
 end
 
+"""
+    serve!(handler, host="127.0.0.1", port=8080; stream=false, listenany=false, reuseaddr=true, backlog=128) -> Server
+    serve!(handler, port; kwargs...) -> Server
+    serve!(handler, listener; kwargs...) -> Server
+
+Start an HTTP server and return the running `Server`.
+
+By default `handler` is called with an `HTTP.Request` and must return an
+`HTTP.Response`. Pass `stream=true` to use the lower-level `HTTP.Stream`
+handler path instead.
+"""
 function serve!(
     handler::F, args...; stream::Bool = false, listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
 ) where {F}
@@ -1447,6 +1518,11 @@ function serve!(
     ))
 end
 
+"""
+    serve(handler, args...; kwargs...)
+
+Run `serve!` in the foreground, blocking until the server is closed.
+"""
 function serve(handler::F, args...; stream::Bool = false, listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128) where {F}
     server = serve!(handler, args...; stream = stream, listenany = listenany, reuseaddr = reuseaddr, backlog = backlog)
     try
