@@ -10,7 +10,6 @@ export getroute
 export getparams
 export getparam
 export getcookies
-export streamhandler
 export Node
 
 import ..Request
@@ -18,12 +17,8 @@ import ..Response
 import ..Stream
 import ..Cookie
 import ..Cookies
-import ..ProtocolError
-import ..startread
 import ..setstatus
-import ..closewrite
-import ..closeread
-import .._write_response_body_to_stream!
+import ..startread
 import ..serve
 import ..serve!
 
@@ -51,26 +46,6 @@ There is no requirement to subtype `Middleware` and users should not rely on or
 dispatch on `Middleware`.
 """
 abstract type Middleware end
-
-"""
-    streamhandler(request_handler) -> stream handler
-
-Middleware that takes a request handler and returns a stream handler.
-"""
-function streamhandler(handler)
-    return function(stream::Stream)
-        req = startread(stream)
-        resp = handler(req)
-        resp isa Response || throw(ProtocolError("streamhandler request handler must return HTTP.Response"))
-        response = resp::Response
-        response.request = req
-        stream.response = response
-        _write_response_body_to_stream!(stream, response.body)
-        closewrite(stream)
-        closeread(stream)
-        return nothing
-    end
-end
 
 mutable struct Variable
     name::String

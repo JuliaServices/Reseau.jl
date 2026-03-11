@@ -5,6 +5,7 @@ export listen
 export listen!
 export serve
 export serve!
+export streamhandler
 export forceclose
 export port
 
@@ -1036,6 +1037,26 @@ function _write_response_body_to_stream!(stream::Stream, body)::Nothing
         return nothing
     end
     throw(ProtocolError("unsupported stream response body type $(typeof(body))"))
+end
+
+"""
+    streamhandler(request_handler) -> stream handler
+
+Adapter that takes a request handler and returns a stream handler.
+"""
+function streamhandler(handler)
+    return function(stream::Stream)
+        req = startread(stream)
+        resp = handler(req)
+        resp isa Response || throw(ProtocolError("streamhandler request handler must return HTTP.Response"))
+        response = resp::Response
+        response.request = req
+        stream.response = response
+        _write_response_body_to_stream!(stream, response.body)
+        closewrite(stream)
+        closeread(stream)
+        return nothing
+    end
 end
 
 mutable struct _H2ServerStreamState
