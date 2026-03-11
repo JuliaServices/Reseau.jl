@@ -50,11 +50,11 @@ import .._validate_request_extra_kwargs
 import .._apply_conn_deadline!
 import .._new_conn!
 import .._is_redirect_status
-import ..get_header
-import ..get_headers
-import ..has_header
-import ..set_header!
-import ..delete_header!
+import ..header
+import ..headers
+import ..hasheader
+import ..setheader
+import ..removeheader
 import ..body_close!
 import ..read_request
 import ..write_response!
@@ -199,8 +199,8 @@ function isupgrade(message::Response)::Bool
     return true
 end
 
-function _response_has_token(headers::Headers, name::AbstractString, token::AbstractString)::Bool
-    values = get_headers(headers, name)
+function _response_has_token(hdrs::Headers, name::AbstractString, token::AbstractString)::Bool
+    values = headers(hdrs, name)
     isempty(values) && return false
     lower_token = lowercase(token)
     for value in values
@@ -505,14 +505,14 @@ function _apply_websocket_request_headers!(
         key::String;
         subprotocols::AbstractVector{<:AbstractString} = String[],
     )::Nothing
-    set_header!(headers, "Upgrade", "websocket")
-    set_header!(headers, "Connection", "Upgrade")
-    set_header!(headers, "Sec-WebSocket-Key", key)
-    set_header!(headers, "Sec-WebSocket-Version", "13")
+    setheader(headers, "Upgrade", "websocket")
+    setheader(headers, "Connection", "Upgrade")
+    setheader(headers, "Sec-WebSocket-Key", key)
+    setheader(headers, "Sec-WebSocket-Version", "13")
     if isempty(subprotocols)
-        delete_header!(headers, "Sec-WebSocket-Protocol")
+        removeheader(headers, "Sec-WebSocket-Protocol")
     else
-        set_header!(headers, "Sec-WebSocket-Protocol", join(String.(subprotocols), ", "))
+        setheader(headers, "Sec-WebSocket-Protocol", join(String.(subprotocols), ", "))
     end
     return nothing
 end
@@ -547,9 +547,9 @@ function _validate_websocket_upgrade!(
         requested_subprotocols::AbstractVector{<:AbstractString},
     )::Union{Nothing, String}
     isupgrade(response) || throw(WebSocketError(CloseFrameBody(1002, "websocket handshake failed")))
-    accept = get_header(response.headers, "Sec-WebSocket-Accept")
+    accept = header(response.headers, "Sec-WebSocket-Accept")
     accept == expected_accept || throw(WebSocketError(CloseFrameBody(1002, "websocket handshake accept mismatch")))
-    subprotocol = get_header(response.headers, "Sec-WebSocket-Protocol")
+    subprotocol = header(response.headers, "Sec-WebSocket-Protocol", nothing)
     subprotocol === nothing && return nothing
     normalized = strip(subprotocol)
     isempty(normalized) && return nothing
@@ -624,8 +624,8 @@ function _open_client_websocket(
     parsed = _parse_websocket_url(url; query = query)
     req_headers = _normalize_headers_input(headers)
     normalized_cookies = _normalize_cookies_input(cookies)
-    if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
-        set_header!(req_headers, "Authorization", parsed.authorization::String)
+    if parsed.authorization !== nothing && !hasheader(req_headers, "Authorization")
+        setheader(req_headers, "Authorization", parsed.authorization::String)
     end
     key = ws_random_handshake_key()
     _apply_websocket_request_headers!(req_headers, key; subprotocols = subprotocols)
@@ -649,8 +649,8 @@ function _open_client_websocket(
         send_request = _copy_request(current_request)
         host, path = _host_path_from_request(current_address, current_request)
         cookie_value = _cookie_header(effective_cookiejar, normalized_cookies, current_secure, host, path)
-        cookie_value === nothing || set_header!(send_request.headers, "Cookie", cookie_value)
-        expected_accept = ws_compute_accept_key(get_header(send_request.headers, "Sec-WebSocket-Key")::String)
+        cookie_value === nothing || setheader(send_request.headers, "Cookie", cookie_value)
+        expected_accept = ws_compute_accept_key(header(send_request.headers, "Sec-WebSocket-Key")::String)
         attempt = _websocket_roundtrip!(
             req_client,
             current_address,
@@ -702,7 +702,7 @@ function _open_client_websocket(
             owns_client && close(req_client)
             throw(WebSocketError(CloseFrameBody(1002, "websocket handshake failed: status $(response.status_code)")))
         end
-        location = get_header(response.headers, "Location")
+        location = header(response.headers, "Location", nothing)
         (location === nothing || isempty(location::String)) && begin
             owns_client && close(req_client)
             throw(WebSocketError(CloseFrameBody(1002, "websocket handshake failed: status $(response.status_code)")))
@@ -725,11 +725,11 @@ function _open_client_websocket(
         key = ws_random_handshake_key()
         _apply_websocket_request_headers!(current_request.headers, key; subprotocols = subprotocols)
         current_request.host = current_address
-        next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, get_header(current_request.headers, "Referer"))
+        next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, header(current_request.headers, "Referer", nothing))
         if next_ref === nothing
-            delete_header!(current_request.headers, "Referer")
+            removeheader(current_request.headers, "Referer")
         else
-            set_header!(current_request.headers, "Referer", next_ref::String)
+            setheader(current_request.headers, "Referer", next_ref::String)
         end
         if !_should_copy_sensitive_headers_on_redirect(initial_address, current_address)
             _strip_sensitive_redirect_headers!(current_request.headers)
@@ -985,14 +985,14 @@ function _write_ws_response!(conn, response::Response)::Nothing
 end
 
 function _origin_allowed_default(request::Request)::Bool
-    origin = get_header(request.headers, "Origin")
+        origin = header(request.headers, "Origin", nothing)
     origin === nothing && return true
     parsed = try
         _parse_http_url(origin::String)
     catch
         return false
     end
-    request_host = request.host === nothing ? get_header(request.headers, "Host") : request.host
+        request_host = request.host === nothing ? header(request.headers, "Host", nothing) : request.host
     request_host === nothing && return false
     origin_host, origin_port = HostResolvers.split_host_port(parsed.address)
     if occursin(':', request_host::String)
@@ -1005,7 +1005,7 @@ end
 function _origin_allowed(server::Server, request::Request)::Bool
     checker = server.check_origin
     checker === nothing && return _origin_allowed_default(request)
-    origin = get_header(request.headers, "Origin")
+        origin = header(request.headers, "Origin", nothing)
     if applicable(checker, request, origin)
         result = checker(request, origin)
     elseif applicable(checker, request)
@@ -1023,11 +1023,11 @@ function _upgrade_response(request::Request, server::Server)::Response
     key = ws_get_request_sec_websocket_key(request)
     key === nothing && return Response(400; body = BytesBody(Vector{UInt8}("missing websocket key")), content_length = 21, headers = Headers())
     headers = Headers()
-    set_header!(headers, "Upgrade", "websocket")
-    set_header!(headers, "Connection", "Upgrade")
-    set_header!(headers, "Sec-WebSocket-Accept", ws_compute_accept_key(key::String))
+    setheader(headers, "Upgrade", "websocket")
+    setheader(headers, "Connection", "Upgrade")
+    setheader(headers, "Sec-WebSocket-Accept", ws_compute_accept_key(key::String))
     selected = isempty(server.subprotocols) ? nothing : ws_select_subprotocol(request, server.subprotocols)
-    selected === nothing || set_header!(headers, "Sec-WebSocket-Protocol", selected::String)
+    selected === nothing || setheader(headers, "Sec-WebSocket-Protocol", selected::String)
     return Response(101; headers = headers, body = EmptyBody(), content_length = 0, request = request)
 end
 
@@ -1039,7 +1039,7 @@ function _serve_ws_session!(server::Server, conn, request::Request, response::Re
     ws = WebSocket(
         conn,
         close_transport!,
-        subprotocol = get_header(response.headers, "Sec-WebSocket-Protocol"),
+        subprotocol = header(response.headers, "Sec-WebSocket-Protocol"),
         maxframesize = server.maxframesize,
         maxfragmentation = server.maxfragmentation,
         is_client = false,

@@ -182,7 +182,7 @@ function _read_headers(io::IO, max_line_bytes::Integer, max_header_bytes::Intege
         key = String(SubString(line, firstindex(line), prevind(line, sep)))
         isempty(_trim_http_ows(key)) && throw(ParseError("malformed HTTP/1 header line (empty key)"))
         value = _trim_http_ows(SubString(line, nextind(line, sep), lastindex(line)))
-        add_header!(headers, key, value)
+        appendheader(headers, key, value)
     end
 end
 
@@ -205,8 +205,8 @@ function _parse_http_version(version::AbstractString)::Tuple{UInt8, UInt8}
     return UInt8(major), UInt8(minor)
 end
 
-function _parse_content_length(headers::Headers)::Int64
-    values = get_headers(headers, "Content-Length")
+function _parse_content_length(hdrs::Headers)::Int64
+    values = headers(hdrs, "Content-Length")
     isempty(values) && return Int64(-1)
     parsed = Int64(-1)
     for value in values
@@ -229,9 +229,9 @@ end
 
 function _should_close_connection(headers::Headers, proto_major::UInt8, proto_minor::UInt8)::Bool
     if proto_major == UInt8(1) && proto_minor == UInt8(0)
-        return !has_header_token(headers, "Connection", "keep-alive")
+        return !headercontains(headers, "Connection", "keep-alive")
     end
-    return has_header_token(headers, "Connection", "close")
+    return headercontains(headers, "Connection", "close")
 end
 
 function _body_allowed_for_status(status_code::Integer)::Bool
@@ -290,9 +290,9 @@ function _read_next_chunk!(body::ChunkedBody)
         parsed_trailers = _read_headers(body.io, body.max_line_bytes, body.max_header_bytes)
         empty!(body.trailers)
         for key in header_keys(parsed_trailers)
-            values = get_headers(parsed_trailers, key)
+            values = headers(parsed_trailers, key)
             for value in values
-                add_header!(body.trailers, key, value)
+                appendheader(body.trailers, key, value)
             end
         end
         body.done = true
@@ -419,9 +419,9 @@ function _write_status_line!(io::IO, response::Response)
     return nothing
 end
 
-function _write_headers!(io::IO, headers::Headers)
-    for key in header_keys(headers)
-        values = get_headers(headers, key)
+function _write_headers!(io::IO, hdrs::Headers)
+    for key in header_keys(hdrs)
+        values = headers(hdrs, key)
         for value in values
             print(io, key, ": ", value, "\r\n")
         end
@@ -431,10 +431,10 @@ end
 
 function _prepare_trailer_header!(headers::Headers, trailer_values::Headers)
     isempty(trailer_values) && return nothing
-    has_header(headers, "Trailer") && return nothing
+    hasheader(headers, "Trailer") && return nothing
     names = header_keys(trailer_values)
     isempty(names) && return nothing
-    set_header!(headers, "Trailer", join(names, ", "))
+    setheader(headers, "Trailer", join(names, ", "))
     return nothing
 end
 
@@ -562,25 +562,25 @@ function write_request!(
         proxy_authorization::Union{Nothing, AbstractString} = nothing,
     ) where {B <: AbstractBody}
     headers = copy(request.headers)
-    if proxy_authorization !== nothing && !has_header(headers, "Proxy-Authorization")
-        set_header!(headers, "Proxy-Authorization", String(proxy_authorization))
+    if proxy_authorization !== nothing && !hasheader(headers, "Proxy-Authorization")
+        setheader(headers, "Proxy-Authorization", String(proxy_authorization))
     end
-    has_host = has_header(headers, "Host")
+    has_host = hasheader(headers, "Host")
     if !has_host && request.host !== nothing
-        set_header!(headers, "Host", request.host::String)
+        setheader(headers, "Host", request.host::String)
     end
     request_close = request.close || _should_close_connection(headers, request.proto_major, request.proto_minor)
-    request_close && set_header!(headers, "Connection", "close")
-    use_chunked = has_header_token(headers, "Transfer-Encoding", "chunked")
+    request_close && setheader(headers, "Connection", "close")
+    use_chunked = headercontains(headers, "Transfer-Encoding", "chunked")
     if !use_chunked
         if request.content_length >= 0
-            set_header!(headers, "Content-Length", string(request.content_length))
+            setheader(headers, "Content-Length", string(request.content_length))
         elseif _request_has_body(request)
             use_chunked = true
-            set_header!(headers, "Transfer-Encoding", "chunked")
-            delete_header!(headers, "Content-Length")
+            setheader(headers, "Transfer-Encoding", "chunked")
+            removeheader(headers, "Content-Length")
         else
-            set_header!(headers, "Content-Length", "0")
+            setheader(headers, "Content-Length", "0")
         end
     end
     use_chunked && _prepare_trailer_header!(headers, request.trailers)
@@ -608,21 +608,21 @@ let the serializer apply wire-level HTTP/1 rules.
 function write_response!(io::IO, response::Response{B}) where {B <: AbstractBody}
     headers = copy(response.headers)
     response_close = response.close || _should_close_connection(headers, response.proto_major, response.proto_minor)
-    response_close && set_header!(headers, "Connection", "close")
+    response_close && setheader(headers, "Connection", "close")
     allows_body = _body_allowed_for_status(response.status_code)
-    use_chunked = allows_body && has_header_token(headers, "Transfer-Encoding", "chunked")
+    use_chunked = allows_body && headercontains(headers, "Transfer-Encoding", "chunked")
     if !allows_body
-        delete_header!(headers, "Content-Length")
-        delete_header!(headers, "Transfer-Encoding")
+        removeheader(headers, "Content-Length")
+        removeheader(headers, "Transfer-Encoding")
     elseif !use_chunked
         if response.content_length >= 0
-            set_header!(headers, "Content-Length", string(response.content_length))
+            setheader(headers, "Content-Length", string(response.content_length))
         elseif _response_has_body(response)
             use_chunked = true
-            set_header!(headers, "Transfer-Encoding", "chunked")
-            delete_header!(headers, "Content-Length")
+            setheader(headers, "Transfer-Encoding", "chunked")
+            removeheader(headers, "Content-Length")
         else
-            set_header!(headers, "Content-Length", "0")
+            setheader(headers, "Content-Length", "0")
         end
     end
     use_chunked && _prepare_trailer_header!(headers, response.trailers)
@@ -789,9 +789,9 @@ function read_request(io::IO; max_line_bytes::Integer = _HTTP1_DEFAULT_MAX_LINE_
     method, target, proto_major, proto_minor = _parse_request_line(line)
     headers = _read_headers(io, max_line_bytes, max_header_bytes)
     content_length = _parse_content_length(headers)
-    host = get_header(headers, "Host")
+    host = header(headers, "Host", nothing)
     close = _should_close_connection(headers, proto_major, proto_minor)
-    if has_header_token(headers, "Transfer-Encoding", "chunked")
+    if headercontains(headers, "Transfer-Encoding", "chunked")
         body = ChunkedBody(io; max_line_bytes = Int(max_line_bytes), max_header_bytes = Int(max_header_bytes))
         request = _new_parsed_request(
             method,
@@ -876,7 +876,7 @@ function _read_incoming_response(
             request,
         )
     end
-    if has_header_token(headers, "Transfer-Encoding", "chunked")
+    if headercontains(headers, "Transfer-Encoding", "chunked")
         body = ChunkedBody(io; max_line_bytes = Int(max_line_bytes), max_header_bytes = Int(max_header_bytes))
         response = _new_parsed_incoming_response(
             Int(status_code),
@@ -963,7 +963,7 @@ function _read_response(
             request,
         )
     end
-    if has_header_token(headers, "Transfer-Encoding", "chunked")
+    if headercontains(headers, "Transfer-Encoding", "chunked")
         body = ChunkedBody(io; max_line_bytes = Int(max_line_bytes), max_header_bytes = Int(max_header_bytes))
         return _new_parsed_response(
             Int(status_code),

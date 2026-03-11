@@ -356,9 +356,9 @@ end
 
 function _pc_run_http_core_workload!()
     headers = HT.Headers()
-    HT.set_header!(headers, "content-type", "application/json")
-    HT.add_header!(headers, "x-test", "a")
-    HT.add_header!(headers, "x-test", "b")
+    HT.setheader(headers, "content-type", "application/json")
+    HT.appendheader(headers, "x-test", "a")
+    HT.appendheader(headers, "x-test", "b")
     request = HT.Request("GET", "/status"; headers = headers, host = "localhost")
     response = HT.Response(200; reason = "OK", headers = headers, request = request)
     _ = response
@@ -374,7 +374,7 @@ function _pc_run_http_core_workload!()
     request_in.method == "GET" || throw(ArgumentError("HTTP precompile workload expected GET request"))
     response_io = IOBuffer()
     response_headers = HT.Headers()
-    HT.set_header!(response_headers, "Transfer-Encoding", "chunked")
+    HT.setheader(response_headers, "Transfer-Encoding", "chunked")
     response_out = HT.Response(
         200;
         reason = "OK",

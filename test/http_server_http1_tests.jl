@@ -105,8 +105,8 @@ end
     response = HT.Response(200)
     stream = HT.sse_stream(response)
     @test response.body === stream
-    @test HT.get_header(response.headers, "Content-Type") == "text/event-stream"
-    @test HT.get_header(response.headers, "Cache-Control") == "no-cache"
+    @test HT.header(response.headers, "Content-Type") == "text/event-stream"
+    @test HT.header(response.headers, "Cache-Control") == "no-cache"
     close(stream)
 end
 
@@ -142,6 +142,45 @@ end
         _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
         _run_with_timeout(() -> wait(server); label = "server task completion")
         @test !isopen(server)
+    end
+end
+
+@testset "HTTP server top-level wrapper kwargs and stream abort state" begin
+    aborted_states = Channel{Bool}(2)
+    server = HT.serve!("127.0.0.1", 0;
+        stream = true,
+        listenany = true,
+        read_timeout_ns = 11_000_000_000,
+        read_header_timeout_ns = 22_000_000_000,
+        write_timeout_ns = 33_000_000_000,
+        idle_timeout_ns = 44_000_000_000,
+        max_header_bytes = 512,
+    ) do stream
+        _ = HT.startread(stream)
+        put!(aborted_states, HT.isaborted(stream))
+        HT.setstatus(stream, 500)
+        HT.setheader(stream, "Connection", "close")
+        put!(aborted_states, HT.isaborted(stream))
+        HT.startwrite(stream)
+        write(stream, "aborted")
+        return nothing
+    end
+    address = _wait_server_addr(server)
+    try
+        @test server.read_timeout_ns == 11_000_000_000
+        @test server.read_header_timeout_ns == 22_000_000_000
+        @test server.write_timeout_ns == 33_000_000_000
+        @test server.idle_timeout_ns == 44_000_000_000
+        @test server.max_header_bytes == 512
+
+        response = HT.get("http://$(address)/"; status_exception = false)
+        @test response.status == 500
+        @test String(response.body) == "aborted"
+        @test take!(aborted_states) == false
+        @test take!(aborted_states) == true
+    finally
+        _run_with_timeout(() -> HT.forceclose(server); label = "server forceclose")
+        _run_with_timeout(() -> wait(server); label = "server task completion")
     end
 end
 

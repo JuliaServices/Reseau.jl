@@ -77,13 +77,13 @@ end
             try
                 request = HT.read_request(HT._ConnReader(conn))
                 @test request.target == "http://example.com:80/proxied"
-                @test HT.get_header(request.headers, "Proxy-Authorization") == "Basic dXNlcjpwYXNz"
+                @test HT.header(request.headers, "Proxy-Authorization") == "Basic dXNlcjpwYXNz"
                 headers = HT.Headers()
-                HT.set_header!(headers, "Upgrade", "websocket")
-                HT.set_header!(headers, "Connection", "Upgrade")
+                HT.setheader(headers, "Upgrade", "websocket")
+                HT.setheader(headers, "Connection", "Upgrade")
                 key = HT.ws_get_request_sec_websocket_key(request)
                 key === nothing && error("missing websocket key")
-                HT.set_header!(headers, "Sec-WebSocket-Accept", HT.ws_compute_accept_key(key))
+                HT.setheader(headers, "Sec-WebSocket-Accept", HT.ws_compute_accept_key(key))
                 io = IOBuffer()
                 HT.write_response!(io, HT.Response(101; headers = headers, body = HT.EmptyBody(), content_length = 0))
                 write(conn, take!(io))

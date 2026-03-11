@@ -28,7 +28,7 @@ end
 
 function _write_response_to_conn!(conn::NC.Conn, request::HT.Request; body_text::String, close_conn::Bool = false)::Nothing
     headers = HT.Headers()
-    close_conn && HT.set_header!(headers, "Connection", "close")
+    close_conn && HT.setheader(headers, "Connection", "close")
     payload = collect(codeunits(body_text))
     response = HT.Response(
         200;

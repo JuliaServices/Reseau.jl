@@ -624,12 +624,12 @@ end
 
 @inline function _request_wants_close(request::Request)::Bool
     request.close && return true
-    return has_header_token(request.headers, "Connection", "close")
+    return headercontains(request.headers, "Connection", "close")
 end
 
 @inline function _response_wants_close(response::Response)::Bool
     response.close && return true
-    return has_header_token(response.headers, "Connection", "close")
+    return headercontains(response.headers, "Connection", "close")
 end
 
 @inline function _request_body_fully_consumed(request::Request)::Bool
@@ -662,7 +662,7 @@ function _write_all_response!(conn::Union{TCP.Conn, TLS.Conn}, response::Respons
 end
 
 function _request_has_unsupported_expect(request::Request)::Bool
-    values = get_headers(request.headers, "Expect")
+    values = headers(request.headers, "Expect")
     isempty(values) && return false
     saw_supported = false
     for value in values
@@ -730,8 +730,8 @@ function _server_stream_write_mode(stream::Stream)::_ServerStreamWriteMode.T
     # request bodies still force connection close independently of write mode.
     allows_body = _server_stream_allows_body(stream)
     allows_body || return _ServerStreamWriteMode.NONE
-    has_header_token(stream.response.headers, "Transfer-Encoding", "chunked") && return _ServerStreamWriteMode.CHUNKED
-    if has_header(stream.response.headers, "Content-Length") || stream.response.content_length >= 0
+    headercontains(stream.response.headers, "Transfer-Encoding", "chunked") && return _ServerStreamWriteMode.CHUNKED
+    if hasheader(stream.response.headers, "Content-Length") || stream.response.content_length >= 0
         return _ServerStreamWriteMode.FIXED
     end
     if stream.response.proto_major == UInt8(1) && stream.response.proto_minor == UInt8(0)
@@ -762,23 +762,23 @@ end
 function _write_server_stream_head!(stream::Stream)::Nothing
     headers = copy(stream.response.headers)
     response_close = stream.response.close || _should_close_connection(headers, stream.response.proto_major, stream.response.proto_minor)
-    response_close && set_header!(headers, "Connection", "close")
+    response_close && setheader(headers, "Connection", "close")
     mode = _server_stream_write_mode(stream)
     stream.write_mode = mode
     if mode == _ServerStreamWriteMode.NONE
-        delete_header!(headers, "Content-Length")
-        delete_header!(headers, "Transfer-Encoding")
+        removeheader(headers, "Content-Length")
+        removeheader(headers, "Transfer-Encoding")
     elseif mode == _ServerStreamWriteMode.FIXED
         if stream.response.content_length >= 0
-            set_header!(headers, "Content-Length", string(stream.response.content_length))
+            setheader(headers, "Content-Length", string(stream.response.content_length))
         end
     elseif mode == _ServerStreamWriteMode.CHUNKED
-        delete_header!(headers, "Content-Length")
-        set_header!(headers, "Transfer-Encoding", "chunked")
+        removeheader(headers, "Content-Length")
+        setheader(headers, "Transfer-Encoding", "chunked")
         _prepare_trailer_header!(headers, stream.response.trailers)
     else
-        delete_header!(headers, "Content-Length")
-        delete_header!(headers, "Transfer-Encoding")
+        removeheader(headers, "Content-Length")
+        removeheader(headers, "Transfer-Encoding")
     end
     io = IOBuffer()
     _write_status_line!(io, stream.response)
@@ -801,7 +801,7 @@ function _maybe_write_continue!(stream::Stream)::Nothing
     already_sent && return nothing
     # We only acknowledge `Expect: 100-continue` once the handler actually tries
     # to consume the request body.
-    has_header_token(stream.request.headers, "Expect", "100-continue") || return nothing
+    headercontains(stream.request.headers, "Expect", "100-continue") || return nothing
     _request_body_fully_consumed(stream.request) && return nothing
     response = Response(
         100;
@@ -863,7 +863,7 @@ end
 function setheader(stream::Stream, key::AbstractString, value::AbstractString)::Nothing
     _require_server_stream(stream)
     (@atomic :acquire stream.response_started) && throw(ArgumentError("cannot change headers after response writing has started"))
-    set_header!(stream.response.headers, key, value)
+    setheader(stream.response.headers, key, value)
     return nothing
 end
 
@@ -874,9 +874,9 @@ end
 function addtrailer(stream::Stream, trailers::Headers)::Nothing
     _require_server_stream(stream)
     for key in header_keys(trailers)
-        values = get_headers(trailers, key)
+        values = headers(trailers, key)
         for value in values
-            add_header!(stream.response.trailers, key, value)
+            appendheader(stream.response.trailers, key, value)
         end
     end
     return nothing
@@ -884,7 +884,7 @@ end
 
 function addtrailer(stream::Stream, header::Pair{<:AbstractString, <:AbstractString})::Nothing
     _require_server_stream(stream)
-    add_header!(stream.response.trailers, header.first, header.second)
+    appendheader(stream.response.trailers, header.first, header.second)
     return nothing
 end
 
@@ -1484,10 +1484,10 @@ end
         lower == "trailer"
 end
 
-function _append_h2_headers!(out::Vector{HeaderField}, headers::Headers)::Nothing
-    for key in header_keys(headers)
+function _append_h2_headers!(out::Vector{HeaderField}, hdrs::Headers)::Nothing
+    for key in header_keys(hdrs)
         _skip_h2_header(key) && continue
-        values = get_headers(headers, key)
+        values = headers(hdrs, key)
         for value in values
             push!(out, HeaderField(lowercase(key), value, false))
         end
@@ -1667,7 +1667,7 @@ function _validate_h2_request_headers!(headers::Vector{HeaderField})::Tuple{Stri
         if name == "te"
             lowercase(_trim_http_ows(value)) == "trailers" || throw(ProtocolError("HTTP/2 TE header may only contain trailers"))
         end
-        add_header!(out_headers, name, value)
+        appendheader(out_headers, name, value)
     end
     method === nothing && throw(ProtocolError("missing HTTP/2 :method pseudo-header"))
     if method == "CONNECT"
@@ -1684,7 +1684,7 @@ end
 function _decode_h2_request(headers::Vector{HeaderField}, body::AbstractBody; stream_done::Bool = false)::Request
     method, _scheme, path, authority, out_headers = _validate_h2_request_headers!(headers)
     target = method == "CONNECT" ? authority::String : (path::String)
-    host = authority === nothing ? get_header(out_headers, "Host") : authority
+    host = authority === nothing ? header(out_headers, "Host") : authority
     content_length = _parse_content_length(out_headers)
     if content_length < 0
         if body isa BytesBody
@@ -2393,7 +2393,10 @@ function listen!(server::Server)::Server
 end
 
 """
-    listen!(handler, host="127.0.0.1", port=8080; listenany=false, reuseaddr=true, backlog=128) -> Server
+    listen!(handler, host="127.0.0.1", port=8080;
+            read_timeout_ns=0, read_header_timeout_ns=0, write_timeout_ns=0,
+            idle_timeout_ns=0, max_header_bytes=1*1024*1024,
+            listenany=false, reuseaddr=true, backlog=128) -> Server
     listen!(handler, port; kwargs...) -> Server
     listen!(handler, listener; kwargs...) -> Server
 
@@ -2404,13 +2407,25 @@ request and writing the response.
 """
 function listen!(
     handler::F, host::AbstractString = "127.0.0.1", port_num::Integer = 8080;
-    listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+    read_timeout_ns::Integer = Int64(0),
+    read_header_timeout_ns::Integer = Int64(0),
+    write_timeout_ns::Integer = Int64(0),
+    idle_timeout_ns::Integer = Int64(0),
+    max_header_bytes::Integer = 1 * 1024 * 1024,
+    listenany::Bool = false,
+    reuseaddr::Bool = true,
+    backlog::Integer = 128,
 ) where {F}
     return listen!(Server(
         network = "tcp",
         address = HostResolvers.join_host_port(host, Int(port_num)),
         handler = handler,
         stream = true,
+        read_timeout_ns = read_timeout_ns,
+        read_header_timeout_ns = read_header_timeout_ns,
+        write_timeout_ns = write_timeout_ns,
+        idle_timeout_ns = idle_timeout_ns,
+        max_header_bytes = max_header_bytes,
         listenany = listenany,
         reuseaddr = reuseaddr,
         backlog = backlog,
@@ -2418,14 +2433,41 @@ function listen!(
 end
 
 function listen!(
-    handler::F, port_num::Integer; listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+    handler::F, port_num::Integer;
+    read_timeout_ns::Integer = Int64(0),
+    read_header_timeout_ns::Integer = Int64(0),
+    write_timeout_ns::Integer = Int64(0),
+    idle_timeout_ns::Integer = Int64(0),
+    max_header_bytes::Integer = 1 * 1024 * 1024,
+    listenany::Bool = false,
+    reuseaddr::Bool = true,
+    backlog::Integer = 128,
 ) where {F}
-    return listen!(handler, "127.0.0.1", port_num; listenany = listenany, reuseaddr = reuseaddr, backlog = backlog)
+    return listen!(
+        handler,
+        "127.0.0.1",
+        port_num;
+        read_timeout_ns = read_timeout_ns,
+        read_header_timeout_ns = read_header_timeout_ns,
+        write_timeout_ns = write_timeout_ns,
+        idle_timeout_ns = idle_timeout_ns,
+        max_header_bytes = max_header_bytes,
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
 end
 
 function listen!(
     handler::F, listener::Union{TCP.Listener, TLS.Listener};
-    listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+    read_timeout_ns::Integer = Int64(0),
+    read_header_timeout_ns::Integer = Int64(0),
+    write_timeout_ns::Integer = Int64(0),
+    idle_timeout_ns::Integer = Int64(0),
+    max_header_bytes::Integer = 1 * 1024 * 1024,
+    listenany::Bool = false,
+    reuseaddr::Bool = true,
+    backlog::Integer = 128,
 ) where {F}
     listenany && throw(ArgumentError("listenany is not valid when passing an existing listener"))
     _ = reuseaddr
@@ -2436,6 +2478,11 @@ function listen!(
         address = bound_address,
         handler = handler,
         stream = true,
+        read_timeout_ns = read_timeout_ns,
+        read_header_timeout_ns = read_header_timeout_ns,
+        write_timeout_ns = write_timeout_ns,
+        idle_timeout_ns = idle_timeout_ns,
+        max_header_bytes = max_header_bytes,
         listenany = false,
         reuseaddr = reuseaddr,
         backlog = backlog,
@@ -2471,7 +2518,11 @@ function listen(handler::F, args...; kwargs...) where {F}
 end
 
 """
-    serve!(handler, host="127.0.0.1", port=8080; stream=false, listenany=false, reuseaddr=true, backlog=128) -> Server
+    serve!(handler, host="127.0.0.1", port=8080;
+           stream=false, read_timeout_ns=0, read_header_timeout_ns=0,
+           write_timeout_ns=0, idle_timeout_ns=0,
+           max_header_bytes=1*1024*1024, listenany=false, reuseaddr=true,
+           backlog=128) -> Server
     serve!(handler, port; kwargs...) -> Server
     serve!(handler, listener; kwargs...) -> Server
 
@@ -2482,10 +2533,30 @@ By default `handler` is called with an `HTTP.Request` and must return an
 handler path instead.
 """
 function serve!(
-    handler::F, args...; stream::Bool = false, listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128,
+    handler::F, args...;
+    stream::Bool = false,
+    read_timeout_ns::Integer = Int64(0),
+    read_header_timeout_ns::Integer = Int64(0),
+    write_timeout_ns::Integer = Int64(0),
+    idle_timeout_ns::Integer = Int64(0),
+    max_header_bytes::Integer = 1 * 1024 * 1024,
+    listenany::Bool = false,
+    reuseaddr::Bool = true,
+    backlog::Integer = 128,
 ) where {F}
     if stream
-        return listen!(handler, args...; listenany = listenany, reuseaddr = reuseaddr, backlog = backlog)
+        return listen!(
+            handler,
+            args...;
+            read_timeout_ns = read_timeout_ns,
+            read_header_timeout_ns = read_header_timeout_ns,
+            write_timeout_ns = write_timeout_ns,
+            idle_timeout_ns = idle_timeout_ns,
+            max_header_bytes = max_header_bytes,
+            listenany = listenany,
+            reuseaddr = reuseaddr,
+            backlog = backlog,
+        )
     end
     if length(args) == 1 && args[1] isa Union{TCP.Listener, TLS.Listener}
         listener = args[1]::Union{TCP.Listener, TLS.Listener}
@@ -2495,6 +2566,11 @@ function serve!(
             address = bound_address,
             handler = handler,
             stream = false,
+            read_timeout_ns = read_timeout_ns,
+            read_header_timeout_ns = read_header_timeout_ns,
+            write_timeout_ns = write_timeout_ns,
+            idle_timeout_ns = idle_timeout_ns,
+            max_header_bytes = max_header_bytes,
             listenany = false,
             reuseaddr = reuseaddr,
             backlog = backlog,
@@ -2522,6 +2598,11 @@ function serve!(
         address = HostResolvers.join_host_port(host, port_num),
         handler = handler,
         stream = false,
+        read_timeout_ns = read_timeout_ns,
+        read_header_timeout_ns = read_header_timeout_ns,
+        write_timeout_ns = write_timeout_ns,
+        idle_timeout_ns = idle_timeout_ns,
+        max_header_bytes = max_header_bytes,
         listenany = listenany,
         reuseaddr = reuseaddr,
         backlog = backlog,
@@ -2533,8 +2614,32 @@ end
 
 Run `serve!` in the foreground, blocking until the server is closed.
 """
-function serve(handler::F, args...; stream::Bool = false, listenany::Bool = false, reuseaddr::Bool = true, backlog::Integer = 128) where {F}
-    server = serve!(handler, args...; stream = stream, listenany = listenany, reuseaddr = reuseaddr, backlog = backlog)
+function serve(
+        handler::F,
+        args...;
+        stream::Bool = false,
+        read_timeout_ns::Integer = Int64(0),
+        read_header_timeout_ns::Integer = Int64(0),
+        write_timeout_ns::Integer = Int64(0),
+        idle_timeout_ns::Integer = Int64(0),
+        max_header_bytes::Integer = 1 * 1024 * 1024,
+        listenany::Bool = false,
+        reuseaddr::Bool = true,
+        backlog::Integer = 128,
+    ) where {F}
+    server = serve!(
+        handler,
+        args...;
+        stream = stream,
+        read_timeout_ns = read_timeout_ns,
+        read_header_timeout_ns = read_header_timeout_ns,
+        write_timeout_ns = write_timeout_ns,
+        idle_timeout_ns = idle_timeout_ns,
+        max_header_bytes = max_header_bytes,
+        listenany = listenany,
+        reuseaddr = reuseaddr,
+        backlog = backlog,
+    )
     try
         wait(server)
     finally

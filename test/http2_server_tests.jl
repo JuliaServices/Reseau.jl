@@ -556,12 +556,12 @@ end
     server = HT.serve!("127.0.0.1", 0; listenany = true) do request
             _ = request
             headers = HT.Headers()
-            HT.add_header!(headers, "Connection", "keep-alive")
-            HT.add_header!(headers, "Keep-Alive", "timeout=5")
-            HT.add_header!(headers, "Transfer-Encoding", "chunked")
-            HT.add_header!(headers, "TE", "trailers")
-            HT.add_header!(headers, "Trailer", "x-drop-me")
-            HT.add_header!(headers, "X-Extra", "ok")
+            HT.appendheader(headers, "Connection", "keep-alive")
+            HT.appendheader(headers, "Keep-Alive", "timeout=5")
+            HT.appendheader(headers, "Transfer-Encoding", "chunked")
+            HT.appendheader(headers, "TE", "trailers")
+            HT.appendheader(headers, "Trailer", "x-drop-me")
+            HT.appendheader(headers, "X-Extra", "ok")
             return HT.Response(200; headers = headers, body = HT.BytesBody(payload), content_length = length(payload), proto_major = 2, proto_minor = 0)
         end
     address = _wait_http_server_addr(server)

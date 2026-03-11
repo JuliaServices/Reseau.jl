@@ -29,7 +29,7 @@ end
     @test response_204.status_code == 204
     @test _read_all_parity(response_204.body) == UInt8[]
     bad_cl = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nhi"
-    @test_throws HT.ProtocolError HT._read_response(IOBuffer(codeunits(bad_cl)))
+    @test_throws HT.ParseError HT._read_response(IOBuffer(codeunits(bad_cl)))
 end
 
 @testset "HTTP parity redirect semantics" begin
@@ -43,8 +43,8 @@ end
             req1 = HT.read_request(HT._ConnReader(conn1))
             push!(seen_methods, req1.method)
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "/next")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "/next")
+            HT.setheader(headers, "Connection", "close")
             resp1 = HT.Response(307; reason = "Temporary Redirect", headers = headers, body = HT.EmptyBody(), content_length = 0, close = true, request = req1)
             io1 = IOBuffer()
             HT.write_response!(io1, resp1)
@@ -100,8 +100,8 @@ end
             req = HT.read_request(HT._ConnReader(conn))
             _ = _read_all_parity(req.body)
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "/next")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "/next")
+            HT.setheader(headers, "Connection", "close")
             resp = HT.Response(307; reason = "Temporary Redirect", headers = headers, body = HT.BytesBody(UInt8[0x72]), content_length = 1, close = true, request = req)
             io = IOBuffer()
             HT.write_response!(io, resp)
@@ -161,10 +161,10 @@ end
         try
             req1 = HT.read_request(HT._ConnReader(conn1))
             push!(seen_bodies, String(_read_all_parity(req1.body)))
-            push!(seen_content_types, HT.get_header(req1.headers, "Content-Type"))
+            push!(seen_content_types, HT.header(req1.headers, "Content-Type"))
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "/next")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "/next")
+            HT.setheader(headers, "Connection", "close")
             resp1 = HT.Response(307; reason = "Temporary Redirect", headers = headers, body = HT.EmptyBody(), content_length = 0, close = true, request = req1)
             io1 = IOBuffer()
             HT.write_response!(io1, resp1)
@@ -179,7 +179,7 @@ end
         try
             req2 = HT.read_request(HT._ConnReader(conn2))
             push!(seen_bodies, String(_read_all_parity(req2.body)))
-            push!(seen_content_types, HT.get_header(req2.headers, "Content-Type"))
+            push!(seen_content_types, HT.header(req2.headers, "Content-Type"))
             resp2 = HT.Response(200; body = HT.BytesBody(UInt8[0x6f, 0x6b]), content_length = 2, request = req2)
             io2 = IOBuffer()
             HT.write_response!(io2, resp2)
@@ -217,8 +217,8 @@ end
             req = HT.read_request(HT._ConnReader(conn))
             @test String(_read_all_parity(req.body)) == "ab"
             headers = HT.Headers()
-            HT.set_header!(headers, "Location", "/next")
-            HT.set_header!(headers, "Connection", "close")
+            HT.setheader(headers, "Location", "/next")
+            HT.setheader(headers, "Connection", "close")
             resp = HT.Response(307; reason = "Temporary Redirect", headers = headers, body = HT.BytesBody(UInt8[0x72]), content_length = 1, close = true, request = req)
             io = IOBuffer()
             HT.write_response!(io, resp)

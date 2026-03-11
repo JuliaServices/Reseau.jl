@@ -246,8 +246,8 @@ function _perform_http_connect_tunnel!(
     )::Nothing
     deadline_ns == 0 || TCP.set_deadline!(tcp, deadline_ns)
     headers = Headers()
-    set_header!(headers, "Host", target_address)
-    proxy.authorization === nothing || set_header!(headers, "Proxy-Authorization", proxy.authorization::String)
+    setheader(headers, "Host", target_address)
+    proxy.authorization === nothing || setheader(headers, "Proxy-Authorization", proxy.authorization::String)
     request = Request(
         "CONNECT",
         target_address;
@@ -523,7 +523,7 @@ end
 @inline function _response_reusable(response::_IncomingResponse, request::Request)::Bool
     response.head.close && return false
     request.close && return false
-    has_header_token(response.head.headers, "Connection", "close") && return false
+    headercontains(response.head.headers, "Connection", "close") && return false
     response.rawbody isa EOFBody && return false
     return true
 end
@@ -1174,12 +1174,12 @@ function _should_copy_sensitive_headers_on_redirect(initial_address::String, red
 end
 
 function _strip_sensitive_redirect_headers!(headers::Headers)
-    delete_header!(headers, "Authorization")
-    delete_header!(headers, "Www-Authenticate")
-    delete_header!(headers, "Cookie")
-    delete_header!(headers, "Cookie2")
-    delete_header!(headers, "Proxy-Authorization")
-    delete_header!(headers, "Proxy-Authenticate")
+    removeheader(headers, "Authorization")
+    removeheader(headers, "Www-Authenticate")
+    removeheader(headers, "Cookie")
+    removeheader(headers, "Cookie2")
+    removeheader(headers, "Proxy-Authorization")
+    removeheader(headers, "Proxy-Authenticate")
     return nothing
 end
 
@@ -1278,7 +1278,7 @@ function _prepare_request_for_redirect(request::Request, status_code::Int, new_t
             copied.headers = Headers()
             copied.trailers = Headers()
         end
-        delete_header!(copied.headers, "Host")
+        removeheader(copied.headers, "Host")
         return copied
     end
     redirected = if _redirect_reuses_request_body(method)
@@ -1304,16 +1304,16 @@ function _prepare_request_for_redirect(request::Request, status_code::Int, new_t
             context = request.context,
         )
     end
-    delete_header!(redirected.headers, "Host")
+    removeheader(redirected.headers, "Host")
     if !_redirect_reuses_request_body(method)
         # Per Go/HTTP behavior: when method is rewritten to GET/HEAD, entity headers
         # tied to an old request body must be removed.
-        delete_header!(redirected.headers, "Content-Length")
-        delete_header!(redirected.headers, "Transfer-Encoding")
-        delete_header!(redirected.headers, "Content-Type")
-        delete_header!(redirected.headers, "Content-Encoding")
-        delete_header!(redirected.headers, "Content-Language")
-        delete_header!(redirected.headers, "Content-Location")
+        removeheader(redirected.headers, "Content-Length")
+        removeheader(redirected.headers, "Transfer-Encoding")
+        removeheader(redirected.headers, "Content-Type")
+        removeheader(redirected.headers, "Content-Encoding")
+        removeheader(redirected.headers, "Content-Language")
+        removeheader(redirected.headers, "Content-Location")
     end
     return redirected
 end
@@ -1357,7 +1357,7 @@ function _do_incoming!(
         proxy_plan = _proxy_plan(proxy_config, current_secure, current_address)
         host, path = _host_path_from_request(current_address, current_request)
         cookie_value = _cookie_header(cookiejar, cookies, current_secure, host, path)
-        cookie_value === nothing || set_header!(send_request.headers, "Cookie", cookie_value)
+        cookie_value === nothing || setheader(send_request.headers, "Cookie", cookie_value)
         _trace_call(client.trace, :on_get_conn, current_address, current_secure)
         response = if _use_h2(client, current_secure, protocol) && proxy_plan.mode != _ProxyPlanMode.HTTP_FORWARD
             try
@@ -1401,7 +1401,7 @@ function _do_incoming!(
         if !_is_redirect_status(response.head.status_code)
             return response
         end
-        location = get_header(response.head.headers, "Location")
+        location = header(response.head.headers, "Location", nothing)
         (location === nothing || isempty(location::String)) && return response
         redirect_policy.max_redirects == 0 && return response
         redirect_count == redirect_policy.max_redirects && throw(TooManyRedirectsError(redirect_policy.max_redirects, _streaming_response(response)))
@@ -1424,12 +1424,12 @@ function _do_incoming!(
             current_server_name = _host_for_sni(current_address)
         end
         current_request = _prepare_request_for_redirect(current_request, response.head.status_code, next_target, redirect_policy)
-        existing_ref = get_header(current_request.headers, "Referer")
+        existing_ref = header(current_request.headers, "Referer", nothing)
         next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, existing_ref)
         if next_ref === nothing
-            delete_header!(current_request.headers, "Referer")
+            removeheader(current_request.headers, "Referer")
         else
-            set_header!(current_request.headers, "Referer", next_ref::String)
+            setheader(current_request.headers, "Referer", next_ref::String)
         end
         if !_should_copy_sensitive_headers_on_redirect(initial_address, current_address)
             _strip_sensitive_redirect_headers!(current_request.headers)
@@ -1621,10 +1621,14 @@ end
 
 function _should_decompress_response(headers::Headers, decompress::Union{Nothing, Bool})::Bool
     decompress === false && return false
-    encoding = get_header(headers, "Content-Encoding")
+    encoding = header(headers, "Content-Encoding", nothing)
     encoding === nothing && return false
     normalized = lowercase(strip(encoding))
     return normalized == "gzip" || normalized == "x-gzip"
+end
+
+@inline function _closed_bufferstream_error(err)::Bool
+    return err isa Base.IOError && occursin("stream is closed or unusable", sprint(showerror, err))
 end
 
 function _pump_response_body!(stream::Base.BufferStream, body::AbstractBody)::Nothing
@@ -1633,7 +1637,12 @@ function _pump_response_body!(stream::Base.BufferStream, body::AbstractBody)::No
         while true
             n = body_read!(body, buf)
             n == 0 && break
-            write(stream, view(buf, 1:n))
+            try
+                write(stream, view(buf, 1:n))
+            catch err
+                _closed_bufferstream_error(err) && break
+                rethrow()
+            end
         end
     finally
         try
@@ -1719,11 +1728,11 @@ function _add_header_value!(headers::Headers, key, value)
     key_s = String(key)
     if value isa AbstractVector && !(value isa AbstractString)
         for item in value
-            add_header!(headers, key_s, String(item))
+            appendheader(headers, key_s, String(item))
         end
         return nothing
     end
-    add_header!(headers, key_s, String(value))
+    appendheader(headers, key_s, String(value))
     return nothing
 end
 
@@ -1777,8 +1786,8 @@ end
 
 function _apply_default_accept_encoding!(headers::Headers, decompress::Union{Nothing, Bool})::Nothing
     decompress === false && return nothing
-    has_header(headers, "Accept-Encoding") && return nothing
-    set_header!(headers, "Accept-Encoding", "gzip")
+    hasheader(headers, "Accept-Encoding") && return nothing
+    setheader(headers, "Accept-Encoding", "gzip")
     return nothing
 end
 
@@ -1908,8 +1917,36 @@ function _parse_http_url(url::AbstractString; query = nothing)::_URLParts
     return _URLParts(secure, address, target, host, full_url, authorization)
 end
 
-function _method_upper(method::AbstractString)::String
+function _method_upper(method::Union{AbstractString, Symbol})::String
     return uppercase(String(method))
+end
+
+@inline function _basic_auth_header(username::AbstractString, password::AbstractString)::String
+    return "Basic " * base64encode(string(username, ":", password))
+end
+
+function _basic_auth_header(basicauth)::String
+    if basicauth isa Tuple && length(basicauth) == 2
+        return _basic_auth_header(String(basicauth[1]), String(basicauth[2]))
+    end
+    if basicauth isa Pair
+        return _basic_auth_header(String(basicauth.first), String(basicauth.second))
+    end
+    throw(ArgumentError("basicauth must be `nothing`, `(username, password)`, or `username => password`"))
+end
+
+function _apply_request_authorization!(
+        headers::Headers,
+        basicauth,
+        url_authorization::Union{Nothing, String},
+    )::Nothing
+    hasheader(headers, "Authorization") && return nothing
+    if basicauth !== nothing
+        setheader(headers, "Authorization", _basic_auth_header(basicauth))
+        return nothing
+    end
+    url_authorization === nothing || setheader(headers, "Authorization", url_authorization::String)
+    return nothing
 end
 
 function _client_for_request(
@@ -1980,6 +2017,10 @@ High-level one-shot HTTP request API (similar shape to HTTP.jl convenience
 methods).
 
 Keyword arguments:
+- `basicauth`: optional basic-auth credentials supplied as
+  `(username, password)` or `username => password`; explicit
+  `Authorization` headers take precedence, and URL `userinfo` is only used as a
+  fallback when neither is provided
 - `status_exception`: throw `StatusError` for non-success responses
 - `redirect`: follow redirects through `do!`
 - `redirect_limit`: maximum number of redirects to follow for this call;
@@ -2004,8 +2045,8 @@ Keyword arguments:
 - `response_stream`: optional sink `IO` or byte buffer written with the final response body
 - `response_body`: alias for `response_stream`
 - `decompress`: `nothing`/`true` auto-decompress gzip responses, `false` leaves wire bytes untouched
-- `sse_callback`: callback receiving `(event)`, `(stream, event)`, or the
-  legacy `(response, event)` form for successful SSE responses
+- `sse_callback`: callback receiving `(event)` or `(stream, event)` for
+  successful SSE responses
 - `client`: optional explicit `Client`; otherwise a default or ephemeral client
   is created
 - `connect_timeout`: connection timeout in seconds for implicit clients
@@ -2024,12 +2065,13 @@ failing, plus any lower-level transport or protocol exception raised during the
 request.
 """
 function request(
-        method::AbstractString,
+        method::Union{AbstractString, Symbol},
         url::AbstractString,
         h = Pair{String, String}[],
         b = nothing;
         headers = h,
         body = b,
+        basicauth = nothing,
         status_exception::Bool = true,
         redirect::Bool = true,
         redirect_limit::Union{Nothing, Integer} = nothing,
@@ -2058,12 +2100,10 @@ function request(
     sink = _resolve_response_sink(response_stream, response_body)
     sse_callback === nothing || sink === nothing || throw(ArgumentError("sse_callback cannot be combined with response_stream or response_body"))
     _apply_default_accept_encoding!(req_headers, decompress)
-    if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
-        set_header!(req_headers, "Authorization", parsed.authorization::String)
-    end
+    _apply_request_authorization!(req_headers, basicauth, parsed.authorization)
     normalized_body = _normalize_body_input(body)
-    if normalized_body.default_content_type !== nothing && !has_header(req_headers, "Content-Type")
-        set_header!(req_headers, "Content-Type", normalized_body.default_content_type::String)
+    if normalized_body.default_content_type !== nothing && !hasheader(req_headers, "Content-Type")
+        setheader(req_headers, "Content-Type", normalized_body.default_content_type::String)
     end
     req = Request(
         _method_upper(method),

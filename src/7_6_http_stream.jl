@@ -2,6 +2,7 @@
 export startread
 export closeread
 export open
+export isaborted
 
 import Base: close, closewrite, eof, isopen, open, read, readbytes!, write
 
@@ -15,7 +16,7 @@ Writes append request body bytes until response reading begins. After
 connection using the same redirect/decompression machinery as `request(...)`.
 """
 function Stream(
-        method::AbstractString,
+        method::Union{AbstractString, Symbol},
         parsed::_URLParts,
         headers::Headers,
         client::Client,
@@ -82,6 +83,13 @@ function _stream_reader(stream::Stream)::IO
     reader = stream.reader
     reader === nothing && throw(ProtocolError("response body reader is not available"))
     return reader::IO
+end
+
+function isaborted(stream::Stream)::Bool
+    response = stream.response
+    response === nothing && return false
+    return _status_throws(response::Response) &&
+           (response.close || hasheader(response, "Connection", "close"))
 end
 
 function _client_finish_stream_read!(stream::Stream; suppress_producer_errors::Bool)::Response
@@ -295,9 +303,11 @@ The returned `Stream` buffers request writes locally until `startread(stream)`
 or the end of the `do` block. Once reading starts, `stream` behaves like a
 readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
 including `redirect`, `redirect_limit`, `redirect_method`,
-`forwardheaders`, `cookies`, `cookiejar`, `decompress`, `client`,
-`connect_timeout`, `readtimeout`, `require_ssl_verification`, and
-`protocol`.
+`forwardheaders`, `cookies`, `cookiejar`, `decompress`, `basicauth`,
+`client`, `connect_timeout`, `readtimeout`, `require_ssl_verification`, and
+`protocol`. `basicauth` accepts `(username, password)` credentials; explicit
+`Authorization` headers take precedence, and URL `userinfo` is only used as a
+fallback when neither is provided.
 
 The `do`-block form closes request writes automatically, closes the readable
 side on exit, and returns the final response metadata.
@@ -318,6 +328,7 @@ function open(
         cookiejar::Union{Nothing, CookieJar} = nothing,
         query = nothing,
         decompress::Union{Nothing, Bool} = nothing,
+        basicauth = nothing,
         client::Union{Nothing, Client} = nothing,
         connect_timeout::Real = 0,
         readtimeout::Real = 0,
@@ -330,9 +341,7 @@ function open(
     req_headers = _normalize_headers_input(headers)
     normalized_cookies = _normalize_cookies_input(cookies)
     _apply_default_accept_encoding!(req_headers, decompress)
-    if parsed.authorization !== nothing && !has_header(req_headers, "Authorization")
-        set_header!(req_headers, "Authorization", parsed.authorization::String)
-    end
+    _apply_request_authorization!(req_headers, basicauth, parsed.authorization)
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
     client === nothing || proxy === _USE_TRANSPORT_PROXY || throw(ArgumentError("proxy override is not supported when passing an explicit Client"))
     proxy_config = _proxy_config_for_request(req_client, proxy)

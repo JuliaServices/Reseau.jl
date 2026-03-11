@@ -23,10 +23,10 @@ end
 
 function run_http_trim_sample()::Nothing
     headers = HT.Headers()
-    HT.set_header!(headers, "content-type", "application/json")
-    HT.add_header!(headers, "x-trace-id", "abc")
-    HT.add_header!(headers, "x-trace-id", "def")
-    HT.has_header_token(headers, "x-trace-id", "abc") || error("expected token")
+    HT.setheader(headers, "content-type", "application/json")
+    HT.appendheader(headers, "x-trace-id", "abc")
+    HT.appendheader(headers, "x-trace-id", "def")
+    HT.headercontains(headers, "x-trace-id", "abc") || error("expected token")
     ctx = HT.RequestContext(deadline_ns = time_ns() + 1_000_000)
     req = HT.Request("GET", "/health"; headers = headers, context = ctx)
     _ = req
@@ -48,9 +48,9 @@ function run_http_trim_sample()::Nothing
     req_body_buf = Vector{UInt8}(undef, 2)
     HT.body_read!(parsed_req.body, req_body_buf) == 2 || error("expected parsed request body")
     resp_headers = HT.Headers()
-    HT.set_header!(resp_headers, "Transfer-Encoding", "chunked")
+    HT.setheader(resp_headers, "Transfer-Encoding", "chunked")
     resp_trailers = HT.Headers()
-    HT.set_header!(resp_trailers, "X-Trim", "1")
+    HT.setheader(resp_trailers, "X-Trim", "1")
     resp_body = HT.BytesBody(UInt8[0x6f, 0x6b])
     resp = HT.Response{typeof(resp_body)}(200, "OK", resp_headers, resp_trailers, resp_body, Int64(-1), UInt8(1), UInt8(1), false, req, nothing, nothing, 0)
     resp_io = IOBuffer()

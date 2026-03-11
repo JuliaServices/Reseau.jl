@@ -13,14 +13,15 @@ export ProtocolError
 export CanceledError
 export HTTPTimeoutError
 export canonical_header_key
-export has_header
-export get_header
-export get_headers
-export header_keys
-export set_header!
-export add_header!
-export delete_header!
-export has_header_token
+export header
+export headers
+export hasheader
+export headercontains
+export setheader
+export defaultheader!
+export appendheader
+export removeheader
+export mkheaders
 export body_read!
 export body_close!
 export body_closed
@@ -199,145 +200,250 @@ end
 """
     Headers
 
-Ordered, case-canonicalized HTTP header map.
+Ordered, case-canonicalized collection of header pairs.
 
-`Headers` deliberately preserves insertion order for keys while storing one
-vector of values per canonicalized name. That mirrors the parts of Go's
-`http.Header` behavior that are useful to higher layers:
-- key lookups are case-insensitive after canonicalization
-- repeated headers preserve value order
-- header iteration is stable and reflects the original append/replace pattern
+`Headers` deliberately behaves like `Vector{Pair{String, String}}` so code
+written against `HTTP.jl`'s pair-vector header representation can reuse the
+same helper functions. Keys are canonicalized on insertion, but pair order is
+preserved.
 """
-mutable struct Headers
-    order::Vector{String}
-    values::Dict{String, Vector{String}}
+mutable struct Headers <: AbstractVector{Pair{String, String}}
+    entries::Vector{Pair{String, String}}
 end
 
 """Create and return an empty `Headers` collection."""
 function Headers()
-    return Headers(String[], Dict{String, Vector{String}}())
+    return Headers(Pair{String, String}[])
 end
 
 """
     Headers(hint)
 
 Create an empty `Headers` collection and use `hint` as a preallocation hint for
-both the key-order vector and backing dictionary. Throws `ArgumentError` when
-`hint < 0`.
+the backing pair storage. Throws `ArgumentError` when `hint < 0`.
 """
 function Headers(hint::Integer)
     hint < 0 && throw(ArgumentError("hint must be >= 0"))
-    order = String[]
-    values = Dict{String, Vector{String}}()
-    sizehint!(order, Int(hint))
-    sizehint!(values, Int(hint))
-    return Headers(order, values)
+    entries = Pair{String, String}[]
+    sizehint!(entries, Int(hint))
+    return Headers(entries)
 end
 
 """
     Headers(headers)
 
-Deep-copy constructor for header collections. Both the ordered key list and
-every value vector are copied, so mutating the result does not affect the
-source.
+Deep-copy constructor for header collections. The underlying pair storage is
+copied, so mutating the result does not affect the source.
 """
 function Headers(headers::Headers)
-    copied = Dict{String, Vector{String}}()
-    for key in headers.order
-        copied[key] = copy(headers.values[key])
-    end
-    return Headers(copy(headers.order), copied)
+    return Headers(copy(headers.entries))
 end
+
+Headers(items::AbstractDict) = mkheaders(items)
+Headers(items::AbstractVector) = mkheaders(items)
+Headers(items::Tuple) = mkheaders(items)
 
 function Base.copy(headers::Headers)
     return Headers(headers)
 end
 
+Base.IndexStyle(::Type{Headers}) = IndexLinear()
+Base.eltype(::Type{Headers}) = Pair{String, String}
+
+function Base.size(headers::Headers)
+    return (length(headers.entries),)
+end
+
 function Base.length(headers::Headers)
-    return length(headers.order)
+    return length(headers.entries)
 end
 
 function Base.isempty(headers::Headers)
-    return isempty(headers.order)
+    return isempty(headers.entries)
 end
 
 function Base.empty!(headers::Headers)
-    empty!(headers.order)
-    empty!(headers.values)
+    empty!(headers.entries)
+    return headers
+end
+
+function Base.iterate(headers::Headers, state...)
+    return iterate(headers.entries, state...)
+end
+
+function Base.getindex(headers::Headers, i::Int)
+    return headers.entries[i]
+end
+
+@inline function _header_pair(key, value)::Pair{String, String}
+    return canonical_header_key(String(key)) => String(value)
+end
+
+function Base.setindex!(headers::Headers, item, i::Int)
+    headers.entries[i] = _header_pair(first(item), last(item))
+    return headers.entries[i]
+end
+
+function Base.push!(headers::Headers, item)
+    push!(headers.entries, _header_pair(first(item), last(item)))
+    return headers
+end
+
+function mkheaders(headers::Headers)::Headers
+    return headers
+end
+
+function _append_header_values!(headers::Headers, key, value)
+    if value isa AbstractVector && !(value isa AbstractString)
+        for item in value
+            appendheader(headers, String(key) => String(item))
+        end
+        return headers
+    end
+    appendheader(headers, String(key) => String(value))
+    return headers
+end
+
+function mkheaders(headers_input)
+    headers_input === nothing && return Headers()
+    headers_input isa Headers && return headers_input
+    headers = Headers()
+    if headers_input isa AbstractDict
+        for (k, v) in pairs(headers_input)
+            _append_header_values!(headers, k, v)
+        end
+        return headers
+    end
+    for item in headers_input
+        if item isa Pair
+            pair = item::Pair
+            _append_header_values!(headers, pair.first, pair.second)
+            continue
+        end
+        if item isa Tuple && length(item) == 2
+            tup = item::Tuple
+            _append_header_values!(headers, tup[1], tup[2])
+            continue
+        end
+        throw(ArgumentError("unsupported header entry type $(typeof(item)); expected Pair or 2-tuple"))
+    end
     return headers
 end
 
 """Return a newly allocated `Vector{String}` of header keys in insertion order."""
 function header_keys(headers::Headers)::Vector{String}
-    return copy(headers.order)
+    out = String[]
+    seen = Set{String}()
+    for (key, _) in headers
+        key in seen && continue
+        push!(seen, key)
+        push!(out, key)
+    end
+    return out
 end
 
-"""Return `true` when `headers` contains at least one value for `key`."""
-function has_header(headers::Headers, key::AbstractString)::Bool
+"""Return the first value for `key`, or `default` if the header is absent."""
+function header(headers::Headers, key::AbstractString, default = "")
     canon = canonical_header_key(key)
-    return haskey(headers.values, canon)
+    for (name, value) in headers
+        name == canon && return value
+    end
+    return default
 end
 
 """
-    get_headers(headers, key) -> Vector{String}
+    headers(headers, key) -> Vector{String}
 
 Return a freshly allocated vector containing all values for `key` in stored
 order. Returns `String[]` when the header is absent.
 """
-function get_headers(headers::Headers, key::AbstractString)::Vector{String}
+function headers(headers::Headers, key::AbstractString)::Vector{String}
     canon = canonical_header_key(key)
-    values = get(() -> nothing, headers.values, canon)
-    values === nothing && return String[]
-    return copy(values::Vector{String})
+    out = String[]
+    for (name, value) in headers
+        name == canon && push!(out, value)
+    end
+    return out
 end
 
-"""Return the first value for `key`, or `nothing` if the header is absent."""
-function get_header(headers::Headers, key::AbstractString)::Union{Nothing, String}
-    canon = canonical_header_key(key)
-    values = get(() -> nothing, headers.values, canon)
-    values === nothing && return nothing
-    isempty(values::Vector{String}) && return nothing
-    return values[1]
+"""Return `true` when the first value for `key` is non-empty."""
+function hasheader(headers::Headers, key::AbstractString)::Bool
+    return header(headers, key) != ""
 end
 
 """
-    set_header!(headers, key, value) -> Headers
+    hasheader(headers, key, value) -> Bool
 
-Replace all existing values for `key` with a single `value`, preserving the
-original key position if the key already exists and appending it otherwise.
-Returns the mutated `headers`.
+Return `true` when the first header value for `key` matches `value`
+case-insensitively.
 """
-function set_header!(headers::Headers, key::AbstractString, value::AbstractString)
-    canon = canonical_header_key(key)
-    if haskey(headers.values, canon)
-        headers.values[canon] = String[String(value)]
-        return headers
+function hasheader(headers::Headers, key::AbstractString, value::AbstractString)::Bool
+    current = header(headers, key, nothing)
+    current === nothing && return false
+    return _ascii_lowercase_string(current::String) == _ascii_lowercase_string(value)
+end
+
+"""
+    setheader(headers, key => value) -> Headers
+    setheader(headers, key, value) -> Headers
+
+Replace the first stored value for `key` with `value`, preserving the original
+position if the key already exists and appending it otherwise. Like `HTTP.jl`'s
+pair-vector helpers, later duplicate entries are left untouched. Returns the
+mutated `headers`.
+"""
+function setheader(headers::Headers, header::Pair)
+    item = _header_pair(header.first, header.second)
+    key = first(item)
+    idx = findfirst(x -> first(x) == key, headers.entries)
+    if idx === nothing
+        push!(headers.entries, item)
+    else
+        headers.entries[idx] = item
     end
-    headers.values[canon] = String[String(value)]
-    push!(headers.order, canon)
     return headers
 end
 
-"""Append one additional value for `key` and return the mutated `headers`."""
-function add_header!(headers::Headers, key::AbstractString, value::AbstractString)
-    canon = canonical_header_key(key)
-    values = get(() -> nothing, headers.values, canon)
-    if values === nothing
-        headers.values[canon] = String[String(value)]
-        push!(headers.order, canon)
-        return headers
+function setheader(headers::Headers, key::AbstractString, value::AbstractString)
+    return setheader(headers, key => value)
+end
+
+"""
+    appendheader(headers, key => value) -> Headers
+    appendheader(headers, key, value) -> Headers
+
+Append a header value to `headers`.
+
+Like `HTTP.jl`, if the previous stored header has the same name and the key is
+not `Set-Cookie`, the value is merged into the previous entry with a comma.
+Otherwise a new pair is appended.
+"""
+function appendheader(headers::Headers, header::Pair)
+    item = _header_pair(header.first, header.second)
+    if !isempty(headers.entries)
+        last_header = headers.entries[end]
+        if first(item) != "Set-Cookie" && first(last_header) == first(item)
+            headers.entries[end] = first(last_header) => string(last(last_header), ", ", last(item))
+            return headers
+        end
     end
-    push!(values::Vector{String}, String(value))
+    push!(headers.entries, item)
     return headers
 end
 
-"""Delete `key` and all associated values, then return the mutated `headers`."""
-function delete_header!(headers::Headers, key::AbstractString)
+function appendheader(headers::Headers, key::AbstractString, value::AbstractString)
+    return appendheader(headers, key => value)
+end
+
+"""
+    removeheader(headers, key) -> Headers
+
+Remove the first stored header for `key` and return the mutated `headers`.
+"""
+function removeheader(headers::Headers, key::AbstractString)
     canon = canonical_header_key(key)
-    haskey(headers.values, canon) || return headers
-    delete!(headers.values, canon)
-    idx = findfirst(isequal(canon), headers.order)
-    idx === nothing || deleteat!(headers.order, idx)
+    idx = findfirst(x -> first(x) == canon, headers.entries)
+    idx === nothing || deleteat!(headers.entries, idx)
     return headers
 end
 
@@ -375,7 +481,7 @@ end
 end
 
 """
-    has_header_token(headers, key, token) -> Bool
+    headercontains(headers, key, token) -> Bool
 
 Return `true` when a comma-separated header field contains `token`
 case-insensitively after trimming optional whitespace.
@@ -384,35 +490,21 @@ This is the helper used for semantics like `Connection: close` and
 `Transfer-Encoding: chunked`, where RFCs define one header line as a list of
 tokens rather than one opaque string.
 """
-function has_header_token(headers::Headers, key::AbstractString, token::AbstractString)::Bool
+function headercontains(headers::Headers, key::AbstractString, token::AbstractString)::Bool
     needle = _ascii_lowercase_string(_trim_http_ows(token))
     isempty(needle) && return false
-    values = get_headers(headers, key)
-    for value in values
-        start = firstindex(value)
-        idx = start
-        stop = lastindex(value)
-        while idx <= stop
-            while idx <= stop
-                c = value[idx]
-                if c == ','
-                    idx = nextind(value, idx)
-                    continue
-                end
-                break
-            end
-            idx > stop && break
-            token_start = idx
-            while idx <= stop && value[idx] != ','
-                idx = nextind(value, idx)
-            end
-            token_end = prevind(value, idx)
-            candidate = _ascii_lowercase_string(_trim_http_ows(SubString(value, token_start, token_end)))
-            candidate == needle && return true
-            idx <= stop && (idx = nextind(value, idx))
-        end
+    value = header(headers, key, nothing)
+    value === nothing && return false
+    for part in eachsplit(value::String, ',')
+        candidate = _ascii_lowercase_string(_trim_http_ows(part))
+        candidate == needle && return true
     end
     return false
+end
+
+function defaultheader!(headers::Headers, item::Pair)
+    header(headers, first(item), nothing) === nothing || return headers
+    return setheader(headers, item)
 end
 
 """
@@ -688,8 +780,8 @@ end
 function Request(
         method::AbstractString,
         target::AbstractString;
-        headers::Headers = Headers(),
-        trailers::Headers = Headers(),
+        headers = Headers(),
+        trailers = Headers(),
         body::B = EmptyBody(),
         host::Union{Nothing, AbstractString} = nothing,
         content_length::Integer = Int64(-1),
@@ -707,8 +799,8 @@ function Request(
     return Request{B}(
         String(method),
         String(target),
-        copy(headers),
-        copy(trailers),
+        copy(mkheaders(headers)),
+        copy(mkheaders(trailers)),
         body,
         host_s,
         Int64(content_length),
@@ -782,8 +874,8 @@ end
 function Response(
         status_code::Integer;
         reason::AbstractString = "",
-        headers::Headers = Headers(),
-        trailers::Headers = Headers(),
+        headers = Headers(),
+        trailers = Headers(),
         body::B = EmptyBody(),
         content_length::Integer = Int64(-1),
         proto_major::Integer = 1,
@@ -803,8 +895,8 @@ function Response(
     return Response{BodyT}(
         Int(status_code),
         String(reason),
-        copy(headers),
-        copy(trailers),
+        copy(mkheaders(headers)),
+        copy(mkheaders(trailers)),
         body,
         Int64(content_length),
         UInt8(proto_major),
@@ -816,6 +908,53 @@ function Response(
         Int(redirect_count),
     )
 end
+
+header(message::Union{Request, Response}, key::AbstractString, default = "") =
+    header(message.headers, key, default)
+
+headers(message::Union{Request, Response}, key::AbstractString)::Vector{String} =
+    headers(message.headers, key)
+
+hasheader(message::Union{Request, Response}, key::AbstractString)::Bool =
+    hasheader(message.headers, key)
+
+hasheader(message::Union{Request, Response}, key::AbstractString, value::AbstractString)::Bool =
+    hasheader(message.headers, key, value)
+
+headercontains(message::Union{Request, Response}, key::AbstractString, value::AbstractString)::Bool =
+    headercontains(message.headers, key, value)
+
+function setheader(message::Union{Request, Response}, header::Pair)
+    setheader(message.headers, header)
+    return message
+end
+
+function setheader(message::Union{Request, Response}, key::AbstractString, value::AbstractString)
+    setheader(message.headers, key, value)
+    return message
+end
+
+function defaultheader!(message::Union{Request, Response}, header::Pair)
+    defaultheader!(message.headers, header)
+    return message
+end
+
+function appendheader(message::Union{Request, Response}, header::Pair)
+    appendheader(message.headers, header)
+    return message
+end
+
+function appendheader(message::Union{Request, Response}, key::AbstractString, value::AbstractString)
+    appendheader(message.headers, key, value)
+    return message
+end
+
+function removeheader(message::Union{Request, Response}, key::AbstractString)
+    removeheader(message.headers, key)
+    return message
+end
+
+Base.getindex(message::Union{Request, Response}, key::AbstractString) = header(message, key)
 
 function Base.getproperty(response::Response, field::Symbol)
     field === :status && return getfield(response, :status_code)

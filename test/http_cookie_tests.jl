@@ -6,7 +6,7 @@ const HT = Reseau.HTTP
 function _set_cookie_headers(values::AbstractString...)::HT.Headers
     headers = HT.Headers()
     for value in values
-        HT.add_header!(headers, "Set-Cookie", value)
+        HT.appendheader(headers, "Set-Cookie", value)
     end
     return headers
 end
@@ -35,7 +35,7 @@ end
     @test occursin("; SameSite=Lax", rendered)
 
     req_headers = HT.Headers()
-    HT.add_header!(req_headers, "Cookie", "a=1; b=two")
+    HT.appendheader(req_headers, "Cookie", "a=1; b=two")
     request = HT.Request("GET", "/"; headers = req_headers)
     req_cookies = HT.cookies(request)
     @test [(c.name, c.value) for c in req_cookies] == [("a", "1"), ("b", "two")]
@@ -44,11 +44,11 @@ end
 @testset "HTTP addcookie! appends request and response headers" begin
     request = HT.Request("GET", "/")
     HT.addcookie!(request, HT.Cookie("session", "abc"))
-    @test HT.get_headers(request.headers, "Cookie") == ["session=abc"]
+    @test HT.headers(request.headers, "Cookie") == ["session=abc"]
 
     response = HT.Response(200)
     HT.addcookie!(response, HT.Cookie("session", "abc"; path = "/", secure = true))
-    values = HT.get_headers(response.headers, "Set-Cookie")
+    values = HT.headers(response.headers, "Set-Cookie")
     @test length(values) == 1
     @test occursin("session=abc", values[1])
     @test occursin("; Path=/", values[1])
