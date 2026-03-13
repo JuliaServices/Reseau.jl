@@ -105,8 +105,14 @@ This is the single biggest parity gap.
 - `cookies`
 - `cookiejar`
 
-`Reseau.HTTP.request(...)` currently supports only a narrower subset:
+`Reseau.HTTP.request(...)` now supports:
 
+- `retry`
+- `retries`
+- `retry_non_idempotent`
+- `retry_if`
+- `respect_retry_after`
+- `retry_bucket`
 - `status_exception`
 - `redirect`
 - `query`
@@ -125,8 +131,20 @@ implemented:
 - `logerrors`
 - `observelayers`
 
-`retry` is also only tolerated in the very narrow `retry=false` form, not
-implemented as a real retry API.
+`Reseau.HTTP.open(...)` shares the same retry controls.
+
+The main remaining retry/API delta is now deliberate API design:
+
+- `Reseau.HTTP` uses `retry_if` instead of `HTTP.jl`'s `retry_check`
+- `Reseau.HTTP` does not yet expose `retry_delays`
+- `Reseau.HTTP` adds `respect_retry_after` and `retry_bucket`
+
+The default retry behavior is also intentionally conservative:
+
+- automatic retries still require a replayable request body
+- built-in automatic retries target idempotent methods plus requests carrying
+  `Idempotency-Key`
+- request readtimeout/deadline failures are not automatically retried
 
 ### 2. Return-Type and Streaming Mismatch
 

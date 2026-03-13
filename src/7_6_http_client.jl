@@ -2,6 +2,7 @@
 export Transport
 export ClientConn
 export ManagedBody
+export RetryBucket
 export roundtrip!
 export close_idle_connections!
 export idle_connection_count
@@ -108,6 +109,7 @@ mutable struct Transport
     host_resolver::HostResolvers.HostResolver
     tls_config::Union{Nothing, TLS.Config}
     proxy::ProxyConfig
+    retry_bucket::Union{Nothing, RetryBucket}
     max_idle_per_host::Int
     max_idle_total::Int
     idle_timeout_ns::Int64
@@ -141,6 +143,7 @@ function Transport(;
         host_resolver::HostResolvers.HostResolver = HostResolvers.HostResolver(),
         tls_config::Union{Nothing, TLS.Config} = nothing,
         proxy = nothing,
+        retry_bucket::Union{Nothing, RetryBucket} = RetryBucket(),
         max_idle_per_host::Integer = 2,
         max_idle_total::Integer = 64,
         idle_timeout_ns::Integer = Int64(90_000_000_000),
@@ -152,6 +155,7 @@ function Transport(;
         host_resolver,
         tls_config,
         _normalize_proxy_config(proxy),
+        retry_bucket,
         Int(max_idle_per_host),
         Int(max_idle_total),
         Int64(idle_timeout_ns),
@@ -1341,6 +1345,7 @@ function _do_incoming!(
         server_name::Union{Nothing, AbstractString} = nothing,
         protocol::Symbol = :auto,
         redirect_policy::_RedirectPolicy = _redirect_policy(client),
+        retry_controller = nothing,
         proxy_config::ProxyConfig = client.transport.proxy,
         cookies::Union{Bool, Vector{Cookie}} = true,
         cookiejar::Union{Nothing, CookieJar} = client.cookiejar,
@@ -1351,21 +1356,39 @@ function _do_incoming!(
     explicit_server_name = server_name !== nothing
     current_server_name = explicit_server_name ? String(server_name::AbstractString) : _host_for_sni(current_address)
     current_request = _copy_request_for_send(request; allow_nonreplayable = true)
+    controller = retry_controller
     previous_response = nothing
+    retry_attempt = 1
+    retry_token = nothing
     for redirect_count in 0:redirect_policy.max_redirects
-        send_request = _copy_request_for_send(current_request; allow_nonreplayable = redirect_count == 0)
-        proxy_plan = _proxy_plan(proxy_config, current_secure, current_address)
-        host, path = _host_path_from_request(current_address, current_request)
-        cookie_value = _cookie_header(cookiejar, cookies, current_secure, host, path)
-        cookie_value === nothing || setheader(send_request.headers, "Cookie", cookie_value)
-        _trace_call(client.trace, :on_get_conn, current_address, current_secure)
-        response = if _use_h2(client, current_secure, protocol) && proxy_plan.mode != _ProxyPlanMode.HTTP_FORWARD
-            try
-                conn = _acquire_h2_conn!(client, proxy_plan, current_address, current_secure; server_name = current_server_name)
-                _h2_roundtrip_incoming!(conn, send_request)
-            catch err
-                _drop_h2_conn!(client, proxy_plan)
-                if protocol == :auto && _should_fallback_h2_to_h1(err)
+        while true
+            send_request = _copy_request_for_send(current_request; allow_nonreplayable = retry_attempt == 1)
+            proxy_plan = _proxy_plan(proxy_config, current_secure, current_address)
+            host, path = _host_path_from_request(current_address, current_request)
+            cookie_value = _cookie_header(cookiejar, cookies, current_secure, host, path)
+            cookie_value === nothing || setheader(send_request.headers, "Cookie", cookie_value)
+            _trace_call(client.trace, :on_get_conn, current_address, current_secure)
+            response = try
+                if _use_h2(client, current_secure, protocol) && proxy_plan.mode != _ProxyPlanMode.HTTP_FORWARD
+                    try
+                        conn = _acquire_h2_conn!(client, proxy_plan, current_address, current_secure; server_name = current_server_name)
+                        _h2_roundtrip_incoming!(conn, send_request)
+                    catch err
+                        _drop_h2_conn!(client, proxy_plan)
+                        if protocol == :auto && _should_fallback_h2_to_h1(err)
+                            _roundtrip_incoming!(
+                                client.transport,
+                                current_address,
+                                send_request;
+                                secure = current_secure,
+                                server_name = current_server_name,
+                                proxy_config = proxy_config,
+                            )
+                        else
+                            rethrow(err)
+                        end
+                    end
+                else
                     _roundtrip_incoming!(
                         client.transport,
                         current_address,
@@ -1374,67 +1397,109 @@ function _do_incoming!(
                         server_name = current_server_name,
                         proxy_config = proxy_config,
                     )
+                end
+            catch err
+                if controller !== nothing
+                    ctrl = controller::_RetryController
+                    _release_retry_token!(ctrl, retry_token, err)
+                end
+                retry_token = nothing
+                if controller !== nothing
+                    ctrl = controller::_RetryController
+                    if _should_retry_request_attempt(ctrl, retry_attempt, current_request, err, nothing)
+                        scheduled, next_token = _arm_request_retry!(ctrl, current_address, current_request, retry_attempt, nothing)
+                        if scheduled
+                            retry_attempt += 1
+                            retry_token = next_token
+                            continue
+                        end
+                    end
+                end
+                rethrow(err)
+            end
+            response = _annotate_incoming_response(
+                response,
+                _request_url(current_secure, current_address, current_request.target),
+                previous_response,
+                redirect_count,
+            )
+            _trace_call(client.trace, :on_got_conn, current_address, current_secure)
+            _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
+            _trace_call(client.trace, :on_got_first_response_byte, response.head.status_code)
+            _store_set_cookies!(cookiejar, cookies, current_secure, host, path, response.head.headers)
+            status_response = _retry_policy_response(response, current_request)
+            if controller !== nothing
+                ctrl = controller::_RetryController
+                if _retryable_status_code(status_response.status_code)
+                    _release_retry_token!(ctrl, retry_token, status_response)
                 else
-                    rethrow(err)
+                    _release_retry_token!(ctrl, retry_token)
                 end
             end
-        else
-            _roundtrip_incoming!(
-                client.transport,
-                current_address,
-                send_request;
-                secure = current_secure,
-                server_name = current_server_name,
-                proxy_config = proxy_config,
-            )
+            retry_token = nothing
+            if controller !== nothing
+                ctrl = controller::_RetryController
+                should_retry = try
+                    _should_retry_request_attempt(ctrl, retry_attempt, current_request, nothing, status_response)
+                catch
+                    try
+                        body_close!(response.rawbody)
+                    catch
+                    end
+                    rethrow()
+                end
+                if should_retry
+                    scheduled, next_token = _arm_request_retry!(ctrl, current_address, current_request, retry_attempt, status_response)
+                    if scheduled
+                        retry_attempt += 1
+                        retry_token = next_token
+                        try
+                            body_close!(response.rawbody)
+                        catch
+                        end
+                        continue
+                    end
+                end
+            end
+            if !_is_redirect_status(response.head.status_code)
+                return response
+            end
+            location = header(response.head.headers, "Location", nothing)
+            (location === nothing || isempty(location::String)) && return response
+            redirect_policy.max_redirects == 0 && return response
+            redirect_count == redirect_policy.max_redirects && throw(TooManyRedirectsError(redirect_policy.max_redirects, _streaming_response(response)))
+            if redirect_policy.check_redirect !== nothing
+                proceed = (redirect_policy.check_redirect::Function)(_streaming_response(response), current_request, location)
+                proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
+                proceed || return response
+            end
+            next_method = _rewrite_method_for_redirect(current_request.method, response.head.status_code, redirect_policy)
+            if _redirect_reuses_request_body(next_method) && !_redirect_body_replayable(current_request)
+                return response
+            end
+            previous_response = _streaming_response(response)
+            body_close!(response.rawbody)
+            previous_secure = current_secure
+            previous_address = current_address
+            previous_target = current_request.target
+            current_address, current_secure, next_target = _resolve_redirect_target(current_address, current_secure, location, current_request.target)
+            if !explicit_server_name
+                current_server_name = _host_for_sni(current_address)
+            end
+            current_request = _prepare_request_for_redirect(current_request, response.head.status_code, next_target, redirect_policy)
+            existing_ref = header(current_request.headers, "Referer", nothing)
+            next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, existing_ref)
+            if next_ref === nothing
+                removeheader(current_request.headers, "Referer")
+            else
+                setheader(current_request.headers, "Referer", next_ref::String)
+            end
+            if !_should_copy_sensitive_headers_on_redirect(initial_address, current_address)
+                _strip_sensitive_redirect_headers!(current_request.headers)
+            end
+            current_request.host = current_address
+            break
         end
-        response = _annotate_incoming_response(
-            response,
-            _request_url(current_secure, current_address, current_request.target),
-            previous_response,
-            redirect_count,
-        )
-        _trace_call(client.trace, :on_got_conn, current_address, current_secure)
-        _trace_call(client.trace, :on_wrote_request, send_request.method, send_request.target)
-        _trace_call(client.trace, :on_got_first_response_byte, response.head.status_code)
-        _store_set_cookies!(cookiejar, cookies, current_secure, host, path, response.head.headers)
-        if !_is_redirect_status(response.head.status_code)
-            return response
-        end
-        location = header(response.head.headers, "Location", nothing)
-        (location === nothing || isempty(location::String)) && return response
-        redirect_policy.max_redirects == 0 && return response
-        redirect_count == redirect_policy.max_redirects && throw(TooManyRedirectsError(redirect_policy.max_redirects, _streaming_response(response)))
-        if redirect_policy.check_redirect !== nothing
-            proceed = (redirect_policy.check_redirect::Function)(_streaming_response(response), current_request, location)
-            proceed isa Bool || throw(ProtocolError("check_redirect callback must return Bool"))
-            proceed || return response
-        end
-        next_method = _rewrite_method_for_redirect(current_request.method, response.head.status_code, redirect_policy)
-        if _redirect_reuses_request_body(next_method) && !_redirect_body_replayable(current_request)
-            return response
-        end
-        previous_response = _streaming_response(response)
-        body_close!(response.rawbody)
-        previous_secure = current_secure
-        previous_address = current_address
-        previous_target = current_request.target
-        current_address, current_secure, next_target = _resolve_redirect_target(current_address, current_secure, location, current_request.target)
-        if !explicit_server_name
-            current_server_name = _host_for_sni(current_address)
-        end
-        current_request = _prepare_request_for_redirect(current_request, response.head.status_code, next_target, redirect_policy)
-        existing_ref = header(current_request.headers, "Referer", nothing)
-        next_ref = _redirect_referer(previous_secure, previous_address, previous_target, current_secure, existing_ref)
-        if next_ref === nothing
-            removeheader(current_request.headers, "Referer")
-        else
-            setheader(current_request.headers, "Referer", next_ref::String)
-        end
-        if !_should_copy_sensitive_headers_on_redirect(initial_address, current_address)
-            _strip_sensitive_redirect_headers!(current_request.headers)
-        end
-        current_request.host = current_address
     end
     throw(ProtocolError("unexpected redirect loop termination"))
 end
@@ -1980,12 +2045,6 @@ end
 
 function _validate_request_extra_kwargs(kwargs)
     for (k, v) in kwargs
-        if k == :retry
-            if v isa Bool && !v
-                continue
-            end
-            throw(ArgumentError("retry keyword is not implemented yet; pass retry=false"))
-        end
         if k == :verbose || k == :canonicalize_headers || k == :logerrors || k == :observelayers
             continue
         end
@@ -2010,6 +2069,210 @@ function _apply_conn_deadline!(conn::ClientConn, deadline_ns::Int64)
     return nothing
 end
 
+mutable struct _RetryController{F}
+    enabled::Bool
+    remaining::Int
+    retry_non_idempotent::Bool
+    retry_if::F
+    respect_retry_after::Bool
+    bucket::Union{Nothing, RetryBucket}
+end
+
+@inline function _retryable_status_code(status::Int)::Bool
+    return status == 408 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
+end
+
+@inline function _retryable_request_method(method::String)::Bool
+    return method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "TRACE" || method == "PUT" || method == "DELETE"
+end
+
+@inline function _retryable_request_headers(request::Request)::Bool
+    key = header(request.headers, "Idempotency-Key", nothing)
+    key !== nothing && !isempty(key::String) && return true
+    legacy = header(request.headers, "X-Idempotency-Key", nothing)
+    return legacy !== nothing && !isempty(legacy::String)
+end
+
+@inline function _retryable_request_body(request::Request)::Bool
+    return request.content_length == 0 || request.body isa EmptyBody || request.body isa BytesBody
+end
+
+@inline function _retryable_policy_request(request::Request, retry_non_idempotent::Bool)::Bool
+    _retryable_request_body(request) || return false
+    retry_non_idempotent && return true
+    return _retryable_request_method(request.method) || _retryable_request_headers(request)
+end
+
+function _retryable_request_error(err)::Bool
+    err isa EOFError && return true
+    err isa SystemError && return true
+    err isa ParseError && return true
+    err isa HostResolvers.DNSTimeoutError && return true
+    err isa HostResolvers.DNSOpError && return _retryable_request_error((err::HostResolvers.DNSOpError).err)
+    err isa IOPoll.NetClosingError && return true
+    err isa IOPoll.NotPollableError && return true
+    err isa IOPoll.DeadlineExceededError && return false
+    err isa TLS.TLSHandshakeTimeoutError && return true
+    if err isa TLS.TLSError
+        cause = (err::TLS.TLSError).cause
+        cause === nothing && return false
+        return _retryable_request_error(cause::Exception)
+    end
+    return false
+end
+
+function _retry_hook_decision(controller::_RetryController, attempt::Int, err, req::Request, resp)
+    hook = controller.retry_if
+    hook === nothing && return nothing
+    decision = hook(attempt, err, req, resp)
+    (decision === nothing || decision isa Bool) || throw(ArgumentError("retry_if must return Bool or nothing"))
+    return decision
+end
+
+function _should_retry_request_attempt(controller::_RetryController, attempt::Int, req::Request, err, resp)::Bool
+    controller.enabled || return false
+    controller.remaining > 0 || return false
+    _retryable_request_body(req) || return false
+    built_in = false
+    if err !== nothing
+        built_in = _retryable_policy_request(req, controller.retry_non_idempotent) && _retryable_request_error(err)
+    elseif resp !== nothing
+        built_in = _retryable_policy_request(req, controller.retry_non_idempotent) && _retryable_status_code((resp::Response).status_code)
+    end
+    decision = _retry_hook_decision(controller, attempt, err, req, resp)
+    decision === nothing && return built_in
+    return decision::Bool
+end
+
+@inline function _retry_bucket_for_request(client::Client, retry_bucket::Bool)
+    retry_bucket || return nothing
+    return client.transport.retry_bucket
+end
+
+@inline function _retry_bucket_for_request(client::Client, retry_bucket::RetryBucket)
+    _ = client
+    return retry_bucket
+end
+
+@inline function _retry_partition_for_address(address::AbstractString)::String
+    host, _ = HostResolvers.split_host_port(address)
+    return lowercase(host)
+end
+
+function _retry_delay_ns(
+        controller::_RetryController,
+        attempt::Int,
+        response::Union{Nothing, Response},
+    )::Int64
+    retry_after_ns = nothing
+    if controller.respect_retry_after && response !== nothing
+        status = (response::Response).status_code
+        if status == 429 || status == 503
+            retry_after_ns = _retry_after_delay_ns((response::Response).headers)
+        end
+    end
+    return _retry_delay_ns(controller.bucket, attempt; retry_after_ns = retry_after_ns)
+end
+
+function _sleep_retry_delay!(request::Request, delay_ns::Int64)::Bool
+    delay_ns < 0 && return false
+    deadline_ns = _request_deadline_ns(request)
+    if deadline_ns != 0
+        now_ns = Int64(time_ns())
+        now_ns >= deadline_ns && return false
+        now_ns > typemax(Int64) - delay_ns && return false
+        now_ns + delay_ns <= deadline_ns || return false
+    end
+    delay_ns == 0 && return true
+    sleep(delay_ns / 1.0e9)
+    return true
+end
+
+function _release_retry_token!(controller::_RetryController, token)
+    token === nothing && return nothing
+    bucket = controller.bucket
+    bucket === nothing && return nothing
+    Base.release(bucket::RetryBucket, token)
+    return nothing
+end
+
+function _release_retry_token!(controller::_RetryController, token, err)
+    token === nothing && return nothing
+    bucket = controller.bucket
+    bucket === nothing && return nothing
+    Base.release(bucket::RetryBucket, token, err)
+    return nothing
+end
+
+function _arm_request_retry!(
+        controller::_RetryController,
+        address::AbstractString,
+        request::Request,
+        attempt::Int,
+        response::Union{Nothing, Response},
+    )
+    delay_ns = _retry_delay_ns(controller, attempt, response)
+    token = nothing
+    bucket = controller.bucket
+    if bucket !== nothing
+        try
+            token = Base.acquire(bucket::RetryBucket, _retry_partition_for_address(address))
+        catch err
+            err isa RetryDeniedError || rethrow(err)
+            return false, nothing
+        end
+    end
+    ok = false
+    try
+        _sleep_retry_delay!(request, delay_ns) || return false, nothing
+        ok = true
+    finally
+        ok || _release_retry_token!(controller, token)
+    end
+    controller.remaining -= 1
+    return true, token
+end
+
+function _retry_controller(
+        client::Client;
+        retry::Bool,
+        retries::Integer,
+        retry_non_idempotent::Bool,
+        retry_if,
+        respect_retry_after::Bool,
+        retry_bucket::Union{Bool, RetryBucket},
+    )::_RetryController
+    retries isa Bool && throw(ArgumentError("retries must be >= 0"))
+    retries >= 0 || throw(ArgumentError("retries must be >= 0"))
+    return _RetryController(
+        retry && retries > 0,
+        Int(retries),
+        retry_non_idempotent,
+        retry_if,
+        respect_retry_after,
+        _retry_bucket_for_request(client, retry_bucket),
+    )
+end
+
+function _retry_policy_response(incoming::_IncomingResponse, fallback_request::Request)::Response
+    head = incoming.head
+    return Response(
+        head.status_code;
+        reason = head.reason,
+        headers = head.headers,
+        trailers = head.trailers,
+        body = nothing,
+        content_length = head.content_length,
+        proto_major = head.proto_major,
+        proto_minor = head.proto_minor,
+        close = head.close,
+        request = head.request === nothing ? fallback_request : (head.request::Request),
+        request_url = head.request_url,
+        previous = head.previous,
+        redirect_count = head.redirect_count,
+    )
+end
+
 """
     request(method, url, headers=Pair{String,String}[], body=nothing; kwargs...)
 
@@ -2021,6 +2284,13 @@ Keyword arguments:
   `(username, password)` or `username => password`; explicit
   `Authorization` headers take precedence, and URL `userinfo` is only used as a
   fallback when neither is provided
+- `retry`: overall toggle for high-level request retries; lower-level reused-connection transport retries still happen independently
+- `retries`: maximum number of retry attempts after the initial request attempt
+- `retry_non_idempotent`: allow automatic retries for methods like `POST`/`PATCH`; `PUT` and `DELETE` are already treated as idempotent
+- `retry_if`: optional callback `(attempt, err, req, resp) -> Bool | nothing`; `true` forces a retry when the request body is replayable, `false` suppresses retry, and `nothing` defers to built-in retry rules
+- `respect_retry_after`: honor server `Retry-After` on retryable `429`/`503` responses
+- `retry_bucket`: `true` uses the request transport's default `RetryBucket`, `false` disables bucket coordination, and a custom `RetryBucket` overrides the transport default
+- automatic retries only occur for replayable request bodies; built-in policy retries idempotent methods (`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`) plus requests carrying `Idempotency-Key`/`X-Idempotency-Key`
 - `status_exception`: throw `StatusError` for non-success responses
 - `redirect`: follow redirects through `do!`
 - `redirect_limit`: maximum number of redirects to follow for this call;
@@ -2054,6 +2324,11 @@ Keyword arguments:
 - `require_ssl_verification`: disable certificate verification only for testing
 - `protocol`: `:auto`, `:h1`, or `:h2`
 
+The built-in retry policy is intentionally conservative: it retries transient
+transport errors plus retryable `408`/`429`/`5xx` responses for replayable
+requests, but does not automatically retry request read-timeout/deadline
+failures.
+
 Returns a high-level `Response`. When no response sink is provided,
 `response.body` is a fully materialized `Vector{UInt8}`. When `response_stream`
 or `response_body` is provided, the final `Response` contains either the filled
@@ -2062,7 +2337,7 @@ buffer/view or `nothing` for `IO` sinks.
 Throws `ArgumentError` for unsupported inputs or invalid sink combinations,
 `StatusError` when `status_exception=true` and the response status is considered
 failing, plus any lower-level transport or protocol exception raised during the
-request.
+request. Automatic retries only occur for replayable request bodies.
 """
 function request(
         method::Union{AbstractString, Symbol},
@@ -2072,6 +2347,12 @@ function request(
         headers = h,
         body = b,
         basicauth = nothing,
+        retry::Bool = true,
+        retries::Integer = 4,
+        retry_non_idempotent::Bool = false,
+        retry_if = nothing,
+        respect_retry_after::Bool = true,
+        retry_bucket::Union{Bool, RetryBucket} = true,
         status_exception::Bool = true,
         redirect::Bool = true,
         redirect_limit::Union{Nothing, Integer} = nothing,
@@ -2118,6 +2399,15 @@ function request(
         set_deadline!(req.context, Int64(time_ns()) + timeout_ns)
     end
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
+    retry_controller = _retry_controller(
+        req_client;
+        retry = retry,
+        retries = retries,
+        retry_non_idempotent = retry_non_idempotent,
+        retry_if = retry_if,
+        respect_retry_after = respect_retry_after,
+        retry_bucket = retry_bucket,
+    )
     client === nothing || proxy === _USE_TRANSPORT_PROXY || throw(ArgumentError("proxy override is not supported when passing an explicit Client"))
     proxy_config = _proxy_config_for_request(req_client, proxy)
     effective_cookiejar = _effective_cookiejar(client, cookiejar)
@@ -2136,6 +2426,7 @@ function request(
                 redirect_method = redirect_method,
                 forwardheaders = forwardheaders,
             ),
+            retry_controller = retry_controller,
             proxy_config = proxy_config,
             cookies = normalized_cookies,
             cookiejar = effective_cookiejar,
