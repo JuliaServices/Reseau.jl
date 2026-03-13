@@ -154,6 +154,26 @@ resp = HTTP.get("https://www.google.com"; client = client)
 close(client)
 ```
 
+High-level request retries are enabled by default for replayable request bodies.
+You can tune them per call with `retry`, `retries`, `retry_non_idempotent`,
+`retry_if`, `respect_retry_after`, and `retry_bucket`:
+
+```julia
+using Reseau
+const HTTP = Reseau.HTTP
+
+resp = HTTP.get(
+    "https://example.com/health";
+    retries = 2,
+    retry_if = (attempt, err, req, resp) -> nothing,
+)
+```
+
+The built-in default is conservative: it retries replayable idempotent requests
+(`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`) and requests carrying
+`Idempotency-Key`, honors `Retry-After` on retryable `429`/`503` responses, and
+does not automatically retry request read timeouts.
+
 ### HTTP Server
 
 ```julia

@@ -173,7 +173,7 @@ end
         @test server.idle_timeout_ns == 44_000_000_000
         @test server.max_header_bytes == 512
 
-        response = HT.get("http://$(address)/"; status_exception = false)
+        response = HT.get("http://$(address)/"; retry = false, status_exception = false)
         @test response.status == 500
         @test String(response.body) == "aborted"
         @test take!(aborted_states) == false
@@ -351,7 +351,7 @@ end
     end
     error_address = _wait_server_addr(error_server)
     try
-        response = HT.get("http://$(error_address)/"; status_exception = false)
+        response = HT.get("http://$(error_address)/"; retry = false, status_exception = false)
         @test response.status == 500
     finally
         _run_with_timeout(() -> HT.forceclose(error_server); label = "error server forceclose")

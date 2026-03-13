@@ -29,6 +29,7 @@ function Stream(
         protocol::Symbol,
         decompress::Union{Nothing, Bool},
         readtimeout::Real,
+        retry_controller::Union{Nothing, _RetryController},
     )
     readtimeout >= 0 || throw(ArgumentError("readtimeout must be >= 0"))
     return Stream(
@@ -46,6 +47,7 @@ function Stream(
         protocol,
         decompress,
         Float64(readtimeout),
+        retry_controller,
         IOBuffer(),
         nothing,
         nothing,
@@ -150,6 +152,7 @@ function _client_start_stream_read!(stream::Stream)::Response
         server_name = stream.parsed.server_name,
         protocol = stream.protocol,
         redirect_policy = stream.redirect ? stream.redirect_policy : _redirect_policy(stream.client; redirect_limit = 0),
+        retry_controller = stream.retry_controller,
         proxy_config = stream.proxy_config,
         cookies = stream.cookies,
         cookiejar = stream.cookiejar,
@@ -303,11 +306,16 @@ The returned `Stream` buffers request writes locally until `startread(stream)`
 or the end of the `do` block. Once reading starts, `stream` behaves like a
 readable `IO` for the response body. `kwargs` largely mirror `request(...)`,
 including `redirect`, `redirect_limit`, `redirect_method`,
-`forwardheaders`, `cookies`, `cookiejar`, `decompress`, `basicauth`,
-`client`, `connect_timeout`, `readtimeout`, `require_ssl_verification`, and
-`protocol`. `basicauth` accepts `(username, password)` credentials; explicit
-`Authorization` headers take precedence, and URL `userinfo` is only used as a
-fallback when neither is provided.
+`forwardheaders`, `cookies`, `cookiejar`, `decompress`, `basicauth`, `retry`,
+`retries`, `retry_non_idempotent`, `retry_if`, `respect_retry_after`,
+`retry_bucket`, `client`, `connect_timeout`, `readtimeout`,
+`require_ssl_verification`, and `protocol`. `basicauth` accepts
+`(username, password)` credentials; explicit `Authorization` headers take
+precedence, and URL `userinfo` is only used as a fallback when neither is
+provided. As with `request(...)`, automatic retries only occur for replayable
+request bodies, `retry_bucket=true` uses the transport's default `RetryBucket`,
+and the built-in policy does not automatically retry request
+read-timeout/deadline failures.
 
 The `do`-block form closes request writes automatically, closes the readable
 side on exit, and returns the final response metadata.
@@ -319,6 +327,12 @@ function open(
         method::Symbol,
         url::AbstractString,
         headers = Pair{String, String}[];
+        retry::Bool = true,
+        retries::Integer = 4,
+        retry_non_idempotent::Bool = false,
+        retry_if = nothing,
+        respect_retry_after::Bool = true,
+        retry_bucket::Union{Bool, RetryBucket} = true,
         redirect::Bool = true,
         redirect_limit::Union{Nothing, Integer} = nothing,
         redirect_method = nothing,
@@ -343,6 +357,15 @@ function open(
     _apply_default_accept_encoding!(req_headers, decompress)
     _apply_request_authorization!(req_headers, basicauth, parsed.authorization)
     req_client, owns_client = _client_for_request(client; connect_timeout = connect_timeout, require_ssl_verification = require_ssl_verification)
+    retry_controller = _retry_controller(
+        req_client;
+        retry = retry,
+        retries = retries,
+        retry_non_idempotent = retry_non_idempotent,
+        retry_if = retry_if,
+        respect_retry_after = respect_retry_after,
+        retry_bucket = retry_bucket,
+    )
     client === nothing || proxy === _USE_TRANSPORT_PROXY || throw(ArgumentError("proxy override is not supported when passing an explicit Client"))
     proxy_config = _proxy_config_for_request(req_client, proxy)
     effective_cookiejar = _effective_cookiejar(client, cookiejar)
@@ -359,6 +382,7 @@ function open(
         protocol = protocol,
         decompress = decompress,
         readtimeout = readtimeout,
+        retry_controller = retry_controller,
         redirect_policy = _redirect_policy(
             req_client;
             redirect_limit = redirect_limit,

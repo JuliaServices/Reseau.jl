@@ -1162,7 +1162,7 @@ end
         @test resp_auth.status == 200
         @test seen_open_auth[] == "Basic YWxpY2U6c2VjcmV0"
 
-        resp_abort = HT.open(:GET, "$(base_url)/open-abort"; status_exception = false) do stream
+        resp_abort = HT.open(:GET, "$(base_url)/open-abort"; retry = false, status_exception = false) do stream
             meta = HT.startread(stream)
             @test meta.status == 500
             @test HT.isaborted(stream)

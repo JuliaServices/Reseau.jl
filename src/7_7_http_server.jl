@@ -134,6 +134,7 @@ mutable struct Stream <: IO
     protocol::Symbol
     decompress::Union{Nothing, Bool}
     readtimeout::Float64
+    retry_controller::Union{Nothing, _RetryController}
     request_buffer::IOBuffer
     response::Union{Nothing, Response}
     reader::Union{Nothing, IO}
@@ -173,6 +174,7 @@ function Stream(server::Server, tracked::_ServerConn, request::Request)
         :auto,
         nothing,
         0.0,
+        nothing,
         IOBuffer(),
         response,
         nothing,
@@ -213,6 +215,7 @@ function Stream(request::Request)
         :auto,
         nothing,
         0.0,
+        nothing,
         IOBuffer(),
         response,
         nothing,
