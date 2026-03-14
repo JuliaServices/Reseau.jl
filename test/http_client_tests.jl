@@ -880,6 +880,34 @@ end
             @test status_err.response.url == "$(base_url)/missing"
         end
 
+        parsed = HT._parse_http_url("http://alice:secret@$(address)/lazy/path?x=1#frag"; query = Dict("y" => 2))
+        @test !parsed.secure
+        @test parsed.address == "$(address)"
+        @test parsed.address === parsed.address
+        @test parsed.target == "/lazy/path?x=1&y=2"
+        @test parsed.target === parsed.target
+        @test parsed.server_name == "127.0.0.1"
+        @test parsed.server_name === parsed.server_name
+        @test parsed.url == "http://$(address)/lazy/path?x=1&y=2"
+        @test parsed.url === parsed.url
+        @test parsed.authorization == "Basic YWxpY2U6c2VjcmV0"
+        @test parsed.authorization === parsed.authorization
+
+        parsed_query = HT._parse_http_url("https://example.com?x=1"; query = Dict("y" => 2))
+        @test parsed_query.secure
+        @test parsed_query.address == "example.com:443"
+        @test parsed_query.target == "/?x=1&y=2"
+        @test parsed_query.server_name == "example.com"
+        @test parsed_query.url == "https://example.com:443/?x=1&y=2"
+        @test parsed_query.authorization === nothing
+
+        parsed_ipv6 = HT._parse_http_url("https://[2001:db8::1]/ipv6")
+        @test parsed_ipv6.address == "[2001:db8::1]:443"
+        @test parsed_ipv6.target == "/ipv6"
+        @test parsed_ipv6.server_name == "2001:db8::1"
+        @test parsed_ipv6.url == "https://[2001:db8::1]:443/ipv6"
+        @test parsed_ipv6.authorization === nothing
+
         _wait_task_client!(server_task)
         @test "/hello" in seen_targets
         @test "/echo" in seen_targets

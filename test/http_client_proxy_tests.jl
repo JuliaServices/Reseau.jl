@@ -479,6 +479,7 @@ end
     proxy_addr = NC.addr(proxy_listener)::NC.SocketAddrV4
     proxy_address = ND.join_host_port("127.0.0.1", Int(proxy_addr.port))
     seen_h2_path = Ref{Union{Nothing, String}}(nothing)
+    tunnel_done = Base.Event()
     origin_task = errormonitor(Threads.@spawn begin
         conn = TL.accept!(origin_listener)
         try
@@ -543,7 +544,7 @@ end
             _send_response_proxy!(client_conn, connect_req; status = 200, reason = "Connection Established", headers = HT.Headers())
             errormonitor(Threads.@spawn _bridge_proxy!(client_conn, origin_conn))
             errormonitor(Threads.@spawn _bridge_proxy!(origin_conn, client_conn))
-            sleep(0.3)
+            wait(tunnel_done)
         finally
             try
                 NC.close!(client_conn)
@@ -565,6 +566,7 @@ end
         )
         @test response.status == 200
         @test String(response.body) == "h2-proxied"
+        notify(tunnel_done)
         close(HT._default_client!())
         _reset_default_http_client_proxy!()
         _wait_task_proxy!(origin_task)
