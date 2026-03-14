@@ -1002,9 +1002,14 @@ Unlike `read!`, a successful return means the full buffer was written. In
 non-blocking mode this loops on `EAGAIN` by waiting for write readiness and
 then resuming from the first unwritten byte.
 """
-function write!(fd::FD, p::Vector{UInt8})::Int
-    GC.@preserve p begin
-        return _write_ptr!(fd, pointer(p), length(p))
+function write!(fd::FD, p::AbstractVector{UInt8})::Int
+    data = if p isa StridedVector{UInt8} && stride(p, 1) == 1
+        p
+    else
+        Vector{UInt8}(p)
+    end
+    GC.@preserve data begin
+        return _write_ptr!(fd, pointer(data), length(data))
     end
 end
 

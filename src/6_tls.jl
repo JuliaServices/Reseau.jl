@@ -1122,13 +1122,24 @@ Throws `TLSError` on TLS failure. A write timeout becomes a permanent write erro
 the connection, matching Go's behavior that a timed-out TLS write leaves record framing
 state ambiguous for future writes.
 """
-function Base.write(conn::Conn, buf::Vector{UInt8})::Int
+function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
     return _write!(conn, buf, length(buf))
 end
 
 function Base.write(conn::Conn, buf::Memory{UInt8}, nbytes::Integer)::Int
     return _write!(conn, buf, nbytes)
 end
+
+function _write_buffer(buf::AbstractVector{UInt8}, nbytes::Int)
+    if buf isa StridedVector{UInt8} && stride(buf, 1) == 1
+        return buf
+    end
+    copied = Vector{UInt8}(undef, nbytes)
+    copyto!(copied, 1, buf, 1, nbytes)
+    return copied
+end
+
+_write_buffer(buf::Memory{UInt8}, nbytes::Int) = buf
 
 function _write!(conn::Conn, buf, nbytes::Integer)::Int
     nbytes_int = Int(nbytes)
@@ -1141,9 +1152,10 @@ function _write!(conn::Conn, buf, nbytes::Integer)::Int
     try
         _ensure_open!(conn, "write")
         conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
+        write_buf = _write_buffer(buf, nbytes_int)
         total = 0
-        GC.@preserve buf begin
-            base_ptr = pointer(buf)
+        GC.@preserve write_buf begin
+            base_ptr = pointer(write_buf)
             while total < nbytes_int
                 chunk_len = nbytes_int - total
                 wrote = @ccall gc_safe = true _LIBSSL.SSL_write(

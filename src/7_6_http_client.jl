@@ -236,9 +236,29 @@ function _effective_tls_config(transport::Transport, address::String, server_nam
 end
 
 function _write_request_bytes!(stream, request_io::IOBuffer)
-    request_bytes = request_io.size
-    n = write(stream, request_io.data, request_bytes)
+    data = take!(request_io)
+    request_bytes = length(data)
+    request_bytes == 0 && return nothing
+    n = write(stream, data)
     n == request_bytes || throw(ProtocolError("transport short write"))
+    return nothing
+end
+
+function _write_request_streaming!(
+        request_io::IOBuffer,
+        stream,
+        request::Request;
+        wire_target::Union{Nothing, AbstractString} = nothing,
+        proxy_authorization::Union{Nothing, AbstractString} = nothing,
+    )
+    if request.content_length >= 0 && request.body isa BytesBody && !headercontains(request.headers, "Transfer-Encoding", "chunked")
+        _write_request_head!(request_io, request; wire_target = wire_target, proxy_authorization = proxy_authorization)
+        _write_request_bytes!(stream, request_io)
+        _write_exact_bytes_body!(stream, request.body::BytesBody, request.content_length)
+        return nothing
+    end
+    write_request!(request_io, request; wire_target = wire_target, proxy_authorization = proxy_authorization)
+    _write_request_bytes!(stream, request_io)
     return nothing
 end
 
@@ -633,18 +653,17 @@ function _roundtrip_incoming!(
         try
             _apply_conn_deadline!(conn, request_deadline)
             request_io = _reset_request_buffer!(conn)
+            stream = _conn_stream(conn)
             try
                 wire_target = plan.mode == _ProxyPlanMode.HTTP_FORWARD ? _request_url(false, String(address), current_request.target) : nothing
                 proxy_auth = plan.mode == _ProxyPlanMode.HTTP_FORWARD && plan.proxy !== nothing ? (plan.proxy::_ProxyTarget).authorization : nothing
-                write_request!(request_io, current_request; wire_target = wire_target, proxy_authorization = proxy_auth)
+                _write_request_streaming!(request_io, stream, current_request; wire_target = wire_target, proxy_authorization = proxy_auth)
             finally
                 try
                     body_close!(current_request.body)
                 catch
                 end
             end
-            stream = _conn_stream(conn)
-            _write_request_bytes!(stream, request_io)
             reader = conn.reader
             raw_response = _read_incoming_response(reader, current_request)
             # HTTP/1 informational responses are consumed internally so callers
@@ -1355,7 +1374,7 @@ function _do_incoming!(
     current_secure = secure
     explicit_server_name = server_name !== nothing
     current_server_name = explicit_server_name ? String(server_name::AbstractString) : _host_for_sni(current_address)
-    current_request = _copy_request_for_send(request; allow_nonreplayable = true)
+    current_request = _copy_request_shallow_body(request)
     controller = retry_controller
     previous_response = nothing
     retry_attempt = 1
@@ -1657,6 +1676,25 @@ function _read_all_response_bytes(io::IO)::Vector{UInt8}
     end
 end
 
+const _MAX_EAGER_RESPONSE_PREALLOC = Int64(1 << 20)
+
+function _read_all_response_bytes(body::AbstractBody; content_length_hint::Int64 = Int64(-1))::Vector{UInt8}
+    if 0 <= content_length_hint <= _MAX_EAGER_RESPONSE_PREALLOC
+        out = Vector{UInt8}(undef, Int(content_length_hint))
+        n = _copy_response_bytes!(out, body)
+        n == content_length_hint || resize!(out, Int(n))
+        return out
+    end
+    out = UInt8[]
+    content_length_hint > 0 && sizehint!(out, Int(min(content_length_hint, _MAX_EAGER_RESPONSE_PREALLOC)))
+    buf = Vector{UInt8}(undef, 8192)
+    while true
+        n = body_read!(body, buf)
+        n == 0 && return out
+        append!(out, @view(buf[1:n]))
+    end
+end
+
 function _copy_response_bytes!(dest::IO, io::IO)::Int64
     buf = Vector{UInt8}(undef, 8192)
     total = Int64(0)
@@ -1674,6 +1712,33 @@ function _copy_response_bytes!(dest::AbstractVector{UInt8}, io::IO)::Int64
     capacity = length(dest)
     while true
         n = readbytes!(io, buf, length(buf))
+        n == 0 && break
+        needed = total + n
+        needed <= capacity || throw(ArgumentError("Unable to grow response stream IOBuffer $(capacity) large enough for response body size: $(needed)"))
+        copyto!(dest, total + 1, buf, 1, n)
+        total = needed
+    end
+    dest isa Vector{UInt8} && resize!(dest::Vector{UInt8}, total)
+    return Int64(total)
+end
+
+function _copy_response_bytes!(dest::IO, body::AbstractBody)::Int64
+    buf = Vector{UInt8}(undef, 8192)
+    total = Int64(0)
+    while true
+        n = body_read!(body, buf)
+        n == 0 && return total
+        total += n
+        write(dest, view(buf, 1:n))
+    end
+end
+
+function _copy_response_bytes!(dest::AbstractVector{UInt8}, body::AbstractBody)::Int64
+    buf = Vector{UInt8}(undef, 8192)
+    total = 0
+    capacity = length(dest)
+    while true
+        n = body_read!(body, buf)
         n == 0 && break
         needed = total + n
         needed <= capacity || throw(ArgumentError("Unable to grow response stream IOBuffer $(capacity) large enough for response body size: $(needed)"))
@@ -1772,6 +1837,29 @@ function _consume_incoming_response!(
         sink;
         decompress::Union{Nothing, Bool},
     )::Tuple{Any, Int64}
+    if !_should_decompress_response(incoming.head.headers, decompress)
+        try
+            if sink === nothing
+                body = _read_all_response_bytes(incoming.rawbody; content_length_hint = incoming.head.content_length)
+                return body, Int64(length(body))
+            end
+            if sink isa IO
+                n = _copy_response_bytes!(sink::IO, incoming.rawbody)
+                return nothing, n
+            end
+            n = _copy_response_bytes!(sink::AbstractVector{UInt8}, incoming.rawbody)
+            if sink isa Vector{UInt8}
+                return sink::Vector{UInt8}, n
+            end
+            return view(sink::AbstractVector{UInt8}, 1:Int(n)), n
+        catch
+            try
+                body_close!(incoming.rawbody)
+            catch
+            end
+            rethrow()
+        end
+    end
     return _with_response_reader(incoming; decompress = decompress) do reader
         if sink === nothing
             body = _read_all_response_bytes(reader)

@@ -34,6 +34,26 @@ end
     @test parsed.target == "/v1"
     @test parsed.content_length == 4
     @test _read_all_body_bytes(parsed.body) == collect(codeunits("ping"))
+
+    function make_streaming_request()
+        headers = HT.Headers()
+        HT.setheader(headers, "host", "example.com")
+        payload = collect(codeunits("streaming-body"))
+        return HT.Request("PUT", "/stream"; headers = headers, body = HT.BytesBody(payload), content_length = length(payload))
+    end
+    expected_io = IOBuffer()
+    HT.write_request!(expected_io, make_streaming_request())
+    streamed_io = IOBuffer()
+    request_buf = IOBuffer()
+    HT._write_request_streaming!(request_buf, streamed_io, make_streaming_request())
+    @test take!(streamed_io) == take!(expected_io)
+
+    partial_body = HT.BytesBody(collect(codeunits("abcdef")))
+    advance_buf = Vector{UInt8}(undef, 2)
+    @test HT.body_read!(partial_body, advance_buf) == 2
+    partial_io = IOBuffer()
+    HT._write_exact_bytes_body!(partial_io, partial_body, 4)
+    @test take!(partial_io) == collect(codeunits("cdef"))
 end
 
 @testset "HTTP/1 response parse/write chunked" begin

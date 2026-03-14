@@ -367,7 +367,10 @@ else
                         TL.handshake!(conn)
                         buf = Vector{UInt8}(undef, 4)
                         n = read!(conn, buf)
-                        n > 0 && write(conn, buf[1:n])
+                        n > 0 && write(conn, view(buf, 1:n))
+                        view_buf = Vector{UInt8}(undef, 3)
+                        n = read!(conn, view_buf)
+                        n > 0 && write(conn, view(view_buf, 1:n))
                         return conn
                     catch err
                         return err
@@ -384,6 +387,11 @@ else
                 recv_buf = Vector{UInt8}(undef, 4)
                 @test read!(client, recv_buf) == 4
                 @test recv_buf == payload
+                payload_view = @view payload[2:4]
+                @test write(client, payload_view) == length(payload_view)
+                recv_view_buf = Vector{UInt8}(undef, length(payload_view))
+                @test read!(client, recv_view_buf) == length(payload_view)
+                @test recv_view_buf == collect(payload_view)
                 @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)

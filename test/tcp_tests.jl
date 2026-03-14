@@ -76,6 +76,11 @@ else
                 nr = _read_exact!(server, recv_buf)
                 @test nr == length(payload)
                 @test recv_buf == payload
+                payload_view = @view payload[2:4]
+                @test write(client, payload_view) == length(payload_view)
+                recv_view_buf = Vector{UInt8}(undef, length(payload_view))
+                @test _read_exact!(server, recv_view_buf) == length(payload_view)
+                @test recv_view_buf == collect(payload_view)
             finally
                 _close_quiet!(server)
                 _close_quiet!(client)

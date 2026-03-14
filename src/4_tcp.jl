@@ -654,7 +654,7 @@ On success, the return value is always `length(buf)`. If the socket cannot
 currently accept data, the call waits for write readiness and resumes until the
 entire buffer has been written or an error/deadline interrupts the operation.
 """
-function Base.write(conn::Conn, buf::Vector{UInt8})::Int
+function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
     return IOPoll.write!(conn.fd.pfd, buf)
 end
 

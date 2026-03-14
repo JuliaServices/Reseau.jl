@@ -78,6 +78,13 @@ function Base.read!(conn::_ChunkReadConn, dst::Vector{UInt8})::Int
     return n
 end
 
+@testset "_read_all_response_bytes caps eager preallocation" begin
+    payload = collect(codeunits("ok"))
+    body = HT.BytesBody(payload)
+    bytes = HT._read_all_response_bytes(body; content_length_hint = HT._MAX_EAGER_RESPONSE_PREALLOC + 1)
+    @test bytes == payload
+end
+
 @testset "_ConnReader uses buffered reads for HTTP/1 parsing" begin
     raw = collect(codeunits("POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhello"))
     conn = _ChunkReadConn(raw; max_chunk = 8)

@@ -465,8 +465,25 @@ function _write_exact_body_dispatch!(io::IO, body::EmptyBody, expected_len::Int6
     return _write_exact_body!(io, body, expected_len)
 end
 
+function _write_exact_bytes_body!(stream, body::BytesBody, expected_len::Int64)
+    expected_len < 0 && throw(ArgumentError("expected_len must be >= 0"))
+    expected_len == 0 && return nothing
+    available = (length(body.data) - body.next_index) + 1
+    available >= expected_len || throw(ProtocolError("body ended before expected Content-Length bytes were written"))
+    stop_index = body.next_index + Int(expected_len) - 1
+    chunk = if body.next_index == 1 && stop_index == length(body.data)
+        body.data
+    else
+        view(body.data, body.next_index:stop_index)
+    end
+    n = write(stream, chunk)
+    n == expected_len || throw(ProtocolError("transport short write"))
+    body.next_index = stop_index + 1
+    return nothing
+end
+
 function _write_exact_body_dispatch!(io::IO, body::BytesBody, expected_len::Int64)
-    return _write_exact_body!(io, body, expected_len)
+    return _write_exact_bytes_body!(io, body, expected_len)
 end
 
 function _write_exact_body_dispatch!(io::IO, body::CallbackBody, expected_len::Int64)
@@ -534,6 +551,49 @@ function _request_has_body(request::Request)::Bool
     return true
 end
 
+function _prepare_request_headers_for_write(
+        request::Request;
+        proxy_authorization::Union{Nothing, AbstractString} = nothing,
+    )::Tuple{Headers, Bool}
+    headers = copy(request.headers)
+    if proxy_authorization !== nothing && !hasheader(headers, "Proxy-Authorization")
+        setheader(headers, "Proxy-Authorization", String(proxy_authorization))
+    end
+    has_host = hasheader(headers, "Host")
+    if !has_host && request.host !== nothing
+        setheader(headers, "Host", request.host::String)
+    end
+    request_close = request.close || _should_close_connection(headers, request.proto_major, request.proto_minor)
+    request_close && setheader(headers, "Connection", "close")
+    use_chunked = headercontains(headers, "Transfer-Encoding", "chunked")
+    if !use_chunked
+        if request.content_length >= 0
+            setheader(headers, "Content-Length", string(request.content_length))
+        elseif _request_has_body(request)
+            use_chunked = true
+            setheader(headers, "Transfer-Encoding", "chunked")
+            removeheader(headers, "Content-Length")
+        else
+            setheader(headers, "Content-Length", "0")
+        end
+    end
+    use_chunked && _prepare_trailer_header!(headers, request.trailers)
+    return headers, use_chunked
+end
+
+function _write_request_head!(
+        io::IO,
+        request::Request;
+        wire_target::Union{Nothing, AbstractString} = nothing,
+        proxy_authorization::Union{Nothing, AbstractString} = nothing,
+    )::Bool
+    headers, use_chunked = _prepare_request_headers_for_write(request; proxy_authorization = proxy_authorization)
+    _write_start_line!(io, request; wire_target = wire_target)
+    _write_headers!(io, headers)
+    write(io, "\r\n")
+    return use_chunked
+end
+
 function _response_has_body(response::Response)::Bool
     _body_allowed_for_status(response.status_code) || return false
     response.body isa EmptyBody && return false
@@ -561,38 +621,13 @@ function write_request!(
         wire_target::Union{Nothing, AbstractString} = nothing,
         proxy_authorization::Union{Nothing, AbstractString} = nothing,
     ) where {B <: AbstractBody}
-    headers = copy(request.headers)
-    if proxy_authorization !== nothing && !hasheader(headers, "Proxy-Authorization")
-        setheader(headers, "Proxy-Authorization", String(proxy_authorization))
-    end
-    has_host = hasheader(headers, "Host")
-    if !has_host && request.host !== nothing
-        setheader(headers, "Host", request.host::String)
-    end
-    request_close = request.close || _should_close_connection(headers, request.proto_major, request.proto_minor)
-    request_close && setheader(headers, "Connection", "close")
-    use_chunked = headercontains(headers, "Transfer-Encoding", "chunked")
-    if !use_chunked
-        if request.content_length >= 0
-            setheader(headers, "Content-Length", string(request.content_length))
-        elseif _request_has_body(request)
-            use_chunked = true
-            setheader(headers, "Transfer-Encoding", "chunked")
-            removeheader(headers, "Content-Length")
-        else
-            setheader(headers, "Content-Length", "0")
-        end
-    end
-    use_chunked && _prepare_trailer_header!(headers, request.trailers)
-    _write_start_line!(io, request; wire_target = wire_target)
-    _write_headers!(io, headers)
-    write(io, "\r\n")
+    use_chunked = _write_request_head!(io, request; wire_target = wire_target, proxy_authorization = proxy_authorization)
     if use_chunked
         _write_chunked_body!(io, request.body, request.trailers)
         return nothing
     end
     request.content_length < 0 && return nothing
-    _write_exact_body!(io, request.body, request.content_length)
+    _write_exact_body_dispatch!(io, request.body, request.content_length)
     return nothing
 end
 
