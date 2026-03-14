@@ -116,6 +116,15 @@ end
     return Char(UInt32(c) + 0x20)
 end
 
+@inline function _to_ascii_lower(b::UInt8)::UInt8
+    0x41 <= b <= 0x5a || return b
+    return b + 0x20
+end
+
+@inline function _is_http_ows_byte(b::UInt8)::Bool
+    return b == 0x20 || b == 0x09
+end
+
 const _COMMON_CANONICAL_HEADER_KEYS = let headers = (
         "Accept",
         "Accept-Charset",
@@ -380,7 +389,7 @@ case-insensitively.
 function hasheader(headers::Headers, key::AbstractString, value::AbstractString)::Bool
     current = header(headers, key, nothing)
     current === nothing && return false
-    return _ascii_lowercase_string(current::String) == _ascii_lowercase_string(value)
+    return _ascii_equal_fold(current::String, value)
 end
 
 """
@@ -457,6 +466,14 @@ end
     return String(chars[1:(i - 1)])
 end
 
+@inline function _ascii_equal_fold(a::AbstractString, b::AbstractString)::Bool
+    ncodeunits(a) == ncodeunits(b) || return false
+    @inbounds for i in 1:ncodeunits(a)
+        _to_ascii_lower(codeunit(a, i)) == _to_ascii_lower(codeunit(b, i)) || return false
+    end
+    return true
+end
+
 @inline function _trim_http_ows(s::AbstractString)::String
     lo = firstindex(s)
     hi = lastindex(s)
@@ -480,6 +497,62 @@ end
     return String(SubString(s, lo, hi))
 end
 
+@inline function _trim_http_ows_bounds(bytes)::Tuple{Int, Int}
+    lo = firstindex(bytes)
+    hi = lastindex(bytes)
+    while lo <= hi && _is_http_ows_byte(bytes[lo])
+        lo += 1
+    end
+    while hi >= lo && _is_http_ows_byte(bytes[hi])
+        hi -= 1
+    end
+    return lo, hi
+end
+
+@inline function _ascii_equal_fold_slice(
+        haystack::Base.CodeUnits{UInt8, String},
+        lo::Int,
+        hi::Int,
+        needle::Base.CodeUnits{UInt8, String},
+        needle_lo::Int,
+        needle_hi::Int,
+    )::Bool
+    (hi - lo) == (needle_hi - needle_lo) || return false
+    j = needle_lo
+    @inbounds for i in lo:hi
+        _to_ascii_lower(haystack[i]) == _to_ascii_lower(needle[j]) || return false
+        j += 1
+    end
+    return true
+end
+
+function _header_value_contains_token(value::String, token::String)::Bool
+    token_bytes = codeunits(token)
+    token_lo, token_hi = _trim_http_ows_bounds(token_bytes)
+    token_hi >= token_lo || return false
+    value_bytes = codeunits(value)
+    i = firstindex(value_bytes)
+    last = lastindex(value_bytes)
+    while i <= last
+        while i <= last && _is_http_ows_byte(value_bytes[i])
+            i += 1
+        end
+        seg_lo = i
+        while i <= last && value_bytes[i] != UInt8(',')
+            i += 1
+        end
+        seg_hi = i - 1
+        while seg_hi >= seg_lo && _is_http_ows_byte(value_bytes[seg_hi])
+            seg_hi -= 1
+        end
+        if seg_hi >= seg_lo && _ascii_equal_fold_slice(value_bytes, seg_lo, seg_hi, token_bytes, token_lo, token_hi)
+            return true
+        end
+        i += 1
+    end
+    return false
+end
+
 """
     headercontains(headers, key, token) -> Bool
 
@@ -491,13 +564,10 @@ This is the helper used for semantics like `Connection: close` and
 tokens rather than one opaque string.
 """
 function headercontains(headers::Headers, key::AbstractString, token::AbstractString)::Bool
-    needle = _ascii_lowercase_string(_trim_http_ows(token))
-    isempty(needle) && return false
-    value = header(headers, key, nothing)
-    value === nothing && return false
-    for part in eachsplit(value::String, ',')
-        candidate = _ascii_lowercase_string(_trim_http_ows(part))
-        candidate == needle && return true
+    needle = token isa String ? (token::String) : String(token)
+    for (name, value) in headers
+        _ascii_equal_fold(name, key) || continue
+        return _header_value_contains_token(value, needle)
     end
     return false
 end

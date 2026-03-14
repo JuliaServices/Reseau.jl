@@ -56,6 +56,17 @@ end
     @test take!(partial_io) == collect(codeunits("cdef"))
 end
 
+@testset "HTTP/1 header serialization preserves stored entries" begin
+    headers = HT.Headers()
+    push!(headers, "X-Test" => "one")
+    push!(headers, "X-Test" => "two")
+    push!(headers, "Set-Cookie" => "a=1")
+    push!(headers, "Set-Cookie" => "b=2")
+    io = IOBuffer()
+    HT._write_headers!(io, headers)
+    @test String(take!(io)) == "X-Test: one\r\nX-Test: two\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n"
+end
+
 @testset "HTTP/1 response parse/write chunked" begin
     raw = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: done\r\n\r\n"
     resp = HT._read_response(IOBuffer(codeunits(raw)))

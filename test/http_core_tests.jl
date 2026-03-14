@@ -50,6 +50,7 @@ end
     @test HT.headercontains(headers, "connection", "upgrade")
     @test HT.headercontains(headers, "connection", "keep-alive")
     @test HT.headercontains(headers, "connection", "close")
+    @test HT.headercontains(headers, "connection", "  UPGRADE\t")
     @test !HT.headercontains(headers, "connection", "te")
 end
 

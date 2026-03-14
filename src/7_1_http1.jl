@@ -289,11 +289,8 @@ function _read_next_chunk!(body::ChunkedBody)
         # Terminal chunk: trailing header block is parsed as trailers.
         parsed_trailers = _read_headers(body.io, body.max_line_bytes, body.max_header_bytes)
         empty!(body.trailers)
-        for key in header_keys(parsed_trailers)
-            values = headers(parsed_trailers, key)
-            for value in values
-                appendheader(body.trailers, key, value)
-            end
+        for (key, value) in parsed_trailers
+            appendheader(body.trailers, key, value)
         end
         body.done = true
         body.chunk_remaining = 0
@@ -420,11 +417,8 @@ function _write_status_line!(io::IO, response::Response)
 end
 
 function _write_headers!(io::IO, hdrs::Headers)
-    for key in header_keys(hdrs)
-        values = headers(hdrs, key)
-        for value in values
-            print(io, key, ": ", value, "\r\n")
-        end
+    for (key, value) in hdrs
+        print(io, key, ": ", value, "\r\n")
     end
     return nothing
 end
