@@ -721,7 +721,7 @@ end
         proto_minor::UInt8,
         close::Bool,
     )::Request{B} where {B <: AbstractBody}
-    return Request{B}(
+    return _request_nocopy(
         method,
         target,
         headers,
@@ -779,7 +779,7 @@ end
         close::Bool,
         request::Union{Nothing, Request},
     )::Response{B} where {B <: AbstractBody}
-    response = Response{B}(
+    return _response_nocopy_exact(
         status_code,
         reason,
         headers,
@@ -794,8 +794,6 @@ end
         nothing,
         0,
     )
-    response.trailers = trailers
-    return response
 end
 
 """

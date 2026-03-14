@@ -1039,34 +1039,34 @@ function _clone_body(body::AbstractBody)::AbstractBody
 end
 
 function _copy_request(request::Request)
-    return Request(
+    return _request_nocopy(
         request.method,
-        request.target;
-        headers = request.headers,
-        trailers = request.trailers,
-        body = _clone_body(request.body),
-        host = request.host,
-        content_length = request.content_length,
-        proto_major = request.proto_major,
-        proto_minor = request.proto_minor,
-        close = request.close,
-        context = request.context,
+        request.target,
+        copy(request.headers),
+        copy(request.trailers),
+        _clone_body(request.body),
+        request.host,
+        request.content_length,
+        request.proto_major,
+        request.proto_minor,
+        request.close,
+        request.context,
     )
 end
 
 function _copy_request_shallow_body(request::Request)
-    return Request(
+    return _request_nocopy(
         request.method,
-        request.target;
-        headers = request.headers,
-        trailers = request.trailers,
-        body = request.body,
-        host = request.host,
-        content_length = request.content_length,
-        proto_major = request.proto_major,
-        proto_minor = request.proto_minor,
-        close = request.close,
-        context = request.context,
+        request.target,
+        copy(request.headers),
+        copy(request.trailers),
+        request.body,
+        request.host,
+        request.content_length,
+        request.proto_major,
+        request.proto_minor,
+        request.close,
+        request.context,
     )
 end
 
@@ -1314,17 +1314,18 @@ function _prepare_request_for_redirect(request::Request, status_code::Int, new_t
         end
         copied
     else
-        Request(
+        _request_nocopy(
             method,
-            new_target;
-            headers = policy.forward_headers ? request.headers : Headers(),
-            host = request.host,
-            body = EmptyBody(),
-            content_length = 0,
-            proto_major = request.proto_major,
-            proto_minor = request.proto_minor,
-            close = request.close,
-            context = request.context,
+            new_target,
+            policy.forward_headers ? copy(request.headers) : Headers(),
+            Headers(),
+            EmptyBody(),
+            request.host,
+            Int64(0),
+            request.proto_major,
+            request.proto_minor,
+            request.close,
+            request.context,
         )
     end
     removeheader(redirected.headers, "Host")
@@ -2433,20 +2434,20 @@ end
 
 function _retry_policy_response(incoming::_IncomingResponse, fallback_request::Request)::Response
     head = incoming.head
-    return Response(
-        head.status_code;
-        reason = head.reason,
-        headers = head.headers,
-        trailers = head.trailers,
-        body = nothing,
-        content_length = head.content_length,
-        proto_major = head.proto_major,
-        proto_minor = head.proto_minor,
-        close = head.close,
-        request = head.request === nothing ? fallback_request : (head.request::Request),
-        request_url = head.request_url,
-        previous = head.previous,
-        redirect_count = head.redirect_count,
+    return _response_nocopy_public(
+        head.status_code,
+        head.reason,
+        head.headers,
+        head.trailers,
+        nothing,
+        head.content_length,
+        head.proto_major,
+        head.proto_minor,
+        head.close,
+        head.request === nothing ? fallback_request : (head.request::Request),
+        head.request_url,
+        head.previous,
+        head.redirect_count,
     )
 end
 
@@ -2633,20 +2634,20 @@ function _finalize_request_response(
         resolved_request::Request,
         request_url::String,
     )::Response
-    return Response(
-        incoming.head.status_code;
-        reason = incoming.head.reason,
-        headers = incoming.head.headers,
-        trailers = incoming.head.trailers,
-        body = body,
-        content_length = body_length,
-        proto_major = incoming.head.proto_major,
-        proto_minor = incoming.head.proto_minor,
-        close = incoming.head.close,
-        request = resolved_request,
-        request_url = incoming.head.request_url === nothing ? request_url : (incoming.head.request_url::String),
-        previous = incoming.head.previous,
-        redirect_count = incoming.head.redirect_count,
+    return _response_nocopy_public(
+        incoming.head.status_code,
+        incoming.head.reason,
+        incoming.head.headers,
+        incoming.head.trailers,
+        body,
+        body_length,
+        incoming.head.proto_major,
+        incoming.head.proto_minor,
+        incoming.head.close,
+        resolved_request,
+        incoming.head.request_url === nothing ? request_url : (incoming.head.request_url::String),
+        incoming.head.previous,
+        incoming.head.redirect_count,
     )
 end
 

@@ -881,6 +881,34 @@ function Request(
     )
 end
 
+@inline function _request_nocopy(
+        method::String,
+        target::String,
+        headers::Headers,
+        trailers::Headers,
+        body::B,
+        host::Union{Nothing, String},
+        content_length::Int64,
+        proto_major::UInt8,
+        proto_minor::UInt8,
+        close::Bool,
+        context::RequestContext,
+    )::Request{B} where {B <: AbstractBody}
+    return Request{B}(
+        method,
+        target,
+        headers,
+        trailers,
+        body,
+        host,
+        content_length,
+        proto_major,
+        proto_minor,
+        close,
+        context,
+    )
+end
+
 """
     Response(status_code; reason="", headers=Headers(), trailers=Headers(), body=EmptyBody(),
              content_length=-1, proto_major=1, proto_minor=1, close=false,
@@ -979,6 +1007,71 @@ function Response(
     )
 end
 
+@inline function _response_nocopy_public(
+        status_code::Int,
+        reason::String,
+        headers::Headers,
+        trailers::Headers,
+        body::B,
+        content_length::Int64,
+        proto_major::UInt8,
+        proto_minor::UInt8,
+        close::Bool,
+        request::Union{Nothing, Request},
+        request_url::Union{Nothing, String},
+        previous::Union{Nothing, Response},
+        redirect_count::Int,
+    )::Response where {B}
+    BodyT = _public_response_body_type(B)
+    return Response{BodyT}(
+        status_code,
+        reason,
+        headers,
+        trailers,
+        body,
+        content_length,
+        proto_major,
+        proto_minor,
+        close,
+        request,
+        request_url,
+        previous,
+        redirect_count,
+    )
+end
+
+@inline function _response_nocopy_exact(
+        status_code::Int,
+        reason::String,
+        headers::Headers,
+        trailers::Headers,
+        body::B,
+        content_length::Int64,
+        proto_major::UInt8,
+        proto_minor::UInt8,
+        close::Bool,
+        request::Union{Nothing, Request},
+        request_url::Union{Nothing, String},
+        previous::Union{Nothing, Response},
+        redirect_count::Int,
+    )::Response{B} where {B}
+    return Response{B}(
+        status_code,
+        reason,
+        headers,
+        trailers,
+        body,
+        content_length,
+        proto_major,
+        proto_minor,
+        close,
+        request,
+        request_url,
+        previous,
+        redirect_count,
+    )
+end
+
 header(message::Union{Request, Response}, key::AbstractString, default = "") =
     header(message.headers, key, default)
 
@@ -1034,7 +1127,7 @@ end
 
 function _streaming_response(incoming::_IncomingResponse)
     head = incoming.head
-    response = Response{typeof(incoming.rawbody)}(
+    return _response_nocopy_exact(
         head.status_code,
         head.reason,
         head.headers,
@@ -1049,6 +1142,4 @@ function _streaming_response(incoming::_IncomingResponse)
         head.previous,
         head.redirect_count,
     )
-    response.trailers = head.trailers
-    return response
 end

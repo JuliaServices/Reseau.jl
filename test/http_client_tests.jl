@@ -525,10 +525,15 @@ end
         @test String(resp.body) == "ok"
         @test resp.url == "$(base_url)/final"
         @test resp.redirect_count == 1
+        @test resp.request !== nothing
+        @test resp.request.target == "/final"
         @test resp.previous !== nothing
         @test resp.previous.status == 302
         @test resp.previous.url == "$(base_url)/start"
         @test resp.previous.redirect_count == 0
+        @test resp.previous.request !== nothing
+        @test resp.previous.request.target == "/start"
+        @test resp.request !== resp.previous.request
 
         err = try
             HT.get("$(base_url)/limit-start"; redirect_limit = 1)
