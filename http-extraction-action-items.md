@@ -63,7 +63,7 @@
 - Completion criteria:
   - The inventory is recorded in this document or a linked companion note with clear keep/move/delete decisions.
 
-### [ ] ITEM-003 (P0) Reset the HTTP package on `master` to a clean 2.0 extraction baseline
+### [x] ITEM-003 (P0) Reset the HTTP package on `master` to a clean 2.0 extraction baseline
 - Description: Replace the current `HTTP/master` package layout with a clean generated-style baseline so the extracted code lands in a deliberate structure instead of incrementally patching the legacy tree. The reset should preserve package identity, CI/doc entrypoints that remain useful, and package metadata that still applies.
 - Desired outcome: The `HTTP` execution worktree contains a minimal package skeleton ready to receive the extracted implementation, with `src/`, `test/`, and `docs/` aligned to the new 2.0 package architecture instead of the old 1.x layout.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml`.
@@ -296,6 +296,11 @@
   - `rg -n 'include\\(\"7_|include\\(\"8_precompile_workload' /Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src` confirmed the HTTP include graph rooted at `src/7_http.jl` plus mixed ownership in `src/8_precompile_workload.jl`.
   - `find /Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test -maxdepth 2 -type f | sort | rg '/http|/hpack|/websocket|trim_compile'` identified the HTTP-owned test tree and mixed `trim_compile_tests.jl` ownership.
   - `find /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs -maxdepth 3 -type f | sort` plus a targeted `Project.toml`/workflow/docs read confirmed that `HTTP/master` is largely replace-all in `src/`, `test/`, and `docs/`, with only package identity and workflow/documenter scaffolding worth preserving.
+- ITEM-003:
+  - `git -C /Users/jacob.quinn/.julia/dev/HTTP-split-worktree rm -r src test docs` cleared the legacy 1.x package trees in the clean execution worktree.
+  - Minimal 2.0 shell files were recreated at `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/HTTP.jl`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/runtests.jl`, and `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/**`.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); using HTTP; println(HTTP); println(HTTP.VERSION)'` loaded the package and printed `HTTP` then `2.0.0`.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.test()'` passed the new `HTTP 2.0 skeleton` testset.
 
 ## Continuity
 
