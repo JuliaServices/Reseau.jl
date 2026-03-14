@@ -41,7 +41,7 @@
   - Clean execution worktrees exist for both repositories.
   - The action-item file reflects the actual worktree paths and branch names to use for all later items.
 
-### [ ] ITEM-002 (P0) Produce the extraction inventory and ownership map
+### [x] ITEM-002 (P0) Produce the extraction inventory and ownership map
 - Description: Inventory every HTTP-owned source file, test, fixture, and doc responsibility currently living in `Reseau`, and contrast that against what still exists on `HTTP/master`. This is the map that prevents orphaned code, missing exports, or silently dropped tests during the split.
 - Desired outcome: A concrete migration inventory exists that identifies exactly what moves to `HTTP`, what stays in `Reseau`, what is deleted from `HTTP/master`, and what shared assumptions need to be untangled.
 - Affected files: `src/Reseau.jl`, `src/7_*.jl`, `src/8_precompile_workload.jl`, `test/http*.jl`, `test/hpack_tests.jl`, `test/websockets/**`, `/Users/jacob.quinn/.julia/dev/HTTP/src/**`, `/Users/jacob.quinn/.julia/dev/HTTP/test/**`, `/Users/jacob.quinn/.julia/dev/HTTP/docs/**`, and this action-item file.
@@ -85,19 +85,20 @@
 
 ### [ ] ITEM-004 (P0) Port the HTTP 2.0 source implementation from Reseau into HTTP
 - Description: Move the actual HTTP client/server/websocket/HTTP2 implementation out of `Reseau` and into `HTTP`, preserving behavior while untangling package boundaries, module names, dependencies, includes, exports, and precompile flow.
-- Desired outcome: `HTTP` becomes the authoritative home of the extracted implementation with no runtime dependency on `Reseau` for HTTP behavior.
+- Desired outcome: `HTTP` becomes the authoritative home of the extracted implementation while depending on `Reseau` as the lower-level transport/TCP/TLS substrate where appropriate.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/7_*.jl`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/8_precompile_workload.jl`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml`.
 - Implementation notes:
   - Re-root the `Reseau.HTTP` module tree into `HTTP`.
   - Translate `include` order and internal module references cleanly.
-  - Replace `Reseau`-specific naming, namespaces, and dependency assumptions with package-local `HTTP` equivalents.
+  - Replace `Reseau.HTTP`-specific naming and module nesting with package-local `HTTP` equivalents.
+  - Keep explicit `Reseau` package dependencies where the HTTP stack should continue to call into the extracted transport/TCP/TLS layers.
   - Reconcile dependency lists, compat bounds, and precompile workload ownership.
   - Ensure the resulting source layout stays readable and reviewable instead of mirroring temporary extraction mechanics.
 - Verification:
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); using HTTP'`
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using HTTP; println(HTTP.VERSION)'`
 - Assumptions:
-  - Non-HTTP networking primitives remain in `Reseau`; any HTTP code that still needs them should depend on external/public interfaces rather than a package-internal backchannel.
+  - Non-HTTP networking primitives remain in `Reseau`, and `HTTP` 2.0 will depend on `Reseau` directly rather than duplicating those layers.
 - Risks:
   - Subtle namespace, initialization-order, or dependency-cycle bugs during the module split.
   - Platform-specific behavior tied to `Reseau` internals may need a cleaner abstraction boundary instead of a straight move.
@@ -290,6 +291,11 @@
   - `git -C /Users/jacob.quinn/.julia/dev/HTTP-split-worktree status --short --branch` returned a clean `## codex/http-2.0-extraction`.
   - `git -C /Users/jacob.quinn/.julia/dev/Reseau worktree list` shows `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree` on `codex/reseau-http-split` alongside the original checkout.
   - `git -C /Users/jacob.quinn/.julia/dev/Reseau-split-worktree status --short --branch` returned a clean `## codex/reseau-http-split`.
+- ITEM-002:
+  - Companion inventory note recorded at `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/http-extraction-inventory.md`.
+  - `rg -n 'include\\(\"7_|include\\(\"8_precompile_workload' /Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src` confirmed the HTTP include graph rooted at `src/7_http.jl` plus mixed ownership in `src/8_precompile_workload.jl`.
+  - `find /Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test -maxdepth 2 -type f | sort | rg '/http|/hpack|/websocket|trim_compile'` identified the HTTP-owned test tree and mixed `trim_compile_tests.jl` ownership.
+  - `find /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs -maxdepth 3 -type f | sort` plus a targeted `Project.toml`/workflow/docs read confirmed that `HTTP/master` is largely replace-all in `src/`, `test/`, and `docs/`, with only package identity and workflow/documenter scaffolding worth preserving.
 
 ## Continuity
 
