@@ -58,6 +58,71 @@ function ND.resolve_tcp_addrs(
     return copy(resolver.addrs)
 end
 
+mutable struct _FlappingResolver <: ND.AbstractResolver
+    responses::Vector{Vector{NC.SocketEndpoint}}
+    delay_s::Float64
+    lock::ReentrantLock
+    calls::Int
+end
+
+function _FlappingResolver(responses::Vector{Vector{NC.SocketEndpoint}}; delay_s::Float64 = 0.0)
+    return _FlappingResolver(responses, delay_s, ReentrantLock(), 0)
+end
+
+function ND.resolve_tcp_addrs(
+        resolver::_FlappingResolver,
+        network::AbstractString,
+        address::AbstractString;
+        op::Symbol = :connect,
+        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
+    )::Vector{NC.SocketEndpoint}
+    _ = network
+    _ = address
+    _ = op
+    _ = policy
+    lock(resolver.lock)
+    try
+        resolver.calls += 1
+        idx = min(resolver.calls, length(resolver.responses))
+        sleep(resolver.delay_s)
+        return copy(resolver.responses[idx])
+    finally
+        unlock(resolver.lock)
+    end
+end
+
+mutable struct _ErrorResolver <: ND.AbstractResolver
+    delay_s::Float64
+    lock::ReentrantLock
+    calls::Int
+    err::Exception
+end
+
+function _ErrorResolver(err::Exception; delay_s::Float64 = 0.0)
+    return _ErrorResolver(delay_s, ReentrantLock(), 0, err)
+end
+
+function ND.resolve_tcp_addrs(
+        resolver::_ErrorResolver,
+        network::AbstractString,
+        address::AbstractString;
+        op::Symbol = :connect,
+        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
+    )::Vector{NC.SocketEndpoint}
+    _ = network
+    _ = address
+    _ = op
+    _ = policy
+    lock(resolver.lock)
+    try
+        resolver.calls += 1
+    finally
+        unlock(resolver.lock)
+    end
+    sleep(resolver.delay_s)
+    throw(resolver.err)
+end
+
 function _nd_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
     return timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
 end
@@ -443,6 +508,64 @@ else
                 _nd_close_quiet!(listener)
                 EL.shutdown!()
             end
+        end
+        @testset "caching resolver fresh/stale/negative behavior" begin
+            addr_a = NC.loopback_addr(1111)
+            addr_b = NC.loopback_addr(2222)
+
+            fresh_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
+            fresh_cache = ND.CachingResolver(fresh_parent; ttl_ns = 1_000_000_000, stale_ttl_ns = 0, negative_ttl_ns = 0, max_hosts = 8)
+            @test ND.resolve_tcp_addrs(fresh_cache, "tcp", "cache.test:80") == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
+            @test ND.resolve_tcp_addrs(fresh_cache, "tcp", "cache.test:80") == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
+            @test fresh_parent.calls == 1
+            @test (@atomic :acquire fresh_cache.cache_hits) == 1
+
+            stale_parent = _FlappingResolver([NC.SocketEndpoint[addr_a], NC.SocketEndpoint[addr_b]]; delay_s = 0.02)
+            stale_cache = ND.CachingResolver(stale_parent; ttl_ns = 10_000_000, stale_ttl_ns = 200_000_000, negative_ttl_ns = 0, max_hosts = 8)
+            first = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
+            sleep(0.02)
+            second = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
+            @test first == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
+            @test second == NC.SocketEndpoint[NC.SocketAddrV4(addr_a.ip, 80)]
+            @test (@atomic :acquire stale_cache.stale_hits) == 1
+            @test timedwait(() -> stale_parent.calls >= 2, 2.0; pollint = 0.001) != :timed_out
+            third = ND.resolve_tcp_addrs(stale_cache, "tcp", "stale.test:80")
+            @test third == NC.SocketEndpoint[NC.SocketAddrV4(addr_b.ip, 80)]
+
+            evict_parent = _CountingResolver(0.0, NC.SocketEndpoint[addr_a])
+            evict_cache = ND.CachingResolver(evict_parent; ttl_ns = 1_000_000_000, stale_ttl_ns = 0, negative_ttl_ns = 0, max_hosts = 1)
+            ND.resolve_tcp_addrs(evict_cache, "tcp", "host-one.test:80")
+            ND.resolve_tcp_addrs(evict_cache, "tcp", "host-two.test:80")
+            ND.resolve_tcp_addrs(evict_cache, "tcp", "host-one.test:80")
+            @test evict_parent.calls == 3
+
+            neg_parent = _ErrorResolver(ND.AddressError("lookup failed", "neg.test"); delay_s = 0.0)
+            neg_cache = ND.CachingResolver(neg_parent; ttl_ns = 0, stale_ttl_ns = 0, negative_ttl_ns = 50_000_000, max_hosts = 8)
+            err1 = try
+                ND.resolve_tcp_addrs(neg_cache, "tcp", "neg.test:80")
+                nothing
+            catch ex
+                ex
+            end
+            err2 = try
+                ND.resolve_tcp_addrs(neg_cache, "tcp", "neg.test:80")
+                nothing
+            catch ex
+                ex
+            end
+            @test err1 isa ND.AddressError
+            @test err2 isa ND.AddressError
+            @test neg_parent.calls == 1
+            @test (@atomic :acquire neg_cache.negative_hits) == 1
+            sleep(0.06)
+            err3 = try
+                ND.resolve_tcp_addrs(neg_cache, "tcp", "neg.test:80")
+                nothing
+            catch ex
+                ex
+            end
+            @test err3 isa ND.AddressError
+            @test neg_parent.calls == 2
         end
     end
 end
