@@ -96,6 +96,24 @@ mutable struct ClientConn
     last_used_ns::Int64
 end
 
+const _CONN_WAITER_WAITING = UInt8(0)
+const _CONN_WAITER_CONN = UInt8(1)
+const _CONN_WAITER_DIAL = UInt8(2)
+const _CONN_WAITER_ERROR = UInt8(3)
+const _CONN_WAITER_CANCELED = UInt8(4)
+
+mutable struct _ConnWaiter
+    key::String
+    signal::Channel{Nothing}
+    conn::Union{Nothing, ClientConn}
+    err::Union{Nothing, Exception}
+    @atomic state::UInt8
+end
+
+function _ConnWaiter(key::String)
+    return _ConnWaiter(key, Channel{Nothing}(1), nothing, nothing, _CONN_WAITER_WAITING)
+end
+
 """
     Transport(; ...)
 
@@ -104,6 +122,11 @@ Connection-pooling transport for HTTP/1 requests.
 This is the closest analogue to Go's `http.Transport` in the current codebase.
 It owns dial/TLS policy and decides when an idle connection can be reused versus
 closed.
+
+`max_conns_per_host = 0` leaves per-host concurrency unlimited. Positive values
+bound the total live HTTP/1 connections (idle, in-flight, and dialing) for one
+pool key and cause additional acquires to wait for direct handoff or a freed
+dial slot.
 """
 mutable struct Transport
     host_resolver::HostResolvers.HostResolver
@@ -112,9 +135,12 @@ mutable struct Transport
     retry_bucket::Union{Nothing, RetryBucket}
     max_idle_per_host::Int
     max_idle_total::Int
+    max_conns_per_host::Int
     idle_timeout_ns::Int64
     lock::ReentrantLock
     idle::Dict{String, Vector{ClientConn}}
+    waiters::Dict{String, Vector{_ConnWaiter}}
+    conns_per_host::Dict{String, Int}
     @atomic idle_total::Int
     @atomic closed::Bool
 end
@@ -146,10 +172,12 @@ function Transport(;
         retry_bucket::Union{Nothing, RetryBucket} = RetryBucket(),
         max_idle_per_host::Integer = 2,
         max_idle_total::Integer = 64,
+        max_conns_per_host::Integer = 0,
         idle_timeout_ns::Integer = Int64(90_000_000_000),
     )
     max_idle_per_host > 0 || throw(ArgumentError("max_idle_per_host must be > 0"))
     max_idle_total > 0 || throw(ArgumentError("max_idle_total must be > 0"))
+    max_conns_per_host >= 0 || throw(ArgumentError("max_conns_per_host must be >= 0"))
     idle_timeout_ns >= 0 || throw(ArgumentError("idle_timeout_ns must be >= 0"))
     return Transport(
         host_resolver,
@@ -158,9 +186,12 @@ function Transport(;
         retry_bucket,
         Int(max_idle_per_host),
         Int(max_idle_total),
+        Int(max_conns_per_host),
         Int64(idle_timeout_ns),
         ReentrantLock(),
         Dict{String, Vector{ClientConn}}(),
+        Dict{String, Vector{_ConnWaiter}}(),
+        Dict{String, Int}(),
         0,
         false,
     )
@@ -183,9 +214,9 @@ function _conn_stream(conn::ClientConn)
     return conn.tcp::TCP.Conn
 end
 
-function _close_conn!(conn::ClientConn)
+function _close_conn!(conn::ClientConn)::Bool
     if _conn_closed(conn)
-        return nothing
+        return false
     end
     @atomic :release conn.closed = true
     if conn.secure
@@ -203,6 +234,167 @@ function _close_conn!(conn::ClientConn)
             end
         end
     end
+    return true
+end
+
+@inline function _notify_waiter!(waiter::_ConnWaiter)
+    isready(waiter.signal) || put!(waiter.signal, nothing)
+    return nothing
+end
+
+@inline function _waiter_waiting(waiter::_ConnWaiter)::Bool
+    return (@atomic :acquire waiter.state) == _CONN_WAITER_WAITING
+end
+
+function _enqueue_waiter_locked!(transport::Transport, waiter::_ConnWaiter)
+    queue = get(() -> _ConnWaiter[], transport.waiters, waiter.key)
+    push!(queue, waiter)
+    transport.waiters[waiter.key] = queue
+    return waiter
+end
+
+function _remove_waiter_locked!(transport::Transport, key::String, waiter::_ConnWaiter)
+    queue = get(() -> nothing, transport.waiters, key)
+    queue === nothing && return nothing
+    idx = findfirst(isequal(waiter), queue::Vector{_ConnWaiter})
+    idx === nothing || deleteat!(queue::Vector{_ConnWaiter}, idx)
+    isempty(queue::Vector{_ConnWaiter}) && delete!(transport.waiters, key)
+    return nothing
+end
+
+function _next_waiter_locked!(transport::Transport, key::String)::Union{Nothing, _ConnWaiter}
+    queue = get(() -> nothing, transport.waiters, key)
+    queue === nothing && return nothing
+    while !isempty(queue::Vector{_ConnWaiter})
+        waiter = popfirst!(queue::Vector{_ConnWaiter})
+        if _waiter_waiting(waiter)
+            isempty(queue::Vector{_ConnWaiter}) && delete!(transport.waiters, key)
+            return waiter
+        end
+    end
+    delete!(transport.waiters, key)
+    return nothing
+end
+
+@inline function _conn_slots_locked(transport::Transport, key::String)::Int
+    return get(() -> 0, transport.conns_per_host, key)
+end
+
+function _reserve_conn_slot_locked!(transport::Transport, key::String)::Bool
+    current = _conn_slots_locked(transport, key)
+    max_per_host = transport.max_conns_per_host
+    if max_per_host != 0 && current >= max_per_host
+        return false
+    end
+    transport.conns_per_host[key] = current + 1
+    return true
+end
+
+function _decrement_conn_slot_locked!(transport::Transport, key::String)
+    current = _conn_slots_locked(transport, key)
+    current <= 1 ? delete!(transport.conns_per_host, key) : (transport.conns_per_host[key] = current - 1)
+    return nothing
+end
+
+function _promote_waiter_to_dial_locked!(transport::Transport, key::String)::Union{Nothing, _ConnWaiter}
+    transport.max_conns_per_host == 0 && return nothing
+    _reserve_conn_slot_locked!(transport, key) || return nothing
+    waiter = _next_waiter_locked!(transport, key)
+    if waiter === nothing
+        _decrement_conn_slot_locked!(transport, key)
+        return nothing
+    end
+    waiter.conn = nothing
+    waiter.err = nothing
+    @atomic :release waiter.state = _CONN_WAITER_DIAL
+    return waiter
+end
+
+function _release_conn_slot_locked!(transport::Transport, key::String)::Union{Nothing, _ConnWaiter}
+    _decrement_conn_slot_locked!(transport, key)
+    _transport_closed(transport) && return nothing
+    return _promote_waiter_to_dial_locked!(transport, key)
+end
+
+function _close_owned_conn!(transport::Transport, conn::ClientConn)
+    _close_conn!(conn) || return nothing
+    waiter = nothing
+    lock(transport.lock)
+    try
+        waiter = _release_conn_slot_locked!(transport, conn.key)
+    finally
+        unlock(transport.lock)
+    end
+    waiter === nothing || _notify_waiter!(waiter)
+    return nothing
+end
+
+function _close_owned_conns!(transport::Transport, conns::Vector{ClientConn})
+    for conn in conns
+        _close_owned_conn!(transport, conn)
+    end
+    return nothing
+end
+
+function _deliver_waiter_conn_locked!(waiter::_ConnWaiter, conn::ClientConn)::Bool
+    _waiter_waiting(waiter) || return false
+    waiter.conn = conn
+    waiter.err = nothing
+    @atomic :release waiter.state = _CONN_WAITER_CONN
+    return true
+end
+
+function _deliver_waiter_error_locked!(waiter::_ConnWaiter, err::Exception)::Bool
+    _waiter_waiting(waiter) || return false
+    waiter.conn = nothing
+    waiter.err = err
+    @atomic :release waiter.state = _CONN_WAITER_ERROR
+    return true
+end
+
+function _wait_for_conn!(transport::Transport, waiter::_ConnWaiter, deadline_ns::Int64)
+    while true
+        state = @atomic :acquire waiter.state
+        if state == _CONN_WAITER_CONN
+            return waiter.conn::ClientConn
+        elseif state == _CONN_WAITER_DIAL
+            return :dial
+        elseif state == _CONN_WAITER_ERROR
+            throw(waiter.err::Exception)
+        elseif state == _CONN_WAITER_CANCELED
+            throw(IOPoll.DeadlineExceededError())
+        end
+        if deadline_ns == 0
+            take!(waiter.signal)
+            continue
+        end
+        now_ns = Int64(time_ns())
+        if now_ns >= deadline_ns
+            lock(transport.lock)
+            try
+                if _waiter_waiting(waiter)
+                    _remove_waiter_locked!(transport, waiter.key, waiter)
+                    @atomic :release waiter.state = _CONN_WAITER_CANCELED
+                    throw(IOPoll.DeadlineExceededError())
+                end
+            finally
+                unlock(transport.lock)
+            end
+            continue
+        end
+        timeout_s = min((deadline_ns - now_ns) / 1.0e9, 0.05)
+        timedwait(() -> isready(waiter.signal), timeout_s; pollint = 0.001)
+        isready(waiter.signal) && take!(waiter.signal)
+    end
+end
+
+function _prepare_conn_for_reuse!(conn::ClientConn)
+    if conn.secure
+        conn.tls === nothing || TLS.set_deadline!(conn.tls::TLS.Conn, Int64(0))
+    else
+        conn.tcp === nothing || TCP.set_deadline!(conn.tcp::TCP.Conn, Int64(0))
+    end
+    conn.last_used_ns = time_ns()
     return nothing
 end
 
@@ -314,15 +506,16 @@ function _new_conn!(
     return ClientConn(plan.pool_key, plan.first_hop_address, false, tcp, nothing, _ConnReader(tcp), IOBuffer(), false, false, time_ns())
 end
 
-function _evict_expired_idle_locked!(transport::Transport, key::String, now_ns::Int64)
+function _evict_expired_idle_locked!(transport::Transport, key::String, now_ns::Int64)::Vector{ClientConn}
     idle_list = get(() -> nothing, transport.idle, key)
-    idle_list === nothing && return nothing
+    idle_list === nothing && return ClientConn[]
     kept = ClientConn[]
+    stale = ClientConn[]
     for conn in idle_list::Vector{ClientConn}
         expired = transport.idle_timeout_ns > 0 && (now_ns - conn.last_used_ns) > transport.idle_timeout_ns
         if _conn_closed(conn) || expired
-            _close_conn!(conn)
             @atomic :acquire_release transport.idle_total -= 1
+            push!(stale, conn)
             continue
         end
         push!(kept, conn)
@@ -332,7 +525,7 @@ function _evict_expired_idle_locked!(transport::Transport, key::String, now_ns::
     else
         transport.idle[key] = kept
     end
-    return nothing
+    return stale
 end
 
 function _acquire_conn!(
@@ -344,55 +537,118 @@ function _acquire_conn!(
         deadline_ns::Int64 = Int64(0),
     )::ClientConn
     _transport_closed(transport) && throw(ProtocolError("transport is closed"))
-    lock(transport.lock)
-    try
-        now_ns = Int64(time_ns())
-        _evict_expired_idle_locked!(transport, plan.pool_key, now_ns)
-        idle_list = get(() -> nothing, transport.idle, plan.pool_key)
-        if idle_list !== nothing && !isempty(idle_list::Vector{ClientConn})
-            conn = pop!(idle_list::Vector{ClientConn})
-            @atomic :acquire_release transport.idle_total -= 1
-            isempty(idle_list::Vector{ClientConn}) && delete!(transport.idle, plan.pool_key)
-            if !_conn_closed(conn)
-                conn.reused = true
-                return conn
+    waiter = nothing
+    while true
+        stale = ClientConn[]
+        conn = nothing
+        should_dial = false
+        lock(transport.lock)
+        try
+            _transport_closed(transport) && throw(ProtocolError("transport is closed"))
+            now_ns = Int64(time_ns())
+            append!(stale, _evict_expired_idle_locked!(transport, plan.pool_key, now_ns))
+            idle_list = get(() -> nothing, transport.idle, plan.pool_key)
+            while idle_list !== nothing && !isempty(idle_list::Vector{ClientConn})
+                conn = pop!(idle_list::Vector{ClientConn})
+                @atomic :acquire_release transport.idle_total -= 1
+                isempty(idle_list::Vector{ClientConn}) && delete!(transport.idle, plan.pool_key)
+                if !_conn_closed(conn::ClientConn)
+                    (conn::ClientConn).reused = true
+                    break
+                end
+                push!(stale, conn::ClientConn)
+                conn = nothing
+                idle_list = get(() -> nothing, transport.idle, plan.pool_key)
             end
-            _close_conn!(conn)
+            if conn === nothing && isempty(stale)
+                if _reserve_conn_slot_locked!(transport, plan.pool_key)
+                    should_dial = true
+                else
+                    waiter = _ConnWaiter(plan.pool_key)
+                    _enqueue_waiter_locked!(transport, waiter)
+                end
+            end
+        finally
+            unlock(transport.lock)
         end
-    finally
-        unlock(transport.lock)
+        isempty(stale) || (_close_owned_conns!(transport, stale); continue)
+        if conn !== nothing
+            return conn::ClientConn
+        end
+        if should_dial
+            try
+                return _new_conn!(transport, plan, address; secure = secure, server_name = server_name, deadline_ns = deadline_ns)
+            catch err
+                waiter_to_notify = nothing
+                lock(transport.lock)
+                try
+                    waiter_to_notify = _release_conn_slot_locked!(transport, plan.pool_key)
+                finally
+                    unlock(transport.lock)
+                end
+                waiter_to_notify === nothing || _notify_waiter!(waiter_to_notify)
+                rethrow(err)
+            end
+        end
+        result = _wait_for_conn!(transport, waiter::_ConnWaiter, deadline_ns)
+        if result === :dial
+            try
+                return _new_conn!(transport, plan, address; secure = secure, server_name = server_name, deadline_ns = deadline_ns)
+            catch err
+                waiter_to_notify = nothing
+                lock(transport.lock)
+                try
+                    waiter_to_notify = _release_conn_slot_locked!(transport, plan.pool_key)
+                finally
+                    unlock(transport.lock)
+                end
+                waiter_to_notify === nothing || _notify_waiter!(waiter_to_notify)
+                rethrow(err)
+            end
+        end
+        conn = result::ClientConn
+        conn.reused = true
+        return conn
     end
-    return _new_conn!(transport, plan, address; secure = secure, server_name = server_name, deadline_ns = deadline_ns)
 end
 
 function _put_idle_conn!(transport::Transport, conn::ClientConn)
     if _transport_closed(transport) || _conn_closed(conn)
-        _close_conn!(conn)
+        _close_owned_conn!(transport, conn)
         return nothing
     end
+    try
+        _prepare_conn_for_reuse!(conn)
+    catch
+        _close_owned_conn!(transport, conn)
+        return nothing
+    end
+    waiter_to_notify = nothing
+    should_close = false
     lock(transport.lock)
     try
         if _transport_closed(transport)
-            _close_conn!(conn)
-            return nothing
-        end
-        idle_list = get(() -> ClientConn[], transport.idle, conn.key)
-        if length(idle_list) >= transport.max_idle_per_host || (@atomic :acquire transport.idle_total) >= transport.max_idle_total
-            _close_conn!(conn)
-            return nothing
-        end
-        if conn.secure
-            conn.tls === nothing || TLS.set_deadline!(conn.tls::TLS.Conn, Int64(0))
+            should_close = true
         else
-            conn.tcp === nothing || TCP.set_deadline!(conn.tcp::TCP.Conn, Int64(0))
+            waiter = _next_waiter_locked!(transport, conn.key)
+            if waiter !== nothing && _deliver_waiter_conn_locked!(waiter, conn)
+                waiter_to_notify = waiter
+            else
+                idle_list = get(() -> ClientConn[], transport.idle, conn.key)
+                if length(idle_list) >= transport.max_idle_per_host || (@atomic :acquire transport.idle_total) >= transport.max_idle_total
+                    should_close = true
+                else
+                    push!(idle_list, conn)
+                    transport.idle[conn.key] = idle_list
+                    @atomic :acquire_release transport.idle_total += 1
+                end
+            end
         end
-        conn.last_used_ns = time_ns()
-        push!(idle_list, conn)
-        transport.idle[conn.key] = idle_list
-        @atomic :acquire_release transport.idle_total += 1
     finally
         unlock(transport.lock)
     end
+    waiter_to_notify === nothing || (_notify_waiter!(waiter_to_notify); return nothing)
+    should_close && _close_owned_conn!(transport, conn)
     return nothing
 end
 
@@ -403,11 +659,12 @@ Close and discard all currently idle pooled connections. Active in-flight
 requests are unaffected. Returns `nothing`.
 """
 function close_idle_connections!(transport::Transport)
+    to_close = ClientConn[]
     lock(transport.lock)
     try
         for (_, idle_list) in transport.idle
             for conn in idle_list
-                _close_conn!(conn)
+                push!(to_close, conn)
             end
         end
         empty!(transport.idle)
@@ -415,6 +672,7 @@ function close_idle_connections!(transport::Transport)
     finally
         unlock(transport.lock)
     end
+    _close_owned_conns!(transport, to_close)
     return nothing
 end
 
@@ -426,8 +684,29 @@ requests are allowed to finish on the connections they already hold.
 """
 function Base.close(transport::Transport)
     _transport_closed(transport) && return nothing
-    @atomic :release transport.closed = true
-    close_idle_connections!(transport)
+    to_close = ClientConn[]
+    waiters_to_notify = _ConnWaiter[]
+    err = ProtocolError("transport is closed")
+    lock(transport.lock)
+    try
+        _transport_closed(transport) && return nothing
+        @atomic :release transport.closed = true
+        for (_, idle_list) in transport.idle
+            append!(to_close, idle_list)
+        end
+        empty!(transport.idle)
+        @atomic :release transport.idle_total = 0
+        for (_, queue) in transport.waiters
+            for waiter in queue
+                _deliver_waiter_error_locked!(waiter, err) && push!(waiters_to_notify, waiter)
+            end
+        end
+        empty!(transport.waiters)
+    finally
+        unlock(transport.lock)
+    end
+    _close_owned_conns!(transport, to_close)
+    foreach(_notify_waiter!, waiters_to_notify)
     return nothing
 end
 
@@ -581,7 +860,7 @@ function _release_managed!(body::ManagedBody)
     if body.reusable
         _put_idle_conn!(body.transport, body.conn)
     else
-        _close_conn!(body.conn)
+        _close_owned_conn!(body.transport, body.conn)
     end
     return nothing
 end
@@ -609,7 +888,6 @@ function body_read!(body::ManagedBody, dst::Vector{UInt8})::Int
         return n
     catch
         body.reusable = false
-        _close_conn!(body.conn)
         _release_managed!(body)
         rethrow()
     end
@@ -681,7 +959,7 @@ function _roundtrip_incoming!(
                 if reusable
                     _put_idle_conn!(transport, conn)
                 else
-                    _close_conn!(conn)
+                    _close_owned_conn!(transport, conn)
                 end
                 return raw_response
             end
@@ -691,7 +969,7 @@ function _roundtrip_incoming!(
                 managed,
             )
         catch err
-            _close_conn!(conn)
+            _close_owned_conn!(transport, conn)
             if attempt == 1 && was_reused && retry_template !== nothing && _retryable_reused_conn_error(err)
                 current_request = _copy_request(retry_template::Request)
                 attempt = 2
