@@ -1787,33 +1787,122 @@ function _pump_response_body!(stream::Base.BufferStream, body::AbstractBody)::No
     return nothing
 end
 
-function _response_body_reader(incoming::_IncomingResponse; decompress::Union{Nothing, Bool})::Tuple{IO, Task}
-    raw_stream = Base.BufferStream()
-    reader = if _should_decompress_response(incoming.head.headers, decompress)
-        CodecZlib.GzipDecompressorStream(raw_stream)
-    else
-        raw_stream
+mutable struct _BodyIO{B <: AbstractBody} <: IO
+    body::B
+    buf::Vector{UInt8}
+    next_index::Int
+    filled::Int
+    @atomic saw_eof::Bool
+    @atomic closed::Bool
+end
+
+function _BodyIO(body::B; buffer_bytes::Integer = 8192) where {B <: AbstractBody}
+    n = Int(buffer_bytes)
+    n > 0 || throw(ArgumentError("buffer_bytes must be > 0"))
+    return _BodyIO{B}(body, Vector{UInt8}(undef, n), 1, 0, false, false)
+end
+
+@inline function _buffered_bytes(io::_BodyIO)::Int
+    return max(io.filled - io.next_index + 1, 0)
+end
+
+function _fill_bodyio!(io::_BodyIO)::Int
+    (@atomic :acquire io.closed) && return 0
+    (@atomic :acquire io.saw_eof) && return 0
+    io.next_index = 1
+    n = body_read!(io.body, io.buf)
+    io.filled = n
+    if n == 0
+        @atomic :release io.saw_eof = true
     end
-    producer = errormonitor(Threads.@spawn _pump_response_body!(raw_stream, incoming.rawbody))
-    return reader, producer
+    return n
+end
+
+function Base.isopen(io::_BodyIO)::Bool
+    return !(@atomic :acquire io.closed)
+end
+
+function Base.bytesavailable(io::_BodyIO)::Int
+    return _buffered_bytes(io)
+end
+
+function Base.eof(io::_BodyIO)::Bool
+    _buffered_bytes(io) > 0 && return false
+    (@atomic :acquire io.closed) && return true
+    (@atomic :acquire io.saw_eof) && return true
+    return _fill_bodyio!(io) == 0
+end
+
+function Base.read(io::_BodyIO, ::Type{UInt8})::UInt8
+    eof(io) && throw(EOFError())
+    b = io.buf[io.next_index]
+    io.next_index += 1
+    return b
+end
+
+function Base.readbytes!(io::_BodyIO, dst::Vector{UInt8}, nb::Integer = length(dst))::Int
+    target = Int(nb)
+    target < 0 && throw(ArgumentError("nb must be >= 0"))
+    target = min(target, length(dst))
+    total = 0
+    while total < target
+        available = _buffered_bytes(io)
+        if available == 0
+            _fill_bodyio!(io) == 0 && break
+            available = _buffered_bytes(io)
+        end
+        chunk = min(available, target - total)
+        copyto!(dst, total + 1, io.buf, io.next_index, chunk)
+        io.next_index += chunk
+        total += chunk
+    end
+    return total
+end
+
+function Base.unsafe_read(io::_BodyIO, ptr::Ptr{UInt8}, nbytes::UInt)
+    remaining = Int(nbytes)
+    offset = 0
+    buf = io.buf
+    while remaining > 0
+        available = _buffered_bytes(io)
+        if available == 0
+            _fill_bodyio!(io) == 0 && throw(EOFError())
+            available = _buffered_bytes(io)
+        end
+        chunk = min(available, remaining)
+        GC.@preserve buf begin
+            unsafe_copyto!(ptr + offset, pointer(buf, io.next_index), chunk)
+        end
+        io.next_index += chunk
+        offset += chunk
+        remaining -= chunk
+    end
+    return nothing
+end
+
+function Base.close(io::_BodyIO)
+    if !(@atomic :acquire io.closed)
+        @atomic :release io.closed = true
+        @atomic :release io.saw_eof = true
+        io.next_index = 1
+        io.filled = 0
+        body_close!(io.body)
+    end
+    return nothing
+end
+
+function _response_body_reader(incoming::_IncomingResponse; decompress::Union{Nothing, Bool})::Tuple{IO, Union{Nothing, Task}}
+    raw_stream = _BodyIO(incoming.rawbody)
+    if _should_decompress_response(incoming.head.headers, decompress)
+        return CodecZlib.GzipDecompressorStream(raw_stream), nothing
+    end
+    return raw_stream, nothing
 end
 
 function _with_response_reader(f::F, incoming::_IncomingResponse; decompress::Union{Nothing, Bool}) where {F}
-    reader, producer = _response_body_reader(incoming; decompress = decompress)
+    reader, _ = _response_body_reader(incoming; decompress = decompress)
     try
-        result = f(reader)
-        wait(producer)
-        return result
-    catch
-        try
-            close(reader)
-        catch
-        end
-        try
-            wait(producer)
-        catch
-        end
-        rethrow()
+        return f(reader)
     finally
         try
             close(reader)

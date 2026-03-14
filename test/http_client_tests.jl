@@ -897,7 +897,7 @@ end
     address = ND.join_host_port("127.0.0.1", Int(laddr.port))
     base_url = "http://$(address)"
     server_task = errormonitor(Threads.@spawn begin
-        for _ in 1:6
+        for _ in 1:8
             conn = NC.accept!(listener)
             try
                 req = HT.read_request(HT._ConnReader(conn))
@@ -919,6 +919,16 @@ end
                     _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
                 elseif req.target == "/gzip-stream"
                     payload = _gzip_bytes_client("gzip-stream")
+                    headers = HT.Headers()
+                    HT.setheader(headers, "Content-Encoding", "gzip")
+                    _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
+                elseif req.target == "/gzip-buffer"
+                    payload = _gzip_bytes_client("gzip-buffer")
+                    headers = HT.Headers()
+                    HT.setheader(headers, "Content-Encoding", "gzip")
+                    _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
+                elseif req.target == "/gzip-too-small"
+                    payload = _gzip_bytes_client("overflow")
                     headers = HT.Headers()
                     HT.setheader(headers, "Content-Encoding", "gzip")
                     _send_response_bytes_client!(conn, req; body_bytes = payload, headers = headers, close_conn = true)
@@ -971,6 +981,23 @@ end
         @test resp_gzip_stream.status == 200
         @test resp_gzip_stream.body === nothing
         @test String(take!(streamed_gzip)) == "gzip-stream"
+
+        gzip_buffer = Vector{UInt8}(undef, 32)
+        resp_gzip_buffer = HT.get("$(base_url)/gzip-buffer"; response_stream = gzip_buffer, decompress = true)
+        @test resp_gzip_buffer.status == 200
+        @test resp_gzip_buffer.body === gzip_buffer
+        @test String(resp_gzip_buffer.body) == "gzip-buffer"
+
+        gzip_small_err = try
+            HT.get("$(base_url)/gzip-too-small"; response_stream = Vector{UInt8}(undef, 2), decompress = true)
+            nothing
+        catch err
+            err
+        end
+        @test gzip_small_err isa ArgumentError
+        if gzip_small_err isa ArgumentError
+            @test occursin("Unable to grow response stream IOBuffer", sprint(showerror, gzip_small_err))
+        end
 
         _wait_task_client!(server_task)
     finally

@@ -1,5 +1,6 @@
 using Test
 using Reseau
+using CodecZlib
 
 const HT = Reseau.HTTP
 const NC = Reseau.TCP
@@ -27,15 +28,19 @@ function _write_all_tcp!(conn::NC.Conn, bytes::Vector{UInt8})::Nothing
 end
 
 function _write_response_to_conn!(conn::NC.Conn, request::HT.Request; body_text::String, close_conn::Bool = false)::Nothing
-    headers = HT.Headers()
-    close_conn && HT.setheader(headers, "Connection", "close")
     payload = collect(codeunits(body_text))
+    return _write_response_bytes_to_conn!(conn, request; body_bytes = payload, close_conn = close_conn)
+end
+
+function _write_response_bytes_to_conn!(conn::NC.Conn, request::HT.Request; body_bytes::Vector{UInt8}, headers::HT.Headers = HT.Headers(), close_conn::Bool = false)::Nothing
+    headers_copy = copy(headers)
+    close_conn && HT.setheader(headers_copy, "Connection", "close")
     response = HT.Response(
         200;
         reason = "OK",
-        headers = headers,
-        body = HT.BytesBody(payload),
-        content_length = length(payload),
+        headers = headers_copy,
+        body = HT.BytesBody(body_bytes),
+        content_length = length(body_bytes),
         close = close_conn,
         request = request,
     )
@@ -43,6 +48,10 @@ function _write_response_to_conn!(conn::NC.Conn, request::HT.Request; body_text:
     HT.write_response!(io, response)
     _write_all_tcp!(conn, take!(io))
     return nothing
+end
+
+function _gzip_bytes_transport(text::String)::Vector{UInt8}
+    return transcode(CodecZlib.GzipCompressor, collect(codeunits(text)))
 end
 
 function _wait_task!(task::Task; timeout_s::Float64 = 5.0)
@@ -206,6 +215,58 @@ end
         @test HT.idle_connection_count(transport) == 0
     finally
         close(transport)
+        try
+            NC.close!(listener)
+        catch
+        end
+    end
+end
+
+@testset "HTTP client transport keep-alive reuse with gzip decompression" begin
+    listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+    laddr = NC.addr(listener)::NC.SocketAddrV4
+    address = ND.join_host_port("127.0.0.1", Int(laddr.port))
+    base_url = "http://$(address)"
+    accept_count = Ref(0)
+    paths = String[]
+    server_task = errormonitor(Threads.@spawn begin
+        conn = NC.accept!(listener)
+        accept_count[] += 1
+        try
+            for _ in 1:2
+                request = HT.read_request(HT._ConnReader(conn))
+                push!(paths, request.target)
+                _read_all_body_bytes(request.body)
+                headers = HT.Headers()
+                HT.setheader(headers, "Content-Encoding", "gzip")
+                _write_response_bytes_to_conn!(
+                    conn,
+                    request;
+                    body_bytes = _gzip_bytes_transport("gzip-ok"),
+                    headers = headers,
+                )
+            end
+        finally
+            try
+                NC.close!(conn)
+            catch
+            end
+        end
+        return nothing
+    end)
+    transport = HT.Transport(max_idle_per_host = 4, max_idle_total = 4)
+    client = HT.Client(transport = transport)
+    try
+        res1 = HT.get("$(base_url)/one"; client = client)
+        @test String(res1.body) == "gzip-ok"
+        res2 = HT.get("$(base_url)/two"; client = client)
+        @test String(res2.body) == "gzip-ok"
+        _wait_task!(server_task)
+        @test accept_count[] == 1
+        @test paths == ["/one", "/two"]
+        @test HT.idle_connection_count(transport; key = "http://$address") == 1
+    finally
+        close(client)
         try
             NC.close!(listener)
         catch
