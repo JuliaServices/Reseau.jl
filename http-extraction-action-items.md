@@ -83,7 +83,7 @@
 - Completion criteria:
   - The `HTTP` execution worktree resembles a clean package baseline and passes its minimal smoke verification.
 
-### [ ] ITEM-004 (P0) Port the HTTP 2.0 source implementation from Reseau into HTTP
+### [x] ITEM-004 (P0) Port the HTTP 2.0 source implementation from Reseau into HTTP
 - Description: Move the actual HTTP client/server/websocket/HTTP2 implementation out of `Reseau` and into `HTTP`, preserving behavior while untangling package boundaries, module names, dependencies, includes, exports, and precompile flow.
 - Desired outcome: `HTTP` becomes the authoritative home of the extracted implementation while depending on `Reseau` as the lower-level transport/TCP/TLS substrate where appropriate.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/7_*.jl`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/8_precompile_workload.jl`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml`.
@@ -301,6 +301,14 @@
   - Minimal 2.0 shell files were recreated at `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/HTTP.jl`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/runtests.jl`, and `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/**`.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); using HTTP; println(HTTP); println(HTTP.VERSION)'` loaded the package and printed `HTTP` then `2.0.0`.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.test()'` passed the new `HTTP 2.0 skeleton` testset.
+- ITEM-004:
+  - Source files from `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/7_*.jl` were copied into `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/`, excluding the nested-module wrapper `7_http.jl`.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/HTTP.jl` now owns the extracted include graph directly, preserving the `Reseau.HTTP` include ordering inside the top-level `HTTP` package.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml` now declares the extracted source dependencies, including `Reseau` plus the stdlib/package deps used by the moved modules.
+  - `rg -n '\\.\\.Reseau' /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src` returned no matches after rewriting the package-boundary imports.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.instantiate(); using HTTP; println(HTTP.VERSION)'` loaded the extracted package and printed `2.0.0`.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); using HTTP; println(isdefined(HTTP, :Request)); println(isdefined(HTTP, :Transport)); println(isdefined(HTTP, :WebSockets))'` printed `true`, `true`, `true`.
+  - Temporary note: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/HTTP.jl` currently sets `__precompile__(false)` so `HTTP` can coexist with the still-embedded `Reseau.HTTP` code during the extraction phase; this should be removed after `Reseau` drops the bundled HTTP implementation.
 
 ## Continuity
 
