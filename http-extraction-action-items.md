@@ -105,7 +105,7 @@
 - Completion criteria:
   - `HTTP` loads successfully from the extracted source tree and owns the implementation directly.
 
-### [ ] ITEM-005 (P0) Port the HTTP test suite, fixtures, and specialized harnesses into HTTP
+### [x] ITEM-005 (P0) Port the HTTP test suite, fixtures, and specialized harnesses into HTTP
 - Description: Move the HTTP-focused tests out of `Reseau` into `HTTP`, including fixtures, websocket harnesses, trim tests, and any optional external suites that remain valuable for release confidence.
 - Desired outcome: `HTTP` contains the full authoritative test suite for the extracted implementation, and `Reseau` no longer owns HTTP behavior tests.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/http*.jl`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/hpack_tests.jl`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/websockets/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/**`.
@@ -309,6 +309,14 @@
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.instantiate(); using HTTP; println(HTTP.VERSION)'` loaded the extracted package and printed `2.0.0`.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); using HTTP; println(isdefined(HTTP, :Request)); println(isdefined(HTTP, :Transport)); println(isdefined(HTTP, :WebSockets))'` printed `true`, `true`, `true`.
   - Temporary note: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/HTTP.jl` currently sets `__precompile__(false)` so `HTTP` can coexist with the still-embedded `Reseau.HTTP` code during the extraction phase; this should be removed after `Reseau` drops the bundled HTTP implementation.
+- ITEM-005:
+  - HTTP-owned tests, copied fixtures, and websocket harness assets now live under `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/**`, including copied TLS fixtures and the Autobahn client config.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/runtests.jl` now runs the HTTP-only suite with `HTTP_TEST_ONLY` and `HTTP_RUN_WEBSOCKET_AUTOBAHN` controls instead of the old `Reseau`-specific entrypoint.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/trim_compile_tests.jl` was reduced to the HTTP-only trim workload, and `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/Project.toml` now supports direct `test/` activation plus local `Pkg.develop` wiring.
+  - `rg -n 'Reseau\\.HTTP' /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test` returned no matches after rewriting the moved tests to target `HTTP`/`HTTP.WebSockets`.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.instantiate(); using HTTP, Test; println(\"test env ok\")'` succeeded.
+  - `HTTP_TEST_ONLY=http_websocket_codec_tests.jl julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.test(; coverage=false)'` passed the moved websocket codec suite from the `HTTP` worktree.
+  - Full-suite stabilization remains a dedicated follow-up in ITEM-008 and ITEM-012; this item establishes ownership and executable test wiring in `HTTP`.
 
 ## Continuity
 
