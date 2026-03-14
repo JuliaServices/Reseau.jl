@@ -18,6 +18,42 @@ function ND.resolve_tcp_addrs(
         op::Symbol = :connect,
         policy::ND.ResolverPolicy = ND.ResolverPolicy(),
     )::Vector{NC.SocketEndpoint}
+    _ = network
+    _ = address
+    _ = op
+    _ = policy
+    sleep(resolver.delay_s)
+    return copy(resolver.addrs)
+end
+
+mutable struct _CountingResolver <: ND.AbstractResolver
+    delay_s::Float64
+    addrs::Vector{NC.SocketEndpoint}
+    lock::ReentrantLock
+    calls::Int
+end
+
+function _CountingResolver(delay_s::Float64, addrs::Vector{NC.SocketEndpoint})
+    return _CountingResolver(delay_s, addrs, ReentrantLock(), 0)
+end
+
+function ND.resolve_tcp_addrs(
+        resolver::_CountingResolver,
+        network::AbstractString,
+        address::AbstractString;
+        op::Symbol = :connect,
+        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
+    )::Vector{NC.SocketEndpoint}
+    _ = network
+    _ = address
+    _ = op
+    _ = policy
+    lock(resolver.lock)
+    try
+        resolver.calls += 1
+    finally
+        unlock(resolver.lock)
+    end
     sleep(resolver.delay_s)
     return copy(resolver.addrs)
 end
@@ -372,6 +408,40 @@ else
             @test err_timeout isa ND.DNSOpError
             if err_timeout isa ND.DNSOpError
                 @test err_timeout.err isa ND.DNSTimeoutError
+            end
+        end
+        @testset "singleflight resolver coalesces duplicate concurrent lookups" begin
+            EL.shutdown!()
+            listener = nothing
+            client1 = nothing
+            client2 = nothing
+            try
+                listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
+                singleflight = ND.SingleflightResolver(resolver)
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn_a = NC.accept!(listener)
+                    conn_b = NC.accept!(listener)
+                    return conn_a, conn_b
+                end)
+                task1 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
+                task2 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
+                @test _nd_wait_task_done(task1, 2.0) != :timed_out
+                @test _nd_wait_task_done(task2, 2.0) != :timed_out
+                client1 = fetch(task1)
+                client2 = fetch(task2)
+                server1, server2 = fetch(accept_task)
+                _nd_close_quiet!(server2)
+                _nd_close_quiet!(server1)
+                @test resolver.calls == 1
+                @test (@atomic :acquire singleflight.actual_lookups) == 1
+                @test (@atomic :acquire singleflight.shared_hits) == 1
+            finally
+                _nd_close_quiet!(client2)
+                _nd_close_quiet!(client1)
+                _nd_close_quiet!(listener)
+                EL.shutdown!()
             end
         end
     end

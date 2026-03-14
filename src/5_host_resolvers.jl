@@ -123,6 +123,37 @@ This is the default resolver used by the convenience APIs.
 """
 struct SystemResolver <: AbstractResolver end
 
+mutable struct _LookupFlight
+    lock::ReentrantLock
+    cond::Threads.Condition
+    result::Union{Nothing, Vector{TCP.SocketEndpoint}}
+    err::Union{Nothing, Exception}
+    @atomic done::Bool
+    function _LookupFlight()
+        lock = ReentrantLock()
+        return new(lock, Threads.Condition(lock), nothing, nothing, false)
+    end
+end
+
+"""
+    SingleflightResolver(parent)
+
+Resolver wrapper that coalesces concurrent duplicate hostname lookups for the
+same `(network, host)` pair while preserving caller-local timeout and connect
+behavior outside the raw lookup step.
+"""
+mutable struct SingleflightResolver{R <: AbstractResolver} <: AbstractResolver
+    parent::R
+    lock::ReentrantLock
+    inflight::Dict{Tuple{String, String}, _LookupFlight}
+    @atomic actual_lookups::Int
+    @atomic shared_hits::Int
+end
+
+function SingleflightResolver(parent::R) where {R <: AbstractResolver}
+    return SingleflightResolver{R}(parent, ReentrantLock(), Dict{Tuple{String, String}, _LookupFlight}(), 0, 0)
+end
+
 """
     StaticResolver
 
@@ -619,6 +650,11 @@ function lookup_port(network::AbstractString, service::AbstractString)::Int
     return lookup_port(DEFAULT_RESOLVER, network, service)
 end
 
+function lookup_port(resolver::AbstractResolver, network::AbstractString, service::AbstractString)::Int
+    _ = resolver
+    return lookup_port(DEFAULT_RESOLVER, network, service)
+end
+
 function lookup_port(::SystemResolver, network::AbstractString, service::AbstractString)::Int
     port, needs_lookup = parse_port(service)
     if needs_lookup
@@ -729,21 +765,140 @@ function _resolve_system_host(host::AbstractString)::Vector{TCP.SocketEndpoint}
 end
 
 function _resolve_static_host(resolver::StaticResolver, host::AbstractString)::Vector{TCP.SocketEndpoint}
+    return _resolve_static_host(resolver, "tcp", host)
+end
+
+function _resolve_static_host(
+        resolver::StaticResolver,
+        network::AbstractString,
+        host::AbstractString,
+    )::Vector{TCP.SocketEndpoint}
     h = String(host)
     literal = _literal_host_addr(h)
     literal === nothing || return TCP.SocketEndpoint[literal]
     mapped = get(() -> nothing, resolver.hosts, lowercase(h))
     mapped === nothing || return copy(mapped::Vector{TCP.SocketEndpoint})
     resolver.fallback === nothing && _addr_error("no suitable address", h)
-    return _resolve_host_ips(resolver.fallback::AbstractResolver, h)
+    return _resolve_host_ips(resolver.fallback::AbstractResolver, network, h)
 end
 
 function _resolve_host_ips(resolver::AbstractResolver, host::AbstractString)::Vector{TCP.SocketEndpoint}
+    return _resolve_host_ips(resolver, "tcp", host)
+end
+
+@inline function _normalize_lookup_host(host::AbstractString)::String
+    normalized = lowercase(String(host))
+    while !isempty(normalized) && last(normalized) == '.'
+        normalized = normalized[1:prevind(normalized, lastindex(normalized))]
+    end
+    return normalized
+end
+
+@inline function _lookup_key(network::AbstractString, host::AbstractString)::Tuple{String, String}
+    return lowercase(String(network)), _normalize_lookup_host(host)
+end
+
+function _resolve_singleflight_host(
+        resolver::SingleflightResolver,
+        network::AbstractString,
+        host::AbstractString,
+    )::Vector{TCP.SocketEndpoint}
+    h = String(host)
+    literal = _literal_host_addr(h)
+    literal === nothing || return TCP.SocketEndpoint[literal]
+    key = _lookup_key(network, h)
+    flight = nothing
+    leader = false
+    lock(resolver.lock)
+    try
+        existing = get(() -> nothing, resolver.inflight, key)
+        if existing === nothing
+            flight = _LookupFlight()
+            resolver.inflight[key] = flight::_LookupFlight
+            @atomic :acquire_release resolver.actual_lookups += 1
+            leader = true
+        else
+            flight = existing::_LookupFlight
+            @atomic :acquire_release resolver.shared_hits += 1
+        end
+    finally
+        unlock(resolver.lock)
+    end
+    if leader
+        result = nothing
+        err = nothing
+        try
+            result = _resolve_host_ips(resolver.parent, network, h)
+        catch ex
+            err = ex::Exception
+        end
+        lock((flight::_LookupFlight).lock)
+        try
+            flight.result = result === nothing ? nothing : copy(result::Vector{TCP.SocketEndpoint})
+            flight.err = err
+            @atomic :release flight.done = true
+            notify(flight.cond; all = true)
+        finally
+            unlock(flight.lock)
+        end
+        lock(resolver.lock)
+        try
+            current = get(() -> nothing, resolver.inflight, key)
+            current === flight && delete!(resolver.inflight, key)
+        finally
+            unlock(resolver.lock)
+        end
+        err === nothing || throw(err::Exception)
+        return result::Vector{TCP.SocketEndpoint}
+    end
+    lock((flight::_LookupFlight).lock)
+    try
+        while !(@atomic :acquire flight.done)
+            wait(flight.cond)
+        end
+        flight.err === nothing || throw(flight.err::Exception)
+        return copy(flight.result::Vector{TCP.SocketEndpoint})
+    finally
+        unlock(flight.lock)
+    end
+end
+
+function _resolve_host_ips(
+        resolver::AbstractResolver,
+        network::AbstractString,
+        host::AbstractString,
+    )::Vector{TCP.SocketEndpoint}
+    if resolver isa SingleflightResolver
+        return _resolve_singleflight_host(resolver::SingleflightResolver, network, host)
+    end
     if resolver isa SystemResolver
         return _resolve_system_host(host)
     end
-    return _resolve_static_host(resolver::StaticResolver, host)
+    if resolver isa StaticResolver
+        return _resolve_static_host(resolver::StaticResolver, network, host)
+    end
+    resolved = resolve_tcp_addrs(
+        resolver,
+        network,
+        join_host_port(host, 0);
+        op = :resolve,
+        policy = ResolverPolicy(),
+    )
+    ips = TCP.SocketEndpoint[]
+    for addr in resolved
+        if addr isa TCP.SocketAddrV4
+            v4 = addr::TCP.SocketAddrV4
+            push!(ips, TCP.SocketAddrV4(v4.ip, 0))
+        else
+            v6 = addr::TCP.SocketAddrV6
+            push!(ips, TCP.SocketAddrV6(v6.ip, 0; scope_id = Int(v6.scope_id)))
+        end
+    end
+    return ips
 end
+
+lookup_port(resolver::SingleflightResolver, network::AbstractString, service::AbstractString)::Int =
+    lookup_port((resolver::SingleflightResolver).parent, network, service)
 
 @inline function _wildcard_addrs(kind::Symbol, op::Symbol)::Vector{TCP.SocketEndpoint}
     if kind == :tcp && op == :listen
@@ -812,7 +967,7 @@ function resolve_tcp_addrs(
     ips = if isempty(host)
         _wildcard_addrs(kind, op)
     else
-        _resolve_host_ips(resolver, host)
+        _resolve_host_ips(resolver, network, host)
     end
     filtered = _apply_policy_and_network(ips, kind, policy)
     isempty(filtered) && _addr_error("no suitable address", host)
@@ -894,12 +1049,13 @@ function HostResolver(;
         resolver::AbstractResolver = DEFAULT_RESOLVER,
         policy::ResolverPolicy = ResolverPolicy(),
     )
-    return HostResolver{typeof(resolver)}(
+    wrapped = resolver isa SingleflightResolver ? resolver : SingleflightResolver(resolver)
+    return HostResolver{typeof(wrapped)}(
         Int64(timeout_ns),
         Int64(deadline_ns),
         local_addr,
         Int64(fallback_delay_ns),
-        resolver,
+        wrapped,
         policy,
     )
 end
