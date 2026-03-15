@@ -34,7 +34,7 @@
   - `tcp_tests.jl`, `tls_tests.jl`, `http_websocket_codec_tests.jl`, and `http_websocket_client_tests.jl` all pass on Julia 1.12.
   - Julia 1.10 smoke loads now move past raw `@ccall gc_safe = true` and raw `Memory{UInt8}` parsing/runtime failures; the next blocker is package resolution/loading work.
 
-### [ ] ITEM-002 (P0) Make both packages resolvable and loadable on Julia 1.10
+### [x] ITEM-002 (P0) Make both packages resolvable and loadable on Julia 1.10
 - Description: After removing the parsing blockers, the next gap is package compatibility and dependency resolution. Both packages still declare `julia = "1.12"`, and the 1.10 smoke currently dies during dependency loading rather than inside package code.
 - Desired outcome: Fresh Julia 1.10 environments can `Pkg.develop` the split worktrees, resolve/install dependencies, and `using Reseau` / `using HTTP` succeeds.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/Project.toml`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/Manifest.toml`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Manifest.toml` (only if regeneration is required), any source files revealed by 1.10 load failures.
@@ -49,6 +49,9 @@
   - The needed dependency set has Julia 1.10-compatible releases available.
 - Completion criteria:
   - Both packages can be installed and loaded on Julia 1.10 from fresh temporary environments.
+- Verification evidence:
+  - A fresh Julia 1.10 temp environment can `Pkg.develop` the Reseau split worktree, instantiate dependencies, and `using Reseau` succeeds.
+  - A fresh Julia 1.10 temp environment can `Pkg.develop` both split worktrees, instantiate dependencies, and `using HTTP` succeeds.
 
 ### [ ] ITEM-003 (P0) Get Reseau’s 1.10 test suite green
 - Description: Once Reseau loads on 1.10, the full runtime and trim-safe suites need to pass. This will likely expose differences in task scheduling, detached thread startup, libuv/runtime helpers, TLS/OpenSSL behavior, or atomic semantics between 1.10 and 1.12.
