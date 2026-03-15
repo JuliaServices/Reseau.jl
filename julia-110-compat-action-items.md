@@ -93,7 +93,7 @@
   - The only package-local regression was a Julia 1.10 method ambiguity between `write(::IO, ::Array)` and HTTP’s stream byte-write methods; an explicit `write(::Stream, ::Vector{UInt8})` method resolves it.
   - `trim_compile_tests.jl` now skips with the same explicit JuliaC/toolchain message used in Reseau on Julia 1.10.
 
-### [ ] ITEM-005 (P1) Update CI/package metadata for Julia 1.10 support
+### [x] ITEM-005 (P1) Update CI/package metadata for Julia 1.10 support
 - Description: Local compatibility is not enough; the package metadata and CI need to reflect the new supported floor so hosted checks can exercise it.
 - Desired outcome: Both repos advertise the right Julia floor and run CI on 1.10 without regressing 1.12.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/Project.toml`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/**`
@@ -105,5 +105,12 @@
   - Re-run the key local 1.10 and 1.12 smoke/tests after metadata changes.
 - Assumptions:
   - CI changes are only worth landing if Items 1-4 are solid locally.
+  - Documentation can stay on Julia 1.12 even while the test floor moves to Julia 1.10.
 - Completion criteria:
   - Both packages declare and test the final Julia support floor needed for 1.10.
+- Verification evidence:
+  - `Project.toml` in both packages now declares `julia = "1.10"`.
+  - Both CI test matrices now run on Julia 1.10 across Linux, macOS, and Windows.
+  - Reseau repo-local Julia 1.10 flow passes after repinning `PrecompileTools` to the Julia 1.10-compatible `1.2.1` line.
+  - HTTP repo-local Julia 1.10 flow passes with the paired Reseau checkout and updated workflow/package metadata.
+  - Julia 1.12 regression checks still pass for Reseau trim compilation, HTTP trim compilation, and HTTP client-stream behavior.

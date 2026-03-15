@@ -22,7 +22,7 @@ jobs:
         include:
           - os: ubuntu-latest
             arch: x64
-            version: '1.12'
+            version: '1.10'
             timeout_minutes: 15
             run_tls_tests: '1'
             run_network_tests: '1'
@@ -30,7 +30,7 @@ jobs:
             coverage: '1'
           - os: macOS-latest
             arch: aarch64
-            version: '1.12'
+            version: '1.10'
             timeout_minutes: 15
             run_tls_tests: '1'
             run_network_tests: '1'
@@ -38,7 +38,7 @@ jobs:
             coverage: '0'
           - os: windows-latest
             arch: x64
-            version: '1.12'
+            version: '1.10'
             timeout_minutes: 20
             run_tls_tests: '1'
             run_network_tests: '1'
@@ -51,6 +51,11 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
+      - run: |
+          julia --project=. --startup-file=no --history-file=no -e '
+            using Pkg
+            Pkg.resolve()
+            Pkg.instantiate()'
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - if: matrix.coverage == '1'
