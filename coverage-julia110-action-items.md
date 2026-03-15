@@ -88,7 +88,7 @@
 - Completion criteria:
   - The tracker records that HTTP remains aligned to the retained Julia 1.12 floor.
 
-### [ ] ITEM-004 (P1) Drive HTTP source coverage above 90% with targeted regression tests
+### [x] ITEM-004 (P1) Drive HTTP source coverage above 90% with targeted regression tests
 - Description: HTTP already has a broad suite, but the current source coverage artifacts still leave material gaps in cookies, streaming, proxy, SSE, HTTP/2, and related client/server edge paths. The new target is >90% source coverage, so the remaining uncovered logic needs focused tests, not generic extra traffic.
 - Desired outcome: HTTP source coverage exceeds 90% in a fresh local run, and the added tests cover real protocol/control-flow branches that matter for the 2.0 line.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/**`
@@ -102,10 +102,19 @@
   - `cd /Users/jacob.quinn/.julia/dev/HTTP-split-worktree && awk 'BEGIN{covered=0; total=0} /^[ \t]*-/ {next} {total++; if ($1+0>0) covered++} END{printf \"HTTP src coverage %d/%d %.2f%%\\n\", covered, total, (total?100*covered/total:0)}' src/*.cov`
 - Assumptions:
   - The >90% target is on source files in `src/`, not test files or docs-generated artifacts.
+  - The highest-leverage remaining HTTP gaps are the cookie helper/jar utilities plus the stream and SSE helper branches that are still deterministic enough to exercise directly from tests.
+  - Direct tests against internal HTTP helper functions are acceptable here when the alternative would be brittle network orchestration solely to hit the same branch.
 - Risks:
   - Some remaining branches may be trim/compiler-only or platform-conditional and need version/platform-aware expectations.
 - Completion criteria:
   - A fresh local HTTP coverage run on the target Julia version reports source coverage above 90%.
+- Verification evidence:
+  - Added targeted regression coverage in `test/http_forms_tests.jl`, `test/http_client_proxy_tests.jl`, `test/http2_frame_tests.jl`, `test/http_websocket_codec_tests.jl`, `test/http_cookie_tests.jl`, and `test/http_client_tests.jl`.
+  - Verified the expanded targeted suites locally with direct `julia --project=. --startup-file=no --history-file=no test/<file>.jl` runs, including the newly expanded cookie and client coverage files.
+  - Fresh full coverage verification passed with:
+    - `cd /Users/jacob.quinn/.julia/dev/HTTP-split-worktree && rm -f src/*.cov test/*.cov && JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path="/Users/jacob.quinn/.julia/dev/Reseau-split-worktree"); Pkg.test(; coverage=true)'`
+    - `cd /Users/jacob.quinn/.julia/dev/HTTP-split-worktree && awk 'BEGIN{covered=0; total=0} /^[ \t]*-/ {next} {total++; if ($1+0>0) covered++} END{printf "HTTP src coverage %d/%d %.2f%%\n", covered, total, (total?100*covered/total:0)}' src/*.cov`
+  - Final HTTP source coverage after the coverage pass is `6583/7304 = 90.13%`.
 
 ### [ ] ITEM-005 (P1) Drive Reseau source coverage above 90% with targeted regression tests
 - Description: Reseau’s current source coverage is materially below the desired bar, with especially visible room in event loops, Darwin socket ops, TCP, TLS, and host resolver edge paths. The package needs more direct behavioral tests around the Go-style poller/runtime semantics and transport/TLS branches it owns.
