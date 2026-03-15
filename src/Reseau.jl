@@ -7,7 +7,6 @@ The package is organized in layers:
 - low-level eventing/polling and socket ops
 - TCP core primitives + host resolution/connection orchestration
 - TLS transport
-- HTTP/1 + HTTP/2 client/server stacks
 """
 module Reseau
 
@@ -17,7 +16,5 @@ include("3_internal_poll.jl")
 include("4_tcp.jl")
 include("5_host_resolvers.jl")
 include("6_tls.jl")
-include("7_http.jl")
-include("8_precompile_workload.jl")
 
 end

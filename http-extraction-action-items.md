@@ -124,7 +124,7 @@
 - Completion criteria:
   - The extracted `HTTP` test suite runs from the `HTTP` worktree and no longer imports `Reseau.HTTP`.
 
-### [ ] ITEM-006 (P0) Remove the extracted HTTP stack from Reseau and restore package boundaries
+### [x] ITEM-006 (P0) Remove the extracted HTTP stack from Reseau and restore package boundaries
 - Description: Strip the HTTP implementation out of `Reseau`, leaving behind the Go-inspired transport/runtime/TLS stack that should remain after the split. Update entrypoints, deps, tests, and any package metadata that still imply bundled HTTP ownership.
 - Desired outcome: `Reseau` contains only the non-HTTP networking stack and remains internally consistent after the removal.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/Reseau.jl`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/7_*.jl`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/8_precompile_workload.jl`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/Project.toml`.
@@ -317,6 +317,13 @@
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.instantiate(); using HTTP, Test; println(\"test env ok\")'` succeeded.
   - `HTTP_TEST_ONLY=http_websocket_codec_tests.jl julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.test(; coverage=false)'` passed the moved websocket codec suite from the `HTTP` worktree.
   - Full-suite stabilization remains a dedicated follow-up in ITEM-008 and ITEM-012; this item establishes ownership and executable test wiring in `HTTP`.
+- ITEM-006:
+  - `git rm` removed the embedded HTTP source tree from `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/7_*.jl`, removed the mixed precompile file `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/8_precompile_workload.jl`, and deleted the HTTP-owned tests/harness assets from `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/**`.
+  - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/Reseau.jl` now only includes the event loop, socket ops, internal poll, TCP, host resolver, and TLS layers.
+  - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/runtests.jl` and `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/trim_compile_tests.jl` now run only the non-HTTP test/trim workloads.
+  - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/Project.toml` no longer declares the HTTP-only package deps (`Base64`, `CodecZlib`, `Dates`, `PrecompileTools`, `Random`, `SHA`, `UUIDs`).
+  - `julia --project=/Users/jacob.quinn/.julia/dev/Reseau-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); using Reseau; println(Reseau)'` succeeded and printed `Reseau`.
+  - Residual verification note: `RESEAU_TEST_ONLY=eventloops_tests.jl JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` hangs after `[runtests] include START: eventloops_tests.jl` in both `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree` and the untouched source branch `/Users/jacob.quinn/.julia/dev/Reseau`, so this appears to be a pre-existing non-HTTP issue rather than a regression introduced by the HTTP split.
 
 ## Continuity
 

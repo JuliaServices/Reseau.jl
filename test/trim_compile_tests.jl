@@ -169,7 +169,6 @@ end
         ("tcp_trim_safe.jl", "tcp_trim_safe"),
         ("host_resolvers_trim_safe.jl", "host_resolvers_trim_safe"),
         ("tls_trim_safe.jl", "tls_trim_safe"),
-        ("http_trim_safe.jl", "http_trim_safe"),
     ]
     trim_workloads = _trim_selected_workloads(trim_workloads)
     for (script_file, output_name) in trim_workloads
