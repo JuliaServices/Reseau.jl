@@ -16,5 +16,6 @@ include("3_internal_poll.jl")
 include("4_tcp.jl")
 include("5_host_resolvers.jl")
 include("6_tls.jl")
+include("8_precompile_workload.jl")
 
 end
