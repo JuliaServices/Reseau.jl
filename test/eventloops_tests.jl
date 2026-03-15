@@ -262,5 +262,43 @@ else
                 _el_close_fd(fd1)
             end
         end
+        @testset "shutdown cancels active waiters and timers" begin
+            fd0, fd1 = _el_socketpair_stream()
+            reg_task = nothing
+            timer_task = nothing
+            reg_reason = Ref{Union{Nothing, NP.PollWakeReason.T}}(nothing)
+            timer_reason = Ref{Union{Nothing, NP.PollWakeReason.T}}(nothing)
+            try
+                state = NP.init!()
+                registration = NP.register!(fd0; mode = NP.PollMode.READ)
+                timer = NP.TimerState()
+                @test NP.schedule_timer!(timer, Int64(time_ns()) + Int64(5_000_000_000))
+                reg_task = errormonitor(Threads.@spawn begin
+                    reg_reason[] = NP.pollwait!(registration.read_waiter)
+                    return nothing
+                end)
+                timer_task = errormonitor(Threads.@spawn begin
+                    timer_reason[] = NP.pollwait!(timer.waiter)
+                    return nothing
+                end)
+                sleep(0.05)
+                NP._notify_all_waiters!(state)
+                @test _el_wait_task_done(reg_task, 2.0) != :timed_out
+                @test _el_wait_task_done(timer_task, 2.0) != :timed_out
+                wait(reg_task)
+                wait(timer_task)
+                @test reg_reason[] == NP.PollWakeReason.CANCELED
+                @test timer_reason[] == NP.PollWakeReason.CANCELED
+                @test (@atomic :acquire timer.closed)
+                @test (@atomic :acquire timer.deadline_ns) == Int64(0)
+                NP.deregister!(fd0)
+            finally
+                reg_task isa Task && istaskdone(reg_task) && wait(reg_task)
+                timer_task isa Task && istaskdone(timer_task) && wait(timer_task)
+                _el_close_fd(fd0)
+                _el_close_fd(fd1)
+                NP.shutdown!()
+            end
+        end
     end
 end

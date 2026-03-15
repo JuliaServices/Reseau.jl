@@ -116,7 +116,7 @@
     - `cd /Users/jacob.quinn/.julia/dev/HTTP-split-worktree && awk 'BEGIN{covered=0; total=0} /^[ \t]*-/ {next} {total++; if ($1+0>0) covered++} END{printf "HTTP src coverage %d/%d %.2f%%\n", covered, total, (total?100*covered/total:0)}' src/*.cov`
   - Final HTTP source coverage after the coverage pass is `6583/7304 = 90.13%`.
 
-### [ ] ITEM-005 (P1) Drive Reseau source coverage above 90% with targeted regression tests
+### [x] ITEM-005 (P1) Drive Reseau source coverage above 90% with targeted regression tests
 - Description: Reseau’s current source coverage is materially below the desired bar, with especially visible room in event loops, Darwin socket ops, TCP, TLS, and host resolver edge paths. The package needs more direct behavioral tests around the Go-style poller/runtime semantics and transport/TLS branches it owns.
 - Desired outcome: Reseau source coverage exceeds 90% in a fresh local run while preserving the rewrite mandate and maintaining deterministic test behavior.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/**`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/codecov.yml` if exclusions need auditing
@@ -130,10 +130,19 @@
   - `cd /Users/jacob.quinn/.julia/dev/Reseau-split-worktree && awk 'BEGIN{covered=0; total=0} /^[ \t]*-/ {next} {total++; if ($1+0>0) covered++} END{printf \"Reseau src coverage %d/%d %.2f%%\\n\", covered, total, (total?100*covered/total:0)}' src/*.cov`
 - Assumptions:
   - The >90% target is for the active `src/` surface that ships today, not archived or intentionally excluded future-phase files.
+  - The highest-leverage remaining Reseau gaps are the HostResolvers parser/cache branches, TLS config/version helpers, and a smaller set of event-loop shutdown/timer control paths; the raw Darwin syscall retry branches are less productive for deterministic coverage work.
+  - Direct tests of internal helper functions are acceptable for these runtime utilities when the public API does not expose the branch without manufacturing brittle OS-level failure modes.
 - Risks:
   - Some event-loop timing branches may need careful harnessing to avoid reintroducing flakiness.
 - Completion criteria:
   - A fresh local Reseau coverage run on the target Julia version reports source coverage above 90%.
+- Verification evidence:
+  - Added targeted regression coverage in `test/eventloops_tests.jl`, `test/tcp_tests.jl`, `test/host_resolvers_tests.jl`, and `test/tls_tests.jl`.
+  - Verified the expanded targeted suites locally with direct `julia --project=. --startup-file=no --history-file=no test/<file>.jl` runs for the touched files.
+  - Fresh full coverage verification passed with:
+    - `cd /Users/jacob.quinn/.julia/dev/Reseau-split-worktree && rm -f src/*.cov test/*.cov && JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=true)'`
+    - `cd /Users/jacob.quinn/.julia/dev/Reseau-split-worktree && awk 'BEGIN{covered=0; total=0} /^[ \t]*-/ {next} {total++; if ($1+0>0) covered++} END{printf "Reseau src coverage %d/%d %.2f%%\n", covered, total, (total?100*covered/total:0)}' src/*.cov`
+  - Final Reseau source coverage after the coverage pass is `2553/2836 = 90.02%`.
 
 ### [ ] ITEM-006 (P1) Keep CI/workflow coverage green on the retained Julia 1.12 floor
 - Description: With the Julia floor retained at 1.12, the CI work is now about preserving green 1.12 workflows while the new coverage tests land, not lowering the version matrix.
