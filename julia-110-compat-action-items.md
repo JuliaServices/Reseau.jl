@@ -74,7 +74,7 @@
   - Event loops, internal poll, socket ops, TCP, host resolvers, and TLS all pass on Julia 1.10.
   - `trim_compile_tests.jl` now skips with an explicit JuliaC/toolchain message on Julia 1.10 instead of failing on a missing CLI entrypoint.
 
-### [ ] ITEM-004 (P0) Get HTTP’s 1.10 test suite green
+### [x] ITEM-004 (P0) Get HTTP’s 1.10 test suite green
 - Description: HTTP depends on the extracted Reseau transport stack and likely has its own 1.10 issues beyond the websocket `Memory` sites. The full suite needs to pass once HTTP can load on 1.10.
 - Desired outcome: HTTP’s Julia 1.10 suite passes end to end against the 1.10-compatible Reseau worktree.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml`
@@ -87,7 +87,11 @@
 - Assumptions:
   - Once Reseau is stable on 1.10, HTTP failures will mostly be package-local rather than transport-core regressions.
 - Completion criteria:
-  - The HTTP Julia 1.10 test suite passes locally, including trim-safe verification.
+  - The HTTP Julia 1.10 test suite passes locally, with trim-safe tests explicitly skipped because JuliaC trim support is unavailable below Julia 1.12.
+- Verification evidence:
+  - `Pkg.test("HTTP")` from a fresh Julia 1.10 temp environment passes end to end against the split Reseau worktree.
+  - The only package-local regression was a Julia 1.10 method ambiguity between `write(::IO, ::Array)` and HTTP’s stream byte-write methods; an explicit `write(::Stream, ::Vector{UInt8})` method resolves it.
+  - `trim_compile_tests.jl` now skips with the same explicit JuliaC/toolchain message used in Reseau on Julia 1.10.
 
 ### [ ] ITEM-005 (P1) Update CI/package metadata for Julia 1.10 support
 - Description: Local compatibility is not enough; the package metadata and CI need to reflect the new supported floor so hosted checks can exercise it.
