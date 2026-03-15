@@ -221,22 +221,23 @@
 - Completion criteria:
   - `Reseau` docs build successfully and include a solid `Sockets` migration guide.
 
-### [ ] ITEM-011 (P1) Update CI, coverage, and docs deployment workflows for both repos
+### [x] ITEM-011 (P1) Update CI, coverage, and docs deployment workflows for both repos
 - Description: Align both repositories’ CI with the new ownership split so tests, coverage, and docs builds run where they belong and publish correctly on branch pushes/tags.
 - Desired outcome: `HTTP` and `Reseau` each have CI workflows that run their own tests, collect coverage, and build/deploy docs on the intended branches with preview support where appropriate.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/*.yml`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/*.yml`, docs deploy config in `docs/make.jl`.
 - Implementation notes:
-  - Ensure `HTTP` CI no longer depends on `Reseau` as a package dependency for test execution.
+  - Point `HTTP` CI and docs builds at the `codex/reseau-http-split` branch until the sibling `Reseau` PR merges, since `HTTP` 2.0 now depends on the extracted lower-level transport package.
   - Add missing docs job or preview-cleanup workflow to `Reseau` if needed.
   - Add or preserve coverage upload for both repos.
   - Validate branch filters against the intended PR base branches.
   - Keep environment-gated long-running tests opt-in if they are too heavy for default CI.
 - Verification:
-  - `python - <<'PY'\nimport yaml, pathlib\nfor path in pathlib.Path('/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows').glob('*.yml'):\n    yaml.safe_load(path.read_text())\nfor path in pathlib.Path('/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows').glob('*.yml'):\n    yaml.safe_load(path.read_text())\nprint('workflow yaml ok')\nPY`
+  - `ruby -e 'require "yaml"; Dir["/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/*.yml", "/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/*.yml"].sort.each { |path| YAML.safe_load(File.read(path), permitted_classes: [], aliases: true); puts path }'`
   - Local docs build commands from ITEM-009 and ITEM-010.
   - Local test commands from ITEM-008 and ITEM-012.
 - Assumptions:
   - Existing repo secrets for Documenter/Codecov/TagBot can be reused once the workflow wiring is correct.
+  - The `codex/reseau-http-split` branch will be pushed before relying on the updated `HTTP` workflow in hosted CI.
 - Risks:
   - Branch filters may need to reflect whichever default branch the repos actually use at PR time.
 - Completion criteria:
@@ -355,6 +356,14 @@
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.develop(PackageSpec(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\")); Pkg.instantiate()'` succeeded.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Documenter: doctest; using HTTP; doctest(HTTP)'` passed.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` completed successfully.
+- ITEM-011:
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/ci.yml` now runs a focused Julia `1.11`/`1.12`/`nightly` matrix, uploads coverage from the Ubuntu `1.12` job only, and explicitly `Pkg.develop`s `https://github.com/JuliaServices/Reseau.jl` at `codex/reseau-http-split` before build/test/docs so the extracted dependency boundary works in hosted CI.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/make.jl` now calls `deploydocs(...)` unconditionally, relying on Documenter to no-op outside CI and to publish previews/releases from the workflow environment.
+  - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/ci.yml` now adds cache, coverage upload, and a dedicated docs job, and `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/previews-cleanup.yml` now provides preview cleanup parity with `HTTP`.
+  - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs/make.jl` now calls `deploydocs(...)` unconditionally against `github.com/JuliaServices/Reseau.jl.git`.
+  - `ruby -e 'require "yaml"; Dir["/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/*.yml", "/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/*.yml"].sort.each { |path| YAML.safe_load(File.read(path), permitted_classes: [], aliases: true); puts path }'` parsed every workflow file successfully.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` succeeded and reported `Documenter could not auto-detect the building environment. Skipping deployment.`
+  - `julia --project=/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` succeeded and reported `Documenter could not auto-detect the building environment. Skipping deployment.`
 
 ## Continuity
 

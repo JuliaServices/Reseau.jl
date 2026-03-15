@@ -15,9 +15,7 @@ makedocs(
     checkdocs = :none,
 )
 
-if get(ENV, "DEPLOY_DOCS", "false") == "true"
-    deploydocs(
-        repo = "github.com/JuliaWeb/Reseau.jl.git",
-        push_preview = true,
-    )
-end
+deploydocs(
+    repo = "github.com/JuliaServices/Reseau.jl.git",
+    push_preview = true,
+)
