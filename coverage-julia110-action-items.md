@@ -144,7 +144,7 @@
     - `cd /Users/jacob.quinn/.julia/dev/Reseau-split-worktree && awk 'BEGIN{covered=0; total=0} /^[ \t]*-/ {next} {total++; if ($1+0>0) covered++} END{printf "Reseau src coverage %d/%d %.2f%%\n", covered, total, (total?100*covered/total:0)}' src/*.cov`
   - Final Reseau source coverage after the coverage pass is `2553/2836 = 90.02%`.
 
-### [ ] ITEM-006 (P1) Keep CI/workflow coverage green on the retained Julia 1.12 floor
+### [x] ITEM-006 (P1) Keep CI/workflow coverage green on the retained Julia 1.12 floor
 - Description: With the Julia floor retained at 1.12, the CI work is now about preserving green 1.12 workflows while the new coverage tests land, not lowering the version matrix.
 - Desired outcome: Both repositories keep their main CI test jobs on Julia 1.12 across the intended platforms, with updated coverage-focused test additions remaining green.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/*.yml`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/*.yml`, possibly docs/test harness files if version-gated behavior is needed
@@ -162,8 +162,14 @@
   - Coverage-focused additions may expose platform-specific timing differences even without changing the Julia version matrix.
 - Completion criteria:
   - Workflow files remain syntactically valid and continue targeting Julia 1.12.
+- Verification evidence:
+  - Workflow YAML parsed cleanly in both worktrees with:
+    - `cd /Users/jacob.quinn/.julia/dev/HTTP-split-worktree && ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |path| YAML.safe_load(File.read(path), permitted_classes: [], aliases: true); puts path }'`
+    - `cd /Users/jacob.quinn/.julia/dev/Reseau-split-worktree && ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |path| YAML.safe_load(File.read(path), permitted_classes: [], aliases: true); puts path }'`
+  - Confirmed the active CI workflows in both repos still target Julia `1.12` via `.github/workflows/ci.yml`.
+  - No workflow edits were required to keep the repos aligned to the retained Julia `1.12` floor.
 
-### [ ] ITEM-007 (P1) Run exhaustive local verification and prepare the follow-up pushes
+### [x] ITEM-007 (P1) Run exhaustive local verification and prepare the follow-up pushes
 - Description: After compatibility, coverage, and CI edits land, both repos need a final clean verification pass so the follow-up can be pushed confidently without leaving coverage/math ambiguity or version-specific regressions unresolved.
 - Desired outcome: Both repos pass full local tests and docs builds on the chosen Julia floor, fresh coverage is above 90%, and the tracker records the evidence for handoff/review.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/**`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/**`, this tracker
@@ -183,6 +189,14 @@
   - Coverage-driven additions can expose docs drift or latent platform assumptions late in the cycle.
 - Completion criteria:
   - Both repos are locally verified on the target Julia version with source coverage above 90%, and the work is ready to push/check in hosted CI.
+- Verification evidence:
+  - HTTP full local tests with coverage passed at `6583/7304 = 90.13%`.
+  - Reseau full local tests with coverage passed at `2553/2836 = 90.02%`.
+  - HTTP docs built successfully with:
+    - `cd /Users/jacob.quinn/.julia/dev/HTTP-split-worktree && julia --project=docs --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path="/Users/jacob.quinn/.julia/dev/Reseau-split-worktree"); include("docs/make.jl")'`
+  - Reseau docs built successfully with:
+    - `cd /Users/jacob.quinn/.julia/dev/Reseau-split-worktree && julia --project=docs --startup-file=no --history-file=no docs/make.jl`
+  - Both execution worktrees are clean after the verification runs except for their committed item history.
 
 ## Compaction Continuity Block
 
