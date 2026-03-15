@@ -13,7 +13,7 @@ ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 EnumX = "1"
 OpenSSL_jll = "3"
 ScopedValues = "1"
-julia = "1.11"
+julia = "1.12"
 
 [extras]
 JuliaC = "acedd4c2-ced6-4a15-accc-2607eb759ba2"
