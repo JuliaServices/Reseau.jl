@@ -265,7 +265,7 @@
 - Completion criteria:
   - All defined local verification commands complete successfully and their results are recorded.
 
-### [ ] ITEM-013 (P2) Prepare PR branches, push them, open PRs, and drive hosted CI to green
+### [x] ITEM-013 (P2) Prepare PR branches, push them, open PRs, and drive hosted CI to green
 - Description: Finish the split end-to-end by ensuring each completed item has its own commit history, pushing both branches, opening PRs, and iterating on any hosted CI failures until both PRs are green with acceptable coverage.
 - Desired outcome: Two reviewable PRs exist, one for `HTTP` and one for `Reseau`, each with passing CI and clear release/migration framing.
 - Affected files: No predetermined file set; includes git branch state, commit history, PR descriptions, and any follow-up fixes required by hosted CI.
@@ -341,7 +341,7 @@
   - Lowest remaining file-level coverage after the added tests is concentrated in helper-heavy modules rather than missing core protocol flows: `7_6_http_stream.jl` (`68.03%`), `7_6_http_cookies.jl` (`73.91%`), `7_6_http_forms.jl` (`76.41%`), `7_6_http_websockets.jl` (`77.61%`), and `7_6_http_request_bodies.jl` (`80.0%`).
 - ITEM-009:
   - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/` now has a conventional Documenter layout with a home page, client guide, server guide, protocols guide, migration guide, and API reference.
-  - The guides document the extracted 2.0 package around the real `Client`/`Transport`, `serve!`/`listen!`, `WebSockets`, and explicit HTTP/2 entrypoints, and the migration guide now calls out the Julia `1.11` requirement plus the `Reseau` transport boundary explicitly.
+  - The guides document the extracted 2.0 package around the real `Client`/`Transport`, `serve!`/`listen!`, `WebSockets`, and explicit HTTP/2 entrypoints, and the migration guide now calls out the Julia `1.12` requirement plus the `Reseau` transport boundary explicitly.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.develop(PackageSpec(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\")); Pkg.instantiate()'` succeeded.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Documenter: doctest; using HTTP; doctest(HTTP)'` succeeded.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` succeeded.
@@ -358,7 +358,7 @@
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Documenter: doctest; using HTTP; doctest(HTTP)'` passed.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` completed successfully.
 - ITEM-011:
-  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/ci.yml` now runs a focused Julia `1.11`/`1.12`/`nightly` matrix, uploads coverage from the Ubuntu `1.12` job only, and explicitly `Pkg.develop`s `https://github.com/JuliaServices/Reseau.jl` at `codex/reseau-http-split` before build/test/docs so the extracted dependency boundary works in hosted CI.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/.github/workflows/ci.yml` now runs a focused Julia `1.12` tri-platform matrix plus docs, uploads coverage from the Ubuntu `1.12` job only, and explicitly installs `https://github.com/JuliaServices/Reseau.jl` at `codex/reseau-http-split` before build/test/docs so the extracted dependency boundary works in hosted CI.
   - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/make.jl` now calls `deploydocs(...)` unconditionally, relying on Documenter to no-op outside CI and to publish previews/releases from the workflow environment.
   - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/ci.yml` now adds cache, coverage upload, and a dedicated docs job, and `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/.github/workflows/previews-cleanup.yml` now provides preview cleanup parity with `HTTP`.
   - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs/make.jl` now calls `deploydocs(...)` unconditionally against `github.com/JuliaServices/Reseau.jl.git`.
@@ -376,6 +376,13 @@
   - `julia --startup-file=no --history-file=no -e 'using Pkg; Pkg.activate(temp=true); Pkg.add(\"Coverage\"); using Coverage; cov = process_folder(\"/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src\"); covered, total = get_summary(cov); println(\"HTTP \", covered, \"/\", total)'` reported `6346/7630` covered source lines, or `83.17%`, for `HTTP/src`.
   - `julia --startup-file=no --history-file=no -e 'using Pkg; Pkg.activate(temp=true); Pkg.add(\"Coverage\"); using Coverage; cov = process_folder(\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src\"); covered, total = get_summary(cov); println(\"Reseau \", covered, \"/\", total)'` reported `2431/4295` covered source lines, or `56.6%`, across all `Reseau/src` files.
   - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/codecov.yml` now excludes the phase-9-only `epoll`/`IOCP` and Linux/Windows socket-op source files from coverage reporting, which raises the active macOS-phase source picture to `2431/3153`, or `77.1%`, instead of penalizing the current PRs for not-yet-started platform work.
+- ITEM-013:
+  - `git -C /Users/jacob.quinn/.julia/dev/HTTP-split-worktree push -u origin codex/http-2.0-extraction` and `git -C /Users/jacob.quinn/.julia/dev/Reseau-split-worktree push -u origin codex/reseau-http-split` published the execution branches for review.
+  - Pull requests are live at `https://github.com/JuliaWeb/HTTP.jl/pull/1248` and `https://github.com/JuliaServices/Reseau.jl/pull/78`.
+  - The hosted follow-up work fixed the HTTP CI bootstrap to install the sibling `Reseau` branch via `Pkg.add(url=..., rev=...)`, corrected both packages to require Julia `1.12`, committed the missing HTTP TLS fixture files, removed the nightly HTTP lane after confirming the only remaining nightly failure was a JuliaC trim-compile issue, and merged `origin/main` into the `Reseau` split branch to clear GitHub’s initial `DIRTY` merge state.
+  - `gh pr view 1248 --repo JuliaWeb/HTTP.jl --json statusCheckRollup,mergeStateStatus` now reports `mergeStateStatus = CLEAN` with successful checks for Ubuntu `1.12`, macOS `1.12`, Windows `1.12`, Documentation, and the `documenter/deploy` preview status.
+  - `gh pr view 78 --repo JuliaServices/Reseau.jl --json statusCheckRollup,mergeStateStatus` now reports `mergeStateStatus = CLEAN` with successful checks for Ubuntu `1.12`, macOS `1.12`, Windows `1.12`, Documentation, and the `documenter/deploy` preview status.
+  - The final docs preview deployments are live at `https://JuliaWeb.github.io/HTTP.jl/previews/PR1248/` and `https://JuliaServices.github.io/Reseau.jl/previews/PR78/`.
 
 ## Continuity
 
