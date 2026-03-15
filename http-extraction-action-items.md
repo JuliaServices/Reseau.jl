@@ -143,7 +143,7 @@
 - Completion criteria:
   - `Reseau` loads and tests cleanly without bundling the HTTP stack.
 
-### [ ] ITEM-007 (P1) Reconcile API surface, dependency policy, and release metadata for HTTP 2.0
+### [x] ITEM-007 (P1) Reconcile API surface, dependency policy, and release metadata for HTTP 2.0
 - Description: Normalize `HTTP` package metadata and public API around the extracted implementation so the 2.0 branch is intentional and reviewable, not just a copied internal tree. This includes versioning, deps, compat, exports, and release-facing package identity decisions.
 - Desired outcome: `HTTP` clearly presents itself as the extracted 2.0 package line with accurate dependency/compat metadata and an auditable public surface.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/HTTP.jl`, relevant source files that define exports/version constants.
@@ -324,6 +324,13 @@
   - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/Project.toml` no longer declares the HTTP-only package deps (`Base64`, `CodecZlib`, `Dates`, `PrecompileTools`, `Random`, `SHA`, `UUIDs`).
   - `julia --project=/Users/jacob.quinn/.julia/dev/Reseau-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); using Reseau; println(Reseau)'` succeeded and printed `Reseau`.
   - Residual verification note: `RESEAU_TEST_ONLY=eventloops_tests.jl JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'` hangs after `[runtests] include START: eventloops_tests.jl` in both `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree` and the untouched source branch `/Users/jacob.quinn/.julia/dev/Reseau`, so this appears to be a pre-existing non-HTTP issue rather than a regression introduced by the HTTP split.
+- ITEM-007:
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/HTTP.jl` no longer needs the temporary `__precompile__(false)` escape hatch now that `Reseau` no longer bundles the same HTTP methods.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/7_6_http_proxy.jl` now uses local IPv4/IPv6 literal parsers backed by `inet_pton` instead of private `HostResolvers._parse_ipv4_literal` / `_parse_ipv6_literal` calls.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/Project.toml` now reflects the slimmer test target after the direct `Base64`/`Dates` test imports were removed.
+  - `rg -n 'HostResolvers\\._parse_ipv|__precompile__\\(false\\)' /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src` returned no matches.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.instantiate(); using HTTP; println(HTTP.VERSION)'` precompiled and loaded `HTTP`, printing `2.0.0`.
+  - `HTTP_TEST_ONLY=http_client_proxy_tests.jl julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.test(; coverage=false)'` passed the proxy suite with the localized parser implementation.
 
 ## Continuity
 
