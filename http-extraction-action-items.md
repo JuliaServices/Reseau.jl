@@ -201,7 +201,7 @@
 - Completion criteria:
   - `HTTP` docs build successfully and include a substantive 1.x -> 2.0 migration guide.
 
-### [ ] ITEM-010 (P1) Build full Reseau documentation for the post-split package
+### [x] ITEM-010 (P1) Build full Reseau documentation for the post-split package
 - Description: Create a proper `Reseau/docs` setup and write documentation for the package that remains after HTTP extraction. This should explain the main entrypoints, package purpose, API reference, and a strong migration guide for `Sockets` stdlib users moving to `Reseau`.
 - Desired outcome: `Reseau` has a conventional Documenter site with architecture-aware guides and a practical porting guide for `Sockets` users.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs/**`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/**` docstrings as needed, possibly `.github/workflows/ci.yml`.
@@ -343,6 +343,12 @@
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.develop(PackageSpec(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\")); Pkg.instantiate()'` succeeded.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Documenter: doctest; using HTTP; doctest(HTTP)'` succeeded.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` succeeded.
+- ITEM-010:
+  - `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs/` now exists with a conventional Documenter structure: home, TCP/resolution guide, TLS guide, `Sockets` migration guide, and API reference.
+  - The docs explicitly position Reseau as the post-split transport/runtime/TLS layer and point HTTP users at HTTP.jl for the extracted HTTP stack.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'` succeeded.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs --startup-file=no --history-file=no -e 'using Documenter: doctest; using Reseau; doctest(Reseau)'` succeeded.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` succeeded.
   - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/` now contains a real 2.0 docs tree: a rewritten home page, client/server/protocol guides, a migration guide from 1.x, and a grouped manual API reference.
   - The migration guide explicitly frames 2.0 as the extracted Reseau-backed HTTP line, calls out the main compatibility expectations, and points users toward the stable top-level surfaces instead of 1.x internals.
   - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/make.jl` now builds the multi-page site and uses `checkdocs = :none` so the authored manual reference can build cleanly without a full `@docs` inclusion pass yet.
