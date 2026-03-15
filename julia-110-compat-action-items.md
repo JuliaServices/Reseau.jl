@@ -53,7 +53,7 @@
   - A fresh Julia 1.10 temp environment can `Pkg.develop` the Reseau split worktree, instantiate dependencies, and `using Reseau` succeeds.
   - A fresh Julia 1.10 temp environment can `Pkg.develop` both split worktrees, instantiate dependencies, and `using HTTP` succeeds.
 
-### [ ] ITEM-003 (P0) Get Reseau’s 1.10 test suite green
+### [x] ITEM-003 (P0) Get Reseau’s 1.10 test suite green
 - Description: Once Reseau loads on 1.10, the full runtime and trim-safe suites need to pass. This will likely expose differences in task scheduling, detached thread startup, libuv/runtime helpers, TLS/OpenSSL behavior, or atomic semantics between 1.10 and 1.12.
 - Desired outcome: Reseau’s supported macOS-phase tests pass on Julia 1.10 with the same package semantics we keep on 1.12.
 - Affected files: `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/test/**`, `/Users/jacob.quinn/.julia/dev/Reseau-split-worktree/Project.toml`
@@ -66,8 +66,13 @@
   - `RESEAU_TEST_ONLY=trim_compile_tests.jl JULIA_NUM_THREADS=1 julia +1.10 --project=. --startup-file=no --history-file=no test/runtests.jl`
 - Assumptions:
   - Linux/Windows phase-9 code only needs to remain parseable; macOS is the active gating platform in this rewrite state.
+  - JuliaC trim compilation is unavailable on Julia 1.10, so the trim-safe suite should skip there rather than pretend verifier coverage exists below the toolchain floor.
 - Completion criteria:
-  - The Reseau Julia 1.10 test suite passes locally, including trim-safe verification.
+  - The Reseau Julia 1.10 test suite passes locally, with trim-safe tests explicitly skipped because JuliaC trim support is unavailable below Julia 1.12.
+- Verification evidence:
+  - `Pkg.test("Reseau")` from a fresh Julia 1.10 temp environment passes end to end.
+  - Event loops, internal poll, socket ops, TCP, host resolvers, and TLS all pass on Julia 1.10.
+  - `trim_compile_tests.jl` now skips with an explicit JuliaC/toolchain message on Julia 1.10 instead of failing on a missing CLI entrypoint.
 
 ### [ ] ITEM-004 (P0) Get HTTP’s 1.10 test suite green
 - Description: HTTP depends on the extracted Reseau transport stack and likely has its own 1.10 issues beyond the websocket `Memory` sites. The full suite needs to pass once HTTP can load on 1.10.

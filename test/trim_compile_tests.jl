@@ -10,12 +10,15 @@ else
     typemax(Int)
 end
 
+const _TRIM_SUPPORTED = VERSION >= v"1.12.0-rc1"
+const _JULIAC_ENTRYPOINT_EXPR = "using JuliaC; if isdefined(JuliaC, :main); JuliaC.main(ARGS); else JuliaC._main_cli(ARGS); end"
+
 function _run_trim_compile(project_path::String, script_path::String, output_name::String; timeout_s::Float64 = 120.0, bundle_dir::Union{Nothing, String} = nothing)
     julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
     cmd = if bundle_dir === nothing
-        `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e "using JuliaC; JuliaC.main(ARGS)" -- --output-exe $output_name --project=$project_path --experimental --trim=safe $script_path`
+        `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e $(_JULIAC_ENTRYPOINT_EXPR) -- --output-exe $output_name --project=$project_path --experimental --trim=safe $script_path`
     else
-        `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e "using JuliaC; JuliaC.main(ARGS)" -- --output-exe $output_name --bundle $bundle_dir --project=$project_path --experimental --trim=safe $script_path`
+        `$julia_exe --startup-file=no --history-file=no --code-coverage=none --project=$project_path -e $(_JULIAC_ENTRYPOINT_EXPR) -- --output-exe $output_name --bundle $bundle_dir --project=$project_path --experimental --trim=safe $script_path`
     end
     return _run_command_with_timeout(cmd; timeout_s = timeout_s, log_label = "compile")
 end
@@ -162,16 +165,21 @@ function _parse_trim_verify_totals(output::String)
 end
 
 @testset "Trim compile" begin
-    project_path = normpath(joinpath(@__DIR__, ".."))
-    trim_workloads = [
-        ("eventloops_trim_safe.jl", "eventloops_trim_safe"),
-        ("socket_ops_trim_safe.jl", "socket_ops_trim_safe"),
-        ("tcp_trim_safe.jl", "tcp_trim_safe"),
-        ("host_resolvers_trim_safe.jl", "host_resolvers_trim_safe"),
-        ("tls_trim_safe.jl", "tls_trim_safe"),
-    ]
-    trim_workloads = _trim_selected_workloads(trim_workloads)
-    for (script_file, output_name) in trim_workloads
-        _run_trim_case(project_path, script_file, output_name)
+    if !_TRIM_SUPPORTED
+        println("[trim] skip Julia < 1.12: JuliaC trim compilation is unavailable")
+        @test true
+    else
+        project_path = normpath(joinpath(@__DIR__, ".."))
+        trim_workloads = [
+            ("eventloops_trim_safe.jl", "eventloops_trim_safe"),
+            ("socket_ops_trim_safe.jl", "socket_ops_trim_safe"),
+            ("tcp_trim_safe.jl", "tcp_trim_safe"),
+            ("host_resolvers_trim_safe.jl", "host_resolvers_trim_safe"),
+            ("tls_trim_safe.jl", "tls_trim_safe"),
+        ]
+        trim_workloads = _trim_selected_workloads(trim_workloads)
+        for (script_file, output_name) in trim_workloads
+            _run_trim_case(project_path, script_file, output_name)
+        end
     end
 end
