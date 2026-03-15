@@ -36,6 +36,11 @@ function _el_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
     return status
 end
 
+# These backend helpers block an OS thread inside the raw poll syscall. When
+# the Julia scheduler only has one worker thread, using `Threads.@spawn` around
+# them would starve the companion task that is supposed to drive the wakeup.
+_el_can_block_julia_worker() = Threads.nthreads() > 1
+
 if !(Sys.isapple() || Sys.islinux())
     @testset "EventLoops (macOS/Linux only)" begin
         @test true
@@ -87,20 +92,24 @@ else
                 elapsed_ns = time_ns() - t0
                 @test errno == Int32(0)
                 @test elapsed_ns >= 15_000_000
-                wake_ch = Channel{Nothing}(1)
-                poll_task = errormonitor(Threads.@spawn begin
-                    err = NP._backend_poll_once!(state, Int64(-1))
-                    err == Int32(0) || throw(SystemError("kevent", Int(err)))
-                    put!(wake_ch, nothing)
-                    return nothing
-                end)
-                sleep(0.03)
-                @test NP._backend_wake!(state) == Int32(0)
-                status = timedwait(() -> isready(wake_ch), 2.0; pollint = 0.001)
-                @test status != :timed_out
-                if status != :timed_out
-                    take!(wake_ch)
-                    wait(poll_task)
+                if _el_can_block_julia_worker()
+                    wake_ch = Channel{Nothing}(1)
+                    poll_task = errormonitor(Threads.@spawn begin
+                        err = NP._backend_poll_once!(state, Int64(-1))
+                        err == Int32(0) || throw(SystemError("kevent", Int(err)))
+                        put!(wake_ch, nothing)
+                        return nothing
+                    end)
+                    sleep(0.03)
+                    @test NP._backend_wake!(state) == Int32(0)
+                    status = timedwait(() -> isready(wake_ch), 2.0; pollint = 0.001)
+                    @test status != :timed_out
+                    if status != :timed_out
+                        take!(wake_ch)
+                        wait(poll_task)
+                    end
+                else
+                    @test NP._backend_wake!(state) == Int32(0)
                 end
             finally
                 if poll_task isa Task && !istaskdone(poll_task)
@@ -128,16 +137,23 @@ else
                 state.registrations[fd0] = registration
                 state.registrations_by_token[token] = registration
                 @atomic :release state.poll_until_ns = Int64(time_ns()) + Int64(5_000_000_000)
-                poll_task = errormonitor(Threads.@spawn begin
-                    t0 = time_ns()
-                    err = NP._backend_poll_once!(state, Int64(5_000_000_000))
-                    return err, time_ns() - t0
-                end)
-                sleep(0.03)
-                NP.schedule_deadlines!(registration.pollstate, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
-                err, elapsed_ns = fetch(poll_task)
-                @test err == Int32(0)
-                @test elapsed_ns < 500_000_000
+                if _el_can_block_julia_worker()
+                    poll_task = errormonitor(Threads.@spawn begin
+                        t0 = time_ns()
+                        err = NP._backend_poll_once!(state, Int64(5_000_000_000))
+                        return err, time_ns() - t0
+                    end)
+                    sleep(0.03)
+                    NP.schedule_deadlines!(registration.pollstate, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
+                    err, elapsed_ns = fetch(poll_task)
+                    @test err == Int32(0)
+                    @test elapsed_ns < 500_000_000
+                else
+                    NP.schedule_deadlines!(registration.pollstate, Int64(time_ns()) + Int64(20_000_000), Int64(0), UInt64(1), UInt64(0))
+                    delay_ns = NP._poll_delay_ns(state)
+                    @test delay_ns >= 0
+                    @test delay_ns < 500_000_000
+                end
             finally
                 if poll_task isa Task && !istaskdone(poll_task)
                     NP._backend_wake!(state)
