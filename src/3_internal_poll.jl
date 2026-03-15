@@ -13,6 +13,7 @@ Conceptually this sits where Go's `internal/poll` package sits:
 module IOPoll
 
 using EnumX
+using ..Reseau: ByteMemory
 using ..Reseau.EventLoops
 using ..Reseau.SocketOps
 import ..Reseau.EventLoops: deadline_fire!
@@ -1014,12 +1015,12 @@ function write!(fd::FD, p::AbstractVector{UInt8})::Int
 end
 
 """
-Write exactly `nbytes` from a `Memory{UInt8}` buffer and return the byte count.
+Write exactly `nbytes` from a contiguous byte buffer and return the byte count.
 
 This follows the same blocking/retry behavior as `write!(fd, ::Vector{UInt8})`
 and only returns successfully once all requested bytes have been accepted.
 """
-function write!(fd::FD, p::Memory{UInt8}, nbytes::Integer)::Int
+function write!(fd::FD, p::ByteMemory, nbytes::Integer)::Int
     n = Int(nbytes)
     n < 0 && throw(ArgumentError("nbytes must be >= 0"))
     n <= length(p) || throw(ArgumentError("nbytes exceeds buffer length"))

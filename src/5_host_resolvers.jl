@@ -17,6 +17,7 @@ resolution logic remains factored into its own file.
 """
 module HostResolvers
 
+using ..Reseau: @gcsafe_ccall
 using ..Reseau.SocketOps
 using ..Reseau.IOPoll
 
@@ -395,14 +396,14 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
     result_ptr = Ref{Ptr{_AddrInfo}}(C_NULL)
     ret = GC.@preserve hints begin
         @static if Sys.iswindows()
-            @ccall gc_safe = true "Ws2_32".getaddrinfo(
+            @gcsafe_ccall "Ws2_32".getaddrinfo(
                 String(hostname)::Cstring,
                 C_NULL::Cstring,
                 hints_ptr::Ptr{_AddrInfo},
                 result_ptr::Ptr{Ptr{_AddrInfo}},
             )::Cint
         else
-            @ccall gc_safe = true getaddrinfo(
+            @gcsafe_ccall getaddrinfo(
                 String(hostname)::Cstring,
                 C_NULL::Cstring,
                 hints_ptr::Ptr{_AddrInfo},
@@ -505,7 +506,7 @@ function _parse_ipv4_literal(host::AbstractString)::Union{Nothing, NTuple{4, UIn
     h = String(host)
     bytes = Vector{UInt8}(undef, 4)
     rc = GC.@preserve bytes begin
-        @ccall gc_safe = true inet_pton(
+        @gcsafe_ccall inet_pton(
             SocketOps.AF_INET::Cint,
             h::Cstring,
             pointer(bytes)::Ptr{UInt8},
@@ -519,7 +520,7 @@ function _parse_ipv6_literal(host::AbstractString)::Union{Nothing, NTuple{16, UI
     h = String(host)
     bytes = Vector{UInt8}(undef, 16)
     rc = GC.@preserve bytes begin
-        @ccall gc_safe = true inet_pton(
+        @gcsafe_ccall inet_pton(
             SocketOps.AF_INET6::Cint,
             h::Cstring,
             pointer(bytes)::Ptr{UInt8},
