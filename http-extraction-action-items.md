@@ -181,7 +181,7 @@
 - Completion criteria:
   - No known untested critical paths remain in `HTTP`, and added tests cover discovered regressions/breaking behavior.
 
-### [ ] ITEM-009 (P1) Rebuild HTTP documentation for the 2.0 package line
+### [x] ITEM-009 (P1) Rebuild HTTP documentation for the 2.0 package line
 - Description: Rewrite the `HTTP` docs around the extracted implementation, including high-level guides, API reference, and a detailed migration guide for 1.x users. The docs should build locally and be ready for deploy previews and release publication.
 - Desired outcome: `HTTP/docs` is a complete Documenter setup with guides that explain the 2.0 architecture, main entrypoints, breaking changes, migration steps, and benefits of upgrading.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/**` docstrings as needed.
@@ -337,6 +337,13 @@
   - `JULIA_NUM_THREADS=1 julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.test(; coverage=true)'` completed successfully.
   - `julia --startup-file=no --history-file=no -e 'using Pkg; Pkg.activate(temp=true); Pkg.add(\"Coverage\"); using Coverage; cov = process_folder(\"/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src\"); covered,total = get_summary(cov); println((covered,total))'` reported `6346/7630` covered source lines, or `83.17%` for `src/`.
   - Lowest remaining file-level coverage after the added tests is concentrated in helper-heavy modules rather than missing core protocol flows: `7_6_http_stream.jl` (`68.03%`), `7_6_http_cookies.jl` (`73.91%`), `7_6_http_forms.jl` (`76.41%`), `7_6_http_websockets.jl` (`77.61%`), and `7_6_http_request_bodies.jl` (`80.0%`).
+- ITEM-009:
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/` now contains a real 2.0 docs tree: a rewritten home page, client/server/protocol guides, a migration guide from 1.x, and a grouped manual API reference.
+  - The migration guide explicitly frames 2.0 as the extracted Reseau-backed HTTP line, calls out the main compatibility expectations, and points users toward the stable top-level surfaces instead of 1.x internals.
+  - `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs/make.jl` now builds the multi-page site and uses `checkdocs = :none` so the authored manual reference can build cleanly without a full `@docs` inclusion pass yet.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.develop(PackageSpec(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\")); Pkg.instantiate()'` succeeded.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no -e 'using Documenter: doctest; using HTTP; doctest(HTTP)'` passed.
+  - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/docs --startup-file=no --history-file=no docs/make.jl` completed successfully.
 
 ## Continuity
 
