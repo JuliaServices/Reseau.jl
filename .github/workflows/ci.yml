@@ -51,11 +51,6 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
-      - run: |
-          julia --project=. --startup-file=no --history-file=no -e '
-            using Pkg
-            Pkg.resolve()
-            Pkg.instantiate()'
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - if: matrix.coverage == '1'
