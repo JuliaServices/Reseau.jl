@@ -139,14 +139,14 @@ Returns the new file descriptor or throws `SystemError` on failure.
 function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
     raw_type = Cint(sotype)
     flagged_type = Cint(raw_type | _SOCK_NONBLOCK | _SOCK_CLOEXEC)
-    fd = @ccall gc_safe = true socket(Cint(family)::Cint, flagged_type::Cint, Cint(proto)::Cint)::Cint
+    fd = @gcsafe_ccall socket(Cint(family)::Cint, flagged_type::Cint, Cint(proto)::Cint)::Cint
     if fd == -1
         errno = _errno_i32()
         if errno != Int32(Base.Libc.EINVAL)
             _throw_errno("socket", errno)
         end
         # Older kernels may not support atomic SOCK_NONBLOCK/SOCK_CLOEXEC.
-        fd = @ccall gc_safe = true socket(Cint(family)::Cint, raw_type::Cint, Cint(proto)::Cint)::Cint
+        fd = @gcsafe_ccall socket(Cint(family)::Cint, raw_type::Cint, Cint(proto)::Cint)::Cint
         fd == -1 && _throw_errno("socket", _errno_i32())
         try
             set_close_on_exec!(fd)
@@ -203,7 +203,7 @@ end
 
 function bind_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)
     while true
-        ret = @ccall gc_safe = true bind(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Cint
+        ret = @gcsafe_ccall bind(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Cint
         ret == 0 && return nothing
         errno = _errno_i32()
         errno == Int32(Base.Libc.EINTR) && continue
@@ -213,7 +213,7 @@ end
 
 function listen_socket(fd::Cint, backlog::Integer)
     while true
-        ret = @ccall gc_safe = true listen(fd::Cint, Cint(backlog)::Cint)::Cint
+        ret = @gcsafe_ccall listen(fd::Cint, Cint(backlog)::Cint)::Cint
         ret == 0 && return nothing
         errno = _errno_i32()
         errno == Int32(Base.Libc.EINTR) && continue
@@ -237,7 +237,7 @@ end
 
 function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
     # Exposes raw errno (e.g. EINPROGRESS) so upper layers can drive connect via poll.
-    ret = @ccall gc_safe = true connect(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Cint
+    ret = @gcsafe_ccall connect(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Cint
     ret == 0 && return Int32(0)
     return _errno_i32()
 end
@@ -260,7 +260,7 @@ function _try_accept_socket_accept4(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     addrlen = Ref{SockLen}(SockLen(_ACCEPT_ADDRBUF_LEN))
     flags = Cint(_SOCK_NONBLOCK | _SOCK_CLOEXEC)
     newfd = GC.@preserve addrbuf begin
-        @ccall gc_safe = true accept4(
+        @gcsafe_ccall accept4(
             fd::Cint,
             Base.unsafe_convert(Ptr{Cvoid}, addrbuf)::Ptr{Cvoid},
             addrlen::Ref{SockLen},
@@ -279,7 +279,7 @@ function _try_accept_socket_fallback(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()
     addrlen = Ref{SockLen}(SockLen(_ACCEPT_ADDRBUF_LEN))
     newfd = GC.@preserve addrbuf begin
-        @ccall gc_safe = true accept(
+        @gcsafe_ccall accept(
             fd::Cint,
             Base.unsafe_convert(Ptr{Cvoid}, addrbuf)::Ptr{Cvoid},
             addrlen::Ref{SockLen},
@@ -462,7 +462,7 @@ Half-close or fully close the socket send/receive direction designated by
 """
 function shutdown_socket(fd::Cint, how::Integer)
     while true
-        ret = @ccall gc_safe = true shutdown(fd::Cint, Cint(how)::Cint)::Cint
+        ret = @gcsafe_ccall shutdown(fd::Cint, Cint(how)::Cint)::Cint
         ret == 0 && return nothing
         errno = _errno_i32()
         errno == Int32(Base.Libc.EINTR) && continue
@@ -482,7 +482,7 @@ read loop.
 function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     # Single read syscall with EINTR retry; caller owns EAGAIN and short-read handling.
     while true
-        n = @ccall gc_safe = true read(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
+        n = @gcsafe_ccall read(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
         if n == -1
             _errno_i32() == Int32(Base.Libc.EINTR) && continue
         end
@@ -501,7 +501,7 @@ whether to retry immediately or wait for write readiness.
 function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     # Single write syscall with EINTR retry; caller owns EAGAIN and short-write handling.
     while true
-        n = @ccall gc_safe = true write(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
+        n = @gcsafe_ccall write(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
         if n == -1
             _errno_i32() == Int32(Base.Libc.EINTR) && continue
         end
@@ -518,7 +518,7 @@ function recv_from!(
         fromlen::Ptr{SockLen} = Ptr{SockLen}(C_NULL),
     )::Cssize_t
     while true
-        n = @ccall gc_safe = true recvfrom(
+        n = @gcsafe_ccall recvfrom(
             fd::Cint,
             ptr::Ptr{UInt8},
             nbytes::Csize_t,
@@ -542,7 +542,7 @@ function send_to!(
         tolen::SockLen = SockLen(0),
     )::Cssize_t
     while true
-        n = @ccall gc_safe = true sendto(
+        n = @gcsafe_ccall sendto(
             fd::Cint,
             ptr::Ptr{UInt8},
             nbytes::Csize_t,
@@ -559,7 +559,7 @@ end
 
 function recv_msg!(fd::Cint, msg::Ref{MsgHdr}, flags::Cint = Cint(0))::Cssize_t
     while true
-        n = @ccall gc_safe = true recvmsg(fd::Cint, msg::Ref{MsgHdr}, flags::Cint)::Cssize_t
+        n = @gcsafe_ccall recvmsg(fd::Cint, msg::Ref{MsgHdr}, flags::Cint)::Cssize_t
         if n == -1
             _errno_i32() == Int32(Base.Libc.EINTR) && continue
         end
@@ -569,7 +569,7 @@ end
 
 function send_msg!(fd::Cint, msg::Ref{MsgHdr}, flags::Cint = Cint(0))::Cssize_t
     while true
-        n = @ccall gc_safe = true sendmsg(fd::Cint, msg::Ref{MsgHdr}, flags::Cint)::Cssize_t
+        n = @gcsafe_ccall sendmsg(fd::Cint, msg::Ref{MsgHdr}, flags::Cint)::Cssize_t
         if n == -1
             _errno_i32() == Int32(Base.Libc.EINTR) && continue
         end

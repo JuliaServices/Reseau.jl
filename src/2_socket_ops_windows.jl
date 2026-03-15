@@ -219,7 +219,7 @@ function ensure_winsock!()
             UInt16(0),
             C_NULL,
         ))
-        rc = @ccall gc_safe = true _WS2_32.WSAStartup(
+        rc = @gcsafe_ccall _WS2_32.WSAStartup(
             UInt16(0x0202)::UInt16,
             wsa_data::Ref{_WSAData},
         )::Cint
@@ -349,7 +349,7 @@ already invalid.
 """
 function close_socket_nothrow(fd::Cint)::Int32
     _clear_fd_state!(fd)
-    ret = @ccall gc_safe = true _WS2_32.closesocket(
+    ret = @gcsafe_ccall _WS2_32.closesocket(
         _socket_value(fd)::UInt,
     )::Cint
     ret == 0 && return Int32(0)
@@ -381,7 +381,7 @@ function bind_socket(fd::Cint, addr::SockAddrIn6)
 end
 
 function bind_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)
-    ret = @ccall gc_safe = true _WS2_32.bind(
+    ret = @gcsafe_ccall _WS2_32.bind(
         _socket_value(fd)::UInt,
         addr::Ptr{Cvoid},
         Cint(addrlen)::Cint,
@@ -391,7 +391,7 @@ function bind_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)
 end
 
 function listen_socket(fd::Cint, backlog::Integer)
-    ret = @ccall gc_safe = true _WS2_32.listen(
+    ret = @gcsafe_ccall _WS2_32.listen(
         _socket_value(fd)::UInt,
         Cint(backlog)::Cint,
     )::Cint
@@ -423,7 +423,7 @@ to `EINPROGRESS` so the transport layer can use the same poll-driven connect
 completion path as it does on Unix.
 """
 function connect_socket(fd::Cint, addr::Ptr{Cvoid}, addrlen::SockLen)::Int32
-    ret = @ccall gc_safe = true "Ws2_32".connect(
+    ret = @gcsafe_ccall "Ws2_32".connect(
         _socket_value(fd)::UInt,
         addr::Ptr{Cvoid},
         Cint(addrlen)::Cint,
@@ -492,7 +492,7 @@ function try_accept_socket(fd::Cint)::Tuple{Cint, AcceptPeer, Int32}
     addrbuf = Ref{NTuple{_ACCEPT_ADDRBUF_LEN, UInt8}}()
     addrlen = Ref{SockLen}(SockLen(_ACCEPT_ADDRBUF_LEN))
     new_sock = GC.@preserve addrbuf begin
-        @ccall gc_safe = true "Ws2_32".accept(
+        @gcsafe_ccall "Ws2_32".accept(
             _socket_value(fd)::UInt,
             Base.unsafe_convert(Ptr{Cvoid}, addrbuf)::Ptr{Cvoid},
             addrlen::Ref{SockLen},
@@ -582,7 +582,7 @@ function finish_accept_ex!(listener_fd::Cint, acceptfd::Cint, addrbuf::Vector{UI
     remote_ptr = Ref{Ptr{UInt8}}(C_NULL)
     remote_len = Ref{Cint}(0)
     GC.@preserve addrbuf begin
-        @ccall gc_safe = true _MSWSOCK.GetAcceptExSockaddrs(
+        @gcsafe_ccall _MSWSOCK.GetAcceptExSockaddrs(
             pointer(addrbuf)::Ptr{UInt8},
             UInt32(0)::UInt32,
             UInt32(_ACCEPT_ADDRBUF_LEN)::UInt32,
@@ -719,7 +719,7 @@ end
 Half-close or fully close the directions designated by `how`.
 """
 function shutdown_socket(fd::Cint, how::Integer)
-    ret = @ccall gc_safe = true _WS2_32.shutdown(
+    ret = @gcsafe_ccall _WS2_32.shutdown(
         _socket_value(fd)::UInt,
         Cint(how)::Cint,
     )::Cint
@@ -736,7 +736,7 @@ inspection to the caller.
 """
 function read_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @ccall gc_safe = true "Ws2_32".recv(
+    ret = @gcsafe_ccall "Ws2_32".recv(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,
@@ -753,7 +753,7 @@ Perform one raw `send` call and surface short writes or errors to the caller.
 """
 function write_once!(fd::Cint, ptr::Ptr{UInt8}, nbytes::Csize_t)::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @ccall gc_safe = true "Ws2_32".send(
+    ret = @gcsafe_ccall "Ws2_32".send(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,
@@ -772,7 +772,7 @@ function recv_from!(
         fromlen::Ptr{SockLen} = Ptr{SockLen}(C_NULL),
     )::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @ccall gc_safe = true "Ws2_32".recvfrom(
+    ret = @gcsafe_ccall "Ws2_32".recvfrom(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,
@@ -793,7 +793,7 @@ function send_to!(
         tolen::SockLen = SockLen(0),
     )::Cssize_t
     n = Int(min(nbytes, Csize_t(typemax(Cint))))
-    ret = @ccall gc_safe = true "Ws2_32".sendto(
+    ret = @gcsafe_ccall "Ws2_32".sendto(
         _socket_value(fd)::UInt,
         ptr::Ptr{UInt8},
         Cint(n)::Cint,

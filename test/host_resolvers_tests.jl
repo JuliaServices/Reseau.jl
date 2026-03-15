@@ -4,6 +4,7 @@ using Reseau
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
 const EL = Reseau.EventLoops
+const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 struct _SlowResolver <: ND.AbstractResolver
@@ -230,13 +231,42 @@ else
             @test ND.join_host_port("::1", "") == "[::1]:"
             @test_throws ND.AddressError ND.split_host_port("127.0.0.1")
             @test_throws ND.AddressError ND.split_host_port("::1:443")
+            @test_throws ND.AddressError ND.split_host_port("[::1]")
+            @test_throws ND.AddressError ND.split_host_port("[::1]:443:80")
+            @test_throws ND.AddressError ND.split_host_port("host[bad]:80")
+            @test_throws ND.AddressError ND.split_host_port("host]bad:80")
+        end
+        @testset "literal host and scope parsing helpers" begin
+            iface = Sys.isapple() ? "lo0" : "lo"
+            @test ND._split_host_zone("fe80::1%$iface") == ("fe80::1", iface)
+            @test ND._split_host_zone("%$iface") == ("%$iface", "")
+            @test_throws ND.AddressError ND._split_host_zone("fe80::1%")
+
+            @test ND._scope_id_from_zone("") == UInt32(0)
+            @test ND._scope_id_from_zone("7") == UInt32(7)
+            @test ND._scope_id_from_zone(iface) > UInt32(0)
+            @test_throws ND.AddressError ND._scope_id_from_zone("-1")
+            @test_throws ND.AddressError ND._scope_id_from_zone(string(UInt64(typemax(UInt32)) + UInt64(1)))
+            @test_throws ND.AddressError ND._scope_id_from_zone("reseau-no-such-iface")
+
+            scoped = ND._literal_host_addr("fe80::1%$iface")
+            @test scoped isa NC.SocketAddrV6
+            if scoped isa NC.SocketAddrV6
+                @test scoped.scope_id == Int(ND._scope_id_from_zone(iface))
+            end
+            @test_throws ND.AddressError ND._literal_host_addr("127.0.0.1%$iface")
         end
         @testset "port parser and service lookup" begin
             @test ND.parse_port("80") == (80, false)
             @test ND.parse_port("+80") == (80, false)
             @test ND.parse_port("-1") == (-1, false)
             @test ND.parse_port("+") == (0, false)
+            @test ND.parse_port("999999999999999999999") == (Int((UInt32(1) << 30) - UInt32(1)), false)
+            @test ND.parse_port("-999999999999999999999") == (-Int(UInt32(1) << 30), false)
+            @test ND.parse_port("service-name") == (0, true)
             @test ND.lookup_port("tcp", "80") == 80
+            @test ND.lookup_port("ip", "domain") == 53
+            @test ND.lookup_port("ip", "http") == 80
             @test ND.lookup_port("tcp", "http") == 80
             @test ND.lookup_port("udp", "domain") == 53
             tcp_candidate = _nd_services_candidate("tcp")
@@ -254,6 +284,17 @@ else
                 @test true
             end
             @test_throws ND.AddressError ND.lookup_port("tcp", "reseau-unknown-service")
+            static_lookup = ND.StaticResolver(
+                services_tcp = Dict("smtp-alt" => 2525),
+                services_udp = Dict("dns-alt" => 5353),
+                fallback = ND.StaticResolver(services_tcp = Dict("fallbacksvc" => 2626)),
+            )
+            @test ND.lookup_port(static_lookup, "udp", "dns-alt") == 5353
+            @test ND.lookup_port(static_lookup, "tcp", "fallbacksvc") == 2626
+            udp_fallback = ND.StaticResolver(fallback = ND.StaticResolver(services_udp = Dict("udp-fallback" => 5354)))
+            @test ND.lookup_port(udp_fallback, "udp", "udp-fallback") == 5354
+            @test_throws ND.AddressError ND.lookup_port("sctp", "domain")
+            @test_throws ND.AddressError ND.lookup_port(static_lookup, "sctp", "smtp-alt")
         end
         @testset "resolver policies and static resolver" begin
             v4 = NC.loopback_addr(9000)
@@ -290,6 +331,10 @@ else
                 "v4.local:echo";
                 policy = ND.ResolverPolicy(; allow_ipv4 = false, allow_ipv6 = true),
             )
+            @test ND._resolve_static_host(resolver, "tcp", "DUAL.LOCAL") == NC.SocketEndpoint[v6, v4]
+            fallback_only = ND.StaticResolver(fallback = ND.StaticResolver(hosts = Dict("fallback.only" => NC.SocketEndpoint[NC.loopback_addr(9090)])))
+            @test ND._resolve_static_host(fallback_only, "tcp", "fallback.only") == NC.SocketEndpoint[NC.loopback_addr(9090)]
+            @test_throws ND.AddressError ND._resolve_static_host(ND.StaticResolver(), "tcp", "missing.static.test")
         end
         @testset "wildcard ordering and self-connect helper" begin
             listen_addrs = ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", ":0"; op = :listen)
@@ -306,6 +351,21 @@ else
             @test ND._is_self_connect(NC.Conn(fake_fd))
             fake_fd.raddr = NC.loopback_addr(5001)
             @test !ND._is_self_connect(NC.Conn(fake_fd))
+        end
+        @testset "host resolver internal helper utilities" begin
+            @test ND._normalize_lookup_host("Example.COM..") == "example.com"
+            @test ND._lookup_key("TCP", "Example.COM.") == ("tcp", "example.com")
+            @test ND._min_nonzero(Int64(0), Int64(9)) == Int64(9)
+            @test ND._min_nonzero(Int64(7), Int64(0)) == Int64(7)
+            @test ND._min_nonzero(Int64(7), Int64(9)) == Int64(7)
+            @test ND._effective_fallback_delay_ns(ND.HostResolver(fallback_delay_ns = 123)) == Int64(123)
+            @test ND._effective_fallback_delay_ns(ND.HostResolver(fallback_delay_ns = 0)) == Int64(300_000_000)
+            @test !ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = -1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
+            @test ND._use_parallel_race(ND.HostResolver(fallback_delay_ns = 1), :tcp, NC.SocketEndpoint[NC.loopback_addr6(80)])
+
+            scoped_addr = NC.SocketAddrV6(NC.loopback_addr6(1234).ip, 1234; scope_id = 7)
+            scoped_ips = ND._resolve_host_ips(_SlowResolver(0.0, NC.SocketEndpoint[scoped_addr]), "tcp", "ignored.host")
+            @test scoped_ips == NC.SocketEndpoint[NC.SocketAddrV6(scoped_addr.ip, 0; scope_id = 7)]
         end
         @testset "system resolver parity guards" begin
             @test ND._HR_AF_INET == SO.AF_INET
@@ -390,6 +450,40 @@ else
                 _nd_close_quiet!(connected)
                 _nd_close_quiet!(listener)
                 EL.shutdown!()
+            end
+        end
+        @testset "parallel race returns wrapped error when both families fail" begin
+            if !_nd_ipv6_supported()
+                @test true
+            else
+                EL.shutdown!()
+                listener = nothing
+                try
+                    listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 4)
+                    port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
+                    NC.close!(listener)
+                    listener = nothing
+                    resolver = ND.StaticResolver(hosts = Dict(
+                        "dual-fail.test" => NC.SocketEndpoint[
+                            NC.loopback_addr6(port),
+                            NC.loopback_addr(port),
+                        ],
+                    ))
+                    err = try
+                        NC.connect("tcp", "dual-fail.test:$port"; resolver = resolver, timeout_ns = 500_000_000, fallback_delay_ns = 1_000_000)
+                        nothing
+                    catch ex
+                        ex
+                    end
+                    @test err isa ND.DNSOpError
+                    if err isa ND.DNSOpError
+                        @test err.err isa Exception
+                        @test err.addr !== nothing
+                    end
+                finally
+                    _nd_close_quiet!(listener)
+                    EL.shutdown!()
+                end
             end
         end
         @testset "ipv6 connect/listen path" begin
@@ -566,6 +660,82 @@ else
             end
             @test err3 isa ND.AddressError
             @test neg_parent.calls == 2
+        end
+        @testset "singleflight and cache refresh error paths" begin
+            err_resolver = _ErrorResolver(ND.AddressError("lookup failed", "singleflight-error.test"); delay_s = 0.02)
+            singleflight = ND.SingleflightResolver(err_resolver)
+            task1 = errormonitor(Threads.@spawn try
+                ND._resolve_host_ips(singleflight, "tcp", "singleflight-error.test")
+            catch ex
+                ex
+            end)
+            task2 = errormonitor(Threads.@spawn try
+                ND._resolve_host_ips(singleflight, "tcp", "singleflight-error.test")
+            catch ex
+                ex
+            end)
+            @test _nd_wait_task_done(task1, 2.0) != :timed_out
+            @test _nd_wait_task_done(task2, 2.0) != :timed_out
+            @test fetch(task1) isa ND.AddressError
+            @test fetch(task2) isa ND.AddressError
+            @test err_resolver.calls == 1
+            @test (@atomic :acquire singleflight.actual_lookups) == 1
+            @test (@atomic :acquire singleflight.shared_hits) == 1
+
+            refresh_parent = _ErrorResolver(ND.AddressError("lookup failed", "refresh.test"); delay_s = 0.0)
+            refresh_cache = ND.CachingResolver(refresh_parent; ttl_ns = 1_000_000, stale_ttl_ns = 50_000_000, negative_ttl_ns = 50_000_000, max_hosts = 8)
+            key = ND._lookup_key("tcp", "refresh.test")
+            old_now_ns = Int64(time_ns()) - Int64(100_000_000)
+            lock(refresh_cache.lock)
+            try
+                ND._store_cache_entry_locked!(refresh_cache, key, NC.SocketEndpoint[NC.loopback_addr(4040)], nothing, old_now_ns)
+                refresh_cache.entries[key].refreshing = true
+            finally
+                unlock(refresh_cache.lock)
+            end
+            ND._refresh_cached_host!(refresh_cache, key, "tcp", "refresh.test")
+            lock(refresh_cache.lock)
+            try
+                entry = refresh_cache.entries[key]
+                @test !entry.refreshing
+                @test entry.err isa ND.AddressError
+                @test entry.result === nothing
+            finally
+                unlock(refresh_cache.lock)
+            end
+        end
+        @testset "DNS race wait registration helpers" begin
+            fd = nothing
+            try
+                fd = NC.open_tcp_fd!()
+                IP.init!(fd.pfd; net = :tcp, pollable = true)
+                state = ND.DNSRaceState()
+                NC._connect_wait_register!(state, fd)
+                @test length(state.wait_fds) == 1
+                @test ND._mark_connect_done!(state)
+                @test (@atomic :acquire state.done)
+                @test isempty(state.wait_fds)
+                @test !ND._mark_connect_done!(state)
+
+                state_done = ND.DNSRaceState()
+                @atomic :release state_done.done = true
+                NC._connect_wait_register!(state_done, fd)
+                @test isempty(state_done.wait_fds)
+
+                state_unregister = ND.DNSRaceState()
+                NC._connect_wait_register!(state_unregister, fd)
+                @test length(state_unregister.wait_fds) == 1
+                NC._connect_wait_unregister!(state_unregister, fd)
+                @test isempty(state_unregister.wait_fds)
+            finally
+                if fd !== nothing
+                    try
+                        NC.close!(fd)
+                    catch
+                    end
+                end
+                EL.shutdown!()
+            end
         end
     end
 end

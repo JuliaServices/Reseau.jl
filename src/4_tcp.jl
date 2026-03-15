@@ -14,6 +14,7 @@ while still keeping the control flow close to Go's `netFD` implementation:
 """
 module TCP
 
+using ..Reseau: ByteMemory
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 
@@ -668,7 +669,7 @@ On success, the return value is always exactly `nbytes`. Like the `Vector`
 overload, this may block waiting for write readiness between partial kernel
 writes.
 """
-function Base.write(conn::Conn, buf::Memory{UInt8}, nbytes::Integer)::Int
+function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
     return IOPoll.write!(conn.fd.pfd, buf, nbytes)
 end
 

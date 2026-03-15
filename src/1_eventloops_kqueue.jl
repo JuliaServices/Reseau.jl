@@ -217,7 +217,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
         timeout_ptr = Base.unsafe_convert(Ptr{Timespec}, timeout_ref)
     end
     n = GC.@preserve events timeout_ref begin
-        @ccall gc_safe = true kevent(
+        @gcsafe_ccall kevent(
             state.kq::Cint,
             C_NULL::Ptr{Kevent},
             0::Cint,

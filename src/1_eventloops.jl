@@ -19,6 +19,7 @@ notifications instead of backend-specific handles.
 module EventLoops
 
 using EnumX
+using ..Reseau: @gcsafe_ccall
 
 @enumx PollMode::UInt8 begin
     READ = 0x01
