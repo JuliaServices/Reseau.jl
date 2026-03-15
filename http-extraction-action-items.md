@@ -163,7 +163,7 @@
 - Completion criteria:
   - HTTP metadata, exports, and deps match the extracted implementation and release intent.
 
-### [ ] ITEM-008 (P1) Close HTTP functional gaps and add missing regression tests
+### [x] ITEM-008 (P1) Close HTTP functional gaps and add missing regression tests
 - Description: After the raw extraction, compare the resulting `HTTP` package against both the new `Reseau.HTTP` behavior and the old `HTTP/master` expectations to identify missing coverage, behavior regressions, or undocumented breaks. Add tests for uncovered branches and fix defects before release.
 - Desired outcome: The new `HTTP` package has strong confidence across core client/server/websocket/HTTP2 flows, with targeted tests for newly discovered edge cases.
 - Affected files: `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src/**`, `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/**`.
@@ -331,6 +331,12 @@
   - `rg -n 'HostResolvers\\._parse_ipv|__precompile__\\(false\\)' /Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src` returned no matches.
   - `julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.instantiate(); using HTTP; println(HTTP.VERSION)'` precompiled and loaded `HTTP`, printing `2.0.0`.
   - `HTTP_TEST_ONLY=http_client_proxy_tests.jl julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.test(; coverage=false)'` passed the proxy suite with the localized parser implementation.
+- ITEM-008:
+  - Full extracted HTTP suites now pass from `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree`, including the client, server, websocket, HTTP/2, integration, parity, proxy, and trim-compile paths. The work here fixed all moved-test dependency/import issues uncovered while driving the extracted suite and added extra sniff/multipart coverage.
+  - Added targeted branch coverage in `/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/test/http_forms_tests.jl` for MIME sniffing signatures, multiple JSON shapes, richer multipart parsing, and lower-cased multipart header ordering.
+  - `JULIA_NUM_THREADS=1 julia --project=/Users/jacob.quinn/.julia/dev/HTTP-split-worktree --startup-file=no --history-file=no -e 'using Pkg; Pkg.develop(path=\"/Users/jacob.quinn/.julia/dev/Reseau-split-worktree\"); Pkg.test(; coverage=true)'` completed successfully.
+  - `julia --startup-file=no --history-file=no -e 'using Pkg; Pkg.activate(temp=true); Pkg.add(\"Coverage\"); using Coverage; cov = process_folder(\"/Users/jacob.quinn/.julia/dev/HTTP-split-worktree/src\"); covered,total = get_summary(cov); println((covered,total))'` reported `6346/7630` covered source lines, or `83.17%` for `src/`.
+  - Lowest remaining file-level coverage after the added tests is concentrated in helper-heavy modules rather than missing core protocol flows: `7_6_http_stream.jl` (`68.03%`), `7_6_http_cookies.jl` (`73.91%`), `7_6_http_forms.jl` (`76.41%`), `7_6_http_websockets.jl` (`77.61%`), and `7_6_http_request_bodies.jl` (`80.0%`).
 
 ## Continuity
 
