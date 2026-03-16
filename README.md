@@ -30,7 +30,7 @@ The main entry points are the exported `TCP` and `TLS` modules:
 
 ## Quick Start
 
-### Direct-address TCP
+### TCP
 
 ```julia
 using Reseau
