@@ -9,41 +9,29 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 15 }}
     env:
       JULIA_NUM_THREADS: 1
-      RESEAU_RUN_TLS_TESTS: ${{ matrix.run_tls_tests }}
-      RESEAU_RUN_NETWORK_TESTS: ${{ matrix.run_network_tests }}
+      RESEAU_RUN_TLS_TESTS: '1'
+      RESEAU_RUN_NETWORK_TESTS: '1'
       RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
-      RESEAU_TRIM_BUNDLE: ${{ matrix.trim_bundle }}
+      RESEAU_TRIM_BUNDLE: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
     strategy:
       fail-fast: false
       matrix:
+        version:
+          - '1'   # latest stable Julia 1.x
+          - 'min' # minimum Julia version from Project.toml compat
+          - 'pre' # latest pre-release Julia
+        os:
+          - ubuntu-latest
+          - windows-latest
+        arch:
+          - x64
         include:
-          - os: ubuntu-latest
-            arch: x64
-            version: '1.10'
-            timeout_minutes: 15
-            run_tls_tests: '1'
-            run_network_tests: '1'
-            trim_bundle: '0'
-            coverage: '1'
           - os: macOS-latest
             arch: aarch64
-            version: '1.10'
-            timeout_minutes: 15
-            run_tls_tests: '1'
-            run_network_tests: '1'
-            trim_bundle: '0'
-            coverage: '0'
-          - os: windows-latest
-            arch: x64
-            version: '1.10'
-            timeout_minutes: 20
-            run_tls_tests: '1'
-            run_network_tests: '1'
-            trim_bundle: '1'
-            coverage: '0'
+            version: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -53,9 +41,9 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
-      - if: matrix.coverage == '1'
+      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.version == '1'
         uses: julia-actions/julia-processcoverage@v1
-      - if: matrix.coverage == '1'
+      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.version == '1'
         uses: codecov/codecov-action@v5
         with:
           files: lcov.info
@@ -72,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.12'
+          version: '1'
       - uses: julia-actions/cache@v2
       - name: Install docs dependencies
         run: |
