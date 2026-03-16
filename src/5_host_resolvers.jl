@@ -18,6 +18,7 @@ resolution logic remains factored into its own file.
 module HostResolvers
 
 using ..Reseau: @gcsafe_ccall
+using ..Reseau.EventLoops
 using ..Reseau.SocketOps
 using ..Reseau.IOPoll
 
@@ -1314,6 +1315,37 @@ function _connect_deadline_ns(d::HostResolver)::Int64
     return _min_nonzero(timeout_deadline, d.deadline_ns)
 end
 
+function _wait_for_timer!(timer::EventLoops.TimerState)::Bool
+    while true
+        reason = EventLoops.pollwait!(timer.waiter)
+        reason == EventLoops.PollWakeReason.READY && return true
+        (@atomic :acquire timer.closed) && return false
+        (@atomic :acquire timer.deadline_ns) == 0 && return true
+    end
+end
+
+function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
+    timer = EventLoops.TimerState(deadline_ns, Int64(0))
+    EventLoops.schedule_timer!(timer, deadline_ns) || return nothing, nothing
+    task = errormonitor(Threads.@spawn begin
+        _wait_for_timer!(timer) || return nothing
+        f()
+        return nothing
+    end)
+    return timer, task
+end
+
+function _close_timer_task!(
+        timer::Union{Nothing, EventLoops.TimerState},
+        task::Union{Nothing, Task},
+    )
+    timer === nothing && return nothing
+    EventLoops._close_timer!(timer)
+    task === nothing && return nothing
+    wait(task)
+    return nothing
+end
+
 function _resolve_with_deadline(
         d::HostResolver,
         network::AbstractString,
@@ -1323,17 +1355,12 @@ function _resolve_with_deadline(
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DNSTimeoutError(String(address)))
-    timeout_s = (deadline_ns - now_ns) / 1.0e9
     mtx = ReentrantLock()
     condition = Threads.Condition(mtx)
     done = Ref(false)
     timed_out = Ref(false)
     result_ref = Ref{Union{Nothing, Vector{TCP.SocketEndpoint}, Exception}}(nothing)
-    # Resolution ownership still relies on a Julia task + Timer handoff rather
-    # than the lower-level poller timer heap. The raw blocking system lookup now
-    # runs on Julia's `@threadcall` worker pool, but timeout/cancellation
-    # semantics remain caller-local for now.
-    timer = Timer(timeout_s) do _
+    timer, timer_task = _spawn_timer_task(deadline_ns) do
         lock(mtx)
         try
             done[] && return nothing
@@ -1369,7 +1396,7 @@ function _resolve_with_deadline(
         end
     finally
         unlock(mtx)
-        close(timer)
+        _close_timer_task!(timer, timer_task)
     end
     timed_out[] && throw(DNSTimeoutError(String(address)))
     result = result_ref[]
@@ -1553,7 +1580,7 @@ function _resolve_parallel(
     # This is the Happy Eyeballs-style stagger: start one address family first,
     # then launch the fallback family if the primary path has not succeeded
     # quickly enough.
-    fallback_timer = Timer(delay_ns / 1.0e9) do _
+    fallback_timer, fallback_timer_task = _spawn_timer_task(Int64(time_ns()) + delay_ns) do
         _emit_event!(:fallback_timer)
     end
     primary_done = false
@@ -1583,10 +1610,7 @@ function _resolve_parallel(
                 end
                 if !fallback_started && !(@atomic :acquire state.done)
                     fallback_started = true
-                    try
-                        close(fallback_timer)
-                    catch
-                    end
+                    _close_timer_task!(fallback_timer, fallback_timer_task)
                     _start_racer(false, fallbacks)
                 end
             else
@@ -1603,10 +1627,7 @@ function _resolve_parallel(
             end
         end
     finally
-        try
-            close(fallback_timer)
-        catch
-        end
+        _close_timer_task!(fallback_timer, fallback_timer_task)
         try
             close(events)
         catch
