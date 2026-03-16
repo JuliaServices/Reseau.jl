@@ -160,7 +160,7 @@ function _backend_wake!(state::Poller)::Int32
     wakefd = Cint(state.wake_ident)
     one = Ref{UInt64}(1)
     while true
-        n = @ccall gc_safe = true write(
+        n = @gcsafe_ccall write(
             wakefd::Cint,
             one::Ref{UInt64},
             Csize_t(sizeof(UInt64))::Csize_t,
@@ -213,7 +213,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     waitms = _epoll_wait_timeout_ms(delay_ns)
     while true
         n = GC.@preserve events begin
-            @ccall gc_safe = true epoll_wait(
+            @gcsafe_ccall epoll_wait(
                 state.kq::Cint,
                 pointer(events)::Ptr{EpollEvent},
                 Cint(length(events))::Cint,
@@ -235,7 +235,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
             if event_data == _WAKE_TOKEN
                 if delay_ns != 0
                     one = Ref{UInt64}(0)
-                    _ = @ccall gc_safe = true read(
+                    _ = @gcsafe_ccall read(
                         Cint(state.wake_ident)::Cint,
                         one::Ref{UInt64},
                         Csize_t(sizeof(UInt64))::Csize_t,

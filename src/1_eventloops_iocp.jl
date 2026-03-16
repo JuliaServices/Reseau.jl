@@ -228,7 +228,7 @@ function _load_connectex_ptr(fd::Cint)::Ptr{Cvoid}
         out_ref = Ref{Ptr{Cvoid}}(C_NULL)
         bytes_ref = Ref{UInt32}(UInt32(0))
         rc = GC.@preserve guid_ref out_ref bytes_ref begin
-            @ccall gc_safe = true _WS2_32.WSAIoctl(
+            @gcsafe_ccall _WS2_32.WSAIoctl(
                 _socket_value(fd)::UInt,
                 _SIO_GET_EXTENSION_FUNCTION_POINTER::UInt32,
                 guid_ref::Ref{Guid},
@@ -252,7 +252,7 @@ end
     bytes_ref = Ref{UInt32}(UInt32(0))
     flags_ref = Ref{UInt32}(UInt32(0))
     ok = GC.@preserve op bytes_ref flags_ref begin
-        @ccall gc_safe = true _WS2_32.WSAGetOverlappedResult(
+        @gcsafe_ccall _WS2_32.WSAGetOverlappedResult(
             _socket_value(fd)::UInt,
             Base.unsafe_convert(Ptr{Overlapped}, op.storage)::Ptr{Overlapped},
             bytes_ref::Ref{UInt32},
@@ -295,7 +295,7 @@ function _maybe_set_completion_modes!(fd::Cint)::Bool
     if _socket_can_skip_completion_port_on_success(fd)
         modes |= _FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
     end
-    ok = @ccall gc_safe = true _KERNEL32.SetFileCompletionNotificationModes(
+    ok = @gcsafe_ccall _KERNEL32.SetFileCompletionNotificationModes(
         _socket_handle(fd)::Ptr{Cvoid},
         modes::UInt8,
     )::Int32
@@ -323,7 +323,7 @@ end
 
 function _cancel_iocp_op!(reg::IocpRegistration, op::IocpOp)::Bool
     (@atomic :acquire op.active) || return false
-    ok = @ccall gc_safe = true _KERNEL32.CancelIoEx(
+    ok = @gcsafe_ccall _KERNEL32.CancelIoEx(
         _socket_handle(reg.fd)::Ptr{Cvoid},
         _op_ptr(op)::Ptr{Cvoid},
     )::Int32
@@ -348,7 +348,7 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
         flags = Ref{UInt32}(UInt32(0))
         rc = GC.@preserve op wsabuf bytes flags begin
             if op.mode == PollMode.READ
-                @ccall gc_safe = true _WS2_32.WSARecv(
+                @gcsafe_ccall _WS2_32.WSARecv(
                     _socket_value(reg.fd)::UInt,
                     wsabuf::Ref{WSABUF},
                     UInt32(1)::UInt32,
@@ -358,7 +358,7 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
                     C_NULL::Ptr{Cvoid},
                 )::Cint
             else
-                @ccall gc_safe = true _WS2_32.WSASend(
+                @gcsafe_ccall _WS2_32.WSASend(
                     _socket_value(reg.fd)::UInt,
                     wsabuf::Ref{WSABUF},
                     UInt32(1)::UInt32,
@@ -396,7 +396,7 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
         bytes_ref = Ref{UInt32}(UInt32(0))
         addrbuf = request.addrbuf
         rc = GC.@preserve op addrbuf bytes_ref begin
-            @ccall gc_safe = true _MSWSOCK.AcceptEx(
+            @gcsafe_ccall _MSWSOCK.AcceptEx(
                 _socket_value(reg.fd)::UInt,
                 _socket_value(request.acceptfd)::UInt,
                 pointer(addrbuf)::Ptr{UInt8},
@@ -564,7 +564,7 @@ function _iocp_finish_accept!(registration::Registration)::Tuple{Cint, Vector{UI
 end
 
 function _backend_init!(state::Poller)::Int32
-    port = @ccall gc_safe = true _KERNEL32.CreateIoCompletionPort(
+    port = @gcsafe_ccall _KERNEL32.CreateIoCompletionPort(
         _INVALID_HANDLE_VALUE::Ptr{Cvoid},
         C_NULL::Ptr{Cvoid},
         UInt(0)::UInt,
@@ -587,7 +587,7 @@ function _backend_close!(state::Poller)
     if scratch_any isa IocpBackendScratch
         scratch = scratch_any::IocpBackendScratch
         if scratch.port != C_NULL
-            _ = @ccall gc_safe = true _KERNEL32.CloseHandle(
+            _ = @gcsafe_ccall _KERNEL32.CloseHandle(
                 scratch.port::Ptr{Cvoid},
             )::Int32
         end
@@ -606,7 +606,7 @@ function _backend_open_fd!(
     scratch_any = state.backend_scratch
     scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
     scratch = scratch_any::IocpBackendScratch
-    associated = @ccall gc_safe = true _KERNEL32.CreateIoCompletionPort(
+    associated = @gcsafe_ccall _KERNEL32.CreateIoCompletionPort(
         _socket_handle(fd)::Ptr{Cvoid},
         scratch.port::Ptr{Cvoid},
         UInt(token)::UInt,
@@ -664,7 +664,7 @@ function _backend_wake!(state::Poller)::Int32
     scratch = scratch_any::IocpBackendScratch
     _, ok = @atomicreplace(state.wak_sig, UInt32(0) => UInt32(1))
     ok || return Int32(0)
-    posted = @ccall gc_safe = true _KERNEL32.PostQueuedCompletionStatus(
+    posted = @gcsafe_ccall _KERNEL32.PostQueuedCompletionStatus(
         scratch.port::Ptr{Cvoid},
         UInt32(0)::UInt32,
         _WAKE_KEY::UInt,
@@ -701,7 +701,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     removed = Ref{UInt32}(UInt32(0))
     wait_ms = _iocp_timeout_ms(delay_ns)
     ok = GC.@preserve entries removed begin
-        @ccall gc_safe = true _KERNEL32.GetQueuedCompletionStatusEx(
+        @gcsafe_ccall _KERNEL32.GetQueuedCompletionStatusEx(
             scratch.port::Ptr{Cvoid},
             pointer(entries)::Ptr{OverlappedEntry},
             UInt32(length(entries))::UInt32,

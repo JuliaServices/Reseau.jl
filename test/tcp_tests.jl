@@ -88,6 +88,38 @@ else
                 EL.shutdown!()
             end
         end
+        @testset "connect honors explicit local address binding" begin
+            EL.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                client = NC.connect("tcp", "127.0.0.1:$(Int(laddr.port))"; local_addr = NC.loopback_addr(0))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                client_local = NC.local_addr(client)::NC.SocketAddrV4
+                @test client_local.ip == NC.loopback_addr(0).ip
+                @test client_local.port > 0
+                mismatch_err = try
+                    NC.connect("tcp", "127.0.0.1:$(Int(laddr.port))"; local_addr = NC.loopback_addr6(0))
+                    nothing
+                catch ex
+                    ex
+                end
+                @test mismatch_err isa Reseau.HostResolvers.DNSOpError
+                if mismatch_err isa Reseau.HostResolvers.DNSOpError
+                    @test mismatch_err.err isa ArgumentError
+                end
+            finally
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                EL.shutdown!()
+            end
+        end
         @testset "connected sockets set TCP_NODELAY and SO_KEEPALIVE defaults" begin
             EL.shutdown!()
             listener = nothing

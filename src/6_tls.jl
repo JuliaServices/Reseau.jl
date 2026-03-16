@@ -14,6 +14,8 @@ module TLS
 using OpenSSL_jll
 using NetworkOptions
 using EnumX: @enumx
+using ..Reseau: ByteMemory
+using ..Reseau: @gcsafe_ccall
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 using ..Reseau.TCP
@@ -345,7 +347,7 @@ function __init__()
     # Module initialization is also where we discover which OpenSSL entry points exist on
     # the linked library. Some version-bounding APIs are absent on older builds, so later
     # config code falls back to `SSL_OP_NO_*` masks when needed.
-    _ = @ccall gc_safe = true _LIBSSL.OPENSSL_init_ssl(
+    _ = @gcsafe_ccall _LIBSSL.OPENSSL_init_ssl(
         Culong(0)::Culong,
         C_NULL::Ptr{Cvoid},
     )::Cint
@@ -676,12 +678,12 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
         if need_verify_paths
             ca_path = _effective_ca_file(config; is_server = is_server)
             if ca_path === nothing
-                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_set_default_verify_paths(
+                ok = @gcsafe_ccall _LIBSSL.SSL_CTX_set_default_verify_paths(
                     ctx::Ptr{Cvoid},
                 )::Cint
                 ok == 1 || throw(_make_tls_error("SSL_CTX_set_default_verify_paths", Int32(ok)))
             else
-                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_load_verify_locations(
+                ok = @gcsafe_ccall _LIBSSL.SSL_CTX_load_verify_locations(
                     ctx::Ptr{Cvoid},
                     ca_path::Cstring,
                     C_NULL::Cstring,
@@ -692,12 +694,12 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
         if is_server
             cert_file = config.cert_file::String
             key_file = config.key_file::String
-            ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_certificate_chain_file(
+            ok = @gcsafe_ccall _LIBSSL.SSL_CTX_use_certificate_chain_file(
                 ctx::Ptr{Cvoid},
                 cert_file::Cstring,
             )::Cint
             ok == 1 || throw(_make_tls_error("SSL_CTX_use_certificate_chain_file", Int32(ok)))
-            ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_PrivateKey_file(
+            ok = @gcsafe_ccall _LIBSSL.SSL_CTX_use_PrivateKey_file(
                 ctx::Ptr{Cvoid},
                 key_file::Cstring,
                 _SSL_FILETYPE_PEM::Cint,
@@ -737,12 +739,12 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
             if config.cert_file !== nothing
                 cert_file = config.cert_file::String
                 key_file = config.key_file::String
-                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_certificate_chain_file(
+                ok = @gcsafe_ccall _LIBSSL.SSL_CTX_use_certificate_chain_file(
                     ctx::Ptr{Cvoid},
                     cert_file::Cstring,
                 )::Cint
                 ok == 1 || throw(_make_tls_error("SSL_CTX_use_certificate_chain_file", Int32(ok)))
-                ok = @ccall gc_safe = true _LIBSSL.SSL_CTX_use_PrivateKey_file(
+                ok = @gcsafe_ccall _LIBSSL.SSL_CTX_use_PrivateKey_file(
                     ctx::Ptr{Cvoid},
                     key_file::Cstring,
                     _SSL_FILETYPE_PEM::Cint,
@@ -1008,7 +1010,7 @@ function handshake!(conn::Conn)
             _with_handshake_deadline(conn) do
                 while true
                     _ensure_open!(conn, "handshake")
-                    ret = @ccall gc_safe = true _LIBSSL.SSL_do_handshake(
+                    ret = @gcsafe_ccall _LIBSSL.SSL_do_handshake(
                         conn.ssl::Ptr{Cvoid},
                     )::Cint
                     if ret == 1
@@ -1077,7 +1079,7 @@ function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
     try
         _ensure_open!(conn, "read")
         while true
-            ret = GC.@preserve buf @ccall gc_safe = true _LIBSSL.SSL_read(
+            ret = GC.@preserve buf @gcsafe_ccall _LIBSSL.SSL_read(
                 conn.ssl::Ptr{Cvoid},
                 pointer(buf)::Ptr{UInt8},
                 Cint(length(buf))::Cint,
@@ -1108,7 +1110,7 @@ end
 
 Write plaintext application bytes through the TLS connection.
 
-`write(conn, buf)` attempts to write the entire buffer. The `Memory{UInt8}` overload
+`write(conn, buf)` attempts to write the entire buffer. The fixed-size byte-buffer overload
 allows callers to cap the write at `nbytes`.
 
 Returns the number of plaintext bytes accepted by OpenSSL.
@@ -1126,7 +1128,7 @@ function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
     return _write!(conn, buf, length(buf))
 end
 
-function Base.write(conn::Conn, buf::Memory{UInt8}, nbytes::Integer)::Int
+function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
     return _write!(conn, buf, nbytes)
 end
 
@@ -1139,7 +1141,7 @@ function _write_buffer(buf::AbstractVector{UInt8}, nbytes::Int)
     return copied
 end
 
-_write_buffer(buf::Memory{UInt8}, nbytes::Int) = buf
+_write_buffer(buf::ByteMemory, nbytes::Int) = buf
 
 function _write!(conn::Conn, buf, nbytes::Integer)::Int
     nbytes_int = Int(nbytes)
@@ -1158,7 +1160,7 @@ function _write!(conn::Conn, buf, nbytes::Integer)::Int
             base_ptr = pointer(write_buf)
             while total < nbytes_int
                 chunk_len = nbytes_int - total
-                wrote = @ccall gc_safe = true _LIBSSL.SSL_write(
+                wrote = @gcsafe_ccall _LIBSSL.SSL_write(
                     conn.ssl::Ptr{Cvoid},
                     (base_ptr + total)::Ptr{UInt8},
                     Cint(chunk_len)::Cint,
@@ -1201,7 +1203,7 @@ function _ssl_shutdown!(conn::Conn)
     catch
     end
     for _ in 1:4
-        ret = @ccall gc_safe = true _LIBSSL.SSL_shutdown(
+        ret = @gcsafe_ccall _LIBSSL.SSL_shutdown(
             conn.ssl::Ptr{Cvoid},
         )::Cint
         if ret == 1 || ret == 0

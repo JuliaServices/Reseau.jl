@@ -1,0 +1,5 @@
+ignore:
+  - "src/1_eventloops_epoll.jl"
+  - "src/1_eventloops_iocp.jl"
+  - "src/2_socket_ops_linux.jl"
+  - "src/2_socket_ops_windows.jl"

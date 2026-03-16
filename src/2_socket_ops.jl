@@ -18,6 +18,8 @@ A few conventions are worth keeping in mind when reading the code:
 """
 module SocketOps
 
+using ..Reseau: @gcsafe_ccall
+
 const SockLen = @static Sys.iswindows() ? Cint : UInt32
 
 const AF_UNIX = Cint(1)
