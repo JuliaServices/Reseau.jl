@@ -220,7 +220,7 @@ Attempt one non-blocking connect and return the raw errno-style result expected
 by the transport layer.
 
 `0` means the socket connected immediately. `EINPROGRESS` and similar values are
-not treated as exceptional here; they are returned so `TCP.connect_tcp_fd!` can
+not treated as exceptional here; they are returned so `TCP.connect` can
 switch into the poll-driven "wait writable, then inspect `SO_ERROR`" path used
 by Go as well.
 """

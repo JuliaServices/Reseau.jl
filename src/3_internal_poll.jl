@@ -616,7 +616,7 @@ Tear down polling state for a descriptor and deregister from `EventLoops`.
 
 Returns `nothing`.
 """
-function close!(pd::PollState)
+function Base.close(pd::PollState)
     was_pollable = false
     lock(pd.lock)
     try
@@ -670,7 +670,7 @@ Returns `nothing`.
 Throws the same exceptions as `_convert_poll_error!` if close, timeout, or
 backend error state is already visible.
 """
-function prepare_read!(pd::PollState, is_file::Bool = false)
+function prepareread(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
     return nothing
 end
@@ -680,7 +680,7 @@ Validate write path state before issuing a write syscall.
 
 Returns `nothing`.
 """
-function prepare_write!(pd::PollState, is_file::Bool = false)
+function preparewrite(pd::PollState, is_file::Bool = false)
     _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
     return nothing
 end
@@ -697,7 +697,7 @@ Throws:
 - `DeadlineExceededError` if the read deadline expires
 - `NotPollableError` if the backend reports a permanent readiness error
 """
-function wait_read!(pd::PollState, is_file::Bool = false)
+function waitread(pd::PollState, is_file::Bool = false)
     while true
         _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
         pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
@@ -717,7 +717,7 @@ stale before the waiter task resumes.
 
 Returns `nothing`.
 """
-function wait_write!(pd::PollState, is_file::Bool = false)
+function waitwrite(pd::PollState, is_file::Bool = false)
     while true
         _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
         pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
@@ -736,11 +736,11 @@ Wait for readiness in a cancellation context (used by close/deadline wake paths)
 
 Returns `nothing`.
 
-Unlike `wait_read!`/`wait_write!`, this helper intentionally does not translate
+Unlike `waitread`/`waitwrite`, this helper intentionally does not translate
 the wakeup into exceptions; callers use it when they need a best-effort park
 that can be interrupted by close/cancel machinery.
 """
-function wait_canceled!(pd::PollState, mode::PollOp.T)
+function waitcancelled(pd::PollState, mode::PollOp.T)
     pollable(pd) || return nothing
     registration = EventLoops.current_registration(pd)
     registration === nothing && return nothing
@@ -820,7 +820,7 @@ function _fd_write_unlock!(fd::FD)
 end
 
 function _destroy!(fd::FD)
-    close!(fd.pd)
+    close(fd.pd)
     if fd.sysfd >= 0
         SocketOps.close_socket_nothrow(fd.sysfd)
         fd.sysfd = Cint(-1)
@@ -836,7 +836,7 @@ Returns `nothing`.
 
 Throws `NetClosingError` or `FileClosingError` if close had already started.
 """
-function close!(fd::FD)
+function Base.close(fd::FD)
     _fdlock_incref_and_close!(fd.fdlock) || throw(_closing_error(fd.is_file))
     evict!(fd.pd)
     _fd_decref!(fd)
@@ -871,7 +871,7 @@ applied before calling this helper.
 function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
     _fd_write_lock!(fd)
     try
-        prepare_write!(fd.pd, fd.is_file)
+        preparewrite(fd.pd, fd.is_file)
         registration = _poll_registration(fd.pd)
         errno = EventLoops._iocp_submit_connect!(registration, addrbuf, addrlen)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
@@ -904,7 +904,7 @@ on `EINTR`/`ECONNABORTED`, wait on `EAGAIN`.
 function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.AcceptPeer}
     _fd_read_lock!(fd)
     try
-        prepare_read!(fd.pd, fd.is_file)
+        prepareread(fd.pd, fd.is_file)
         while true
             @static if Sys.iswindows()
                 registration = _poll_registration(fd.pd)
@@ -943,7 +943,7 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                 return child_sysfd, peer_addr
             end
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
-                wait_read!(fd.pd, fd.is_file)
+                waitread(fd.pd, fd.is_file)
                 continue
             end
             _is_accept_retry_errno(errno) && continue
@@ -975,7 +975,7 @@ function read!(fd::FD, p::Vector{UInt8})::Int
     _fd_read_lock!(fd)
     try
         isempty(p) && return 0
-        prepare_read!(fd.pd, fd.is_file)
+        prepareread(fd.pd, fd.is_file)
         while true
             n = GC.@preserve p SocketOps.read_once!(fd.sysfd, pointer(p), Csize_t(length(p)))
             if n >= 0
@@ -986,7 +986,7 @@ function read!(fd::FD, p::Vector{UInt8})::Int
             end
             errno = SocketOps.last_error()
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
-                wait_read!(fd.pd, fd.is_file)
+                waitread(fd.pd, fd.is_file)
                 continue
             end
             throw(SystemError("read", Int(errno)))
@@ -1033,7 +1033,7 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
     _fd_write_lock!(fd)
     nn = 0
     try
-        prepare_write!(fd.pd, fd.is_file)
+        preparewrite(fd.pd, fd.is_file)
         while true
             nn == nbytes && return nn
             n = SocketOps.write_once!(fd.sysfd, p + nn, Csize_t(nbytes - nn))
@@ -1044,7 +1044,7 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
             n == 0 && throw(EOFError())
             errno = SocketOps.last_error()
             if errno == Int32(Base.Libc.EAGAIN) && pollable(fd.pd)
-                wait_write!(fd.pd, fd.is_file)
+                waitwrite(fd.pd, fd.is_file)
                 continue
             end
             throw(SystemError("write", Int(errno)))

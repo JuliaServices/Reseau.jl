@@ -129,7 +129,7 @@ function _pc_run_internal_poll_workload!()
         n = IP.read!(ipfd, Vector{UInt8}(undef, 1))
         n == 1 || error("internal poll workload expected one-byte read")
     finally
-        ipfd.sysfd >= 0 && IP.close!(ipfd)
+        ipfd.sysfd >= 0 && close(ipfd)
         _pc_close_fd(fd1)
     end
     return nothing

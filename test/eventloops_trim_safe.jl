@@ -82,7 +82,7 @@ function run_internal_poll_trim_sample()::Nothing
             err isa IP.NoDeadlineError || rethrow(err)
         end
     finally
-        ipfd.sysfd >= 0 && IP.close!(ipfd)
+        ipfd.sysfd >= 0 && close(ipfd)
         _close_fd(fd1)
     end
     return nothing

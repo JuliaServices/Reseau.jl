@@ -56,10 +56,10 @@ else
                 end
             finally
                 if read_task isa Task && !istaskdone(read_task)
-                    IP.close!(ipfd)
+                    close(ipfd)
                 end
                 if ipfd.sysfd >= 0
-                    IP.close!(ipfd)
+                    close(ipfd)
                 end
                 _ip_close_fd(fd1)
                 EL.shutdown!()
@@ -79,7 +79,7 @@ else
                 n = IP.read!(ipfd, Vector{UInt8}(undef, 1))
                 @test n == 1
             finally
-                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
                 EL.shutdown!()
             end
@@ -100,7 +100,7 @@ else
                 @test n == 1
                 @test buf[1] == 0x63
             finally
-                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
                 EL.shutdown!()
             end
@@ -115,7 +115,7 @@ else
                 IP.init!(ipfd)
                 IP.set_read_deadline!(ipfd, time_ns() + 100_000_000)
                 wait_task = errormonitor(Threads.@spawn begin
-                    IP.wait_read!(ipfd.pd, ipfd.is_file)
+                    IP.waitread(ipfd.pd, ipfd.is_file)
                     return :ok
                 end)
                 pre = EL.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
@@ -130,9 +130,9 @@ else
                 status == :timed_out || @test fetch(wait_task) == :ok
             finally
                 if wait_task isa Task && !istaskdone(wait_task)
-                    IP.close!(ipfd)
+                    close(ipfd)
                 end
-                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
                 EL.shutdown!()
             end
@@ -175,7 +175,7 @@ else
                 @test IP._check_error(ipfd.pd, IP.PollOp.READ) == Int32(0)
                 @test IP._check_error(ipfd.pd, IP.PollOp.WRITE) == Int32(0)
             finally
-                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
                 EL.shutdown!()
             end
@@ -198,7 +198,7 @@ else
                 end)
                 pre = EL.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001)
                 @test pre == :timed_out
-                IP.close!(ipfd)
+                close(ipfd)
                 status = EL.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001)
                 @test status != :timed_out
                 if status != :timed_out
@@ -220,9 +220,9 @@ else
                 state = EL.POLLER[]
                 event = EL.PollEvent(ipfd.sysfd, ipfd.pd.token, EL.PollMode.READ, true)
                 EL._dispatch_ready_event!(state, event)
-                @test_throws IP.NotPollableError IP.prepare_read!(ipfd.pd)
+                @test_throws IP.NotPollableError IP.prepareread(ipfd.pd)
             finally
-                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
                 EL.shutdown!()
             end
@@ -236,7 +236,7 @@ else
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.init!(ipfd)
                 wait_task = errormonitor(Threads.@spawn begin
-                    IP.wait_canceled!(ipfd.pd, IP.PollOp.READ)
+                    IP.waitcancelled(ipfd.pd, IP.PollOp.READ)
                     return :ok
                 end)
                 pre = EL.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
@@ -249,9 +249,9 @@ else
                 end
             finally
                 if wait_task isa Task && !istaskdone(wait_task)
-                    IP.close!(ipfd)
+                    close(ipfd)
                 end
-                ipfd.sysfd >= 0 && IP.close!(ipfd)
+                ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
                 EL.shutdown!()
             end

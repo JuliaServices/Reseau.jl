@@ -917,17 +917,17 @@ function _wait_ssl_ready!(conn::Conn, ssl_err::Cint, op::AbstractString)
     # OpenSSL's nonblocking contract is the same basic model Go's tls.Conn builds on:
     # retry the operation after the underlying socket becomes readable or writable.
     if ssl_err == _SSL_ERROR_WANT_READ
-        IOPoll.wait_read!(conn.tcp.fd.pfd.pd)
+        IOPoll.waitread(conn.tcp.fd.pfd.pd)
         return true
     end
     if ssl_err == _SSL_ERROR_WANT_WRITE
-        IOPoll.wait_write!(conn.tcp.fd.pfd.pd)
+        IOPoll.waitwrite(conn.tcp.fd.pfd.pd)
         return true
     end
     if ssl_err == _SSL_ERROR_SYSCALL
         errno = SocketOps.last_error()
         if _is_socket_would_block(errno)
-            IOPoll.wait_read!(conn.tcp.fd.pfd.pd)
+            IOPoll.waitread(conn.tcp.fd.pfd.pd)
             return true
         end
         if errno == Int32(0)
