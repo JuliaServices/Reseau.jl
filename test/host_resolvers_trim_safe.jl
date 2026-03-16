@@ -4,6 +4,27 @@ const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
 const EL = Reseau.EventLoops
 
+struct _TrimResolver <: ND.AbstractResolver
+    addr::NC.SocketEndpoint
+end
+
+function ND.lookup_port(::_TrimResolver, network::AbstractString, service::AbstractString)::Int
+    _ = network
+    return parse(Int, service)
+end
+
+function ND._resolve_host_ips(resolver::_TrimResolver, network::AbstractString, host::AbstractString)::Vector{NC.SocketEndpoint}
+    _ = network
+    host == "trim.local" || throw(ND.AddressError("unknown host", String(host)))
+    addr = resolver.addr
+    if addr isa NC.SocketAddrV4
+        v4 = addr::NC.SocketAddrV4
+        return NC.SocketEndpoint[NC.SocketAddrV4(v4.ip, 0)]
+    end
+    v6 = addr::NC.SocketAddrV6
+    return NC.SocketEndpoint[NC.SocketAddrV6(v6.ip, 0; scope_id = Int(v6.scope_id))]
+end
+
 function _trim_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
     offset = 0
     while offset < length(buf)
@@ -22,9 +43,10 @@ function run_host_resolvers_trim_sample()::Nothing
     client::Union{Nothing, NC.Conn} = nothing
     server::Union{Nothing, NC.Conn} = nothing
     try
-        listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 16)
-        laddr = NC.addr(listener)
-        client = ND.connect("tcp", "127.0.0.1:$(Int((laddr::NC.SocketAddrV4).port))")
+        listener = NC.listen(NC.loopback_addr(0); backlog = 16)
+        laddr = NC.addr(listener)::NC.SocketAddrV4
+        resolver = _TrimResolver(NC.loopback_addr(Int(laddr.port)))
+        client = ND.connect("tcp", "trim.local:$(Int(laddr.port))"; resolver = resolver, fallback_delay_ns = -1)
         server = NC.accept!(listener)
         payload = UInt8[0x66, 0x67, 0x68]
         recv_buf = Vector{UInt8}(undef, length(payload))

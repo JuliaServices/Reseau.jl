@@ -2,7 +2,6 @@ using Reseau
 
 const TL = Reseau.TLS
 const NC = Reseau.TCP
-const ND = Reseau.HostResolvers
 const EL = Reseau.EventLoops
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
@@ -16,9 +15,9 @@ function run_tls_trim_sample()::Nothing
     client_tls::Union{Nothing, TL.Conn} = nothing
     server_tls::Union{Nothing, TL.Conn} = nothing
     try
-        listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+        listener = NC.listen(NC.loopback_addr(0); backlog = 8)
         laddr = NC.addr(listener)::NC.SocketAddrV4
-        client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+        client_tcp = NC.connect(NC.loopback_addr(Int(laddr.port)))
         server_tcp = NC.accept!(listener)
         client_cfg = TL.Config(verify_peer = false, server_name = "localhost", handshake_timeout_ns = 1_000_000_000)
         server_cfg = TL.Config(

@@ -384,6 +384,8 @@ end
 function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::Vector{TCP.SocketEndpoint}
     SocketOps.ensure_winsock!()
     addresses = TCP.SocketEndpoint[]
+    hostname_s = String(hostname)
+    null_service = Ptr{UInt8}(C_NULL)
     hints = Ref{_AddrInfo}()
     hints_ptr = Base.unsafe_convert(Ptr{_AddrInfo}, hints)
     Base.Libc.memset(hints_ptr, 0, sizeof(_AddrInfo))
@@ -394,24 +396,27 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
         unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(_AddrInfo, 3)), _SOCK_STREAM)
     end
     result_ptr = Ref{Ptr{_AddrInfo}}(C_NULL)
-    ret = GC.@preserve hints begin
-        @static if Sys.iswindows()
-            @gcsafe_ccall "Ws2_32".getaddrinfo(
-                String(hostname)::Cstring,
-                C_NULL::Cstring,
-                hints_ptr::Ptr{_AddrInfo},
-                result_ptr::Ptr{Ptr{_AddrInfo}},
-            )::Cint
-        else
-            @gcsafe_ccall getaddrinfo(
-                String(hostname)::Cstring,
-                C_NULL::Cstring,
-                hints_ptr::Ptr{_AddrInfo},
-                result_ptr::Ptr{Ptr{_AddrInfo}},
-            )::Cint
-        end
+    # `getaddrinfo` can block inside the system resolver stack. Run it on Julia's
+    # libuv worker pool so hostname resolution does not occupy a Julia scheduler
+    # thread while callers wait on timeout/deadline machinery.
+    ret = @static if Sys.iswindows()
+        @threadcall((:getaddrinfo, "Ws2_32"), Cint,
+            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
+            hostname_s,
+            null_service,
+            hints,
+            result_ptr,
+        )
+    else
+        @threadcall(:getaddrinfo, Cint,
+            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
+            hostname_s,
+            null_service,
+            hints,
+            result_ptr,
+        )
     end
-    ret == 0 || _addr_error("lookup failed: $(_gai_error_string(ret))", String(hostname))
+    ret == 0 || _addr_error("lookup failed: $(_gai_error_string(ret))", hostname_s)
     try
         current = result_ptr[]
         while current != C_NULL
@@ -1324,9 +1329,10 @@ function _resolve_with_deadline(
     done = Ref(false)
     timed_out = Ref(false)
     result_ref = Ref{Union{Nothing, Vector{TCP.SocketEndpoint}, Exception}}(nothing)
-    # Resolution still relies on Julia tasks + Timer rather than the lower-level
-    # poller timer heap. That is acceptable here because DNS resolution is not
-    # currently driven by the socket event loop itself.
+    # Resolution ownership still relies on a Julia task + Timer handoff rather
+    # than the lower-level poller timer heap. The raw blocking system lookup now
+    # runs on Julia's `@threadcall` worker pool, but timeout/cancellation
+    # semantics remain caller-local for now.
     timer = Timer(timeout_s) do _
         lock(mtx)
         try
