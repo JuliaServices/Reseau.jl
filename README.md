@@ -10,12 +10,9 @@ Reseau owns:
   and Windows (`IOCP`)
 - low-level socket operations and internal poll/runtime plumbing
 - TCP connections and listeners
-- host parsing, resolution, and timeout-aware dialing
+- hostname-aware dialing and listening on top of the TCP stack
 - TLS clients and listeners
 - precompile and `--trim=safe` validation in the test suite
-
-HTTP.jl 2.0 is built on top of this transport stack. If you want HTTP clients,
-servers, WebSockets, or HTTP/2, use HTTP.jl on top of Reseau.
 
 ## Installation
 
@@ -26,11 +23,10 @@ Pkg.add("Reseau")
 
 ## Main Entry Points
 
-The public API is intentionally module-qualified:
+The main entry points are the exported `TCP` and `TLS` modules:
 
-- `Reseau.TCP` for concrete-address TCP work
-- `Reseau.HostResolvers` for string-address resolution and dialing
-- `Reseau.TLS` for TLS clients and listeners
+- `TCP` for TCP connections, listeners, deadlines, and string-address dialing
+- `TLS` for TLS clients and listeners
 
 ## Quick Start
 
@@ -39,27 +35,27 @@ The public API is intentionally module-qualified:
 ```julia
 using Reseau
 
-listener = Reseau.TCP.listen(Reseau.TCP.loopback_addr(0); backlog = 128)
-addr = Reseau.TCP.addr(listener)
+listener = TCP.listen(TCP.loopback_addr(0); backlog = 128)
+addr = TCP.addr(listener)
 
 server_task = errormonitor(Threads.@spawn begin
-    conn = Reseau.TCP.accept!(listener)
+    conn = TCP.accept!(listener)
     try
         buf = Vector{UInt8}(undef, 5)
         read!(conn, buf)
         write(conn, buf)
     finally
-        Reseau.TCP.close!(conn)
+        TCP.close!(conn)
     end
 end)
 
-client = Reseau.TCP.connect(addr)
+client = TCP.connect(addr)
 write(client, collect(codeunits("hello")))
 reply = Vector{UInt8}(undef, 5)
 read!(client, reply)
 
-Reseau.TCP.close!(client)
-Reseau.TCP.close!(listener)
+TCP.close!(client)
+TCP.close!(listener)
 wait(server_task)
 ```
 
@@ -68,26 +64,26 @@ wait(server_task)
 ```julia
 using Reseau
 
-conn = Reseau.HostResolvers.connect("tcp", "example.com:80")
-Reseau.TCP.close!(conn)
+conn = TCP.connect("example.com:80")
+TCP.close!(conn)
 
-listener = Reseau.HostResolvers.listen("tcp", "127.0.0.1:0"; backlog = 64)
-println(Reseau.TCP.addr(listener))
-Reseau.TCP.close!(listener)
+listener = TCP.listen("127.0.0.1:0"; backlog = 64)
+println(TCP.addr(listener))
+TCP.close!(listener)
 ```
 
-You can also take control of timeout, deadline, and resolver policy explicitly:
+The hostname/address-string behavior is available directly on `TCP.connect`,
+`TCP.listen`, and `TLS.connect`; you do not need to reach into the internal
+resolution layer for normal usage.
+
+You can also set deadlines directly on live connections:
 
 ```julia
 using Reseau
 
-resolver = Reseau.HostResolvers.HostResolver(
-    timeout_ns = 2_000_000_000,
-    fallback_delay_ns = 300_000_000,
-)
-
-conn = Reseau.HostResolvers.connect(resolver, "tcp", "example.com:80")
-Reseau.TCP.close!(conn)
+conn = TCP.connect("example.com:80")
+TCP.set_read_deadline!(conn, time_ns() + 5_000_000_000)
+TCP.close!(conn)
 ```
 
 ### TLS client
@@ -95,15 +91,14 @@ Reseau.TCP.close!(conn)
 ```julia
 using Reseau
 
-conn = Reseau.TLS.connect(
-    "tcp",
+conn = TLS.connect(
     "www.google.com:443";
     alpn_protocols = ["h2", "http/1.1"],
 )
 
-state = Reseau.TLS.connection_state(conn)
+state = TLS.connection_state(conn)
 println((state.handshake_complete, state.alpn_protocol))
-Reseau.TLS.close!(conn)
+TLS.close!(conn)
 ```
 
 By default, outbound TLS verification uses `NetworkOptions.ca_roots_path()` when
@@ -114,16 +109,16 @@ By default, outbound TLS verification uses `NetworkOptions.ca_roots_path()` when
 ```julia
 using Reseau
 
-config = Reseau.TLS.Config(
+config = TLS.Config(
     cert_file = "server.crt",
     key_file = "server.key",
 )
 
-listener = Reseau.TLS.listen("tcp", "127.0.0.1:8443", config)
-conn = Reseau.TLS.accept!(listener)
+listener = TLS.listen("tcp", "127.0.0.1:8443", config)
+conn = TLS.accept!(listener)
 
-Reseau.TLS.close!(conn)
-Reseau.TLS.close!(listener)
+TLS.close!(conn)
+TLS.close!(listener)
 ```
 
 For verified client-certificate auth, provide `client_ca_file` explicitly:
@@ -131,10 +126,10 @@ For verified client-certificate auth, provide `client_ca_file` explicitly:
 ```julia
 using Reseau
 
-config = Reseau.TLS.Config(
+config = TLS.Config(
     cert_file = "server.crt",
     key_file = "server.key",
-    client_auth = Reseau.TLS.ClientAuthMode.RequireAndVerifyClientCert,
+    client_auth = TLS.ClientAuthMode.RequireAndVerifyClientCert,
     client_ca_file = "client-ca.pem",
 )
 ```
@@ -142,21 +137,18 @@ config = Reseau.TLS.Config(
 ## Why Use Reseau
 
 - Deadlines and readiness behavior are first-class instead of layered on later.
-- Concrete-address and string-address dialing are both supported cleanly.
+- Concrete-address and hostname-based dialing both work through the same `TCP`
+  and `TLS` entrypoints.
 - TLS lives in the same transport stack instead of hanging off a different socket
   abstraction.
-- HTTP.jl 2.0 uses this exact transport layer, so networking semantics stay
-  aligned across the stack.
 
 ## Package Layout
 
 - `Reseau.EventLoops`: backend-specific pollers and timer scheduling
 - `Reseau.SocketOps`: raw socket syscalls, sockaddr helpers, and platform quirks
 - `Reseau.IOPoll`: internal poll-descriptor, deadline, and readiness machinery
-- `Reseau.TCP`: TCP endpoints, listeners, deadlines, and lifecycle operations
-- `Reseau.HostResolvers`: host/service parsing, resolution, and Happy
-  Eyeballs-style dialing
-- `Reseau.TLS`: TLS configuration, clients, listeners, and handshake behavior
+- `TCP`: TCP endpoints, listeners, deadlines, and hostname-aware dial/listen helpers
+- `TLS`: TLS configuration, clients, listeners, and handshake behavior
 
 ## Documentation
 

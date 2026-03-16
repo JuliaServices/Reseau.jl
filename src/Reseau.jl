@@ -10,6 +10,8 @@ The package is organized in layers:
 """
 module Reseau
 
+export TCP, TLS
+
 include("0_memory_compat.jl")
 include("0_gcsafe_ccall_compat.jl")
 include("1_eventloops.jl")
