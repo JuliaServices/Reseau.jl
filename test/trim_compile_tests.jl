@@ -11,6 +11,7 @@ else
 end
 
 const _TRIM_SUPPORTED = VERSION >= v"1.12.0-rc1"
+const _TRIM_PRE_RELEASE = !isempty(VERSION.prerelease)
 const _JULIAC_ENTRYPOINT_EXPR = "using JuliaC; if isdefined(JuliaC, :main); JuliaC.main(ARGS); else JuliaC._main_cli(ARGS); end"
 
 function _run_trim_compile(project_path::String, script_path::String, output_name::String; timeout_s::Float64 = 120.0, bundle_dir::Union{Nothing, String} = nothing)
@@ -167,6 +168,9 @@ end
 @testset "Trim compile" begin
     if !_TRIM_SUPPORTED
         println("[trim] skip Julia < 1.12: JuliaC trim compilation is unavailable")
+        @test true
+    elseif _TRIM_PRE_RELEASE
+        println("[trim] skip prerelease Julia: trim verifier behavior is not stable yet")
         @test true
     else
         project_path = normpath(joinpath(@__DIR__, ".."))
