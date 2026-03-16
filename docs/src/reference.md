@@ -1,101 +1,83 @@
 # API Reference
 
-Reseau keeps its public surface module-qualified. That is intentional: it makes
-the layer boundaries obvious.
+The public surface is centered on the exported `TCP` and `TLS` modules.
 
-## `Reseau.TCP`
+## `TCP`
 
-### Address constructors
+### Address Constructors
 
-- `Reseau.TCP.SocketAddrV4`
-- `Reseau.TCP.SocketAddrV6`
-- `Reseau.TCP.loopback_addr`
-- `Reseau.TCP.any_addr`
-- `Reseau.TCP.loopback_addr6`
-- `Reseau.TCP.any_addr6`
+- `TCP.SocketAddrV4`
+- `TCP.SocketAddrV6`
+- `TCP.loopback_addr`
+- `TCP.any_addr`
+- `TCP.loopback_addr6`
+- `TCP.any_addr6`
 
-### Connections and listeners
+### Connections and Listeners
 
-- `Reseau.TCP.connect`
-- `Reseau.TCP.listen`
-- `Reseau.TCP.accept!`
-- `Reseau.TCP.close!`
-- `Reseau.TCP.close_read!`
-- `Reseau.TCP.close_write!`
+- `TCP.connect`
+- `TCP.listen`
+- `TCP.accept`
+- `close(::TCP.Conn)`
+- `close(::TCP.Listener)`
 
-### Deadlines and socket options
+The string-address overloads on `TCP.connect` accept:
 
-- `Reseau.TCP.set_deadline!`
-- `Reseau.TCP.set_read_deadline!`
-- `Reseau.TCP.set_write_deadline!`
-- `Reseau.TCP.set_nodelay!`
-- `Reseau.TCP.set_keepalive!`
+- `timeout_ns`
+- `deadline_ns`
+- `local_addr`
+- `fallback_delay_ns`
+- `resolver`
+- `policy`
 
-### Address inspection
+### Deadlines, Shutdown, and Socket Options
 
-- `Reseau.TCP.local_addr`
-- `Reseau.TCP.remote_addr`
-- `Reseau.TCP.addr`
+- `TCP.set_deadline!`
+- `TCP.set_read_deadline!`
+- `TCP.set_write_deadline!`
+- `TCP.closeread`
+- `closewrite(::TCP.Conn)`
+- `TCP.set_nodelay!`
+- `TCP.set_keepalive!`
 
-## `Reseau.HostResolvers`
+### Address Inspection
 
-### Address parsing and lookup
+- `TCP.local_addr`
+- `TCP.remote_addr`
+- `TCP.addr`
 
-- `Reseau.HostResolvers.join_host_port`
-- `Reseau.HostResolvers.split_host_port`
-- `Reseau.HostResolvers.parse_port`
-- `Reseau.HostResolvers.lookup_port`
-- `Reseau.HostResolvers.resolve_tcp_addr`
-- `Reseau.HostResolvers.resolve_tcp_addrs`
+## `TLS`
 
-### Dial/listen helpers
+### Main Types
 
-- `Reseau.HostResolvers.connect`
-- `Reseau.HostResolvers.listen`
-- `Reseau.HostResolvers.HostResolver`
+- `TLS.Config`
+- `TLS.Conn`
+- `TLS.Listener`
+- `TLS.ClientAuthMode`
 
-### Resolver helpers
+### Client and Server Setup
 
-- `Reseau.HostResolvers.ResolverPolicy`
-- `Reseau.HostResolvers.SystemResolver`
-- `Reseau.HostResolvers.StaticResolver`
-- `Reseau.HostResolvers.CachingResolver`
-- `Reseau.HostResolvers.SingleflightResolver`
+- `TLS.connect`
+- `TLS.listen`
+- `TLS.client`
+- `TLS.server`
+- `TLS.accept`
+- `TLS.handshake!`
 
-## `Reseau.TLS`
+The string-address overloads on `TLS.connect` accept the same resolution and
+connect-policy keywords as `TCP.connect`, along with all `TLS.Config` keywords.
 
-### Main types
+### Lifecycle and Inspection
 
-- `Reseau.TLS.Config`
-- `Reseau.TLS.Conn`
-- `Reseau.TLS.Listener`
-- `Reseau.TLS.ClientAuthMode`
-
-### Client and server setup
-
-- `Reseau.TLS.connect`
-- `Reseau.TLS.listen`
-- `Reseau.TLS.client`
-- `Reseau.TLS.server`
-- `Reseau.TLS.accept!`
-- `Reseau.TLS.handshake!`
-
-### Lifecycle and inspection
-
-- `Reseau.TLS.close!`
-- `Reseau.TLS.addr`
+- `close(::TLS.Conn)`
+- `close(::TLS.Listener)`
+- `TLS.addr`
+- `TLS.net_conn`
+- `TLS.connection_state`
+- `closewrite(::TLS.Conn)`
 
 ### Errors
 
-- `Reseau.TLS.ConfigError`
-- `Reseau.TLS.TLSError`
-- `Reseau.TLS.TLSHandshakeTimeoutError`
-
-## Package Boundary Note
-
-HTTP-related APIs are intentionally no longer part of Reseau. Use HTTP.jl for:
-
-- request/response handling
-- HTTP clients and servers
-- WebSockets
-- HPACK and HTTP/2
+- `TLS.ConfigError`
+- `TLS.TLSError`
+- `TLS.TLSHandshakeTimeoutError`

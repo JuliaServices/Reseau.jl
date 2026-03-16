@@ -18,7 +18,7 @@ function run_tls_trim_sample()::Nothing
         listener = NC.listen(NC.loopback_addr(0); backlog = 8)
         laddr = NC.addr(listener)::NC.SocketAddrV4
         client_tcp = NC.connect(NC.loopback_addr(Int(laddr.port)))
-        server_tcp = NC.accept!(listener)
+        server_tcp = NC.accept(listener)
         client_cfg = TL.Config(verify_peer = false, server_name = "localhost", handshake_timeout_ns = 1_000_000_000)
         server_cfg = TL.Config(
             verify_peer = false,
@@ -33,29 +33,29 @@ function run_tls_trim_sample()::Nothing
     finally
         if server_tls !== nothing
             try
-                TL.close!(server_tls::TL.Conn)
+                close(server_tls::TL.Conn)
             catch
             end
         elseif server_tcp !== nothing
             try
-                NC.close!(server_tcp::NC.Conn)
+                close(server_tcp::NC.Conn)
             catch
             end
         end
         if client_tls !== nothing
             try
-                TL.close!(client_tls::TL.Conn)
+                close(client_tls::TL.Conn)
             catch
             end
         elseif client_tcp !== nothing
             try
-                NC.close!(client_tcp::NC.Conn)
+                close(client_tcp::NC.Conn)
             catch
             end
         end
         if listener !== nothing
             try
-                NC.close!(listener::NC.Listener)
+                close(listener::NC.Listener)
             catch
             end
         end

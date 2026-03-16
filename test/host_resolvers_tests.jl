@@ -160,7 +160,7 @@ end
 function _nd_close_quiet!(x)
     x === nothing && return nothing
     try
-        NC.close!(x)
+        close(x)
     catch
     end
     return nothing
@@ -426,7 +426,7 @@ else
             try
                 listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
                 laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)); timeout_ns = 1_000_000_000)
                 status = _nd_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
@@ -460,13 +460,13 @@ else
                         ],
                     ),
                 )
-                warm_accept = errormonitor(Threads.@spawn NC.accept!(listener))
+                warm_accept = errormonitor(Threads.@spawn NC.accept(listener))
                 warm_client = NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 1_000_000)
                 @test _nd_wait_task_done(warm_accept, 2.0) != :timed_out
                 warm_server = fetch(warm_accept)
                 _nd_close_quiet!(warm_server)
                 _nd_close_quiet!(warm_client)
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 connect_task = errormonitor(Threads.@spawn NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 5_000_000_000))
                 @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
                 @test _nd_wait_task_done(accept_task, 1.5) != :timed_out
@@ -490,7 +490,7 @@ else
                 try
                     listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 4)
                     port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
-                    NC.close!(listener)
+                    close(listener)
                     listener = nothing
                     resolver = ND.StaticResolver(hosts = Dict(
                         "dual-fail.test" => NC.SocketEndpoint[
@@ -527,7 +527,7 @@ else
                 try
                     listener = NC.listen("tcp6", "[::1]:0"; backlog = 16)
                     laddr = NC.addr(listener)::NC.SocketAddrV6
-                    accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                     client = NC.connect("tcp6", ND.join_host_port("::1", Int(laddr.port)); timeout_ns = 1_000_000_000)
                     @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
                     server = fetch(accept_task)
@@ -623,8 +623,8 @@ else
                 resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
                 singleflight = ND.SingleflightResolver(resolver)
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn_a = NC.accept!(listener)
-                    conn_b = NC.accept!(listener)
+                    conn_a = NC.accept(listener)
+                    conn_b = NC.accept(listener)
                     return conn_a, conn_b
                 end)
                 task1 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
@@ -773,7 +773,7 @@ else
             finally
                 if fd !== nothing
                     try
-                        NC.close!(fd)
+                        close(fd)
                     catch
                     end
                 end

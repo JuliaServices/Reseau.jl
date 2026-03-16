@@ -47,7 +47,7 @@ function run_host_resolvers_trim_sample()::Nothing
         laddr = NC.addr(listener)::NC.SocketAddrV4
         resolver = _TrimResolver(NC.loopback_addr(Int(laddr.port)))
         client = ND.connect("tcp", "trim.local:$(Int(laddr.port))"; resolver = resolver, fallback_delay_ns = -1)
-        server = NC.accept!(listener)
+        server = NC.accept(listener)
         payload = UInt8[0x66, 0x67, 0x68]
         recv_buf = Vector{UInt8}(undef, length(payload))
         write(client, payload) == length(payload) || error("expected full write")
@@ -56,19 +56,19 @@ function run_host_resolvers_trim_sample()::Nothing
     finally
         if server !== nothing
             try
-                NC.close!(server::NC.Conn)
+                close(server::NC.Conn)
             catch
             end
         end
         if client !== nothing
             try
-                NC.close!(client::NC.Conn)
+                close(client::NC.Conn)
             catch
             end
         end
         if listener !== nothing
             try
-                NC.close!(listener::NC.Listener)
+                close(listener::NC.Listener)
             catch
             end
         end

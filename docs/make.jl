@@ -6,7 +6,7 @@ makedocs(
     modules = [Reseau],
     pages = [
         "Home" => "index.md",
-        "TCP and Resolution" => "tcp.md",
+        "TCP" => "tcp.md",
         "TLS" => "tls.md",
         "Sockets Migration Guide" => "migrate-sockets.md",
         "API Reference" => "reference.md",

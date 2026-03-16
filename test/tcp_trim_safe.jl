@@ -30,7 +30,7 @@ function run_tcp_trim_sample()::Nothing
         listener = NC.listen(NC.loopback_addr(0); backlog = 16)
         laddr = NC.addr(listener)
         client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
-        server = NC.accept!(listener)
+        server = NC.accept(listener)
         payload = UInt8[0x30, 0x31, 0x32, 0x33]
         recv_buf = Vector{UInt8}(undef, length(payload))
         _write_all!(client, payload)
@@ -39,19 +39,19 @@ function run_tcp_trim_sample()::Nothing
     finally
         if server !== nothing
             try
-                NC.close!(server::NC.Conn)
+                close(server::NC.Conn)
             catch
             end
         end
         if client !== nothing
             try
-                NC.close!(client::NC.Conn)
+                close(client::NC.Conn)
             catch
             end
         end
         if listener !== nothing
             try
-                NC.close!(listener::NC.Listener)
+                close(listener::NC.Listener)
             catch
             end
         end

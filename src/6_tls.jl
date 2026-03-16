@@ -1260,14 +1260,14 @@ end
 end
 
 """
-    close!(conn)
+    close(conn)
 
 Close the TLS connection and the underlying TCP transport.
 
 If the handshake completed, this best-effort sends a TLS `close_notify` alert before
 closing the socket. The method is idempotent and returns `nothing`.
 """
-function close!(conn::Conn)
+function Base.close(conn::Conn)
     _mark_closed!(conn) || return nothing
     if _handshake_complete(conn) && conn.ssl != C_NULL
         if _try_lock_close_path!(conn)
@@ -1281,7 +1281,7 @@ function close!(conn::Conn)
     end
     try
         # Close the transport first to unblock any in-flight waits.
-        TCP.close!(conn.tcp)
+        close(conn.tcp)
     catch
     end
     lock(conn.handshake_lock)
@@ -1298,7 +1298,7 @@ function close!(conn::Conn)
 end
 
 """
-    close_write!(conn)
+    closewrite(conn)
 
 Send TLS shutdown on the write side and mark future writes as permanently failed.
 
@@ -1309,12 +1309,12 @@ Returns `nothing`.
 
 Throws `TLSError` if the TLS shutdown path fails.
 """
-function close_write!(conn::Conn)
-    _ensure_open!(conn, "close_write")
-    _handshake_complete(conn) || throw(TLSError("close_write", Int32(0), "close_write before handshake complete", nothing))
+function Base.closewrite(conn::Conn)
+    _ensure_open!(conn, "closewrite")
+    _handshake_complete(conn) || throw(TLSError("closewrite", Int32(0), "closewrite before handshake complete", nothing))
     lock(conn.write_lock)
     try
-        _ensure_open!(conn, "close_write")
+        _ensure_open!(conn, "closewrite")
         _ssl_shutdown!(conn)
         conn.write_permanent_error === nothing && (conn.write_permanent_error = TLSError("write", Int32(0), "tls: protocol is shutdown", nothing))
         return nothing
@@ -1322,17 +1322,12 @@ function close_write!(conn::Conn)
         ex = _as_exception(err)
         ex isa TLSError && rethrow()
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
-            throw(_closed_error("close_write", ex))
+            throw(_closed_error("closewrite", ex))
         end
-        throw(_wrap_tls_exception("close_write", ex))
+        throw(_wrap_tls_exception("closewrite", ex))
     finally
         unlock(conn.write_lock)
     end
-end
-
-function Base.close(conn::Conn)
-    close!(conn)
-    return nothing
 end
 
 """
@@ -1464,29 +1459,24 @@ function listen(
 end
 
 """
-    accept!(listener) -> Conn
+    accept(listener) -> Conn
 
 Accept one inbound TCP connection and wrap it in server-side TLS state.
 
 The returned `Conn` has not handshaken yet.
 """
-function accept!(listener::Listener)::Conn
-    tcp = TCP.accept!(listener.listener)
+function accept(listener::Listener)::Conn
+    tcp = TCP.accept(listener.listener)
     return server(tcp, listener.config)
 end
 
 """
-    close!(listener)
+    close(listener)
 
 Close the underlying TCP listener. Returns `nothing`.
 """
-function close!(listener::Listener)
-    TCP.close!(listener.listener)
-    return nothing
-end
-
 function Base.close(listener::Listener)
-    close!(listener)
+    close(listener.listener)
     return nothing
 end
 
@@ -1538,12 +1528,12 @@ function _connect(
         ex = _as_exception(err)
         if tls_conn !== nothing
             try
-                close!(tls_conn)
+                close(tls_conn)
             catch
             end
         else
             try
-                TCP.close!(tcp)
+                close(tcp)
             catch
             end
         end
@@ -1557,7 +1547,7 @@ end
 Connect to `address`, negotiate TLS, and return a fully handshaken client
 connection.
 
-Host-resolution keyword arguments are forwarded to `HostResolvers.HostResolver`:
+Network-resolution keyword arguments are:
 - `timeout_ns`
 - `deadline_ns`
 - `local_addr`

@@ -25,7 +25,7 @@ end
 function _close_quiet!(x)
     x === nothing && return nothing
     try
-        NC.close!(x)
+        close(x)
     catch
     end
     return nothing
@@ -48,7 +48,7 @@ else
                 laddr = NC.addr(listener)
                 @test laddr isa NC.SocketAddrV4
                 @test (laddr::NC.SocketAddrV4).port > 0
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 pre = _nc_wait_task_done(accept_task, 0.05)
                 @test pre == :timed_out
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
@@ -96,7 +96,7 @@ else
             try
                 listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client = NC.connect("tcp", "127.0.0.1:$(Int(laddr.port))"; local_addr = NC.loopback_addr(0))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -128,7 +128,7 @@ else
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -150,7 +150,7 @@ else
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)
                 port = Int((laddr::NC.SocketAddrV4).port)
-                NC.close!(listener)
+                close(listener)
                 listener = nothing
                 err = try
                     NC.connect(NC.loopback_addr(port))
@@ -175,7 +175,7 @@ else
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 accept_task = errormonitor(Threads.@spawn begin
                     try
-                        NC.accept!(listener)
+                        NC.accept(listener)
                         return :ok
                     catch err
                         return err
@@ -183,7 +183,7 @@ else
                 end)
                 pre = _nc_wait_task_done(accept_task, 0.05)
                 @test pre == :timed_out
-                NC.close!(listener)
+                close(listener)
                 listener = nothing
                 status = _nc_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
@@ -204,7 +204,7 @@ else
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
                 status = _nc_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
@@ -232,7 +232,7 @@ else
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
                 status = _nc_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
@@ -247,16 +247,16 @@ else
                 end)
                 pre = _nc_wait_task_done(read_task, 0.05)
                 @test pre == :timed_out
-                NC.close!(server)
-                @test_throws IP.NetClosingError NC.close!(server)
+                close(server)
+                @test_throws IP.NetClosingError close(server)
                 done = _nc_wait_task_done(read_task, 2.0)
                 @test done != :timed_out
                 if done != :timed_out
                     err = fetch(read_task)
                     @test err isa IP.NetClosingError
                 end
-                NC.close!(listener)
-                @test_throws IP.NetClosingError NC.close!(listener)
+                close(listener)
+                @test_throws IP.NetClosingError close(listener)
             finally
                 _close_quiet!(server)
                 _close_quiet!(client)
@@ -273,7 +273,7 @@ else
                 sysfd_before = fd.pfd.sysfd
                 finalize(fd)
                 @test fd.pfd.sysfd == sysfd_before
-                NC.close!(fd)
+                close(fd)
                 @test fd.pfd.sysfd == Cint(-1)
             finally
                 _close_quiet!(fd)
@@ -288,7 +288,7 @@ else
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -300,8 +300,8 @@ else
                 @test SO.get_sockopt_int(client.fd.pfd.sysfd, SO.SOL_SOCKET, SO.SO_KEEPALIVE) == 0
                 NC.set_keepalive!(client, true)
                 @test SO.get_sockopt_int(client.fd.pfd.sysfd, SO.SOL_SOCKET, SO.SO_KEEPALIVE) != 0
-                @test NC.close_read!(client) === nothing
-                NC.close_write!(client)
+                @test NC.closeread(client) === nothing
+                closewrite(client)
                 NC.set_read_deadline!(server, time_ns() + 1_000_000_000)
                 @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
             finally

@@ -1,17 +1,16 @@
 # Reseau.jl
 
-Reseau.jl is the lower-level networking stack that now sits under the extracted
-HTTP.jl 2.0 package.
+`Reseau.jl` is a pure-Julia networking transport stack organized around the
+same broad layers as Go's `runtime`, `internal/poll`, `net`, and `crypto/tls`
+packages.
 
-After the split, Reseau owns:
+Reseau owns:
 
-- event loop and poller behavior
-- non-blocking socket operations
-- TCP connection and listener types
-- host parsing and resolution
-- TLS connections and listeners
-
-If you want HTTP, WebSockets, SSE, or HTTP/2, use HTTP.jl on top of Reseau.
+- event-loop backends and timer-driven readiness polling
+- non-blocking socket operations and deadline handling
+- TCP connections and listeners
+- hostname-aware dialing and listening through the `TCP` entrypoints
+- TLS clients and listeners
 
 ## Installation
 
@@ -20,41 +19,55 @@ using Pkg
 Pkg.add("Reseau")
 ```
 
-For development from a local checkout:
+## Main Entry Points
 
-```julia
-using Pkg
-Pkg.develop(path="/path/to/Reseau.jl")
-```
+The user-facing API is centered on the exported `TCP` and `TLS` modules:
 
-## Package Shape
-
-The public surface is intentionally module-qualified:
-
-- `Reseau.TCP` for concrete-address TCP work
-- `Reseau.HostResolvers` for string-address resolution and dialing
-- `Reseau.TLS` for TLS clients and listeners
-
-This makes it clearer which layer owns what, and mirrors the way Go splits
-transport, name resolution, and TLS responsibilities.
+- `TCP` for plain TCP connections, listeners, deadlines, and string-address dialing
+- `TLS` for TLS connections, listeners, and handshake/configuration control
 
 ## Quick Start
 
-### Direct-address TCP
+### TCP
 
 ```julia
 using Reseau
 
-listener = Reseau.TCP.listen(Reseau.TCP.loopback_addr(9000))
-conn = Reseau.TCP.accept!(listener)
+listener = TCP.listen(TCP.loopback_addr(0); backlog = 128)
+addr = TCP.addr(listener)
+
+server_task = errormonitor(Threads.@spawn begin
+    conn = TCP.accept(listener)
+    try
+        buf = Vector{UInt8}(undef, 5)
+        read!(conn, buf)
+        write(conn, buf)
+    finally
+        close(conn)
+    end
+end)
+
+client = TCP.connect(addr)
+write(client, collect(codeunits("hello")))
+reply = Vector{UInt8}(undef, 5)
+read!(client, reply)
+
+close(client)
+close(listener)
+wait(server_task)
 ```
 
-### String-address TCP
+### Hostname-Based Dialing
 
 ```julia
 using Reseau
 
-conn = Reseau.HostResolvers.connect("tcp", "example.com:443")
+conn = TCP.connect("example.com:80")
+close(conn)
+
+listener = TCP.listen("127.0.0.1:0"; backlog = 64)
+println(TCP.addr(listener))
+close(listener)
 ```
 
 ### TLS
@@ -62,25 +75,25 @@ conn = Reseau.HostResolvers.connect("tcp", "example.com:443")
 ```julia
 using Reseau
 
-conn = Reseau.TLS.connect(
-    "tcp",
-    "example.com:443";
-    alpn_protocols=["h2", "http/1.1"],
+conn = TLS.connect(
+    "www.google.com:443";
+    alpn_protocols = ["h2", "http/1.1"],
 )
+
+state = TLS.connection_state(conn)
+println((state.handshake_complete, state.alpn_protocol))
+close(conn)
 ```
 
 ## Why Use Reseau
 
-- Deadlines and blocking behavior are explicit and testable.
-- String-address dialing and concrete-address dialing are both first-class.
-- TLS is part of the same stack instead of an afterthought layered over a
-  different transport abstraction.
-- HTTP.jl 2.0 now uses this exact stack, so transport semantics stay aligned
-  across the ecosystem.
+- Deadlines and readiness behavior are part of the transport instead of bolted on outside it.
+- Concrete-address and hostname-based dialing use the same `TCP` and `TLS` entrypoints.
+- TLS lives in the same stack as plain TCP, so timeout and lifecycle behavior stay aligned.
 
 ## Reading Guide
 
-- Read [TCP and Resolution](tcp.md) for the main connection/listener APIs.
-- Read [TLS](tls.md) for client/server TLS configuration.
-- Read [Sockets Migration Guide](migrate-sockets.md) if you are porting from
-  Julia's stdlib `Sockets`.
+- Read [TCP](tcp.md) for plain connections, listeners, deadlines, and string-address dialing.
+- Read [TLS](tls.md) for client/server TLS configuration and handshake behavior.
+- Read [Sockets Migration Guide](migrate-sockets.md) if you are porting from Julia's stdlib `Sockets`.
+- Read [API Reference](reference.md) for the exported surface area.

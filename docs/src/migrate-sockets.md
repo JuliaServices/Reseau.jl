@@ -1,28 +1,26 @@
 # Migrating from `Sockets` to Reseau
 
-If you are using Julia's stdlib `Sockets`, the main conceptual change is that
-Reseau makes transport layers explicit instead of forcing everything through one
-untyped socket surface.
+If you are using Julia's stdlib `Sockets`, the easiest mental model is:
 
-The payoff is better deadlines, clearer address handling, integrated TLS, and a
-stack that matches what HTTP.jl 2.0 now uses underneath.
+- keep `connect`, `listen`, `accept`, and `close`
+- move plain TCP work onto `TCP`
+- move TLS work onto `TLS`
+- replace ad hoc timeout wrappers with connection deadlines
 
 ## Quick Mapping
 
 | `Sockets` | Reseau |
 | --- | --- |
-| `listen(ip"127.0.0.1", port)` | `Reseau.TCP.listen(Reseau.TCP.loopback_addr(port))` |
-| `connect(ip"127.0.0.1", port)` | `Reseau.TCP.connect(Reseau.TCP.loopback_addr(port))` |
-| `connect("example.com", port)` | `Reseau.HostResolvers.connect("tcp", "example.com:$port")` |
-| `accept(server)` | `Reseau.TCP.accept!(listener)` |
-| `close(sock)` | `Reseau.TCP.close!(conn)` |
-| `getsockname(sock)` | `Reseau.TCP.local_addr(conn)` |
-| `getpeername(sock)` | `Reseau.TCP.remote_addr(conn)` |
-| external TLS wrapper | `Reseau.TLS.connect`, `Reseau.TLS.listen`, `Reseau.TLS.client`, `Reseau.TLS.server` |
+| `listen(ip"127.0.0.1", port)` | `TCP.listen(TCP.loopback_addr(port))` |
+| `connect(ip"127.0.0.1", port)` | `TCP.connect(TCP.loopback_addr(port))` |
+| `connect("example.com", port)` | `TCP.connect("example.com:$port")` |
+| `accept(server)` | `TCP.accept(listener)` |
+| `close(sock)` | `close(conn)` / `close(listener)` |
+| `getsockname(sock)` | `TCP.local_addr(conn)` |
+| `getpeername(sock)` | `TCP.remote_addr(conn)` |
+| external TLS wrapper | `TLS.connect`, `TLS.listen`, `TLS.client`, `TLS.server` |
 
-## The Two Most Common Ports
-
-## 1. Simple TCP server
+## 1. Simple TCP Server
 
 ### `Sockets`
 
@@ -31,6 +29,8 @@ using Sockets
 
 server = listen(ip"127.0.0.1", 9000)
 sock = accept(server)
+close(sock)
+close(server)
 ```
 
 ### `Reseau`
@@ -38,11 +38,13 @@ sock = accept(server)
 ```julia
 using Reseau
 
-listener = Reseau.TCP.listen(Reseau.TCP.loopback_addr(9000))
-conn = Reseau.TCP.accept!(listener)
+listener = TCP.listen(TCP.loopback_addr(9000))
+conn = TCP.accept(listener)
+close(conn)
+close(listener)
 ```
 
-## 2. Hostname-based client dial
+## 2. Hostname-Based Client Dial
 
 ### `Sockets`
 
@@ -50,6 +52,7 @@ conn = Reseau.TCP.accept!(listener)
 using Sockets
 
 sock = connect("example.com", 443)
+close(sock)
 ```
 
 ### `Reseau`
@@ -57,72 +60,74 @@ sock = connect("example.com", 443)
 ```julia
 using Reseau
 
-conn = Reseau.HostResolvers.connect("tcp", "example.com:443")
+conn = TCP.connect("example.com:443")
+close(conn)
 ```
 
 ## Deadlines Are First-Class
 
-This is one of the biggest quality-of-life improvements over `Sockets`.
+One of the biggest quality-of-life improvements over `Sockets` is that the
+deadline lives on the connection itself:
 
 ```julia
 using Reseau
 
-conn = Reseau.HostResolvers.connect("tcp", "example.com:443")
-Reseau.TCP.set_read_deadline!(conn, time_ns() + 5_000_000_000)
+conn = TCP.connect("example.com:443")
+TCP.set_read_deadline!(conn, time_ns() + 5_000_000_000)
+close(conn)
 ```
 
-Instead of managing ad hoc task timeouts around blocking socket calls, the
-deadline is attached to the connection itself.
+Instead of managing task-local timeout wrappers around blocking socket calls,
+the transport itself owns the timeout.
 
-## Shutdown Is Explicit
+## TLS Lives in the Same Package
 
-Half-closing is exposed directly:
-
-```julia
-Reseau.TCP.close_write!(conn)
-Reseau.TCP.close_read!(conn)
-```
-
-That is a better migration target than reaching for low-level shutdown syscalls.
-
-## TLS No Longer Lives Somewhere Else
-
-With `Sockets`, TLS usually meant another package layered on top. With Reseau,
-TLS is part of the same stack:
+With `Sockets`, TLS usually means adding another layer elsewhere. With Reseau,
+plain TCP and TLS share one stack:
 
 ```julia
 using Reseau
 
-tls = Reseau.TLS.connect(
-    "tcp",
+tls = TLS.connect(
     "example.com:443";
-    verify_peer=true,
-    alpn_protocols=["h2", "http/1.1"],
+    verify_peer = true,
+    alpn_protocols = ["h2", "http/1.1"],
 )
+
+close(tls)
 ```
 
 For servers:
 
 ```julia
-cfg = Reseau.TLS.Config(cert_file="server.crt", key_file="server.key")
-listener = Reseau.TLS.listen("tcp", "127.0.0.1:8443", cfg)
+using Reseau
+
+cfg = TLS.Config(cert_file = "server.crt", key_file = "server.key")
+listener = TLS.listen("tcp", "127.0.0.1:8443", cfg)
+close(listener)
 ```
 
-## What to Change in Real Code
+## One Naming Difference To Know
 
-1. Replace direct `Sockets.connect(host, port)` calls with
-   `HostResolvers.connect("tcp", "host:port")`.
-2. Replace direct listen/accept loops with `TCP.listen` + `TCP.accept!`.
-3. Replace manual timeout wrappers with connection deadlines.
-4. Move TLS setup onto `Reseau.TLS.Config` and `Reseau.TLS.connect/listen`.
-5. Update any code that expected raw `Sockets.TCPSocket` internals; Reseau uses
-   its own `TCP.Conn` and `TLS.Conn` types.
+Full connection teardown now matches Base: use `close(conn)` and
+`close(listener)`.
 
-## Benefits of Porting
+Half-close is still spelled with explicit transport helpers:
+
+- `closewrite(conn)`
+- `TCP.closeread(conn)`
+
+## What To Change In Real Code
+
+1. Replace `Sockets.connect(host, port)` with `TCP.connect("host:port")` when you want hostname resolution.
+2. Replace listen/accept loops with `TCP.listen(...)` and `TCP.accept(listener)`.
+3. Replace timeout wrappers with `TCP.set_deadline!`, `TCP.set_read_deadline!`, or `TCP.set_write_deadline!`.
+4. Move TLS setup onto `TLS.Config`, `TLS.connect`, and `TLS.listen`.
+5. Update any code that expected `Sockets.TCPSocket` internals; Reseau uses `TCP.Conn` and `TLS.Conn`.
+
+## Benefits Of Porting
 
 - Better deadline and readiness behavior
-- Clearer address and hostname handling
-- TLS integrated into the same stack
-- The same transport semantics used by HTTP.jl 2.0
-- A package boundary that makes plain TCP, resolved TCP, and TLS easier to test
-  in isolation
+- One TCP surface for both concrete addresses and `"host:port"` dialing
+- TLS integrated into the same transport stack
+- Clearer listener/connection types than raw `Sockets` handles

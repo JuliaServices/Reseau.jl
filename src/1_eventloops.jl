@@ -126,6 +126,13 @@ function pollwait!(waiter::PollWaiter)::PollWakeReason.T
     end
 end
 
+@inline function _merge_wake_reason(
+        current::PollWakeReason.T,
+        incoming::PollWakeReason.T,
+    )::PollWakeReason.T
+    return current == PollWakeReason.READY ? current : incoming
+end
+
 """
     pollnotify!(waiter, reason=PollWakeReason.READY)
 
@@ -138,13 +145,6 @@ behavior once readiness has already been latched.
 Throws `ArgumentError` if the waiter state machine is observed in an invalid
 state.
 """
-@inline function _merge_wake_reason(
-        current::PollWakeReason.T,
-        incoming::PollWakeReason.T,
-    )::PollWakeReason.T
-    return current == PollWakeReason.READY ? current : incoming
-end
-
 function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReason.READY)::Bool
     state = @atomic :acquire waiter.state
     while true

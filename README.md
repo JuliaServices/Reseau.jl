@@ -39,13 +39,13 @@ listener = TCP.listen(TCP.loopback_addr(0); backlog = 128)
 addr = TCP.addr(listener)
 
 server_task = errormonitor(Threads.@spawn begin
-    conn = TCP.accept!(listener)
+    conn = TCP.accept(listener)
     try
         buf = Vector{UInt8}(undef, 5)
         read!(conn, buf)
         write(conn, buf)
     finally
-        TCP.close!(conn)
+        close(conn)
     end
 end)
 
@@ -54,8 +54,8 @@ write(client, collect(codeunits("hello")))
 reply = Vector{UInt8}(undef, 5)
 read!(client, reply)
 
-TCP.close!(client)
-TCP.close!(listener)
+close(client)
+close(listener)
 wait(server_task)
 ```
 
@@ -65,11 +65,11 @@ wait(server_task)
 using Reseau
 
 conn = TCP.connect("example.com:80")
-TCP.close!(conn)
+close(conn)
 
 listener = TCP.listen("127.0.0.1:0"; backlog = 64)
 println(TCP.addr(listener))
-TCP.close!(listener)
+close(listener)
 ```
 
 The hostname/address-string behavior is available directly on `TCP.connect`,
@@ -83,7 +83,7 @@ using Reseau
 
 conn = TCP.connect("example.com:80")
 TCP.set_read_deadline!(conn, time_ns() + 5_000_000_000)
-TCP.close!(conn)
+close(conn)
 ```
 
 ### TLS client
@@ -98,7 +98,7 @@ conn = TLS.connect(
 
 state = TLS.connection_state(conn)
 println((state.handshake_complete, state.alpn_protocol))
-TLS.close!(conn)
+close(conn)
 ```
 
 By default, outbound TLS verification uses `NetworkOptions.ca_roots_path()` when
@@ -115,10 +115,10 @@ config = TLS.Config(
 )
 
 listener = TLS.listen("tcp", "127.0.0.1:8443", config)
-conn = TLS.accept!(listener)
+conn = TLS.accept(listener)
 
-TLS.close!(conn)
-TLS.close!(listener)
+close(conn)
+close(listener)
 ```
 
 For verified client-certificate auth, provide `client_ca_file` explicitly:
@@ -152,7 +152,7 @@ config = TLS.Config(
 
 ## Documentation
 
-- [TCP and Resolution](docs/src/tcp.md)
+- [TCP](docs/src/tcp.md)
 - [TLS](docs/src/tls.md)
 - [Sockets Migration Guide](docs/src/migrate-sockets.md)
 - [API Reference](docs/src/reference.md)

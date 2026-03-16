@@ -1516,13 +1516,13 @@ function _resolve_serial(
                     )
                     conn = TCP.Conn(fd)
                     if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
-                        TCP.close!(conn)
+                        close(conn)
                         continue
                     end
                     if _mark_connect_done!(state)
                         return conn, nothing
                     end
-                    TCP.close!(conn)
+                    close(conn)
                     return nothing, first_err
                 catch err
                     ex = _as_exception(err)

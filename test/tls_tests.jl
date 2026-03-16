@@ -18,9 +18,9 @@ function _tls_close_quiet!(x)
     x === nothing && return nothing
     try
         if x isa TL.Conn || x isa TL.Listener
-            TL.close!(x)
+            close(x)
         elseif x isa NC.Conn || x isa NC.Listener
-            NC.close!(x)
+            close(x)
         end
     catch
     end
@@ -132,7 +132,7 @@ else
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 4)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server_tcp = fetch(accept_task)
@@ -268,7 +268,7 @@ else
                     request_listener = TL.listen("tcp", "127.0.0.1:0", request_server_cfg; backlog = 8)
                     request_addr = TL.addr(request_listener)::NC.SocketAddrV4
                     request_accept = errormonitor(Threads.@spawn begin
-                        conn = TL.accept!(request_listener)
+                        conn = TL.accept(request_listener)
                         try
                             TL.handshake!(conn)
                             return conn
@@ -299,7 +299,7 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", strict_server_cfg; backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     try
                         TL.handshake!(conn)
                         _tls_close_quiet!(conn)
@@ -337,7 +337,7 @@ else
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server_tcp = fetch(accept_task)
@@ -380,7 +380,7 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     TL.handshake!(conn)
                     return conn
                 end)
@@ -414,7 +414,7 @@ else
                 accept_task = errormonitor(Threads.@spawn begin
                     local conns = TL.Conn[]
                     for _ in 1:2
-                        conn = TL.accept!(listener)
+                        conn = TL.accept(listener)
                         TL.handshake!(conn)
                         push!(conns, conn)
                     end
@@ -469,7 +469,7 @@ else
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     try
-                        conn = TL.accept!(listener)
+                        conn = TL.accept(listener)
                         TL.handshake!(conn)
                         buf = Vector{UInt8}(undef, 4)
                         n = read!(conn, buf)
@@ -520,12 +520,12 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 close_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     try
                         TL.handshake!(conn)
                     catch
                     end
-                    TL.close!(conn)
+                    close(conn)
                     return nothing
                 end)
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
@@ -550,7 +550,7 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     TL.handshake!(conn)
                     return conn
                 end)
@@ -560,7 +560,7 @@ else
                 ))
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
-                TL.close_write!(client)
+                closewrite(client)
                 write_err = try
                     write(client, UInt8[0x41])
                     nothing
@@ -589,7 +589,7 @@ else
             try
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server_tcp = fetch(accept_task)
@@ -598,7 +598,7 @@ else
                     server_name = "localhost",
                 ))
                 err = try
-                    TL.close_write!(tls_client)
+                    closewrite(tls_client)
                     nothing
                 catch ex
                     ex
@@ -625,7 +625,7 @@ else
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     try
-                        conn = TL.accept!(listener)
+                        conn = TL.accept(listener)
                         TL.handshake!(conn)
                         return conn
                     catch err
@@ -668,7 +668,7 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     try
                         TL.handshake!(conn)
                     catch
@@ -706,7 +706,7 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     try
                         TL.handshake!(conn)
                     catch
@@ -746,7 +746,7 @@ else
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = NC.accept!(listener)
+                    conn = NC.accept(listener)
                     EL.sleep(1.0)
                     return conn
                 end)
@@ -789,7 +789,7 @@ else
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = NC.accept!(listener)
+                    conn = NC.accept(listener)
                     EL.sleep(1.0)
                     return conn
                 end)
@@ -830,9 +830,9 @@ else
                 listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = NC.accept!(listener)
+                    conn = NC.accept(listener)
                     EL.sleep(1.2)
-                    NC.close!(conn)
+                    close(conn)
                     return nothing
                 end)
                 host_resolver = ND.HostResolver(timeout_ns = 100_000_000)
@@ -880,7 +880,7 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     TL.handshake!(conn)
                     return conn
                 end)
@@ -890,8 +890,8 @@ else
                 ))
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
-                TL.close!(client)
-                TL.close!(client)
+                close(client)
+                close(client)
                 @test_throws TL.TLSError TL.handshake!(client)
                 @test_throws TL.TLSError read!(client, Vector{UInt8}(undef, 1))
                 @test_throws TL.TLSError write(client, UInt8[0x41])
@@ -910,10 +910,10 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 hold_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     TL.handshake!(conn)
                     EL.sleep(1.5)
-                    TL.close!(conn)
+                    close(conn)
                     return nothing
                 end)
                 client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
@@ -960,7 +960,7 @@ else
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
-                    conn = TL.accept!(listener)
+                    conn = TL.accept(listener)
                     TL.handshake!(conn)
                     return conn
                 end)
@@ -979,7 +979,7 @@ else
                     return :ok
                 end)
                 @test _tls_wait_task_done(read_task, 0.05) == :timed_out
-                TL.close!(client)
+                close(client)
                 @test _tls_wait_task_done(read_task, 2.0) != :timed_out
                 result = fetch(read_task)
                 @test result isa TL.TLSError

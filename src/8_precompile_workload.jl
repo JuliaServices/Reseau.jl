@@ -182,7 +182,7 @@ function _pc_run_tcp_workload!()
     try
         listener = NC.listen(NC.loopback_addr(0); backlog = 16)
         laddr = NC.addr(listener)
-        accept_task = errormonitor(Threads.@spawn NC.accept!(listener))
+        accept_task = errormonitor(Threads.@spawn NC.accept(listener))
         client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
         server = fetch(accept_task)
         payload = UInt8[0x41, 0x42, 0x43]
@@ -192,15 +192,15 @@ function _pc_run_tcp_workload!()
         _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
     finally
         try
-            server === nothing || NC.close!(server)
+            server === nothing || close(server)
         catch
         end
         try
-            client === nothing || NC.close!(client)
+            client === nothing || close(client)
         catch
         end
         try
-            listener === nothing || NC.close!(listener)
+            listener === nothing || close(listener)
         catch
         end
     end
@@ -217,7 +217,7 @@ function _pc_run_host_resolvers_workload!()
         listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 16)
         laddr = NC.addr(listener)
         client = ND.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)))
-        server = NC.accept!(listener)
+        server = NC.accept(listener)
         payload = UInt8[0x51, 0x52]
         written = write(client, payload)
         written == length(payload) || throw(ArgumentError("host resolver workload expected 2-byte write"))
@@ -225,15 +225,15 @@ function _pc_run_host_resolvers_workload!()
         _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
     finally
         try
-            server === nothing || NC.close!(server)
+            server === nothing || close(server)
         catch
         end
         try
-            client === nothing || NC.close!(client)
+            client === nothing || close(client)
         catch
         end
         try
-            listener === nothing || NC.close!(listener)
+            listener === nothing || close(listener)
         catch
         end
     end
@@ -265,7 +265,7 @@ function _pc_run_tls_workload!()
         listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
         laddr = TL.addr(listener)::NC.SocketAddrV4
         accept_task = errormonitor(Threads.@spawn begin
-            conn = TL.accept!(listener::TL.Listener)
+            conn = TL.accept(listener::TL.Listener)
             TL.handshake!(conn)
             return conn
         end)
@@ -300,15 +300,15 @@ function _pc_run_tls_workload!()
         read_count == 3 || throw(ArgumentError("TLS precompile workload expected 3-byte read"))
     finally
         try
-            server === nothing || TL.close!(server)
+            server === nothing || close(server)
         catch
         end
         try
-            client === nothing || TL.close!(client)
+            client === nothing || close(client)
         catch
         end
         try
-            listener === nothing || TL.close!(listener)
+            listener === nothing || close(listener)
         catch
         end
         EL.shutdown!()

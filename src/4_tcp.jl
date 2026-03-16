@@ -21,16 +21,18 @@ using ..Reseau.SocketOps
 """
     connect
     listen
+    accept
 
 Primary user-facing TCP entry points.
 
 This file defines the concrete-address methods like `connect(::SocketAddr)` and
-`listen(::SocketAddr)`. String/hostname-based overloads are added later by the
-`HostResolvers` module so callers can still use one unified `TCP.connect` /
-`TCP.listen` surface.
+`listen(::SocketAddr)`. String/hostname-based overloads are added later so
+callers can still use one unified `TCP.connect` / `TCP.listen` surface.
+`accept(::Listener)` completes the listener side.
 """
 function connect end
 function listen end
+function accept end
 
 """
     SocketAddr
@@ -525,7 +527,7 @@ function connect_tcp_fd!(
         _apply_default_tcp_opts!(fd)
         return fd
     catch
-        close!(fd)
+        close(fd)
         rethrow()
     end
 end
@@ -553,7 +555,7 @@ function listen_tcp_fd!(local_addr::SocketAddr; backlog::Integer = 128, reuseadd
         _set_local_addr!(fd)
         return fd
     catch
-        close!(fd)
+        close(fd)
         rethrow()
     end
 end
@@ -583,7 +585,7 @@ function accept_tcp_fd!(listener_fd::FD)::FD
         @atomic :release child.is_connected = true
         return child
     catch
-        close!(child)
+        close(child)
         rethrow()
     end
 end
@@ -614,14 +616,14 @@ function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool 
 end
 
 """
-    accept!(listener)
+    accept(listener)
 
 Accept a new `Conn` from `listener`.
 
 Throws `SystemError`, `IOPoll.DeadlineExceededError`, or other poll/transport
 errors if the underlying accept path fails.
 """
-function accept!(listener::Listener)::Conn
+function accept(listener::Listener)::Conn
     return Conn(accept_tcp_fd!(listener.fd))
 end
 
@@ -674,51 +676,51 @@ function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
 end
 
 """
-    close!(conn)
+    close(conn)
 
 Close the connection. Repeated closes are treated as no-ops.
 """
-function close!(conn::Conn)
-    close!(conn.fd)
+function Base.close(conn::Conn)
+    close(conn.fd)
     return nothing
 end
 
 """
-    close!(listener)
+    close(listener)
 
 Close the listening socket. Repeated closes are treated as no-ops.
 """
-function close!(listener::Listener)
-    close!(listener.fd)
+function Base.close(listener::Listener)
+    close(listener.fd)
     return nothing
 end
 
 """
-    close_read!(conn)
+    closeread(conn)
 
 Shut down the read side of the TCP connection.
 """
-function close_read!(conn::Conn)
+function closeread(conn::Conn)
     SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_RD)
     return nothing
 end
 
 """
-    close_write!(conn)
+    closewrite(conn)
 
 Shut down the write side of the TCP connection.
 """
-function close_write!(conn::Conn)
+function Base.closewrite(conn::Conn)
     SocketOps.shutdown_socket(conn.fd.pfd.sysfd, SocketOps.SHUT_WR)
     return nothing
 end
 
 """
-    close!(fd::FD)
+    close(fd)
 
 Close a net descriptor. Repeated closes are treated as no-op.
 """
-function close!(fd::FD)
+function Base.close(fd::FD)
     IOPoll.close!(fd.pfd)
     return nothing
 end
