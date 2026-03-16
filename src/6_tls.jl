@@ -142,9 +142,10 @@ Keyword arguments:
 - `client_auth`: server-side client certificate policy.
 - `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
   provide both; clients may provide both for mutual TLS.
-- `ca_file`: PEM bundle used to verify remote servers. When omitted, the platform/OpenSSL
-  defaults are used when possible.
-- `client_ca_file`: PEM bundle used by servers to verify client certificates.
+- `ca_file`: CA bundle or hashed CA directory used to verify remote servers. When omitted,
+  client verification uses `NetworkOptions.ca_roots_path()`.
+- `client_ca_file`: CA bundle or hashed CA directory used by servers to verify client
+  certificates. This is required for server configs that verify presented client certs.
 - `alpn_protocols`: ordered ALPN protocol preference list.
 - `handshake_timeout_ns`: optional cap, in monotonic nanoseconds, applied only while the
   handshake is running. Existing transport deadlines still win if they are earlier.
@@ -240,16 +241,39 @@ end
     ca_path === nothing && return nothing
     ca_path_s = String(ca_path)
     isempty(ca_path_s) && return nothing
-    isfile(ca_path_s) || return nothing
+    ispath(ca_path_s) || return nothing
     return ca_path_s
+end
+
+@inline function _server_needs_verified_client_ca(config::Config)::Bool
+    mode = config.client_auth
+    return mode == ClientAuthMode.VerifyClientCertIfGiven || mode == ClientAuthMode.RequireAndVerifyClientCert
 end
 
 @inline function _effective_ca_file(config::Config; is_server::Bool)::Union{Nothing, String}
     if is_server
-        return config.client_ca_file
+        return _server_needs_verified_client_ca(config) ? config.client_ca_file : nothing
     end
     config.ca_file !== nothing && return config.ca_file::String
     return _default_ca_file_path()
+end
+
+function _load_verify_locations!(ctx::Ptr{Cvoid}, ca_path::String)
+    ok = if isdir(ca_path)
+        @gcsafe_ccall _LIBSSL.SSL_CTX_load_verify_locations(
+            ctx::Ptr{Cvoid},
+            C_NULL::Cstring,
+            ca_path::Cstring,
+        )::Cint
+    else
+        @gcsafe_ccall _LIBSSL.SSL_CTX_load_verify_locations(
+            ctx::Ptr{Cvoid},
+            ca_path::Cstring,
+            C_NULL::Cstring,
+        )::Cint
+    end
+    ok == 1 || throw(_make_tls_error("SSL_CTX_load_verify_locations", Int32(ok)))
+    return nothing
 end
 
 """
@@ -532,11 +556,16 @@ function _validate_config(config::Config; is_server::Bool)
     end
     if config.ca_file !== nothing
         ca_path = config.ca_file::String
-        isfile(ca_path) || throw(ConfigError("CA file not found: $ca_path"))
+        ispath(ca_path) || throw(ConfigError("CA roots path not found: $ca_path"))
     end
     if config.client_ca_file !== nothing
         client_ca_path = config.client_ca_file::String
-        isfile(client_ca_path) || throw(ConfigError("client CA file not found: $client_ca_path"))
+        ispath(client_ca_path) || throw(ConfigError("client CA roots path not found: $client_ca_path"))
+    elseif is_server && _server_needs_verified_client_ca(config)
+        throw(ConfigError("server TLS with verified client auth requires `client_ca_file`"))
+    end
+    if !is_server && config.verify_peer && config.ca_file === nothing
+        _default_ca_file_path() === nothing && throw(ConfigError("client TLS verification requires a CA roots path from NetworkOptions.ca_roots_path()"))
     end
     if config.min_version !== nothing && config.max_version !== nothing
         (config.min_version::UInt16) <= (config.max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
@@ -671,25 +700,14 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
             _set_ctx_max_version!(ctx, config.max_version::UInt16)
         end
         need_verify_paths = if is_server
-            config.client_auth != ClientAuthMode.NoClientCert
+            _server_needs_verified_client_ca(config)
         else
             config.verify_peer
         end
         if need_verify_paths
             ca_path = _effective_ca_file(config; is_server = is_server)
-            if ca_path === nothing
-                ok = @gcsafe_ccall _LIBSSL.SSL_CTX_set_default_verify_paths(
-                    ctx::Ptr{Cvoid},
-                )::Cint
-                ok == 1 || throw(_make_tls_error("SSL_CTX_set_default_verify_paths", Int32(ok)))
-            else
-                ok = @gcsafe_ccall _LIBSSL.SSL_CTX_load_verify_locations(
-                    ctx::Ptr{Cvoid},
-                    ca_path::Cstring,
-                    C_NULL::Cstring,
-                )::Cint
-                ok == 1 || throw(_make_tls_error("SSL_CTX_load_verify_locations", Int32(ok)))
-            end
+            ca_path === nothing && throw(ConfigError("no CA roots path available for TLS verification"))
+            _load_verify_locations!(ctx, ca_path::String)
         end
         if is_server
             cert_file = config.cert_file::String

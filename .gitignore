@@ -5,10 +5,9 @@
 /docs/build/
 /docs/Manifest.toml
 /Manifest.toml
+/Manifest-*.toml
 /aws-c-io
 /deps/usr/
 /deps/deps.jl
 /echo_trim_safe
 /echo_trim_safe.exe
-Manifest.toml
-Manifest-v1.12.toml

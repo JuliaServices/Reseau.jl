@@ -91,26 +91,39 @@ else
                     nothing
                 else
                     path_s = String(path)
-                    isempty(path_s) || !isfile(path_s) ? nothing : path_s
+                    isempty(path_s) || !ispath(path_s) ? nothing : path_s
                 end
             catch
                 nothing
             end
             if expected_default_ca !== nothing
                 @test default_ca == expected_default_ca
-                @test isfile(default_ca::String)
+                @test ispath(default_ca::String)
             else
                 @test default_ca === nothing
             end
             @test TL._effective_ca_file(cfg_default; is_server = false) == default_ca
             explicit_ca_cfg = TL.Config(server_name = "localhost", ca_file = _TLS_CERT_PATH)
             @test TL._effective_ca_file(explicit_ca_cfg; is_server = false) == _TLS_CERT_PATH
+            @test TL._effective_ca_file(TL.Config(verify_peer = false, client_auth = TL.ClientAuthMode.RequestClientCert); is_server = true) === nothing
+            verified_client_auth_cfg = TL.Config(
+                verify_peer = false,
+                client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven,
+                client_ca_file = _TLS_CERT_PATH,
+            )
+            @test TL._effective_ca_file(verified_client_auth_cfg; is_server = true) == _TLS_CERT_PATH
             @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
             @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
             @test_throws TL.ConfigError TL.Config(handshake_timeout_ns = -1)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, ca_file = joinpath(@__DIR__, "missing-ca.pem")); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, client_ca_file = joinpath(@__DIR__, "missing-client-ca.pem")); is_server = true)
+            @test_throws TL.ConfigError TL._validate_config(TL.Config(
+                cert_file = _TLS_CERT_PATH,
+                key_file = _TLS_KEY_PATH,
+                verify_peer = false,
+                client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven,
+            ); is_server = true)
             @test_throws TL.ConfigError TL.listen("tcp", "127.0.0.1:0", TL.Config(verify_peer = false))
             EL.shutdown!()
             listener = nothing

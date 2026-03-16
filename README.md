@@ -1,21 +1,21 @@
 # Reseau.jl
 
-`Reseau.jl` is a pure-Julia networking stack organized in roughly the same layers as Go's `net`, `crypto/tls`, and `net/http` implementations.
+`Reseau.jl` is a pure-Julia networking transport stack organized in roughly the
+same layers as Go's `runtime`, `internal/poll`, `net`, and `crypto/tls`
+packages.
 
-Today the package includes:
-- cross-platform event-loop backends for macOS (`kqueue`), Linux (`epoll`), and Windows (`IOCP`)
+Reseau owns:
+
+- cross-platform event-loop backends for macOS (`kqueue`), Linux (`epoll`),
+  and Windows (`IOCP`)
 - low-level socket operations and internal poll/runtime plumbing
 - TCP connections and listeners
-- host resolution + dialing/listening helpers
-- TLS client/server support
-- HTTP/1.1 and HTTP/2 client/server support
-- precompile and `--trim=safe` compile workloads in the test suite
+- host parsing, resolution, and timeout-aware dialing
+- TLS clients and listeners
+- precompile and `--trim=safe` validation in the test suite
 
-The public API is intentionally layered. Most users will spend their time in:
-- `Reseau.TCP`
-- `Reseau.HostResolvers`
-- `Reseau.TLS`
-- `Reseau.HTTP`
+HTTP.jl 2.0 is built on top of this transport stack. If you want HTTP clients,
+servers, WebSockets, or HTTP/2, use HTTP.jl on top of Reseau.
 
 ## Installation
 
@@ -24,226 +24,165 @@ using Pkg
 Pkg.add("Reseau")
 ```
 
-For development:
+## Main Entry Points
 
-```julia
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
-julia --project=. -e 'using Pkg; Pkg.test()'
-```
+The public API is intentionally module-qualified:
 
-## Package Layout
-
-- `Reseau.EventLoops`: platform event-loop backends (`kqueue` / `epoll` / `IOCP`)
-- `Reseau.SocketOps`: raw socket syscalls, sockaddr helpers, and platform quirks
-- `Reseau.IOPoll`: internal poll-descriptor and deadline layer
-- `Reseau.TCP`: TCP endpoints, `Conn`, `Listener`, deadlines, close semantics
-- `Reseau.HostResolvers`: `host:port` parsing, `getaddrinfo`, Happy Eyeballs-style connect orchestration
-- `Reseau.TLS`: TLS connections/listeners built on top of `TCP`
-- `Reseau.HTTP`: HTTP core types, HTTP/1.1, HPACK, HTTP/2, high-level client/server APIs
+- `Reseau.TCP` for concrete-address TCP work
+- `Reseau.HostResolvers` for string-address resolution and dialing
+- `Reseau.TLS` for TLS clients and listeners
 
 ## Quick Start
 
-### TCP
+### Direct-address TCP
 
 ```julia
 using Reseau
-const TCP = Reseau.TCP
 
-listener = TCP.listen(TCP.loopback_addr(0); backlog = 128)
-addr = TCP.addr(listener)
+listener = Reseau.TCP.listen(Reseau.TCP.loopback_addr(0); backlog = 128)
+addr = Reseau.TCP.addr(listener)
 
 server_task = errormonitor(Threads.@spawn begin
-    conn = TCP.accept!(listener)
-    buf = Vector{UInt8}(undef, 5)
-    read!(conn, buf)
-    write(conn, buf)
-    TCP.close!(conn)
+    conn = Reseau.TCP.accept!(listener)
+    try
+        buf = Vector{UInt8}(undef, 5)
+        read!(conn, buf)
+        write(conn, buf)
+    finally
+        Reseau.TCP.close!(conn)
+    end
 end)
 
-client = TCP.connect(addr)
+client = Reseau.TCP.connect(addr)
 write(client, collect(codeunits("hello")))
 reply = Vector{UInt8}(undef, 5)
 read!(client, reply)
 
-TCP.close!(client)
-TCP.close!(listener)
+Reseau.TCP.close!(client)
+Reseau.TCP.close!(listener)
 wait(server_task)
 ```
 
-### Host Resolution + Connect/Listen by Address String
+### String-address dialing
 
 ```julia
 using Reseau
-const ND = Reseau.HostResolvers
-const TCP = Reseau.TCP
 
-conn = ND.connect("tcp", "example.com:80")
-TCP.close!(conn)
+conn = Reseau.HostResolvers.connect("tcp", "example.com:80")
+Reseau.TCP.close!(conn)
 
-listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 64)
-println(TCP.addr(listener))
-TCP.close!(listener)
+listener = Reseau.HostResolvers.listen("tcp", "127.0.0.1:0"; backlog = 64)
+println(Reseau.TCP.addr(listener))
+Reseau.TCP.close!(listener)
 ```
 
-If you want custom resolution behavior, timeouts, or a static resolver:
+You can also take control of timeout, deadline, and resolver policy explicitly:
 
 ```julia
 using Reseau
-const ND = Reseau.HostResolvers
 
-resolver = ND.HostResolver(; timeout_ns = 2_000_000_000)
-conn = ND.connect(resolver, "tcp", "example.com:80")
+resolver = Reseau.HostResolvers.HostResolver(
+    timeout_ns = 2_000_000_000,
+    fallback_delay_ns = 300_000_000,
+)
+
+conn = Reseau.HostResolvers.connect(resolver, "tcp", "example.com:80")
 Reseau.TCP.close!(conn)
 ```
 
-### TLS
+### TLS client
 
 ```julia
 using Reseau
-const TLS = Reseau.TLS
 
-conn = TLS.connect("tcp", "www.google.com:443")
-state = TLS.connection_state(conn)
-println((state.handshake_complete, state.negotiated_protocol))
-TLS.close!(conn)
+conn = Reseau.TLS.connect(
+    "tcp",
+    "www.google.com:443";
+    alpn_protocols = ["h2", "http/1.1"],
+)
+
+state = Reseau.TLS.connection_state(conn)
+println((state.handshake_complete, state.alpn_protocol))
+Reseau.TLS.close!(conn)
 ```
 
-Server-side TLS listeners are built on top of `TCP` listeners:
+By default, outbound TLS verification uses `NetworkOptions.ca_roots_path()` when
+`ca_file` is omitted.
+
+### TLS listener
 
 ```julia
 using Reseau
-const TLS = Reseau.TLS
 
-config = TLS.Config(
+config = Reseau.TLS.Config(
     cert_file = "server.crt",
     key_file = "server.key",
 )
-listener = TLS.listen("tcp", "127.0.0.1:8443", config)
-conn = TLS.accept!(listener)
-TLS.close!(conn)
-TLS.close!(listener)
+
+listener = Reseau.TLS.listen("tcp", "127.0.0.1:8443", config)
+conn = Reseau.TLS.accept!(listener)
+
+Reseau.TLS.close!(conn)
+Reseau.TLS.close!(listener)
 ```
 
-### HTTP Client
+For verified client-certificate auth, provide `client_ca_file` explicitly:
 
 ```julia
 using Reseau
-const HTTP = Reseau.HTTP
 
-resp = HTTP.get("https://www.google.com")
-println(resp.status)
-println(length(resp.body))
-
-resp = HTTP.post(
-    "https://httpbin.org/post",
-    ["Content-Type" => "application/json"],
-    collect(codeunits("{\"hello\":true}"));
-    status_exception = false,
-)
-println(resp.status)
-```
-
-You can also create a reusable client explicitly:
-
-```julia
-using Reseau
-const HTTP = Reseau.HTTP
-
-client = HTTP.Client(; prefer_http2 = true)
-resp = HTTP.get("https://www.google.com"; client = client)
-close(client)
-```
-
-High-level request retries are enabled by default for replayable request bodies.
-You can tune them per call with `retry`, `retries`, `retry_non_idempotent`,
-`retry_if`, `respect_retry_after`, and `retry_bucket`:
-
-```julia
-using Reseau
-const HTTP = Reseau.HTTP
-
-resp = HTTP.get(
-    "https://example.com/health";
-    retries = 2,
-    retry_if = (attempt, err, req, resp) -> nothing,
+config = Reseau.TLS.Config(
+    cert_file = "server.crt",
+    key_file = "server.key",
+    client_auth = Reseau.TLS.ClientAuthMode.RequireAndVerifyClientCert,
+    client_ca_file = "client-ca.pem",
 )
 ```
 
-The built-in default is conservative: it retries replayable idempotent requests
-(`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`) and requests carrying
-`Idempotency-Key`, honors `Retry-After` on retryable `429`/`503` responses, and
-does not automatically retry request read timeouts.
+## Why Use Reseau
 
-### HTTP Server
+- Deadlines and readiness behavior are first-class instead of layered on later.
+- Concrete-address and string-address dialing are both supported cleanly.
+- TLS lives in the same transport stack instead of hanging off a different socket
+  abstraction.
+- HTTP.jl 2.0 uses this exact transport layer, so networking semantics stay
+  aligned across the stack.
 
-```julia
-using Reseau
-const HTTP = Reseau.HTTP
+## Package Layout
 
-server = HTTP.serve!("127.0.0.1", 8080) do req
-    body = HTTP.BytesBody(collect(codeunits("hello from reseau")))
-    return HTTP.Response(200; body = body, content_length = 17)
-end)
+- `Reseau.EventLoops`: backend-specific pollers and timer scheduling
+- `Reseau.SocketOps`: raw socket syscalls, sockaddr helpers, and platform quirks
+- `Reseau.IOPoll`: internal poll-descriptor, deadline, and readiness machinery
+- `Reseau.TCP`: TCP endpoints, listeners, deadlines, and lifecycle operations
+- `Reseau.HostResolvers`: host/service parsing, resolution, and Happy
+  Eyeballs-style dialing
+- `Reseau.TLS`: TLS configuration, clients, listeners, and handshake behavior
 
-println(HTTP.server_addr(server))
+## Documentation
 
-# ... run requests ...
+- [TCP and Resolution](docs/src/tcp.md)
+- [TLS](docs/src/tls.md)
+- [Sockets Migration Guide](docs/src/migrate-sockets.md)
+- [API Reference](docs/src/reference.md)
 
-close(server)
-wait(server)
-```
+## Development
 
-Router-style handlers are available too:
+From a local checkout:
 
-```julia
-using Reseau
-const HTTP = Reseau.HTTP
-
-router = HTTP.Router()
-HTTP.register!(router, "GET", "/hello/{name}") do req
-    payload = "hello " * HTTP.getparam(req, "name")
-    bytes = collect(codeunits(payload))
-    return HTTP.Response(200; body = HTTP.BytesBody(bytes), content_length = length(bytes))
-end
-
-server = HTTP.serve!(router, "127.0.0.1", 8080)
-
-# cookie parsing middleware is available as HTTP.Handlers.cookie_middleware
-
-close(server)
-wait(server)
-```
-
-## Notes on Lower Layers
-
-`Reseau.EventLoops`, `Reseau.SocketOps`, and `Reseau.IOPoll` are real implementations, not stubs, and they are heavily tested. They exist primarily to support the higher-level TCP/TLS/HTTP stack, but they are also useful when you want to reason about readiness, deadlines, or platform-specific event-loop behavior.
-
-## Testing and Benchmarks
-
-Useful commands during development:
-
-```julia
-julia --project=. test/runtests.jl
-julia --project=. benchmarks/benchmarks.jl
+```sh
+julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate()'
+JULIA_NUM_THREADS=1 julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)'
 ```
 
 The test suite also exercises:
+
 - precompile workloads
 - `--trim=safe` compile workloads
-- platform-specific event-loop/socket paths
+- platform-specific event-loop and socket paths
 
 ## Windows Compiled-Binary Note
 
-On Windows, fully compiled or `--trim=safe` executables should bundle dependent artifacts/JLLs so runtime libraries like OpenSSL are present next to the built executable.
-
-In practice, that means preferring a bundled build flow such as JuliaC's `--bundle` mode for Windows executables. The repository's trim-compile tests exercise this path directly in [`test/trim_compile_tests.jl`](/Users/jacob.quinn/.julia/dev/Reseau/test/trim_compile_tests.jl).
-
-## Status
-
-Reseau is a serious rewrite with production-oriented goals:
-- direct OS syscalls instead of libuv-mediated sockets
-- Go-inspired layering and semantics
-- broad test coverage, including trim-compile validation
-- cross-platform event-loop backends for macOS, Linux, and Windows
-
-The implementation is still evolving, but the intended direction is clear: a full networking stack in Julia with predictable semantics from raw sockets up through HTTP.
+On Windows, fully compiled or `--trim=safe` executables should bundle dependent
+artifacts and JLLs so runtime libraries like OpenSSL are available next to the
+built executable. The trim-compile tests in `test/trim_compile_tests.jl`
+exercise that path directly.
