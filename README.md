@@ -4,6 +4,9 @@
 same layers as Go's `runtime`, `internal/poll`, `net`, and `crypto/tls`
 packages.
 
+[![](https://img.shields.io/badge/docs-stable-blue.svg)](https://juliaservices.github.io/Reseau.jl/stable)
+[![](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaservices.github.io/Reseau.jl/dev)
+
 Reseau owns:
 
 - cross-platform event-loop backends for macOS (`kqueue`), Linux (`epoll`),
@@ -152,10 +155,13 @@ config = TLS.Config(
 
 ## Documentation
 
-- [TCP](docs/src/tcp.md)
-- [TLS](docs/src/tls.md)
-- [Sockets Migration Guide](docs/src/migrate-sockets.md)
-- [API Reference](docs/src/reference.md)
+- [Stable docs](https://juliaservices.github.io/Reseau.jl/stable)
+- [Dev docs](https://juliaservices.github.io/Reseau.jl/dev)
+- [TCP](https://juliaservices.github.io/Reseau.jl/stable/tcp/)
+- [TLS](https://juliaservices.github.io/Reseau.jl/stable/tls/)
+- [Name Resolution](https://juliaservices.github.io/Reseau.jl/stable/resolution/)
+- [Sockets Migration Guide](https://juliaservices.github.io/Reseau.jl/stable/migrate-sockets/)
+- [API Reference](https://juliaservices.github.io/Reseau.jl/stable/reference/)
 
 ## Development
 

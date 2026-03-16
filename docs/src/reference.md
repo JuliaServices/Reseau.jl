@@ -1,83 +1,165 @@
-# API Reference
+```@meta
+CollapsedDocStrings = true
+Description = "Canonical API reference for Reseau.jl's TCP, TLS, and name-resolution surfaces."
+```
 
-The public surface is centered on the exported `TCP` and `TLS` modules.
+# [API Reference](@id api-reference-manual)
 
-## `TCP`
+This page is the canonical home for the package and module docstrings used
+throughout the rest of the manual.
 
-### Address Constructors
+```@contents
+Pages = ["reference.md"]
+Depth = 2:2
+```
 
-- `TCP.SocketAddrV4`
-- `TCP.SocketAddrV6`
-- `TCP.loopback_addr`
-- `TCP.any_addr`
-- `TCP.loopback_addr6`
-- `TCP.any_addr6`
+## Package Modules
 
-### Connections and Listeners
+```@docs
+Reseau
+Reseau.TCP
+Reseau.TLS
+```
 
-- `TCP.connect`
-- `TCP.listen`
-- `TCP.accept`
-- `close(::TCP.Conn)`
-- `close(::TCP.Listener)`
+### Internal Layers
 
-The string-address overloads on `TCP.connect` accept:
+These modules are not the primary end-user entrypoints, but they explain the
+package layering and are part of the documented rewrite architecture:
 
-- `timeout_ns`
-- `deadline_ns`
-- `local_addr`
-- `fallback_delay_ns`
-- `resolver`
-- `policy`
+```@docs
+Reseau.EventLoops
+Reseau.SocketOps
+Reseau.IOPoll
+Reseau.IOPoll.PollOp
+Reseau.HostResolvers
+```
 
-### Deadlines, Shutdown, and Socket Options
+## TCP
 
-- `TCP.set_deadline!`
-- `TCP.set_read_deadline!`
-- `TCP.set_write_deadline!`
-- `TCP.closeread`
-- `closewrite(::TCP.Conn)`
-- `TCP.set_nodelay!`
-- `TCP.set_keepalive!`
+```@meta
+CurrentModule = Reseau.TCP
+```
 
-### Address Inspection
+### Address Types and Constructors
 
-- `TCP.local_addr`
-- `TCP.remote_addr`
-- `TCP.addr`
+```@docs
+SocketAddr
+SocketAddrV4
+SocketAddrV6
+loopback_addr
+any_addr
+loopback_addr6
+any_addr6
+```
 
-## `TLS`
+### Connections and I/O
 
-### Main Types
+```@docs
+Conn
+Listener
+connect
+listen
+accept
+Base.read!(::Conn, ::Vector{UInt8})
+Base.write(::Conn, ::AbstractVector{UInt8})
+Base.close(::Conn)
+Base.close(::Listener)
+closeread
+Base.closewrite(::Conn)
+```
 
-- `TLS.Config`
-- `TLS.Conn`
-- `TLS.Listener`
-- `TLS.ClientAuthMode`
+### Deadlines, Socket Options, and Address Inspection
 
-### Client and Server Setup
+```@docs
+set_deadline!
+set_read_deadline!
+set_write_deadline!
+set_nodelay!
+set_keepalive!
+local_addr
+remote_addr
+addr
+```
 
-- `TLS.connect`
-- `TLS.listen`
-- `TLS.client`
-- `TLS.server`
-- `TLS.accept`
-- `TLS.handshake!`
+## Name Resolution
 
-The string-address overloads on `TLS.connect` accept the same resolution and
-connect-policy keywords as `TCP.connect`, along with all `TLS.Config` keywords.
+```@meta
+CurrentModule = Reseau.HostResolvers
+```
 
-### Lifecycle and Inspection
+### Policy and Resolver Types
 
-- `close(::TLS.Conn)`
-- `close(::TLS.Listener)`
-- `TLS.addr`
-- `TLS.net_conn`
-- `TLS.connection_state`
-- `closewrite(::TLS.Conn)`
+```@docs
+ResolverPolicy
+SystemResolver
+SingleflightResolver
+CachingResolver
+StaticResolver
+HostResolver
+```
 
-### Errors
+### Explicit Resolution Helpers
 
-- `TLS.ConfigError`
-- `TLS.TLSError`
-- `TLS.TLSHandshakeTimeoutError`
+```@docs
+resolve_tcp_addrs
+resolve_tcp_addr
+```
+
+## TLS
+
+```@meta
+CurrentModule = Reseau.TLS
+```
+
+### Configuration, State, and Errors
+
+```@docs
+Config
+ConnectionState
+Conn
+Listener
+ConfigError
+TLSError
+TLSHandshakeTimeoutError
+```
+
+### Client and Server Construction
+
+```@docs
+client
+server
+connect
+listen
+accept
+handshake!
+```
+
+### I/O, Lifecycle, Deadlines, and Inspection
+
+```@docs
+Base.read!(::Conn, ::Vector{UInt8})
+Base.write(::Conn, ::AbstractVector{UInt8})
+Base.close(::Conn)
+Base.close(::Listener)
+Base.closewrite(::Conn)
+set_deadline!
+set_read_deadline!
+set_write_deadline!
+local_addr
+remote_addr
+net_conn
+connection_state
+addr
+```
+
+## Docstring Index
+
+```@meta
+CurrentModule = Main
+```
+
+```@index
+Pages = ["reference.md"]
+Modules = [Reseau, Reseau.TCP, Reseau.HostResolvers, Reseau.TLS]
+Order = [:module, :type, :function]
+```

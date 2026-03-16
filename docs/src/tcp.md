@@ -1,48 +1,51 @@
-# TCP
+```@meta
+CurrentModule = Reseau.TCP
+Description = "TCP connections, listeners, deadlines, socket options, and address helpers in Reseau.jl."
+```
 
-`TCP` is the main plain-transport entrypoint in Reseau. The same `TCP.connect`
-and `TCP.listen` surface supports both concrete socket addresses and
-hostname-based string addresses.
+# [TCP](@id tcp-manual)
 
-## Address Constructors
+`TCP` is the plain-transport entrypoint in Reseau. The same [`connect`](@ref)
+and [`listen`](@ref) surface supports both concrete socket addresses and
+hostname-based string addresses. Read [Name Resolution](@ref name-resolution-manual) for the resolver
+and policy objects behind the string-address overloads.
+
+```@contents
+Pages = ["tcp.md"]
+Depth = 2:3
+```
+
+## Address Model
 
 Use concrete addresses when you already know the exact family and endpoint you
-want:
+want to target. Reseau exposes both IPv4 and IPv6 address snapshots:
 
-- `TCP.SocketAddrV4`
-- `TCP.SocketAddrV6`
-- `TCP.loopback_addr`
-- `TCP.any_addr`
-- `TCP.loopback_addr6`
-- `TCP.any_addr6`
-
-```julia
-using Reseau
-
-addr = TCP.loopback_addr(9000)
-listener = TCP.listen(addr; backlog = 128, reuseaddr = true)
-conn = TCP.accept(listener)
-
-close(conn)
-close(listener)
+```@docs; canonical=false
+SocketAddr
+SocketAddrV4
+SocketAddrV6
+loopback_addr
+any_addr
+loopback_addr6
+any_addr6
 ```
 
-## String-Address Dialing and Listening
+Concrete addresses are especially useful when you want to bind explicitly to a
+family or pass a preselected local address to outbound dialing.
 
-If you prefer the `Sockets`-style `"host:port"` surface, use the same
-`TCP.connect` and `TCP.listen` entrypoints directly:
+## Connections and Listeners
 
-```julia
-using Reseau
+The core connection surface is small and intentionally transport-focused:
 
-conn = TCP.connect("example.com:443")
-close(conn)
-
-listener = TCP.listen("127.0.0.1:9000"; backlog = 64)
-close(listener)
+```@docs; canonical=false
+Conn
+Listener
+connect
+listen
+accept
 ```
 
-If you need to tune connect behavior, the string-address overloads accept:
+For `"host:port"` dialing, the string-address overloads accept:
 
 - `timeout_ns`
 - `deadline_ns`
@@ -51,45 +54,52 @@ If you need to tune connect behavior, the string-address overloads accept:
 - `resolver`
 - `policy`
 
-```julia
-using Reseau
+Those knobs feed the resolver layer described in [Name Resolution](@ref name-resolution-manual), while
+the actual socket lifecycle still lands in the same `TCP.Conn` and
+`TCP.Listener` types.
 
-conn = TCP.connect(
-    "example.com:443";
-    timeout_ns = 2_000_000_000,
-    fallback_delay_ns = 100_000_000,
-)
+## Stream I/O and Lifecycle
 
-close(conn)
+`TCP.Conn` follows Julia's standard stream conventions for `read!`, `write`,
+and `close`, while still exposing explicit half-close helpers when you need
+them:
+
+```@docs; canonical=false
+Base.read!(::Conn, ::Vector{UInt8})
+Base.write(::Conn, ::AbstractVector{UInt8})
+Base.close(::Conn)
+Base.close(::Listener)
+closeread
+Base.closewrite(::Conn)
 ```
 
-## Deadlines and Shutdown
+The important behavioral detail is that partial reads and writes are normal:
+reads return as soon as at least one byte is available, and writes retry
+through readiness waits until the requested payload has been written or an
+error/deadline interrupts the operation.
 
-Deadlines live on the connection itself:
+## Deadlines, Socket Options, and Address Inspection
 
-- `TCP.set_deadline!(conn, deadline_ns)`
-- `TCP.set_read_deadline!(conn, deadline_ns)`
-- `TCP.set_write_deadline!(conn, deadline_ns)`
+Deadline management lives on the live connection, not in helper tasks or
+external timeout wrappers:
 
-Full close uses Julia's standard `close(conn)` / `close(listener)` surface.
-
-Half-close remains explicit today:
-
-- `closewrite(conn)`
-- `TCP.closeread(conn)`
-
-```julia
-using Reseau
-
-conn = TCP.connect("example.com:80")
-TCP.set_read_deadline!(conn, time_ns() + 5_000_000_000)
-close(conn)
+```@docs; canonical=false
+set_deadline!
+set_read_deadline!
+set_write_deadline!
+set_nodelay!
+set_keepalive!
+local_addr
+remote_addr
+addr
 ```
 
-## Address Inspection
+Use absolute monotonic nanoseconds from `time_ns()` for deadline APIs. Setting
+a deadline to `0` clears it, while setting it to a time in the past makes the
+next blocking wait time out immediately.
 
-Use these helpers to inspect the bound or connected endpoints:
+## Where To Go Next
 
-- `TCP.local_addr(conn)`
-- `TCP.remote_addr(conn)`
-- `TCP.addr(listener)`
+- Read [TLS](@ref tls-manual) for the TLS wrapper layer that reuses the same transport and deadline model.
+- Read [Name Resolution](@ref name-resolution-manual) for `ResolverPolicy`, `HostResolver`, and explicit resolution helpers.
+- Read [API Reference](@ref api-reference-manual) for the canonical docstrings for the entire TCP surface.

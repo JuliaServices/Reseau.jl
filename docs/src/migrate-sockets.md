@@ -1,11 +1,21 @@
-# Migrating from `Sockets` to Reseau
+```@meta
+Description = "How to migrate TCP and TLS code from Julia's stdlib Sockets to Reseau.jl."
+```
 
-If you are using Julia's stdlib `Sockets`, the easiest mental model is:
+# [Migrating from `Sockets` to Reseau](@id sockets-migration-manual)
 
-- keep `connect`, `listen`, `accept`, and `close`
-- move plain TCP work onto `TCP`
-- move TLS work onto `TLS`
-- replace ad hoc timeout wrappers with connection deadlines
+If you are porting code from Julia's stdlib `Sockets`, the easiest mental model
+is:
+
+- keep the familiar `connect`, `listen`, `accept`, `read!`, `write`, and `close` flow
+- move plain transport work onto [`Reseau.TCP`](@ref)
+- move TLS work onto [`Reseau.TLS`](@ref)
+- replace timeout wrappers with connection deadlines
+
+```@contents
+Pages = ["migrate-sockets.md"]
+Depth = 2:3
+```
 
 ## Quick Mapping
 
@@ -15,12 +25,14 @@ If you are using Julia's stdlib `Sockets`, the easiest mental model is:
 | `connect(ip"127.0.0.1", port)` | `TCP.connect(TCP.loopback_addr(port))` |
 | `connect("example.com", port)` | `TCP.connect("example.com:$port")` |
 | `accept(server)` | `TCP.accept(listener)` |
+| `read!(sock, buf)` | `read!(conn, buf)` |
+| `write(sock, buf)` | `write(conn, buf)` |
 | `close(sock)` | `close(conn)` / `close(listener)` |
 | `getsockname(sock)` | `TCP.local_addr(conn)` |
 | `getpeername(sock)` | `TCP.remote_addr(conn)` |
 | external TLS wrapper | `TLS.connect`, `TLS.listen`, `TLS.client`, `TLS.server` |
 
-## 1. Simple TCP Server
+## TCP Server Shape
 
 ### `Sockets`
 
@@ -44,18 +56,12 @@ close(conn)
 close(listener)
 ```
 
-## 2. Hostname-Based Client Dial
+Read [TCP](@ref tcp-manual) for the full connection and deadline model.
 
-### `Sockets`
+## Hostname-Based Dialing
 
-```julia
-using Sockets
-
-sock = connect("example.com", 443)
-close(sock)
-```
-
-### `Reseau`
+If your old code used separate host and port arguments, the most direct Reseau
+translation is the `"host:port"` string-address surface:
 
 ```julia
 using Reseau
@@ -64,10 +70,26 @@ conn = TCP.connect("example.com:443")
 close(conn)
 ```
 
-## Deadlines Are First-Class
+If you need to control family preference, timeout budget, or custom resolution,
+read [Name Resolution](@ref name-resolution-manual).
 
-One of the biggest quality-of-life improvements over `Sockets` is that the
-deadline lives on the connection itself:
+## Standard I/O Still Applies
+
+One nice migration property is that the connection still behaves like a Julia
+stream:
+
+- `read!(conn, buf)`
+- `write(conn, buf)`
+- `close(conn)`
+
+The difference is in the transport semantics: deadlines and readiness are now
+part of the connection itself, and partial reads/writes are documented
+explicitly on the `TCP.Conn` and `TLS.Conn` APIs in [API Reference](@ref api-reference-manual).
+
+## Deadlines Become First-Class
+
+Instead of wrapping operations in ad hoc timeout tasks, set deadlines directly
+on the live connection:
 
 ```julia
 using Reseau
@@ -77,13 +99,12 @@ TCP.set_read_deadline!(conn, time_ns() + 5_000_000_000)
 close(conn)
 ```
 
-Instead of managing task-local timeout wrappers around blocking socket calls,
-the transport itself owns the timeout.
+This deadline model carries through to TLS as well.
 
-## TLS Lives in the Same Package
+## TLS Lives In The Same Stack
 
-With `Sockets`, TLS usually means adding another layer elsewhere. With Reseau,
-plain TCP and TLS share one stack:
+With `Sockets`, TLS is usually another package layered on top. With Reseau, TCP
+and TLS are sibling surfaces in one transport stack:
 
 ```julia
 using Reseau
@@ -107,27 +128,21 @@ listener = TLS.listen("tcp", "127.0.0.1:8443", cfg)
 close(listener)
 ```
 
-## One Naming Difference To Know
+Read [TLS](@ref tls-manual) for handshake behavior, config options, and lifecycle details.
 
-Full connection teardown now matches Base: use `close(conn)` and
-`close(listener)`.
+## One Naming Difference To Keep
 
-Half-close is still spelled with explicit transport helpers:
+Full teardown follows Base conventions: use `close(conn)` and `close(listener)`.
+
+Half-close remains explicit:
 
 - `closewrite(conn)`
 - `TCP.closeread(conn)`
 
-## What To Change In Real Code
+## Porting Checklist
 
 1. Replace `Sockets.connect(host, port)` with `TCP.connect("host:port")` when you want hostname resolution.
 2. Replace listen/accept loops with `TCP.listen(...)` and `TCP.accept(listener)`.
 3. Replace timeout wrappers with `TCP.set_deadline!`, `TCP.set_read_deadline!`, or `TCP.set_write_deadline!`.
-4. Move TLS setup onto `TLS.Config`, `TLS.connect`, and `TLS.listen`.
-5. Update any code that expected `Sockets.TCPSocket` internals; Reseau uses `TCP.Conn` and `TLS.Conn`.
-
-## Benefits Of Porting
-
-- Better deadline and readiness behavior
-- One TCP surface for both concrete addresses and `"host:port"` dialing
-- TLS integrated into the same transport stack
-- Clearer listener/connection types than raw `Sockets` handles
+4. Move TLS setup onto `TLS.Config`, `TLS.connect`, `TLS.listen`, `TLS.client`, and `TLS.server`.
+5. Update any code that expected `Sockets.TCPSocket` internals; Reseau exposes `TCP.Conn` and `TLS.Conn` instead.

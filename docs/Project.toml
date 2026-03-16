@@ -3,4 +3,4 @@ Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 Reseau = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 
 [compat]
-Documenter = "1"
+Documenter = "1.17"
