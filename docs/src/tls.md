@@ -89,13 +89,12 @@ Two details matter in practice:
 
 - TLS deadlines are delegated to the wrapped TCP transport, so the timeout
   model matches [TCP](@ref tcp-manual) exactly.
-- A timed-out TLS write is treated as a permanent write failure, mirroring Go's
-  `crypto/tls` behavior where partial record emission leaves future writes
-  unsafe.
+- A timed-out TLS write is treated as a permanent write failure because partial
+  record emission leaves future writes unsafe.
 
 ## Practical Usage Notes
 
-- If `server_name` is omitted, [`connect`](@ref) derives it from the dial target when possible so SNI and certificate verification behave like Go's defaults.
+- If `server_name` is omitted, [`connect`](@ref) derives it from the dial target when possible so SNI and certificate verification use that host name automatically.
 - If `ca_file` is omitted for outbound verification, Reseau falls back to `NetworkOptions.ca_roots_path()` when that path is available.
 - [`connection_state`](@ref) does not force the handshake to run; it reports the current negotiated state as-is.
 

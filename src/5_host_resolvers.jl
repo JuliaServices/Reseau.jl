@@ -5,7 +5,7 @@ Address parsing, name resolution, and TCP string-address helpers.
 
 This layer is the bridge between string-oriented user input like
 `"example.com:443"` and the lower-level `TCP` primitives that operate on concrete
-socket addresses. The overall shape intentionally follows Go's `net` package:
+socket addresses. It is responsible for:
 - parse and canonicalize host/port strings
 - resolve hostnames according to a resolver policy
 - attempt connections serially or in a Happy Eyeballs-style race
@@ -55,7 +55,8 @@ end
 """
     DNSOpError
 
-High-level connect/listen operation error wrapper, similar to Go's `OpError`.
+High-level connect/listen operation error wrapper that preserves operation
+context.
 """
 struct DNSOpError <: Exception
     op::String
@@ -1241,8 +1242,8 @@ end
 """
     HostResolver
 
-Go-like connect configuration for timeout/deadline/local-bind and resolver
-injection.
+Connect configuration for timeout/deadline handling, optional local bind
+selection, and resolver/policy injection.
 
 Fields:
 - `timeout_ns`: relative timeout budget for the whole resolve+connect operation
@@ -1253,8 +1254,8 @@ Fields:
 - `resolver`: resolver implementation for host/service lookup
 - `policy`: address ordering/filtering policy
 
-The effective deadline is the earlier of `now + timeout_ns` and `deadline_ns`,
-mirroring Go's "minimum non-zero deadline wins" behavior.
+The effective deadline is the earlier non-zero value of `now + timeout_ns` and
+`deadline_ns`.
 """
 struct HostResolver{R<:AbstractResolver}
     timeout_ns::Int64
@@ -1399,8 +1400,8 @@ function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining
     deadline_ns == 0 && return Int64(0)
     time_remaining = deadline_ns - now_ns
     time_remaining <= 0 && throw(DNSTimeoutError(""))
-    # Like Go's dialer, we avoid spending the entire remaining budget on the
-    # first address candidate when multiple endpoints remain to be tried.
+    # Avoid spending the entire remaining budget on the first address candidate
+    # when multiple endpoints remain to be tried.
     timeout = time_remaining ÷ addrs_remaining
     sane_min = Int64(2_000_000_000)
     if timeout < sane_min
@@ -1629,9 +1630,8 @@ end
 
 Connect a TCP connection from a `host:port` string.
 
-This is the main Go-style dialing entry point. It resolves the address, applies
-deadline and policy rules, optionally runs a dual-stack race, and returns a
-connected `TCP.Conn`.
+This resolves the address, applies deadline and policy rules, optionally runs a
+dual-stack race, and returns a connected `TCP.Conn`.
 
 Throws `DNSOpError` on failure. The wrapped `err` may be an `AddressError`,
 `DNSTimeoutError`, `UnknownNetworkError`, `SystemError`, or a lower-level poll

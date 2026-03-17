@@ -4,8 +4,8 @@
 Small counting semaphore used by `FDLock` slow paths.
 
 Unlike `PollWaiter`, this is deliberately unbounded: repeated wakeups must not
-be lost while a goroutine-like lock waiter is still making progress through the
-`FDLock` state machine.
+be lost while a lock waiter is still making progress through the `FDLock` state
+machine.
 """
 mutable struct RuntimeSema
     lock::ReentrantLock
@@ -62,7 +62,7 @@ function _new_binary_semaphore0()
 end
 
 """
-Atomic lock/reference state for an `FD`, mirroring Go's `internal/poll` approach.
+Atomic lock/reference state for an `FD`.
 
 The bitfield tracks:
 - whether close has started

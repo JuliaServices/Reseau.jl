@@ -1,8 +1,7 @@
 # Reseau.jl
 
-`Reseau.jl` is a pure-Julia networking transport stack organized in roughly the
-same layers as Go's `runtime`, `internal/poll`, `net`, and `crypto/tls`
-packages.
+`Reseau.jl` is a pure-Julia networking transport stack that owns low-level
+polling, TCP, hostname-aware dialing, and TLS in one package.
 
 [![](https://img.shields.io/badge/docs-stable-blue.svg)](https://juliaservices.github.io/Reseau.jl/stable)
 [![](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaservices.github.io/Reseau.jl/dev)

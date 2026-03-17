@@ -110,16 +110,15 @@ end
 Create a socket and configure it as close-on-exec and non-blocking.
 
 Darwin requires setting both flags after `socket`, so there is a narrow race
-window compared with Linux. The TODO below mirrors the same concern in Go's
-runtime: ideally the descriptor would be protected from fork/exec inheritance
-even before `fcntl(F_SETFD)` runs.
+window compared with Linux. Ideally the descriptor would be protected from
+fork/exec inheritance even before `fcntl(F_SETFD)` runs.
 
 Returns the new file descriptor or throws `SystemError` on failure.
 """
 function open_socket(family::Integer, sotype::Integer, proto::Integer = 0)::Cint
-    # TODO(go-parity): Go holds a spawn/exec fork lock around `socket` + CLOEXEC on Darwin
-    # because CLOEXEC is set after open. We should evaluate a Julia equivalent so a fork/exec
-    # cannot inherit this descriptor in the tiny race window before `fcntl(F_SETFD)`.
+    # TODO: Evaluate a Julia equivalent of a spawn/exec guard here so a
+    # fork/exec cannot inherit this descriptor in the tiny race window before
+    # `fcntl(F_SETFD)` runs.
     fd = @gcsafe_ccall socket(Cint(family)::Cint, Cint(sotype)::Cint, Cint(proto)::Cint)::Cint
     fd == -1 && _throw_errno("socket", _errno_i32())
     try

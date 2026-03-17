@@ -10,7 +10,7 @@ makedocs(
         canonical = "https://juliaservices.github.io/Reseau.jl/stable",
         collapselevel = 2,
         edit_link = "main",
-        description = "Pure-Julia TCP and TLS transport stack with deadline-aware I/O, host-aware dialing, and Go-inspired networking architecture.",
+        description = "Pure-Julia TCP and TLS transport stack with deadline-aware I/O, host-aware dialing, and cross-platform polling.",
     ),
     pages = [
         "Home" => "index.md",

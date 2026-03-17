@@ -177,8 +177,8 @@ Unregister read/write filters for `fd`.
 function _backend_close_fd!(state::Poller, fd::Cint)::Int32
     _ = state
     _ = fd
-    # Follow Go's kqueue path: close(fd) implicitly removes attached knotes.
-    # Explicit EV_DELETE here adds syscall/load without correctness benefit.
+    # On kqueue, close(fd) implicitly removes attached knotes. Explicit
+    # EV_DELETE here adds syscall/load without correctness benefit.
     return Int32(0)
 end
 
@@ -217,8 +217,8 @@ end
 Poll kqueue once and dispatch decoded events through `_dispatch_ready_event!`.
 """
 # TODO(phase-2): Revisit this `delay_ns` polling contract if we see scheduler or
-# throughput issues; Go's `runtime.netpoll(delay)` is tightly integrated with its
-# runtime timer/scheduler loop, while we currently drive polling from a foreign thread.
+# throughput issues; the current implementation drives polling from a dedicated
+# foreign thread rather than an integrated runtime timer/scheduler loop.
 function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     backend = state.backend_state
     backend isa KqueueBackendState || return Int32(Base.Libc.ENOSYS)

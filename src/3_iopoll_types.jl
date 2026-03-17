@@ -58,13 +58,11 @@ end
 """
     PollWaiter
 
-Go-style binary wake semaphore for one read waiter and one write waiter per fd.
-It uses the low-level `wait()` + `schedule(task)` ownership protocol documented in
-Julia's scheduler docs.
+Binary wake primitive used by descriptor registrations and timers.
 
-The important invariant is that a single `PollWaiter` has at most one active
-waiting task. That matches Go's `pollDesc` model, where the runtime keeps one
-read waiter slot and one write waiter slot per descriptor.
+It uses the low-level `wait()` + `schedule(task)` ownership protocol documented
+in Julia's scheduler docs. A single `PollWaiter` may have at most one parked
+task at a time.
 """
 mutable struct PollWaiter
     @atomic state::PollWaiterState.T
@@ -126,8 +124,8 @@ end
 Mark waiter as notified and wake the waiter task if it has already parked.
 Returns `true` if a parked waiter was woken and `false` if the waiter was
 already notified or had not yet parked. `PollWakeReason.READY` dominates a
-pending `PollWakeReason.CANCELED`, which matches Go's "ready beats cancel"
-behavior once readiness has already been latched.
+previously latched `PollWakeReason.CANCELED` so once readiness has been
+observed it is preserved.
 
 Throws `ArgumentError` if the waiter state machine is observed in an invalid
 state.
@@ -207,12 +205,10 @@ end
 Descriptor-local state shared between descriptor operations and the runtime
 poller.
 
-This is intentionally close in spirit to Go's runtime `pollDesc`: it holds
-registration identity (`sysfd`, `token`), coarse descriptor state
+It holds registration identity (`sysfd`, `token`), coarse descriptor state
 (`pollable`, `closing`, `event_err`), and the read/write deadline words plus
-their sequence numbers. The sequence counters are what let the poller heap
-discard stale deadline entries without mutating the heap in place whenever a
-deadline changes.
+their sequence numbers. The sequence counters let the poller heap discard stale
+deadline entries after deadline changes without mutating the heap in place.
 """
 mutable struct PollState
     lock::ReentrantLock
@@ -308,8 +304,7 @@ Notable fields:
   time entry still belongs to the current occupant of an fd slot
 - `time_heap` is the min-heap that drives finite backend poll timeouts
 - `poll_until_ns` records the deadline currently being slept toward so that a
-  newly earlier deadline can call `_backend_wake!`, just like Go uses
-  `netpollBreak()` to shorten a blocking poll
+  newly earlier deadline can call `_backend_wake!` and shorten a blocking poll
 """
 abstract type BackendState end
 
