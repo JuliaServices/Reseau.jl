@@ -431,7 +431,7 @@ Open a non-blocking, close-on-exec TCP socket and wrap it in `FD`.
 
 This is the lowest-level TCP constructor exposed within the package. The
 returned descriptor is not yet registered with `IOPoll`; callers that plan to
-issue readiness-driven operations should call `IOPoll.init!` before use.
+issue readiness-driven operations should call `IOPoll.register!` before use.
 
 Returns an internal `FD` object and throws `SystemError` on socket creation
 failure.
@@ -475,7 +475,7 @@ function connect(
         # Defensive re-assert: keep connect path non-blocking even if platform state drifts.
         SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
         @static if Sys.iswindows()
-            IOPoll.init!(fd.pfd; net = :tcp, pollable = true)
+            IOPoll.register!(fd.pfd)
             if connect_deadline_ns != 0
                 IOPoll.set_write_deadline!(fd.pfd, connect_deadline_ns)
             end
@@ -498,13 +498,13 @@ function connect(
         end
         errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))
         if errno == Int32(0) || errno == Int32(Base.Libc.EISCONN)
-            IOPoll.init!(fd.pfd; net = :tcp, pollable = true)
+            IOPoll.register!(fd.pfd)
             _finalize_connected_addrs!(fd, remote_addr)
             _apply_default_tcp_opts!(fd)
             return Conn(fd)
         end
         _is_connect_pending_errno(errno) || throw(SystemError("connect", Int(errno)))
-        IOPoll.init!(fd.pfd; net = :tcp, pollable = true)
+        IOPoll.register!(fd.pfd)
         if connect_deadline_ns != 0
             IOPoll.set_write_deadline!(fd.pfd, connect_deadline_ns)
         end
@@ -545,7 +545,7 @@ function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool 
         reuseaddr && SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_REUSEADDR, 1)
         SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         SocketOps.listen_socket(fd.pfd.sysfd, backlog)
-        IOPoll.init!(fd.pfd; net = :tcp, pollable = true)
+        IOPoll.register!(fd.pfd)
         _set_local_addr!(fd)
         return Listener(fd)
     catch
@@ -573,7 +573,7 @@ function accept(listener::Listener)::Conn
         is_connected = true,
     )
     try
-        IOPoll.init!(child.pfd; net = listener_fd.net, pollable = true)
+        IOPoll.register!(child.pfd)
         _apply_default_tcp_opts!(child)
         _set_local_addr!(child)
         _set_remote_addr_from_accept!(child, peer_addr)

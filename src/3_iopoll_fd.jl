@@ -1,328 +1,4 @@
 """
-    IOPoll
-
-Go-style poll descriptor layer built on `EventLoops`.
-Provides deadline-aware readiness waiting for network descriptors.
-
-Conceptually this sits where Go's `internal/poll` package sits:
-- `EventLoops` is the runtime-facing readiness engine
-- `IOPoll` turns readiness and deadlines into descriptor-centric operations
-- higher transport layers call `prepare_*`, `wait_*`, and deadline helpers
-  instead of talking to the event loop directly
-"""
-module IOPoll
-
-using EnumX
-using ..Reseau: ByteMemory
-using ..Reseau.EventLoops
-using ..Reseau.SocketOps
-import ..Reseau.EventLoops: deadline_fire!
-
-const PollState = EventLoops.PollState
-
-# FDLock state bits packed into one atomic word (close flag, lock flags, refs, waiter counts).
-const _MUTEX_CLOSED = UInt64(1) << 0
-const _MUTEX_RLOCK = UInt64(1) << 1
-const _MUTEX_WLOCK = UInt64(1) << 2
-const _MUTEX_REF = UInt64(1) << 3
-const _MUTEX_REF_MASK = (UInt64(1) << 20 - UInt64(1)) << 3
-const _MUTEX_RWAIT = UInt64(1) << 23
-const _MUTEX_RMASK = (UInt64(1) << 20 - UInt64(1)) << 23
-const _MUTEX_WWAIT = UInt64(1) << 43
-const _MUTEX_WMASK = (UInt64(1) << 20 - UInt64(1)) << 43
-
-const _POLL_NO_ERROR = Int32(0)
-const _POLL_ERR_CLOSING = Int32(1)
-const _POLL_ERR_TIMEOUT = Int32(2)
-const _POLL_ERR_NOT_POLLABLE = Int32(3)
-
-"""
-Bitmask of operations used for readiness waits and deadline management.
-
-`READWRITE` is intentionally the bitwise OR of `READ` and `WRITE` so callers can
-test or combine directions cheaply.
-"""
-@enumx PollOp::UInt8 begin
-    READ = 0x01
-    WRITE = 0x02
-    READWRITE = 0x03
-end
-
-struct NetClosingError <: Exception end
-struct FileClosingError <: Exception end
-struct NoDeadlineError <: Exception end
-struct DeadlineExceededError <: Exception end
-struct NotPollableError <: Exception end
-
-function Base.showerror(io::IO, ::NetClosingError)
-    print(io, "use of closed network connection")
-    return nothing
-end
-
-function Base.showerror(io::IO, ::FileClosingError)
-    print(io, "use of closed file")
-    return nothing
-end
-
-function Base.showerror(io::IO, ::NoDeadlineError)
-    print(io, "file type does not support deadline")
-    return nothing
-end
-
-function Base.showerror(io::IO, ::DeadlineExceededError)
-    print(io, "i/o timeout")
-    return nothing
-end
-
-function Base.showerror(io::IO, ::NotPollableError)
-    print(io, "not pollable")
-    return nothing
-end
-
-@inline function _closing_error(is_file::Bool)::Exception
-    is_file && return FileClosingError()
-    return NetClosingError()
-end
-
-@inline function _mode_has_read(mode::PollOp.T)::Bool
-    return (UInt8(mode) & UInt8(PollOp.READ)) != 0
-end
-
-@inline function _mode_has_write(mode::PollOp.T)::Bool
-    return (UInt8(mode) & UInt8(PollOp.WRITE)) != 0
-end
-
-@inline function _is_accept_retry_errno(errno::Int32)::Bool
-    return errno == Int32(Base.Libc.EINTR) || errno == Int32(Base.Libc.ECONNABORTED)
-end
-
-@inline function _monotonic_ns()::Int64
-    return Int64(time_ns())
-end
-
-"""
-    RuntimeSema
-
-Small counting semaphore used by `FDLock` slow paths.
-
-Unlike `PollWaiter`, this is deliberately unbounded: repeated wakeups must not
-be lost while a goroutine-like lock waiter is still making progress through the
-`FDLock` state machine.
-"""
-mutable struct RuntimeSema
-    lock::ReentrantLock
-    cond::Base.Threads.Condition
-    count::Int
-    function RuntimeSema()
-        lock = ReentrantLock()
-        return new(lock, Base.Threads.Condition(lock), 0)
-    end
-end
-
-"""
-    _runtime_sema_acquire!(sema)
-
-Block until one semaphore unit is available, then consume it.
-
-Returns `nothing`.
-"""
-function _runtime_sema_acquire!(sema::RuntimeSema)
-    lock(sema.lock)
-    try
-        while sema.count == 0
-            wait(sema.cond)
-        end
-        sema.count -= 1
-    finally
-        unlock(sema.lock)
-    end
-    return nothing
-end
-
-"""
-    _runtime_sema_release!(sema)
-
-Add one semaphore unit and notify one blocked waiter.
-
-Returns `nothing`.
-"""
-function _runtime_sema_release!(sema::RuntimeSema)
-    lock(sema.lock)
-    try
-        sema.count += 1
-        notify(sema.cond)
-    finally
-        unlock(sema.lock)
-    end
-    return nothing
-end
-
-function _new_binary_semaphore0()
-    sema = Base.Semaphore(1)
-    Base.acquire(sema)
-    return sema
-end
-
-"""
-Atomic lock/reference state for an `FD`, mirroring Go's `internal/poll` approach.
-
-The bitfield tracks:
-- whether close has started
-- read/write lock ownership
-- shared references
-- queued waiters for read and write locks
-"""
-mutable struct FDLock
-    @atomic state::UInt64
-    const rsema::RuntimeSema
-    const wsema::RuntimeSema
-    function FDLock()
-        return new(UInt64(0), RuntimeSema(), RuntimeSema())
-    end
-end
-
-"""
-    _fdlock_incref!(mu)
-
-Acquire one shared descriptor reference.
-
-Returns `true` on success and `false` if close has already started.
-
-Throws `ArgumentError` if the reference count overflows, which would indicate an
-unreasonable number of concurrent operations on one descriptor.
-"""
-function _fdlock_incref!(mu::FDLock)::Bool
-    while true
-        old = @atomic :acquire mu.state
-        (old & _MUTEX_CLOSED) != 0 && return false
-        new = old + _MUTEX_REF
-        (new & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
-        _, ok = @atomicreplace(mu.state, old => new)
-        ok && return true
-    end
-end
-
-"""
-    _fdlock_incref_and_close!(mu)
-
-Start close, acquire one final shared reference, and wake all queued lock
-waiters.
-
-Returns `true` if this call successfully initiated close and `false` if another
-task had already done so.
-"""
-function _fdlock_incref_and_close!(mu::FDLock)::Bool
-    while true
-        old = @atomic :acquire mu.state
-        (old & _MUTEX_CLOSED) != 0 && return false
-        new = (old | _MUTEX_CLOSED) + _MUTEX_REF
-        (new & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
-        new &= ~(_MUTEX_RMASK | _MUTEX_WMASK)
-        _, ok = @atomicreplace(mu.state, old => new)
-        ok || continue
-        wake = old
-        # Close wakes all queued read waiters.
-        while (wake & _MUTEX_RMASK) != 0
-            wake -= _MUTEX_RWAIT
-            _runtime_sema_release!(mu.rsema)
-        end
-        # Close wakes all queued write waiters.
-        while (wake & _MUTEX_WMASK) != 0
-            wake -= _MUTEX_WWAIT
-            _runtime_sema_release!(mu.wsema)
-        end
-        return true
-    end
-end
-
-"""
-    _fdlock_decref!(mu)
-
-Release one shared descriptor reference.
-
-Returns `true` exactly when the descriptor has already been marked closed and
-this call released the final outstanding reference, meaning the underlying OS
-handle may now be destroyed.
-"""
-function _fdlock_decref!(mu::FDLock)::Bool
-    while true
-        old = @atomic :acquire mu.state
-        (old & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("inconsistent fd mutex state"))
-        new = old - _MUTEX_REF
-        _, ok = @atomicreplace(mu.state, old => new)
-        ok || continue
-        return (new & (_MUTEX_CLOSED | _MUTEX_REF_MASK)) == _MUTEX_CLOSED
-    end
-end
-
-"""
-    _fdlock_rwlock!(mu, read_lock, wait_lock)
-
-Acquire the descriptor's read or write operation lock.
-
-Arguments:
-- `read_lock`: `true` for the read lock, `false` for the write lock
-- `wait_lock`: whether to queue and block if the lock is already held
-
-Returns `true` on success and `false` if the descriptor is closed or if
-`wait_lock == false` and the lock is already held.
-"""
-function _fdlock_rwlock!(mu::FDLock, read_lock::Bool, wait_lock::Bool)::Bool
-    mutex_bit = read_lock ? _MUTEX_RLOCK : _MUTEX_WLOCK
-    mutex_wait = read_lock ? _MUTEX_RWAIT : _MUTEX_WWAIT
-    mutex_mask = read_lock ? _MUTEX_RMASK : _MUTEX_WMASK
-    mutex_sema = read_lock ? mu.rsema : mu.wsema
-    while true
-        old = @atomic :acquire mu.state
-        (old & _MUTEX_CLOSED) != 0 && return false
-        new = UInt64(0)
-        if (old & mutex_bit) == 0
-            new = (old | mutex_bit) + _MUTEX_REF
-            (new & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
-        else
-            wait_lock || return false
-            new = old + mutex_wait
-            (new & mutex_mask) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
-        end
-        _, ok = @atomicreplace(mu.state, old => new)
-        ok || continue
-        if (old & mutex_bit) == 0
-            return true
-        end
-        _runtime_sema_acquire!(mutex_sema)
-    end
-end
-
-"""
-    _fdlock_rwunlock!(mu, read_lock)
-
-Release the descriptor's read or write operation lock.
-
-Returns `true` when the descriptor has already been marked closed and this call
-released the final reference, so destruction should proceed.
-"""
-function _fdlock_rwunlock!(mu::FDLock, read_lock::Bool)::Bool
-    mutex_bit = read_lock ? _MUTEX_RLOCK : _MUTEX_WLOCK
-    mutex_wait = read_lock ? _MUTEX_RWAIT : _MUTEX_WWAIT
-    mutex_mask = read_lock ? _MUTEX_RMASK : _MUTEX_WMASK
-    mutex_sema = read_lock ? mu.rsema : mu.wsema
-    while true
-        old = @atomic :acquire mu.state
-        ((old & mutex_bit) == 0 || (old & _MUTEX_REF_MASK) == 0) && throw(ArgumentError("inconsistent fd mutex state"))
-        new = (old & ~mutex_bit) - _MUTEX_REF
-        if (old & mutex_mask) != 0
-            new -= mutex_wait
-        end
-        _, ok = @atomicreplace(mu.state, old => new)
-        ok || continue
-        if (old & mutex_mask) != 0
-            _runtime_sema_release!(mutex_sema)
-        end
-        return (new & (_MUTEX_CLOSED | _MUTEX_REF_MASK)) == _MUTEX_CLOSED
-    end
-end
-
-"""
 Internal file descriptor wrapper used by the poll layer.
 
 This coordinates descriptor lifetime, read/write serialization, and integration
@@ -512,7 +188,6 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
         (@atomic :acquire pd.pollable) || throw(NoDeadlineError())
         wake_read = false
         wake_write = false
-        registration = nothing
         rd_ns = Int64(0)
         wd_ns = Int64(0)
         rseq = UInt64(0)
@@ -570,41 +245,27 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
 end
 
 """
-Initialize polling state for an `FD`.
-
-When `pollable=true`, the fd is registered with `EventLoops`; otherwise the fd
-is treated as blocking and deadline support is disabled.
-
-Keyword arguments:
-- `net`: reserved for parity with higher-level callers that track transport kind
-- `pollable`: whether the descriptor should be registered with the runtime
-  poller
+Register an `FD` with the runtime poller.
 
 Returns `nothing`.
 
 Throws `SystemError` if event loop registration fails.
 """
-function init!(fd::FD; net::Symbol = :tcp, pollable::Bool = true)
-    _ = net
+function register!(fd::FD)
     pd = fd.pd
     lock(pd.lock)
     try
-        if pollable
-            _set_nonblocking!(fd.sysfd)
-            registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE, pollstate = pd)
-            pd.sysfd = fd.sysfd
-            pd.token = registration.token
-            @atomic :release pd.pollable = true
-            @atomic :release pd.closing = false
-            @atomic :release pd.event_err = false
-            @atomic :release pd.rd_ns = Int64(0)
-            @atomic :release pd.wd_ns = Int64(0)
-            @atomic :release pd.rseq = UInt64(1)
-            @atomic :release pd.wseq = UInt64(1)
-        else
-            @atomic :release fd.is_blocking = true
-            @atomic :release pd.pollable = false
-        end
+        _set_nonblocking!(fd.sysfd)
+        registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE, pollstate = pd)
+        pd.sysfd = fd.sysfd
+        pd.token = registration.token
+        @atomic :release pd.pollable = true
+        @atomic :release pd.closing = false
+        @atomic :release pd.event_err = false
+        @atomic :release pd.rd_ns = Int64(0)
+        @atomic :release pd.wd_ns = Int64(0)
+        @atomic :release pd.rseq = UInt64(1)
+        @atomic :release pd.wseq = UInt64(1)
     finally
         unlock(pd.lock)
     end
@@ -952,6 +613,7 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
     finally
         _fd_read_unlock!(fd)
     end
+    return nothing
 end
 
 """
@@ -994,6 +656,7 @@ function read!(fd::FD, p::Vector{UInt8})::Int
     finally
         _fd_read_unlock!(fd)
     end
+    return nothing
 end
 
 """
@@ -1052,6 +715,4 @@ function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
     finally
         _fd_write_unlock!(fd)
     end
-end
-
 end

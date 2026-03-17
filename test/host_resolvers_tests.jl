@@ -751,7 +751,7 @@ else
             fd = nothing
             try
                 fd = NC.open_tcp_fd!()
-                IP.init!(fd.pfd; net = :tcp, pollable = true)
+                IP.register!(fd.pfd)
                 state = ND.DNSRaceState()
                 NC._connect_wait_register!(state, fd)
                 @test length(state.wait_fds) == 1

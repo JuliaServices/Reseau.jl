@@ -117,7 +117,7 @@ function _pc_run_internal_poll_workload!()
     fd0 = Cint(-1)
     try
         IP._set_nonblocking!(ipfd.sysfd)
-        IP.init!(ipfd)
+        IP.register!(ipfd)
         IP.set_read_deadline!(ipfd, time_ns() + 8_000_000)
         try
             IP.read!(ipfd, Vector{UInt8}(undef, 1))

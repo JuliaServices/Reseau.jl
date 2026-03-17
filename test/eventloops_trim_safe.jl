@@ -63,7 +63,7 @@ function run_internal_poll_trim_sample()::Nothing
     ipfd = IP.FD(fd0)
     fd0 = Cint(-1)
     try
-        IP.init!(ipfd; pollable = false)
+        IP.register!(ipfd)
         _write_byte(fd1, 0x65)
         read_buf = Vector{UInt8}(undef, 1)
         n = IP.read!(ipfd, read_buf)
@@ -75,12 +75,6 @@ function run_internal_poll_trim_sample()::Nothing
         peer_n = ccall(:read, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd1, peer, Csize_t(1))
         peer_n == Cssize_t(1) || throw(SystemError("read", Int(Base.Libc.errno())))
         peer[] == 0x66 || error("unexpected peer byte")
-        try
-            IP.set_read_deadline!(ipfd, Int64(1))
-            error("expected NoDeadlineError for non-pollable fd")
-        catch err
-            err isa IP.NoDeadlineError || rethrow(err)
-        end
     finally
         ipfd.sysfd >= 0 && close(ipfd)
         _close_fd(fd1)

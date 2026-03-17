@@ -38,7 +38,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 read_task = errormonitor(Threads.@spawn begin
                     buf = Vector{UInt8}(undef, 1)
                     n = IP.read!(ipfd, buf)
@@ -71,7 +71,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 IP.set_read_deadline!(ipfd, time_ns() + 40_000_000)
                 @test_throws IP.DeadlineExceededError IP.read!(ipfd, Vector{UInt8}(undef, 1))
                 IP.set_read_deadline!(ipfd, Int64(0))
@@ -90,7 +90,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 IP.set_read_deadline!(ipfd, time_ns() + 20_000_000)
                 IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
                 EL.sleep(0.06)
@@ -112,7 +112,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 IP.set_read_deadline!(ipfd, time_ns() + 100_000_000)
                 wait_task = errormonitor(Threads.@spawn begin
                     IP.waitread(ipfd.pd, ipfd.is_file)
@@ -155,7 +155,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 state = EL.POLLER[]
                 future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
                 IP.set_deadline!(ipfd, future_deadline)
@@ -187,7 +187,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 read_task = errormonitor(Threads.@spawn begin
                     try
                         IP.read!(ipfd, Vector{UInt8}(undef, 1))
@@ -216,7 +216,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 state = EL.POLLER[]
                 event = EL.PollEvent(ipfd.sysfd, ipfd.pd.token, EL.PollMode.READ, true)
                 EL._dispatch_ready_event!(state, event)
@@ -234,7 +234,7 @@ else
             fd0 = Cint(-1)
             try
                 IP._set_nonblocking!(ipfd.sysfd)
-                IP.init!(ipfd)
+                IP.register!(ipfd)
                 wait_task = errormonitor(Threads.@spawn begin
                     IP.waitcancelled(ipfd.pd, IP.PollOp.READ)
                     return :ok
