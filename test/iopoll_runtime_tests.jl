@@ -118,17 +118,21 @@ end
         NP.shutdown!()
         _el_log_test_progress("START: poller-backed sleep/timedwait")
         @testset "poller-backed sleep/timedwait" begin
+            _el_log_test_progress("poller-backed sleep/timedwait: sleep")
             t0 = time_ns()
             IP.sleep(0.03)
             elapsed_ns = time_ns() - t0
             @test elapsed_ns >= 15_000_000
+            _el_log_test_progress("poller-backed sleep/timedwait: timedwait false")
             @test IP.timedwait(() -> false, 0.05; pollint = 0.001) == :timed_out
             wake_ch = Channel{Nothing}(1)
-            wake_task = errormonitor(Threads.@spawn begin
+            _el_log_test_progress("poller-backed sleep/timedwait: spawn wake task")
+            wake_task = errormonitor(@async begin
                 IP.sleep(0.03)
                 put!(wake_ch, nothing)
                 return nothing
             end)
+            _el_log_test_progress("poller-backed sleep/timedwait: wait for wake")
             status = IP.timedwait(() -> isready(wake_ch), 2.0; pollint = 0.001)
             @test status != :timed_out
             status == :timed_out || take!(wake_ch)
@@ -248,7 +252,9 @@ end
         _el_log_test_progress("DONE: earlier scheduled deadline wakes poll early")
         _el_log_test_progress("START: runtime register/pollwait/deregister")
         @testset "runtime register/pollwait/deregister" begin
+            _el_log_test_progress("runtime register/pollwait/deregister: init")
             NP.init!()
+            _el_log_test_progress("runtime register/pollwait/deregister: socketpair")
             fd0, fd1 = _el_socketpair_stream()
             waiter_task = nothing
             try
@@ -256,7 +262,7 @@ end
                 registration = NP.register!(fd0; mode = NP.PollMode.READWRITE)
                 @test registration.token > 0
                 wait_ch = Channel{Nothing}(1)
-                waiter_task = errormonitor(Threads.@spawn begin
+                waiter_task = errormonitor(@async begin
                     NP.pollwait!(registration.read_waiter)
                     put!(wait_ch, nothing)
                     return nothing
@@ -301,7 +307,7 @@ end
                 token2 = registration2.token
                 @test token2 != token1
                 wait_ch = Channel{Nothing}(1)
-                waiter_task = errormonitor(Threads.@spawn begin
+                waiter_task = errormonitor(@async begin
                     NP.pollwait!(registration2.read_waiter)
                     put!(wait_ch, nothing)
                     return nothing
@@ -341,7 +347,7 @@ end
             NP.shutdown!()
             fd0, fd1 = _el_socketpair_stream()
             try
-                dereg_task = errormonitor(Threads.@spawn NP.deregister!(fd0))
+                dereg_task = errormonitor(@async NP.deregister!(fd0))
                 @test _el_wait_task_done(dereg_task, 0.5) != :timed_out
                 wait(dereg_task)
             finally
@@ -362,11 +368,11 @@ end
                 registration = NP.register!(fd0; mode = NP.PollMode.READ)
                 timer = NP.TimerState()
                 @test NP.schedule_timer!(timer, Int64(time_ns()) + Int64(5_000_000_000))
-                reg_task = errormonitor(Threads.@spawn begin
+                reg_task = errormonitor(@async begin
                     reg_reason[] = NP.pollwait!(registration.read_waiter)
                     return nothing
                 end)
-                timer_task = errormonitor(Threads.@spawn begin
+                timer_task = errormonitor(@async begin
                     timer_reason[] = NP.pollwait!(timer.waiter)
                     return nothing
                 end)
