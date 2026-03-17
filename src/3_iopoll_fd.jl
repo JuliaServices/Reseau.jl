@@ -2,11 +2,11 @@
 Internal file descriptor wrapper used by the poll layer.
 
 This coordinates descriptor lifetime, read/write serialization, and integration
-with `PollState`.
+with the shared runtime poller.
 
 Fields:
 - `fdlock`: Go-style reference and read/write lock state
-- `pd`: deadline/readiness state shared with `EventLoops`
+- `pd`: descriptor-local deadline/readiness state shared with the runtime poller
 - `csema`: close semaphore used to wait for non-blocking operations to drain
 - `is_blocking`: whether the OS descriptor has been switched back to blocking
 """
@@ -63,7 +63,7 @@ This mirrors the shape of Go's `runtime_pollWait` checks: close and deadline
 state are consulted before and after parking so callers can distinguish "ready"
 from "woken because the descriptor was closed or timed out".
 """
-function _check_error(pd::PollState, mode::PollOp.T)::Int32
+function _check_error(pd::PollState, mode::PollMode.T)::Int32
     (@atomic :acquire pd.closing) && return _POLL_ERR_CLOSING
     if _mode_has_read(mode)
         (@atomic :acquire pd.rd_ns) < 0 && return _POLL_ERR_TIMEOUT
@@ -90,7 +90,7 @@ that on `PollState` because `PollState` outlives any single readiness wait.
 """
 function _refresh_event_err!(pd::PollState)
     (@atomic :acquire pd.pollable) || return nothing
-    registration = EventLoops.current_registration(pd)
+    registration = current_registration(pd)
     registration === nothing && return nothing
     has_event_error = @atomic :acquire registration.event_err
     @atomic :release pd.event_err = has_event_error
@@ -104,17 +104,11 @@ Notify the read and/or write waiters associated with `pd`.
 
 Returns `nothing`.
 """
-function _wake_waiters!(pd::PollState, mode::PollOp.T)
+function _wake_waiters!(pd::PollState, mode::PollMode.T)
     (@atomic :acquire pd.pollable) || return nothing
-    registration = EventLoops.current_registration(pd)
+    registration = current_registration(pd)
     registration === nothing && return nothing
-    event_mode = EventLoops.PollMode.READWRITE
-    if mode == PollOp.READ
-        event_mode = EventLoops.PollMode.READ
-    elseif mode == PollOp.WRITE
-        event_mode = EventLoops.PollMode.WRITE
-    end
-    EventLoops._notify_registration!(registration, event_mode, EventLoops.PollWakeReason.CANCELED)
+    _notify_registration!(registration, mode, PollWakeReason.CANCELED)
     return nothing
 end
 
@@ -133,7 +127,7 @@ Returns `nothing`.
 """
 function deadline_fire!(
         pd::PollState,
-        mode::EventLoops.PollMode.T,
+        mode::PollMode.T,
         rseq::UInt64,
         wseq::UInt64,
     )
@@ -142,14 +136,14 @@ function deadline_fire!(
     lock(pd.lock)
     try
         (@atomic :acquire pd.closing) && return nothing
-        EventLoops.current_registration(pd) === nothing && return nothing
-        if (UInt8(mode) & UInt8(EventLoops.PollMode.READ)) != 0
+        current_registration(pd) === nothing && return nothing
+        if (UInt8(mode) & UInt8(PollMode.READ)) != 0
             if (@atomic :acquire pd.rseq) == rseq && (@atomic :acquire pd.rd_ns) > 0
                 @atomic :release pd.rd_ns = Int64(-1)
                 wake_read = true
             end
         end
-        if (UInt8(mode) & UInt8(EventLoops.PollMode.WRITE)) != 0
+        if (UInt8(mode) & UInt8(PollMode.WRITE)) != 0
             if (@atomic :acquire pd.wseq) == wseq && (@atomic :acquire pd.wd_ns) > 0
                 @atomic :release pd.wd_ns = Int64(-1)
                 wake_write = true
@@ -159,11 +153,11 @@ function deadline_fire!(
         unlock(pd.lock)
     end
     if wake_read && wake_write
-        _wake_waiters!(pd, PollOp.READWRITE)
+        _wake_waiters!(pd, PollMode.READWRITE)
     elseif wake_read
-        _wake_waiters!(pd, PollOp.READ)
+        _wake_waiters!(pd, PollMode.READ)
     elseif wake_write
-        _wake_waiters!(pd, PollOp.WRITE)
+        _wake_waiters!(pd, PollMode.WRITE)
     end
     return nothing
 end
@@ -180,7 +174,7 @@ Throws:
 - `NetClosingError` / `FileClosingError` if close has already started
 - `NoDeadlineError` if the descriptor is not managed by the poller
 """
-function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
+function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
     deadline = Int64(deadline_ns)
     _fdlock_incref!(fd.fdlock) || throw(_closing_error(fd.is_file))
     try
@@ -230,13 +224,13 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollOp.T)
         # left in the heap and filtered by sequence/token checks when they reach
         # the top, which keeps scheduling cheap and matches Go's timer seq
         # invalidation strategy.
-        EventLoops.schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
+        schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
         if wake_read && wake_write
-            _wake_waiters!(pd, PollOp.READWRITE)
+            _wake_waiters!(pd, PollMode.READWRITE)
         elseif wake_read
-            _wake_waiters!(pd, PollOp.READ)
+            _wake_waiters!(pd, PollMode.READ)
         elseif wake_write
-            _wake_waiters!(pd, PollOp.WRITE)
+            _wake_waiters!(pd, PollMode.WRITE)
         end
     finally
         _fd_decref!(fd)
@@ -249,14 +243,14 @@ Register an `FD` with the runtime poller.
 
 Returns `nothing`.
 
-Throws `SystemError` if event loop registration fails.
+Throws `SystemError` if runtime poller registration fails.
 """
 function register!(fd::FD)
     pd = fd.pd
     lock(pd.lock)
     try
         _set_nonblocking!(fd.sysfd)
-        registration = EventLoops.register!(fd.sysfd; mode = EventLoops.PollMode.READWRITE, pollstate = pd)
+        registration = register!(fd.sysfd; mode = PollMode.READWRITE, pollstate = pd)
         pd.sysfd = fd.sysfd
         pd.token = registration.token
         @atomic :release pd.pollable = true
@@ -273,7 +267,7 @@ function register!(fd::FD)
 end
 
 """
-Tear down polling state for a descriptor and deregister from `EventLoops`.
+Tear down polling state for a descriptor and deregister from the runtime poller.
 
 Returns `nothing`.
 """
@@ -286,7 +280,7 @@ function Base.close(pd::PollState)
     finally
         unlock(pd.lock)
     end
-    was_pollable && pd.sysfd >= 0 && EventLoops.deregister!(pd.sysfd)
+    was_pollable && pd.sysfd >= 0 && deregister!(pd.sysfd)
     return nothing
 end
 
@@ -306,20 +300,20 @@ function evict!(pd::PollState)
     finally
         unlock(pd.lock)
     end
-    _wake_waiters!(pd, PollOp.READWRITE)
+    _wake_waiters!(pd, PollMode.READWRITE)
     return nothing
 end
 
 """
-Return whether the descriptor is currently managed by the poller.
+Return whether the descriptor is currently managed by the runtime poller.
 """
 function pollable(pd::PollState)::Bool
     return @atomic :acquire pd.pollable
 end
 
-@inline function _poll_registration(pd::PollState)::EventLoops.Registration
-    registration = EventLoops.current_registration(pd)
-    registration === nothing && throw(SystemError("event loop wait", Int(Base.Libc.EBADF)))
+@inline function _poll_registration(pd::PollState)::Registration
+    registration = current_registration(pd)
+    registration === nothing && throw(SystemError("iopoll wait", Int(Base.Libc.EBADF)))
     return registration
 end
 
@@ -332,7 +326,7 @@ Throws the same exceptions as `_convert_poll_error!` if close, timeout, or
 backend error state is already visible.
 """
 function prepareread(pd::PollState, is_file::Bool = false)
-    _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
+    _convert_poll_error!(_check_error(pd, PollMode.READ), is_file)
     return nothing
 end
 
@@ -342,7 +336,7 @@ Validate write path state before issuing a write syscall.
 Returns `nothing`.
 """
 function preparewrite(pd::PollState, is_file::Bool = false)
-    _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
+    _convert_poll_error!(_check_error(pd, PollMode.WRITE), is_file)
     return nothing
 end
 
@@ -360,13 +354,13 @@ Throws:
 """
 function waitread(pd::PollState, is_file::Bool = false)
     while true
-        _convert_poll_error!(_check_error(pd, PollOp.READ), is_file)
+        _convert_poll_error!(_check_error(pd, PollMode.READ), is_file)
         pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
         registration = _poll_registration(pd)
-        EventLoops.arm_waiter!(registration, EventLoops.PollMode.READ)
-        reason = EventLoops.pollwait!(registration.read_waiter)
-        reason == EventLoops.PollWakeReason.READY && return nothing
-        err = _check_error(pd, PollOp.READ)
+        arm_waiter!(registration, PollMode.READ)
+        reason = pollwait!(registration.read_waiter)
+        reason == PollWakeReason.READY && return nothing
+        err = _check_error(pd, PollMode.READ)
         err == _POLL_NO_ERROR && continue
         _convert_poll_error!(err, is_file)
     end
@@ -380,13 +374,13 @@ Returns `nothing`.
 """
 function waitwrite(pd::PollState, is_file::Bool = false)
     while true
-        _convert_poll_error!(_check_error(pd, PollOp.WRITE), is_file)
+        _convert_poll_error!(_check_error(pd, PollMode.WRITE), is_file)
         pollable(pd) || throw(ArgumentError("waiting for unsupported file type"))
         registration = _poll_registration(pd)
-        EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
-        reason = EventLoops.pollwait!(registration.write_waiter)
-        reason == EventLoops.PollWakeReason.READY && return nothing
-        err = _check_error(pd, PollOp.WRITE)
+        arm_waiter!(registration, PollMode.WRITE)
+        reason = pollwait!(registration.write_waiter)
+        reason == PollWakeReason.READY && return nothing
+        err = _check_error(pd, PollMode.WRITE)
         err == _POLL_NO_ERROR && continue
         _convert_poll_error!(err, is_file)
     end
@@ -401,17 +395,17 @@ Unlike `waitread`/`waitwrite`, this helper intentionally does not translate
 the wakeup into exceptions; callers use it when they need a best-effort park
 that can be interrupted by close/cancel machinery.
 """
-function waitcancelled(pd::PollState, mode::PollOp.T)
+function waitcancelled(pd::PollState, mode::PollMode.T)
     pollable(pd) || return nothing
-    registration = EventLoops.current_registration(pd)
+    registration = current_registration(pd)
     registration === nothing && return nothing
-    if mode == PollOp.WRITE
-        EventLoops.arm_waiter!(registration, EventLoops.PollMode.WRITE)
-        EventLoops.pollwait!(registration.write_waiter)
+    if mode == PollMode.WRITE
+        arm_waiter!(registration, PollMode.WRITE)
+        pollwait!(registration.write_waiter)
         return nothing
     end
-    EventLoops.arm_waiter!(registration, EventLoops.PollMode.READ)
-    EventLoops.pollwait!(registration.read_waiter)
+    arm_waiter!(registration, PollMode.READ)
+    pollwait!(registration.read_waiter)
     return nothing
 end
 
@@ -422,7 +416,7 @@ Set both read and write deadlines for `fd`.
 timestamp. Use `0` to clear both deadlines.
 """
 function set_deadline!(fd::FD, deadline_ns::Integer)
-    _set_deadline_impl!(fd, deadline_ns, PollOp.READWRITE)
+    _set_deadline_impl!(fd, deadline_ns, PollMode.READWRITE)
     return nothing
 end
 
@@ -430,7 +424,7 @@ end
 Set the read deadline for `fd`.
 """
 function set_read_deadline!(fd::FD, deadline_ns::Integer)
-    _set_deadline_impl!(fd, deadline_ns, PollOp.READ)
+    _set_deadline_impl!(fd, deadline_ns, PollMode.READ)
     return nothing
 end
 
@@ -438,7 +432,7 @@ end
 Set the write deadline for `fd`.
 """
 function set_write_deadline!(fd::FD, deadline_ns::Integer)
-    _set_deadline_impl!(fd, deadline_ns, PollOp.WRITE)
+    _set_deadline_impl!(fd, deadline_ns, PollMode.WRITE)
     return nothing
 end
 
@@ -534,20 +528,20 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
     try
         preparewrite(fd.pd, fd.is_file)
         registration = _poll_registration(fd.pd)
-        errno = EventLoops._iocp_submit_connect!(registration, addrbuf, addrlen)
+        errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         try
-            EventLoops.pollwait!(registration.write_waiter)
-            _convert_poll_error!(_check_error(fd.pd, PollOp.WRITE), fd.is_file)
+            pollwait!(registration.write_waiter)
+            _convert_poll_error!(_check_error(fd.pd, PollMode.WRITE), fd.is_file)
         catch err
             ex = err::Exception
-            if EventLoops._iocp_cancel_mode!(registration, EventLoops.PollMode.WRITE)
-                EventLoops.pollwait!(registration.write_waiter)
+            if _iocp_cancel_mode!(registration, PollMode.WRITE)
+                pollwait!(registration.write_waiter)
             end
-            _ = EventLoops._iocp_finish_connect!(registration)
+            _ = _iocp_finish_connect!(registration)
             rethrow(ex)
         end
-        errno = EventLoops._iocp_finish_connect!(registration)
+        errno = _iocp_finish_connect!(registration)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         SocketOps.update_connect_context!(fd.sysfd)
     finally
@@ -571,24 +565,24 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                 registration = _poll_registration(fd.pd)
                 child_sysfd = SocketOps.open_socket(family, sotype)
                 addrbuf = Vector{UInt8}(undef, Int(2 * SocketOps._ACCEPT_ADDRBUF_LEN))
-                errno = EventLoops._iocp_submit_accept!(registration, child_sysfd, addrbuf)
+                errno = _iocp_submit_accept!(registration, child_sysfd, addrbuf)
                 if errno != Int32(0)
                     SocketOps.close_socket_nothrow(child_sysfd)
                     throw(SystemError("acceptex", Int(errno)))
                 end
                 try
-                    EventLoops.pollwait!(registration.read_waiter)
-                    _convert_poll_error!(_check_error(fd.pd, PollOp.READ), fd.is_file)
+                    pollwait!(registration.read_waiter)
+                    _convert_poll_error!(_check_error(fd.pd, PollMode.READ), fd.is_file)
                 catch err
                     ex = err::Exception
-                    if EventLoops._iocp_cancel_mode!(registration, EventLoops.PollMode.READ)
-                        EventLoops.pollwait!(registration.read_waiter)
+                    if _iocp_cancel_mode!(registration, PollMode.READ)
+                        pollwait!(registration.read_waiter)
                     end
-                    _, _, _ = EventLoops._iocp_finish_accept!(registration)
+                    _, _, _ = _iocp_finish_accept!(registration)
                     SocketOps.close_socket_nothrow(child_sysfd)
                     rethrow(ex)
                 end
-                accepted_sysfd, accepted_addrbuf, errno = EventLoops._iocp_finish_accept!(registration)
+                accepted_sysfd, accepted_addrbuf, errno = _iocp_finish_accept!(registration)
                 if errno == Int32(0)
                     peer_addr = SocketOps.finish_accept_ex!(fd.sysfd, accepted_sysfd, accepted_addrbuf)
                     return accepted_sysfd, peer_addr

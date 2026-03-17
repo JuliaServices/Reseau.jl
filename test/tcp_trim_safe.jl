@@ -1,7 +1,7 @@
 using Reseau
 
 const NC = Reseau.TCP
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 
 function _write_all!(conn::NC.Conn, data::Vector{UInt8})::Nothing
     n = write(conn, data)

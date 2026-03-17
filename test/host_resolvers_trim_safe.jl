@@ -2,7 +2,7 @@ using Reseau
 
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 
 struct _TrimResolver <: ND.AbstractResolver
     addr::NC.SocketEndpoint

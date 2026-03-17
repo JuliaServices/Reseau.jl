@@ -18,7 +18,6 @@ resolution logic remains factored into its own file.
 module HostResolvers
 
 using ..Reseau: @gcsafe_ccall
-using ..Reseau.EventLoops
 using ..Reseau.SocketOps
 using ..Reseau.IOPoll
 
@@ -1315,18 +1314,18 @@ function _connect_deadline_ns(d::HostResolver)::Int64
     return _min_nonzero(timeout_deadline, d.deadline_ns)
 end
 
-function _wait_for_timer!(timer::EventLoops.TimerState)::Bool
+function _wait_for_timer!(timer::IOPoll.TimerState)::Bool
     while true
-        reason = EventLoops.pollwait!(timer.waiter)
-        reason == EventLoops.PollWakeReason.READY && return true
+        reason = IOPoll.pollwait!(timer.waiter)
+        reason == IOPoll.PollWakeReason.READY && return true
         (@atomic :acquire timer.closed) && return false
         (@atomic :acquire timer.deadline_ns) == 0 && return true
     end
 end
 
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
-    timer = EventLoops.TimerState(deadline_ns, Int64(0))
-    EventLoops.schedule_timer!(timer, deadline_ns) || return nothing, nothing
+    timer = IOPoll.TimerState(deadline_ns, Int64(0))
+    IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
     task = errormonitor(Threads.@spawn begin
         _wait_for_timer!(timer) || return nothing
         f()
@@ -1336,11 +1335,11 @@ function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
 end
 
 function _close_timer_task!(
-        timer::Union{Nothing, EventLoops.TimerState},
+        timer::Union{Nothing, IOPoll.TimerState},
         task::Union{Nothing, Task},
     )
     timer === nothing && return nothing
-    EventLoops._close_timer!(timer)
+    IOPoll._close_timer!(timer)
     task === nothing && return nothing
     wait(task)
     return nothing

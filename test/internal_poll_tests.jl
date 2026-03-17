@@ -1,7 +1,7 @@
 using Test
 using Reseau
 
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 const IP = Reseau.IOPoll
 
 function _ip_socketpair_stream()
@@ -169,11 +169,11 @@ else
                 end
                 IP.set_deadline!(ipfd, Int64(time_ns()) + Int64(30_000_000))
                 EL.sleep(0.06)
-                @test IP._check_error(ipfd.pd, IP.PollOp.READ) == Int32(2)
-                @test IP._check_error(ipfd.pd, IP.PollOp.WRITE) == Int32(2)
+                @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(2)
+                @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(2)
                 IP.set_deadline!(ipfd, Int64(0))
-                @test IP._check_error(ipfd.pd, IP.PollOp.READ) == Int32(0)
-                @test IP._check_error(ipfd.pd, IP.PollOp.WRITE) == Int32(0)
+                @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(0)
+                @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(0)
             finally
                 ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
@@ -236,7 +236,7 @@ else
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
                 wait_task = errormonitor(Threads.@spawn begin
-                    IP.waitcancelled(ipfd.pd, IP.PollOp.READ)
+                    IP.waitcancelled(ipfd.pd, IP.PollMode.READ)
                     return :ok
                 end)
                 pre = EL.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
