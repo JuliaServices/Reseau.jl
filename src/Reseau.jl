@@ -1,12 +1,9 @@
 """
     Reseau
 
-Root module for the rewritten Go-parity networking stack.
+Root module for Reseau's networking transport stack.
 
-The package is organized in layers:
-- low-level eventing/polling and socket ops
-- TCP core primitives + host resolution/connection orchestration
-- TLS transport
+The primary public entrypoints are `TCP` and `TLS`.
 """
 module Reseau
 

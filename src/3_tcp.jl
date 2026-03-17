@@ -207,7 +207,8 @@ User-facing connected TCP stream.
 
 Reads and writes are forwarded to `IOPoll`, which means blocking operations are
 actually readiness waits against the shared low-level poller rather than
-thread-per-socket blocking syscalls.
+thread-per-socket blocking syscalls. Because `Conn <: IO`, standard Base stream
+helpers like `read`, `read!`, `readbytes!`, `eof`, and `write` apply directly.
 """
 struct Conn <: IO
     fd::FD
@@ -647,6 +648,16 @@ function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
 end
 
 """
+    read!(conn, buf) -> buf
+
+Read exactly `length(buf)` bytes into `buf` or throw `EOFError`.
+
+Use `readbytes!` or `readavailable` when you want a count-returning read that
+may stop early.
+"""
+Base.read!(conn::Conn, buf::Vector{UInt8})
+
+"""
     readbytes!(conn, buf, nb=length(buf)) -> Int
 
 Read up to `nb` bytes into `buf`, returning the byte count.
@@ -684,6 +695,12 @@ function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(bu
     return bytes_read
 end
 
+"""
+    readavailable(conn) -> Vector{UInt8}
+
+Read and return the bytes that are currently ready without requiring a
+full-buffer exact read.
+"""
 function Base.readavailable(conn::Conn)::Vector{UInt8}
     buf = Vector{UInt8}(undef, Base.SZ_UNBUFFERED_IO)
     n = try
@@ -702,6 +719,11 @@ function Base.read(conn::Conn, ::Type{UInt8})::UInt8
     return ref[]
 end
 
+"""
+    eof(conn) -> Bool
+
+Report whether the peer has cleanly closed the read side of the connection.
+"""
 function Base.eof(conn::Conn)::Bool
     isopen(conn) || return true
     return _peek_eof(conn)
@@ -745,6 +767,8 @@ On success, the return value is always `length(buf)`. If the socket cannot
 currently accept data, the call waits for write readiness and resumes until the
 entire buffer has been written or an error/deadline interrupts the operation.
 """
+Base.write(conn::Conn, buf::AbstractVector{UInt8})
+
 function Base.write(conn::Conn, buf::StridedVector{UInt8})::Int
     if stride(buf, 1) == 1
         return GC.@preserve buf Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))

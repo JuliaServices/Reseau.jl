@@ -7,9 +7,9 @@ Description = "Host resolution, address-family policy, and resolver configuratio
 
 `TCP.connect("host:port")`, `TCP.listen("host:port")`, and `TLS.connect("host:port")`
 all flow through a resolver layer that turns host/port strings into concrete
-`TCP.SocketEndpoint` values. That layer is public enough to be useful whenever
-you need custom resolution, caching, or explicit address-family policy instead
-of the default behavior.
+`TCP.SocketEndpoint` values. Most users can ignore that layer and stay on the
+`TCP` or `TLS` entrypoints directly. The types documented here are advanced
+controls for custom resolution, caching, and explicit address-family policy.
 
 ```@contents
 Pages = ["resolution.md"]
@@ -19,8 +19,8 @@ Depth = 2:3
 ## When This Layer Matters
 
 Most users can call [`Reseau.TCP.connect`](@ref Reseau.TCP.connect) or
-[`Reseau.TLS.connect`](@ref Reseau.TLS.connect) directly and never touch the
-resolver types. Reach for this layer when you need any of the following:
+[`Reseau.TLS.connect`](@ref Reseau.TLS.connect) directly and never touch these
+types. Reach for this layer when you need any of the following:
 
 - explicit IPv4/IPv6 preference or filtering
 - a custom resolver backend
@@ -42,7 +42,8 @@ endpoints before connect attempts begin.
 
 ## Resolver Implementations
 
-Reseau ships a small stack of resolver building blocks:
+Reseau ships a small stack of resolver building blocks for advanced dialing
+control:
 
 ```@docs; canonical=false
 SystemResolver

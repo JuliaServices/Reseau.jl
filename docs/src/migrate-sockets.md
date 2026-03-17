@@ -79,12 +79,15 @@ One nice migration property is that the connection still behaves like a Julia
 stream:
 
 - `read!(conn, buf)`
+- `readbytes!(conn, buf, nb)`
+- `readavailable(conn)`
 - `write(conn, buf)`
 - `close(conn)`
 
-The difference is in the transport semantics: deadlines and readiness are now
-part of the connection itself, and partial reads/writes are documented
-explicitly on the `TCP.Conn` and `TLS.Conn` APIs in [API Reference](@ref api-reference-manual).
+The main difference is in the transport semantics: deadlines and readiness are
+part of the connection itself. `read!(conn, buf)` keeps Julia's usual
+exact-fill-or-`EOFError` behavior, while `readbytes!` and `readavailable` are
+the short-read helpers when you want count-returning reads.
 
 ## Deadlines Become First-Class
 

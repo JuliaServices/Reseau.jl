@@ -71,6 +71,9 @@ on plaintext application data while OpenSSL handles record framing underneath:
 
 ```@docs; canonical=false
 Base.read!(::Conn, ::Vector{UInt8})
+Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
+Base.readavailable(::Conn)
+Base.eof(::Conn)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
@@ -87,6 +90,7 @@ addr
 
 Two details matter in practice:
 
+- `read!(conn, buf)` fills `buf` or throws `EOFError`; use `readbytes!` or `readavailable` when you want short-read behavior.
 - TLS deadlines are delegated to the wrapped TCP transport, so the timeout
   model matches [TCP](@ref tcp-manual) exactly.
 - A timed-out TLS write is treated as a permanent write failure because partial
@@ -101,5 +105,5 @@ Two details matter in practice:
 ## Where To Go Next
 
 - Read [TCP](@ref tcp-manual) for the underlying transport model and socket lifecycle.
-- Read [Name Resolution](@ref name-resolution-manual) for resolver and address-family policy controls shared by `TCP.connect` and `TLS.connect`.
+- Read [Name Resolution](@ref name-resolution-manual) for the advanced resolver and address-family policy controls shared by `TCP.connect` and `TLS.connect`.
 - Read [API Reference](@ref api-reference-manual) for the canonical TLS docstrings.

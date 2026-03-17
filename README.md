@@ -1,19 +1,17 @@
 # Reseau.jl
 
-`Reseau.jl` is a pure-Julia networking transport stack that owns low-level
-polling, TCP, hostname-aware dialing, and TLS in one package.
+`Reseau.jl` is a pure-Julia networking transport stack with deadline-aware TCP,
+hostname-aware dialing, and TLS in one package.
 
 [![](https://img.shields.io/badge/docs-stable-blue.svg)](https://juliaservices.github.io/Reseau.jl/stable)
 [![](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaservices.github.io/Reseau.jl/dev)
 
-Reseau owns:
+Reseau provides:
 
-- cross-platform event-loop backends for macOS (`kqueue`), Linux (`epoll`),
-  and Windows (`IOCP`)
-- low-level socket operations and internal poll/runtime plumbing
 - TCP connections and listeners
-- hostname-aware dialing and listening on top of the TCP stack
+- hostname-aware dialing and listening through the `TCP` and `TLS` entrypoints
 - TLS clients and listeners
+- integrated readiness, deadline, and timer handling across macOS, Linux, and Windows
 - precompile and `--trim=safe` validation in the test suite
 
 ## Installation
@@ -25,7 +23,7 @@ Pkg.add("Reseau")
 
 ## Main Entry Points
 
-The main entry points are the exported `TCP` and `TLS` modules:
+The supported 1.0-facing entry points are the exported `TCP` and `TLS` modules:
 
 - `TCP` for TCP connections, listeners, deadlines, and string-address dialing
 - `TLS` for TLS clients and listeners
@@ -40,25 +38,25 @@ using Reseau
 listener = TCP.listen(TCP.loopback_addr(0); backlog = 128)
 addr = TCP.addr(listener)
 
-server_task = errormonitor(Threads.@spawn begin
+server_task = errormonitor(@async begin
     conn = TCP.accept(listener)
     try
-        buf = Vector{UInt8}(undef, 5)
-        read!(conn, buf)
-        write(conn, buf)
+        write(conn, "echo:" * String(read(conn)))
     finally
         close(conn)
     end
 end)
 
 client = TCP.connect(addr)
-write(client, collect(codeunits("hello")))
-reply = Vector{UInt8}(undef, 5)
-read!(client, reply)
+write(client, "hello")
+closewrite(client)
+reply = String(read(client))
 
 close(client)
 close(listener)
 wait(server_task)
+
+reply == "echo:hello"
 ```
 
 ### String-address dialing
@@ -75,8 +73,8 @@ close(listener)
 ```
 
 The hostname/address-string behavior is available directly on `TCP.connect`,
-`TCP.listen`, and `TLS.connect`; you do not need to reach into the internal
-resolution layer for normal usage.
+`TCP.listen`, and `TLS.connect`; most code never needs to reach into the
+resolver support layer directly.
 
 You can also set deadlines directly on live connections:
 
@@ -144,12 +142,12 @@ config = TLS.Config(
 - TLS lives in the same transport stack instead of hanging off a different socket
   abstraction.
 
-## Package Layout
+## Internal Architecture
 
-- `Reseau.SocketOps`: raw socket syscalls, sockaddr helpers, and platform quirks
-- `Reseau.IOPoll`: internal runtime poller, timer scheduling, deadline, and readiness machinery
-- `TCP`: TCP endpoints, listeners, deadlines, and hostname-aware dial/listen helpers
-- `TLS`: TLS configuration, clients, listeners, and handshake behavior
+`TCP` and `TLS` are the intended public surfaces. Reseau also contains internal
+support layers such as `Reseau.SocketOps`, `Reseau.IOPoll`, and
+`Reseau.HostResolvers` that power the transport stack but are not the primary
+1.0 API entrypoints.
 
 ## Documentation
 

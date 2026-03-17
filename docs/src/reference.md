@@ -1,12 +1,12 @@
 ```@meta
 CollapsedDocStrings = true
-Description = "Canonical API reference for Reseau.jl's TCP, TLS, and name-resolution surfaces."
+Description = "Canonical API reference for Reseau.jl's public TCP and TLS surfaces."
 ```
 
 # [API Reference](@id api-reference-manual)
 
-This page is the canonical home for the package and module docstrings used
-throughout the rest of the manual.
+This page is the canonical home for Reseau's public package, TCP, and TLS
+docstrings.
 
 ```@contents
 Pages = ["reference.md"]
@@ -19,18 +19,6 @@ Depth = 2:2
 Reseau
 Reseau.TCP
 Reseau.TLS
-```
-
-### Internal Layers
-
-These modules are not the primary end-user entrypoints, but they explain the
-package layering and are part of the documented rewrite architecture:
-
-```@docs
-Reseau.SocketOps
-Reseau.IOPoll
-Reseau.IOPoll.PollMode
-Reseau.HostResolvers
 ```
 
 ## TCP
@@ -60,6 +48,9 @@ connect
 listen
 accept
 Base.read!(::Conn, ::Vector{UInt8})
+Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
+Base.readavailable(::Conn)
+Base.eof(::Conn)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
@@ -78,30 +69,6 @@ set_keepalive!
 local_addr
 remote_addr
 addr
-```
-
-## Name Resolution
-
-```@meta
-CurrentModule = Reseau.HostResolvers
-```
-
-### Policy and Resolver Types
-
-```@docs
-ResolverPolicy
-SystemResolver
-SingleflightResolver
-CachingResolver
-StaticResolver
-HostResolver
-```
-
-### Explicit Resolution Helpers
-
-```@docs
-resolve_tcp_addrs
-resolve_tcp_addr
 ```
 
 ## TLS
@@ -137,6 +104,9 @@ handshake!
 
 ```@docs
 Base.read!(::Conn, ::Vector{UInt8})
+Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
+Base.readavailable(::Conn)
+Base.eof(::Conn)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
@@ -151,6 +121,22 @@ connection_state
 addr
 ```
 
+## Internal Support Layers
+
+These modules power the public transport surface and are documented here for
+completeness, but they are not the primary 1.0 entrypoints.
+
+```@meta
+CurrentModule = Main
+```
+
+```@docs
+Reseau.SocketOps
+Reseau.IOPoll
+Reseau.IOPoll.PollMode
+Reseau.HostResolvers
+```
+
 ## Docstring Index
 
 ```@meta
@@ -159,6 +145,6 @@ CurrentModule = Main
 
 ```@index
 Pages = ["reference.md"]
-Modules = [Reseau, Reseau.TCP, Reseau.HostResolvers, Reseau.TLS]
+Modules = [Reseau, Reseau.TCP, Reseau.TLS]
 Order = [:module, :type, :function]
 ```

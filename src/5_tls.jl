@@ -300,7 +300,9 @@ TLS stream wrapper over one `TCP.Conn`.
 
 `Conn` is safe for one concurrent reader and one concurrent writer. Handshake,
 read, and write all have separate locks so lazy handshakes and shutdown can
-coordinate without corrupting the OpenSSL state machine.
+coordinate without corrupting the OpenSSL state machine. Because `Conn <: IO`,
+standard Base stream helpers like `read`, `read!`, `readbytes!`, `eof`, and
+`write` apply directly to decrypted application data.
 """
 mutable struct Conn <: IO
     tcp::TCP.Conn
@@ -1188,6 +1190,21 @@ function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     return nothing
 end
 
+"""
+    read!(conn, buf) -> buf
+
+Read exactly `length(buf)` decrypted bytes into `buf` or throw `EOFError`.
+
+Use `readbytes!` or `readavailable` when you want a count-returning read that
+may stop early.
+"""
+Base.read!(conn::Conn, buf::Vector{UInt8})
+
+"""
+    readbytes!(conn, buf, nb=length(buf)) -> Int
+
+Read up to `nb` decrypted bytes into `buf`, returning the byte count.
+"""
 function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(buf))::Int
     Base.require_one_based_indexing(buf)
     requested = Int(nb)
@@ -1217,6 +1234,12 @@ function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(bu
     return bytes_read
 end
 
+"""
+    readavailable(conn) -> Vector{UInt8}
+
+Read and return decrypted plaintext that is ready without requiring a
+full-buffer exact read.
+"""
 function Base.readavailable(conn::Conn)::Vector{UInt8}
     _ensure_open!(conn, "read")
     if _handshake_complete(conn)
@@ -1244,6 +1267,11 @@ function Base.read(conn::Conn, ::Type{UInt8})::UInt8
     return ref[]
 end
 
+"""
+    eof(conn) -> Bool
+
+Report whether the peer has cleanly finished the TLS stream.
+"""
 function Base.eof(conn::Conn)::Bool
     isopen(conn) || return true
     return _peek_eof(conn)
@@ -1266,6 +1294,8 @@ Write plaintext application bytes through the TLS connection.
 `write(conn, buf)` attempts to write the entire buffer. The fixed-size
 byte-buffer overload allows callers to cap the write at `nbytes`.
 """
+Base.write(conn::Conn, buf::AbstractVector{UInt8})
+
 function _write_buffer(buf::AbstractVector{UInt8}, nbytes::Int)
     if buf isa StridedVector{UInt8} && stride(buf, 1) == 1
         return buf

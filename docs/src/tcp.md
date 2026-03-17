@@ -66,6 +66,9 @@ them:
 
 ```@docs; canonical=false
 Base.read!(::Conn, ::Vector{UInt8})
+Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
+Base.readavailable(::Conn)
+Base.eof(::Conn)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
@@ -73,10 +76,11 @@ closeread
 Base.closewrite(::Conn)
 ```
 
-The important behavioral detail is that partial reads and writes are normal:
-reads return as soon as at least one byte is available, and writes retry
-through readiness waits until the requested payload has been written or an
-error/deadline interrupts the operation.
+The key contract is:
+
+- `read!(conn, buf)` fills `buf` or throws `EOFError`, just like other Julia `IO` types.
+- `readbytes!(conn, buf, nb)` and `readavailable(conn)` are the count-returning entrypoints when you want short-read behavior.
+- `write(conn, buf)` writes the full payload unless an error or deadline interrupts the operation.
 
 ## Deadlines, Socket Options, and Address Inspection
 
@@ -101,5 +105,5 @@ next blocking wait time out immediately.
 ## Where To Go Next
 
 - Read [TLS](@ref tls-manual) for the TLS wrapper layer that reuses the same transport and deadline model.
-- Read [Name Resolution](@ref name-resolution-manual) for `ResolverPolicy`, `HostResolver`, and explicit resolution helpers.
+- Read [Name Resolution](@ref name-resolution-manual) for the advanced resolver controls that sit behind string-address dialing.
 - Read [API Reference](@ref api-reference-manual) for the canonical docstrings for the entire TCP surface.
