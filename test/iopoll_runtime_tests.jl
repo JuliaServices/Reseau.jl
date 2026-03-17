@@ -81,6 +81,12 @@ function _el_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
     return status
 end
 
+function _el_log_test_progress(msg::AbstractString)
+    println("[iopoll_runtime_tests] ", msg)
+    flush(stdout)
+    return nothing
+end
+
 # These backend helpers block an OS thread inside the raw poll syscall. When
 # the Julia scheduler only has one worker thread, using `Threads.@spawn` around
 # them would starve the companion task that is supposed to drive the wakeup.
@@ -110,6 +116,7 @@ end
 
 @testset "IOPoll runtime phase 1" begin
         NP.shutdown!()
+        _el_log_test_progress("START: poller-backed sleep/timedwait")
         @testset "poller-backed sleep/timedwait" begin
             t0 = time_ns()
             IP.sleep(0.03)
@@ -127,6 +134,8 @@ end
             status == :timed_out || take!(wake_ch)
             wait(wake_task)
         end
+        _el_log_test_progress("DONE: poller-backed sleep/timedwait")
+        _el_log_test_progress("START: pollwait wake reason precedence")
         @testset "pollwait wake reason precedence" begin
             waiter = NP.PollWaiter()
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
@@ -138,23 +147,28 @@ end
             @test !NP.pollnotify!(waiter, NP.PollWakeReason.CANCELED)
             @test NP.pollwait!(waiter) == NP.PollWakeReason.READY
         end
+        _el_log_test_progress("DONE: pollwait wake reason precedence")
+        _el_log_test_progress("START: backend delay semantics")
         @testset "backend delay semantics" begin
             state = NP.Poller()
             errno = NP._backend_init!(state)
             @test errno == Int32(0)
             poll_task = nothing
             try
+                _el_log_test_progress("backend delay semantics: zero timeout")
                 t0 = time_ns()
                 errno = NP._backend_poll_once!(state, Int64(0))
                 elapsed_ns = time_ns() - t0
                 @test errno == Int32(0)
                 @test elapsed_ns < 50_000_000
+                _el_log_test_progress("backend delay semantics: finite timeout")
                 t0 = time_ns()
                 errno = NP._backend_poll_once!(state, Int64(30_000_000))
                 elapsed_ns = time_ns() - t0
                 @test errno == Int32(0)
                 @test elapsed_ns >= 15_000_000
                 if _el_can_block_julia_worker()
+                    _el_log_test_progress("backend delay semantics: blocking wake")
                     wake_ch = Channel{Nothing}(1)
                     poll_task = errormonitor(Threads.@spawn begin
                         err = NP._backend_poll_once!(state, Int64(-1))
@@ -182,6 +196,8 @@ end
                 NP._backend_close!(state)
             end
         end
+        _el_log_test_progress("DONE: backend delay semantics")
+        _el_log_test_progress("START: earlier scheduled deadline wakes poll early")
         @testset "earlier scheduled deadline wakes poll early" begin
             old_poller = NP.POLLER[]
             state = NP.Poller()
@@ -229,11 +245,14 @@ end
                 NP._backend_close!(state)
             end
         end
+        _el_log_test_progress("DONE: earlier scheduled deadline wakes poll early")
+        _el_log_test_progress("START: runtime register/pollwait/deregister")
         @testset "runtime register/pollwait/deregister" begin
             NP.init!()
             fd0, fd1 = _el_socketpair_stream()
             waiter_task = nothing
             try
+                _el_log_test_progress("runtime register/pollwait/deregister: register")
                 registration = NP.register!(fd0; mode = NP.PollMode.READWRITE)
                 @test registration.token > 0
                 wait_ch = Channel{Nothing}(1)
@@ -244,6 +263,7 @@ end
                 end)
                 pre = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
                 @test pre == :timed_out
+                _el_log_test_progress("runtime register/pollwait/deregister: trigger read ready")
                 _el_write_byte(fd1, 0x33)
                 status = timedwait(() -> isready(wait_ch), 2.0; pollint = 0.001)
                 @test status != :timed_out
@@ -267,6 +287,8 @@ end
                 NP.shutdown!()
             end
         end
+        _el_log_test_progress("DONE: runtime register/pollwait/deregister")
+        _el_log_test_progress("START: stale token suppression")
         @testset "stale token suppression" begin
             state = NP.init!()
             fd0, fd1 = _el_socketpair_stream()
@@ -312,6 +334,8 @@ end
                 NP.shutdown!()
             end
         end
+        _el_log_test_progress("DONE: stale token suppression")
+        _el_log_test_progress("START: shutdown-safe control paths")
         @testset "shutdown-safe control paths" begin
             NP.init!()
             NP.shutdown!()
@@ -325,6 +349,8 @@ end
                 _el_close_fd(fd1)
             end
         end
+        _el_log_test_progress("DONE: shutdown-safe control paths")
+        _el_log_test_progress("START: shutdown cancels active waiters and timers")
         @testset "shutdown cancels active waiters and timers" begin
             fd0, fd1 = _el_socketpair_stream()
             reg_task = nothing
@@ -363,4 +389,5 @@ end
                 NP.shutdown!()
             end
         end
+        _el_log_test_progress("DONE: shutdown cancels active waiters and timers")
     end

@@ -1359,6 +1359,12 @@ function Base.write(conn::Conn, byte::UInt8)::Int
     end
 end
 
+function Base.write(conn::Conn, buf::Vector{UInt8})::Int
+    GC.@preserve buf begin
+        return Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))
+    end
+end
+
 function Base.write(conn::Conn, buf::StridedVector{UInt8})::Int
     if stride(buf, 1) == 1
         return GC.@preserve buf Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))
