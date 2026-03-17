@@ -12,8 +12,7 @@ module Reseau
 
 export TCP, TLS
 
-include("0_memory_compat.jl")
-include("0_gcsafe_ccall_compat.jl")
+include("0_compat.jl")
 include("2_socket_ops.jl")
 include("3_iopoll.jl")
 include("4_tcp.jl")
