@@ -314,6 +314,8 @@ mutable struct Conn
     @atomic handshake_complete::Bool
     @atomic closed::Bool
     write_permanent_error::Union{Nothing, TLSError}
+    negotiated_version::String
+    negotiated_alpn::Union{Nothing, String}
 end
 
 """
@@ -843,7 +845,21 @@ end
 function _new_conn(tcp::TCP.Conn, config::Config; is_server::Bool)::Conn
     ctx = _shared_ssl_ctx(config; is_server = is_server)
     ssl = _ssl_new(ctx, tcp, config; is_server = is_server)
-    return Conn(tcp, ctx, ssl, is_server, config, ReentrantLock(), ReentrantLock(), ReentrantLock(), false, false, nothing)
+    return Conn(
+        tcp,
+        ctx,
+        ssl,
+        is_server,
+        config,
+        ReentrantLock(),
+        ReentrantLock(),
+        ReentrantLock(),
+        false,
+        false,
+        nothing,
+        "",
+        nothing,
+    )
 end
 
 """
@@ -891,6 +907,8 @@ function _mark_closed!(conn::Conn)::Bool
 end
 
 function _set_handshake_complete!(conn::Conn)
+    conn.negotiated_version = _ssl_version(conn)
+    conn.negotiated_alpn = _ssl_alpn_protocol(conn)
     @atomic :release conn.handshake_complete = true
     return nothing
 end
@@ -1430,8 +1448,8 @@ This does not force a handshake; if the handshake has not yet run, the returned
 function connection_state(conn::Conn)::ConnectionState
     return ConnectionState(
         _handshake_complete(conn),
-        _ssl_version(conn),
-        _ssl_alpn_protocol(conn),
+        conn.negotiated_version,
+        conn.negotiated_alpn,
     )
 end
 
@@ -1487,6 +1505,48 @@ Return the local listening address for the wrapped TCP listener.
 """
 function addr(listener::Listener)
     return TCP.addr(listener.listener)
+end
+
+@inline function _show_endpoint(io::IO, endpoint::Union{Nothing, TCP.SocketAddr})
+    if endpoint === nothing
+        print(io, "?")
+    else
+        show(io, endpoint)
+    end
+    return nothing
+end
+
+@inline _show_role(conn::Conn) = conn.is_server ? "server" : "client"
+@inline _show_state(listener::Listener) = listener.listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
+@inline _show_closed(conn::Conn) = _is_closed(conn) || conn.ssl == C_NULL || conn.tcp.fd.pfd.sysfd < 0
+
+function Base.show(io::IO, conn::Conn)
+    print(io, "TLS.Conn(")
+    _show_endpoint(io, local_addr(conn))
+    print(io, " => ")
+    _show_endpoint(io, remote_addr(conn))
+    print(io, ", ", _show_role(conn))
+    if _show_closed(conn)
+        print(io, ", closed")
+    elseif !_handshake_complete(conn)
+        print(io, ", handshake pending")
+    else
+        if isempty(conn.negotiated_version)
+            print(io, ", handshake complete")
+        else
+            print(io, ", ", conn.negotiated_version)
+        end
+        conn.negotiated_alpn === nothing || print(io, ", ", conn.negotiated_alpn)
+    end
+    print(io, ")")
+    return nothing
+end
+
+function Base.show(io::IO, listener::Listener)
+    print(io, "TLS.Listener(")
+    _show_endpoint(io, addr(listener))
+    print(io, ", ", _show_state(listener), ")")
+    return nothing
 end
 
 function _prepare_connect_config(config::Config, address::AbstractString)::Config

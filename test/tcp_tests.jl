@@ -120,6 +120,42 @@ else
                 EL.shutdown!()
             end
         end
+        @testset "show methods summarize TCP endpoints" begin
+            EL.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+
+                client_local = NC.local_addr(client)
+                client_remote = NC.remote_addr(client)
+                server_local = NC.local_addr(server)
+                server_remote = NC.remote_addr(server)
+
+                @test repr(listener) == "TCP.Listener($(repr(laddr)), active)"
+                @test repr(client) == "TCP.Conn($(repr(client_local)) => $(repr(client_remote)), open)"
+                @test repr(server) == "TCP.Conn($(repr(server_local)) => $(repr(server_remote)), open)"
+
+                close(client)
+                close(server)
+                close(listener)
+
+                @test repr(client) == "TCP.Conn($(repr(client_local)) => $(repr(client_remote)), closed)"
+                @test repr(server) == "TCP.Conn($(repr(server_local)) => $(repr(server_remote)), closed)"
+                @test repr(listener) == "TCP.Listener($(repr(laddr)), closed)"
+            finally
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                EL.shutdown!()
+            end
+        end
         @testset "connected sockets set TCP_NODELAY and SO_KEEPALIVE defaults" begin
             EL.shutdown!()
             listener = nothing
