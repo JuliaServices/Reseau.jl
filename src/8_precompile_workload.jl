@@ -2,7 +2,7 @@
 # precompile artifacts stay aligned with the transport/runtime stack we ship.
 using PrecompileTools: @compile_workload, @setup_workload
 
-const EL = EventLoops
+const EL = IOPoll
 const IP = IOPoll
 const SO = SocketOps
 const NC = TCP

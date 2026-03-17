@@ -1,7 +1,7 @@
 using Test
 using Reseau
 
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 function _socketpair(sotype::Cint = SO.SOCK_STREAM)::Tuple{Cint, Cint}

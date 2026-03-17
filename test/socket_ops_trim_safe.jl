@@ -1,6 +1,6 @@
 using Reseau
 
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 function _accept_with_retry(listener::Cint)::Cint

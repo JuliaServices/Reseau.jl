@@ -14,18 +14,6 @@ const _POLL_ERR_CLOSING = Int32(1)
 const _POLL_ERR_TIMEOUT = Int32(2)
 const _POLL_ERR_NOT_POLLABLE = Int32(3)
 
-"""
-Bitmask of operations used for readiness waits and deadline management.
-
-`READWRITE` is intentionally the bitwise OR of `READ` and `WRITE` so callers can
-test or combine directions cheaply.
-"""
-@enumx PollOp::UInt8 begin
-    READ = 0x01
-    WRITE = 0x02
-    READWRITE = 0x03
-end
-
 struct NetClosingError <: Exception end
 struct FileClosingError <: Exception end
 struct NoDeadlineError <: Exception end
@@ -60,14 +48,6 @@ end
 @inline function _closing_error(is_file::Bool)::Exception
     is_file && return FileClosingError()
     return NetClosingError()
-end
-
-@inline function _mode_has_read(mode::PollOp.T)::Bool
-    return (UInt8(mode) & UInt8(PollOp.READ)) != 0
-end
-
-@inline function _mode_has_write(mode::PollOp.T)::Bool
-    return (UInt8(mode) & UInt8(PollOp.WRITE)) != 0
 end
 
 @inline function _is_accept_retry_errno(errno::Int32)::Bool

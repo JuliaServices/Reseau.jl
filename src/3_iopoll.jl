@@ -1,27 +1,39 @@
 """
     IOPoll
 
-Go-style poll descriptor layer built on `EventLoops`.
-Provides deadline-aware readiness waiting for network descriptors.
+Go-style polling and runtime netpoll layer for network descriptors.
 
-Conceptually this sits where Go's `internal/poll` package sits:
-- `EventLoops` is the runtime-facing readiness engine
-- `IOPoll` turns readiness and deadlines into descriptor-centric operations
-- higher transport layers call `prepare_*`, `wait_*`, and deadline helpers
-  instead of talking to the event loop directly
+This merged module now spans both of the Go-inspired layers that used to be
+split between `runtime/netpoll`-like machinery and `internal/poll`-like fd
+operations:
+- one dedicated native poller thread blocks in the platform poll syscall
+- registrations own one read waiter and one write waiter per descriptor
+- deadlines and timers live inside the shared poller heap
+- higher transport layers call `register!`, `prepare_*`, `wait_*`, and fd/timer
+  helpers instead of talking to backend-specific handles directly
 """
 module IOPoll
 
 using EnumX
-using ..Reseau: ByteMemory
-using ..Reseau.EventLoops
+using ..Reseau: ByteMemory, @gcsafe_ccall
 using ..Reseau.SocketOps
-import ..Reseau.EventLoops: deadline_fire!
 
-const PollState = EventLoops.PollState
-
+include("3_iopoll_types.jl")
+include("3_iopoll_waiters.jl")
 include("3_iopoll_errors.jl")
+include("3_iopoll_runtime.jl")
+include("3_iopoll_timers.jl")
 include("3_iopoll_fdlock.jl")
 include("3_iopoll_fd.jl")
+
+@static if Sys.isapple()
+    include("1_eventloops_kqueue.jl")
+elseif Sys.islinux()
+    include("1_eventloops_epoll.jl")
+elseif Sys.iswindows()
+    include("1_eventloops_iocp.jl")
+else
+    include("1_eventloops_kqueue.jl")
+end
 
 end

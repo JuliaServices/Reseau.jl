@@ -1,8 +1,8 @@
 using Test
 using Reseau
 
-const NP = Reseau.EventLoops
-const EL = Reseau.EventLoops
+const NP = Reseau.IOPoll
+const EL = Reseau.IOPoll
 
 function _el_socketpair_stream()
     fds = Vector{Cint}(undef, 2)

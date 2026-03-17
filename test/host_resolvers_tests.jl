@@ -3,7 +3,7 @@ using Reseau
 
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 

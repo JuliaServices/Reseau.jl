@@ -5,7 +5,7 @@ using Reseau
 const TL = Reseau.TLS
 const NC = Reseau.TCP
 const ND = Reseau.HostResolvers
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")

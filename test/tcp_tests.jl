@@ -1,7 +1,7 @@
 using Test
 using Reseau
 
-const EL = Reseau.EventLoops
+const EL = Reseau.IOPoll
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps

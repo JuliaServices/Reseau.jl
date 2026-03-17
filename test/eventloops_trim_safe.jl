@@ -1,6 +1,6 @@
 using Reseau
 
-const NP = Reseau.EventLoops
+const NP = Reseau.IOPoll
 const IP = Reseau.IOPoll
 
 @static if !Sys.iswindows()
