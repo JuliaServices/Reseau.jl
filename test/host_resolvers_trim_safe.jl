@@ -26,15 +26,8 @@ function ND._resolve_host_ips(resolver::_TrimResolver, network::AbstractString, 
 end
 
 function _trim_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
-    offset = 0
-    while offset < length(buf)
-        chunk = Vector{UInt8}(undef, length(buf) - offset)
-        n = read!(conn, chunk)
-        n > 0 || throw(EOFError())
-        copyto!(buf, offset + 1, chunk, 1, n)
-        offset += n
-    end
-    return offset
+    read!(conn, buf)
+    return length(buf)
 end
 
 function run_host_resolvers_trim_sample()::Nothing

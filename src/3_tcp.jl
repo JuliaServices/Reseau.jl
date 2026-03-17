@@ -209,7 +209,7 @@ Reads and writes are forwarded to `IOPoll`, which means blocking operations are
 actually readiness waits against the shared low-level poller rather than
 thread-per-socket blocking syscalls.
 """
-struct Conn
+struct Conn <: IO
     fd::FD
 end
 
@@ -585,25 +585,155 @@ function accept(listener::Listener)::Conn
     end
 end
 
-"""
-    read!(conn, buf) -> Int
-
-Read up to `length(buf)` bytes into `buf` and return the number of bytes read.
-
-Important behavior notes:
-- the result may be smaller than `length(buf)` whenever fewer bytes are
-  presently available on the stream than the caller asked for
-- once at least one byte is read, the call returns immediately instead of
-  waiting to fill the remainder of `buf`
-- if no bytes are currently available, the underlying descriptor waits for read
-  readiness and then retries, subject to any active read deadline
-- `length(buf) == 0` returns `0` immediately
-
-Throws the same errors as `IOPoll.read!`, including `EOFError`,
-`IOPoll.DeadlineExceededError`, and close-related exceptions.
-"""
-function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
+@inline function _read_some!(conn::Conn, buf::Vector{UInt8})::Int
     return IOPoll.read!(conn.fd.pfd, buf)
+end
+
+@inline function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+    return IOPoll._read_ptr_some!(conn.fd.pfd, ptr, nbytes)
+end
+
+function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
+    newlen = if current == 0
+        min(nb, 1024)
+    else
+        min(nb, current * 2)
+    end
+    resize!(buf, newlen)
+    return newlen
+end
+
+function _peek_eof(conn::Conn)::Bool
+    pfd = conn.fd.pfd
+    pref = Ref{UInt8}(0x00)
+    while true
+        IOPoll.prepareread(pfd.pd, pfd.is_file)
+        n = GC.@preserve pref SocketOps.recv_from!(
+            pfd.sysfd,
+            Base.unsafe_convert(Ptr{UInt8}, pref),
+            Csize_t(1),
+            SocketOps.MSG_PEEK,
+        )
+        if n > 0
+            return false
+        end
+        n == 0 && return true
+        errno = SocketOps.last_error()
+        if errno == Int32(Base.Libc.EAGAIN) && IOPoll.pollable(pfd.pd)
+            IOPoll.waitread(pfd.pd, pfd.is_file)
+            continue
+        end
+        throw(SystemError("recv(MSG_PEEK)", Int(errno)))
+    end
+end
+
+"""
+    unsafe_read(conn, ptr, nbytes)
+
+Read exactly `nbytes` into `ptr` or throw `EOFError`.
+
+This is the primitive that powers Julia's standard `read!` behavior once
+`TCP.Conn` participates in the `IO` hierarchy.
+"""
+function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
+    remaining = Int(nbytes)
+    offset = 0
+    while remaining > 0
+        n = _read_some!(conn, ptr + offset, remaining)
+        offset += n
+        remaining -= n
+    end
+    return nothing
+end
+
+"""
+    readbytes!(conn, buf, nb=length(buf)) -> Int
+
+Read up to `nb` bytes into `buf`, returning the byte count.
+
+Unlike `read!(conn, buf)`, this API may return after a short read or EOF. It is
+the count-returning TCP read entrypoint once `TCP.Conn` follows Julia's `IO`
+contract.
+"""
+function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(buf))::Int
+    Base.require_one_based_indexing(buf)
+    requested = Int(nb)
+    requested < 0 && throw(ArgumentError("nb must be >= 0"))
+    requested == 0 && return 0
+
+    original_len = length(buf)
+    current_len = original_len
+    bytes_read = 0
+    while bytes_read < requested
+        if current_len == 0 || bytes_read == current_len
+            current_len = _grow_readbytes_target!(buf, current_len, requested)
+        end
+        chunk_capacity = min(current_len - bytes_read, requested - bytes_read)
+        n = try
+            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), chunk_capacity)
+        catch err
+            ex = err::Exception
+            ex isa EOFError || rethrow(ex)
+            break
+        end
+        bytes_read += n
+    end
+    if current_len > original_len
+        resize!(buf, bytes_read)
+    end
+    return bytes_read
+end
+
+function Base.readavailable(conn::Conn)::Vector{UInt8}
+    buf = Vector{UInt8}(undef, Base.SZ_UNBUFFERED_IO)
+    n = try
+        _read_some!(conn, buf)
+    catch err
+        ex = err::Exception
+        ex isa EOFError || rethrow(ex)
+        return UInt8[]
+    end
+    return resize!(buf, n)
+end
+
+function Base.read(conn::Conn, ::Type{UInt8})::UInt8
+    ref = Ref{UInt8}(0x00)
+    Base.unsafe_read(conn, ref, 1)
+    return ref[]
+end
+
+function Base.eof(conn::Conn)::Bool
+    isopen(conn) || return true
+    return _peek_eof(conn)
+end
+
+function Base.isopen(conn::Conn)::Bool
+    return conn.fd.pfd.sysfd >= 0
+end
+
+function Base.flush(::Conn)
+    return nothing
+end
+
+"""
+    write(conn, byte::UInt8) -> Int
+
+Write one byte to the connection and return `1`.
+"""
+function Base.write(conn::Conn, byte::UInt8)::Int
+    ref = Ref{UInt8}(byte)
+    GC.@preserve ref begin
+        return Int(Base.unsafe_write(conn, Base.unsafe_convert(Ptr{UInt8}, ref), UInt(1)))
+    end
+end
+
+"""
+    unsafe_write(conn, ptr, nbytes)
+
+Write exactly `nbytes` from `ptr`, returning the number of bytes written.
+"""
+function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
+    return IOPoll._write_ptr!(conn.fd.pfd, ptr, Int(nbytes))
 end
 
 """
@@ -615,8 +745,21 @@ On success, the return value is always `length(buf)`. If the socket cannot
 currently accept data, the call waits for write readiness and resumes until the
 entire buffer has been written or an error/deadline interrupts the operation.
 """
+function Base.write(conn::Conn, buf::StridedVector{UInt8})::Int
+    if stride(buf, 1) == 1
+        return GC.@preserve buf Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))
+    end
+    data = Vector{UInt8}(buf)
+    GC.@preserve data begin
+        return Int(Base.unsafe_write(conn, pointer(data), UInt(length(data))))
+    end
+end
+
 function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
-    return IOPoll.write!(conn.fd.pfd, buf)
+    data = Vector{UInt8}(buf)
+    GC.@preserve data begin
+        return Int(Base.unsafe_write(conn, pointer(data), UInt(length(data))))
+    end
 end
 
 """
@@ -630,7 +773,12 @@ overload, this may block waiting for write readiness between partial kernel
 writes.
 """
 function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
-    return IOPoll.write!(conn.fd.pfd, buf, nbytes)
+    n = Int(nbytes)
+    n < 0 && throw(ArgumentError("nbytes must be >= 0"))
+    n <= length(buf) || throw(ArgumentError("nbytes exceeds buffer length"))
+    GC.@preserve buf begin
+        return Int(Base.unsafe_write(conn, pointer(buf), UInt(n)))
+    end
 end
 
 """

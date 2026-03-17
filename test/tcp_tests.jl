@@ -10,15 +10,8 @@ function _nc_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
 end
 
 function _read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
-    offset = 0
-    while offset < length(buf)
-        chunk = Vector{UInt8}(undef, length(buf) - offset)
-        n = read!(conn, chunk)
-        n > 0 || throw(EOFError())
-        copyto!(buf, offset + 1, chunk, 1, n)
-        offset += n
-    end
-    return offset
+    read!(conn, buf)
+    return length(buf)
 end
 
 function _close_quiet!(x)
@@ -36,6 +29,7 @@ if !(Sys.isapple() || Sys.islinux())
     end
 else
     @testset "TCP phase 4" begin
+        @test NC.Conn <: IO
         @testset "connect/listen/accept and address snapshots" begin
             IP.shutdown!()
             listener = nothing
@@ -80,6 +74,14 @@ else
                 recv_view_buf = Vector{UInt8}(undef, length(payload_view))
                 @test _read_exact!(server, recv_view_buf) == length(payload_view)
                 @test recv_view_buf == collect(payload_view)
+                @test write(client, "ok") == 2
+                string_buf = Vector{UInt8}(undef, 2)
+                @test read!(server, string_buf) === string_buf
+                @test String(string_buf) == "ok"
+                @test write(client, UInt8[0x31, 0x32, 0x33]) == 3
+                short_buf = UInt8[]
+                @test readbytes!(server, short_buf, 3) == 3
+                @test short_buf == UInt8[0x31, 0x32, 0x33]
             finally
                 _close_quiet!(server)
                 _close_quiet!(client)
@@ -249,7 +251,7 @@ else
                 NC.set_read_deadline!(server, Int64(0))
                 @test write(client, UInt8[0x77]) == 1
                 recv_buf = Vector{UInt8}(undef, 1)
-                @test read!(server, recv_buf) == 1
+                @test read!(server, recv_buf) === recv_buf
                 @test recv_buf[1] == 0x77
             finally
                 _close_quiet!(server)
@@ -338,6 +340,7 @@ else
                 @test NC.closeread(client) === nothing
                 closewrite(client)
                 NC.set_read_deadline!(server, time_ns() + 1_000_000_000)
+                @test eof(server)
                 @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
             finally
                 _close_quiet!(server)

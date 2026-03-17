@@ -631,12 +631,18 @@ Throws `EOFError` when the peer cleanly closes a stream whose
 expires while waiting, and `SystemError` for OS-level read failures.
 """
 function read!(fd::FD, p::Vector{UInt8})::Int
+    GC.@preserve p begin
+        return _read_ptr_some!(fd, pointer(p), length(p))
+    end
+end
+
+function _read_ptr_some!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
     _fd_read_lock!(fd)
     try
-        isempty(p) && return 0
+        nbytes == 0 && return 0
         prepareread(fd.pd, fd.is_file)
         while true
-            n = GC.@preserve p SocketOps.read_once!(fd.sysfd, pointer(p), Csize_t(length(p)))
+            n = SocketOps.read_once!(fd.sysfd, p, Csize_t(nbytes))
             if n >= 0
                 if n == 0 && fd.zero_read_is_eof
                     throw(EOFError())

@@ -10,14 +10,7 @@ function _write_all!(conn::NC.Conn, data::Vector{UInt8})::Nothing
 end
 
 function _read_exact!(conn::NC.Conn, data::Vector{UInt8})::Nothing
-    offset = 0
-    while offset < length(data)
-        chunk = Vector{UInt8}(undef, length(data) - offset)
-        n = read!(conn, chunk)
-        n > 0 || error("expected positive read progress")
-        copyto!(data, offset + 1, chunk, 1, n)
-        offset += n
-    end
+    read!(conn, data)
     return nothing
 end
 

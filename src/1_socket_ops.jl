@@ -32,6 +32,7 @@ const SOCK_DGRAM = Cint(2)
 const SHUT_RD = Cint(0)
 const SHUT_WR = Cint(1)
 const SHUT_RDWR = Cint(2)
+const MSG_PEEK = Cint(0x02)
 
 const SOL_SOCKET = @static Sys.islinux() ? Cint(1) : Cint(0xffff)
 const IPPROTO_TCP = Cint(6)
