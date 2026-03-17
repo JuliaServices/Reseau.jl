@@ -105,15 +105,6 @@ struct WSABUF
     buf::Ptr{UInt8}
 end
 
-module IocpOpKind
-Base.@enum T::UInt8 begin
-    PROBE_READ = 0x01
-    PROBE_WRITE = 0x02
-    CONNECT = 0x03
-    ACCEPT = 0x04
-end
-end
-
 mutable struct IocpConnectRequest
     addrbuf::Vector{UInt8}
     addrlen::Int32

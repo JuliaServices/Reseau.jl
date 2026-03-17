@@ -34,6 +34,15 @@ Base.@enum T::UInt8 begin
 end
 end
 
+module IocpOpKind
+Base.@enum T::UInt8 begin
+    PROBE_READ = 0x01
+    PROBE_WRITE = 0x02
+    CONNECT = 0x03
+    ACCEPT = 0x04
+end
+end
+
 @inline function _mode_has_read(mode::PollMode.T)::Bool
     return (UInt8(mode) & UInt8(PollMode.READ)) != 0
 end
