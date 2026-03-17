@@ -401,6 +401,79 @@ else
                 EL.shutdown!()
             end
         end
+        @testset "show methods summarize TLS endpoints and handshake state" begin
+            EL.shutdown!()
+            tls_listener = nothing
+            tcp_listener = nothing
+            client_tcp = nothing
+            server_tcp = nothing
+            client_tls = nothing
+            server_tls = nothing
+            try
+                listener_cfg = _tls_server_config()
+                tls_listener = TL.listen("tcp", "127.0.0.1:0", listener_cfg; backlog = 8)
+                tls_laddr = TL.addr(tls_listener)
+                @test repr(tls_listener) == "TLS.Listener($(repr(tls_laddr)), active)"
+                close(tls_listener)
+                @test repr(tls_listener) == "TLS.Listener($(repr(tls_laddr)), closed)"
+                tls_listener = nothing
+
+                tcp_listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                tcp_laddr = NC.addr(tcp_listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept(tcp_listener))
+                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(tcp_laddr.port))")
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server_tcp = fetch(accept_task)
+
+                server_cfg = TL.Config(
+                    verify_peer = false,
+                    cert_file = _TLS_CERT_PATH,
+                    key_file = _TLS_KEY_PATH,
+                    alpn_protocols = ["h2", "http/1.1"],
+                )
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    alpn_protocols = ["h2", "http/1.1"],
+                )
+                client_tls = TL.client(client_tcp, client_cfg)
+                server_tls = TL.server(server_tcp, server_cfg)
+
+                client_local = TL.local_addr(client_tls)
+                client_remote = TL.remote_addr(client_tls)
+                server_local = TL.local_addr(server_tls)
+                server_remote = TL.remote_addr(server_tls)
+
+                @test repr(client_tls) == "TLS.Conn($(repr(client_local)) => $(repr(client_remote)), client, handshake pending)"
+                @test repr(server_tls) == "TLS.Conn($(repr(server_local)) => $(repr(server_remote)), server, handshake pending)"
+
+                server_task = errormonitor(Threads.@spawn TL.handshake!(server_tls))
+                TL.handshake!(client_tls)
+                @test _tls_wait_task_done(server_task, 2.0) != :timed_out
+                fetch(server_task)
+
+                client_state = TL.connection_state(client_tls)
+                server_state = TL.connection_state(server_tls)
+                @test client_state.alpn_protocol == "h2"
+                @test server_state.alpn_protocol == "h2"
+                @test repr(client_tls) == "TLS.Conn($(repr(client_local)) => $(repr(client_remote)), client, $(client_state.version), $(client_state.alpn_protocol))"
+                @test repr(server_tls) == "TLS.Conn($(repr(server_local)) => $(repr(server_remote)), server, $(server_state.version), $(server_state.alpn_protocol))"
+
+                close(client_tls)
+                close(server_tls)
+
+                @test repr(client_tls) == "TLS.Conn($(repr(client_local)) => $(repr(client_remote)), client, closed)"
+                @test repr(server_tls) == "TLS.Conn($(repr(server_local)) => $(repr(server_remote)), server, closed)"
+            finally
+                _tls_close_quiet!(server_tls)
+                _tls_close_quiet!(client_tls)
+                _tls_close_quiet!(server_tcp)
+                _tls_close_quiet!(client_tcp)
+                _tls_close_quiet!(tcp_listener)
+                _tls_close_quiet!(tls_listener)
+                EL.shutdown!()
+            end
+        end
         @testset "SSL_CTX is reused for equivalent client configs" begin
             EL.shutdown!()
             listener = nothing

@@ -790,4 +790,32 @@ function addr(listener::Listener)::Union{Nothing, SocketAddr}
     return listener.fd.laddr
 end
 
+@inline function _show_endpoint(io::IO, endpoint::Union{Nothing, SocketAddr})
+    if endpoint === nothing
+        print(io, "?")
+    else
+        show(io, endpoint)
+    end
+    return nothing
+end
+
+@inline _show_state(conn::Conn) = conn.fd.pfd.sysfd >= 0 ? "open" : "closed"
+@inline _show_state(listener::Listener) = listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
+
+function Base.show(io::IO, conn::Conn)
+    print(io, "TCP.Conn(")
+    _show_endpoint(io, local_addr(conn))
+    print(io, " => ")
+    _show_endpoint(io, remote_addr(conn))
+    print(io, ", ", _show_state(conn), ")")
+    return nothing
+end
+
+function Base.show(io::IO, listener::Listener)
+    print(io, "TCP.Listener(")
+    _show_endpoint(io, addr(listener))
+    print(io, ", ", _show_state(listener), ")")
+    return nothing
+end
+
 end
