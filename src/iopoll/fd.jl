@@ -162,6 +162,10 @@ function deadline_fire!(
     return nothing
 end
 
+@inline function _monotonic_ns()::Int64
+    return Int64(time_ns())
+end
+
 """
 Set read/write deadline state on an `FD`.
 

@@ -53,7 +53,3 @@ end
 @inline function _is_accept_retry_errno(errno::Int32)::Bool
     return errno == Int32(Base.Libc.EINTR) || errno == Int32(Base.Libc.ECONNABORTED)
 end
-
-@inline function _monotonic_ns()::Int64
-    return Int64(time_ns())
-end
