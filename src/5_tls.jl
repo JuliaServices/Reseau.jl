@@ -302,7 +302,7 @@ TLS stream wrapper over one `TCP.Conn`.
 read, and write all have separate locks so lazy handshakes and shutdown can
 coordinate without corrupting the OpenSSL state machine.
 """
-mutable struct Conn
+mutable struct Conn <: IO
     tcp::TCP.Conn
     ssl_ctx::Ptr{Cvoid}
     ssl::Ptr{Cvoid}
@@ -1082,53 +1082,42 @@ end
     return nothing
 end
 
-"""
-    read!(conn, buf) -> Int
+@inline function _pending_plaintext(conn::Conn)::Int
+    conn.ssl == C_NULL && return 0
+    return Int(ccall((:SSL_pending, _LIBSSL), Cint, (Ptr{Cvoid},), conn.ssl))
+end
 
-Read decrypted application data into `buf`.
+@inline function _read_some!(conn::Conn, buf::Vector{UInt8})::Int
+    GC.@preserve buf begin
+        return _read_some!(conn, pointer(buf), length(buf))
+    end
+end
 
-The return value matches Julia's standard `read!` convention:
-- `0` means EOF
-- positive values report the number of bytes written into `buf`
-
-The result may be smaller than `length(buf)` for the same reasons as plain TCP:
-OpenSSL may already have only part of a TLS record decrypted, the underlying
-socket may currently have less data available than requested, or EOF may arrive
-before the buffer is filled. Once at least one plaintext byte is produced, the
-call returns immediately instead of waiting to fill the rest of `buf`.
-
-The handshake is performed lazily before the first application read.
-
-If no application bytes are currently available, the call waits for whichever
-underlying socket readiness OpenSSL requests (`WANT_READ` or `WANT_WRITE`),
-subject to any active connection deadline.
-
-Throws `TLSError`, `TLSHandshakeTimeoutError`, or transport-layer close/timeout errors
-wrapped as TLS failures.
-"""
-function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
-    length(buf) == 0 && return 0
+function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+    nbytes == 0 && return 0
     _ensure_open!(conn, "read")
     _ensure_handshake!(conn)
     lock(conn.read_lock)
     try
         _ensure_open!(conn, "read")
         while true
-            ret = GC.@preserve buf @gcsafe_ccall _LIBSSL.SSL_read(
+            chunk_len = min(nbytes, typemax(Cint))
+            ret = @gcsafe_ccall _LIBSSL.SSL_read(
                 conn.ssl::Ptr{Cvoid},
-                pointer(buf)::Ptr{UInt8},
-                Cint(length(buf))::Cint,
+                ptr::Ptr{UInt8},
+                Cint(chunk_len)::Cint,
             )::Cint
             if ret > 0
                 return Int(ret)
             end
             ssl_err = ccall((:SSL_get_error, _LIBSSL), Cint, (Ptr{Cvoid}, Cint), conn.ssl, ret)
             _wait_ssl_ready!(conn, ssl_err, "read") && continue
-            ssl_err == _SSL_ERROR_ZERO_RETURN && return 0
+            ssl_err == _SSL_ERROR_ZERO_RETURN && throw(EOFError())
             throw(_make_tls_error("read", ssl_err))
         end
     catch err
         ex = _as_exception(err)
+        ex isa EOFError && rethrow()
         ex isa TLSError && rethrow()
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("read", ex))
@@ -1139,34 +1128,144 @@ function Base.read!(conn::Conn, buf::Vector{UInt8})::Int
     end
 end
 
+function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
+    newlen = if current == 0
+        min(nb, 1024)
+    else
+        min(nb, current * 2)
+    end
+    resize!(buf, newlen)
+    return newlen
+end
+
+function _peek_eof(conn::Conn)::Bool
+    _ensure_open!(conn, "peek")
+    _ensure_handshake!(conn)
+    lock(conn.read_lock)
+    try
+        _ensure_open!(conn, "peek")
+        _pending_plaintext(conn) > 0 && return false
+        pref = Ref{UInt8}(0x00)
+        while true
+            ret = GC.@preserve pref @gcsafe_ccall _LIBSSL.SSL_peek(
+                conn.ssl::Ptr{Cvoid},
+                Base.unsafe_convert(Ptr{UInt8}, pref)::Ptr{UInt8},
+                Cint(1)::Cint,
+            )::Cint
+            if ret > 0
+                return false
+            end
+            ssl_err = ccall((:SSL_get_error, _LIBSSL), Cint, (Ptr{Cvoid}, Cint), conn.ssl, ret)
+            _wait_ssl_ready!(conn, ssl_err, "peek") && continue
+            ssl_err == _SSL_ERROR_ZERO_RETURN && return true
+            throw(_make_tls_error("peek", ssl_err))
+        end
+    catch err
+        ex = _as_exception(err)
+        ex isa TLSError && rethrow()
+        if ex isa IOPoll.NetClosingError || _is_closed(conn)
+            throw(_closed_error("peek", ex))
+        end
+        throw(_wrap_tls_exception("peek", ex))
+    finally
+        unlock(conn.read_lock)
+    end
+end
+
+"""
+    unsafe_read(conn, ptr, nbytes)
+
+Read exactly `nbytes` of decrypted application data or throw `EOFError`.
+"""
+function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
+    remaining = Int(nbytes)
+    offset = 0
+    while remaining > 0
+        n = _read_some!(conn, ptr + offset, remaining)
+        offset += n
+        remaining -= n
+    end
+    return nothing
+end
+
+function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(buf))::Int
+    Base.require_one_based_indexing(buf)
+    requested = Int(nb)
+    requested < 0 && throw(ArgumentError("nb must be >= 0"))
+    requested == 0 && return 0
+
+    original_len = length(buf)
+    current_len = original_len
+    bytes_read = 0
+    while bytes_read < requested
+        if current_len == 0 || bytes_read == current_len
+            current_len = _grow_readbytes_target!(buf, current_len, requested)
+        end
+        chunk_capacity = min(current_len - bytes_read, requested - bytes_read)
+        n = try
+            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), chunk_capacity)
+        catch err
+            ex = err::Exception
+            ex isa EOFError || rethrow(ex)
+            break
+        end
+        bytes_read += n
+    end
+    if current_len > original_len
+        resize!(buf, bytes_read)
+    end
+    return bytes_read
+end
+
+function Base.readavailable(conn::Conn)::Vector{UInt8}
+    _ensure_open!(conn, "read")
+    if _handshake_complete(conn)
+        pending = _pending_plaintext(conn)
+        if pending > 0
+            buf = Vector{UInt8}(undef, pending)
+            n = _read_some!(conn, buf)
+            return resize!(buf, n)
+        end
+    end
+    buf = Vector{UInt8}(undef, Base.SZ_UNBUFFERED_IO)
+    n = try
+        _read_some!(conn, buf)
+    catch err
+        ex = err::Exception
+        ex isa EOFError || rethrow(ex)
+        return UInt8[]
+    end
+    return resize!(buf, n)
+end
+
+function Base.read(conn::Conn, ::Type{UInt8})::UInt8
+    ref = Ref{UInt8}(0x00)
+    Base.unsafe_read(conn, ref, 1)
+    return ref[]
+end
+
+function Base.eof(conn::Conn)::Bool
+    isopen(conn) || return true
+    return _peek_eof(conn)
+end
+
+function Base.isopen(conn::Conn)::Bool
+    return !_is_closed(conn) && conn.ssl != C_NULL && isopen(conn.tcp)
+end
+
+function Base.flush(::Conn)
+    return nothing
+end
+
 """
     write(conn, buf) -> Int
     write(conn, buf, nbytes) -> Int
 
 Write plaintext application bytes through the TLS connection.
 
-`write(conn, buf)` attempts to write the entire buffer. The fixed-size byte-buffer overload
-allows callers to cap the write at `nbytes`.
-
-Returns the number of plaintext bytes accepted by OpenSSL.
-
-On success, the return value is always the full requested length. If OpenSSL or
-the underlying transport cannot make progress immediately, the call waits for
-the requested readiness (`WANT_READ`/`WANT_WRITE`) and then resumes until the
-whole payload is written or an error occurs.
-
-Throws `TLSError` on TLS failure. A write timeout becomes a permanent write error for
-the connection because a timed-out TLS write can leave record framing state
-ambiguous for future writes.
+`write(conn, buf)` attempts to write the entire buffer. The fixed-size
+byte-buffer overload allows callers to cap the write at `nbytes`.
 """
-function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
-    return _write!(conn, buf, length(buf))
-end
-
-function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
-    return _write!(conn, buf, nbytes)
-end
-
 function _write_buffer(buf::AbstractVector{UInt8}, nbytes::Int)
     if buf isa StridedVector{UInt8} && stride(buf, 1) == 1
         return buf
@@ -1178,10 +1277,8 @@ end
 
 _write_buffer(buf::ByteMemory, nbytes::Int) = buf
 
-function _write!(conn::Conn, buf, nbytes::Integer)::Int
+function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     nbytes_int = Int(nbytes)
-    nbytes_int < 0 && throw(ArgumentError("nbytes must be >= 0"))
-    nbytes_int <= length(buf) || throw(ArgumentError("nbytes exceeds buffer length"))
     nbytes_int == 0 && return 0
     _ensure_open!(conn, "write")
     _ensure_handshake!(conn)
@@ -1189,25 +1286,21 @@ function _write!(conn::Conn, buf, nbytes::Integer)::Int
     try
         _ensure_open!(conn, "write")
         conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
-        write_buf = _write_buffer(buf, nbytes_int)
         total = 0
-        GC.@preserve write_buf begin
-            base_ptr = pointer(write_buf)
-            while total < nbytes_int
-                chunk_len = nbytes_int - total
-                wrote = @gcsafe_ccall _LIBSSL.SSL_write(
-                    conn.ssl::Ptr{Cvoid},
-                    (base_ptr + total)::Ptr{UInt8},
-                    Cint(chunk_len)::Cint,
-                )::Cint
-                if wrote > 0
-                    total += Int(wrote)
-                    continue
-                end
-                ssl_err = ccall((:SSL_get_error, _LIBSSL), Cint, (Ptr{Cvoid}, Cint), conn.ssl, wrote)
-                _wait_ssl_ready!(conn, ssl_err, "write") && continue
-                throw(_make_tls_error("write", ssl_err))
+        while total < nbytes_int
+            chunk_len = min(nbytes_int - total, typemax(Cint))
+            wrote = @gcsafe_ccall _LIBSSL.SSL_write(
+                conn.ssl::Ptr{Cvoid},
+                (ptr + total)::Ptr{UInt8},
+                Cint(chunk_len)::Cint,
+            )::Cint
+            if wrote > 0
+                total += Int(wrote)
+                continue
             end
+            ssl_err = ccall((:SSL_get_error, _LIBSSL), Cint, (Ptr{Cvoid}, Cint), conn.ssl, wrote)
+            _wait_ssl_ready!(conn, ssl_err, "write") && continue
+            throw(_make_tls_error("write", ssl_err))
         end
         return total
     catch err
@@ -1226,6 +1319,39 @@ function _write!(conn::Conn, buf, nbytes::Integer)::Int
         throw(_wrap_tls_exception("write", ex))
     finally
         unlock(conn.write_lock)
+    end
+end
+
+function Base.write(conn::Conn, byte::UInt8)::Int
+    ref = Ref{UInt8}(byte)
+    GC.@preserve ref begin
+        return Int(Base.unsafe_write(conn, Base.unsafe_convert(Ptr{UInt8}, ref), UInt(1)))
+    end
+end
+
+function Base.write(conn::Conn, buf::StridedVector{UInt8})::Int
+    if stride(buf, 1) == 1
+        return GC.@preserve buf Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))
+    end
+    data = Vector{UInt8}(buf)
+    GC.@preserve data begin
+        return Int(Base.unsafe_write(conn, pointer(data), UInt(length(data))))
+    end
+end
+
+function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
+    data = Vector{UInt8}(buf)
+    GC.@preserve data begin
+        return Int(Base.unsafe_write(conn, pointer(data), UInt(length(data))))
+    end
+end
+
+function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
+    n = Int(nbytes)
+    n < 0 && throw(ArgumentError("nbytes must be >= 0"))
+    n <= length(buf) || throw(ArgumentError("nbytes exceeds buffer length"))
+    GC.@preserve buf begin
+        return Int(Base.unsafe_write(conn, pointer(buf), UInt(n)))
     end
 end
 

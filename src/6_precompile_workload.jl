@@ -288,8 +288,7 @@ function _pc_run_tls_workload!()
         recv_buf = Vector{UInt8}(undef, 3)
         written = write(client, payload)
         written == 3 || throw(ArgumentError("TLS precompile workload expected 3-byte write"))
-        read_count = read!(server, recv_buf)
-        read_count == 3 || throw(ArgumentError("TLS precompile workload expected 3-byte read"))
+        read!(server, recv_buf)
     finally
         try
             server === nothing || close(server)

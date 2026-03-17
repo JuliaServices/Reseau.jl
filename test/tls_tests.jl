@@ -80,6 +80,7 @@ if !(Sys.isapple() || Sys.islinux())
     end
 else
     @testset "TLS phase 6" begin
+        @test TL.Conn <: IO
         @testset "config validation" begin
             cfg_default = TL.Config()
             @test cfg_default.min_version == TL.TLS1_2_VERSION
@@ -545,11 +546,11 @@ else
                         conn = TL.accept(listener)
                         TL.handshake!(conn)
                         buf = Vector{UInt8}(undef, 4)
-                        n = read!(conn, buf)
-                        n > 0 && write(conn, view(buf, 1:n))
+                        read!(conn, buf)
+                        write(conn, buf)
                         view_buf = Vector{UInt8}(undef, 3)
-                        n = read!(conn, view_buf)
-                        n > 0 && write(conn, view(view_buf, 1:n))
+                        read!(conn, view_buf)
+                        write(conn, view_buf)
                         return conn
                     catch err
                         return err
@@ -564,12 +565,12 @@ else
                 payload = UInt8[0x61, 0x62, 0x63, 0x64]
                 @test write(client, payload) == 4
                 recv_buf = Vector{UInt8}(undef, 4)
-                @test read!(client, recv_buf) == 4
+                @test read!(client, recv_buf) === recv_buf
                 @test recv_buf == payload
                 payload_view = @view payload[2:4]
                 @test write(client, payload_view) == length(payload_view)
                 recv_view_buf = Vector{UInt8}(undef, length(payload_view))
-                @test read!(client, recv_view_buf) == length(payload_view)
+                @test read!(client, recv_view_buf) === recv_view_buf
                 @test recv_view_buf == collect(payload_view)
                 @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
                 server_result = fetch(accept_task)
@@ -607,7 +608,8 @@ else
                 ))
                 @test _tls_wait_task_done(close_task, 2.0) != :timed_out
                 buf = Vector{UInt8}(undef, 1)
-                @test read!(client, buf) == 0
+                @test eof(client)
+                @test_throws EOFError read!(client, buf)
             finally
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
@@ -645,7 +647,8 @@ else
                     @test write_err.message == "tls: protocol is shutdown"
                 end
                 TL.set_read_deadline!(server, time_ns() + 1_000_000_000)
-                @test read!(server, Vector{UInt8}(undef, 1)) == 0
+                @test eof(server)
+                @test_throws EOFError read!(server, Vector{UInt8}(undef, 1))
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
