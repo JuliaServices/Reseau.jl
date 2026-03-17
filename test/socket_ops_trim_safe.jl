@@ -20,6 +20,7 @@ end
 function _wait_connect_ready!(fd::Cint)
     registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
+        IP.arm_waiter!(registration, IP.PollMode.WRITE)
         IP.pollwait!(registration.write_waiter)
     finally
         IP.deregister!(fd)

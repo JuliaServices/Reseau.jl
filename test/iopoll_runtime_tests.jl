@@ -11,20 +11,25 @@ function _el_socketpair_stream()
     client = Cint(-1)
     accepted = Cint(-1)
     try
+        _el_log_test_progress("_el_socketpair_stream: listener")
         listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
         SO.bind_socket(listener, SO.sockaddr_in_loopback(0))
         SO.listen_socket(listener, 32)
         bound = SO.get_socket_name_in(listener)
         port = Int(SO.sockaddr_in_port(bound))
+        _el_log_test_progress("_el_socketpair_stream: connect")
         client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
         err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
         if err != Int32(0) && err != Int32(Base.Libc.EISCONN)
             err == Int32(Base.Libc.EINPROGRESS) || err == Int32(Base.Libc.EALREADY) || err == Int32(Base.Libc.EINTR) || throw(SystemError("connect", Int(err)))
+            _el_log_test_progress("_el_socketpair_stream: wait connect ready")
             _el_wait_connect_ready!(client)
+            _el_log_test_progress("_el_socketpair_stream: check so_error")
             so_error = SO.get_socket_error(client)
             so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
         end
+        _el_log_test_progress("_el_socketpair_stream: accept")
         accepted, _ = _el_accept_with_retry(listener)
         stream_client = client
         stream_server = accepted
@@ -107,6 +112,9 @@ end
 function _el_wait_connect_ready!(fd::Cint)
     registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
+        # Unix backends observe writability directly from the registration, but
+        # IOCP requires an explicit probe submission before a waiter can block.
+        IP.arm_waiter!(registration, IP.PollMode.WRITE)
         IP.pollwait!(registration.write_waiter)
     finally
         IP.deregister!(fd)

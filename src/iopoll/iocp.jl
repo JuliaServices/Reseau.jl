@@ -708,7 +708,11 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     for i in 1:n
         entry = entries[i]
         if entry.key == _WAKE_KEY && entry.overlapped == C_NULL
-            delay_ns != 0 && (@atomic :release backend.wake_sig = UInt32(0))
+            # Reseau runs one dedicated poller thread, so once the wake packet is
+            # consumed the coalescing latch must always be cleared. Leaving it set
+            # after a zero-timeout poll can suppress the next real wake and strand
+            # later timers or deadline updates behind an infinite GQCS wait.
+            @atomic :release backend.wake_sig = UInt32(0)
             continue
         end
         entry.overlapped == C_NULL && continue
