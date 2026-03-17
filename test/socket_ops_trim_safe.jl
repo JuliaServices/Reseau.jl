@@ -1,6 +1,6 @@
 using Reseau
 
-const EL = Reseau.IOPoll
+const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 function _accept_with_retry(listener::Cint)::Cint
@@ -18,11 +18,11 @@ function _accept_with_retry(listener::Cint)::Cint
 end
 
 function _wait_connect_ready!(fd::Cint)
-    registration = EL.register!(fd; mode = EL.PollMode.WRITE)
+    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
-        EL.pollwait!(registration.write_waiter)
+        IP.pollwait!(registration.write_waiter)
     finally
-        EL.deregister!(fd)
+        IP.deregister!(fd)
     end
     return nothing
 end
@@ -91,7 +91,7 @@ function run_socket_ops_trim_sample()::Nothing
         accepted >= 0 && SO.close_socket_nothrow(accepted)
         client >= 0 && SO.close_socket_nothrow(client)
         listener >= 0 && SO.close_socket_nothrow(listener)
-        EL.shutdown!()
+        IP.shutdown!()
     end
     return nothing
 end

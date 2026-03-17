@@ -1,7 +1,7 @@
 using Test
 using Reseau
 
-const EL = Reseau.IOPoll
+const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 function _socketpair(sotype::Cint = SO.SOCK_STREAM)::Tuple{Cint, Cint}
@@ -30,11 +30,11 @@ function _accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
 end
 
 function _wait_connect_ready!(fd::Cint)
-    registration = EL.register!(fd; mode = EL.PollMode.WRITE)
+    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
-        EL.pollwait!(registration.write_waiter)
+        IP.pollwait!(registration.write_waiter)
     finally
-        EL.deregister!(fd)
+        IP.deregister!(fd)
     end
     return nothing
 end
@@ -109,7 +109,7 @@ else
             end
         end
         @testset "connect completion and accept flags" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = Cint(-1)
             client = Cint(-1)
             accepted = Cint(-1)
@@ -136,7 +136,7 @@ else
                 accepted >= 0 && SO.close_socket_nothrow(accepted)
                 client >= 0 && SO.close_socket_nothrow(client)
                 listener >= 0 && SO.close_socket_nothrow(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
     end
