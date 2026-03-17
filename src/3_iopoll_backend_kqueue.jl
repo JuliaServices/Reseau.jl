@@ -37,11 +37,14 @@ struct Timespec
 end
 
 """
-Per-poller reusable backend buffers to avoid steady-state allocations.
+Typed kqueue backend state attached to the shared poller.
 """
-mutable struct KqueueBackendScratch
+mutable struct KqueueBackendState <: BackendState
+    kq::Cint
+    wake_ident::UInt
     events::Vector{Kevent}
     timeout_ref::Base.RefValue{Timespec}
+    @atomic wake_sig::UInt32
 end
 
 @inline function _make_kevent(
@@ -81,9 +84,8 @@ function _backend_init!(state::Poller)::Int32
         @ccall close(kq::Cint)::Cint
         return errno
     end
-    state.kq = kq
-    state.wake_ident = WAKE_IDENT
-    change = Ref(_make_kevent(state.wake_ident, EVFILT_USER, EV_ADD | EV_CLEAR | EV_ENABLE, UInt32(0), 0, C_NULL))
+    wake_ident = WAKE_IDENT
+    change = Ref(_make_kevent(wake_ident, EVFILT_USER, EV_ADD | EV_CLEAR | EV_ENABLE, UInt32(0), 0, C_NULL))
     while true
         n = @ccall kevent(
             kq::Cint,
@@ -97,12 +99,17 @@ function _backend_init!(state::Poller)::Int32
             errno = Int32(Base.Libc.errno())
             errno == Int32(Base.Libc.EINTR) && continue
             @ccall close(kq::Cint)::Cint
-            state.kq = Cint(-1)
             return errno
         end
         break
     end
-    state.backend_scratch = KqueueBackendScratch(Vector{Kevent}(undef, MAX_KQUEUE_EVENTS), Ref(Timespec(0, 0)))
+    state.backend_state = KqueueBackendState(
+        kq,
+        wake_ident,
+        Vector{Kevent}(undef, MAX_KQUEUE_EVENTS),
+        Ref(Timespec(0, 0)),
+        UInt32(0),
+    )
     return Int32(0)
 end
 
@@ -110,11 +117,15 @@ end
 Close backend resources.
 """
 function _backend_close!(state::Poller)
-    if state.kq != Cint(-1)
-        @ccall close(state.kq::Cint)::Cint
-        state.kq = Cint(-1)
+    backend = state.backend_state
+    if backend isa KqueueBackendState
+        kqueue = backend::KqueueBackendState
+        if kqueue.kq != Cint(-1)
+            @ccall close(kqueue.kq::Cint)::Cint
+            kqueue.kq = Cint(-1)
+        end
     end
-    state.backend_scratch = nothing
+    state.backend_state = nothing
     return nothing
 end
 
@@ -127,6 +138,9 @@ function _backend_open_fd!(
         mode::PollMode.T,
         token::UInt64,
     )::Int32
+    backend = state.backend_state
+    backend isa KqueueBackendState || return Int32(Base.Libc.ENOSYS)
+    kqueue = backend::KqueueBackendState
     changes = Kevent[]
     udata = Ptr{Cvoid}(UInt(token))
     if _mode_has_read(mode)
@@ -138,7 +152,7 @@ function _backend_open_fd!(
     isempty(changes) && return Int32(Base.Libc.EINVAL)
     n = GC.@preserve changes begin
         @ccall kevent(
-            state.kq::Cint,
+            kqueue.kq::Cint,
             pointer(changes)::Ptr{Kevent},
             Cint(length(changes))::Cint,
             C_NULL::Ptr{Kevent},
@@ -172,13 +186,16 @@ end
 Wake a blocking `kevent` call via EVFILT_USER + NOTE_TRIGGER.
 """
 function _backend_wake!(state::Poller)::Int32
-    state.kq == Cint(-1) && return Int32(0)
-    _, ok = @atomicreplace(state.wak_sig, UInt32(0) => UInt32(1))
+    backend = state.backend_state
+    backend isa KqueueBackendState || return Int32(Base.Libc.ENOSYS)
+    kqueue = backend::KqueueBackendState
+    kqueue.kq == Cint(-1) && return Int32(0)
+    _, ok = @atomicreplace(kqueue.wake_sig, UInt32(0) => UInt32(1))
     ok || return Int32(0)
-    trigger = Ref(_make_kevent(state.wake_ident, EVFILT_USER, UInt16(0), NOTE_TRIGGER, 0, C_NULL))
+    trigger = Ref(_make_kevent(kqueue.wake_ident, EVFILT_USER, UInt16(0), NOTE_TRIGGER, 0, C_NULL))
     while true
         n = @ccall kevent(
-            state.kq::Cint,
+            kqueue.kq::Cint,
             trigger::Ref{Kevent},
             1::Cint,
             C_NULL::Ptr{Kevent},
@@ -188,7 +205,7 @@ function _backend_wake!(state::Poller)::Int32
         if n == -1
             errno = Int32(Base.Libc.errno())
             errno == Int32(Base.Libc.EINTR) && continue
-            @atomic :release state.wak_sig = UInt32(0)
+            @atomic :release kqueue.wake_sig = UInt32(0)
             return errno
         end
         break
@@ -203,11 +220,11 @@ Poll kqueue once and dispatch decoded events through `_dispatch_ready_event!`.
 # throughput issues; Go's `runtime.netpoll(delay)` is tightly integrated with its
 # runtime timer/scheduler loop, while we currently drive polling from a foreign thread.
 function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
-    scratch_any = state.backend_scratch
-    scratch_any isa KqueueBackendScratch || return Int32(Base.Libc.ENOSYS)
-    scratch = scratch_any::KqueueBackendScratch
-    events = scratch.events
-    timeout_ref = scratch.timeout_ref
+    backend = state.backend_state
+    backend isa KqueueBackendState || return Int32(Base.Libc.ENOSYS)
+    kqueue = backend::KqueueBackendState
+    events = kqueue.events
+    timeout_ref = kqueue.timeout_ref
     timeout_ptr = Ptr{Timespec}(C_NULL)
     if delay_ns == 0
         timeout_ref[] = Timespec(0, 0)
@@ -218,7 +235,7 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     end
     n = GC.@preserve events timeout_ref begin
         @gcsafe_ccall kevent(
-            state.kq::Cint,
+            kqueue.kq::Cint,
             C_NULL::Ptr{Kevent},
             0::Cint,
             pointer(events)::Ptr{Kevent},
@@ -234,8 +251,8 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     end
     for i in 1:n
         ev = events[i]
-        if ev.filter == EVFILT_USER && ev.ident == state.wake_ident
-            delay_ns != 0 && (@atomic :release state.wak_sig = UInt32(0))
+        if ev.filter == EVFILT_USER && ev.ident == kqueue.wake_ident
+            delay_ns != 0 && (@atomic :release kqueue.wake_sig = UInt32(0))
             continue
         end
         mode = _decode_event_mode(ev.filter, ev.flags)

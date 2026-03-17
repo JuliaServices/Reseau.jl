@@ -47,10 +47,13 @@ end
 end
 
 """
-Per-poller reusable Linux backend buffers.
+Typed epoll backend state attached to the shared poller.
 """
-mutable struct EpollBackendScratch
+mutable struct EpollBackendState <: BackendState
+    epfd::Cint
+    wakefd::Cint
     events::Vector{EpollEvent}
+    @atomic wake_sig::UInt32
 end
 
 """
@@ -77,9 +80,7 @@ function _backend_init!(state::Poller)::Int32
         @ccall close(epfd::Cint)::Cint
         return errno
     end
-    state.kq = epfd
-    state.wake_ident = UInt(efd)
-    state.backend_scratch = EpollBackendScratch(Vector{EpollEvent}(undef, MAX_EPOLL_EVENTS))
+    state.backend_state = EpollBackendState(epfd, efd, Vector{EpollEvent}(undef, MAX_EPOLL_EVENTS), UInt32(0))
     return Int32(0)
 end
 
@@ -87,14 +88,17 @@ end
 Close epoll backend resources.
 """
 function _backend_close!(state::Poller)
-    wakefd = Cint(state.wake_ident)
-    wakefd > 0 && (@ccall close(wakefd::Cint)::Cint)
-    if state.kq != Cint(-1)
-        @ccall close(state.kq::Cint)::Cint
-        state.kq = Cint(-1)
+    backend = state.backend_state
+    if backend isa EpollBackendState
+        epoll = backend::EpollBackendState
+        epoll.wakefd > 0 && (@ccall close(epoll.wakefd::Cint)::Cint)
+        if epoll.epfd != Cint(-1)
+            @ccall close(epoll.epfd::Cint)::Cint
+            epoll.epfd = Cint(-1)
+        end
+        epoll.wakefd = Cint(-1)
     end
-    state.wake_ident = UInt(0)
-    state.backend_scratch = nothing
+    state.backend_state = nothing
     return nothing
 end
 
@@ -107,6 +111,9 @@ function _backend_open_fd!(
         mode::PollMode.T,
         token::UInt64,
     )::Int32
+    backend = state.backend_state
+    backend isa EpollBackendState || return Int32(Base.Libc.ENOSYS)
+    epoll = backend::EpollBackendState
     events = UInt32(0)
     _mode_has_read(mode) && (events |= EPOLLIN)
     _mode_has_write(mode) && (events |= EPOLLOUT)
@@ -114,7 +121,7 @@ function _backend_open_fd!(
     events |= (EPOLLRDHUP | EPOLLET)
     ev = Ref(_make_epoll_event(events, token))
     ctl = @ccall epoll_ctl(
-        state.kq::Cint,
+        epoll.epfd::Cint,
         EPOLL_CTL_ADD::Cint,
         fd::Cint,
         ev::Ref{EpollEvent},
@@ -134,9 +141,12 @@ end
 Remove fd from epoll interest set.
 """
 function _backend_close_fd!(state::Poller, fd::Cint)::Int32
+    backend = state.backend_state
+    backend isa EpollBackendState || return Int32(Base.Libc.ENOSYS)
+    epoll = backend::EpollBackendState
     ev = Ref(_make_epoll_event(UInt32(0), UInt64(0)))
     ctl = @ccall epoll_ctl(
-        state.kq::Cint,
+        epoll.epfd::Cint,
         EPOLL_CTL_DEL::Cint,
         fd::Cint,
         ev::Ref{EpollEvent},
@@ -154,14 +164,16 @@ end
 Wake a blocking epoll_wait via eventfd.
 """
 function _backend_wake!(state::Poller)::Int32
-    state.kq == Cint(-1) && return Int32(0)
-    _, ok = @atomicreplace(state.wak_sig, UInt32(0) => UInt32(1))
+    backend = state.backend_state
+    backend isa EpollBackendState || return Int32(Base.Libc.ENOSYS)
+    epoll = backend::EpollBackendState
+    epoll.epfd == Cint(-1) && return Int32(0)
+    _, ok = @atomicreplace(epoll.wake_sig, UInt32(0) => UInt32(1))
     ok || return Int32(0)
-    wakefd = Cint(state.wake_ident)
     one = Ref{UInt64}(1)
     while true
         n = @gcsafe_ccall write(
-            wakefd::Cint,
+            epoll.wakefd::Cint,
             one::Ref{UInt64},
             Csize_t(sizeof(UInt64))::Csize_t,
         )::Cssize_t
@@ -172,7 +184,7 @@ function _backend_wake!(state::Poller)::Int32
             errno = Int32(Base.Libc.errno())
             errno == Int32(Base.Libc.EINTR) && continue
             errno == Int32(Base.Libc.EAGAIN) && return Int32(0)
-            @atomic :release state.wak_sig = UInt32(0)
+            @atomic :release epoll.wake_sig = UInt32(0)
             return errno
         end
     end
@@ -206,15 +218,15 @@ end
 Poll epoll once and dispatch decoded events.
 """
 function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
-    scratch_any = state.backend_scratch
-    scratch_any isa EpollBackendScratch || return Int32(Base.Libc.ENOSYS)
-    scratch = scratch_any::EpollBackendScratch
-    events = scratch.events
+    backend = state.backend_state
+    backend isa EpollBackendState || return Int32(Base.Libc.ENOSYS)
+    epoll = backend::EpollBackendState
+    events = epoll.events
     waitms = _epoll_wait_timeout_ms(delay_ns)
     while true
         n = GC.@preserve events begin
             @gcsafe_ccall epoll_wait(
-                state.kq::Cint,
+                epoll.epfd::Cint,
                 pointer(events)::Ptr{EpollEvent},
                 Cint(length(events))::Cint,
                 waitms::Cint,
@@ -236,11 +248,11 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
                 if delay_ns != 0
                     one = Ref{UInt64}(0)
                     _ = @gcsafe_ccall read(
-                        Cint(state.wake_ident)::Cint,
+                        epoll.wakefd::Cint,
                         one::Ref{UInt64},
                         Csize_t(sizeof(UInt64))::Csize_t,
                     )::Cssize_t
-                    @atomic :release state.wak_sig = UInt32(0)
+                    @atomic :release epoll.wake_sig = UInt32(0)
                 end
                 continue
             end

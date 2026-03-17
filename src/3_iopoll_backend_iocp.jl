@@ -143,12 +143,13 @@ mutable struct IocpRegistration
     @atomic closing::Bool
 end
 
-mutable struct IocpBackendScratch
+mutable struct IocpBackendState <: BackendState
     port::Ptr{Cvoid}
     entries::Vector{OverlappedEntry}
     by_fd::Dict{Cint, IocpRegistration}
     by_ptr::Dict{Ptr{Cvoid}, IocpOp}
     zombies::Vector{IocpRegistration}
+    @atomic wake_sig::UInt32
 end
 
 @inline function _socket_value(fd::Cint)::UInt
@@ -161,6 +162,12 @@ end
 
 @inline function _op_ptr(op::IocpOp)::Ptr{Cvoid}
     return Ptr{Cvoid}(Base.unsafe_convert(Ptr{Overlapped}, op.storage))
+end
+
+@inline function _iocp_backend(state::Poller)
+    backend = state.backend_state
+    backend isa IocpBackendState || return nothing
+    return backend::IocpBackendState
 end
 
 @inline function _win_get_last_error()::UInt32
@@ -309,15 +316,15 @@ end
     return (@atomic :acquire reg.read_op.active) || (@atomic :acquire reg.write_op.active)
 end
 
-function _cleanup_registration_if_done!(scratch::IocpBackendScratch, reg::IocpRegistration)
+function _cleanup_registration_if_done!(backend::IocpBackendState, reg::IocpRegistration)
     if !(@atomic :acquire reg.closing)
         return nothing
     end
     _registration_has_active(reg) && return nothing
-    delete!(scratch.by_ptr, _op_ptr(reg.read_op))
-    delete!(scratch.by_ptr, _op_ptr(reg.write_op))
-    idx = findfirst(x -> x === reg, scratch.zombies)
-    idx === nothing || deleteat!(scratch.zombies, idx)
+    delete!(backend.by_ptr, _op_ptr(reg.read_op))
+    delete!(backend.by_ptr, _op_ptr(reg.write_op))
+    idx = findfirst(x -> x === reg, backend.zombies)
+    idx === nothing || deleteat!(backend.zombies, idx)
     return nothing
 end
 
@@ -452,10 +459,9 @@ function _lookup_iocp_registration(registration::Registration)::Union{Nothing, I
     isassigned(POLLER) || return nothing
     state = POLLER[]
     (@atomic :acquire state.running) || return nothing
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return nothing
-    scratch = scratch_any::IocpBackendScratch
-    reg = get(scratch.by_fd, registration.fd, nothing)
+    backend = _iocp_backend(state)
+    backend === nothing && return nothing
+    reg = get(backend.by_fd, registration.fd, nothing)
     reg === nothing && return nothing
     reg.token == registration.token || return nothing
     return reg
@@ -463,8 +469,6 @@ end
 
 function _finish_iocp_mode!(registration::Registration, mode::PollMode.T)::Int32
     state = POLLER[]
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
     reg = nothing
     op = nothing
     lock(state.lock)
@@ -547,8 +551,6 @@ end
 
 function _iocp_finish_accept!(registration::Registration)::Tuple{Cint, Vector{UInt8}, Int32}
     state = POLLER[]
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return Cint(-1), UInt8[], Int32(Base.Libc.ENOSYS)
     request = nothing
     lock(state.lock)
     try
@@ -571,28 +573,27 @@ function _backend_init!(state::Poller)::Int32
         UInt32(0)::UInt32,
     )::Ptr{Cvoid}
     port == C_NULL && return _map_win_errno(_win_get_last_error())
-    state.backend_scratch = IocpBackendScratch(
+    state.backend_state = IocpBackendState(
         port,
         Vector{OverlappedEntry}(undef, _MAX_IOCP_EVENTS),
         Dict{Cint, IocpRegistration}(),
         Dict{Ptr{Cvoid}, IocpOp}(),
         IocpRegistration[],
+        UInt32(0),
     )
-    state.wake_ident = UInt(0)
     return Int32(0)
 end
 
 function _backend_close!(state::Poller)
-    scratch_any = state.backend_scratch
-    if scratch_any isa IocpBackendScratch
-        scratch = scratch_any::IocpBackendScratch
-        if scratch.port != C_NULL
+    backend = _iocp_backend(state)
+    if backend !== nothing
+        if backend.port != C_NULL
             _ = @gcsafe_ccall _KERNEL32.CloseHandle(
-                scratch.port::Ptr{Cvoid},
+                backend.port::Ptr{Cvoid},
             )::Int32
         end
     end
-    state.backend_scratch = nothing
+    state.backend_state = nothing
     return nothing
 end
 
@@ -603,29 +604,27 @@ function _backend_open_fd!(
         token::UInt64,
     )::Int32
     _ = mode
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
-    scratch = scratch_any::IocpBackendScratch
+    backend = _iocp_backend(state)
+    backend === nothing && return Int32(Base.Libc.ENOSYS)
     associated = @gcsafe_ccall _KERNEL32.CreateIoCompletionPort(
         _socket_handle(fd)::Ptr{Cvoid},
-        scratch.port::Ptr{Cvoid},
+        backend.port::Ptr{Cvoid},
         UInt(token)::UInt,
         UInt32(0)::UInt32,
     )::Ptr{Cvoid}
     associated == C_NULL && return _map_win_errno(_win_get_last_error())
     reg = _new_iocp_registration(fd, token)
     reg.wait_on_success = _maybe_set_completion_modes!(fd)
-    scratch.by_fd[fd] = reg
-    scratch.by_ptr[_op_ptr(reg.read_op)] = reg.read_op
-    scratch.by_ptr[_op_ptr(reg.write_op)] = reg.write_op
+    backend.by_fd[fd] = reg
+    backend.by_ptr[_op_ptr(reg.read_op)] = reg.read_op
+    backend.by_ptr[_op_ptr(reg.write_op)] = reg.write_op
     return Int32(0)
 end
 
 function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
-    scratch = scratch_any::IocpBackendScratch
-    reg = get(scratch.by_fd, registration.fd, nothing)
+    backend = _iocp_backend(state)
+    backend === nothing && return Int32(Base.Libc.ENOSYS)
+    reg = get(backend.by_fd, registration.fd, nothing)
     reg === nothing && return Int32(0)
     reg.token == registration.token || return Int32(0)
     if _mode_has_read(mode) && _mode_has_read(registration.mode)
@@ -640,38 +639,36 @@ function _backend_arm_waiter!(state::Poller, registration::Registration, mode::P
 end
 
 function _backend_close_fd!(state::Poller, fd::Cint)::Int32
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
-    scratch = scratch_any::IocpBackendScratch
-    reg = pop!(scratch.by_fd, fd, nothing)
+    backend = _iocp_backend(state)
+    backend === nothing && return Int32(Base.Libc.ENOSYS)
+    reg = pop!(backend.by_fd, fd, nothing)
     reg === nothing && return Int32(0)
     @atomic :release reg.closing = true
     _cancel_iocp_op!(reg, reg.read_op)
     _cancel_iocp_op!(reg, reg.write_op)
     if _registration_has_active(reg)
-        idx = findfirst(x -> x === reg, scratch.zombies)
-        idx === nothing && push!(scratch.zombies, reg)
+        idx = findfirst(x -> x === reg, backend.zombies)
+        idx === nothing && push!(backend.zombies, reg)
     else
-        delete!(scratch.by_ptr, _op_ptr(reg.read_op))
-        delete!(scratch.by_ptr, _op_ptr(reg.write_op))
+        delete!(backend.by_ptr, _op_ptr(reg.read_op))
+        delete!(backend.by_ptr, _op_ptr(reg.write_op))
     end
     return Int32(0)
 end
 
 function _backend_wake!(state::Poller)::Int32
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
-    scratch = scratch_any::IocpBackendScratch
-    _, ok = @atomicreplace(state.wak_sig, UInt32(0) => UInt32(1))
+    backend = _iocp_backend(state)
+    backend === nothing && return Int32(Base.Libc.ENOSYS)
+    _, ok = @atomicreplace(backend.wake_sig, UInt32(0) => UInt32(1))
     ok || return Int32(0)
     posted = @gcsafe_ccall _KERNEL32.PostQueuedCompletionStatus(
-        scratch.port::Ptr{Cvoid},
+        backend.port::Ptr{Cvoid},
         UInt32(0)::UInt32,
         _WAKE_KEY::UInt,
         C_NULL::Ptr{Cvoid},
     )::Int32
     if posted == 0
-        @atomic :release state.wak_sig = UInt32(0)
+        @atomic :release backend.wake_sig = UInt32(0)
         return _map_win_errno(_win_get_last_error())
     end
     return Int32(0)
@@ -694,15 +691,14 @@ end
 end
 
 function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
-    scratch_any = state.backend_scratch
-    scratch_any isa IocpBackendScratch || return Int32(Base.Libc.ENOSYS)
-    scratch = scratch_any::IocpBackendScratch
-    entries = scratch.entries
+    backend = _iocp_backend(state)
+    backend === nothing && return Int32(Base.Libc.ENOSYS)
+    entries = backend.entries
     removed = Ref{UInt32}(UInt32(0))
     wait_ms = _iocp_timeout_ms(delay_ns)
     ok = GC.@preserve entries removed begin
         @gcsafe_ccall _KERNEL32.GetQueuedCompletionStatusEx(
-            scratch.port::Ptr{Cvoid},
+            backend.port::Ptr{Cvoid},
             pointer(entries)::Ptr{OverlappedEntry},
             UInt32(length(entries))::UInt32,
             removed::Ref{UInt32},
@@ -719,17 +715,17 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     for i in 1:n
         entry = entries[i]
         if entry.key == _WAKE_KEY && entry.overlapped == C_NULL
-            delay_ns != 0 && (@atomic :release state.wak_sig = UInt32(0))
+            delay_ns != 0 && (@atomic :release backend.wake_sig = UInt32(0))
             continue
         end
         entry.overlapped == C_NULL && continue
-        op = get(scratch.by_ptr, entry.overlapped, nothing)
+        op = get(backend.by_ptr, entry.overlapped, nothing)
         op === nothing && continue
         @atomic :release op.active = false
         is_probe = op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
         reg = op.owner
         if reg isa IocpRegistration
-            _cleanup_registration_if_done!(scratch, reg)
+            _cleanup_registration_if_done!(backend, reg)
             (@atomic :acquire reg.closing) && continue
         end
         status = UInt32(entry.internal & UInt(typemax(UInt32)))

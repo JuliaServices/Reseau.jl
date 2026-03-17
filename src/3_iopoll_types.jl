@@ -206,16 +206,15 @@ Notable fields:
   newly earlier deadline can call `_backend_wake!`, just like Go uses
   `netpollBreak()` to shorten a blocking poll
 """
+abstract type BackendState end
+
 mutable struct Poller
     lock::ReentrantLock
     registrations::Dict{Cint, Registration}
     registrations_by_token::Dict{UInt64, Registration}
     time_heap::Vector{TimeEntry}
     shutdown_event::Base.Threads.Event
-    kq::Cint
-    wake_ident::UInt
-    backend_scratch::Any
-    @atomic wak_sig::UInt32
+    backend_state::Union{Nothing, BackendState}
     @atomic next_token::UInt64
     @atomic poll_until_ns::Int64
     @atomic running::Bool
@@ -228,10 +227,7 @@ function Poller()
         Dict{UInt64, Registration}(),
         TimeEntry[],
         Base.Threads.Event(),
-        Cint(-1),
-        UInt(1),
         nothing,
-        UInt32(0),
         UInt64(0),
         Int64(0),
         false,
