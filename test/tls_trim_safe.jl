@@ -2,7 +2,7 @@ using Reseau
 
 const TL = Reseau.TLS
 const NC = Reseau.TCP
-const EL = Reseau.IOPoll
+const IP = Reseau.IOPoll
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
@@ -59,7 +59,7 @@ function run_tls_trim_sample()::Nothing
             catch
             end
         end
-        EL.shutdown!()
+        IP.shutdown!()
     end
     return nothing
 end

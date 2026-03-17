@@ -1,7 +1,7 @@
 using Reseau
 
 const NC = Reseau.TCP
-const EL = Reseau.IOPoll
+const IP = Reseau.IOPoll
 
 function _write_all!(conn::NC.Conn, data::Vector{UInt8})::Nothing
     n = write(conn, data)
@@ -55,7 +55,7 @@ function run_tcp_trim_sample()::Nothing
             catch
             end
         end
-        EL.shutdown!()
+        IP.shutdown!()
     end
     return nothing
 end

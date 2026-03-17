@@ -2,7 +2,6 @@
 # precompile artifacts stay aligned with the transport/runtime stack we ship.
 using PrecompileTools: @compile_workload, @setup_workload
 
-const EL = IOPoll
 const IP = IOPoll
 const SO = SocketOps
 const NC = TCP
@@ -50,11 +49,11 @@ function _pc_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
 end
 
 function _pc_wait_connect_ready!(fd::Cint)
-    registration = EL.register!(fd; mode = EL.PollMode.WRITE)
+    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
     try
-        EL.pollwait!(registration.write_waiter)
+        IP.pollwait!(registration.write_waiter)
     finally
-        EL.deregister!(fd)
+        IP.deregister!(fd)
     end
     return nothing
 end
@@ -74,37 +73,37 @@ function _pc_accept_with_retry!(listener::Cint)::Cint
 end
 
 function _pc_run_eventloops_workload!()
-    EL.__init__()
-    @assert isassigned(EL.POLLER)
-    waiter = EL.PollWaiter()
-    EL.pollnotify!(waiter)
-    EL.pollwait!(waiter)
+    IP.__init__()
+    @assert isassigned(IP.POLLER)
+    waiter = IP.PollWaiter()
+    IP.pollnotify!(waiter)
+    IP.pollwait!(waiter)
     _pc_runtime_supported() || return nothing
-    state = EL.Poller()
+    state = IP.Poller()
     fd0 = Cint(-1)
     fd1 = Cint(-1)
     backend_open = false
     try
-        errno = EL._backend_init!(state)
+        errno = IP._backend_init!(state)
         errno == Int32(0) || throw(SystemError("event loop backend init", Int(errno)))
         backend_open = true
         fd0, fd1 = _pc_socketpair_stream()
         token = UInt64(1)
-        registration = EL.Registration(fd0, token, EL.PollMode.READWRITE, EL.PollWaiter(), EL.PollWaiter(), false)
+        registration = IP.Registration(fd0, token, IP.PollMode.READWRITE, IP.PollWaiter(), IP.PollWaiter(), false)
         state.registrations[fd0] = registration
         state.registrations_by_token[token] = registration
-        errno = EL._backend_open_fd!(state, fd0, EL.PollMode.READWRITE, token)
+        errno = IP._backend_open_fd!(state, fd0, IP.PollMode.READWRITE, token)
         errno == Int32(0) || throw(SystemError("event loop open fd", Int(errno)))
         _pc_write_byte(fd1, 0x31)
-        errno = EL._backend_poll_once!(state, Int64(0))
+        errno = IP._backend_poll_once!(state, Int64(0))
         errno == Int32(0) || throw(SystemError("event loop poll once", Int(errno)))
-        EL.pollwait!(registration.read_waiter)
-        errno = EL._backend_close_fd!(state, fd0)
+        IP.pollwait!(registration.read_waiter)
+        errno = IP._backend_close_fd!(state, fd0)
         errno == Int32(0) || throw(SystemError("event loop close fd", Int(errno)))
     finally
         _pc_close_fd(fd0)
         _pc_close_fd(fd1)
-        backend_open && EL._backend_close!(state)
+        backend_open && IP._backend_close!(state)
     end
     return nothing
 end
@@ -289,7 +288,7 @@ function _pc_run_tls_workload!()
             min_version = client_cfg.min_version,
             max_version = client_cfg.max_version,
         )
-        status = EL.timedwait(() -> istaskdone(accept_task), 2.0; pollint = 0.001)
+        status = IP.timedwait(() -> istaskdone(accept_task), 2.0; pollint = 0.001)
         status == :timed_out && throw(ArgumentError("TLS precompile workload timed out during accept"))
         server = fetch(accept_task)
         payload = UInt8[0x54, 0x4c, 0x53]
@@ -311,15 +310,15 @@ function _pc_run_tls_workload!()
             listener === nothing || close(listener)
         catch
         end
-        EL.shutdown!()
+        IP.shutdown!()
     end
     return nothing
 end
 
 try
     @setup_workload begin
-        EL.__init__()
-        @assert isassigned(EL.POLLER)
+        IP.__init__()
+        @assert isassigned(IP.POLLER)
         @compile_workload begin
             _pc_run_eventloops_workload!()
             _pc_run_internal_poll_workload!()

@@ -1,7 +1,6 @@
 using Test
 using Reseau
 
-const EL = Reseau.IOPoll
 const IP = Reseau.IOPoll
 
 function _ip_socketpair_stream()
@@ -30,7 +29,7 @@ if !(Sys.isapple() || Sys.islinux())
     end
 else
     @testset "IOPoll phase 2" begin
-        EL.shutdown!()
+        IP.shutdown!()
         @testset "read waits then wakes on readability" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)
@@ -44,10 +43,10 @@ else
                     n = IP.read!(ipfd, buf)
                     return n, buf[1]
                 end)
-                pre = EL.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001)
+                pre = IP.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001)
                 @test pre == :timed_out
                 _ip_write_byte(fd1, 0x61)
-                status = EL.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001)
+                status = IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001)
                 @test status != :timed_out
                 if status != :timed_out
                     n, b = fetch(read_task)
@@ -62,7 +61,7 @@ else
                     close(ipfd)
                 end
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "read deadline timeout" begin
@@ -81,7 +80,7 @@ else
             finally
                 ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "stale deadline timer does not poison future waits" begin
@@ -93,7 +92,7 @@ else
                 IP.register!(ipfd)
                 IP.set_read_deadline!(ipfd, time_ns() + 20_000_000)
                 IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
-                EL.sleep(0.06)
+                IP.sleep(0.06)
                 _ip_write_byte(fd1, 0x63)
                 buf = Vector{UInt8}(undef, 1)
                 n = IP.read!(ipfd, buf)
@@ -102,7 +101,7 @@ else
             finally
                 ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "wait_read retries stale canceled wake internally" begin
@@ -118,14 +117,14 @@ else
                     IP.waitread(ipfd.pd, ipfd.is_file)
                     return :ok
                 end)
-                pre = EL.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
+                pre = IP.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
                 @test pre == :timed_out
                 IP.set_read_deadline!(ipfd, time_ns() + 5_000_000_000)
-                EL.sleep(0.12)
-                stale = EL.timedwait(() -> istaskdone(wait_task), 0.02; pollint = 0.001)
+                IP.sleep(0.12)
+                stale = IP.timedwait(() -> istaskdone(wait_task), 0.02; pollint = 0.001)
                 @test stale == :timed_out
                 _ip_write_byte(fd1, 0x64)
-                status = EL.timedwait(() -> istaskdone(wait_task), 2.0; pollint = 0.001)
+                status = IP.timedwait(() -> istaskdone(wait_task), 2.0; pollint = 0.001)
                 @test status != :timed_out
                 status == :timed_out || @test fetch(wait_task) == :ok
             finally
@@ -134,20 +133,20 @@ else
                 end
                 ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "combined deadline entry normalization" begin
-            registration = EL.Registration(Cint(7), UInt64(11), EL.PollMode.READWRITE, EL.PollWaiter(), EL.PollWaiter(), false)
-            combined = EL._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
+            registration = IP.Registration(Cint(7), UInt64(11), IP.PollMode.READWRITE, IP.PollWaiter(), IP.PollWaiter(), false)
+            combined = IP._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
             @test length(combined) == 1
-            @test combined[1].mode == EL.PollMode.READWRITE
+            @test combined[1].mode == IP.PollMode.READWRITE
             @test combined[1].primary_seq == UInt64(3)
             @test combined[1].secondary_seq == UInt64(5)
-            split = EL._build_deadline_entries(registration.pollstate, Int64(10), Int64(11), UInt64(3), UInt64(5))
+            split = IP._build_deadline_entries(registration.pollstate, Int64(10), Int64(11), UInt64(3), UInt64(5))
             @test length(split) == 2
-            @test split[1].mode == EL.PollMode.READ
-            @test split[2].mode == EL.PollMode.WRITE
+            @test split[1].mode == IP.PollMode.READ
+            @test split[2].mode == IP.PollMode.WRITE
         end
         @testset "set_deadline uses one combined heap entry and expires both sides" begin
             fd0, fd1 = _ip_socketpair_stream()
@@ -156,19 +155,19 @@ else
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
-                state = EL.POLLER[]
+                state = IP.POLLER[]
                 future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
                 IP.set_deadline!(ipfd, future_deadline)
                 lock(state.lock)
                 try
-                    entries = filter(x -> x.kind == EL.TimeEntryKind.DEADLINE && (x.pollstate::EL.PollState).token == ipfd.pd.token, state.time_heap)
+                    entries = filter(x -> x.kind == IP.TimeEntryKind.DEADLINE && (x.pollstate::IP.PollState).token == ipfd.pd.token, state.time_heap)
                     @test length(entries) == 1
-                    @test entries[1].mode == EL.PollMode.READWRITE
+                    @test entries[1].mode == IP.PollMode.READWRITE
                 finally
                     unlock(state.lock)
                 end
                 IP.set_deadline!(ipfd, Int64(time_ns()) + Int64(30_000_000))
-                EL.sleep(0.06)
+                IP.sleep(0.06)
                 @test IP._check_error(ipfd.pd, IP.PollMode.READ) == Int32(2)
                 @test IP._check_error(ipfd.pd, IP.PollMode.WRITE) == Int32(2)
                 IP.set_deadline!(ipfd, Int64(0))
@@ -177,7 +176,7 @@ else
             finally
                 ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "close evicts blocked waiters" begin
@@ -196,10 +195,10 @@ else
                         return err
                     end
                 end)
-                pre = EL.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001)
+                pre = IP.timedwait(() -> istaskdone(read_task), 0.05; pollint = 0.001)
                 @test pre == :timed_out
                 close(ipfd)
-                status = EL.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001)
+                status = IP.timedwait(() -> istaskdone(read_task), 2.0; pollint = 0.001)
                 @test status != :timed_out
                 if status != :timed_out
                     err = fetch(read_task)
@@ -207,7 +206,7 @@ else
                 end
             finally
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "event error maps to not pollable" begin
@@ -217,14 +216,14 @@ else
             try
                 IP._set_nonblocking!(ipfd.sysfd)
                 IP.register!(ipfd)
-                state = EL.POLLER[]
-                event = EL.PollEvent(ipfd.sysfd, ipfd.pd.token, EL.PollMode.READ, true)
-                EL._dispatch_ready_event!(state, event)
+                state = IP.POLLER[]
+                event = IP.PollEvent(ipfd.sysfd, ipfd.pd.token, IP.PollMode.READ, true)
+                IP._dispatch_ready_event!(state, event)
                 @test_throws IP.NotPollableError IP.prepareread(ipfd.pd)
             finally
                 ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "wait_canceled wakes on readiness" begin
@@ -239,10 +238,10 @@ else
                     IP.waitcancelled(ipfd.pd, IP.PollMode.READ)
                     return :ok
                 end)
-                pre = EL.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
+                pre = IP.timedwait(() -> istaskdone(wait_task), 0.05; pollint = 0.001)
                 @test pre == :timed_out
                 _ip_write_byte(fd1, 0x71)
-                status = EL.timedwait(() -> istaskdone(wait_task), 2.0; pollint = 0.001)
+                status = IP.timedwait(() -> istaskdone(wait_task), 2.0; pollint = 0.001)
                 @test status != :timed_out
                 if status != :timed_out
                     @test fetch(wait_task) == :ok
@@ -253,19 +252,19 @@ else
                 end
                 ipfd.sysfd >= 0 && close(ipfd)
                 _ip_close_fd(fd1)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "fdlock close wakes queued waiters" begin
             mu = IP.FDLock()
             @test IP._fdlock_rwlock!(mu, true, true)
             waiters = [errormonitor(Threads.@spawn IP._fdlock_rwlock!(mu, true, true)) for _ in 1:32]
-            pre = EL.timedwait(() -> all(istaskdone, waiters), 0.05; pollint = 0.001)
+            pre = IP.timedwait(() -> all(istaskdone, waiters), 0.05; pollint = 0.001)
             @test pre == :timed_out
             @test IP._fdlock_incref_and_close!(mu)
             _ = IP._fdlock_rwunlock!(mu, true)
             for waiter in waiters
-                status = EL.timedwait(() -> istaskdone(waiter), 2.0; pollint = 0.001)
+                status = IP.timedwait(() -> istaskdone(waiter), 2.0; pollint = 0.001)
                 @test status != :timed_out
                 if status != :timed_out
                     @test fetch(waiter) == false

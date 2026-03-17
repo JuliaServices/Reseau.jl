@@ -2,7 +2,7 @@ using Test
 using Reseau
 
 const NP = Reseau.IOPoll
-const EL = Reseau.IOPoll
+const IP = Reseau.IOPoll
 
 function _el_socketpair_stream()
     fds = Vector{Cint}(undef, 2)
@@ -50,17 +50,17 @@ else
         NP.shutdown!()
         @testset "poller-backed sleep/timedwait" begin
             t0 = time_ns()
-            EL.sleep(0.03)
+            IP.sleep(0.03)
             elapsed_ns = time_ns() - t0
             @test elapsed_ns >= 15_000_000
-            @test EL.timedwait(() -> false, 0.05; pollint = 0.001) == :timed_out
+            @test IP.timedwait(() -> false, 0.05; pollint = 0.001) == :timed_out
             wake_ch = Channel{Nothing}(1)
             wake_task = errormonitor(Threads.@spawn begin
-                EL.sleep(0.03)
+                IP.sleep(0.03)
                 put!(wake_ch, nothing)
                 return nothing
             end)
-            status = EL.timedwait(() -> isready(wake_ch), 2.0; pollint = 0.001)
+            status = IP.timedwait(() -> isready(wake_ch), 2.0; pollint = 0.001)
             @test status != :timed_out
             status == :timed_out || take!(wake_ch)
             wait(wake_task)

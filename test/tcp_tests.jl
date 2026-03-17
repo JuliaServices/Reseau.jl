@@ -1,13 +1,12 @@
 using Test
 using Reseau
 
-const EL = Reseau.IOPoll
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
 function _nc_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return EL.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    return IP.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
 end
 
 function _read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
@@ -38,7 +37,7 @@ if !(Sys.isapple() || Sys.islinux())
 else
     @testset "TCP phase 4" begin
         @testset "connect/listen/accept and address snapshots" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -85,11 +84,11 @@ else
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "connect honors explicit local address binding" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -117,11 +116,11 @@ else
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "show methods summarize TCP endpoints" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -153,11 +152,11 @@ else
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "connected sockets set TCP_NODELAY and SO_KEEPALIVE defaults" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -176,11 +175,11 @@ else
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "refused connect surfaces connect syscall error" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
@@ -200,11 +199,11 @@ else
                 end
             finally
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "accept unblocks on listener close" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             accept_task = nothing
             try
@@ -229,11 +228,11 @@ else
                 end
             finally
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "read deadline timeout and reset through Conn" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -256,11 +255,11 @@ else
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "blocked read unblocks on conn close and repeated close errors" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -297,11 +296,11 @@ else
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "FD lifecycle uses explicit close" begin
-            EL.shutdown!()
+            IP.shutdown!()
             fd = nothing
             try
                 fd = NC.open_tcp_fd!()
@@ -313,11 +312,11 @@ else
                 @test fd.pfd.sysfd == Cint(-1)
             finally
                 _close_quiet!(fd)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "TCP half-close and tuning controls" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -344,7 +343,7 @@ else
                 _close_quiet!(server)
                 _close_quiet!(client)
                 _close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
     end

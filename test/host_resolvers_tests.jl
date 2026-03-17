@@ -3,7 +3,6 @@ using Reseau
 
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
-const EL = Reseau.IOPoll
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 
@@ -418,7 +417,7 @@ else
             end
         end
         @testset "connect/listen by address strings (ipv4)" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -440,11 +439,11 @@ else
                 _nd_close_quiet!(server)
                 _nd_close_quiet!(client)
                 _nd_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "happy-eyeballs fallback launches immediately after primary error" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             connected = nothing
             accepted = nothing
@@ -478,14 +477,14 @@ else
                 _nd_close_quiet!(accepted)
                 _nd_close_quiet!(connected)
                 _nd_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "parallel race returns wrapped error when both families fail" begin
             if !_nd_ipv6_supported()
                 @test true
             else
-                EL.shutdown!()
+                IP.shutdown!()
                 listener = nothing
                 try
                     listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 4)
@@ -511,7 +510,7 @@ else
                     end
                 finally
                     _nd_close_quiet!(listener)
-                    EL.shutdown!()
+                    IP.shutdown!()
                 end
             end
         end
@@ -519,7 +518,7 @@ else
             if !_nd_ipv6_supported()
                 @test true
             else
-                EL.shutdown!()
+                IP.shutdown!()
                 listener = nothing
                 client = nothing
                 server = nothing
@@ -540,7 +539,7 @@ else
                     _nd_close_quiet!(server)
                     _nd_close_quiet!(client)
                     _nd_close_quiet!(listener)
-                    EL.shutdown!()
+                    IP.shutdown!()
                 end
             end
         end
@@ -613,7 +612,7 @@ else
             end
         end
         @testset "singleflight resolver coalesces duplicate concurrent lookups" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client1 = nothing
             client2 = nothing
@@ -643,7 +642,7 @@ else
                 _nd_close_quiet!(client2)
                 _nd_close_quiet!(client1)
                 _nd_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "caching resolver fresh/stale/negative behavior" begin
@@ -777,7 +776,7 @@ else
                     catch
                     end
                 end
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
     end

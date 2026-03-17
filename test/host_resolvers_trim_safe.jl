@@ -2,7 +2,7 @@ using Reseau
 
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
-const EL = Reseau.IOPoll
+const IP = Reseau.IOPoll
 
 struct _TrimResolver <: ND.AbstractResolver
     addr::NC.SocketEndpoint
@@ -72,7 +72,7 @@ function run_host_resolvers_trim_sample()::Nothing
             catch
             end
         end
-        EL.shutdown!()
+        IP.shutdown!()
     end
     return nothing
 end

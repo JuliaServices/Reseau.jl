@@ -5,13 +5,13 @@ using Reseau
 const TL = Reseau.TLS
 const NC = Reseau.TCP
 const ND = Reseau.HostResolvers
-const EL = Reseau.IOPoll
+const IP = Reseau.IOPoll
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
 
 function _tls_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
-    return EL.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
+    return IP.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
 end
 
 function _tls_close_quiet!(x)
@@ -125,7 +125,7 @@ else
                 client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven,
             ); is_server = true)
             @test_throws TL.ConfigError TL.listen("tcp", "127.0.0.1:0", TL.Config(verify_peer = false))
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client_tcp = nothing
             server_tcp = nothing
@@ -145,7 +145,7 @@ else
                 _tls_close_quiet!(server_tcp)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "version fallback helpers and connect config inference" begin
@@ -249,7 +249,7 @@ else
             @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert)) == C_NULL
             @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequestClientCert)) != C_NULL
             @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequireAnyClientCert)) != C_NULL
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             accept_task = nothing
             client = nothing
@@ -325,11 +325,11 @@ else
             finally
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "client certificate config loads native certificate into SSL handle" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client_tcp = nothing
             server_tcp = nothing
@@ -354,7 +354,7 @@ else
                 _tls_close_quiet!(server_tcp)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "SNI/hostname normalization parity" begin
@@ -366,7 +366,7 @@ else
             @test TL._hostname_in_sni("[::1]") == ""
         end
         @testset "ALPN negotiates on server and client paths" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -398,11 +398,11 @@ else
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "show methods summarize TLS endpoints and handshake state" begin
-            EL.shutdown!()
+            IP.shutdown!()
             tls_listener = nothing
             tcp_listener = nothing
             client_tcp = nothing
@@ -471,11 +471,11 @@ else
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(tcp_listener)
                 _tls_close_quiet!(tls_listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "SSL_CTX is reused for equivalent client configs" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             accept_task = nothing
             client1 = nothing
@@ -507,7 +507,7 @@ else
                 _tls_close_quiet!(client1)
                 _tls_close_quiet!(client2)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "SSL_CTX cache respects max bound with eviction" begin
@@ -533,7 +533,7 @@ else
             end
         end
         @testset "connect/listen handshake and roundtrip" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -582,11 +582,11 @@ else
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "peer read observes clean EOF after close_notify" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             try
@@ -611,11 +611,11 @@ else
             finally
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "close_write shuts down TLS write side and rejects further writes" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -650,11 +650,11 @@ else
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "close_write before handshake complete returns TLSError" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client_tcp = nothing
             server_tcp = nothing
@@ -685,11 +685,11 @@ else
                 _tls_close_quiet!(server_tcp)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "peer verification success with explicit CA file" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -730,11 +730,11 @@ else
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "peer verification failure surfaces TLSError" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             accept_task = nothing
             try
@@ -767,11 +767,11 @@ else
                 accept_task !== nothing && _tls_wait_task_done(accept_task, 2.0)
             finally
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "ip literal verification path does not require explicit server_name" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             accept_task = nothing
             client = nothing
@@ -807,11 +807,11 @@ else
             finally
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "handshake timeout surfaces TLSHandshakeTimeoutError" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client_tcp = nothing
             stalled_peer = nothing
@@ -820,7 +820,7 @@ else
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    EL.sleep(1.0)
+                    IP.sleep(1.0)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
@@ -849,11 +849,11 @@ else
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "handshake deadline with no handshake_timeout maps to i/o timeout TLSError" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client_tcp = nothing
             stalled_peer = nothing
@@ -863,7 +863,7 @@ else
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    EL.sleep(1.0)
+                    IP.sleep(1.0)
                     return conn
                 end)
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
@@ -892,11 +892,11 @@ else
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "host resolver timeout budget includes TLS handshake time" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             stalled_peer = nothing
             try
@@ -904,7 +904,7 @@ else
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn begin
                     conn = NC.accept(listener)
-                    EL.sleep(1.2)
+                    IP.sleep(1.2)
                     close(conn)
                     return nothing
                 end)
@@ -941,11 +941,11 @@ else
             finally
                 _tls_close_quiet!(stalled_peer)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "operations fail fast after close" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -972,11 +972,11 @@ else
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "write timeout remains sticky across subsequent writes" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             try
@@ -985,7 +985,7 @@ else
                 hold_task = errormonitor(Threads.@spawn begin
                     conn = TL.accept(listener)
                     TL.handshake!(conn)
-                    EL.sleep(1.5)
+                    IP.sleep(1.5)
                     close(conn)
                     return nothing
                 end)
@@ -1020,11 +1020,11 @@ else
             finally
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
         @testset "blocked read unblocks when local close races" begin
-            EL.shutdown!()
+            IP.shutdown!()
             listener = nothing
             client = nothing
             server = nothing
@@ -1063,7 +1063,7 @@ else
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
-                EL.shutdown!()
+                IP.shutdown!()
             end
         end
     end
