@@ -1,3 +1,9 @@
+"""
+    PollMode
+
+Bitmask enum used for read, write, and combined read/write readiness and
+deadline directions within `IOPoll`.
+"""
 module PollMode
 Base.@enum T::UInt8 begin
     READ = 0x01
