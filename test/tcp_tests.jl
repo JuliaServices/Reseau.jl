@@ -23,12 +23,7 @@ function _close_quiet!(x)
     return nothing
 end
 
-if !(Sys.isapple() || Sys.islinux())
-    @testset "TCP (macOS/Linux only)" begin
-        @test true
-    end
-else
-    @testset "TCP phase 4" begin
+@testset "TCP phase 4" begin
         @test NC.Conn <: IO
         @testset "connect/listen/accept and address snapshots" begin
             IP.shutdown!()
@@ -350,4 +345,3 @@ else
             end
         end
     end
-end

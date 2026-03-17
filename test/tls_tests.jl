@@ -74,12 +74,7 @@ function _tls_connect(
     )
 end
 
-if !(Sys.isapple() || Sys.islinux())
-    @testset "TLS (macOS/Linux only)" begin
-        @test true
-    end
-else
-    @testset "TLS phase 6" begin
+@testset "TLS phase 6" begin
         @test TL.Conn <: IO
         @testset "config validation" begin
             cfg_default = TL.Config()
@@ -1070,4 +1065,3 @@ else
             end
         end
     end
-end

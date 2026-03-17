@@ -3,32 +3,77 @@ using Reseau
 
 const NP = Reseau.IOPoll
 const IP = Reseau.IOPoll
+const SO = Reseau.SocketOps
+const _EL_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 function _el_socketpair_stream()
-    fds = Vector{Cint}(undef, 2)
-    ret = ccall(:socketpair, Cint, (Cint, Cint, Cint, Ptr{Cint}), Cint(1), Cint(1), Cint(0), pointer(fds))
-    ret == 0 || throw(SystemError("socketpair", Int(Base.Libc.errno())))
-    return fds[1], fds[2]
+    listener = Cint(-1)
+    client = Cint(-1)
+    accepted = Cint(-1)
+    try
+        listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
+        SO.bind_socket(listener, SO.sockaddr_in_loopback(0))
+        SO.listen_socket(listener, 32)
+        bound = SO.get_socket_name_in(listener)
+        port = Int(SO.sockaddr_in_port(bound))
+        client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
+        if err != Int32(0) && err != Int32(Base.Libc.EISCONN)
+            err == Int32(Base.Libc.EINPROGRESS) || err == Int32(Base.Libc.EALREADY) || err == Int32(Base.Libc.EINTR) || throw(SystemError("connect", Int(err)))
+            _el_wait_connect_ready!(client)
+            so_error = SO.get_socket_error(client)
+            so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
+        end
+        accepted, _ = _el_accept_with_retry(listener)
+        stream_client = client
+        stream_server = accepted
+        client = Cint(-1)
+        accepted = Cint(-1)
+        return stream_client, stream_server
+    finally
+        accepted >= 0 && SO.close_socket_nothrow(accepted)
+        client >= 0 && SO.close_socket_nothrow(client)
+        listener >= 0 && SO.close_socket_nothrow(listener)
+    end
+end
+
+function _el_open_stream_fd()::Cint
+    return SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
 end
 
 function _el_close_fd(fd::Cint)
     fd < 0 && return nothing
-    ccall(:close, Cint, (Cint,), fd)
+    SO.close_socket_nothrow(fd)
     return nothing
 end
 
 function _el_write_byte(fd::Cint, b::UInt8)
     buf = Ref{UInt8}(b)
-    n = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd, buf, Csize_t(1))
-    n == Cssize_t(1) || throw(SystemError("write", Int(Base.Libc.errno())))
-    return nothing
+    for _ in 1:5000
+        n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
+        n == Cssize_t(1) && return nothing
+        errno = SO.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _EL_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("write", Int(errno)))
+    end
+    throw(ArgumentError("timed out writing byte"))
 end
 
 function _el_read_byte(fd::Cint)
     buf = Ref{UInt8}(0x00)
-    n = ccall(:read, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd, buf, Csize_t(1))
-    n == Cssize_t(1) || throw(SystemError("read", Int(Base.Libc.errno())))
-    return buf[]
+    for _ in 1:5000
+        n = GC.@preserve buf SO.read_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
+        n == Cssize_t(1) && return buf[]
+        errno = SO.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _EL_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("read", Int(errno)))
+    end
+    throw(ArgumentError("timed out reading byte"))
 end
 
 function _el_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
@@ -41,12 +86,29 @@ end
 # them would starve the companion task that is supposed to drive the wakeup.
 _el_can_block_julia_worker() = Threads.nthreads() > 1
 
-if !(Sys.isapple() || Sys.islinux())
-    @testset "IOPoll Runtime (macOS/Linux only)" begin
-        @test true
+function _el_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
+    for _ in 1:5000
+        accepted, peer, errno = SO.try_accept_socket(listener)
+        accepted != -1 && return accepted, peer
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _EL_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("accept", Int(errno)))
     end
-else
-    @testset "IOPoll runtime phase 1" begin
+    throw(ArgumentError("timed out waiting for accepted socket"))
+end
+
+function _el_wait_connect_ready!(fd::Cint)
+    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
+    try
+        IP.pollwait!(registration.write_waiter)
+    finally
+        IP.deregister!(fd)
+    end
+    return nothing
+end
+
+@testset "IOPoll runtime phase 1" begin
         NP.shutdown!()
         @testset "poller-backed sleep/timedwait" begin
             t0 = time_ns()
@@ -96,7 +158,7 @@ else
                     wake_ch = Channel{Nothing}(1)
                     poll_task = errormonitor(Threads.@spawn begin
                         err = NP._backend_poll_once!(state, Int64(-1))
-                        err == Int32(0) || throw(SystemError("kevent", Int(err)))
+                        err == Int32(0) || throw(SystemError("backend poll", Int(err)))
                         put!(wake_ch, nothing)
                         return nothing
                     end)
@@ -131,7 +193,8 @@ else
                 @test errno == Int32(0)
                 @atomic :release state.running = true
                 NP.POLLER[] = state
-                fd0, fd1 = _el_socketpair_stream()
+                fd0 = _el_open_stream_fd()
+                fd1 = Cint(-1)
                 token = UInt64(41)
                 registration = NP.Registration(fd0, token, NP.PollMode.READWRITE, NP.PollWaiter(), NP.PollWaiter(), false)
                 state.registrations[fd0] = registration
@@ -301,4 +364,3 @@ else
             end
         end
     end
-end

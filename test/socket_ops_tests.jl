@@ -3,17 +3,11 @@ using Reseau
 
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
-
-function _socketpair(sotype::Cint = SO.SOCK_STREAM)::Tuple{Cint, Cint}
-    fds = Vector{Cint}(undef, 2)
-    ret = @ccall socketpair(SO.AF_UNIX::Cint, sotype::Cint, Cint(0)::Cint, pointer(fds)::Ptr{Cint})::Cint
-    ret == 0 || throw(SystemError("socketpair", Int(Base.Libc.errno())))
-    return fds[1], fds[2]
-end
+const _SO_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 function _close_fd_raw(fd::Cint)
     fd < 0 && return nothing
-    @ccall close(fd::Cint)::Cint
+    SO.close_socket_nothrow(fd)
     return nothing
 end
 
@@ -22,7 +16,7 @@ function _accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
         accepted, peer, errno = SO.try_accept_socket(listener)
         accepted != -1 && return accepted, peer
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
-        errno == Int32(Base.Libc.EWOULDBLOCK) && (yield(); continue)
+        errno == _SO_EWOULDBLOCK && (yield(); continue)
         errno == Int32(Base.Libc.EINTR) && continue
         throw(SystemError("accept", Int(errno)))
     end
@@ -39,12 +33,57 @@ function _wait_connect_ready!(fd::Cint)
     return nothing
 end
 
-if !(Sys.isapple() || Sys.islinux())
-    @testset "SocketOps (macOS/Linux only)" begin
-        @test true
+function _stream_pair()::Tuple{Cint, Cint}
+    listener = Cint(-1)
+    client = Cint(-1)
+    accepted = Cint(-1)
+    try
+        listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
+        SO.bind_socket(listener, SO.sockaddr_in_loopback(0))
+        SO.listen_socket(listener, 32)
+        bound = SO.get_socket_name_in(listener)
+        port = Int(SO.sockaddr_in_port(bound))
+        client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
+        if err != Int32(0) && err != Int32(Base.Libc.EISCONN)
+            err == Int32(Base.Libc.EINPROGRESS) || err == Int32(Base.Libc.EALREADY) || err == Int32(Base.Libc.EINTR) || throw(SystemError("connect", Int(err)))
+            _wait_connect_ready!(client)
+            so_error = SO.get_socket_error(client)
+            so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
+        end
+        accepted, _ = _accept_with_retry(listener)
+        stream_client = client
+        stream_server = accepted
+        client = Cint(-1)
+        accepted = Cint(-1)
+        return stream_client, stream_server
+    finally
+        accepted >= 0 && SO.close_socket_nothrow(accepted)
+        client >= 0 && SO.close_socket_nothrow(client)
+        listener >= 0 && SO.close_socket_nothrow(listener)
     end
-else
-    @testset "SocketOps phase 3" begin
+end
+
+function _dgram_pair()::Tuple{Cint, Cint, SO.SockAddrIn, SO.SockAddrIn}
+    fd0 = Cint(-1)
+    fd1 = Cint(-1)
+    try
+        fd0 = SO.open_socket(SO.AF_INET, SO.SOCK_DGRAM)
+        fd1 = SO.open_socket(SO.AF_INET, SO.SOCK_DGRAM)
+        SO.bind_socket(fd0, SO.sockaddr_in_loopback(0))
+        SO.bind_socket(fd1, SO.sockaddr_in_loopback(0))
+        addr0 = SO.get_socket_name_in(fd0)
+        addr1 = SO.get_socket_name_in(fd1)
+        return fd0, fd1, addr0, addr1
+    catch
+        fd1 >= 0 && SO.close_socket_nothrow(fd1)
+        fd0 >= 0 && SO.close_socket_nothrow(fd0)
+        rethrow()
+    end
+end
+
+@testset "SocketOps phase 3" begin
         @testset "open sets cloexec and nonblocking" begin
             fd = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
             try
@@ -59,7 +98,7 @@ else
             @test_throws SystemError SO.close_socket(Cint(-1))
         end
         @testset "read/write and recv/send wrappers" begin
-            fd0, fd1 = _socketpair(SO.SOCK_STREAM)
+            fd0, fd1 = _stream_pair()
             d0 = Cint(-1)
             d1 = Cint(-1)
             try
@@ -88,7 +127,7 @@ else
                 _close_fd_raw(d0)
                 _close_fd_raw(d1)
             end
-            fd2, fd3 = _socketpair(SO.SOCK_DGRAM)
+            fd2, fd3, addr2, addr3 = _dgram_pair()
             d2 = Cint(-1)
             d3 = Cint(-1)
             try
@@ -97,7 +136,15 @@ else
                 SO.set_nonblocking!(d2, false)
                 SO.set_nonblocking!(d3, false)
                 msg = UInt8[0x41, 0x42]
-                sn = GC.@preserve msg SO.send_to!(d2, pointer(msg), Csize_t(length(msg)), Cint(0), C_NULL, SO.SockLen(0))
+                addr3_ref = Ref(addr3)
+                sn = GC.@preserve msg addr3_ref SO.send_to!(
+                    d2,
+                    pointer(msg),
+                    Csize_t(length(msg)),
+                    Cint(0),
+                    Base.unsafe_convert(Ptr{Cvoid}, addr3_ref),
+                    SO.SockLen(sizeof(SO.SockAddrIn)),
+                )
                 @test sn == Cssize_t(length(msg))
                 got = Vector{UInt8}(undef, 2)
                 rn = GC.@preserve got SO.recv_from!(d3, pointer(got), Csize_t(length(got)))
@@ -140,4 +187,3 @@ else
             end
         end
     end
-end

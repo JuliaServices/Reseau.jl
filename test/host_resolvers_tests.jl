@@ -182,6 +182,12 @@ function _nd_ipv6_supported()::Bool
     end
 end
 
+function _nd_named_scope_iface()::Union{Nothing, String}
+    Sys.isapple() && return "lo0"
+    Sys.islinux() && return "lo"
+    return nothing
+end
+
 function _nd_services_candidate(proto::String)::Union{Nothing, Tuple{String, Int}}
     path = "/etc/services"
     isfile(path) || return nothing
@@ -224,12 +230,7 @@ function _nd_services_candidate(proto::String)::Union{Nothing, Tuple{String, Int
     return nothing
 end
 
-if !(Sys.isapple() || Sys.islinux())
-    @testset "HostResolvers (macOS/Linux only)" begin
-        @test true
-    end
-else
-    @testset "HostResolvers phase 5" begin
+@testset "HostResolvers phase 5" begin
         @testset "host-port parser and joiner" begin
             host, port = ND.split_host_port("127.0.0.1:8080")
             @test host == "127.0.0.1"
@@ -258,24 +259,32 @@ else
             @test_throws ND.AddressError ND.split_host_port("host]bad:80")
         end
         @testset "literal host and scope parsing helpers" begin
-            iface = Sys.isapple() ? "lo0" : "lo"
-            @test ND._split_host_zone("fe80::1%$iface") == ("fe80::1", iface)
-            @test ND._split_host_zone("%$iface") == ("%$iface", "")
+            iface = _nd_named_scope_iface()
+            parser_zone = something(iface, "zone0")
+            @test ND._split_host_zone("fe80::1%$parser_zone") == ("fe80::1", parser_zone)
+            @test ND._split_host_zone("%$parser_zone") == ("%$parser_zone", "")
             @test_throws ND.AddressError ND._split_host_zone("fe80::1%")
 
             @test ND._scope_id_from_zone("") == UInt32(0)
             @test ND._scope_id_from_zone("7") == UInt32(7)
-            @test ND._scope_id_from_zone(iface) > UInt32(0)
+            if iface !== nothing
+                @test ND._scope_id_from_zone(iface) > UInt32(0)
+            else
+                @test true
+            end
             @test_throws ND.AddressError ND._scope_id_from_zone("-1")
             @test_throws ND.AddressError ND._scope_id_from_zone(string(UInt64(typemax(UInt32)) + UInt64(1)))
             @test_throws ND.AddressError ND._scope_id_from_zone("reseau-no-such-iface")
 
-            scoped = ND._literal_host_addr("fe80::1%$iface")
+            scope_literal = iface === nothing ? "fe80::1%7" : "fe80::1%$iface"
+            expected_scope_id = iface === nothing ? UInt32(7) : ND._scope_id_from_zone(iface)
+            scoped = ND._literal_host_addr(scope_literal)
             @test scoped isa NC.SocketAddrV6
             if scoped isa NC.SocketAddrV6
-                @test scoped.scope_id == Int(ND._scope_id_from_zone(iface))
+                @test scoped.scope_id == Int(expected_scope_id)
             end
-            @test_throws ND.AddressError ND._literal_host_addr("127.0.0.1%$iface")
+            invalid_v4_scope = iface === nothing ? "127.0.0.1%7" : "127.0.0.1%$iface"
+            @test_throws ND.AddressError ND._literal_host_addr(invalid_v4_scope)
         end
         @testset "port parser and service lookup" begin
             @test ND.parse_port("80") == (80, false)
@@ -773,4 +782,3 @@ else
             end
         end
     end
-end

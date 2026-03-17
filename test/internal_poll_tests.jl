@@ -2,33 +2,83 @@ using Test
 using Reseau
 
 const IP = Reseau.IOPoll
+const SO = Reseau.SocketOps
+const _IP_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 function _ip_socketpair_stream()
-    fds = Vector{Cint}(undef, 2)
-    ret = ccall(:socketpair, Cint, (Cint, Cint, Cint, Ptr{Cint}), Cint(1), Cint(1), Cint(0), pointer(fds))
-    ret == 0 || throw(SystemError("socketpair", Int(Base.Libc.errno())))
-    return fds[1], fds[2]
-end
+    listener = Cint(-1)
+    client = Cint(-1)
+    accepted = Cint(-1)
+    try
+        listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
+        SO.bind_socket(listener, SO.sockaddr_in_loopback(0))
+        SO.listen_socket(listener, 32)
+        bound = SO.get_socket_name_in(listener)
+        port = Int(SO.sockaddr_in_port(bound))
+        client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
+        if err != Int32(0) && err != Int32(Base.Libc.EISCONN)
+            err == Int32(Base.Libc.EINPROGRESS) || err == Int32(Base.Libc.EALREADY) || err == Int32(Base.Libc.EINTR) || throw(SystemError("connect", Int(err)))
+            _ip_wait_connect_ready!(client)
+            so_error = SO.get_socket_error(client)
+            so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
+        end
+        accepted, _ = _ip_accept_with_retry(listener)
+        stream_client = client
+        stream_server = accepted
+        client = Cint(-1)
+        accepted = Cint(-1)
+        return stream_client, stream_server
+    finally
+        accepted >= 0 && SO.close_socket_nothrow(accepted)
+        client >= 0 && SO.close_socket_nothrow(client)
+        listener >= 0 && SO.close_socket_nothrow(listener)
+    end
 
 function _ip_close_fd(fd::Cint)
     fd < 0 && return nothing
-    @ccall close(fd::Cint)::Cint
+    SO.close_socket_nothrow(fd)
     return nothing
 end
 
 function _ip_write_byte(fd::Cint, b::UInt8)
     buf = Ref{UInt8}(b)
-    n = @ccall write(fd::Cint, buf::Ref{UInt8}, Csize_t(1)::Csize_t)::Cssize_t
-    n == Cssize_t(1) || throw(SystemError("write", Int(Base.Libc.errno())))
+    for _ in 1:5000
+        n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
+        n == Cssize_t(1) && return nothing
+        errno = SO.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _IP_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("write", Int(errno)))
+    end
+    throw(ArgumentError("timed out writing byte"))
+end
+
+function _ip_accept_with_retry(listener::Cint)::Tuple{Cint, SO.AcceptPeer}
+    for _ in 1:5000
+        accepted, peer, errno = SO.try_accept_socket(listener)
+        accepted != -1 && return accepted, peer
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _IP_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("accept", Int(errno)))
+    end
+    throw(ArgumentError("timed out waiting for accepted socket"))
+end
+
+function _ip_wait_connect_ready!(fd::Cint)
+    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
+    try
+        IP.pollwait!(registration.write_waiter)
+    finally
+        IP.deregister!(fd)
+    end
     return nothing
 end
 
-if !(Sys.isapple() || Sys.islinux())
-    @testset "IOPoll (macOS/Linux only)" begin
-        @test true
-    end
-else
-    @testset "IOPoll phase 2" begin
+@testset "IOPoll phase 2" begin
         IP.shutdown!()
         @testset "read waits then wakes on readability" begin
             fd0, fd1 = _ip_socketpair_stream()
