@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
 jobs:
   test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - t${{ matrix.threads }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 15 }}
     env:
-      JULIA_NUM_THREADS: 1
+      JULIA_NUM_THREADS: ${{ matrix.threads }}
       RESEAU_RUN_TLS_TESTS: '1'
       RESEAU_RUN_NETWORK_TESTS: '1'
       RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
@@ -19,19 +19,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version:
-          - '1'   # latest stable Julia 1.x
-          - 'min' # minimum Julia version from Project.toml compat
-          - 'pre' # latest pre-release Julia
-        os:
-          - ubuntu-latest
-          - windows-latest
-        arch:
-          - x64
         include:
-          - os: macOS-latest
+          - version: '1'
+            os: ubuntu-latest
+            arch: x64
+            threads: 1
+          - version: 'min'
+            os: ubuntu-latest
+            arch: x64
+            threads: 1
+          - version: 'pre'
+            os: ubuntu-latest
+            arch: x64
+            threads: 1
+          - version: '1'
+            os: windows-latest
+            arch: x64
+            threads: 1
+          - version: 'min'
+            os: windows-latest
+            arch: x64
+            threads: 1
+          - version: 'pre'
+            os: windows-latest
+            arch: x64
+            threads: 1
+          - version: '1'
+            os: macOS-latest
             arch: aarch64
-            version: '1'
+            threads: 1
+          - version: '1'
+            os: ubuntu-latest
+            arch: x64
+            threads: 2
+          - version: '1'
+            os: windows-latest
+            arch: x64
+            threads: 2
+          - version: '1'
+            os: macOS-latest
+            arch: aarch64
+            threads: 2
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -41,9 +69,9 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
-      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.version == '1'
+      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.version == '1' && matrix.threads == 1
         uses: julia-actions/julia-processcoverage@v1
-      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.version == '1'
+      - if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64' && matrix.version == '1' && matrix.threads == 1
         uses: codecov/codecov-action@v5
         with:
           files: lcov.info
