@@ -365,11 +365,11 @@ end
 end
 
 @static if Sys.isapple()
-include("2_socket_ops_darwin.jl")
+include("socket_ops/darwin.jl")
 elseif Sys.islinux()
-include("2_socket_ops_linux.jl")
+include("socket_ops/linux.jl")
 elseif Sys.iswindows()
-include("2_socket_ops_windows.jl")
+include("socket_ops/windows.jl")
 else
 
 # Unsupported platforms keep the same API surface but fail eagerly with ENOSYS.
