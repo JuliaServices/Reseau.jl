@@ -1314,15 +1314,11 @@ function _connect_deadline_ns(d::HostResolver)::Int64
     return _min_nonzero(timeout_deadline, d.deadline_ns)
 end
 
-function _wait_for_timer!(timer::IOPoll.TimerState)::Bool
-    return IOPoll.wait_timer!(timer)
-end
-
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
     timer = IOPoll.TimerState(deadline_ns, Int64(0))
     IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
     task = errormonitor(Threads.@spawn begin
-        _wait_for_timer!(timer) || return nothing
+        IOPoll.waittimer(timer) || return nothing
         f()
         return nothing
     end)

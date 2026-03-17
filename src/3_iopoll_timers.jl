@@ -294,14 +294,14 @@ function _close_timer!(timer::TimerState)
 end
 
 """
-    wait_timer!(timer)
+    waittimer(timer)
 
 Wait for a timer to fire or be canceled.
 
 Returns `true` when the timer reached its scheduled deadline and `false` when it
 was closed before firing.
 """
-function wait_timer!(timer::TimerState)::Bool
+function waittimer(timer::TimerState)::Bool
     while true
         reason = pollwait!(timer.waiter)
         reason == PollWakeReason.READY && return true
@@ -322,6 +322,8 @@ function _timer_fire!(timer::TimerState, seq::UInt64)
     pollnotify!(timer.waiter, PollWakeReason.READY)
     return nothing
 end
+
+function deadline_fire! end
 
 @inline function _fire_time_entry!(entry::TimeEntry)
     if entry.kind == TimeEntryKind.DEADLINE
@@ -378,7 +380,7 @@ function sleep_until_ns(deadline_ns::Integer)
     (@atomic :acquire state.running) || return nothing
     timer = TimerState(target_ns, Int64(0))
     schedule_timer!(timer, target_ns) || return nothing
-    wait_timer!(timer)
+    waittimer(timer)
     return nothing
 end
 

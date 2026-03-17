@@ -18,7 +18,6 @@ using ..Reseau: ByteMemory, @gcsafe_ccall
 using ..Reseau.SocketOps
 
 include("3_iopoll_types.jl")
-include("3_iopoll_waiters.jl")
 include("3_iopoll_errors.jl")
 include("3_iopoll_runtime.jl")
 include("3_iopoll_timers.jl")
