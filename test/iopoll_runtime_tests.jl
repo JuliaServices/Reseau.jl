@@ -42,11 +42,11 @@ end
 _el_can_block_julia_worker() = Threads.nthreads() > 1
 
 if !(Sys.isapple() || Sys.islinux())
-    @testset "EventLoops (macOS/Linux only)" begin
+    @testset "IOPoll Runtime (macOS/Linux only)" begin
         @test true
     end
 else
-    @testset "EventLoops kqueue phase 1" begin
+    @testset "IOPoll runtime phase 1" begin
         NP.shutdown!()
         @testset "poller-backed sleep/timedwait" begin
             t0 = time_ns()

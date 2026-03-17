@@ -175,7 +175,7 @@ end
     else
         project_path = normpath(joinpath(@__DIR__, ".."))
         trim_workloads = [
-            ("eventloops_trim_safe.jl", "eventloops_trim_safe"),
+            ("iopoll_runtime_trim_safe.jl", "iopoll_runtime_trim_safe"),
             ("socket_ops_trim_safe.jl", "socket_ops_trim_safe"),
             ("tcp_trim_safe.jl", "tcp_trim_safe"),
             ("host_resolvers_trim_safe.jl", "host_resolvers_trim_safe"),

@@ -1315,12 +1315,7 @@ function _connect_deadline_ns(d::HostResolver)::Int64
 end
 
 function _wait_for_timer!(timer::IOPoll.TimerState)::Bool
-    while true
-        reason = IOPoll.pollwait!(timer.waiter)
-        reason == IOPoll.PollWakeReason.READY && return true
-        (@atomic :acquire timer.closed) && return false
-        (@atomic :acquire timer.deadline_ns) == 0 && return true
-    end
+    return IOPoll.wait_timer!(timer)
 end
 
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}

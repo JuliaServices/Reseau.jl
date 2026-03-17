@@ -27,10 +27,9 @@ These modules are not the primary end-user entrypoints, but they explain the
 package layering and are part of the documented rewrite architecture:
 
 ```@docs
-Reseau.EventLoops
 Reseau.SocketOps
 Reseau.IOPoll
-Reseau.IOPoll.PollOp
+Reseau.IOPoll.PollMode
 Reseau.HostResolvers
 ```
 

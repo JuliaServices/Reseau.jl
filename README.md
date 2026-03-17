@@ -147,9 +147,8 @@ config = TLS.Config(
 
 ## Package Layout
 
-- `Reseau.EventLoops`: backend-specific pollers and timer scheduling
 - `Reseau.SocketOps`: raw socket syscalls, sockaddr helpers, and platform quirks
-- `Reseau.IOPoll`: internal poll-descriptor, deadline, and readiness machinery
+- `Reseau.IOPoll`: internal runtime poller, timer scheduling, deadline, and readiness machinery
 - `TCP`: TCP endpoints, listeners, deadlines, and hostname-aware dial/listen helpers
 - `TLS`: TLS configuration, clients, listeners, and handshake behavior
 

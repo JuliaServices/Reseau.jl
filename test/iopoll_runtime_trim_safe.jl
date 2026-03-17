@@ -30,7 +30,7 @@ end
     return nothing
 end
 
-function run_eventloops_trim_sample()::Nothing
+function run_iopoll_runtime_trim_sample()::Nothing
     (Sys.isapple() || Sys.islinux()) || return nothing
     state = NP.Poller()
     fd0 = Cint(-1)
@@ -84,7 +84,7 @@ end
 
 else
 
-function run_eventloops_trim_sample()::Nothing
+function run_iopoll_runtime_trim_sample()::Nothing
     return nothing
 end
 
@@ -97,7 +97,7 @@ end
 function @main(args::Vector{String})::Cint
     _ = args
     try
-        run_eventloops_trim_sample()
+        run_iopoll_runtime_trim_sample()
         run_internal_poll_trim_sample()
     finally
         NP.shutdown!()
