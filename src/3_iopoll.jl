@@ -14,7 +14,6 @@ operations:
 """
 module IOPoll
 
-using EnumX
 using ..Reseau: ByteMemory, @gcsafe_ccall
 using ..Reseau.SocketOps
 

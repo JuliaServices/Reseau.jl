@@ -13,7 +13,6 @@ module TLS
 
 using OpenSSL_jll
 using NetworkOptions
-using EnumX: @enumx
 using ..Reseau: ByteMemory
 using ..Reseau: @gcsafe_ccall
 using ..Reseau.IOPoll
@@ -58,12 +57,14 @@ const TLS1_1_VERSION = UInt16(0x0302)
 const TLS1_2_VERSION = UInt16(0x0303)
 const TLS1_3_VERSION = UInt16(0x0304)
 
-@enumx ClientAuthMode::UInt8 begin
+module ClientAuthMode
+Base.@enum T::UInt8 begin
     NoClientCert = 0
     RequestClientCert = 1
     RequireAnyClientCert = 2
     VerifyClientCertIfGiven = 3
     RequireAndVerifyClientCert = 4
+end
 end
 
 """

@@ -1,23 +1,31 @@
-@enumx PollMode::UInt8 begin
+module PollMode
+Base.@enum T::UInt8 begin
     READ = 0x01
     WRITE = 0x02
     READWRITE = 0x03
 end
+end
 
-@enumx TimeEntryKind::UInt8 begin
+module TimeEntryKind
+Base.@enum T::UInt8 begin
     DEADLINE = 0x01
     TIMER = 0x02
 end
+end
 
-@enumx PollWaiterState::UInt8 begin
+module PollWaiterState
+Base.@enum T::UInt8 begin
     EMPTY = 0x00
     WAITING = 0x01
     NOTIFIED = 0x02
 end
+end
 
-@enumx PollWakeReason::UInt8 begin
+module PollWakeReason
+Base.@enum T::UInt8 begin
     READY = 0x01
     CANCELED = 0x02
+end
 end
 
 @inline function _mode_has_read(mode::PollMode.T)::Bool
