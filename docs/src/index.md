@@ -4,9 +4,9 @@ Description = "Documentation for Reseau.jl's pure-Julia TCP and TLS transport st
 
 # [Reseau.jl](@id home-page)
 
-`Reseau.jl` is a pure-Julia networking transport stack organized around the
-same broad layers as Go's `runtime`, `internal/poll`, `net`, and `crypto/tls`
-packages. The public surface is deliberately small: plain TCP lives under
+`Reseau.jl` is a pure-Julia networking transport stack with internal polling,
+TCP, hostname-aware dialing, and TLS in one package. The public surface is
+deliberately small: plain TCP lives under
 [`Reseau.TCP`](@ref), TLS lives under [`Reseau.TLS`](@ref), and hostname-aware
 dialing flows through the resolver layer described in [Name Resolution](@ref name-resolution-manual).
 

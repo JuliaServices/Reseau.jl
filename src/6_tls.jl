@@ -3,11 +3,11 @@
 
 TLS client/server layer built on OpenSSL and `TCP` connections.
 
-The design intentionally tracks the shape of Go's `crypto/tls` package:
-- `Config` is an immutable policy object that can be shared across connections
-- `Conn` lazily completes the handshake on first I/O unless `handshake!` is called eagerly
-- deadline handling is delegated to the underlying transport so TLS retries follow the
-  same timeout model as plain TCP
+This layer provides:
+- reusable `Config` objects for client and server policy
+- `Conn` wrappers that can handshake eagerly or lazily on first I/O
+- deadline handling delegated to the wrapped transport so TLS retries follow
+  the same timeout model as plain TCP
 """
 module TLS
 
@@ -133,7 +133,7 @@ end
 """
     Config(; ...)
 
-Go-style TLS configuration for client/server TLS sessions.
+Reusable TLS configuration for client and server sessions.
 
 Keyword arguments:
 - `server_name`: hostname or IP literal used for certificate verification. For clients,
@@ -298,10 +298,9 @@ end
 
 TLS stream wrapper over one `TCP.Conn`.
 
-`Conn` is safe for one concurrent reader and one concurrent writer, mirroring the
-underlying TCP transport and Go's `tls.Conn`. Handshake, read, and write all have
-separate locks so lazy handshakes and shutdown can coordinate without corrupting the
-OpenSSL state machine.
+`Conn` is safe for one concurrent reader and one concurrent writer. Handshake,
+read, and write all have separate locks so lazy handshakes and shutdown can
+coordinate without corrupting the OpenSSL state machine.
 """
 mutable struct Conn
     tcp::TCP.Conn
@@ -430,8 +429,8 @@ end
 end
 
 function _apply_client_server_name!(ssl::Ptr{Cvoid}, config::Config)
-    # Match Go's client behavior: SNI is sent only for hostnames, while peer verification
-    # still supports both DNS names and IP literals.
+    # SNI is sent only for hostnames, while peer verification still supports
+    # both DNS names and IP literals.
     config.server_name === nothing && return nothing
     configured = config.server_name::String
     verify_name = _verify_name(configured)
@@ -674,9 +673,8 @@ function _set_ctx_max_version!(ctx::Ptr{Cvoid}, version::UInt16)
 end
 
 function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
-    # `SSL_CTX` is the expensive, shareable part of OpenSSL configuration. We mirror Go's
-    # preference for immutable shared config objects by fully configuring the context up
-    # front, then reusing it across many live `Conn`s.
+    # `SSL_CTX` is the expensive, shareable part of OpenSSL configuration, so
+    # it is fully configured up front and then reused across many live `Conn`s.
     _validate_config(config; is_server = is_server)
     method = ccall((:TLS_method, _LIBSSL), Ptr{Cvoid}, ())
     method == C_NULL && throw(_make_tls_error("TLS_method", Int32(0)))
@@ -933,8 +931,8 @@ function _ensure_open!(conn::Conn, op::AbstractString)
 end
 
 function _wait_ssl_ready!(conn::Conn, ssl_err::Cint, op::AbstractString)
-    # OpenSSL's nonblocking contract is the same basic model Go's tls.Conn builds on:
-    # retry the operation after the underlying socket becomes readable or writable.
+    # OpenSSL signals retryable progress via read/write readiness on the
+    # underlying socket.
     if ssl_err == _SSL_ERROR_WANT_READ
         IOPoll.waitread(conn.tcp.fd.pfd.pd)
         return true
@@ -1158,8 +1156,8 @@ the requested readiness (`WANT_READ`/`WANT_WRITE`) and then resumes until the
 whole payload is written or an error occurs.
 
 Throws `TLSError` on TLS failure. A write timeout becomes a permanent write error for
-the connection, matching Go's behavior that a timed-out TLS write leaves record framing
-state ambiguous for future writes.
+the connection because a timed-out TLS write can leave record framing state
+ambiguous for future writes.
 """
 function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
     return _write!(conn, buf, length(buf))
@@ -1408,8 +1406,8 @@ end
 
 Expose the underlying TCP connection.
 
-This mirrors Go's `(*tls.Conn).NetConn()` idea: callers that need transport-level
-inspection can reach through the TLS wrapper without reconstructing the socket state.
+Callers that need transport-level inspection can reach through the TLS wrapper
+without reconstructing the socket state.
 """
 function net_conn(conn::Conn)::TCP.Conn
     return conn.tcp
@@ -1630,7 +1628,7 @@ TLS keyword arguments are forwarded to `Config`:
 - `max_version`
 
 If `server_name` is omitted, it is derived from `address` when possible so SNI
-and peer verification behave like Go's client defaults.
+and peer verification use the dial target's host name automatically.
 """
 function connect(
         network::AbstractString,

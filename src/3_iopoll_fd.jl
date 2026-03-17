@@ -5,7 +5,7 @@ This coordinates descriptor lifetime, read/write serialization, and integration
 with the shared runtime poller.
 
 Fields:
-- `fdlock`: Go-style reference and read/write lock state
+- `fdlock`: reference and read/write lock state
 - `pd`: descriptor-local deadline/readiness state shared with the runtime poller
 - `csema`: close semaphore used to wait for non-blocking operations to drain
 - `is_blocking`: whether the OS descriptor has been switched back to blocking
@@ -59,9 +59,9 @@ end
 """
 Map current `PollState` state into a compact poll error code.
 
-This mirrors the shape of Go's `runtime_pollWait` checks: close and deadline
-state are consulted before and after parking so callers can distinguish "ready"
-from "woken because the descriptor was closed or timed out".
+Close and deadline state are consulted before and after parking so callers can
+distinguish "ready" from "woken because the descriptor was closed or timed
+out".
 """
 function _check_error(pd::PollState, mode::PollMode.T)::Int32
     (@atomic :acquire pd.closing) && return _POLL_ERR_CLOSING
@@ -221,9 +221,8 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
             unlock(pd.lock)
         end
         # Publish the post-update snapshot to the poller heap. Stale entries are
-        # left in the heap and filtered by sequence/token checks when they reach
-        # the top, which keeps scheduling cheap and matches Go's timer seq
-        # invalidation strategy.
+        # left in the heap and filtered by sequence/token checks when they
+        # reach the top, which keeps scheduling cheap.
         schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
         if wake_read && wake_write
             _wake_waiters!(pd, PollMode.READWRITE)

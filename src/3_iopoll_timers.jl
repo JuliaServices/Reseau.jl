@@ -144,9 +144,9 @@ function _build_deadline_entries(
         wseq::UInt64,
     )::Vector{TimeEntry}
     entries = TimeEntry[]
-    # Match Go's combined read/write deadline fast path when both deadlines are
-    # identical. Distinct deadlines stay as separate heap entries because they
-    # can expire independently.
+    # When both deadlines are identical, one combined entry is enough. Distinct
+    # deadlines stay as separate heap entries because they can expire
+    # independently.
     if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
         push!(entries, _deadline_entry(rd_ns, pd, PollMode.READWRITE, rseq, wseq))
         return entries
@@ -195,9 +195,9 @@ function schedule_deadlines!(
     finally
         unlock(state.lock)
     end
-    # This is the local equivalent of Go's `netpollBreak()`: once the poller
-    # has committed to a sleep horizon, a newly earlier wakeup must actively
-    # wake it so the blocking syscall can be retried with a shorter timeout.
+    # Once the poller has committed to a sleep horizon, a newly earlier wakeup
+    # must actively wake it so the blocking syscall can be retried with a
+    # shorter timeout.
     _maybe_wake_for_earlier_time!(state, new_earliest)
     return nothing
 end

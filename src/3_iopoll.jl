@@ -1,16 +1,16 @@
 """
     IOPoll
 
-Go-style polling and runtime netpoll layer for network descriptors.
+Internal readiness polling and deadline management for network descriptors.
 
-This merged module now spans both of the Go-inspired layers that used to be
-split between `runtime/netpoll`-like machinery and `internal/poll`-like fd
-operations:
-- one dedicated native poller thread blocks in the platform poll syscall
-- registrations own one read waiter and one write waiter per descriptor
-- deadlines and timers live inside the shared poller heap
-- higher transport layers call `register!`, `prepare_*`, `wait_*`, and fd/timer
-  helpers instead of talking to backend-specific handles directly
+`IOPoll` owns:
+- one dedicated native poller thread plus the platform backend integration
+- descriptor registration and readiness waiters
+- read/write deadlines and poller-managed timers
+- the low-level `FD` wrapper used by higher transport layers
+
+Higher layers call `register!`, `prepare_*`, `wait_*`, and timer helpers
+instead of interacting with backend-specific handles directly.
 """
 module IOPoll
 

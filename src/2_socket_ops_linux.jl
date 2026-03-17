@@ -1,6 +1,6 @@
 # Linux socket syscall bindings used by `SocketOps`.
 #
-# The higher layers assume Go-like invariants:
+# The higher layers assume these invariants:
 # - newly created sockets are non-blocking and close-on-exec before they escape
 # - retryable syscall interruptions are handled here instead of in every caller
 # - connect/accept can surface raw errno so the poll layer can finish the state

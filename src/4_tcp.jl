@@ -5,7 +5,7 @@ Core TCP socket operations and connection/listener types.
 
 This layer sits directly above `SocketOps` and `IOPoll`. It is responsible for
 turning raw non-blocking sockets into higher-level connection/listener objects,
-while still keeping the control flow close to Go's `netFD` implementation:
+including:
 - sockets are created non-blocking and registered with the poller
 - non-blocking connect completes by waiting for write readiness and then reading
   `SO_ERROR`
@@ -183,7 +183,7 @@ end
 """
     FD
 
-Go-style network descriptor owner built on `IOPoll.FD`.
+Internal socket owner built on `IOPoll.FD`.
 
 This is the internal object that owns the actual socket. Public callers usually
 interact with `Conn` or `Listener`, but the transport implementation keeps the
@@ -331,7 +331,7 @@ function _finalize_connected_addrs!(fd::FD, fallback_remote::SocketAddr)
 end
 
 function _apply_default_tcp_opts!(fd::FD)
-    # Match Go's baseline behavior: disable Nagle and enable keepalive by default.
+    # Default connected sockets to low-latency sends and kernel keepalive.
     try
         SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_NODELAY, 1)
     catch
@@ -379,9 +379,9 @@ function _wait_connect_complete!(
                 throw(ConnectCanceledError())
             end
             try
-                # This mirrors Go's non-blocking connect completion path:
-                # wait for writability, then inspect `SO_ERROR` to learn whether
-                # the connection actually succeeded.
+                # Non-blocking connect completion is detected by waiting for
+                # writability, then inspecting `SO_ERROR` to learn whether the
+                # connection actually succeeded.
                 IOPoll.waitwrite(fd.pfd.pd)
             catch err
                 ex = err::Exception
