@@ -355,6 +355,10 @@ struct DNSOpError <: Exception
     err::Exception
 end
 
+struct UnknownNetworkError <: Exception
+    network::String
+end
+
 abstract type AbstractResolver end
 
 struct SystemResolver <: AbstractResolver end
@@ -403,6 +407,7 @@ function ResolverPolicy(; prefer_ipv6::Bool = false, allow_ipv4::Bool = true, al
 end
 
 const DEFAULT_RESOLVER = SystemResolver()
+const _SERVICE_TCP = Dict{String, Int}("http" => 80, "https" => 443, "ssh" => 22)
 
 mutable struct DNSRaceState
     @atomic done::Bool
@@ -515,20 +520,60 @@ end
     return addr isa TCP.SocketAddrV6
 end
 
-function split_host_port(address::AbstractString)::Tuple{String, String}
-    addr = String(address)
-    idx = findlast(==(':'), addr)
-    idx === nothing && throw(AddressError("missing port in address", addr))
-    host = addr[begin:prevind(addr, idx)]
-    service = addr[nextind(addr, idx):end]
-    isempty(service) && throw(AddressError("missing port in address", addr))
-    return host, service
+function split_host_port(hostport::AbstractString)::Tuple{String, String}
+    s = String(hostport)
+    i = findlast(==(':'), s)
+    i === nothing && throw(AddressError("missing port in address", s))
+    first_i = firstindex(s)
+    last_i = lastindex(s)
+    j = first_i
+    k = first_i
+    host = ""
+    if !isempty(s) && s[first_i] == '['
+        end_idx = findfirst(==(']'), s)
+        end_idx === nothing && throw(AddressError("missing ']' in address", s))
+        if end_idx == last_i
+            throw(AddressError("missing port in address", s))
+        end
+        next_after_bracket = nextind(s, end_idx)
+        if next_after_bracket != i
+            if s[next_after_bracket] == ':'
+                throw(AddressError("too many colons in address", s))
+            end
+            throw(AddressError("missing port in address", s))
+        end
+        host_start = nextind(s, first_i)
+        host_end = prevind(s, end_idx)
+        host = host_start <= host_end ? String(SubString(s, host_start, host_end)) : ""
+        j = host_start
+        k = next_after_bracket
+    else
+        if i != first_i
+            host_end = prevind(s, i)
+            host = String(SubString(s, first_i, host_end))
+            findfirst(==(':'), SubString(s, first_i, host_end)) !== nothing &&
+                throw(AddressError("too many colons in address", s))
+        else
+            host = ""
+        end
+    end
+    findnext(==('['), s, j) !== nothing && throw(AddressError("unexpected '[' in address", s))
+    findnext(==(']'), s, k) !== nothing && throw(AddressError("unexpected ']' in address", s))
+    if i == last_i
+        return host, ""
+    end
+    port_start = nextind(s, i)
+    port = String(SubString(s, port_start, last_i))
+    return host, port
 end
 
 function lookup_port(resolver::AbstractResolver, network::AbstractString, service::AbstractString)::Int
     _ = resolver
-    _ = network
-    return parse(Int, service)
+    return lookup_port(DEFAULT_RESOLVER, network, service)
+end
+
+function lookup_port(network::AbstractString, service::AbstractString)::Int
+    return lookup_port(DEFAULT_RESOLVER, network, service)
 end
 
 lookup_port(resolver::SingleflightResolver, network::AbstractString, service::AbstractString)::Int =
@@ -536,6 +581,66 @@ lookup_port(resolver::SingleflightResolver, network::AbstractString, service::Ab
 
 lookup_port(resolver::CachingResolver, network::AbstractString, service::AbstractString)::Int =
     lookup_port((resolver::CachingResolver).parent, network, service)
+
+function _parse_port_table(table::Dict{String, Int}, network::AbstractString, service::AbstractString)::Int
+    port = get(() -> nothing, table, lowercase(String(service)))
+    port === nothing && throw(AddressError("unknown port", string(network, "/", service)))
+    return port::Int
+end
+
+function parse_port(service::AbstractString)::Tuple{Int, Bool}
+    isempty(service) && return 0, false
+    s = String(service)
+    neg = false
+    if startswith(s, '+')
+        s = s[2:end]
+    elseif startswith(s, '-')
+        neg = true
+        s = s[2:end]
+    end
+    isempty(s) && return 0, false
+    max_val = typemax(UInt32)
+    cutoff = UInt32(1 << 30)
+    n = UInt32(0)
+    for ch in s
+        ('0' <= ch <= '9') || return 0, true
+        d = UInt32(ch - '0')
+        if n >= cutoff
+            n = max_val
+            break
+        end
+        n *= UInt32(10)
+        nn = n + d
+        if nn < n || nn > max_val
+            n = max_val
+            break
+        end
+        n = nn
+    end
+    port = if !neg && n >= cutoff
+        Int(cutoff - UInt32(1))
+    elseif neg && n > cutoff
+        Int(cutoff)
+    else
+        Int(n)
+    end
+    neg && (port = -port)
+    return port, false
+end
+
+function lookup_port(::SystemResolver, network::AbstractString, service::AbstractString)::Int
+    port, needs_lookup = parse_port(service)
+    if needs_lookup
+        n = String(network)
+        if n == "tcp" || n == "tcp4" || n == "tcp6"
+            port = _parse_port_table(_SERVICE_TCP, n, service)
+        else
+            throw(UnknownNetworkError(n))
+        end
+    end
+    (port < 0 || port > 65535) && throw(AddressError("invalid port", String(service)))
+    return port
+end
 
 function _with_port(addr::TCP.SocketAddrV4, port::Int)::TCP.SocketAddrV4
     return TCP.SocketAddrV4(addr.ip, UInt16(port))
@@ -665,9 +770,25 @@ function _apply_policy_and_network(
         kind::Symbol,
         policy::ResolverPolicy,
     )::Vector{TCP.SocketEndpoint}
-    _ = kind
-    _ = policy
-    return ips
+    out = TCP.SocketEndpoint[]
+    for addr in ips
+        if kind == :tcp4 && !(addr isa TCP.SocketAddrV4)
+            continue
+        end
+        if kind == :tcp6 && !(addr isa TCP.SocketAddrV6)
+            continue
+        end
+        if addr isa TCP.SocketAddrV4
+            policy.allow_ipv4 || continue
+        else
+            policy.allow_ipv6 || continue
+        end
+        push!(out, addr)
+    end
+    if policy.prefer_ipv6 && kind == :tcp
+        sort!(out; by = a -> a isa TCP.SocketAddrV6 ? 0 : 1)
+    end
+    return out
 end
 
 function resolve_tcp_addrs(
@@ -821,7 +942,13 @@ end
 end
 
 @inline _is_self_connect(conn::TCP.Conn)::Bool = false
-@inline _network_kind(network::AbstractString)::Symbol = Symbol(network)
+@inline function _network_kind(network::AbstractString)::Symbol
+    n = String(network)
+    n == "tcp" && return :tcp
+    n == "tcp4" && return :tcp4
+    n == "tcp6" && return :tcp6
+    throw(UnknownNetworkError(n))
+end
 
 function _mark_connect_done!(state::DNSRaceState)
     while true
