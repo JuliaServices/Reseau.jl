@@ -9,6 +9,7 @@ module IOPoll
 export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close_timer!, sleep, read!, _read_ptr_some!
 
 struct DeadlineExceededError <: Exception end
+struct NoDeadlineError <: Exception end
 
 module PollMode
 Base.@enum T::UInt8 begin
@@ -42,16 +43,6 @@ mutable struct PollWaiter
     end
 end
 
-mutable struct Registration
-    fd::Int32
-    token::UInt64
-    read_waiter::PollWaiter
-    write_waiter::PollWaiter
-    function Registration(fd::Int32, token::UInt64)
-        return new(fd, token, PollWaiter(), PollWaiter())
-    end
-end
-
 mutable struct PollState
     lock::ReentrantLock
     sysfd::Int32
@@ -77,6 +68,27 @@ mutable struct PollState
             UInt64(0),
         )
     end
+end
+
+mutable struct Registration
+    fd::Int32
+    token::UInt64
+    mode::PollMode.T
+    read_waiter::PollWaiter
+    write_waiter::PollWaiter
+    @atomic event_err::Bool
+    pollstate::PollState
+end
+
+function Registration(
+        fd::Int32,
+        token::UInt64,
+        mode::PollMode.T,
+        read_waiter::PollWaiter,
+        write_waiter::PollWaiter,
+        event_err::Bool,
+    )
+    return Registration(fd, token, mode, read_waiter, write_waiter, event_err, PollState(fd, token))
 end
 
 mutable struct FD
@@ -117,16 +129,6 @@ mutable struct TimerState
     end
 end
 
-function register!(pfd::FD)
-    @atomic :release pfd.pd.pollable = true
-    return nothing
-end
-
-function set_write_deadline!(pfd::FD, deadline_ns::Int64)
-    @atomic :release pfd.pd.wd_ns = deadline_ns
-    return nothing
-end
-
 connect!(pfd::FD, addrbuf, addrlen) = nothing
 waitwrite(pd::PollState) = nothing
 schedule_timer!(timer::TimerState, deadline_ns::Int64) = true
@@ -138,11 +140,70 @@ _read_ptr_some!(pfd::FD, ptr::Ptr{UInt8}, nbytes::Int) = throw(EOFError())
 
 const _POLL_NO_ERROR = Int32(0)
 const _REGISTRATIONS = IdDict{PollState, Registration}()
+const _NEXT_TOKEN = Ref{UInt64}(UInt64(0))
 
-function register!(pfd::FD)
-    @atomic :release pfd.pd.pollable = true
-    reg = Registration(pfd.sysfd, UInt64(1))
-    _REGISTRATIONS[pfd.pd] = reg
+@inline _mode_has_read(mode::PollMode.T)::Bool = mode == PollMode.READ || mode == PollMode.READWRITE
+@inline _mode_has_write(mode::PollMode.T)::Bool = mode == PollMode.WRITE || mode == PollMode.READWRITE
+@inline _mode_is_empty(mode::PollMode.T)::Bool = mode != PollMode.READ && mode != PollMode.WRITE && mode != PollMode.READWRITE
+
+function schedule_deadlines!(
+        pd::PollState,
+        rd_ns::Int64,
+        wd_ns::Int64,
+        rseq::UInt64,
+        wseq::UInt64,
+    )
+    _ = pd
+    _ = rd_ns
+    _ = wd_ns
+    _ = rseq
+    _ = wseq
+    return nothing
+end
+
+@inline function _next_token!()::UInt64
+    _NEXT_TOKEN[] += UInt64(1)
+    return _NEXT_TOKEN[]
+end
+
+function register!(
+        fd::Integer;
+        mode::PollMode.T = PollMode.READWRITE,
+        pollstate::Union{Nothing, PollState} = nothing,
+    )::Registration
+    _mode_is_empty(mode) && throw(ArgumentError("register! requires READ and/or WRITE mode"))
+    pd = pollstate === nothing ? PollState(fd) : pollstate::PollState
+    token = _next_token!()
+    registration = Registration(Int32(fd), token, mode, PollWaiter(), PollWaiter(), false)
+    registration.pollstate = pd
+    pd.sysfd = Int32(fd)
+    pd.token = token
+    _REGISTRATIONS[pd] = registration
+    return registration
+end
+
+function register!(fd::FD)
+    pd = fd.pd
+    lock(pd.lock)
+    try
+        registration = register!(fd.sysfd; mode = PollMode.READWRITE, pollstate = pd)
+        pd.sysfd = fd.sysfd
+        pd.token = registration.token
+        @atomic :release pd.pollable = true
+        @atomic :release pd.closing = false
+        @atomic :release pd.event_err = false
+        @atomic :release pd.rd_ns = Int64(0)
+        @atomic :release pd.wd_ns = Int64(0)
+        @atomic :release pd.rseq = UInt64(1)
+        @atomic :release pd.wseq = UInt64(1)
+    finally
+        unlock(pd.lock)
+    end
+    return nothing
+end
+
+function deregister!(pd::PollState)
+    pop!(_REGISTRATIONS, pd, nothing)
     return nothing
 end
 
@@ -161,22 +222,171 @@ _convert_poll_error!(res::Int32, is_file::Bool) = nothing
 preparewrite(pd::PollState, is_file::Bool = false) = nothing
 _fd_write_lock!(fd::FD) = nothing
 _fd_write_unlock!(fd::FD) = nothing
+pollable(pd::PollState)::Bool = @atomic :acquire pd.pollable
+
+function _wake_waiters!(pd::PollState, mode::PollMode.T)
+    registration = current_registration(pd)
+    registration === nothing && return nothing
+    if _mode_has_read(mode)
+        pollnotify!(registration.read_waiter, PollWakeReason.CANCELED)
+    end
+    if _mode_has_write(mode)
+        pollnotify!(registration.write_waiter, PollWakeReason.CANCELED)
+    end
+    return nothing
+end
 
 function pollwait!(waiter::PollWaiter)::PollWakeReason.T
-    return PollWakeReason.READY
+    task = current_task()
+    task.sticky && (task.sticky = false)
+    waiter.task = task
+    try
+        state, ok = @atomicreplace(waiter.state, PollWaiterState.EMPTY => PollWaiterState.WAITING)
+        if ok
+            wait()
+        else
+            state == PollWaiterState.NOTIFIED || throw(ArgumentError("concurrent wait on PollWaiter"))
+        end
+        while true
+            state, ok = @atomicreplace(waiter.state, PollWaiterState.NOTIFIED => PollWaiterState.EMPTY)
+            ok && return @atomic :acquire waiter.reason
+            state == PollWaiterState.EMPTY && return @atomic :acquire waiter.reason
+            state == PollWaiterState.WAITING || throw(ArgumentError("invalid PollWaiter state"))
+            wait()
+        end
+    finally
+        waiter.task = nothing
+    end
 end
 
 function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReason.READY)::Bool
-    @atomic :release waiter.reason = reason
-    return true
+    state = @atomic :acquire waiter.state
+    while true
+        if state == PollWaiterState.NOTIFIED
+            current = @atomic :acquire waiter.reason
+            current == PollWakeReason.READY && return false
+            @atomic :release waiter.reason = reason
+            return false
+        end
+        state, ok = @atomicreplace(waiter.state, state => PollWaiterState.NOTIFIED)
+        ok || continue
+        @atomic :release waiter.reason = reason
+        if state == PollWaiterState.WAITING
+            task = waiter.task
+            task isa Task || throw(ArgumentError("invalid PollWaiter task state"))
+            schedule(task)
+            return true
+        end
+        state == PollWaiterState.EMPTY || throw(ArgumentError("invalid PollWaiter state"))
+        return false
+    end
 end
 
 function arm_waiter!(registration::Registration, mode::PollMode.T)
     if mode == PollMode.WRITE
         pollnotify!(registration.write_waiter, PollWakeReason.READY)
-    else
-        pollnotify!(registration.read_waiter, PollWakeReason.READY)
+        return nothing
     end
+    pollnotify!(registration.read_waiter, PollWakeReason.READY)
+    return nothing
+end
+
+function Base.close(pd::PollState)
+    was_pollable = false
+    lock(pd.lock)
+    try
+        was_pollable = @atomic :acquire pd.pollable
+        @atomic :release pd.pollable = false
+    finally
+        unlock(pd.lock)
+    end
+    was_pollable && pd.sysfd >= 0 && deregister!(pd)
+    return nothing
+end
+
+function evict!(pd::PollState)
+    lock(pd.lock)
+    try
+        (@atomic :acquire pd.closing) && return nothing
+        @atomic :release pd.closing = true
+        @atomic pd.rseq += UInt64(1)
+        @atomic pd.wseq += UInt64(1)
+    finally
+        unlock(pd.lock)
+    end
+    _wake_waiters!(pd, PollMode.READWRITE)
+    return nothing
+end
+
+@inline function _monotonic_ns()::Int64
+    return Int64(time_ns())
+end
+
+function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
+    deadline = Int64(deadline_ns)
+    try
+        pd = fd.pd
+        (@atomic :acquire pd.pollable) || throw(NoDeadlineError())
+        wake_read = false
+        wake_write = false
+        rd_ns = Int64(0)
+        wd_ns = Int64(0)
+        rseq = UInt64(0)
+        wseq = UInt64(0)
+        lock(pd.lock)
+        try
+            (@atomic :acquire pd.closing) && return nothing
+            if _mode_has_read(mode)
+                @atomic pd.rseq += UInt64(1)
+                if deadline == 0
+                    @atomic :release pd.rd_ns = Int64(0)
+                elseif deadline <= _monotonic_ns()
+                    @atomic :release pd.rd_ns = Int64(-1)
+                    wake_read = true
+                else
+                    @atomic :release pd.rd_ns = deadline
+                end
+            end
+            if _mode_has_write(mode)
+                @atomic pd.wseq += UInt64(1)
+                if deadline == 0
+                    @atomic :release pd.wd_ns = Int64(0)
+                elseif deadline <= _monotonic_ns()
+                    @atomic :release pd.wd_ns = Int64(-1)
+                    wake_write = true
+                else
+                    @atomic :release pd.wd_ns = deadline
+                end
+            end
+            rd_ns = @atomic :acquire pd.rd_ns
+            wd_ns = @atomic :acquire pd.wd_ns
+            rseq = @atomic :acquire pd.rseq
+            wseq = @atomic :acquire pd.wseq
+        finally
+            unlock(pd.lock)
+        end
+        schedule_deadlines!(pd, rd_ns, wd_ns, rseq, wseq)
+        if wake_read && wake_write
+            _wake_waiters!(pd, PollMode.READWRITE)
+        elseif wake_read
+            _wake_waiters!(pd, PollMode.READ)
+        elseif wake_write
+            _wake_waiters!(pd, PollMode.WRITE)
+        end
+    finally
+        nothing
+    end
+    return nothing
+end
+
+function set_write_deadline!(fd::FD, deadline_ns::Integer)
+    _set_deadline_impl!(fd, deadline_ns, PollMode.WRITE)
+    return nothing
+end
+
+function Base.close(fd::FD)
+    evict!(fd.pd)
+    close(fd.pd)
     return nothing
 end
 
@@ -218,6 +428,7 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
         end
         errno = _iocp_finish_connect!(registration)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
+        Main.Reseau.SocketOps.update_connect_context!(fd.sysfd)
     finally
         _fd_write_unlock!(fd)
     end
@@ -228,11 +439,16 @@ end
 
 module SocketOps
 
-export AF_INET, AF_INET6, SOCK_STREAM, SockAddrIn, SockAddrIn6, open_socket, bind_socket, set_nonblocking!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
+export AF_INET, AF_INET6, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_KEEPALIVE, SO_ERROR, SockAddrIn, SockAddrIn6, open_socket, bind_socket, connect_socket, set_nonblocking!, set_sockopt_int, get_socket_error, update_connect_context!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
 
 const AF_INET = Int32(2)
 const AF_INET6 = Int32(23)
 const SOCK_STREAM = Int32(1)
+const IPPROTO_TCP = Int32(6)
+const TCP_NODELAY = Int32(1)
+const SOL_SOCKET = Int32(0xffff)
+const SO_KEEPALIVE = Int32(0x0008)
+const SO_ERROR = Int32(0x1007)
 
 struct SockAddrIn
     sin_family::UInt16
@@ -270,7 +486,11 @@ end
 
 open_socket(family::Int32, sotype::Int32) = Int32(1)
 bind_socket(sysfd::Int32, sockaddr::Union{SockAddrIn, SockAddrIn6}) = nothing
+connect_socket(sysfd::Int32, sockaddr::Union{SockAddrIn, SockAddrIn6}) = Int32(0)
 set_nonblocking!(sysfd::Int32, enabled::Bool) = nothing
+set_sockopt_int(fd::Int32, level::Int32, optname::Int32, value::Integer) = nothing
+get_socket_error(fd::Int32)::Int32 = Int32(0)
+update_connect_context!(fd::Int32) = nothing
 
 function sockaddr_in(ip::NTuple{4, UInt8}, port::Integer)::SockAddrIn
     return SockAddrIn(
@@ -354,7 +574,7 @@ mutable struct FD
     raddr::Union{Nothing, SocketAddr}
 end
 
-struct Conn
+struct Conn <: IO
     fd::FD
 end
 
@@ -418,7 +638,17 @@ function _finalize_connected_addrs!(fd::FD, fallback_remote::SocketAddr)
     return nothing
 end
 
-_apply_default_tcp_opts!(fd::FD) = nothing
+function _apply_default_tcp_opts!(fd::FD)
+    try
+        SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.IPPROTO_TCP, SocketOps.TCP_NODELAY, 1)
+    catch
+    end
+    try
+        SocketOps.set_sockopt_int(fd.pfd.sysfd, SocketOps.SOL_SOCKET, SocketOps.SO_KEEPALIVE, 1)
+    catch
+    end
+    return nothing
+end
 
 function _wait_connect_complete!(
         fd::FD,
@@ -671,9 +901,9 @@ end
 
 end
 
-Base.close(fd::TCP.FD) = nothing
-Base.close(::TCP.Conn) = nothing
-Base.close(::TCP.Listener) = nothing
+Base.close(fd::TCP.FD) = close(fd.pfd)
+Base.close(conn::TCP.Conn) = close(conn.fd)
+Base.close(listener::TCP.Listener) = close(listener.fd)
 
 module HostResolvers
 
