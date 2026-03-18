@@ -330,6 +330,9 @@ end
             @test_throws ND.UnknownNetworkError ND.lookup_port("sctp", "domain")
             @test_throws ND.UnknownNetworkError ND.lookup_port(static_lookup, "sctp", "smtp-alt")
         end
+        @testset "resolve_tcp_addr convenience wrapper" begin
+            @test ND.resolve_tcp_addr("tcp", "127.0.0.1:80") == NC.loopback_addr(80)
+        end
         @testset "resolver policies and static resolver" begin
             v4 = NC.loopback_addr(9000)
             v6 = NC.loopback_addr6(9000)

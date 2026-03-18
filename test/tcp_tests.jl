@@ -255,6 +255,37 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "combined deadline applies to both read and write state" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                pfd = server.fd.pfd
+                future_deadline = Int64(time_ns()) + Int64(5_000_000_000)
+                NC.set_deadline!(server, future_deadline)
+                @test (@atomic :acquire pfd.pd.rd_ns) == future_deadline
+                @test (@atomic :acquire pfd.pd.wd_ns) == future_deadline
+                NC.set_deadline!(server, Int64(time_ns()) + Int64(30_000_000))
+                IP.sleep(0.06)
+                @test IP._check_error(pfd.pd, IP.PollMode.READ) == Int32(2)
+                @test IP._check_error(pfd.pd, IP.PollMode.WRITE) == Int32(2)
+                NC.set_deadline!(server, Int64(0))
+                @test IP._check_error(pfd.pd, IP.PollMode.READ) == Int32(0)
+                @test IP._check_error(pfd.pd, IP.PollMode.WRITE) == Int32(0)
+            finally
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "blocked read unblocks on conn close and repeated close errors" begin
             IP.shutdown!()
             listener = nothing
@@ -343,5 +374,20 @@ end
                 _close_quiet!(listener)
                 IP.shutdown!()
             end
+        end
+        @testset "IPv6 show output uses compressed form" begin
+            @test repr(NC.loopback_addr6(443)) == "[::1]:443"
+            @test repr(NC.any_addr6(0)) == "[::]:0"
+            doc_addr = NC.SocketAddrV6((
+                    0x20, 0x01, 0x0d, 0xb8,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x01,
+                ),
+                8443,
+            )
+            @test repr(doc_addr) == "[2001:db8::1]:8443"
+            scoped = NC.SocketAddrV6(NC.loopback_addr6(1).ip, 1; scope_id = 7)
+            @test repr(scoped) == "[::1%7]:1"
         end
     end

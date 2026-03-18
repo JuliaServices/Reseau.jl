@@ -157,13 +157,46 @@ function any_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
 end
 
 function _format_ipv6(ip::NTuple{16, UInt8})::String
-    groups = String[]
+    groups = UInt16[]
     for i in 1:8
         hi = UInt16(ip[(2 * i) - 1])
         lo = UInt16(ip[2 * i])
-        push!(groups, string((hi << 8) | lo, base = 16))
+        push!(groups, (hi << 8) | lo)
     end
-    return join(groups, ":")
+    best_start = 0
+    best_len = 0
+    i = 1
+    while i <= length(groups)
+        if groups[i] == 0
+            j = i
+            while j <= length(groups) && groups[j] == 0
+                j += 1
+            end
+            run_len = j - i
+            if run_len > best_len && run_len >= 2
+                best_start = i
+                best_len = run_len
+            end
+            i = j
+        else
+            i += 1
+        end
+    end
+    if best_len >= 2
+        left = [string(groups[idx], base = 16) for idx in 1:(best_start - 1)]
+        right_start = best_start + best_len
+        right = [string(groups[idx], base = 16) for idx in right_start:length(groups)]
+        if isempty(left) && isempty(right)
+            return "::"
+        elseif isempty(left)
+            return "::" * join(right, ":")
+        elseif isempty(right)
+            return join(left, ":") * "::"
+        else
+            return join(left, ":") * "::" * join(right, ":")
+        end
+    end
+    return join((string(group, base = 16) for group in groups), ":")
 end
 
 function Base.show(io::IO, addr::SocketAddrV4)
