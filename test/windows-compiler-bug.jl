@@ -118,16 +118,93 @@ end
 
 module SocketOps
 
-export AF_INET, AF_INET6, SOCK_STREAM, open_socket, bind_socket, set_nonblocking!, sockaddr_bytes
+export AF_INET, AF_INET6, SOCK_STREAM, SockAddrIn, SockAddrIn6, open_socket, bind_socket, set_nonblocking!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
 
 const AF_INET = Int32(2)
 const AF_INET6 = Int32(23)
 const SOCK_STREAM = Int32(1)
 
+struct SockAddrIn
+    sin_family::UInt16
+    sin_port::UInt16
+    sin_addr::UInt32
+    sin_zero::NTuple{8, UInt8}
+end
+
+struct SockAddrIn6
+    sin6_family::UInt16
+    sin6_port::UInt16
+    sin6_flowinfo::UInt32
+    sin6_addr::NTuple{16, UInt8}
+    sin6_scope_id::UInt32
+end
+
+@inline function _hton16(v::UInt16)::UInt16
+    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    return v
+end
+
+@inline function _hton32(v::UInt32)::UInt32
+    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    return v
+end
+
+@inline function _port_u16(port::Integer)::UInt16
+    (port < 0 || port > 0xffff) && throw(ArgumentError("port must be in [0, 65535]"))
+    return UInt16(port)
+end
+
+@inline function _ipv4_u32(ip::NTuple{4, UInt8})::UInt32
+    return (UInt32(ip[1]) << 24) | (UInt32(ip[2]) << 16) | (UInt32(ip[3]) << 8) | UInt32(ip[4])
+end
+
 open_socket(family::Int32, sotype::Int32) = Int32(1)
-bind_socket(sysfd::Int32, sockaddr) = nothing
+bind_socket(sysfd::Int32, sockaddr::Union{SockAddrIn, SockAddrIn6}) = nothing
 set_nonblocking!(sysfd::Int32, enabled::Bool) = nothing
-sockaddr_bytes(sockaddr) = UInt8[0x00]
+
+function sockaddr_in(ip::NTuple{4, UInt8}, port::Integer)::SockAddrIn
+    return SockAddrIn(
+        UInt16(AF_INET),
+        _hton16(_port_u16(port)),
+        _hton32(_ipv4_u32(ip)),
+        ntuple(_ -> UInt8(0), 8),
+    )
+end
+
+function sockaddr_in_any(port::Integer)::SockAddrIn
+    return sockaddr_in((UInt8(0), UInt8(0), UInt8(0), UInt8(0)), port)
+end
+
+function sockaddr_in6(
+        ip::NTuple{16, UInt8},
+        port::Integer;
+        flowinfo::Integer = 0,
+        scope_id::Integer = 0,
+    )::SockAddrIn6
+    return SockAddrIn6(
+        UInt16(AF_INET6),
+        _hton16(_port_u16(port)),
+        _hton32(UInt32(flowinfo)),
+        ip,
+        UInt32(scope_id),
+    )
+end
+
+function sockaddr_in6_any(port::Integer; scope_id::Integer = 0)::SockAddrIn6
+    return sockaddr_in6(ntuple(_ -> UInt8(0), 16), port; scope_id = scope_id)
+end
+
+function sockaddr_bytes(addr::SockAddrIn)::Vector{UInt8}
+    bytes = Vector{UInt8}(undef, sizeof(SockAddrIn))
+    GC.@preserve bytes addr unsafe_store!(Ptr{SockAddrIn}(pointer(bytes)), addr)
+    return bytes
+end
+
+function sockaddr_bytes(addr::SockAddrIn6)::Vector{UInt8}
+    bytes = Vector{UInt8}(undef, sizeof(SockAddrIn6))
+    GC.@preserve bytes addr unsafe_store!(Ptr{SockAddrIn6}(pointer(bytes)), addr)
+    return bytes
+end
 
 end
 
@@ -193,7 +270,13 @@ end
 @inline _connect_wait_unregister!(::Any, ::FD) = nothing
 @inline _addr_family(::SocketAddrV4)::Int32 = SocketOps.AF_INET
 @inline _addr_family(::SocketAddrV6)::Int32 = SocketOps.AF_INET6
-@inline _to_sockaddr(addr::SocketAddr) = addr
+@inline function _to_sockaddr(addr::SocketAddrV4)::SocketOps.SockAddrIn
+    return SocketOps.sockaddr_in(addr.ip, Int(addr.port))
+end
+
+@inline function _to_sockaddr(addr::SocketAddrV6)::SocketOps.SockAddrIn6
+    return SocketOps.sockaddr_in6(addr.ip, Int(addr.port); scope_id = Int(addr.scope_id))
+end
 
 function _new_netfd(
         sysfd::Int32;
@@ -223,7 +306,7 @@ function _wait_connect_complete!(
         @static if Sys.iswindows()
             sockaddr = _to_sockaddr(remote_addr)
             addrbuf = SocketOps.sockaddr_bytes(sockaddr)
-            addrlen = Int32(1)
+            addrlen = Int32(sizeof(typeof(sockaddr)))
             while true
                 if _connect_canceled(cancel_state)
                     throw(ConnectCanceledError())
@@ -263,8 +346,11 @@ function _wait_connect_complete!(
 end
 
 @inline function _bind_connectex_local!(fd::FD, family::Int32)
-    _ = fd
-    _ = family
+    if family == SocketOps.AF_INET6
+        SocketOps.bind_socket(fd.pfd.sysfd, SocketOps.sockaddr_in6_any(0))
+        return nothing
+    end
+    SocketOps.bind_socket(fd.pfd.sysfd, SocketOps.sockaddr_in_any(0))
     return nothing
 end
 
