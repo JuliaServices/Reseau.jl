@@ -255,7 +255,7 @@ function _pc_run_tls_workload!()
             key_file = key_path::String,
             handshake_timeout_ns = 1_000_000_000,
         )
-        listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+        listener = TL.listen(NC.loopback_addr(0), server_cfg; backlog = 8)
         laddr = TL.addr(listener)::NC.SocketAddrV4
         accept_task = errormonitor(Threads.@spawn begin
             conn = TL.accept(listener::TL.Listener)
@@ -268,8 +268,7 @@ function _pc_run_tls_workload!()
             handshake_timeout_ns = 1_000_000_000,
         )
         client = TL.connect(
-            "tcp",
-            "127.0.0.1:$(Int(laddr.port))";
+            NC.loopback_addr(Int(laddr.port));
             server_name = client_cfg.server_name,
             verify_peer = client_cfg.verify_peer,
             client_auth = client_cfg.client_auth,

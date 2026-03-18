@@ -1729,6 +1729,49 @@ function _prepare_connect_config(config::Config, address::AbstractString)::Confi
     return _config_with_server_name(config, host)
 end
 
+function _prepare_connect_config(config::Config, remote_addr::TCP.SocketAddr)::Config
+    config.server_name !== nothing && return config
+    host = try
+        hostport = sprint(show, remote_addr)
+        parsed_host, _ = HostResolvers.split_host_port(hostport)
+        _normalize_peer_name(parsed_host)
+    catch
+        ""
+    end
+    isempty(host) && return config
+    return _config_with_server_name(config, host)
+end
+
+function _connect_client(tcp::TCP.Conn, config::Config, deadline_ns::Int64 = Int64(0))::Conn
+    tls_conn = try
+        client(tcp, config)
+    catch err
+        ex = _as_exception(err)
+        try
+            close(tcp)
+        catch
+        end
+        ex isa Exception && rethrow()
+    end
+    try
+        if deadline_ns != 0
+            _with_temporary_deadline_cap(tls_conn, deadline_ns) do
+                handshake!(tls_conn)
+            end
+        else
+            handshake!(tls_conn)
+        end
+        return tls_conn
+    catch err
+        ex = _as_exception(err)
+        try
+            close(tls_conn)
+        catch
+        end
+        ex isa Exception && rethrow()
+    end
+end
+
 function _connect(
         host_resolver::HostResolvers.HostResolver,
         network::AbstractString,
@@ -1738,28 +1781,41 @@ function _connect(
     tls_config = _prepare_connect_config(config, address)
     connect_deadline_ns = HostResolvers._connect_deadline_ns(host_resolver)
     tcp = TCP.connect(host_resolver, network, address)
-    tls_conn = nothing
-    try
-        tls_conn = client(tcp, tls_config)
-        _with_temporary_deadline_cap(tls_conn, connect_deadline_ns) do
-            handshake!(tls_conn)
-        end
-        return tls_conn
-    catch err
-        ex = _as_exception(err)
-        if tls_conn !== nothing
-            try
-                close(tls_conn)
-            catch
-            end
-        else
-            try
-                close(tcp)
-            catch
-            end
-        end
-        ex isa Exception && rethrow()
-    end
+    return _connect_client(tcp, tls_config, connect_deadline_ns)
+end
+
+function _connect(
+        remote_addr::TCP.SocketAddr,
+        local_addr::Union{Nothing, TCP.SocketAddr},
+        config::Config,
+    )::Conn
+    tls_config = _prepare_connect_config(config, remote_addr)
+    tcp = TCP.connect(remote_addr, local_addr)
+    return _connect_client(tcp, tls_config)
+end
+
+"""
+    connect(remote_addr; kwargs...) -> Conn
+    connect(remote_addr, local_addr; kwargs...) -> Conn
+
+Connect to a concrete `TCP.SocketAddr`, negotiate TLS, and return a fully
+handshaken client connection.
+
+This is the direct-address counterpart to the string-address `connect(network,
+address; ...)` overloads. The underlying socket setup is delegated to
+`TCP.connect`, after which the returned transport is wrapped in TLS and
+handshaken immediately.
+
+TLS keyword arguments are forwarded to `Config`. If `server_name` is omitted, it
+is inferred from the concrete remote address when possible so peer verification
+and SNI can follow the same rules as the string-address client path.
+"""
+function connect(remote_addr::TCP.SocketAddr; kw...)::Conn
+    return _connect(remote_addr, nothing, Config(; kw...))
+end
+
+function connect(remote_addr::TCP.SocketAddr, local_addr::Union{Nothing, TCP.SocketAddr}; kw...)::Conn
+    return _connect(remote_addr, local_addr, Config(; kw...))
 end
 
 """
@@ -1814,6 +1870,26 @@ Convenience shorthand for `connect("tcp", address; kwargs...)`.
 """
 function connect(address::AbstractString; kwargs...)::Conn
     return connect("tcp", address; kwargs...)
+end
+
+"""
+    listen(local_addr, config; backlog=128, reuseaddr=true) -> Listener
+
+Create a TLS listener from a concrete local `TCP.SocketAddr`.
+
+This is the direct-address counterpart to `listen(network, address, config;
+...)`. The underlying TCP listener is created with `TCP.listen`, then accepted
+connections are wrapped in lazy-handshake TLS state.
+"""
+function listen(
+        local_addr::TCP.SocketAddr,
+        config::Config;
+        backlog::Integer = 128,
+        reuseaddr::Bool = true,
+    )::Listener
+    _validate_config(config; is_server = true)
+    listener = TCP.listen(local_addr; backlog = backlog, reuseaddr = reuseaddr)
+    return Listener(listener, config)
 end
 
 end
