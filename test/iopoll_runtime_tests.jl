@@ -281,6 +281,7 @@ end
                 @test registration.token > 0
                 wait_ch = Channel{Nothing}(1)
                 waiter_task = errormonitor(@async begin
+                    NP.arm_waiter!(registration, NP.PollMode.READ)
                     NP.pollwait!(registration.read_waiter)
                     put!(wait_ch, nothing)
                     return nothing
@@ -336,6 +337,7 @@ end
                 @test token2 != token1
                 wait_ch = Channel{Nothing}(1)
                 waiter_task = errormonitor(@async begin
+                    NP.arm_waiter!(registration2, NP.PollMode.READ)
                     NP.pollwait!(registration2.read_waiter)
                     put!(wait_ch, nothing)
                     return nothing
