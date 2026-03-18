@@ -661,6 +661,7 @@ module SocketOps
 
 export AF_INET, AF_INET6, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_KEEPALIVE, SO_ERROR, SockAddrIn, SockAddrIn6, open_socket, bind_socket, connect_socket, set_nonblocking!, set_sockopt_int, get_socket_error, update_connect_context!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
 
+const SockLen = Int32
 const AF_INET = Int32(2)
 const AF_INET6 = Int32(23)
 const SOCK_STREAM = Int32(1)
@@ -669,6 +670,64 @@ const TCP_NODELAY = Int32(1)
 const SOL_SOCKET = Int32(0xffff)
 const SO_KEEPALIVE = Int32(0x0008)
 const SO_ERROR = Int32(0x1007)
+
+const _WS2_32 = "Ws2_32"
+const _KERNEL32 = "Kernel32"
+const _INVALID_SOCKET = UInt(typemax(UInt))
+const _SOCKET_ERROR = Int32(-1)
+const _FIONBIO_BITS = UInt32(0x8004667e)
+const _FIONBIO = reinterpret(Int32, _FIONBIO_BITS)
+const _WSA_FLAG_OVERLAPPED = UInt32(0x01)
+const _WSA_FLAG_NO_HANDLE_INHERIT = UInt32(0x80)
+const _HANDLE_FLAG_INHERIT = UInt32(0x00000001)
+const _ERROR_IO_PENDING = Int32(997)
+const _ERROR_OPERATION_ABORTED = Int32(995)
+const _ERROR_NETNAME_DELETED = UInt32(64)
+const _ERROR_INVALID_PARAMETER = UInt32(87)
+const _ERROR_NOT_ENOUGH_MEMORY = UInt32(8)
+const _ERROR_INVALID_HANDLE = UInt32(6)
+const _ERROR_NOT_SUPPORTED = UInt32(50)
+const _SO_UPDATE_CONNECT_CONTEXT = Int32(0x7010)
+const _WSAEINTR = Int32(10004)
+const _WSAEBADF = Int32(10009)
+const _WSAEACCES = Int32(10013)
+const _WSAEFAULT = Int32(10014)
+const _WSAEINVAL = Int32(10022)
+const _WSAEMFILE = Int32(10024)
+const _WSAEWOULDBLOCK = Int32(10035)
+const _WSAEINPROGRESS = Int32(10036)
+const _WSAEALREADY = Int32(10037)
+const _WSAENOTSOCK = Int32(10038)
+const _WSAEDESTADDRREQ = Int32(10039)
+const _WSAEMSGSIZE = Int32(10040)
+const _WSAEPROTOTYPE = Int32(10041)
+const _WSAENOPROTOOPT = Int32(10042)
+const _WSAEPROTONOSUPPORT = Int32(10043)
+const _WSAESOCKTNOSUPPORT = Int32(10044)
+const _WSAEOPNOTSUPP = Int32(10045)
+const _WSAEPFNOSUPPORT = Int32(10046)
+const _WSAEAFNOSUPPORT = Int32(10047)
+const _WSAEADDRINUSE = Int32(10048)
+const _WSAEADDRNOTAVAIL = Int32(10049)
+const _WSAENETDOWN = Int32(10050)
+const _WSAENETUNREACH = Int32(10051)
+const _WSAENETRESET = Int32(10052)
+const _WSAECONNABORTED = Int32(10053)
+const _WSAECONNRESET = Int32(10054)
+const _WSAENOBUFS = Int32(10055)
+const _WSAEISCONN = Int32(10056)
+const _WSAENOTCONN = Int32(10057)
+const _WSAESHUTDOWN = Int32(10058)
+const _WSAETIMEDOUT = Int32(10060)
+const _WSAECONNREFUSED = Int32(10061)
+const _WSAEHOSTDOWN = Int32(10064)
+const _WSAEHOSTUNREACH = Int32(10065)
+const _WSADATA_DESC_ZERO = ntuple(_ -> UInt8(0), 257)
+const _WSADATA_STATUS_ZERO = ntuple(_ -> UInt8(0), 129)
+const _ERRNO_ESOCKTNOSUPPORT = @static isdefined(Base.Libc, :ESOCKTNOSUPPORT) ? Int32(getfield(Base.Libc, :ESOCKTNOSUPPORT)) : Int32(Base.Libc.EPROTONOSUPPORT)
+const _ERRNO_ESHUTDOWN = @static isdefined(Base.Libc, :ESHUTDOWN) ? Int32(getfield(Base.Libc, :ESHUTDOWN)) : Int32(Base.Libc.ENOTCONN)
+const _ERRNO_EHOSTDOWN = @static isdefined(Base.Libc, :EHOSTDOWN) ? Int32(getfield(Base.Libc, :EHOSTDOWN)) : Int32(Base.Libc.EHOSTUNREACH)
+const _ERRNO_ECANCELED = @static isdefined(Base.Libc, :ECANCELED) ? Int32(getfield(Base.Libc, :ECANCELED)) : Int32(Base.Libc.EINTR)
 
 struct SockAddrIn
     sin_family::UInt16
@@ -683,6 +742,16 @@ struct SockAddrIn6
     sin6_flowinfo::UInt32
     sin6_addr::NTuple{16, UInt8}
     sin6_scope_id::UInt32
+end
+
+struct _WSAData
+    wVersion::UInt16
+    wHighVersion::UInt16
+    szDescription::NTuple{257, UInt8}
+    szSystemStatus::NTuple{129, UInt8}
+    iMaxSockets::UInt16
+    iMaxUdpDg::UInt16
+    lpVendorInfo::Ptr{UInt8}
 end
 
 @inline function _hton16(v::UInt16)::UInt16
@@ -700,17 +769,375 @@ end
     return UInt16(port)
 end
 
+@inline function _byte_u8(v::Integer)::UInt8
+    (v < 0 || v > 0xff) && throw(ArgumentError("byte must be in [0, 255]"))
+    return UInt8(v)
+end
+
 @inline function _ipv4_u32(ip::NTuple{4, UInt8})::UInt32
     return (UInt32(ip[1]) << 24) | (UInt32(ip[2]) << 16) | (UInt32(ip[3]) << 8) | UInt32(ip[4])
 end
 
-open_socket(family::Int32, sotype::Int32) = Int32(1)
-bind_socket(sysfd::Int32, sockaddr::Union{SockAddrIn, SockAddrIn6}) = nothing
-connect_socket(sysfd::Int32, sockaddr::Union{SockAddrIn, SockAddrIn6}) = Int32(0)
-set_nonblocking!(sysfd::Int32, enabled::Bool) = nothing
-set_sockopt_int(fd::Int32, level::Int32, optname::Int32, value::Integer) = nothing
-get_socket_error(fd::Int32)::Int32 = Int32(0)
-update_connect_context!(fd::Int32) = nothing
+@inline function _socket_value(fd::Int32)::UInt
+    return UInt(reinterpret(UInt32, fd))
+end
+
+@inline function _socket_handle(fd::Int32)::Ptr{Cvoid}
+    return Ptr{Cvoid}(_socket_value(fd))
+end
+
+@inline function _wsa_get_last_error()::Int32
+    return Int32(ccall((:WSAGetLastError, _WS2_32), Int32, ()))
+end
+
+@inline function _win_get_last_error()::UInt32
+    return ccall((:GetLastError, _KERNEL32), UInt32, ())
+end
+
+@inline function _map_win32_errno(err::UInt32)::Int32
+    err == _ERROR_INVALID_HANDLE && return Int32(Base.Libc.EBADF)
+    err == _ERROR_INVALID_PARAMETER && return Int32(Base.Libc.EINVAL)
+    err == _ERROR_NOT_ENOUGH_MEMORY && return Int32(Base.Libc.ENOMEM)
+    err == _ERROR_NOT_SUPPORTED && return Int32(Base.Libc.ENOSYS)
+    err == _ERROR_NETNAME_DELETED && return Int32(Base.Libc.ECONNRESET)
+    return Int32(Base.Libc.EIO)
+end
+
+@inline function _map_wsa_errno(err::Int32)::Int32
+    err == Int32(0) && return Int32(0)
+    err == _ERROR_IO_PENDING && return Int32(Base.Libc.EINPROGRESS)
+    err == _ERROR_OPERATION_ABORTED && return _ERRNO_ECANCELED
+    err == _WSAEINTR && return Int32(Base.Libc.EINTR)
+    err == _WSAEBADF && return Int32(Base.Libc.EBADF)
+    err == _WSAEACCES && return Int32(Base.Libc.EACCES)
+    err == _WSAEFAULT && return Int32(Base.Libc.EFAULT)
+    err == _WSAEINVAL && return Int32(Base.Libc.EINVAL)
+    err == _WSAEMFILE && return Int32(Base.Libc.EMFILE)
+    err == _WSAEWOULDBLOCK && return Int32(Base.Libc.EAGAIN)
+    err == _WSAEINPROGRESS && return Int32(Base.Libc.EINPROGRESS)
+    err == _WSAEALREADY && return Int32(Base.Libc.EALREADY)
+    err == _WSAENOTSOCK && return Int32(Base.Libc.EBADF)
+    err == _WSAEDESTADDRREQ && return Int32(Base.Libc.EDESTADDRREQ)
+    err == _WSAEMSGSIZE && return Int32(Base.Libc.EMSGSIZE)
+    err == _WSAEPROTOTYPE && return Int32(Base.Libc.EPROTOTYPE)
+    err == _WSAENOPROTOOPT && return Int32(Base.Libc.ENOPROTOOPT)
+    err == _WSAEPROTONOSUPPORT && return Int32(Base.Libc.EPROTONOSUPPORT)
+    err == _WSAESOCKTNOSUPPORT && return _ERRNO_ESOCKTNOSUPPORT
+    err == _WSAEOPNOTSUPP && return Int32(Base.Libc.EOPNOTSUPP)
+    err == _WSAEPFNOSUPPORT && return Int32(Base.Libc.EAFNOSUPPORT)
+    err == _WSAEAFNOSUPPORT && return Int32(Base.Libc.EAFNOSUPPORT)
+    err == _WSAEADDRINUSE && return Int32(Base.Libc.EADDRINUSE)
+    err == _WSAEADDRNOTAVAIL && return Int32(Base.Libc.EADDRNOTAVAIL)
+    err == _WSAENETDOWN && return Int32(Base.Libc.ENETDOWN)
+    err == _WSAENETUNREACH && return Int32(Base.Libc.ENETUNREACH)
+    err == _WSAENETRESET && return Int32(Base.Libc.ENETRESET)
+    err == _WSAECONNABORTED && return Int32(Base.Libc.ECONNABORTED)
+    err == _WSAECONNRESET && return Int32(Base.Libc.ECONNRESET)
+    err == _WSAENOBUFS && return Int32(Base.Libc.ENOBUFS)
+    err == _WSAEISCONN && return Int32(Base.Libc.EISCONN)
+    err == _WSAENOTCONN && return Int32(Base.Libc.ENOTCONN)
+    err == _WSAESHUTDOWN && return _ERRNO_ESHUTDOWN
+    err == _WSAETIMEDOUT && return Int32(Base.Libc.ETIMEDOUT)
+    err == _WSAECONNREFUSED && return Int32(Base.Libc.ECONNREFUSED)
+    err == _WSAEHOSTDOWN && return _ERRNO_EHOSTDOWN
+    err == _WSAEHOSTUNREACH && return Int32(Base.Libc.EHOSTUNREACH)
+    return Int32(Base.Libc.EIO)
+end
+
+function _throw_errno(op::AbstractString, errno::Int32)
+    throw(SystemError(op, Int(errno)))
+end
+
+const _winsock_lock = ReentrantLock()
+const _winsock_initialized = Ref{Bool}(false)
+const _winsock_init_pid = Ref{Int}(0)
+const _fd_state_lock = ReentrantLock()
+const _fd_nonblocking_state = Dict{Int32, Bool}()
+
+function _set_fd_nonblocking_state!(fd::Int32, enabled::Bool)
+    lock(_fd_state_lock)
+    try
+        _fd_nonblocking_state[fd] = enabled
+    finally
+        unlock(_fd_state_lock)
+    end
+    return nothing
+end
+
+function _clear_fd_state!(fd::Int32)
+    lock(_fd_state_lock)
+    try
+        delete!(_fd_nonblocking_state, fd)
+    finally
+        unlock(_fd_state_lock)
+    end
+    return nothing
+end
+
+@static if Sys.iswindows()
+    function ensure_winsock!()
+        pid = Base.getpid()
+        if _winsock_initialized[] && _winsock_init_pid[] == pid
+            return nothing
+        end
+        lock(_winsock_lock)
+        try
+            if _winsock_initialized[] && _winsock_init_pid[] == pid
+                return nothing
+            end
+            wsa_data = Ref(_WSAData(
+                UInt16(0),
+                UInt16(0),
+                _WSADATA_DESC_ZERO,
+                _WSADATA_STATUS_ZERO,
+                UInt16(0),
+                UInt16(0),
+                C_NULL,
+            ))
+            rc = ccall(
+                (:WSAStartup, _WS2_32),
+                Int32,
+                (UInt16, Ref{_WSAData}),
+                UInt16(0x0202),
+                wsa_data,
+            )
+            rc == 0 || _throw_errno("WSAStartup", _map_wsa_errno(Int32(rc)))
+            _winsock_initialized[] = true
+            _winsock_init_pid[] = pid
+        finally
+            unlock(_winsock_lock)
+        end
+        return nothing
+    end
+
+    function set_close_on_exec!(fd::Int32)
+        ok = ccall(
+            (:SetHandleInformation, _KERNEL32),
+            Int32,
+            (Ptr{Cvoid}, UInt32, UInt32),
+            _socket_handle(fd),
+            _HANDLE_FLAG_INHERIT,
+            UInt32(0),
+        )
+        ok == 0 && _throw_errno("SetHandleInformation", _map_win32_errno(_win_get_last_error()))
+        return nothing
+    end
+
+    function set_nonblocking!(fd::Int32, enabled::Bool = true)
+        ensure_winsock!()
+        arg = Ref{UInt32}(enabled ? UInt32(1) : UInt32(0))
+        ret = ccall((:ioctlsocket, _WS2_32), Int32, (UInt, Clong, Ref{UInt32}), _socket_value(fd), Clong(_FIONBIO), arg)
+        ret == 0 || _throw_errno("ioctlsocket(FIONBIO)", _map_wsa_errno(_wsa_get_last_error()))
+        _set_fd_nonblocking_state!(fd, enabled)
+        return nothing
+    end
+
+    function close_socket_nothrow(fd::Int32)::Int32
+        _clear_fd_state!(fd)
+        ret = ccall((:closesocket, _WS2_32), Int32, (UInt,), _socket_value(fd))
+        ret == 0 && return Int32(0)
+        errno = _map_wsa_errno(_wsa_get_last_error())
+        errno == Int32(Base.Libc.EBADF) && return errno
+        return Int32(0)
+    end
+
+    function open_socket(family::Int32, sotype::Int32, proto::Int32 = Int32(0))::Int32
+        ensure_winsock!()
+        raw_type = Int32(sotype)
+        flags = UInt32(_WSA_FLAG_OVERLAPPED | _WSA_FLAG_NO_HANDLE_INHERIT)
+        sock = ccall(
+            (:WSASocketW, _WS2_32),
+            UInt,
+            (Int32, Int32, Int32, Ptr{Cvoid}, UInt32, UInt32),
+            Int32(family),
+            raw_type,
+            Int32(proto),
+            C_NULL,
+            UInt32(0),
+            flags,
+        )
+        if sock == _INVALID_SOCKET
+            errno = _wsa_get_last_error()
+            if errno == _WSAEINVAL
+                sock = ccall(
+                    (:WSASocketW, _WS2_32),
+                    UInt,
+                    (Int32, Int32, Int32, Ptr{Cvoid}, UInt32, UInt32),
+                    Int32(family),
+                    raw_type,
+                    Int32(proto),
+                    C_NULL,
+                    UInt32(0),
+                    _WSA_FLAG_OVERLAPPED,
+                )
+                sock == _INVALID_SOCKET && _throw_errno("socket", _map_wsa_errno(_wsa_get_last_error()))
+                fd_fallback = Int32(UInt32(sock))
+                try
+                    set_close_on_exec!(fd_fallback)
+                    set_nonblocking!(fd_fallback, true)
+                catch
+                    close_socket_nothrow(fd_fallback)
+                    rethrow()
+                end
+                return fd_fallback
+            end
+            _throw_errno("socket", _map_wsa_errno(errno))
+        end
+        fd = Int32(UInt32(sock))
+        try
+            set_nonblocking!(fd, true)
+        catch
+            close_socket_nothrow(fd)
+            rethrow()
+        end
+        return fd
+    end
+
+    function bind_socket(fd::Int32, addr::SockAddrIn)
+        addr_ref = Ref(addr)
+        GC.@preserve addr_ref begin
+            bind_socket(fd, Base.unsafe_convert(Ptr{Cvoid}, addr_ref), SockLen(sizeof(SockAddrIn)))
+        end
+        return nothing
+    end
+
+    function bind_socket(fd::Int32, addr::SockAddrIn6)
+        addr_ref = Ref(addr)
+        GC.@preserve addr_ref begin
+            bind_socket(fd, Base.unsafe_convert(Ptr{Cvoid}, addr_ref), SockLen(sizeof(SockAddrIn6)))
+        end
+        return nothing
+    end
+
+    function bind_socket(fd::Int32, addr::Ptr{Cvoid}, addrlen::SockLen)
+        ret = ccall(
+            (:bind, _WS2_32),
+            Int32,
+            (UInt, Ptr{Cvoid}, Int32),
+            _socket_value(fd),
+            addr,
+            Int32(addrlen),
+        )
+        ret == 0 && return nothing
+        _throw_errno("bind", _map_wsa_errno(_wsa_get_last_error()))
+    end
+
+    function set_sockopt_int(fd::Int32, level::Int32, optname::Int32, value::Integer)
+        raw = Ref{Int32}(Int32(value))
+        ret = GC.@preserve raw begin
+            ccall(
+                (:setsockopt, _WS2_32),
+                Int32,
+                (UInt, Int32, Int32, Ptr{UInt8}, Int32),
+                _socket_value(fd),
+                level,
+                optname,
+                Ptr{UInt8}(Base.unsafe_convert(Ptr{Int32}, raw)),
+                Int32(sizeof(Int32)),
+            )
+        end
+        ret == 0 && return nothing
+        _throw_errno("setsockopt", _map_wsa_errno(_wsa_get_last_error()))
+    end
+
+    function get_sockopt_int(fd::Int32, level::Int32, optname::Int32)::Int32
+        value = Ref{Int32}(0)
+        optlen = Ref{Int32}(Int32(sizeof(Int32)))
+        ret = GC.@preserve value begin
+            ccall(
+                (:getsockopt, _WS2_32),
+                Int32,
+                (UInt, Int32, Int32, Ptr{UInt8}, Ref{Int32}),
+                _socket_value(fd),
+                level,
+                optname,
+                Ptr{UInt8}(Base.unsafe_convert(Ptr{Int32}, value)),
+                optlen,
+            )
+        end
+        ret == 0 && return Int32(value[])
+        _throw_errno("getsockopt", _map_wsa_errno(_wsa_get_last_error()))
+    end
+
+    function get_socket_error(fd::Int32)::Int32
+        return get_sockopt_int(fd, SOL_SOCKET, SO_ERROR)
+    end
+
+    function _set_sockopt_ptr!(fd::Int32, optname::Int32, ptr::Ptr{UInt8}, optlen::Integer)
+        ret = ccall(
+            (:setsockopt, _WS2_32),
+            Int32,
+            (UInt, Int32, Int32, Ptr{UInt8}, Int32),
+            _socket_value(fd),
+            SOL_SOCKET,
+            optname,
+            ptr,
+            Int32(optlen),
+        )
+        ret == 0 && return nothing
+        _throw_errno("setsockopt", _map_wsa_errno(_wsa_get_last_error()))
+    end
+
+    function update_connect_context!(fd::Int32)
+        handle_ref = Ref{UInt}(_socket_value(fd))
+        GC.@preserve handle_ref begin
+            _set_sockopt_ptr!(
+                fd,
+                _SO_UPDATE_CONNECT_CONTEXT,
+                Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt}, handle_ref)),
+                sizeof(UInt),
+            )
+        end
+        return nothing
+    end
+
+    function sockaddr_bytes(addr::SockAddrIn)::Vector{UInt8}
+        bytes = Vector{UInt8}(undef, sizeof(SockAddrIn))
+        addr_ref = Ref(addr)
+        GC.@preserve addr_ref bytes begin
+            unsafe_copyto!(
+                pointer(bytes),
+                Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrIn}, addr_ref)),
+                sizeof(SockAddrIn),
+            )
+        end
+        return bytes
+    end
+
+    function sockaddr_bytes(addr::SockAddrIn6)::Vector{UInt8}
+        bytes = Vector{UInt8}(undef, sizeof(SockAddrIn6))
+        addr_ref = Ref(addr)
+        GC.@preserve addr_ref bytes begin
+            unsafe_copyto!(
+                pointer(bytes),
+                Ptr{UInt8}(Base.unsafe_convert(Ptr{SockAddrIn6}, addr_ref)),
+                sizeof(SockAddrIn6),
+            )
+        end
+        return bytes
+    end
+else
+    open_socket(family::Int32, sotype::Int32, proto::Int32 = Int32(0)) = Int32(1)
+    bind_socket(sysfd::Int32, sockaddr::Union{SockAddrIn, SockAddrIn6}) = nothing
+    bind_socket(sysfd::Int32, addr::Ptr{Cvoid}, addrlen::SockLen) = nothing
+    connect_socket(sysfd::Int32, sockaddr::Union{SockAddrIn, SockAddrIn6}) = Int32(0)
+    set_nonblocking!(sysfd::Int32, enabled::Bool) = nothing
+    set_sockopt_int(fd::Int32, level::Int32, optname::Int32, value::Integer) = nothing
+    get_socket_error(fd::Int32)::Int32 = Int32(0)
+    update_connect_context!(fd::Int32) = nothing
+
+    function sockaddr_bytes(addr::SockAddrIn)::Vector{UInt8}
+        bytes = Vector{UInt8}(undef, sizeof(SockAddrIn))
+        GC.@preserve bytes addr unsafe_store!(Ptr{SockAddrIn}(pointer(bytes)), addr)
+        return bytes
+    end
+
+    function sockaddr_bytes(addr::SockAddrIn6)::Vector{UInt8}
+        bytes = Vector{UInt8}(undef, sizeof(SockAddrIn6))
+        GC.@preserve bytes addr unsafe_store!(Ptr{SockAddrIn6}(pointer(bytes)), addr)
+        return bytes
+    end
+end
 
 function sockaddr_in(ip::NTuple{4, UInt8}, port::Integer)::SockAddrIn
     return SockAddrIn(
@@ -719,6 +1146,10 @@ function sockaddr_in(ip::NTuple{4, UInt8}, port::Integer)::SockAddrIn
         _hton32(_ipv4_u32(ip)),
         ntuple(_ -> UInt8(0), 8),
     )
+end
+
+function sockaddr_in(ip::NTuple{4, <:Integer}, port::Integer)::SockAddrIn
+    return sockaddr_in((_byte_u8(ip[1]), _byte_u8(ip[2]), _byte_u8(ip[3]), _byte_u8(ip[4])), port)
 end
 
 function sockaddr_in_any(port::Integer)::SockAddrIn
@@ -740,20 +1171,26 @@ function sockaddr_in6(
     )
 end
 
+function sockaddr_in6(
+        ip::NTuple{16, <:Integer},
+        port::Integer;
+        flowinfo::Integer = 0,
+        scope_id::Integer = 0,
+    )::SockAddrIn6
+    return sockaddr_in6((
+            _byte_u8(ip[1]), _byte_u8(ip[2]), _byte_u8(ip[3]), _byte_u8(ip[4]),
+            _byte_u8(ip[5]), _byte_u8(ip[6]), _byte_u8(ip[7]), _byte_u8(ip[8]),
+            _byte_u8(ip[9]), _byte_u8(ip[10]), _byte_u8(ip[11]), _byte_u8(ip[12]),
+            _byte_u8(ip[13]), _byte_u8(ip[14]), _byte_u8(ip[15]), _byte_u8(ip[16]),
+        ),
+        port;
+        flowinfo = flowinfo,
+        scope_id = scope_id,
+    )
+end
+
 function sockaddr_in6_any(port::Integer; scope_id::Integer = 0)::SockAddrIn6
     return sockaddr_in6(ntuple(_ -> UInt8(0), 16), port; scope_id = scope_id)
-end
-
-function sockaddr_bytes(addr::SockAddrIn)::Vector{UInt8}
-    bytes = Vector{UInt8}(undef, sizeof(SockAddrIn))
-    GC.@preserve bytes addr unsafe_store!(Ptr{SockAddrIn}(pointer(bytes)), addr)
-    return bytes
-end
-
-function sockaddr_bytes(addr::SockAddrIn6)::Vector{UInt8}
-    bytes = Vector{UInt8}(undef, sizeof(SockAddrIn6))
-    GC.@preserve bytes addr unsafe_store!(Ptr{SockAddrIn6}(pointer(bytes)), addr)
-    return bytes
 end
 
 end
