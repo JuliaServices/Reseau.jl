@@ -1,4 +1,5 @@
 using Test
+using UUIDs
 
 module Reseau
 
@@ -4885,10 +4886,77 @@ function _probe(f, label::AbstractString)
     return nothing
 end
 
+function _extract_package_module_source(name::AbstractString)::String
+    src = read(@__FILE__, String)
+    start_rng = findfirst("module Reseau", src)
+    stop_rng = findfirst("end # module Reseau", src)
+    start_rng === nothing && error("module Reseau block not found")
+    stop_rng === nothing && error("module Reseau terminator not found")
+    modsrc = src[first(start_rng):last(stop_rng)]
+    modsrc = replace(modsrc, "module Reseau" => "module $(name)")
+    modsrc = replace(modsrc, "..Reseau" => "..$(name)")
+    modsrc = replace(modsrc, "Main.Reseau" => "Main.$(name)")
+    return modsrc
+end
+
+function _with_extracted_package(f::F) where {F}
+    mktempdir() do dir
+        name = "StandalonePkg"
+        uuid = uuid4()
+        pkgid = Base.PkgId(uuid, name)
+        write(
+            joinpath(dir, "Project.toml"),
+            "name = \"$name\"\nuuid = \"$(string(uuid))\"\nversion = \"0.1.0\"\n",
+        )
+        mkpath(joinpath(dir, "src"))
+        write(joinpath(dir, "src", "$name.jl"), _extract_package_module_source(name))
+        pushfirst!(LOAD_PATH, dir)
+        try
+            mod = Base.require(pkgid)
+            return f(mod)
+        finally
+            popfirst!(LOAD_PATH)
+        end
+    end
+end
+
 println("[windows-compiler-bug] julia threads: $(Threads.nthreads())")
 
 @test Reseau.TCP === TCP
 @test Reseau.TLS === TLS
+
+_probe("extracted package kwcall + runtime") do
+    _with_extracted_package() do mod
+        c = getproperty(mod, :TCP)
+        kwtt_v4 = (
+            NamedTuple{(:local_addr,), Tuple{getproperty(c, :SocketAddrV4)}},
+            typeof(getproperty(c, :connect)),
+            String,
+            String,
+        )
+        kwtt_v6 = (
+            NamedTuple{(:local_addr,), Tuple{getproperty(c, :SocketAddrV6)}},
+            typeof(getproperty(c, :connect)),
+            String,
+            String,
+        )
+        Base.precompile(Tuple{typeof(Core.kwcall), kwtt_v4...})
+        Base.code_typed(Core.kwcall, kwtt_v4)
+        Base.precompile(Tuple{typeof(Core.kwcall), kwtt_v6...})
+        Base.code_typed(Core.kwcall, kwtt_v6)
+        local_v4 = Base.invokelatest(getproperty(c, :loopback_addr), 0)
+        local_v6 = Base.invokelatest(getproperty(c, :loopback_addr6), 0)
+        try
+            Base.invokelatest(getproperty(c, :connect), "tcp", "127.0.0.1:1"; local_addr = local_v4)
+        catch
+        end
+        try
+            Base.invokelatest(getproperty(c, :connect), "tcp", "127.0.0.1:1"; local_addr = local_v6)
+        catch
+        end
+        return nothing
+    end
+end
 
 _probe("kwsort infer local_addr v4") do
     tt = (NamedTuple{(:local_addr,), Tuple{NC.SocketAddrV4}}, typeof(NC.connect), String, String)
