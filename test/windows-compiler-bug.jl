@@ -8,22 +8,107 @@ export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close
 
 struct DeadlineExceededError <: Exception end
 
-mutable struct FD
-    sysfd::Int32
+module PollWaiterState
+Base.@enum T::UInt8 begin
+    EMPTY = 0x00
+    WAITING = 0x01
+    NOTIFIED = 0x02
+end
 end
 
-mutable struct TimerState
-    deadline_ns::Int64
-    interval_ns::Int64
-    function TimerState(deadline_ns::Int64 = Int64(0), interval_ns::Int64 = Int64(0))
-        return new(deadline_ns, interval_ns)
+module PollWakeReason
+Base.@enum T::UInt8 begin
+    READY = 0x01
+    CANCELED = 0x02
+end
+end
+
+mutable struct PollWaiter
+    @atomic state::PollWaiterState.T
+    @atomic reason::PollWakeReason.T
+    task::Union{Nothing, Task}
+    function PollWaiter()
+        return new(PollWaiterState.EMPTY, PollWakeReason.READY, nothing)
     end
 end
 
-register!(pfd) = nothing
-set_write_deadline!(pfd, deadline_ns::Int64) = nothing
-connect!(pfd, addrbuf, addrlen) = nothing
-waitwrite(pd) = nothing
+mutable struct PollState
+    lock::ReentrantLock
+    sysfd::Int32
+    token::UInt64
+    @atomic pollable::Bool
+    @atomic closing::Bool
+    @atomic event_err::Bool
+    @atomic rd_ns::Int64
+    @atomic wd_ns::Int64
+    @atomic rseq::UInt64
+    @atomic wseq::UInt64
+    function PollState(sysfd::Integer = -1, token::UInt64 = UInt64(0))
+        return new(
+            ReentrantLock(),
+            Int32(sysfd),
+            token,
+            false,
+            false,
+            false,
+            Int64(0),
+            Int64(0),
+            UInt64(0),
+            UInt64(0),
+        )
+    end
+end
+
+mutable struct FD
+    sysfd::Int32
+    pd::PollState
+    csema::Base.Semaphore
+    @atomic is_blocking::Bool
+    is_stream::Bool
+    zero_read_is_eof::Bool
+    is_file::Bool
+    function FD(
+            sysfd::Integer;
+            is_stream::Bool = true,
+            zero_read_is_eof::Bool = true,
+            is_file::Bool = false,
+        )
+        return new(
+            Int32(sysfd),
+            PollState(sysfd),
+            Base.Semaphore(0),
+            false,
+            is_stream,
+            zero_read_is_eof,
+            is_file,
+        )
+    end
+end
+
+mutable struct TimerState
+    lock::ReentrantLock
+    waiter::PollWaiter
+    @atomic deadline_ns::Int64
+    @atomic interval_ns::Int64
+    @atomic seq::UInt64
+    @atomic closed::Bool
+    function TimerState(deadline_ns::Int64 = Int64(0), interval_ns::Int64 = Int64(0))
+        return new(ReentrantLock(), PollWaiter(), deadline_ns, interval_ns, UInt64(0), false)
+    end
+end
+
+function register!(pfd::FD)
+    @atomic :release pfd.pd.pollable = true
+    return nothing
+end
+
+function set_write_deadline!(pfd::FD, deadline_ns::Int64)
+    @atomic :release pfd.pd.wd_ns = deadline_ns
+    return nothing
+end
+
+connect!(pfd::FD, addrbuf, addrlen) = nothing
+waitwrite(pd::PollState) = nothing
 schedule_timer!(timer::TimerState, deadline_ns::Int64) = true
 waittimer(timer::TimerState) = false
 _close_timer!(timer::TimerState) = nothing
