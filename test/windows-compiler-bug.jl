@@ -10,6 +10,14 @@ export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close
 
 struct DeadlineExceededError <: Exception end
 
+module PollMode
+Base.@enum T::UInt8 begin
+    READ = 0x01
+    WRITE = 0x02
+    READWRITE = 0x03
+end
+end
+
 module PollWaiterState
 Base.@enum T::UInt8 begin
     EMPTY = 0x00
@@ -31,6 +39,16 @@ mutable struct PollWaiter
     task::Union{Nothing, Task}
     function PollWaiter()
         return new(PollWaiterState.EMPTY, PollWakeReason.READY, nothing)
+    end
+end
+
+mutable struct Registration
+    fd::Int32
+    token::UInt64
+    read_waiter::PollWaiter
+    write_waiter::PollWaiter
+    function Registration(fd::Int32, token::UInt64)
+        return new(fd, token, PollWaiter(), PollWaiter())
     end
 end
 
@@ -117,6 +135,94 @@ _close_timer!(timer::TimerState) = nothing
 sleep(seconds::Real) = nothing
 read!(pfd::FD, buf::Vector{UInt8}) = throw(EOFError())
 _read_ptr_some!(pfd::FD, ptr::Ptr{UInt8}, nbytes::Int) = throw(EOFError())
+
+const _POLL_NO_ERROR = Int32(0)
+const _REGISTRATIONS = IdDict{PollState, Registration}()
+
+function register!(pfd::FD)
+    @atomic :release pfd.pd.pollable = true
+    reg = Registration(pfd.sysfd, UInt64(1))
+    _REGISTRATIONS[pfd.pd] = reg
+    return nothing
+end
+
+function current_registration(pd::PollState)
+    return get(() -> nothing, _REGISTRATIONS, pd)
+end
+
+function _poll_registration(pd::PollState)::Registration
+    reg = current_registration(pd)
+    reg === nothing && throw(SystemError("iopoll wait", Int(Base.Libc.EBADF)))
+    return reg
+end
+
+_check_error(pd::PollState, mode::PollMode.T)::Int32 = _POLL_NO_ERROR
+_convert_poll_error!(res::Int32, is_file::Bool) = nothing
+preparewrite(pd::PollState, is_file::Bool = false) = nothing
+_fd_write_lock!(fd::FD) = nothing
+_fd_write_unlock!(fd::FD) = nothing
+
+function pollwait!(waiter::PollWaiter)::PollWakeReason.T
+    return PollWakeReason.READY
+end
+
+function pollnotify!(waiter::PollWaiter, reason::PollWakeReason.T = PollWakeReason.READY)::Bool
+    @atomic :release waiter.reason = reason
+    return true
+end
+
+function arm_waiter!(registration::Registration, mode::PollMode.T)
+    if mode == PollMode.WRITE
+        pollnotify!(registration.write_waiter, PollWakeReason.READY)
+    else
+        pollnotify!(registration.read_waiter, PollWakeReason.READY)
+    end
+    return nothing
+end
+
+function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8}, addrlen::Int32)::Int32
+    _ = registration
+    _ = addrbuf
+    _ = addrlen
+    return Int32(0)
+end
+
+function _iocp_finish_connect!(registration::Registration)::Int32
+    _ = registration
+    return Int32(0)
+end
+
+function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
+    _ = registration
+    _ = mode
+    return false
+end
+
+function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
+    _fd_write_lock!(fd)
+    try
+        preparewrite(fd.pd, fd.is_file)
+        registration = _poll_registration(fd.pd)
+        errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
+        errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
+        try
+            pollwait!(registration.write_waiter)
+            _convert_poll_error!(_check_error(fd.pd, PollMode.WRITE), fd.is_file)
+        catch err
+            ex = err::Exception
+            if _iocp_cancel_mode!(registration, PollMode.WRITE)
+                pollwait!(registration.write_waiter)
+            end
+            _ = _iocp_finish_connect!(registration)
+            rethrow(ex)
+        end
+        errno = _iocp_finish_connect!(registration)
+        errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
+    finally
+        _fd_write_unlock!(fd)
+    end
+    return nothing
+end
 
 end
 
