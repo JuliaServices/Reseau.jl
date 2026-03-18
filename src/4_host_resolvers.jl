@@ -371,15 +371,210 @@ const _AF_UNSPEC = Cint(0)
 const _SOCK_STREAM = Cint(1)
 const _HR_AF_INET = SocketOps.AF_INET
 const _HR_AF_INET6 = SocketOps.AF_INET6
+const _WSAHOST_NOT_FOUND = Cint(11001)
+const _WSATRY_AGAIN = Cint(11002)
+const _WSATYPE_NOT_FOUND = Cint(10109)
+const _DNS_ERROR_RCODE_NAME_ERROR = Cint(9003)
+const _DNS_INFO_NO_RECORDS = Cint(9501)
+
+@static if Sys.iswindows()
+    const _IPHLPAPI = "Iphlpapi"
+    const _ERROR_BUFFER_OVERFLOW = UInt32(111)
+    const _GAA_FLAG_INCLUDE_PREFIX = UInt32(0x00000010)
+    const _GAA_FLAG_INCLUDE_GATEWAYS = UInt32(0x00000080)
+    const _ZONE_CACHE_TTL_NS = Int64(60_000_000_000)
+    const _WINDOWS_ZONE_CACHE_LOCK = ReentrantLock()
+    const _WINDOWS_ZONE_CACHE_LAST_FETCH_NS = Ref{Int64}(Int64(0))
+    const _WINDOWS_ZONE_CACHE_TO_INDEX = Ref(Dict{String, UInt32}())
+
+    struct _WindowsSocketAddress
+        sockaddr::Ptr{Cvoid}
+        sockaddrlength::Int32
+    end
+
+    struct _WindowsIpAdapterUnicastAddress
+        length::UInt32
+        flags::UInt32
+        next::Ptr{_WindowsIpAdapterUnicastAddress}
+        address::_WindowsSocketAddress
+        prefix_origin::Int32
+        suffix_origin::Int32
+        dad_state::Int32
+        valid_lifetime::UInt32
+        preferred_lifetime::UInt32
+        lease_lifetime::UInt32
+        on_link_prefix_length::UInt8
+    end
+
+    struct _WindowsIpAdapterAnycastAddress
+        length::UInt32
+        flags::UInt32
+        next::Ptr{_WindowsIpAdapterAnycastAddress}
+        address::_WindowsSocketAddress
+    end
+
+    struct _WindowsIpAdapterMulticastAddress
+        length::UInt32
+        flags::UInt32
+        next::Ptr{_WindowsIpAdapterMulticastAddress}
+        address::_WindowsSocketAddress
+    end
+
+    struct _WindowsIpAdapterDnsServerAdapter
+        length::UInt32
+        reserved::UInt32
+        next::Ptr{_WindowsIpAdapterDnsServerAdapter}
+        address::_WindowsSocketAddress
+    end
+
+    struct _WindowsIpAdapterPrefix
+        length::UInt32
+        flags::UInt32
+        next::Ptr{_WindowsIpAdapterPrefix}
+        address::_WindowsSocketAddress
+        prefix_length::UInt32
+    end
+
+    struct _WindowsIpAdapterWinsServerAddress
+        length::UInt32
+        reserved::UInt32
+        next::Ptr{_WindowsIpAdapterWinsServerAddress}
+        address::_WindowsSocketAddress
+    end
+
+    struct _WindowsIpAdapterGatewayAddress
+        length::UInt32
+        reserved::UInt32
+        next::Ptr{_WindowsIpAdapterGatewayAddress}
+        address::_WindowsSocketAddress
+    end
+
+    struct _WindowsIpAdapterAddresses
+        length::UInt32
+        ifindex::UInt32
+        next::Ptr{_WindowsIpAdapterAddresses}
+        adapter_name::Ptr{UInt8}
+        first_unicast_address::Ptr{_WindowsIpAdapterUnicastAddress}
+        first_anycast_address::Ptr{_WindowsIpAdapterAnycastAddress}
+        first_multicast_address::Ptr{_WindowsIpAdapterMulticastAddress}
+        first_dns_server_address::Ptr{_WindowsIpAdapterDnsServerAdapter}
+        dns_suffix::Ptr{UInt16}
+        description::Ptr{UInt16}
+        friendly_name::Ptr{UInt16}
+        physical_address::NTuple{8, UInt8}
+        physical_address_length::UInt32
+        flags::UInt32
+        mtu::UInt32
+        iftype::UInt32
+        oper_status::UInt32
+        ipv6_ifindex::UInt32
+        zone_indices::NTuple{16, UInt32}
+        first_prefix::Ptr{_WindowsIpAdapterPrefix}
+        transmit_link_speed::UInt64
+        receive_link_speed::UInt64
+        first_wins_server_address::Ptr{_WindowsIpAdapterWinsServerAddress}
+        first_gateway_address::Ptr{_WindowsIpAdapterGatewayAddress}
+    end
+end
+
+@inline function _utf16_ptr_string(ptr::Ptr{UInt16})::String
+    ptr == C_NULL && return ""
+    len = 0
+    while unsafe_load(ptr, len + 1) != UInt16(0)
+        len += 1
+    end
+    return transcode(String, unsafe_wrap(Vector{UInt16}, ptr, len))
+end
+
+@static if Sys.iswindows()
+    function _windows_zone_entries()::Dict{String, UInt32}
+        SocketOps.ensure_winsock!()
+        size = UInt32(15_000)
+        while true
+            size_ref = Ref(size)
+            buf = Vector{UInt8}(undef, Int(size_ref[]))
+            rc = GC.@preserve buf size_ref begin
+                @ccall Iphlpapi.GetAdaptersAddresses(
+                    UInt32(_AF_UNSPEC)::UInt32,
+                    (_GAA_FLAG_INCLUDE_PREFIX | _GAA_FLAG_INCLUDE_GATEWAYS)::UInt32,
+                    C_NULL::Ptr{Cvoid},
+                    Ptr{_WindowsIpAdapterAddresses}(pointer(buf))::Ptr{_WindowsIpAdapterAddresses},
+                    size_ref::Ref{UInt32},
+                )::UInt32
+            end
+            if rc == UInt32(0)
+                out = Dict{String, UInt32}()
+                GC.@preserve buf begin
+                    current = Ptr{_WindowsIpAdapterAddresses}(pointer(buf))
+                    while current != C_NULL
+                        adapter = unsafe_load(current)
+                        name = _utf16_ptr_string(adapter.friendly_name)
+                        if !isempty(name)
+                            idx = adapter.ifindex == UInt32(0) ? adapter.ipv6_ifindex : adapter.ifindex
+                            idx != UInt32(0) && !haskey(out, name) && (out[name] = idx)
+                        end
+                        current = adapter.next
+                    end
+                end
+                return out
+            end
+            rc == _ERROR_BUFFER_OVERFLOW || return Dict{String, UInt32}()
+            size = size_ref[]
+            size <= UInt32(length(buf)) && return Dict{String, UInt32}()
+        end
+    end
+
+    function _update_windows_zone_cache!(force::Bool)::Bool
+        now_ns = Int64(time_ns())
+        lock(_WINDOWS_ZONE_CACHE_LOCK)
+        try
+            if !force && (_WINDOWS_ZONE_CACHE_LAST_FETCH_NS[] + _ZONE_CACHE_TTL_NS) > now_ns
+                return false
+            end
+            _WINDOWS_ZONE_CACHE_LAST_FETCH_NS[] = now_ns
+            _WINDOWS_ZONE_CACHE_TO_INDEX[] = _windows_zone_entries()
+            return true
+        finally
+            unlock(_WINDOWS_ZONE_CACHE_LOCK)
+        end
+    end
+
+    function _windows_zone_index(name::String)::UInt32
+        isempty(name) && return UInt32(0)
+        updated = _update_windows_zone_cache!(false)
+        lock(_WINDOWS_ZONE_CACHE_LOCK)
+        try
+            idx = get(() -> UInt32(0), _WINDOWS_ZONE_CACHE_TO_INDEX[], name)
+            idx != UInt32(0) && return idx
+        finally
+            unlock(_WINDOWS_ZONE_CACHE_LOCK)
+        end
+        if !updated
+            _update_windows_zone_cache!(true)
+            lock(_WINDOWS_ZONE_CACHE_LOCK)
+            try
+                return get(() -> UInt32(0), _WINDOWS_ZONE_CACHE_TO_INDEX[], name)
+            finally
+                unlock(_WINDOWS_ZONE_CACHE_LOCK)
+            end
+        end
+        return UInt32(0)
+    end
+end
 
 @inline function _gai_error_string(code::Cint)::String
-    ptr = @static if Sys.iswindows()
-        ccall((:gai_strerrorA, "Ws2_32"), Cstring, (Cint,), code)
+    @static if Sys.iswindows()
+        code == _WSAHOST_NOT_FOUND && return "no such host"
+        code == _DNS_ERROR_RCODE_NAME_ERROR && return "no such host"
+        code == _DNS_INFO_NO_RECORDS && return "no DNS records"
+        code == _WSATRY_AGAIN && return "temporary failure in name resolution"
+        code == _WSATYPE_NOT_FOUND && return "unknown service"
+        return "getaddrinfo error code $code"
     else
-        ccall(:gai_strerror, Cstring, (Cint,), code)
+        ptr = ccall(:gai_strerror, Cstring, (Cint,), code)
+        ptr == C_NULL && return "unknown getaddrinfo error code $code"
+        return unsafe_string(ptr)
     end
-    ptr == C_NULL && return "unknown getaddrinfo error code $code"
-    return unsafe_string(ptr)
 end
 
 function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::Vector{TCP.SocketEndpoint}
@@ -558,7 +753,11 @@ function _scope_id_from_zone(zone::AbstractString)::UInt32
         (numeric < 0 || numeric > typemax(UInt32)) && _addr_error("invalid scope id", z)
         return UInt32(numeric)
     end
-    idx = @ccall if_nametoindex(z::Cstring)::UInt32
+    idx = @static if Sys.iswindows()
+        _windows_zone_index(z)
+    else
+        @ccall if_nametoindex(z::Cstring)::UInt32
+    end
     idx == 0 && _addr_error("unknown interface zone", z)
     return idx
 end

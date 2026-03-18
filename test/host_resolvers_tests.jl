@@ -445,41 +445,50 @@ end
             end
         end
         @testset "happy-eyeballs fallback launches immediately after primary error" begin
-            IP.shutdown!()
-            listener = nothing
-            connected = nothing
-            accepted = nothing
-            try
-                listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 16)
-                laddr = NC.addr(listener)::NC.SocketAddrV4
-                port = Int(laddr.port)
-                resolver = ND.StaticResolver(
-                    hosts = Dict(
-                        "dual.test" => NC.SocketEndpoint[
+            if !_nd_ipv6_supported()
+                @test true
+            else
+                IP.shutdown!()
+                listener = nothing
+                connected = nothing
+                accepted = nothing
+                try
+                    listener_network = Sys.iswindows() ? "tcp6" : "tcp4"
+                    listener_address = Sys.iswindows() ? "[::1]:0" : "127.0.0.1:0"
+                    listener = NC.listen(listener_network, listener_address; backlog = 16)
+                    port = Int(NC.addr(listener).port)
+                    dual_addrs = if Sys.iswindows()
+                        NC.SocketEndpoint[
+                            NC.loopback_addr(port),
+                            NC.loopback_addr6(port),
+                        ]
+                    else
+                        NC.SocketEndpoint[
                             NC.loopback_addr6(port),
                             NC.loopback_addr(port),
-                        ],
-                    ),
-                )
-                warm_accept = errormonitor(Threads.@spawn NC.accept(listener))
-                warm_client = NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 1_000_000)
-                @test _nd_wait_task_done(warm_accept, 2.0) != :timed_out
-                warm_server = fetch(warm_accept)
-                _nd_close_quiet!(warm_server)
-                _nd_close_quiet!(warm_client)
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                connect_task = errormonitor(Threads.@spawn NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 5_000_000_000))
-                @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
-                @test _nd_wait_task_done(accept_task, 1.5) != :timed_out
-                connected = fetch(connect_task)
-                accepted = fetch(accept_task)
-                @test connected isa NC.Conn
-                @test accepted isa NC.Conn
-            finally
-                _nd_close_quiet!(accepted)
-                _nd_close_quiet!(connected)
-                _nd_close_quiet!(listener)
-                IP.shutdown!()
+                        ]
+                    end
+                    resolver = ND.StaticResolver(hosts = Dict("dual.test" => dual_addrs))
+                    warm_accept = errormonitor(Threads.@spawn NC.accept(listener))
+                    warm_client = NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 1_000_000)
+                    @test _nd_wait_task_done(warm_accept, 2.0) != :timed_out
+                    warm_server = fetch(warm_accept)
+                    _nd_close_quiet!(warm_server)
+                    _nd_close_quiet!(warm_client)
+                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    connect_task = errormonitor(Threads.@spawn NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 5_000_000_000))
+                    @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
+                    @test _nd_wait_task_done(accept_task, 1.5) != :timed_out
+                    connected = fetch(connect_task)
+                    accepted = fetch(accept_task)
+                    @test connected isa NC.Conn
+                    @test accepted isa NC.Conn
+                finally
+                    _nd_close_quiet!(accepted)
+                    _nd_close_quiet!(connected)
+                    _nd_close_quiet!(listener)
+                    IP.shutdown!()
+                end
             end
         end
         @testset "parallel race returns wrapped error when both families fail" begin
