@@ -1657,6 +1657,10 @@ end
     return nothing
 end
 
+@inline function _same_addr_family(a::TCP.SocketEndpoint, b::TCP.SocketEndpoint)::Bool
+    return (_is_ipv4(a) && _is_ipv4(b)) || (_is_ipv6(a) && _is_ipv6(b))
+end
+
 @inline function _wrap_op_error(
         op::AbstractString,
         net::AbstractString,
@@ -1876,6 +1880,17 @@ function connect(
         _resolve_with_deadline(d, network, address, deadline_ns)
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
+    end
+    if d.local_addr !== nothing
+        local_addr = d.local_addr::TCP.SocketEndpoint
+        filtered = TCP.SocketEndpoint[]
+        for addr in addrs
+            _same_addr_family(addr, local_addr) && push!(filtered, addr)
+        end
+        if isempty(filtered)
+            throw(_wrap_op_error("connect", network, local_addr, nothing, ArgumentError("local and remote address families must match")))
+        end
+        addrs = filtered
     end
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
