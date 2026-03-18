@@ -891,6 +891,7 @@ const _FIONBIO = reinterpret(Int32, _FIONBIO_BITS)
 const _WSA_FLAG_OVERLAPPED = UInt32(0x01)
 const _WSA_FLAG_NO_HANDLE_INHERIT = UInt32(0x80)
 const _HANDLE_FLAG_INHERIT = UInt32(0x00000001)
+const _ACCEPT_ADDRBUF_LEN = 128
 const _ERROR_IO_PENDING = Int32(997)
 const _ERROR_OPERATION_ABORTED = Int32(995)
 const _ERROR_NETNAME_DELETED = UInt32(64)
@@ -940,6 +941,10 @@ const _ERRNO_ESHUTDOWN = @static isdefined(Base.Libc, :ESHUTDOWN) ? Int32(getfie
 const _ERRNO_EHOSTDOWN = @static isdefined(Base.Libc, :EHOSTDOWN) ? Int32(getfield(Base.Libc, :EHOSTDOWN)) : Int32(Base.Libc.EHOSTUNREACH)
 const _ERRNO_ECANCELED = @static isdefined(Base.Libc, :ECANCELED) ? Int32(getfield(Base.Libc, :ECANCELED)) : Int32(Base.Libc.EINTR)
 
+struct _SockAddrHeader
+    sa_family::UInt16
+end
+
 struct SockAddrIn
     sin_family::UInt16
     sin_port::UInt16
@@ -983,23 +988,27 @@ struct _WSAData
 end
 
 @inline function _hton16(v::UInt16)::UInt16
-    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    _is_little_endian() && return bswap(v)
     return v
 end
 
 @inline function _ntoh16(v::UInt16)::UInt16
-    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    _is_little_endian() && return bswap(v)
     return v
 end
 
 @inline function _hton32(v::UInt32)::UInt32
-    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    _is_little_endian() && return bswap(v)
     return v
 end
 
 @inline function _ntoh32(v::UInt32)::UInt32
-    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    _is_little_endian() && return bswap(v)
     return v
+end
+
+@inline function _is_little_endian()::Bool
+    return Base.ENDIAN_BOM == 0x04030201
 end
 
 @inline function _port_u16(port::Integer)::UInt16
@@ -1084,6 +1093,14 @@ end
 
 function _throw_errno(op::AbstractString, errno::Int32)
     throw(SystemError(op, Int(errno)))
+end
+
+@inline function _throw_enosys(op::AbstractString)
+    throw(SystemError(op, Int(Base.Libc.ENOSYS)))
+end
+
+@inline function _errno_i32()::Int32
+    return last_error()
 end
 
 const _winsock_lock = ReentrantLock()
@@ -1342,9 +1359,9 @@ end
         return bytes
     end
 
-    function sockaddr_bytes(addr::SockAddrIn6)::Vector{UInt8}
-        bytes = Vector{UInt8}(undef, sizeof(SockAddrIn6))
-        addr_ref = Ref(addr)
+function sockaddr_bytes(addr::SockAddrIn6)::Vector{UInt8}
+    bytes = Vector{UInt8}(undef, sizeof(SockAddrIn6))
+    addr_ref = Ref(addr)
         GC.@preserve addr_ref bytes begin
             unsafe_copyto!(
                 pointer(bytes),
@@ -1375,6 +1392,19 @@ else
         GC.@preserve bytes addr unsafe_store!(Ptr{SockAddrIn6}(pointer(bytes)), addr)
         return bytes
     end
+end
+
+@inline function _decode_accept_peer(addrptr::Ptr{UInt8}, addrlen::SockLen)::AcceptPeer
+    Int(addrlen) < sizeof(_SockAddrHeader) && return nothing
+    header = unsafe_load(Ptr{_SockAddrHeader}(addrptr))
+    family = Int32(header.sa_family)
+    if family == AF_INET && Int(addrlen) >= sizeof(SockAddrIn)
+        return unsafe_load(Ptr{SockAddrIn}(addrptr))
+    end
+    if family == AF_INET6 && Int(addrlen) >= sizeof(SockAddrIn6)
+        return unsafe_load(Ptr{SockAddrIn6}(addrptr))
+    end
+    return nothing
 end
 
 shutdown_socket(fd::Int32, how::Integer) = nothing
