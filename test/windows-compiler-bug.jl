@@ -1588,6 +1588,7 @@ const _ERROR_INVALID_PARAMETER = UInt32(87)
 const _ERROR_NOT_ENOUGH_MEMORY = UInt32(8)
 const _ERROR_INVALID_HANDLE = UInt32(6)
 const _ERROR_NOT_SUPPORTED = UInt32(50)
+const _SO_UPDATE_ACCEPT_CONTEXT = Int32(0x700b)
 const _SO_UPDATE_CONNECT_CONTEXT = Int32(0x7010)
 const _SIO_GET_EXTENSION_FUNCTION_POINTER = UInt32(0xC8000006)
 const _IPPROTO_UDP = Int32(17)
@@ -1929,9 +1930,23 @@ function _load_extension_ptr!(sock::Int32, guid::Guid)::Ptr{Cvoid}
     guid_ref = Ref(guid)
     out_ref = Ref{Ptr{Cvoid}}(C_NULL)
     bytes_ref = Ref{UInt32}(UInt32(0))
-    _ = sock
-    _ = guid_ref
-    _ = bytes_ref
+    rc = GC.@preserve guid_ref out_ref bytes_ref begin
+        ccall(
+            (:WSAIoctl, _WS2_32),
+            Int32,
+            (UInt, UInt32, Ref{Guid}, UInt32, Ref{Ptr{Cvoid}}, UInt32, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
+            _socket_value(sock),
+            _SIO_GET_EXTENSION_FUNCTION_POINTER,
+            guid_ref,
+            UInt32(sizeof(Guid)),
+            out_ref,
+            UInt32(sizeof(Ptr{Cvoid})),
+            bytes_ref,
+            C_NULL,
+            C_NULL,
+        )
+    end
+    rc == 0 || return C_NULL
     return out_ref[]
 end
 
@@ -1953,6 +1968,8 @@ function _load_sendrecvmsg_ptrs!()::Tuple{Ptr{Cvoid}, Ptr{Cvoid}}
         finally
             close_socket_nothrow(sock)
         end
+        recv_ptr == C_NULL && _throw_errno("WSAIoctl(WSARecvMsg)", _map_wsa_errno(_wsa_get_last_error()))
+        send_ptr == C_NULL && _throw_errno("WSAIoctl(WSASendMsg)", _map_wsa_errno(_wsa_get_last_error()))
         _wsarecvmsg_ptr[] = recv_ptr
         _wsasendmsg_ptr[] = send_ptr
         return send_ptr, recv_ptr
@@ -2354,8 +2371,21 @@ function _recv_msg_simple!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssiz
     bufs = _wsabufs_from_msghdr(msg)
     bytes_ref = Ref{UInt32}(UInt32(0))
     flags_ref = Ref{UInt32}(_cint_bits_u32(flags))
-    _ = fd
-    _ = bufs
+    n = GC.@preserve bufs bytes_ref flags_ref begin
+        ccall(
+            (:WSARecv, _WS2_32),
+            Int32,
+            (UInt, Ptr{WSABuf}, UInt32, Ref{UInt32}, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
+            _socket_value(fd),
+            _wsabuf_ptr(bufs),
+            UInt32(length(bufs)),
+            bytes_ref,
+            flags_ref,
+            C_NULL,
+            C_NULL,
+        )
+    end
+    n == _SOCKET_ERROR && return Cssize_t(-1)
     msg_ref[] = MsgHdr(
         msg.msg_name,
         msg.msg_namelen,
@@ -2372,9 +2402,21 @@ function _send_msg_simple!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssiz
     msg = msg_ref[]
     bufs = _wsabufs_from_msghdr(msg)
     bytes_ref = Ref{UInt32}(UInt32(0))
-    _ = fd
-    _ = bufs
-    _ = flags
+    n = GC.@preserve bufs bytes_ref begin
+        ccall(
+            (:WSASend, _WS2_32),
+            Int32,
+            (UInt, Ptr{WSABuf}, UInt32, Ref{UInt32}, UInt32, Ptr{Cvoid}, Ptr{Cvoid}),
+            _socket_value(fd),
+            _wsabuf_ptr(bufs),
+            UInt32(length(bufs)),
+            bytes_ref,
+            _cint_bits_u32(flags),
+            C_NULL,
+            C_NULL,
+        )
+    end
+    n == _SOCKET_ERROR && return Cssize_t(-1)
     return Cssize_t(bytes_ref[])
 end
 
@@ -2384,8 +2426,19 @@ function _recv_msg_ext!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssize_t
     bufs = _wsabufs_from_msghdr(msg)
     wmsg = Ref(_wsamsg_from_msghdr(msg, bufs, flags))
     bytes_ref = Ref{UInt32}(UInt32(0))
-    _ = fd
-    _ = recv_ptr
+    n = GC.@preserve bufs wmsg bytes_ref begin
+        ccall(
+            recv_ptr,
+            Int32,
+            (UInt, Ref{WSAMsg}, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
+            _socket_value(fd),
+            wmsg,
+            bytes_ref,
+            C_NULL,
+            C_NULL,
+        )
+    end
+    n == _SOCKET_ERROR && return Cssize_t(-1)
     _store_wsamsg_back!(msg_ref, msg, wmsg[])
     return Cssize_t(bytes_ref[])
 end
@@ -2396,9 +2449,20 @@ function _send_msg_ext!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssize_t
     bufs = _wsabufs_from_msghdr(msg)
     wmsg = Ref(_wsamsg_from_msghdr(msg, bufs, flags))
     bytes_ref = Ref{UInt32}(UInt32(0))
-    _ = fd
-    _ = send_ptr
-    _ = wmsg
+    n = GC.@preserve bufs wmsg bytes_ref begin
+        ccall(
+            send_ptr,
+            Int32,
+            (UInt, Ref{WSAMsg}, UInt32, Ref{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}),
+            _socket_value(fd),
+            wmsg,
+            UInt32(0),
+            bytes_ref,
+            C_NULL,
+            C_NULL,
+        )
+    end
+    n == _SOCKET_ERROR && return Cssize_t(-1)
     return Cssize_t(bytes_ref[])
 end
 
@@ -2423,12 +2487,36 @@ accept_socket(fd::Int32)::Int32 = Int32(3)
 close_socket(fd::Int32) = nothing
 
 function finish_accept_ex!(listener_fd::Int32, acceptfd::Int32, addrbuf::Vector{UInt8})::AcceptPeer
-    _ = listener_fd
-    _ = acceptfd
-    GC.@preserve addrbuf begin
-        addrptr = Ptr{UInt8}(pointer(addrbuf))
-        return _decode_accept_peer(addrptr, SockLen(length(addrbuf)))
+    listener_ref = Ref{UInt}(_socket_value(listener_fd))
+    GC.@preserve listener_ref begin
+        _set_sockopt_ptr!(
+            acceptfd,
+            _SO_UPDATE_ACCEPT_CONTEXT,
+            Ptr{UInt8}(Base.unsafe_convert(Ptr{UInt}, listener_ref)),
+            sizeof(UInt),
+        )
     end
+    local_ptr = Ref{Ptr{UInt8}}(C_NULL)
+    local_len = Ref{Int32}(0)
+    remote_ptr = Ref{Ptr{UInt8}}(C_NULL)
+    remote_len = Ref{Int32}(0)
+    GC.@preserve addrbuf begin
+        _ = ccall(
+            (:GetAcceptExSockaddrs, _MSWSOCK),
+            Cvoid,
+            (Ptr{UInt8}, UInt32, UInt32, UInt32, Ref{Ptr{UInt8}}, Ref{Int32}, Ref{Ptr{UInt8}}, Ref{Int32}),
+            pointer(addrbuf),
+            UInt32(0),
+            UInt32(_ACCEPT_ADDRBUF_LEN),
+            UInt32(_ACCEPT_ADDRBUF_LEN),
+            local_ptr,
+            local_len,
+            remote_ptr,
+            remote_len,
+        )
+    end
+    remote_ptr[] == C_NULL && return nothing
+    return _decode_accept_peer(remote_ptr[], SockLen(remote_len[]))
 end
 
 function __init__()
