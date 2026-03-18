@@ -28,8 +28,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          julia --project=. --startup-file=no --history-file=no test/windows-compiler-bug.jl 2>&1 | tee compiler-bug.log
+          set +e
+          timeout 120s julia --project=. --startup-file=no --history-file=no test/windows-compiler-bug.jl 2>&1 | tee compiler-bug.log
+          julia_status=${PIPESTATUS[0]}
+          set -e
           if grep -Eq 'Internal error: during type inference of|BoundsError\(a=Array\{Base\.Compiler\.TryCatchFrame' compiler-bug.log; then
             echo 'Windows compiler bug reproduced'
             exit 1
           fi
+          if [ "${julia_status}" -eq 124 ]; then
+            echo 'Windows compiler bug timed out'
+            exit 1
+          fi
+          exit "${julia_status}"
