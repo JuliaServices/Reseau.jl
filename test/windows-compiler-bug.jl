@@ -414,7 +414,11 @@ end
 
 preparewrite(pd::PollState, is_file::Bool = false) = nothing
 function _fd_write_lock!(fd::FD)
+    println("[windows-compiler-bug] enter _fd_write_lock!")
+    flush(stdout)
     _fdlock_rwlock!(fd.fdlock, false, true) || throw(_closing_error(fd.is_file))
+    println("[windows-compiler-bug] acquired _fd_write_lock!")
+    flush(stdout)
     return nothing
 end
 
@@ -615,12 +619,22 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
     println("[windows-compiler-bug] enter IOPoll.connect!")
     flush(stdout)
     _fd_write_lock!(fd)
+    println("[windows-compiler-bug] after _fd_write_lock!")
+    flush(stdout)
     try
         preparewrite(fd.pd, fd.is_file)
+        println("[windows-compiler-bug] after preparewrite")
+        flush(stdout)
         registration = _poll_registration(fd.pd)
+        println("[windows-compiler-bug] after _poll_registration")
+        flush(stdout)
         errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
+        println("[windows-compiler-bug] after _iocp_submit_connect!")
+        flush(stdout)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         try
+            println("[windows-compiler-bug] before pollwait! write")
+            flush(stdout)
             pollwait!(registration.write_waiter)
             _convert_poll_error!(_check_error(fd.pd, PollMode.WRITE), fd.is_file)
         catch err
