@@ -1,5 +1,7 @@
 using Test
 
+module Reseau
+
 module IOPoll
 
 export DeadlineExceededError, FD
@@ -668,6 +670,8 @@ end
 
 end
 
+end # module Reseau
+
 function _probe(f, label::AbstractString)
     println("[windows-compiler-bug] probe start: $(label)")
     try
@@ -682,11 +686,11 @@ end
 println("[windows-compiler-bug] julia threads: $(Threads.nthreads())")
 
 _probe("tcp kwcall local_addr v4") do
-    TCP.connect("tcp", "127.0.0.1:1"; local_addr = TCP.loopback_addr(0))
+    Reseau.TCP.connect("tcp", "127.0.0.1:1"; local_addr = Reseau.TCP.loopback_addr(0))
 end
 
 _probe("tcp kwcall local_addr v6 mismatch") do
-    TCP.connect("tcp", "127.0.0.1:1"; local_addr = TCP.loopback_addr6(0))
+    Reseau.TCP.connect("tcp", "127.0.0.1:1"; local_addr = Reseau.TCP.loopback_addr6(0))
 end
 
 @test true
