@@ -37,6 +37,13 @@ Base.@enum T::UInt8 begin
 end
 end
 
+module TimeEntryKind
+Base.@enum T::UInt8 begin
+    DEADLINE = 0x01
+    TIMER = 0x02
+end
+end
+
 module IocpOpKind
 Base.@enum T::UInt8 begin
     PROBE_READ = 0x01
@@ -333,6 +340,14 @@ mutable struct FD
     end
 end
 
+@inline function _fd_incref!(fd::FD)::Bool
+    return _fdlock_incref!(fd.fdlock)
+end
+
+@inline function _fd_decref!(fd::FD)::Bool
+    return _fdlock_decref!(fd.fdlock)
+end
+
 mutable struct TimerState
     lock::ReentrantLock
     waiter::PollWaiter
@@ -345,14 +360,102 @@ mutable struct TimerState
     end
 end
 
+struct PollEvent
+    fd::Int32
+    token::UInt64
+    mode::PollMode.T
+    errored::Bool
+end
+
+struct TimeEntry
+    deadline_ns::Int64
+    kind::TimeEntryKind.T
+    pollstate::Union{Nothing, PollState}
+    timer::Union{Nothing, TimerState}
+    mode::PollMode.T
+    primary_seq::UInt64
+    secondary_seq::UInt64
+end
+
+abstract type BackendState end
+
+mutable struct Poller
+    lock::ReentrantLock
+    registrations::Dict{Int32, Registration}
+    registrations_by_token::Dict{UInt64, Registration}
+    time_heap::Vector{TimeEntry}
+    shutdown_event::Base.Threads.Event
+    backend_state::Union{Nothing, BackendState}
+    @atomic next_token::UInt64
+    @atomic poll_until_ns::Int64
+    @atomic running::Bool
+end
+
+function Poller()
+    return Poller(
+        ReentrantLock(),
+        Dict{Int32, Registration}(),
+        Dict{UInt64, Registration}(),
+        TimeEntry[],
+        Base.Threads.Event(),
+        nothing,
+        UInt64(0),
+        Int64(0),
+        false,
+    )
+end
+
 connect!(pfd::FD, addrbuf, addrlen) = nothing
 waitwrite(pd::PollState) = nothing
 schedule_timer!(timer::TimerState, deadline_ns::Int64) = true
 waittimer(timer::TimerState) = false
 _close_timer!(timer::TimerState) = nothing
-sleep(seconds::Real) = nothing
+function deadline_fire! end
+
+function _drain_expired_time_entries!(state::Poller, now_ns::Int64)
+    _ = state
+    _ = now_ns
+    return nothing
+end
+
+function sleep_until_ns(deadline_ns::Integer)
+    target_ns = Int64(deadline_ns)
+    target_ns <= Int64(time_ns()) && return nothing
+    return nothing
+end
+
+function sleep_ns(delay_ns::Integer)
+    delay = Int64(delay_ns)
+    delay <= 0 && return nothing
+    return sleep_until_ns(Int64(time_ns()) + delay)
+end
+
+function sleep(sec::Real)
+    sec >= 0 || throw(ArgumentError("cannot sleep for $sec seconds"))
+    return sleep_ns(ceil(Int64, sec * 1.0e9))
+end
+
+function timedwait(testcb, timeout_s::Real; pollint::Real = 0.1)
+    pollint >= 1.0e-3 || throw(ArgumentError("pollint must be >= 1 millisecond"))
+    start_ns = Int64(time_ns())
+    timeout_ns = ceil(Int64, timeout_s * 1.0e9)
+    testcb() && return :ok
+    step_ns = ceil(Int64, pollint * 1.0e9)
+    while true
+        elapsed_ns = Int64(time_ns()) - start_ns
+        elapsed_ns > timeout_ns && return :timed_out
+        remaining_ns = timeout_ns - elapsed_ns
+        sleep_ns(min(step_ns, remaining_ns))
+        testcb() && return :ok
+    end
+end
+
 read!(pfd::FD, buf::Vector{UInt8}) = throw(EOFError())
 _read_ptr_some!(pfd::FD, ptr::Ptr{UInt8}, nbytes::Int) = throw(EOFError())
+
+const POLLER = Ref{Poller}()
+const _POLLER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+const _pthread_t = UInt
 
 const _POLL_NO_ERROR = Int32(0)
 const _POLL_ERR_CLOSING = Int32(1)
@@ -386,6 +489,22 @@ end
     return _NEXT_TOKEN[]
 end
 
+@inline function _next_token!(state::Poller)::UInt64
+    return @atomic state.next_token += UInt64(1)
+end
+
+@inline function _is_generating_output()::Bool
+    return false
+end
+
+function _throw_errno(op::AbstractString, errno::Int32)
+    throw(SystemError(op, Int(errno)))
+end
+
+@inline function _runtime_supported()::Bool
+    return true
+end
+
 function _new_iocp_registration(fd::Int32, token::UInt64)::IocpRegistration
     read_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.READ, token, IocpOpKind.PROBE_READ, nothing, nothing, false)
     write_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.WRITE, token, IocpOpKind.PROBE_WRITE, nothing, nothing, false)
@@ -393,6 +512,10 @@ function _new_iocp_registration(fd::Int32, token::UInt64)::IocpRegistration
     read_op.owner = reg
     write_op.owner = reg
     return reg
+end
+
+function _new_registration(fd::Int32, token::UInt64, mode::PollMode.T)::Registration
+    return Registration(fd, token, mode, PollWaiter(), PollWaiter(), false)
 end
 
 @inline function _map_overlapped_errno(err::Int32)::Int32
@@ -513,6 +636,79 @@ function current_registration(pd::PollState)
     return get(() -> nothing, _REGISTRATIONS, pd)
 end
 
+function _notify_registration!(
+        registration::Registration,
+        mode::PollMode.T,
+        reason::PollWakeReason.T = PollWakeReason.READY,
+    )
+    if _mode_has_read(mode) && _mode_has_read(registration.mode)
+        pollnotify!(registration.read_waiter, reason)
+    end
+    if _mode_has_write(mode) && _mode_has_write(registration.mode)
+        pollnotify!(registration.write_waiter, reason)
+    end
+    return nothing
+end
+
+function _spawn_detached_thread(
+        name::AbstractString,
+        thread_fn::Ref{Ptr{Cvoid}},
+        arg = nothing,
+    )
+    _ = name
+    _ = thread_fn
+    _ = arg
+    return nothing
+end
+
+function init!()::Poller
+    if isassigned(POLLER)
+        state = POLLER[]
+        (@atomic state.running) && return state
+    end
+    _runtime_supported() || throw(ArgumentError("iopoll backend is currently supported on macOS, Linux, and Windows"))
+    state = Poller()
+    @atomic state.running = true
+    POLLER[] = state
+    return state
+end
+
+function shutdown!()
+    isassigned(POLLER) || return nothing
+    state = POLLER[]
+    @atomic :release state.running = false
+    return nothing
+end
+
+function _dispatch_ready_event!(state::Poller, event::PollEvent)
+    registration = get(() -> nothing, state.registrations_by_token, event.token)
+    registration === nothing && return nothing
+    _notify_registration!(registration::Registration, event.mode, PollWakeReason.READY)
+    return nothing
+end
+
+function _notify_all_waiters!(state::Poller)
+    for registration in values(state.registrations_by_token)
+        _notify_registration!(registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+    end
+    return nothing
+end
+
+function _poller_thread_main!(state::Poller)
+    _ = state
+    return nothing
+end
+
+function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
+    _ = arg
+    return C_NULL
+end
+
+function __init__()
+    _POLLER_THREAD_ENTRY_C[] = C_NULL
+    return nothing
+end
+
 function _poll_registration(pd::PollState)::Registration
     reg = current_registration(pd)
     reg === nothing && throw(SystemError("iopoll wait", Int(Base.Libc.EBADF)))
@@ -552,6 +748,18 @@ function _check_error(pd::PollState, mode::PollMode.T)::Int32
 end
 
 preparewrite(pd::PollState, is_file::Bool = false) = nothing
+prepareread(pd::PollState, is_file::Bool = false) = nothing
+
+function _fd_read_lock!(fd::FD)
+    _fdlock_rwlock!(fd.fdlock, true, true) || throw(_closing_error(fd.is_file))
+    return nothing
+end
+
+function _fd_read_unlock!(fd::FD)
+    _fdlock_rwunlock!(fd.fdlock, true) || return nothing
+    return nothing
+end
+
 function _fd_write_lock!(fd::FD)
     println("[windows-compiler-bug] enter _fd_write_lock!")
     flush(stdout)
@@ -566,6 +774,55 @@ function _fd_write_unlock!(fd::FD)
     return nothing
 end
 pollable(pd::PollState)::Bool = @atomic :acquire pd.pollable
+
+function waitread(pd::PollState, is_file::Bool = false)
+    registration = _poll_registration(pd)
+    arm_waiter!(registration, PollMode.READ)
+    pollwait!(registration.read_waiter)
+    _convert_poll_error!(_check_error(pd, PollMode.READ), is_file)
+    return nothing
+end
+
+function waitcancelled(pd::PollState, mode::PollMode.T)
+    registration = _poll_registration(pd)
+    if _mode_has_read(mode)
+        pollwait!(registration.read_waiter)
+    end
+    if _mode_has_write(mode)
+        pollwait!(registration.write_waiter)
+    end
+    return nothing
+end
+
+function _write_ptr!(fd::FD, p::Ptr{UInt8}, nbytes::Int)::Int
+    _ = p
+    _ = nbytes
+    return 0
+end
+
+function write!(fd::FD, p::AbstractVector{UInt8})::Int
+    GC.@preserve p begin
+        return _write_ptr!(fd, pointer(p), length(p))
+    end
+end
+
+function accept!(fd::FD, family::Int32, sotype::Int32)::Tuple{Int32, Main.Reseau.SocketOps.AcceptPeer}
+    _ = sotype
+    if family == Main.Reseau.SocketOps.AF_INET6
+        return Int32(4), Main.Reseau.SocketOps.sockaddr_in6_loopback(1)
+    end
+    return Int32(4), Main.Reseau.SocketOps.sockaddr_in_loopback(1)
+end
+
+function set_blocking!(fd::FD, blocking::Bool = true)
+    @atomic :release fd.is_blocking = blocking
+    return nothing
+end
+
+function _destroy!(fd::FD)
+    close(fd)
+    return nothing
+end
 
 function _wake_waiters!(pd::PollState, mode::PollMode.T)
     registration = current_registration(pd)
