@@ -2,6 +2,8 @@ using Test
 
 module Reseau
 
+export TCP, TLS
+
 module IOPoll
 
 export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close_timer!, sleep
@@ -1275,7 +1277,15 @@ end
 
 end
 
+module TLS
+end
+
 end # module Reseau
+
+using .Reseau: TCP, TLS
+
+const NC = Reseau.TCP
+const TL = Reseau.TLS
 
 function _probe(f, label::AbstractString)
     println("[windows-compiler-bug] probe start: $(label)")
@@ -1290,12 +1300,15 @@ end
 
 println("[windows-compiler-bug] julia threads: $(Threads.nthreads())")
 
+@test Reseau.TCP === TCP
+@test Reseau.TLS === TLS
+
 _probe("tcp kwcall local_addr v4") do
-    Reseau.TCP.connect("tcp", "127.0.0.1:1"; local_addr = Reseau.TCP.loopback_addr(0))
+    NC.connect("tcp", "127.0.0.1:1"; local_addr = NC.loopback_addr(0))
 end
 
 _probe("tcp kwcall local_addr v6 mismatch") do
-    Reseau.TCP.connect("tcp", "127.0.0.1:1"; local_addr = Reseau.TCP.loopback_addr6(0))
+    NC.connect("tcp", "127.0.0.1:1"; local_addr = NC.loopback_addr6(0))
 end
 
 @test true
