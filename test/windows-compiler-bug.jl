@@ -4869,7 +4869,9 @@ end # module Reseau
 
 using .Reseau: TCP, TLS
 
+const IP = Reseau.IOPoll
 const NC = Reseau.TCP
+const ND = Reseau.HostResolvers
 const TL = Reseau.TLS
 
 function _probe(f, label::AbstractString)
@@ -4899,6 +4901,30 @@ _probe("kwsort infer local_addr v6") do
     tt = (NamedTuple{(:local_addr,), Tuple{NC.SocketAddrV6}}, typeof(NC.connect), String, String)
     Base.precompile(Tuple{typeof(Core.kwcall), tt...})
     Base.code_typed(Core.kwcall, tt)
+    return nothing
+end
+
+_probe("infer HostResolvers.connect direct") do
+    Base.precompile(Tuple{typeof(ND.connect), ND.HostResolver, String, String})
+    Base.code_typed(ND.connect, (ND.HostResolver, String, String))
+    return nothing
+end
+
+_probe("infer HostResolvers._resolve_serial") do
+    Base.precompile(Tuple{typeof(ND._resolve_serial), ND.HostResolver, String, String, Vector{NC.SocketEndpoint}, Int64, ND.DNSRaceState})
+    Base.code_typed(ND._resolve_serial, (ND.HostResolver, String, String, Vector{NC.SocketEndpoint}, Int64, ND.DNSRaceState))
+    return nothing
+end
+
+_probe("infer TCP._connect_socketaddr_impl") do
+    Base.precompile(Tuple{typeof(NC._connect_socketaddr_impl), NC.SocketAddrV4, Union{Nothing, NC.SocketAddr}, Int64, Any})
+    Base.code_typed(NC._connect_socketaddr_impl, (NC.SocketAddrV4, Union{Nothing, NC.SocketAddr}, Int64, Any))
+    return nothing
+end
+
+_probe("infer IOPoll.connect!") do
+    Base.precompile(Tuple{typeof(IP.connect!), IP.FD, Vector{UInt8}, Int32})
+    Base.code_typed(IP.connect!, (IP.FD, Vector{UInt8}, Int32))
     return nothing
 end
 
