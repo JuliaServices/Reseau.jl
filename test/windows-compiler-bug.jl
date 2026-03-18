@@ -10,6 +10,24 @@ export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close
 
 struct DeadlineExceededError <: Exception end
 struct NoDeadlineError <: Exception end
+struct NetClosingError <: Exception end
+struct FileClosingError <: Exception end
+struct NotPollableError <: Exception end
+
+const _MUTEX_CLOSED = UInt64(1) << 0
+const _MUTEX_RLOCK = UInt64(1) << 1
+const _MUTEX_WLOCK = UInt64(1) << 2
+const _MUTEX_REF = UInt64(1) << 3
+const _MUTEX_REF_MASK = (UInt64(1) << 20 - UInt64(1)) << 3
+const _MUTEX_RWAIT = UInt64(1) << 23
+const _MUTEX_RMASK = (UInt64(1) << 20 - UInt64(1)) << 23
+const _MUTEX_WWAIT = UInt64(1) << 43
+const _MUTEX_WMASK = (UInt64(1) << 20 - UInt64(1)) << 43
+
+@inline function _closing_error(is_file::Bool)::Exception
+    is_file && return FileClosingError()
+    return NetClosingError()
+end
 
 module PollMode
 Base.@enum T::UInt8 begin
@@ -91,7 +109,148 @@ function Registration(
     return Registration(fd, token, mode, read_waiter, write_waiter, event_err, PollState(fd, token))
 end
 
+mutable struct RuntimeSema
+    lock::ReentrantLock
+    cond::Base.Threads.Condition
+    count::Int
+    function RuntimeSema()
+        lock = ReentrantLock()
+        return new(lock, Base.Threads.Condition(lock), 0)
+    end
+end
+
+function _runtime_sema_acquire!(sema::RuntimeSema)
+    lock(sema.lock)
+    try
+        while sema.count == 0
+            wait(sema.cond)
+        end
+        sema.count -= 1
+    finally
+        unlock(sema.lock)
+    end
+    return nothing
+end
+
+function _runtime_sema_release!(sema::RuntimeSema)
+    lock(sema.lock)
+    try
+        sema.count += 1
+        notify(sema.cond)
+    finally
+        unlock(sema.lock)
+    end
+    return nothing
+end
+
+function _new_binary_semaphore0()
+    sema = Base.Semaphore(1)
+    Base.acquire(sema)
+    return sema
+end
+
+mutable struct FDLock
+    @atomic state::UInt64
+    const rsema::RuntimeSema
+    const wsema::RuntimeSema
+    function FDLock()
+        return new(UInt64(0), RuntimeSema(), RuntimeSema())
+    end
+end
+
+function _fdlock_incref!(mu::FDLock)::Bool
+    while true
+        old = @atomic :acquire mu.state
+        (old & _MUTEX_CLOSED) != 0 && return false
+        new = old + _MUTEX_REF
+        (new & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
+        _, ok = @atomicreplace(mu.state, old => new)
+        ok && return true
+    end
+end
+
+function _fdlock_incref_and_close!(mu::FDLock)::Bool
+    while true
+        old = @atomic :acquire mu.state
+        (old & _MUTEX_CLOSED) != 0 && return false
+        new = (old | _MUTEX_CLOSED) + _MUTEX_REF
+        (new & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
+        new &= ~(_MUTEX_RMASK | _MUTEX_WMASK)
+        _, ok = @atomicreplace(mu.state, old => new)
+        ok || continue
+        wake = old
+        while (wake & _MUTEX_RMASK) != 0
+            wake -= _MUTEX_RWAIT
+            _runtime_sema_release!(mu.rsema)
+        end
+        while (wake & _MUTEX_WMASK) != 0
+            wake -= _MUTEX_WWAIT
+            _runtime_sema_release!(mu.wsema)
+        end
+        return true
+    end
+end
+
+function _fdlock_decref!(mu::FDLock)::Bool
+    while true
+        old = @atomic :acquire mu.state
+        (old & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("inconsistent fd mutex state"))
+        new = old - _MUTEX_REF
+        _, ok = @atomicreplace(mu.state, old => new)
+        ok || continue
+        return (new & (_MUTEX_CLOSED | _MUTEX_REF_MASK)) == _MUTEX_CLOSED
+    end
+end
+
+function _fdlock_rwlock!(mu::FDLock, read_lock::Bool, wait_lock::Bool)::Bool
+    mutex_bit = read_lock ? _MUTEX_RLOCK : _MUTEX_WLOCK
+    mutex_wait = read_lock ? _MUTEX_RWAIT : _MUTEX_WWAIT
+    mutex_mask = read_lock ? _MUTEX_RMASK : _MUTEX_WMASK
+    mutex_sema = read_lock ? mu.rsema : mu.wsema
+    while true
+        old = @atomic :acquire mu.state
+        (old & _MUTEX_CLOSED) != 0 && return false
+        new = UInt64(0)
+        if (old & mutex_bit) == 0
+            new = (old | mutex_bit) + _MUTEX_REF
+            (new & _MUTEX_REF_MASK) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
+        else
+            wait_lock || return false
+            new = old + mutex_wait
+            (new & mutex_mask) == 0 && throw(ArgumentError("too many concurrent operations on a single fd"))
+        end
+        _, ok = @atomicreplace(mu.state, old => new)
+        ok || continue
+        if (old & mutex_bit) == 0
+            return true
+        end
+        _runtime_sema_acquire!(mutex_sema)
+    end
+end
+
+function _fdlock_rwunlock!(mu::FDLock, read_lock::Bool)::Bool
+    mutex_bit = read_lock ? _MUTEX_RLOCK : _MUTEX_WLOCK
+    mutex_wait = read_lock ? _MUTEX_RWAIT : _MUTEX_WWAIT
+    mutex_mask = read_lock ? _MUTEX_RMASK : _MUTEX_WMASK
+    mutex_sema = read_lock ? mu.rsema : mu.wsema
+    while true
+        old = @atomic :acquire mu.state
+        ((old & mutex_bit) == 0 || (old & _MUTEX_REF_MASK) == 0) && throw(ArgumentError("inconsistent fd mutex state"))
+        new = (old & ~mutex_bit) - _MUTEX_REF
+        if (old & mutex_mask) != 0
+            new -= mutex_wait
+        end
+        _, ok = @atomicreplace(mu.state, old => new)
+        ok || continue
+        if (old & mutex_mask) != 0
+            _runtime_sema_release!(mutex_sema)
+        end
+        return (new & (_MUTEX_CLOSED | _MUTEX_REF_MASK)) == _MUTEX_CLOSED
+    end
+end
+
 mutable struct FD
+    fdlock::FDLock
     sysfd::Int32
     pd::PollState
     csema::Base.Semaphore
@@ -106,9 +265,10 @@ mutable struct FD
             is_file::Bool = false,
         )
         return new(
+            FDLock(),
             Int32(sysfd),
-            PollState(sysfd),
-            Base.Semaphore(0),
+            PollState(),
+            _new_binary_semaphore0(),
             false,
             is_stream,
             zero_read_is_eof,
@@ -139,6 +299,9 @@ read!(pfd::FD, buf::Vector{UInt8}) = throw(EOFError())
 _read_ptr_some!(pfd::FD, ptr::Ptr{UInt8}, nbytes::Int) = throw(EOFError())
 
 const _POLL_NO_ERROR = Int32(0)
+const _POLL_ERR_CLOSING = Int32(1)
+const _POLL_ERR_TIMEOUT = Int32(2)
+const _POLL_ERR_NOT_POLLABLE = Int32(3)
 const _REGISTRATIONS = IdDict{PollState, Registration}()
 const _NEXT_TOKEN = Ref{UInt64}(UInt64(0))
 
@@ -217,11 +380,48 @@ function _poll_registration(pd::PollState)::Registration
     return reg
 end
 
-_check_error(pd::PollState, mode::PollMode.T)::Int32 = _POLL_NO_ERROR
-_convert_poll_error!(res::Int32, is_file::Bool) = nothing
+function _convert_poll_error!(res::Int32, is_file::Bool)
+    res == _POLL_NO_ERROR && return nothing
+    res == _POLL_ERR_CLOSING && throw(_closing_error(is_file))
+    res == _POLL_ERR_TIMEOUT && throw(DeadlineExceededError())
+    res == _POLL_ERR_NOT_POLLABLE && throw(NotPollableError())
+    throw(ArgumentError("invalid poll status"))
+end
+
+function _refresh_event_err!(pd::PollState)
+    (@atomic :acquire pd.pollable) || return nothing
+    registration = current_registration(pd)
+    registration === nothing && return nothing
+    has_event_error = @atomic :acquire registration.event_err
+    @atomic :release pd.event_err = has_event_error
+    return nothing
+end
+
+function _check_error(pd::PollState, mode::PollMode.T)::Int32
+    (@atomic :acquire pd.closing) && return _POLL_ERR_CLOSING
+    if _mode_has_read(mode)
+        (@atomic :acquire pd.rd_ns) < 0 && return _POLL_ERR_TIMEOUT
+    end
+    if _mode_has_write(mode)
+        (@atomic :acquire pd.wd_ns) < 0 && return _POLL_ERR_TIMEOUT
+    end
+    if _mode_has_read(mode)
+        _refresh_event_err!(pd)
+        (@atomic :acquire pd.event_err) && return _POLL_ERR_NOT_POLLABLE
+    end
+    return _POLL_NO_ERROR
+end
+
 preparewrite(pd::PollState, is_file::Bool = false) = nothing
-_fd_write_lock!(fd::FD) = nothing
-_fd_write_unlock!(fd::FD) = nothing
+function _fd_write_lock!(fd::FD)
+    _fdlock_rwlock!(fd.fdlock, false, true) || throw(_closing_error(fd.is_file))
+    return nothing
+end
+
+function _fd_write_unlock!(fd::FD)
+    _fdlock_rwunlock!(fd.fdlock, false) || return nothing
+    return nothing
+end
 pollable(pd::PollState)::Bool = @atomic :acquire pd.pollable
 
 function _wake_waiters!(pd::PollState, mode::PollMode.T)
@@ -324,6 +524,7 @@ end
 
 function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
     deadline = Int64(deadline_ns)
+    _fdlock_incref!(fd.fdlock) || throw(_closing_error(fd.is_file))
     try
         pd = fd.pd
         (@atomic :acquire pd.pollable) || throw(NoDeadlineError())
@@ -374,7 +575,7 @@ function _set_deadline_impl!(fd::FD, deadline_ns::Integer, mode::PollMode.T)
             _wake_waiters!(pd, PollMode.WRITE)
         end
     finally
-        nothing
+        _fdlock_decref!(fd.fdlock)
     end
     return nothing
 end
@@ -385,7 +586,9 @@ function set_write_deadline!(fd::FD, deadline_ns::Integer)
 end
 
 function Base.close(fd::FD)
+    _fdlock_incref_and_close!(fd.fdlock) || throw(_closing_error(fd.is_file))
     evict!(fd.pd)
+    _fdlock_decref!(fd.fdlock)
     close(fd.pd)
     return nothing
 end
