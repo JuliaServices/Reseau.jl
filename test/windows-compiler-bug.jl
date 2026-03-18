@@ -2,9 +2,13 @@ using Test
 
 module IOPoll
 
-export DeadlineExceededError
+export DeadlineExceededError, FD
 
 struct DeadlineExceededError <: Exception end
+
+mutable struct FD
+    sysfd::Int32
+end
 
 register!(pfd) = nothing
 set_write_deadline!(pfd, deadline_ns::Int64) = nothing
@@ -30,6 +34,9 @@ end
 
 module TCP
 
+using ..IOPoll
+using ..SocketOps
+
 export connect, SocketAddr, SocketAddrV4, SocketAddrV6, SocketEndpoint, Conn, ConnectCanceledError, loopback_addr, loopback_addr6, _connect_socketaddr_impl
 
 function connect end
@@ -49,12 +56,8 @@ end
 
 const SocketEndpoint = Union{SocketAddrV4, SocketAddrV6}
 
-mutable struct PollFD
-    sysfd::Int32
-end
-
 mutable struct FD
-    pfd::PollFD
+    pfd::IOPoll.FD
     family::Int32
     sotype::Int32
     net::Symbol
@@ -100,7 +103,7 @@ function _new_netfd(
         net::Symbol = :tcp,
         is_connected::Bool = false,
     )::FD
-    return FD(PollFD(sysfd), family, sotype, net, is_connected, nothing, nothing)
+    return FD(IOPoll.FD(sysfd), family, sotype, net, is_connected, nothing, nothing)
 end
 
 function _finalize_connected_addrs!(fd::FD, fallback_remote::SocketAddr)
@@ -257,11 +260,29 @@ abstract type AbstractResolver end
 
 struct SystemResolver <: AbstractResolver end
 
-struct SingleflightResolver{R <: AbstractResolver} <: AbstractResolver
-    parent::R
+mutable struct _LookupFlight
+    lock::ReentrantLock
+    cond::Threads.Condition
+    result::Union{Nothing, Vector{TCP.SocketEndpoint}}
+    err::Union{Nothing, Exception}
+    @atomic done::Bool
+    function _LookupFlight()
+        lock = ReentrantLock()
+        return new(lock, Threads.Condition(lock), nothing, nothing, false)
+    end
 end
 
-SingleflightResolver(parent::R) where {R <: AbstractResolver} = SingleflightResolver{R}(parent)
+mutable struct SingleflightResolver{R <: AbstractResolver} <: AbstractResolver
+    parent::R
+    lock::ReentrantLock
+    inflight::Dict{Tuple{String, String}, _LookupFlight}
+    @atomic actual_lookups::Int
+    @atomic shared_hits::Int
+end
+
+function SingleflightResolver(parent::R) where {R <: AbstractResolver}
+    return SingleflightResolver{R}(parent, ReentrantLock(), Dict{Tuple{String, String}, _LookupFlight}(), 0, 0)
+end
 
 struct ResolverPolicy
     prefer_ipv6::Bool
@@ -278,8 +299,10 @@ const DEFAULT_RESOLVER = SystemResolver()
 
 mutable struct DNSRaceState
     @atomic done::Bool
+    lock::ReentrantLock
+    wait_fds::Vector{IOPoll.FD}
     function DNSRaceState()
-        return new(false)
+        return new(false, ReentrantLock(), IOPoll.FD[])
     end
 end
 
@@ -287,8 +310,33 @@ end
     return @atomic :acquire state.done
 end
 
-TCP._connect_wait_register!(state::DNSRaceState, fd::TCP.FD) = nothing
-TCP._connect_wait_unregister!(state::DNSRaceState, fd::TCP.FD) = nothing
+function TCP._connect_wait_register!(state::DNSRaceState, fd::TCP.FD)
+    lock(state.lock)
+    try
+        if @atomic :acquire state.done
+            try
+                IOPoll.set_write_deadline!(fd.pfd, Int64(time_ns()) - Int64(1))
+            catch
+            end
+            return nothing
+        end
+        push!(state.wait_fds, fd.pfd)
+    finally
+        unlock(state.lock)
+    end
+    return nothing
+end
+
+function TCP._connect_wait_unregister!(state::DNSRaceState, fd::TCP.FD)
+    lock(state.lock)
+    try
+        idx = findfirst(x -> x === fd.pfd, state.wait_fds)
+        idx === nothing || deleteat!(state.wait_fds, idx)
+    finally
+        unlock(state.lock)
+    end
+    return nothing
+end
 
 struct HostResolver{R <: AbstractResolver}
     timeout_ns::Int64
@@ -476,6 +524,20 @@ function _mark_connect_done!(state::DNSRaceState)
         current && return false
         _, ok = @atomicreplace(state.done, current => true)
         ok || continue
+        waiters = IOPoll.FD[]
+        lock(state.lock)
+        try
+            append!(waiters, state.wait_fds)
+            empty!(state.wait_fds)
+        finally
+            unlock(state.lock)
+        end
+        for waiter in waiters
+            try
+                IOPoll.set_write_deadline!(waiter, Int64(time_ns()) - Int64(1))
+            catch
+            end
+        end
         return true
     end
 end
