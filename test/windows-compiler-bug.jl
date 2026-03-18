@@ -4702,8 +4702,13 @@ function listen(
 end
 
 Base.isopen(conn::Conn) = true
+Base.write(conn::Conn, buf::AbstractVector{UInt8}) = write(conn.tcp, buf)
+Base.read!(conn::Conn, buf::Vector{UInt8}) = read!(conn.tcp, buf)
 Base.close(conn::Conn) = close(conn.tcp)
 Base.close(listener::Listener) = close(listener.tcp)
+addr(listener::Listener) = TCP.addr(listener.tcp)
+accept(listener::Listener) = Conn(TCP.accept(listener.tcp), listener.config)
+handshake!(conn::Conn) = conn
 
 end
 
@@ -4764,10 +4769,69 @@ function _pc_run_socket_ops_workload!()
 end
 
 function _pc_run_tcp_workload!()
+    _pc_is_generating_output() && return nothing
+    _pc_runtime_supported() || return nothing
+    listener = nothing
+    client = nothing
+    server = nothing
+    try
+        listener = NC.listen(NC.loopback_addr(0); backlog = 16)
+        laddr = NC.addr(listener)
+        accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+        client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
+        server = fetch(accept_task)
+        payload = UInt8[0x41, 0x42, 0x43]
+        written = write(client, payload)
+        written == length(payload) || throw(ArgumentError("tcp workload expected 3-byte write"))
+        recv_buf = Vector{UInt8}(undef, length(payload))
+        _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
+    finally
+        try
+            server === nothing || close(server)
+        catch
+        end
+        try
+            client === nothing || close(client)
+        catch
+        end
+        try
+            listener === nothing || close(listener)
+        catch
+        end
+    end
     return nothing
 end
 
 function _pc_run_host_resolvers_workload!()
+    _pc_is_generating_output() && return nothing
+    _pc_runtime_supported() || return nothing
+    listener = nothing
+    client = nothing
+    server = nothing
+    try
+        listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 16)
+        laddr = NC.addr(listener)
+        client = ND.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)))
+        server = NC.accept(listener)
+        payload = UInt8[0x51, 0x52]
+        written = write(client, payload)
+        written == length(payload) || throw(ArgumentError("host resolver workload expected 2-byte write"))
+        recv_buf = Vector{UInt8}(undef, length(payload))
+        _pc_read_exact!(server, recv_buf) == length(payload) || throw(EOFError())
+    finally
+        try
+            server === nothing || close(server)
+        catch
+        end
+        try
+            client === nothing || close(client)
+        catch
+        end
+        try
+            listener === nothing || close(listener)
+        catch
+        end
+    end
     return nothing
 end
 
@@ -4777,6 +4841,71 @@ function _pc_tls_resource_file(name::AbstractString)::Union{Nothing, String}
 end
 
 function _pc_run_tls_workload!()
+    _pc_is_generating_output() && return nothing
+    _pc_runtime_supported() || return nothing
+    cert_path = _pc_tls_resource_file("unittests.crt")
+    key_path = _pc_tls_resource_file("unittests.key")
+    (cert_path === nothing || key_path === nothing) && return nothing
+    listener = nothing
+    client = nothing
+    server = nothing
+    try
+        server_cfg = TL.Config(
+            verify_peer = false,
+            cert_file = cert_path::String,
+            key_file = key_path::String,
+            handshake_timeout_ns = 1_000_000_000,
+        )
+        listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+        laddr = TL.addr(listener)::NC.SocketAddrV4
+        accept_task = errormonitor(Threads.@spawn begin
+            conn = TL.accept(listener::TL.Listener)
+            TL.handshake!(conn)
+            return conn
+        end)
+        client_cfg = TL.Config(
+            verify_peer = false,
+            server_name = "localhost",
+            handshake_timeout_ns = 1_000_000_000,
+        )
+        client = TL.connect(
+            "tcp",
+            "127.0.0.1:$(Int(laddr.port))";
+            server_name = client_cfg.server_name,
+            verify_peer = client_cfg.verify_peer,
+            client_auth = client_cfg.client_auth,
+            cert_file = client_cfg.cert_file,
+            key_file = client_cfg.key_file,
+            ca_file = client_cfg.ca_file,
+            client_ca_file = client_cfg.client_ca_file,
+            alpn_protocols = copy(client_cfg.alpn_protocols),
+            handshake_timeout_ns = client_cfg.handshake_timeout_ns,
+            min_version = client_cfg.min_version,
+            max_version = client_cfg.max_version,
+        )
+        status = IP.timedwait(() -> istaskdone(accept_task), 2.0; pollint = 0.001)
+        status == :timed_out && throw(ArgumentError("TLS precompile workload timed out during accept"))
+        server = fetch(accept_task)
+        payload = UInt8[0x54, 0x4c, 0x53]
+        recv_buf = Vector{UInt8}(undef, 3)
+        written = write(client, payload)
+        written == 3 || throw(ArgumentError("TLS precompile workload expected 3-byte write"))
+        read!(server, recv_buf)
+    finally
+        try
+            server === nothing || close(server)
+        catch
+        end
+        try
+            client === nothing || close(client)
+        catch
+        end
+        try
+            listener === nothing || close(listener)
+        catch
+        end
+        IP.shutdown!()
+    end
     return nothing
 end
 
