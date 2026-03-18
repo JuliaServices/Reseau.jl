@@ -217,6 +217,14 @@ function _connect_socketaddr_impl(
     end
 end
 
+function connect(remote_addr::SocketAddr)::Conn
+    return _connect_socketaddr_impl(remote_addr, nothing, Int64(0), nothing)
+end
+
+function connect(remote_addr::SocketAddr, local_addr::Union{Nothing, SocketAddr})::Conn
+    return _connect_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing)
+end
+
 end
 
 Base.close(fd::TCP.FD) = nothing
