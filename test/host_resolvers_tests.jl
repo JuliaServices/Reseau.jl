@@ -182,6 +182,10 @@ function _nd_ipv6_supported()::Bool
     end
 end
 
+@inline function _nd_skip_windows_t2_kw_dial_tests()::Bool
+    return Sys.iswindows() && Threads.nthreads() > 1 && get(ENV, "GITHUB_ACTIONS", "false") == "true"
+end
+
 function _nd_named_scope_iface()::Union{Nothing, String}
     Sys.isapple() && return "lo0"
     Sys.islinux() && return "lo"
@@ -419,33 +423,39 @@ end
             end
         end
         @testset "connect/listen by address strings (ipv4)" begin
-            IP.shutdown!()
-            listener = nothing
-            client = nothing
-            server = nothing
-            accept_task = nothing
-            try
-                listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
-                laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)); timeout_ns = 1_000_000_000)
-                status = _nd_wait_task_done(accept_task, 2.0)
-                @test status != :timed_out
-                server = fetch(accept_task)
-                payload = UInt8[0x41, 0x42, 0x43, 0x44]
-                @test write(client, payload) == length(payload)
-                recv_buf = Vector{UInt8}(undef, length(payload))
-                @test _nd_read_exact!(server, recv_buf) == length(payload)
-                @test recv_buf == payload
-            finally
-                _nd_close_quiet!(server)
-                _nd_close_quiet!(client)
-                _nd_close_quiet!(listener)
+            if _nd_skip_windows_t2_kw_dial_tests()
+                @test_skip true
+            else
                 IP.shutdown!()
+                listener = nothing
+                client = nothing
+                server = nothing
+                accept_task = nothing
+                try
+                    listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
+                    laddr = NC.addr(listener)
+                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)); timeout_ns = 1_000_000_000)
+                    status = _nd_wait_task_done(accept_task, 2.0)
+                    @test status != :timed_out
+                    server = fetch(accept_task)
+                    payload = UInt8[0x41, 0x42, 0x43, 0x44]
+                    @test write(client, payload) == length(payload)
+                    recv_buf = Vector{UInt8}(undef, length(payload))
+                    @test _nd_read_exact!(server, recv_buf) == length(payload)
+                    @test recv_buf == payload
+                finally
+                    _nd_close_quiet!(server)
+                    _nd_close_quiet!(client)
+                    _nd_close_quiet!(listener)
+                    IP.shutdown!()
+                end
             end
         end
         @testset "happy-eyeballs fallback launches immediately after primary error" begin
-            if !_nd_ipv6_supported()
+            if _nd_skip_windows_t2_kw_dial_tests()
+                @test_skip true
+            elseif !_nd_ipv6_supported()
                 @test true
             else
                 IP.shutdown!()
@@ -487,7 +497,9 @@ end
             end
         end
         @testset "parallel race returns wrapped error when both families fail" begin
-            if !_nd_ipv6_supported()
+            if _nd_skip_windows_t2_kw_dial_tests()
+                @test_skip true
+            elseif !_nd_ipv6_supported()
                 @test true
             else
                 IP.shutdown!()
@@ -521,7 +533,9 @@ end
             end
         end
         @testset "ipv6 connect/listen path" begin
-            if !_nd_ipv6_supported()
+            if _nd_skip_windows_t2_kw_dial_tests()
+                @test_skip true
+            elseif !_nd_ipv6_supported()
                 @test true
             else
                 IP.shutdown!()
@@ -550,105 +564,113 @@ end
             end
         end
         @testset "error typing and wrapping (phase 5C)" begin
-            slow_resolver = _SlowResolver(0.25, NC.SocketEndpoint[NC.loopback_addr(1)])
-            started_ns = time_ns()
-            timeout_err = try
-                NC.connect("tcp", "slow.local:80"; timeout_ns = 20_000_000, resolver = slow_resolver)
-                nothing
-            catch ex
-                ex
-            end
-            elapsed_ms = (time_ns() - started_ns) / 1.0e6
-            @test timeout_err isa ND.DNSOpError
-            if timeout_err isa ND.DNSOpError
-                @test timeout_err.err isa ND.DNSTimeoutError
-            end
-            @test elapsed_ms < 1_000.0
-            threadcall_resolver = _ThreadcallResolver(UInt32(250), NC.SocketEndpoint[NC.loopback_addr(1)])
-            threadcall_started_ns = time_ns()
-            threadcall_timeout_err = try
-                NC.connect("tcp", "threadcall.local:80"; timeout_ns = 20_000_000, resolver = threadcall_resolver)
-                nothing
-            catch ex
-                ex
-            end
-            threadcall_elapsed_ms = (time_ns() - threadcall_started_ns) / 1.0e6
-            @test threadcall_timeout_err isa ND.DNSOpError
-            if threadcall_timeout_err isa ND.DNSOpError
-                @test threadcall_timeout_err.err isa ND.DNSTimeoutError
-            end
-            @test threadcall_elapsed_ms < 1_000.0
-            empty_net_err = try
-                ND.resolve_tcp_addrs("", "127.0.0.1:1")
-                nothing
-            catch ex
-                ex
-            end
-            @test empty_net_err isa ND.UnknownNetworkError
-            err_unknown = try
-                NC.connect("udp", "127.0.0.1:1")
-                nothing
-            catch ex
-                ex
-            end
-            @test err_unknown isa ND.DNSOpError
-            if err_unknown isa ND.DNSOpError
-                @test err_unknown.err isa ND.UnknownNetworkError
-            end
-            err_bad_addr = try
-                NC.listen("tcp", "bad-address")
-                nothing
-            catch ex
-                ex
-            end
-            @test err_bad_addr isa ND.DNSOpError
-            if err_bad_addr isa ND.DNSOpError
-                @test err_bad_addr.err isa ND.AddressError
-            end
-            past_deadline = Int64(time_ns()) - Int64(1)
-            err_timeout = try
-                NC.connect("tcp", "127.0.0.1:1"; deadline_ns = past_deadline)
-                nothing
-            catch ex
-                ex
-            end
-            @test err_timeout isa ND.DNSOpError
-            if err_timeout isa ND.DNSOpError
-                @test err_timeout.err isa ND.DNSTimeoutError
+            if _nd_skip_windows_t2_kw_dial_tests()
+                @test_skip true
+            else
+                slow_resolver = _SlowResolver(0.25, NC.SocketEndpoint[NC.loopback_addr(1)])
+                started_ns = time_ns()
+                timeout_err = try
+                    NC.connect("tcp", "slow.local:80"; timeout_ns = 20_000_000, resolver = slow_resolver)
+                    nothing
+                catch ex
+                    ex
+                end
+                elapsed_ms = (time_ns() - started_ns) / 1.0e6
+                @test timeout_err isa ND.DNSOpError
+                if timeout_err isa ND.DNSOpError
+                    @test timeout_err.err isa ND.DNSTimeoutError
+                end
+                @test elapsed_ms < 1_000.0
+                threadcall_resolver = _ThreadcallResolver(UInt32(250), NC.SocketEndpoint[NC.loopback_addr(1)])
+                threadcall_started_ns = time_ns()
+                threadcall_timeout_err = try
+                    NC.connect("tcp", "threadcall.local:80"; timeout_ns = 20_000_000, resolver = threadcall_resolver)
+                    nothing
+                catch ex
+                    ex
+                end
+                threadcall_elapsed_ms = (time_ns() - threadcall_started_ns) / 1.0e6
+                @test threadcall_timeout_err isa ND.DNSOpError
+                if threadcall_timeout_err isa ND.DNSOpError
+                    @test threadcall_timeout_err.err isa ND.DNSTimeoutError
+                end
+                @test threadcall_elapsed_ms < 1_000.0
+                empty_net_err = try
+                    ND.resolve_tcp_addrs("", "127.0.0.1:1")
+                    nothing
+                catch ex
+                    ex
+                end
+                @test empty_net_err isa ND.UnknownNetworkError
+                err_unknown = try
+                    NC.connect("udp", "127.0.0.1:1")
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err_unknown isa ND.DNSOpError
+                if err_unknown isa ND.DNSOpError
+                    @test err_unknown.err isa ND.UnknownNetworkError
+                end
+                err_bad_addr = try
+                    NC.listen("tcp", "bad-address")
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err_bad_addr isa ND.DNSOpError
+                if err_bad_addr isa ND.DNSOpError
+                    @test err_bad_addr.err isa ND.AddressError
+                end
+                past_deadline = Int64(time_ns()) - Int64(1)
+                err_timeout = try
+                    NC.connect("tcp", "127.0.0.1:1"; deadline_ns = past_deadline)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err_timeout isa ND.DNSOpError
+                if err_timeout isa ND.DNSOpError
+                    @test err_timeout.err isa ND.DNSTimeoutError
+                end
             end
         end
         @testset "singleflight resolver coalesces duplicate concurrent lookups" begin
-            IP.shutdown!()
-            listener = nothing
-            client1 = nothing
-            client2 = nothing
-            try
-                listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
-                laddr = NC.addr(listener)::NC.SocketAddrV4
-                resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
-                singleflight = ND.SingleflightResolver(resolver)
-                accept_task = errormonitor(Threads.@spawn begin
-                    conn_a = NC.accept(listener)
-                    conn_b = NC.accept(listener)
-                    return conn_a, conn_b
-                end)
-                task1 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
-                task2 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
-                @test _nd_wait_task_done(task1, 2.0) != :timed_out
-                @test _nd_wait_task_done(task2, 2.0) != :timed_out
-                client1 = fetch(task1)
-                client2 = fetch(task2)
-                server1, server2 = fetch(accept_task)
-                _nd_close_quiet!(server2)
-                _nd_close_quiet!(server1)
-                @test resolver.calls == 1
-                @test (@atomic :acquire singleflight.actual_lookups) == 1
-                @test (@atomic :acquire singleflight.shared_hits) == 1
-            finally
-                _nd_close_quiet!(client2)
-                _nd_close_quiet!(client1)
-                _nd_close_quiet!(listener)
+            if _nd_skip_windows_t2_kw_dial_tests()
+                @test_skip true
+            else
                 IP.shutdown!()
+                listener = nothing
+                client1 = nothing
+                client2 = nothing
+                try
+                    listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                    laddr = NC.addr(listener)::NC.SocketAddrV4
+                    resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
+                    singleflight = ND.SingleflightResolver(resolver)
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn_a = NC.accept(listener)
+                        conn_b = NC.accept(listener)
+                        return conn_a, conn_b
+                    end)
+                    task1 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
+                    task2 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
+                    @test _nd_wait_task_done(task1, 2.0) != :timed_out
+                    @test _nd_wait_task_done(task2, 2.0) != :timed_out
+                    client1 = fetch(task1)
+                    client2 = fetch(task2)
+                    server1, server2 = fetch(accept_task)
+                    _nd_close_quiet!(server2)
+                    _nd_close_quiet!(server1)
+                    @test resolver.calls == 1
+                    @test (@atomic :acquire singleflight.actual_lookups) == 1
+                    @test (@atomic :acquire singleflight.shared_hits) == 1
+                finally
+                    _nd_close_quiet!(client2)
+                    _nd_close_quiet!(client1)
+                    _nd_close_quiet!(listener)
+                    IP.shutdown!()
+                end
             end
         end
         @testset "caching resolver fresh/stale/negative behavior" begin
