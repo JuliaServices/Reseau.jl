@@ -129,16 +129,11 @@ end
                 recv_msg_buf = Vector{UInt8}(undef, 3)
                 recv_iov = Ref(SO.IOVec(pointer(recv_msg_buf), Csize_t(length(recv_msg_buf))))
                 recv_hdr = Ref(SO.MsgHdr(C_NULL, SO.SockLen(0), Base.unsafe_convert(Ptr{SO.IOVec}, recv_iov), Cint(1), C_NULL, SO.SockLen(0), Cint(0)))
-                if Sys.iswindows()
-                    @test_throws SystemError GC.@preserve payload iov send_hdr SO.send_msg!(d0, send_hdr)
-                    @test_throws SystemError GC.@preserve recv_msg_buf recv_iov recv_hdr SO.recv_msg!(d1, recv_hdr)
-                else
-                    sent = GC.@preserve payload iov send_hdr SO.send_msg!(d0, send_hdr)
-                    @test sent == Cssize_t(length(payload))
-                    recvd = GC.@preserve recv_msg_buf recv_iov recv_hdr SO.recv_msg!(d1, recv_hdr)
-                    @test recvd == Cssize_t(length(payload))
-                    @test recv_msg_buf == payload
-                end
+                sent = GC.@preserve payload iov send_hdr SO.send_msg!(d0, send_hdr)
+                @test sent == Cssize_t(length(payload))
+                recvd = GC.@preserve recv_msg_buf recv_iov recv_hdr SO.recv_msg!(d1, recv_hdr)
+                @test recvd == Cssize_t(length(payload))
+                @test recv_msg_buf == payload
             finally
                 _close_fd_raw(d0)
                 _close_fd_raw(d1)
