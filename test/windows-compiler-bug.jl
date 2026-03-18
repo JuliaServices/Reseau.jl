@@ -4888,6 +4888,20 @@ println("[windows-compiler-bug] julia threads: $(Threads.nthreads())")
 @test Reseau.TCP === TCP
 @test Reseau.TLS === TLS
 
+_probe("kwsort infer local_addr v4") do
+    tt = (NamedTuple{(:local_addr,), Tuple{NC.SocketAddrV4}}, typeof(NC.connect), String, String)
+    Base.precompile(Tuple{typeof(Core.kwcall), tt...})
+    Base.code_typed(Core.kwcall, tt)
+    return nothing
+end
+
+_probe("kwsort infer local_addr v6") do
+    tt = (NamedTuple{(:local_addr,), Tuple{NC.SocketAddrV6}}, typeof(NC.connect), String, String)
+    Base.precompile(Tuple{typeof(Core.kwcall), tt...})
+    Base.code_typed(Core.kwcall, tt)
+    return nothing
+end
+
 _probe("tcp kwcall local_addr v4") do
     NC.connect("tcp", "127.0.0.1:1"; local_addr = NC.loopback_addr(0))
 end
