@@ -862,21 +862,27 @@ end
 
 module SocketOps
 
-export AF_INET, AF_INET6, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_KEEPALIVE, SO_ERROR, SockAddrIn, SockAddrIn6, AcceptPeer, open_socket, bind_socket, connect_socket, set_nonblocking!, set_sockopt_int, get_socket_error, update_connect_context!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
+export AF_UNIX, AF_INET, AF_INET6, SOCK_STREAM, SOCK_DGRAM, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_KEEPALIVE, SO_ERROR, SO_REUSEADDR, MSG_PEEK, SockAddrIn, SockAddrIn6, AcceptPeer, IOVec, MsgHdr, open_socket, bind_socket, connect_socket, set_nonblocking!, set_sockopt_int, get_socket_error, update_connect_context!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
 
 const SockLen = Int32
+const AF_UNIX = Int32(1)
 const AF_INET = Int32(2)
 const AF_INET6 = Int32(23)
 const SOCK_STREAM = Int32(1)
+const SOCK_DGRAM = Int32(2)
 const IPPROTO_TCP = Int32(6)
 const TCP_NODELAY = Int32(1)
 const SOL_SOCKET = Int32(0xffff)
 const SO_KEEPALIVE = Int32(0x0008)
 const SO_ERROR = Int32(0x1007)
+const SO_REUSEADDR = Int32(0x0004)
 const SHUT_RD = Int32(0)
 const SHUT_WR = Int32(1)
+const SHUT_RDWR = Int32(2)
+const MSG_PEEK = Int32(0x02)
 
 const _WS2_32 = "Ws2_32"
+const _MSWSOCK = "Mswsock"
 const _KERNEL32 = "Kernel32"
 const _INVALID_SOCKET = UInt(typemax(UInt))
 const _SOCKET_ERROR = Int32(-1)
@@ -951,6 +957,21 @@ end
 
 const AcceptPeer = Union{SockAddrIn, SockAddrIn6}
 
+struct IOVec
+    iov_base::Ptr{Cvoid}
+    iov_len::Csize_t
+end
+
+struct MsgHdr
+    msg_name::Ptr{Cvoid}
+    msg_namelen::SockLen
+    msg_iov::Ptr{IOVec}
+    msg_iovlen::Int32
+    msg_control::Ptr{Cvoid}
+    msg_controllen::SockLen
+    msg_flags::Int32
+end
+
 struct _WSAData
     wVersion::UInt16
     wHighVersion::UInt16
@@ -966,7 +987,17 @@ end
     return v
 end
 
+@inline function _ntoh16(v::UInt16)::UInt16
+    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    return v
+end
+
 @inline function _hton32(v::UInt32)::UInt32
+    Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
+    return v
+end
+
+@inline function _ntoh32(v::UInt32)::UInt32
     Base.ENDIAN_BOM == 0x04030201 && return bswap(v)
     return v
 end
@@ -1365,6 +1396,10 @@ function sockaddr_in_any(port::Integer)::SockAddrIn
     return sockaddr_in((UInt8(0), UInt8(0), UInt8(0), UInt8(0)), port)
 end
 
+function sockaddr_in_loopback(port::Integer)::SockAddrIn
+    return sockaddr_in((UInt8(127), UInt8(0), UInt8(0), UInt8(1)), port)
+end
+
 function sockaddr_in6(
         ip::NTuple{16, UInt8},
         port::Integer;
@@ -1402,6 +1437,18 @@ function sockaddr_in6_any(port::Integer; scope_id::Integer = 0)::SockAddrIn6
     return sockaddr_in6(ntuple(_ -> UInt8(0), 16), port; scope_id = scope_id)
 end
 
+function sockaddr_in6_loopback(port::Integer; scope_id::Integer = 0)::SockAddrIn6
+    return sockaddr_in6((
+            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+            UInt8(0), UInt8(0), UInt8(0), UInt8(1),
+        ),
+        port;
+        scope_id = scope_id,
+    )
+end
+
 @inline function sockaddr_in_ip(addr::SockAddrIn)::NTuple{4, UInt8}
     ip = _hton32(addr.sin_addr)
     return (
@@ -1413,12 +1460,12 @@ end
 end
 
 @inline function sockaddr_in_port(addr::SockAddrIn)::UInt16
-    return _hton16(addr.sin_port)
+    return _ntoh16(addr.sin_port)
 end
 
 @inline sockaddr_in6_ip(addr::SockAddrIn6)::NTuple{16, UInt8} = addr.sin6_addr
 @inline function sockaddr_in6_port(addr::SockAddrIn6)::UInt16
-    return _hton16(addr.sin6_port)
+    return _ntoh16(addr.sin6_port)
 end
 @inline sockaddr_in6_scopeid(addr::SockAddrIn6)::UInt32 = addr.sin6_scope_id
 
@@ -1432,8 +1479,18 @@ get_peer_name_in6(fd::Int32)::SockAddrIn6 = sockaddr_in6((
         UInt8(0), UInt8(0), UInt8(0), UInt8(0),
         UInt8(0), UInt8(0), UInt8(0), UInt8(1),
     ), 1)
+fd_is_cloexec(fd::Int32)::Bool = true
+fd_is_nonblocking(fd::Int32)::Bool = true
 last_error() = Int32(Base.Libc.EAGAIN)
 recv_from!(fd::Int32, ptr::Ptr{UInt8}, nbytes, flags)::Int = 0
+read_once!(fd::Int32, ptr::Ptr{UInt8}, nbytes::Csize_t) = 0
+write_once!(fd::Int32, ptr::Ptr{UInt8}, nbytes::Csize_t) = nbytes
+send_to!(fd::Int32, ptr::Ptr{UInt8}, nbytes::Csize_t, flags::Int32, addr::Ptr{Cvoid}, addrlen::SockLen) = nbytes
+recv_msg!(fd::Int32, msg::Ref{MsgHdr}, flags::Int32 = Int32(0)) = 0
+send_msg!(fd::Int32, msg::Ref{MsgHdr}, flags::Int32 = Int32(0)) = 0
+try_accept_socket(fd::Int32)::Tuple{Int32, AcceptPeer, Int32} = (Int32(3), sockaddr_in_loopback(1), Int32(0))
+accept_socket(fd::Int32)::Int32 = Int32(3)
+close_socket(fd::Int32) = nothing
 
 end
 
