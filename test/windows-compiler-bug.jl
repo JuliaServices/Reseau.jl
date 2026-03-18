@@ -934,7 +934,7 @@ end
 function _new_iocp_registration(fd::Int32, token::UInt64)::IocpRegistration
     read_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.READ, token, IocpOpKind.PROBE_READ, nothing, nothing, false)
     write_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.WRITE, token, IocpOpKind.PROBE_WRITE, nothing, nothing, false)
-    reg = IocpRegistration(fd, token, read_op, write_op, true, false)
+    reg = IocpRegistration(fd, token, read_op, write_op, false, false)
     read_op.owner = reg
     write_op.owner = reg
     return reg
@@ -981,8 +981,9 @@ function _load_connectex_ptr(fd::Int32)::Ptr{Cvoid}
         _ = guid_ref
         _ = out_ref
         _ = bytes_ref
-        _CONNECTEX_PTR[] = out_ref[]
-        return out_ref[]
+        ptr = out_ref[] == C_NULL ? Ptr{Cvoid}(0x1) : out_ref[]
+        _CONNECTEX_PTR[] = ptr
+        return ptr
     finally
         unlock(_CONNECTEX_LOCK)
     end
@@ -1520,10 +1521,11 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
         request = op.request
         request isa IocpConnectRequest || throw(ArgumentError("missing ConnectEx request"))
         connectex_ptr = _load_connectex_ptr(reg.fd)
+        connectex_ptr == C_NULL && return _map_overlapped_errno(_wsa_get_last_error())
         _ = request.addrbuf
         _ = request.addrlen
         _ = connectex_ptr
-        rc = Int32(0)
+        rc = Int32(1)
     else
         rc = Int32(Base.Libc.ENOSYS)
     end
@@ -1531,22 +1533,34 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
         if rc == 0
             reg.wait_on_success && return Int32(0)
             @atomic :release op.active = false
-            pollnotify!(
-                op.mode == PollMode.READ ? registration.read_waiter : registration.write_waiter,
-                PollWakeReason.READY,
-            )
+            _notify_registration!(registration, op.mode)
+            return Int32(0)
+        end
+        err = _wsa_get_last_error()
+        if err == _ERROR_IO_PENDING
             return Int32(0)
         end
         @atomic :release op.active = false
+        if err == _WSAEWOULDBLOCK || err == _WSAEINPROGRESS || err == _WSAEALREADY || err == _WSAENOTCONN
+            return Int32(0)
+        end
+        @atomic :release registration.event_err = true
+        _notify_registration!(registration, op.mode)
         return Int32(0)
     end
-    if rc == 0
-        pollnotify!(registration.write_waiter, PollWakeReason.READY)
+    if rc != 0
+        reg.wait_on_success && return Int32(0)
+        @atomic :release op.active = false
+        _notify_registration!(registration, op.mode)
+        return Int32(0)
+    end
+    err = _wsa_get_last_error()
+    if err == _ERROR_IO_PENDING
         return Int32(0)
     end
     @atomic :release op.active = false
     _clear_iocp_op!(op)
-    return Int32(Base.Libc.EIO)
+    return _map_overlapped_errno(err)
 end
 
 function _finish_iocp_mode!(registration::Registration, mode::PollMode.T)::Int32
