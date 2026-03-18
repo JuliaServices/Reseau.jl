@@ -1589,6 +1589,8 @@ const _ERROR_NOT_ENOUGH_MEMORY = UInt32(8)
 const _ERROR_INVALID_HANDLE = UInt32(6)
 const _ERROR_NOT_SUPPORTED = UInt32(50)
 const _SO_UPDATE_CONNECT_CONTEXT = Int32(0x7010)
+const _SIO_GET_EXTENSION_FUNCTION_POINTER = UInt32(0xC8000006)
+const _IPPROTO_UDP = Int32(17)
 const _WSAEINTR = Int32(10004)
 const _WSAEBADF = Int32(10009)
 const _WSAEACCES = Int32(10013)
@@ -1629,6 +1631,7 @@ const _ERRNO_ESOCKTNOSUPPORT = @static isdefined(Base.Libc, :ESOCKTNOSUPPORT) ? 
 const _ERRNO_ESHUTDOWN = @static isdefined(Base.Libc, :ESHUTDOWN) ? Int32(getfield(Base.Libc, :ESHUTDOWN)) : Int32(Base.Libc.ENOTCONN)
 const _ERRNO_EHOSTDOWN = @static isdefined(Base.Libc, :EHOSTDOWN) ? Int32(getfield(Base.Libc, :EHOSTDOWN)) : Int32(Base.Libc.EHOSTUNREACH)
 const _ERRNO_ECANCELED = @static isdefined(Base.Libc, :ECANCELED) ? Int32(getfield(Base.Libc, :ECANCELED)) : Int32(Base.Libc.EINTR)
+const Cssize_t = Int
 
 struct _SockAddrHeader
     sa_family::UInt16
@@ -1666,6 +1669,27 @@ struct MsgHdr
     msg_flags::Int32
 end
 
+struct Guid
+    data1::UInt32
+    data2::UInt16
+    data3::UInt16
+    data4::NTuple{8, UInt8}
+end
+
+struct WSABuf
+    len::UInt32
+    buf::Ptr{UInt8}
+end
+
+struct WSAMsg
+    name::Ptr{Cvoid}
+    namelen::Int32
+    buffers::Ptr{WSABuf}
+    buffercount::UInt32
+    control::WSABuf
+    flags::UInt32
+end
+
 struct _WSAData
     wVersion::UInt16
     wHighVersion::UInt16
@@ -1675,6 +1699,20 @@ struct _WSAData
     iMaxUdpDg::UInt16
     lpVendorInfo::Ptr{UInt8}
 end
+
+const _WSAID_WSASENDMSG = Guid(
+    0xa441e712,
+    0x754f,
+    0x43ca,
+    (UInt8(0x84), UInt8(0xa7), UInt8(0x0d), UInt8(0xee), UInt8(0x44), UInt8(0xcf), UInt8(0x60), UInt8(0x6d)),
+)
+
+const _WSAID_WSARECVMSG = Guid(
+    0xf689d7c8,
+    0x6f1f,
+    0x436b,
+    (UInt8(0x8a), UInt8(0x53), UInt8(0xe5), UInt8(0x4f), UInt8(0xe3), UInt8(0x51), UInt8(0xc3), UInt8(0x22)),
+)
 
 @inline function _hton16(v::UInt16)::UInt16
     _is_little_endian() && return bswap(v)
@@ -1797,6 +1835,9 @@ const _winsock_initialized = Ref{Bool}(false)
 const _winsock_init_pid = Ref{Int}(0)
 const _fd_state_lock = ReentrantLock()
 const _fd_nonblocking_state = Dict{Int32, Bool}()
+const _sendrecvmsg_lock = ReentrantLock()
+const _wsasendmsg_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+const _wsarecvmsg_ptr = Ref{Ptr{Cvoid}}(C_NULL)
 
 function _set_fd_nonblocking_state!(fd::Int32, enabled::Bool)
     lock(_fd_state_lock)
@@ -1816,6 +1857,108 @@ function _clear_fd_state!(fd::Int32)
         unlock(_fd_state_lock)
     end
     return nothing
+end
+
+function _fd_nonblocking_enabled(fd::Int32)::Bool
+    lock(_fd_state_lock)
+    try
+        return get(() -> false, _fd_nonblocking_state, fd)
+    finally
+        unlock(_fd_state_lock)
+    end
+end
+
+@inline function _cint_bits_u32(v::Int32)::UInt32
+    return reinterpret(UInt32, Int32(v))
+end
+
+@inline function _msg_iov_count(msg::MsgHdr)::Int
+    return Int(msg.msg_iovlen)
+end
+
+function _wsabufs_from_msghdr(msg::MsgHdr)::Vector{WSABuf}
+    count = _msg_iov_count(msg)
+    count < 0 && throw(ArgumentError("negative msg_iovlen"))
+    count == 0 && return WSABuf[]
+    msg.msg_iov == C_NULL && throw(ArgumentError("msg_iov must not be null when msg_iovlen > 0"))
+    bufs = Vector{WSABuf}(undef, count)
+    for i in 1:count
+        iov = unsafe_load(msg.msg_iov, i)
+        len = UInt32(min(iov.iov_len, Csize_t(typemax(UInt32))))
+        bufs[i] = WSABuf(len, Ptr{UInt8}(iov.iov_base))
+    end
+    return bufs
+end
+
+@inline function _wsabuf_ptr(bufs::Vector{WSABuf})::Ptr{WSABuf}
+    isempty(bufs) && return Ptr{WSABuf}(C_NULL)
+    return pointer(bufs)
+end
+
+@inline function _control_wsabuf(msg::MsgHdr)::WSABuf
+    len = UInt32(min(Csize_t(msg.msg_controllen), Csize_t(typemax(UInt32))))
+    ptr = msg.msg_control == C_NULL ? Ptr{UInt8}(C_NULL) : Ptr{UInt8}(msg.msg_control)
+    return WSABuf(len, ptr)
+end
+
+@inline function _wsamsg_from_msghdr(msg::MsgHdr, bufs::Vector{WSABuf}, flags::Int32)::WSAMsg
+    return WSAMsg(
+        msg.msg_name,
+        Int32(msg.msg_namelen),
+        _wsabuf_ptr(bufs),
+        UInt32(length(bufs)),
+        _control_wsabuf(msg),
+        _cint_bits_u32(flags),
+    )
+end
+
+function _store_wsamsg_back!(msg_ref::Ref{MsgHdr}, msg::MsgHdr, wsamsg::WSAMsg)
+    msg_ref[] = MsgHdr(
+        msg.msg_name,
+        SockLen(wsamsg.namelen),
+        msg.msg_iov,
+        msg.msg_iovlen,
+        msg.msg_control,
+        SockLen(wsamsg.control.len),
+        Int32(wsamsg.flags),
+    )
+    return nothing
+end
+
+function _load_extension_ptr!(sock::Int32, guid::Guid)::Ptr{Cvoid}
+    guid_ref = Ref(guid)
+    out_ref = Ref{Ptr{Cvoid}}(C_NULL)
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    _ = sock
+    _ = guid_ref
+    _ = bytes_ref
+    return out_ref[]
+end
+
+function _load_sendrecvmsg_ptrs!()::Tuple{Ptr{Cvoid}, Ptr{Cvoid}}
+    send_ptr = _wsasendmsg_ptr[]
+    recv_ptr = _wsarecvmsg_ptr[]
+    (send_ptr != C_NULL && recv_ptr != C_NULL) && return send_ptr, recv_ptr
+    lock(_sendrecvmsg_lock)
+    try
+        send_ptr = _wsasendmsg_ptr[]
+        recv_ptr = _wsarecvmsg_ptr[]
+        if send_ptr != C_NULL && recv_ptr != C_NULL
+            return send_ptr, recv_ptr
+        end
+        sock = open_socket(AF_INET, SOCK_DGRAM, _IPPROTO_UDP)
+        try
+            recv_ptr = _load_extension_ptr!(sock, _WSAID_WSARECVMSG)
+            send_ptr = _load_extension_ptr!(sock, _WSAID_WSASENDMSG)
+        finally
+            close_socket_nothrow(sock)
+        end
+        _wsarecvmsg_ptr[] = recv_ptr
+        _wsasendmsg_ptr[] = send_ptr
+        return send_ptr, recv_ptr
+    finally
+        unlock(_sendrecvmsg_lock)
+    end
 end
 
 @static if Sys.iswindows()
@@ -2199,17 +2342,99 @@ get_peer_name_in6(fd::Int32)::SockAddrIn6 = sockaddr_in6((
         UInt8(0), UInt8(0), UInt8(0), UInt8(1),
     ), 1)
 fd_is_cloexec(fd::Int32)::Bool = true
-fd_is_nonblocking(fd::Int32)::Bool = true
+fd_is_nonblocking(fd::Int32)::Bool = _fd_nonblocking_enabled(fd)
 last_error() = Int32(Base.Libc.EAGAIN)
 recv_from!(fd::Int32, ptr::Ptr{UInt8}, nbytes, flags)::Int = 0
 read_once!(fd::Int32, ptr::Ptr{UInt8}, nbytes::Csize_t) = 0
 write_once!(fd::Int32, ptr::Ptr{UInt8}, nbytes::Csize_t) = nbytes
 send_to!(fd::Int32, ptr::Ptr{UInt8}, nbytes::Csize_t, flags::Int32, addr::Ptr{Cvoid}, addrlen::SockLen) = nbytes
-recv_msg!(fd::Int32, msg::Ref{MsgHdr}, flags::Int32 = Int32(0)) = 0
-send_msg!(fd::Int32, msg::Ref{MsgHdr}, flags::Int32 = Int32(0)) = 0
+
+function _recv_msg_simple!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssize_t
+    msg = msg_ref[]
+    bufs = _wsabufs_from_msghdr(msg)
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    flags_ref = Ref{UInt32}(_cint_bits_u32(flags))
+    _ = fd
+    _ = bufs
+    msg_ref[] = MsgHdr(
+        msg.msg_name,
+        msg.msg_namelen,
+        msg.msg_iov,
+        msg.msg_iovlen,
+        msg.msg_control,
+        msg.msg_controllen,
+        Int32(flags_ref[]),
+    )
+    return Cssize_t(bytes_ref[])
+end
+
+function _send_msg_simple!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssize_t
+    msg = msg_ref[]
+    bufs = _wsabufs_from_msghdr(msg)
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    _ = fd
+    _ = bufs
+    _ = flags
+    return Cssize_t(bytes_ref[])
+end
+
+function _recv_msg_ext!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssize_t
+    _, recv_ptr = _load_sendrecvmsg_ptrs!()
+    msg = msg_ref[]
+    bufs = _wsabufs_from_msghdr(msg)
+    wmsg = Ref(_wsamsg_from_msghdr(msg, bufs, flags))
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    _ = fd
+    _ = recv_ptr
+    _store_wsamsg_back!(msg_ref, msg, wmsg[])
+    return Cssize_t(bytes_ref[])
+end
+
+function _send_msg_ext!(fd::Int32, msg_ref::Ref{MsgHdr}, flags::Int32)::Cssize_t
+    send_ptr, _ = _load_sendrecvmsg_ptrs!()
+    msg = msg_ref[]
+    bufs = _wsabufs_from_msghdr(msg)
+    wmsg = Ref(_wsamsg_from_msghdr(msg, bufs, flags))
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    _ = fd
+    _ = send_ptr
+    _ = wmsg
+    return Cssize_t(bytes_ref[])
+end
+
+function recv_msg!(fd::Int32, msg::Ref{MsgHdr}, flags::Int32 = Int32(0))::Cssize_t
+    msghdr = msg[]
+    if msghdr.msg_name == C_NULL && msghdr.msg_control == C_NULL
+        return _recv_msg_simple!(fd, msg, flags)
+    end
+    return _recv_msg_ext!(fd, msg, flags)
+end
+
+function send_msg!(fd::Int32, msg::Ref{MsgHdr}, flags::Int32 = Int32(0))::Cssize_t
+    msghdr = msg[]
+    if msghdr.msg_name == C_NULL && msghdr.msg_control == C_NULL
+        return _send_msg_simple!(fd, msg, flags)
+    end
+    return _send_msg_ext!(fd, msg, flags)
+end
+
 try_accept_socket(fd::Int32)::Tuple{Int32, AcceptPeer, Int32} = (Int32(3), sockaddr_in_loopback(1), Int32(0))
 accept_socket(fd::Int32)::Int32 = Int32(3)
 close_socket(fd::Int32) = nothing
+
+function finish_accept_ex!(listener_fd::Int32, acceptfd::Int32, addrbuf::Vector{UInt8})::AcceptPeer
+    _ = listener_fd
+    _ = acceptfd
+    GC.@preserve addrbuf begin
+        addrptr = Ptr{UInt8}(pointer(addrbuf))
+        return _decode_accept_peer(addrptr, SockLen(length(addrbuf)))
+    end
+end
+
+function __init__()
+    @static Sys.iswindows() && ensure_winsock!()
+    return nothing
+end
 
 end
 
