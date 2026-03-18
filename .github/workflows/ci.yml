@@ -48,6 +48,14 @@ jobs:
             os: macOS-latest
             arch: aarch64
             threads: 1
+          - version: 'min'
+            os: macOS-latest
+            arch: aarch64
+            threads: 1
+          - version: 'pre'
+            os: macOS-latest
+            arch: aarch64
+            threads: 1
           - version: '1'
             os: ubuntu-latest
             arch: x64

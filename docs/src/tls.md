@@ -7,7 +7,8 @@ Description = "TLS clients, listeners, configuration, and handshake behavior in 
 
 `TLS` wraps `TCP` connections and listeners with OpenSSL-backed TLS state while
 keeping deadlines and socket lifecycle aligned with the underlying transport.
-String-address client dialing uses the same resolver/policy layer as
+Concrete-address dialing and listening use the same `connect` and `listen`
+entrypoints as the string-address surface. String-address client dialing uses the resolver/policy layer as
 [`Reseau.TCP.connect`](@ref Reseau.TCP.connect); see [Name Resolution](@ref name-resolution-manual)
 for that part of the stack.
 
@@ -43,8 +44,8 @@ explicitly in [`Config`](@ref).
 
 ## Client and Server Construction
 
-You can either dial and handshake a client in one step, or wrap an existing
-`TCP.Conn` manually:
+You can either dial and handshake a client in one step from a concrete
+`TCP.SocketAddr` or string address, or wrap an existing `TCP.Conn` manually:
 
 ```@docs; canonical=false
 client
@@ -57,7 +58,7 @@ handshake!
 
 Important behaviors to keep in mind:
 
-- [`connect`](@ref) returns a fully handshaken client connection.
+- [`connect`](@ref) returns a fully handshaken client connection for both concrete-address and string-address dialing.
 - [`listen`](@ref) returns a TLS listener whose accepted connections are
   lazy-handshake wrappers.
 - [`client`](@ref) and [`server`](@ref) are the direct wrapping APIs when you

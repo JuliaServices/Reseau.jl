@@ -44,21 +44,31 @@ struct UnknownNetworkError <: Exception
 end
 
 """
-    DNSTimeoutError
+    LookupError
 
-Raised when connect cannot complete before the configured deadline.
+Host or service lookup failure.
 """
-struct DNSTimeoutError <: Exception
+struct LookupError <: Exception
+    err::String
+    name::String
+end
+
+"""
+    DialTimeoutError
+
+Raised when dial cannot complete before the configured deadline.
+"""
+struct DialTimeoutError <: Exception
     address::String
 end
 
 """
-    DNSOpError
+    OpError
 
 High-level connect/listen operation error wrapper that preserves operation
 context.
 """
-struct DNSOpError <: Exception
+struct OpError <: Exception
     op::String
     net::String
     source::Union{Nothing, TCP.SocketEndpoint}
@@ -76,12 +86,21 @@ function Base.showerror(io::IO, err::UnknownNetworkError)
     return nothing
 end
 
-function Base.showerror(io::IO, err::DNSTimeoutError)
-    print(io, "connect timeout: $(err.address)")
+function Base.showerror(io::IO, err::LookupError)
+    print(io, "$(err.err): $(err.name)")
     return nothing
 end
 
-function Base.showerror(io::IO, err::DNSOpError)
+function Base.showerror(io::IO, err::DialTimeoutError)
+    if isempty(err.address)
+        print(io, "dial timeout")
+    else
+        print(io, "dial timeout: $(err.address)")
+    end
+    return nothing
+end
+
+function Base.showerror(io::IO, err::OpError)
     print(io, "$(err.op) $(err.net)")
     err.source === nothing || print(io, " ", err.source)
     err.addr === nothing || print(io, " -> ", err.addr)
@@ -173,7 +192,7 @@ Explicit opt-in hostname cache with policy TTLs.
 
 This caches positive host-IP lookups for `ttl_ns`, may serve stale positives for
 up to `stale_ttl_ns` while refreshing in the background, and may cache
-`AddressError` failures for `negative_ttl_ns`. `max_hosts` bounds the number of
+`LookupError` failures for `negative_ttl_ns`. `max_hosts` bounds the number of
 cached host keys and evicts the least-recently-used entry when full.
 """
 mutable struct CachingResolver{R <: AbstractResolver} <: AbstractResolver
@@ -615,7 +634,7 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
             result_ptr,
         )
     end
-    ret == 0 || _addr_error("lookup failed: $(_gai_error_string(ret))", hostname_s)
+    ret == 0 || _lookup_error("lookup failed: $(_gai_error_string(ret))", hostname_s)
     try
         current = result_ptr[]
         while current != C_NULL
@@ -696,6 +715,10 @@ end
 
 function _addr_error(err::AbstractString, addr::AbstractString)
     throw(AddressError(String(err), String(addr)))
+end
+
+function _lookup_error(err::AbstractString, name::AbstractString)
+    throw(LookupError(String(err), String(name)))
 end
 
 @inline function _is_ipv4(addr::TCP.SocketEndpoint)::Bool
@@ -784,7 +807,7 @@ end
 
 function _parse_port_table(table::Dict{String, Int}, network::AbstractString, service::AbstractString)::Int
     port = get(() -> nothing, table, lowercase(String(service)))
-    port === nothing && _addr_error("unknown port", string(network, "/", service))
+    port === nothing && _lookup_error("unknown port", string(network, "/", service))
     return port::Int
 end
 
@@ -950,7 +973,7 @@ function lookup_port(::SystemResolver, network::AbstractString, service::Abstrac
         elseif n == "udp" || n == "udp4" || n == "udp6"
             port = _parse_port_table(_SERVICE_UDP, n, service)
         else
-            _addr_error("unknown network", n)
+            throw(UnknownNetworkError(n))
         end
     end
     (port < 0 || port > 65535) && _addr_error("invalid port", service)
@@ -980,7 +1003,7 @@ function lookup_port(resolver::StaticResolver, network::AbstractString, service:
                 port = _parse_port_table(_SERVICE_UDP, n, service)
             end
         else
-            _addr_error("unknown network", n)
+            throw(UnknownNetworkError(n))
         end
     end
     (port < 0 || port > 65535) && _addr_error("invalid port", service)
@@ -1057,7 +1080,7 @@ function _resolve_static_host(
     literal === nothing || return TCP.SocketEndpoint[literal]
     mapped = get(() -> nothing, resolver.hosts, lowercase(h))
     mapped === nothing || return copy(mapped::Vector{TCP.SocketEndpoint})
-    resolver.fallback === nothing && _addr_error("no suitable address", h)
+    resolver.fallback === nothing && _lookup_error("no suitable address", h)
     return _resolve_host_ips(resolver.fallback::AbstractResolver, network, h)
 end
 
@@ -1207,7 +1230,7 @@ function _refresh_cached_host!(
             return nothing
         end
         entry.refreshing = false
-        if err isa AddressError && resolver.negative_ttl_ns > 0
+        if err isa LookupError && resolver.negative_ttl_ns > 0
             _store_cache_entry_locked!(resolver, key, nothing, err, now_ns)
         end
     finally
@@ -1274,7 +1297,7 @@ function _resolve_cached_host(
     try
         if err === nothing
             _store_cache_entry_locked!(resolver, key, result::Vector{TCP.SocketEndpoint}, nothing, now_ns)
-        elseif err isa AddressError && resolver.negative_ttl_ns > 0
+        elseif err isa LookupError && resolver.negative_ttl_ns > 0
             _store_cache_entry_locked!(resolver, key, nothing, err, now_ns)
         end
     finally
@@ -1377,7 +1400,8 @@ Keyword arguments:
 Returns a `Vector{TCP.SocketEndpoint}` in the order that subsequent connection
 logic should attempt.
 
-Throws `AddressError` or `UnknownNetworkError` when parsing or resolution fails.
+Throws `AddressError`, `LookupError`, or `UnknownNetworkError` when parsing or
+resolution fails.
 """
 function resolve_tcp_addrs(
         resolver::AbstractResolver,
@@ -1397,7 +1421,7 @@ function resolve_tcp_addrs(
         _resolve_host_ips(resolver, network, host)
     end
     filtered = _apply_policy_and_network(ips, kind, policy)
-    isempty(filtered) && _addr_error("no suitable address", host)
+    isempty(filtered) && _lookup_error("no suitable address", host)
     out = TCP.SocketEndpoint[]
     for ipaddr in filtered
         push!(out, _with_port(ipaddr, port))
@@ -1547,7 +1571,7 @@ function _resolve_with_deadline(
     )::Vector{TCP.SocketEndpoint}
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
     now_ns = Int64(time_ns())
-    now_ns >= deadline_ns && throw(DNSTimeoutError(String(address)))
+    now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
     mtx = ReentrantLock()
     condition = Threads.Condition(mtx)
     done = Ref(false)
@@ -1591,9 +1615,9 @@ function _resolve_with_deadline(
         unlock(mtx)
         _close_timer_task!(timer, timer_task)
     end
-    timed_out[] && throw(DNSTimeoutError(String(address)))
+    timed_out[] && throw(DialTimeoutError(String(address)))
     result = result_ref[]
-    result === nothing && throw(DNSTimeoutError(String(address)))
+    result === nothing && throw(DialTimeoutError(String(address)))
     result isa Exception && throw(result)
     return result::Vector{TCP.SocketEndpoint}
 end
@@ -1601,7 +1625,7 @@ end
 function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining::Int)::Int64
     deadline_ns == 0 && return Int64(0)
     time_remaining = deadline_ns - now_ns
-    time_remaining <= 0 && throw(DNSTimeoutError(""))
+    time_remaining <= 0 && throw(DialTimeoutError(""))
     # Avoid spending the entire remaining budget on the first address candidate
     # when multiple endpoints remain to be tried.
     timeout = time_remaining ÷ addrs_remaining
@@ -1633,14 +1657,18 @@ end
     return nothing
 end
 
+@inline function _same_addr_family(a::TCP.SocketEndpoint, b::TCP.SocketEndpoint)::Bool
+    return (_is_ipv4(a) && _is_ipv4(b)) || (_is_ipv6(a) && _is_ipv6(b))
+end
+
 @inline function _wrap_op_error(
         op::AbstractString,
         net::AbstractString,
         source::Union{Nothing, TCP.SocketEndpoint},
         addr::Union{Nothing, TCP.SocketEndpoint},
         err::Exception,
-    )::DNSOpError
-    return DNSOpError(String(op), String(net), source, addr, err)
+    )::OpError
+    return OpError(String(op), String(net), source, addr, err)
 end
 
 @inline function _as_exception(err)::Exception
@@ -1686,13 +1714,13 @@ function _resolve_serial(
         end
         now_ns = Int64(time_ns())
         if deadline_ns != 0 && now_ns >= deadline_ns
-            return nothing, DNSTimeoutError(String(address))
+            return nothing, DialTimeoutError(String(address))
         end
         attempt_deadline = try
             _partial_deadline_ns(now_ns, deadline_ns, length(addrs) - i + 1)
         catch err
-            err isa DNSTimeoutError || rethrow(err)
-            return nothing, DNSTimeoutError(String(address))
+            err isa DialTimeoutError || rethrow(err)
+            return nothing, DialTimeoutError(String(address))
         end
         try
             max_attempts = d.local_addr === nothing ? 3 : 1
@@ -1722,7 +1750,7 @@ function _resolve_serial(
                        attempt < max_attempts
                         continue
                     end
-                    mapped = ex isa IOPoll.DeadlineExceededError ? DNSTimeoutError(String(address)) : ex
+                    mapped = ex isa IOPoll.DeadlineExceededError ? DialTimeoutError(String(address)) : ex
                     first_err === nothing && (first_err = mapped)
                     break
                 end
@@ -1830,9 +1858,9 @@ Connect a TCP connection from a `host:port` string.
 This resolves the address, applies deadline and policy rules, optionally runs a
 dual-stack race, and returns a connected `TCP.Conn`.
 
-Throws `DNSOpError` on failure. The wrapped `err` may be an `AddressError`,
-`DNSTimeoutError`, `UnknownNetworkError`, `SystemError`, or a lower-level poll
-error depending on which phase failed.
+Throws `OpError` on failure. The wrapped `err` may be an `AddressError`,
+`LookupError`, `DialTimeoutError`, `UnknownNetworkError`, `SystemError`, or a
+lower-level poll error depending on which phase failed.
 """
 function connect(
         d::HostResolver,
@@ -1841,7 +1869,7 @@ function connect(
     )::TCP.Conn
     deadline_ns = _connect_deadline_ns(d)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
-        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
+        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
     end
     kind = try
         _network_kind(network)
@@ -1853,8 +1881,19 @@ function connect(
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
+    if d.local_addr !== nothing
+        local_addr = d.local_addr::TCP.SocketEndpoint
+        filtered = TCP.SocketEndpoint[]
+        for addr in addrs
+            _same_addr_family(addr, local_addr) && push!(filtered, addr)
+        end
+        if isempty(filtered)
+            throw(_wrap_op_error("connect", network, local_addr, nothing, ArgumentError("local and remote address families must match")))
+        end
+        addrs = filtered
+    end
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
-        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
+        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
     end
     _prefer_ipv4_first!(addrs, d.policy)
     primaries, fallbacks = _partition_addrs(addrs)
@@ -1918,7 +1957,7 @@ Keyword arguments:
 - `backlog`: listen backlog passed to the kernel
 - `reuseaddr`: whether to enable `SO_REUSEADDR` on the underlying socket
 
-Throws `DNSOpError` if resolution fails or no candidate can be bound.
+Throws `OpError` if resolution fails or no candidate can be bound.
 """
 function listen(
         d::HostResolver,

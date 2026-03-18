@@ -233,10 +233,49 @@ end
             @test inferred.server_name == "Example.com"
             inferred_ip = TL._prepare_connect_config(TL.Config(verify_peer = false), "[::1]:443")
             @test inferred_ip.server_name == "::1"
+            inferred_addr = TL._prepare_connect_config(TL.Config(verify_peer = false), NC.loopback_addr(443))
+            @test inferred_addr.server_name == "127.0.0.1"
             explicit = TL.Config(server_name = "manual.example", verify_peer = false)
             @test TL._prepare_connect_config(explicit, "example.com:443") === explicit
+            @test TL._prepare_connect_config(explicit, NC.loopback_addr(443)) === explicit
             unchanged = TL._prepare_connect_config(TL.Config(verify_peer = false), "bad-address")
             @test unchanged.server_name === nothing
+        end
+        @testset "direct socket-address connect/listen passthroughs" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen(NC.loopback_addr(0), _tls_server_config(); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client = TL.connect(
+                    NC.loopback_addr(Int(laddr.port)),
+                    NC.loopback_addr(0);
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 1_000_000_000,
+                )
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                client_local = TL.local_addr(client)::NC.SocketAddrV4
+                @test client_local.ip == NC.loopback_addr(0).ip
+                payload = UInt8[0x64, 0x69, 0x72]
+                recv_buf = Vector{UInt8}(undef, length(payload))
+                @test write(client, payload) == length(payload)
+                @test read!(server, recv_buf) === recv_buf
+                @test recv_buf == payload
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
         end
         @testset "server client-auth mode mapping and runtime path" begin
             @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.NoClientCert)) == TL._SSL_VERIFY_NONE

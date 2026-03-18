@@ -114,12 +114,15 @@ config = TLS.Config(
     key_file = "server.key",
 )
 
-listener = TLS.listen("tcp", "127.0.0.1:8443", config)
+listener = TLS.listen(TCP.loopback_addr(8443), config)
 conn = TLS.accept(listener)
 
 close(conn)
 close(listener)
 ```
+
+When you already have a concrete endpoint, `TLS.connect` accepts
+`TCP.SocketAddr` values directly as well.
 
 For verified client-certificate auth, provide `client_ca_file` explicitly:
 

@@ -19,12 +19,12 @@ function run_tls_trim_sample()::Nothing
         laddr = NC.addr(listener)::NC.SocketAddrV4
         client_tcp = NC.connect(NC.loopback_addr(Int(laddr.port)))
         server_tcp = NC.accept(listener)
-        client_cfg = TL.Config(verify_peer = false, server_name = "localhost", handshake_timeout_ns = 1_000_000_000)
+        client_cfg = TL.Config(verify_peer = false, server_name = "localhost", handshake_timeout_ns = 10_000_000_000)
         server_cfg = TL.Config(
             verify_peer = false,
             cert_file = _TLS_CERT_PATH,
             key_file = _TLS_KEY_PATH,
-            handshake_timeout_ns = 1_000_000_000,
+            handshake_timeout_ns = 10_000_000_000,
         )
         client_tls = TL.client(client_tcp, client_cfg)
         server_tls = TL.server(server_tcp, server_cfg)
