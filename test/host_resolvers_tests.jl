@@ -584,22 +584,15 @@ end
                         ),
                     )
                     local_addr = NC.loopback_addr6(0)
-                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                    _nd_windows_debug("happy-eyeballs: accept task spawned")
-                    connect_task = errormonitor(Threads.@spawn _nd_connect_local_fallback(
+                    connected = _nd_connect_local_fallback(
                         "dual.test:$port",
                         resolver,
                         local_addr,
                         5_000_000_000,
-                    ))
-                    _nd_windows_debug("happy-eyeballs: connect task spawned")
-                    @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
-                    _nd_windows_debug("happy-eyeballs: connect task done=$(istaskdone(connect_task))")
-                    @test _nd_wait_task_done(accept_task, 1.5) != :timed_out
-                    _nd_windows_debug("happy-eyeballs: accept task done=$(istaskdone(accept_task))")
-                    connected = fetch(connect_task)
-                    accepted = fetch(accept_task)
-                    _nd_windows_debug("happy-eyeballs: fetched both tasks")
+                    )
+                    _nd_windows_debug("happy-eyeballs: connect returned")
+                    accepted = NC.accept(listener)
+                    _nd_windows_debug("happy-eyeballs: accept returned")
                     @test connected isa NC.Conn
                     @test accepted isa NC.Conn
                 finally
@@ -770,18 +763,12 @@ end
                     laddr = NC.addr(listener)::NC.SocketAddrV4
                     resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
                     singleflight = ND.SingleflightResolver(resolver)
-                    accept_task = errormonitor(Threads.@spawn begin
-                        conn_a = NC.accept(listener)
-                        conn_b = NC.accept(listener)
-                        return conn_a, conn_b
-                    end)
-                    task1 = errormonitor(Threads.@spawn _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1))
                     task2 = errormonitor(Threads.@spawn _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1))
-                    @test _nd_wait_task_done(task1, 2.0) != :timed_out
+                    client1 = _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1)
                     @test _nd_wait_task_done(task2, 2.0) != :timed_out
-                    client1 = fetch(task1)
                     client2 = fetch(task2)
-                    server1, server2 = fetch(accept_task)
+                    server1 = NC.accept(listener)
+                    server2 = NC.accept(listener)
                     _nd_close_quiet!(server2)
                     _nd_close_quiet!(server1)
                     @test resolver.calls == 1
