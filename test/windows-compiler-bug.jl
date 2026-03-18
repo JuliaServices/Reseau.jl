@@ -677,16 +677,13 @@ function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8
     op = reg.write_op
     op.kind = IocpOpKind.CONNECT
     op.request = IocpConnectRequest(addrbuf, addrlen)
-    @atomic :release op.active = true
-    pollnotify!(registration.write_waiter, PollWakeReason.READY)
-    return Int32(0)
+    errno = _submit_iocp_op!(registration, reg, op)
+    errno != Int32(0) && _clear_iocp_op!(op)
+    return errno
 end
 
 function _iocp_finish_connect!(registration::Registration)::Int32
-    reg = _lookup_iocp_registration(registration)
-    reg === nothing && return Int32(Base.Libc.EBADF)
-    _clear_iocp_op!(reg.write_op)
-    return Int32(0)
+    return _finish_iocp_mode!(registration, PollMode.WRITE)
 end
 
 function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
@@ -696,6 +693,52 @@ function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
     active = @atomic :acquire op.active
     @atomic :release op.active = false
     return active
+end
+
+function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op::IocpOp)::Int32
+    _, ok = @atomicreplace(op.active, false => true)
+    ok || return Int32(Base.Libc.EALREADY)
+    op.storage[] = _ZERO_OVERLAPPED
+    rc = Int32(-1)
+    if op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
+        rc = Int32(0)
+    elseif op.kind == IocpOpKind.CONNECT
+        request = op.request
+        request isa IocpConnectRequest || throw(ArgumentError("missing ConnectEx request"))
+        _ = request.addrbuf
+        _ = request.addrlen
+        rc = Int32(0)
+    else
+        rc = Int32(Base.Libc.ENOSYS)
+    end
+    if op.kind == IocpOpKind.PROBE_READ || op.kind == IocpOpKind.PROBE_WRITE
+        if rc == 0
+            reg.wait_on_success && return Int32(0)
+            @atomic :release op.active = false
+            pollnotify!(
+                op.mode == PollMode.READ ? registration.read_waiter : registration.write_waiter,
+                PollWakeReason.READY,
+            )
+            return Int32(0)
+        end
+        @atomic :release op.active = false
+        return Int32(0)
+    end
+    if rc == 0
+        pollnotify!(registration.write_waiter, PollWakeReason.READY)
+        return Int32(0)
+    end
+    @atomic :release op.active = false
+    _clear_iocp_op!(op)
+    return Int32(Base.Libc.EIO)
+end
+
+function _finish_iocp_mode!(registration::Registration, mode::PollMode.T)::Int32
+    reg = _lookup_iocp_registration(registration)
+    reg === nothing && return Int32(Base.Libc.EBADF)
+    op = _iocp_op_for_mode(reg, mode)
+    _clear_iocp_op!(op)
+    return Int32(0)
 end
 
 function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
