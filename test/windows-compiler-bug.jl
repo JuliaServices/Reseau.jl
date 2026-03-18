@@ -828,7 +828,7 @@ end
 end
 
 @inline function _is_generating_output()::Bool
-    return false
+    return ccall(:jl_generating_output, Cint, ()) == 1
 end
 
 function _throw_errno(op::AbstractString, errno::Int32)
@@ -843,7 +843,7 @@ end
 end
 
 @inline function _runtime_supported()::Bool
-    return true
+    return Sys.isapple() || Sys.islinux() || Sys.iswindows()
 end
 
 @inline function _is_accept_retry_errno(errno::Int32)::Bool
@@ -1108,16 +1108,31 @@ function init!()::Poller
         (@atomic state.running) && return state
     end
     _runtime_supported() || throw(ArgumentError("iopoll backend is currently supported on macOS, Linux, and Windows"))
-    state = Poller()
-    @atomic state.running = true
-    POLLER[] = state
-    return state
+    new_state = Poller()
+    errno = _backend_init!(new_state)
+    errno == Int32(0) || _throw_errno("iopoll backend init", errno)
+    @atomic new_state.running = true
+    POLLER[] = new_state
+    try
+        _spawn_detached_thread(
+            "reseau-iopoll-poller",
+            _POLLER_THREAD_ENTRY_C,
+            new_state,
+        )
+    catch
+        @atomic :release new_state.running = false
+        _backend_close!(new_state)
+        POLLER[] = Poller()
+        rethrow()
+    end
+    return new_state
 end
 
 function shutdown!()
     isassigned(POLLER) || return nothing
     state = POLLER[]
     @atomic :release state.running = false
+    _backend_close!(state)
     return nothing
 end
 
@@ -1136,17 +1151,47 @@ function _notify_all_waiters!(state::Poller)
 end
 
 function _poller_thread_main!(state::Poller)
-    _ = state
+    while @atomic state.running
+        delay_ns = _poll_delay_ns(state)
+        errno = _backend_poll_once!(state, delay_ns)
+        @atomic :release state.poll_until_ns = Int64(0)
+        _drain_expired_time_entries!(state, Int64(time_ns()))
+        errno == Int32(0) && continue
+        if errno == Int32(Base.Libc.EINTR)
+            continue
+        end
+        _notify_all_waiters!(state)
+        @atomic :release state.running = false
+    end
+    notify(state.shutdown_event)
     return nothing
 end
 
 function _poller_thread_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
-    _ = arg
+    state = unsafe_pointer_to_objref(arg)::Poller
+    try
+        _poller_thread_main!(state)
+    catch
+        _notify_all_waiters!(state)
+        notify(state.shutdown_event)
+    end
     return C_NULL
 end
 
 function __init__()
-    _POLLER_THREAD_ENTRY_C[] = C_NULL
+    _POLLER_THREAD_ENTRY_C[] = @cfunction(_poller_thread_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+    if _is_generating_output()
+        POLLER[] = Poller()
+    elseif _runtime_supported()
+        @static if Sys.iswindows()
+            POLLER[] = Poller()
+        else
+            init!()
+        end
+    else
+        POLLER[] = Poller()
+    end
+    @assert isassigned(POLLER)
     return nothing
 end
 
@@ -5037,7 +5082,7 @@ function _rewrite_extracted_block(str::String, name::AbstractString)::String
     str = replace(
         str,
         "using PrecompileTools: @compile_workload, @setup_workload" =>
-            "macro compile_workload(expr)\n    return esc(expr)\nend\n\nmacro setup_workload(expr)\n    return esc(expr)\nend",
+            "macro compile_workload(expr)\n    return nothing\nend\n\nmacro setup_workload(expr)\n    return esc(expr)\nend",
     )
     str = replace(str, "..Reseau" => "..$(name)")
     str = replace(str, "Main.Reseau" => "Main.$(name)")
