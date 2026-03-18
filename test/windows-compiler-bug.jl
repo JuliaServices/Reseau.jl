@@ -5003,64 +5003,69 @@ function _with_split_extracted_package(f::F) where {F}
     end
 end
 
-function _with_full_split_extracted_package(f::F) where {F}
+function _write_full_split_extracted_package(dir::AbstractString, name::AbstractString)::Base.PkgId
     src = read(@__FILE__, String)
+    uuid = uuid4()
+    pkgid = Base.PkgId(uuid, name)
+    compat = """
+    const ByteMemory = Vector{UInt8}
+    bytememory(n::Integer)::ByteMemory = Vector{UInt8}(undef, Int(n))
+    const HAS_CCALL_GCSAFE = false
+    macro gcsafe_ccall(expr)
+        return esc(expr)
+    end
+    """
+    root = """
+    module $name
+    export TCP, TLS
+    include("0_compat.jl")
+    include("1_socket_ops.jl")
+    include("2_iopoll.jl")
+    include("3_tcp.jl")
+    include("4_host_resolvers.jl")
+    include("5_tls.jl")
+    include("6_precompile_workload.jl")
+    end
+    """
+    helpers = _rewrite_extracted_block(
+        _extract_tail_block(src, "const IP = IOPoll", "end # module Reseau"),
+        name,
+    )
+    write(
+        joinpath(dir, "Project.toml"),
+        "name = \"$name\"\nuuid = \"$(string(uuid))\"\nversion = \"0.1.0\"\n",
+    )
+    mkpath(joinpath(dir, "src"))
+    write(joinpath(dir, "src", "$name.jl"), root)
+    write(joinpath(dir, "src", "0_compat.jl"), compat)
+    write(
+        joinpath(dir, "src", "1_socket_ops.jl"),
+        _rewrite_extracted_block(_extract_block(src, "module SocketOps", "module TCP"), name),
+    )
+    write(
+        joinpath(dir, "src", "2_iopoll.jl"),
+        _rewrite_extracted_block(_extract_block(src, "module IOPoll", "module SocketOps"), name),
+    )
+    write(
+        joinpath(dir, "src", "3_tcp.jl"),
+        _rewrite_extracted_block(_extract_block(src, "module TCP", "module HostResolvers"), name),
+    )
+    write(
+        joinpath(dir, "src", "4_host_resolvers.jl"),
+        _rewrite_extracted_block(_extract_block(src, "module HostResolvers", "module TLS"), name),
+    )
+    write(
+        joinpath(dir, "src", "5_tls.jl"),
+        _rewrite_extracted_block(_extract_block(src, "module TLS", "const IP = IOPoll"), name),
+    )
+    write(joinpath(dir, "src", "6_precompile_workload.jl"), helpers)
+    return pkgid
+end
+
+function _with_full_split_extracted_package(f::F) where {F}
     mktempdir() do dir
         name = "StandalonePkgSplitFull"
-        uuid = uuid4()
-        pkgid = Base.PkgId(uuid, name)
-        compat = """
-        const ByteMemory = Vector{UInt8}
-        bytememory(n::Integer)::ByteMemory = Vector{UInt8}(undef, Int(n))
-        const HAS_CCALL_GCSAFE = false
-        macro gcsafe_ccall(expr)
-            return esc(expr)
-        end
-        """
-        root = """
-        module $name
-        export TCP, TLS
-        include("0_compat.jl")
-        include("1_socket_ops.jl")
-        include("2_iopoll.jl")
-        include("3_tcp.jl")
-        include("4_host_resolvers.jl")
-        include("5_tls.jl")
-        include("6_precompile_workload.jl")
-        end
-        """
-        helpers = _rewrite_extracted_block(
-            _extract_tail_block(src, "const IP = IOPoll", "end # module Reseau"),
-            name,
-        )
-        write(
-            joinpath(dir, "Project.toml"),
-            "name = \"$name\"\nuuid = \"$(string(uuid))\"\nversion = \"0.1.0\"\n",
-        )
-        mkpath(joinpath(dir, "src"))
-        write(joinpath(dir, "src", "$name.jl"), root)
-        write(joinpath(dir, "src", "0_compat.jl"), compat)
-        write(
-            joinpath(dir, "src", "1_socket_ops.jl"),
-            _rewrite_extracted_block(_extract_block(src, "module SocketOps", "module TCP"), name),
-        )
-        write(
-            joinpath(dir, "src", "2_iopoll.jl"),
-            _rewrite_extracted_block(_extract_block(src, "module IOPoll", "module SocketOps"), name),
-        )
-        write(
-            joinpath(dir, "src", "3_tcp.jl"),
-            _rewrite_extracted_block(_extract_block(src, "module TCP", "module HostResolvers"), name),
-        )
-        write(
-            joinpath(dir, "src", "4_host_resolvers.jl"),
-            _rewrite_extracted_block(_extract_block(src, "module HostResolvers", "module TLS"), name),
-        )
-        write(
-            joinpath(dir, "src", "5_tls.jl"),
-            _rewrite_extracted_block(_extract_block(src, "module TLS", "const IP = IOPoll"), name),
-        )
-        write(joinpath(dir, "src", "6_precompile_workload.jl"), helpers)
+        pkgid = _write_full_split_extracted_package(dir, name)
         pushfirst!(LOAD_PATH, dir)
         try
             mod = Base.require(pkgid)
@@ -5069,6 +5074,50 @@ function _with_full_split_extracted_package(f::F) where {F}
             popfirst!(LOAD_PATH)
         end
     end
+end
+
+function _run_full_split_extracted_package_subprocess()::Nothing
+    mktempdir() do dir
+        name = "StandalonePkgSplitFullFresh"
+        _write_full_split_extracted_package(dir, name)
+        depot = joinpath(dir, "depot")
+        mkpath(depot)
+        script = """
+        pushfirst!(LOAD_PATH, @__DIR__)
+        using $name
+        const TCP = $name.TCP
+        kwtt_v4 = (
+            NamedTuple{(:local_addr,), Tuple{TCP.SocketAddrV4}},
+            typeof(TCP.connect),
+            String,
+            String,
+        )
+        kwtt_v6 = (
+            NamedTuple{(:local_addr,), Tuple{TCP.SocketAddrV6}},
+            typeof(TCP.connect),
+            String,
+            String,
+        )
+        Base.precompile(Tuple{typeof(Core.kwcall), kwtt_v4...})
+        Base.code_typed(Core.kwcall, kwtt_v4)
+        Base.precompile(Tuple{typeof(Core.kwcall), kwtt_v6...})
+        Base.code_typed(Core.kwcall, kwtt_v6)
+        try
+            TCP.connect("tcp", "127.0.0.1:1"; local_addr = TCP.loopback_addr(0))
+        catch
+        end
+        try
+            TCP.connect("tcp", "127.0.0.1:1"; local_addr = TCP.loopback_addr6(0))
+        catch
+        end
+        nothing
+        """
+        script_path = joinpath(dir, "fresh-process-probe.jl")
+        write(script_path, script)
+        cmd = `$(Base.julia_cmd()) --project=$(dir) --startup-file=no --history-file=no $(script_path)`
+        run(setenv(cmd, "JULIA_DEPOT_PATH" => depot))
+    end
+    return nothing
 end
 
 println("[windows-compiler-bug] julia threads: $(Threads.nthreads())")
@@ -5174,6 +5223,10 @@ _probe("full split package kwcall + runtime") do
         return nothing
     end
 end
+
+println("[windows-compiler-bug] fresh child process probe start")
+_run_full_split_extracted_package_subprocess()
+println("[windows-compiler-bug] fresh child process probe done")
 
 _probe("kwsort infer local_addr v4") do
     tt = (NamedTuple{(:local_addr,), Tuple{NC.SocketAddrV4}}, typeof(NC.connect), String, String)
