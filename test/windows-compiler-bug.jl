@@ -332,17 +332,95 @@ end
     return !isempty(fallbacks)
 end
 
+@inline function _is_ipv4(addr::TCP.SocketEndpoint)::Bool
+    return addr isa TCP.SocketAddrV4
+end
+
+@inline function _is_ipv6(addr::TCP.SocketEndpoint)::Bool
+    return addr isa TCP.SocketAddrV6
+end
+
+function split_host_port(address::AbstractString)::Tuple{String, String}
+    addr = String(address)
+    idx = findlast(==(':'), addr)
+    idx === nothing && throw(AddressError("missing port in address", addr))
+    host = addr[begin:prevind(addr, idx)]
+    service = addr[nextind(addr, idx):end]
+    isempty(service) && throw(AddressError("missing port in address", addr))
+    return host, service
+end
+
+function lookup_port(resolver::AbstractResolver, network::AbstractString, service::AbstractString)::Int
+    _ = resolver
+    _ = network
+    return parse(Int, service)
+end
+
+function _with_port(addr::TCP.SocketAddrV4, port::Int)::TCP.SocketAddrV4
+    return TCP.SocketAddrV4(addr.ip, UInt16(port))
+end
+
+function _with_port(addr::TCP.SocketAddrV6, port::Int)::TCP.SocketAddrV6
+    return TCP.SocketAddrV6(addr.ip, UInt16(port), addr.scope_id)
+end
+
+function _resolve_host_ips(
+        resolver::AbstractResolver,
+        network::AbstractString,
+        host::AbstractString,
+    )::Vector{TCP.SocketEndpoint}
+    _ = resolver
+    _ = network
+    h = String(host)
+    if h == "127.0.0.1"
+        return TCP.SocketEndpoint[TCP.loopback_addr(0)]
+    end
+    if h == "::1"
+        return TCP.SocketEndpoint[TCP.loopback_addr6(0)]
+    end
+    throw(AddressError("lookup failed", h))
+end
+
+function _apply_policy_and_network(
+        ips::Vector{TCP.SocketEndpoint},
+        kind::Symbol,
+        policy::ResolverPolicy,
+    )::Vector{TCP.SocketEndpoint}
+    _ = kind
+    _ = policy
+    return ips
+end
+
+function resolve_tcp_addrs(
+        resolver::AbstractResolver,
+        network::AbstractString,
+        address::AbstractString;
+        op::Symbol = :connect,
+        policy::ResolverPolicy = ResolverPolicy(),
+    )::Vector{TCP.SocketEndpoint}
+    kind = _network_kind(network)
+    addr = String(address)
+    op == :connect && isempty(addr) && throw(AddressError("missing address", addr))
+    host, service = split_host_port(addr)
+    port = lookup_port(resolver, network, service)
+    ips = _resolve_host_ips(resolver, network, host)
+    filtered = _apply_policy_and_network(ips, kind, policy)
+    isempty(filtered) && throw(AddressError("no suitable address", host))
+    out = TCP.SocketEndpoint[]
+    for ipaddr in filtered
+        push!(out, _with_port(ipaddr, port))
+    end
+    return out
+end
+
 function _resolve_with_deadline(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
         deadline_ns::Int64,
     )::Vector{TCP.SocketEndpoint}
-    _ = d
-    _ = network
-    _ = address
-    _ = deadline_ns
-    return TCP.SocketEndpoint[TCP.loopback_addr(1)]
+    deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
+    return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
 end
 
 function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining::Int)::Int64
