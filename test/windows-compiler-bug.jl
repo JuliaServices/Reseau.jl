@@ -1201,11 +1201,7 @@ function _fd_read_unlock!(fd::FD)
 end
 
 function _fd_write_lock!(fd::FD)
-    println("[windows-compiler-bug] enter _fd_write_lock!")
-    flush(stdout)
     _fdlock_rwlock!(fd.fdlock, false, true) || throw(_closing_error(fd.is_file))
-    println("[windows-compiler-bug] acquired _fd_write_lock!")
-    flush(stdout)
     return nothing
 end
 
@@ -1517,25 +1513,13 @@ function _finish_iocp_mode!(registration::Registration, mode::PollMode.T)::Int32
 end
 
 function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
-    println("[windows-compiler-bug] enter IOPoll.connect!")
-    flush(stdout)
     _fd_write_lock!(fd)
-    println("[windows-compiler-bug] after _fd_write_lock!")
-    flush(stdout)
     try
         preparewrite(fd.pd, fd.is_file)
-        println("[windows-compiler-bug] after preparewrite")
-        flush(stdout)
         registration = _poll_registration(fd.pd)
-        println("[windows-compiler-bug] after _poll_registration")
-        flush(stdout)
         errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
-        println("[windows-compiler-bug] after _iocp_submit_connect!")
-        flush(stdout)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         try
-            println("[windows-compiler-bug] before pollwait! write")
-            flush(stdout)
             pollwait!(registration.write_waiter)
             _convert_poll_error!(_check_error(fd.pd, PollMode.WRITE), fd.is_file)
         catch err
@@ -2720,8 +2704,6 @@ function _wait_connect_complete!(
         remote_addr::SocketAddr,
         cancel_state = nothing,
     )
-    println("[windows-compiler-bug] enter _wait_connect_complete!")
-    flush(stdout)
     _connect_wait_register!(cancel_state, fd)
     try
         @static if Sys.iswindows()
@@ -2786,42 +2768,24 @@ function _connect_socketaddr_impl(
         attempt_deadline::Int64,
         state,
     )::Conn
-    println("[windows-compiler-bug] enter _connect_socketaddr_impl")
-    flush(stdout)
     family = _addr_family(remote_addr)
-    println("[windows-compiler-bug] computed family")
-    flush(stdout)
     if local_addr !== nothing && _addr_family(local_addr) != family
         throw(ArgumentError("local and remote address families must match"))
     end
-    println("[windows-compiler-bug] local family check done")
-    flush(stdout)
     fd = open_tcp_fd!(; family = family)
-    println("[windows-compiler-bug] opened tcp fd")
-    flush(stdout)
     try
         if local_addr !== nothing
             SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         elseif Sys.iswindows()
             _bind_connectex_local!(fd, family)
         end
-        println("[windows-compiler-bug] local bind step done")
-        flush(stdout)
         SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
-        println("[windows-compiler-bug] set nonblocking")
-        flush(stdout)
         @static if Sys.iswindows()
             IOPoll.register!(fd.pfd)
-            println("[windows-compiler-bug] registered with iopoll")
-            flush(stdout)
             if attempt_deadline != 0
                 IOPoll.set_write_deadline!(fd.pfd, attempt_deadline)
-                println("[windows-compiler-bug] set write deadline")
-                flush(stdout)
             end
             try
-                println("[windows-compiler-bug] before _wait_connect_complete!")
-                flush(stdout)
                 _wait_connect_complete!(fd, remote_addr, state)
             finally
                 if attempt_deadline != 0
@@ -4326,8 +4290,6 @@ function _resolve_serial(
         deadline_ns::Int64,
         state::DNSRaceState,
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
-    println("[windows-compiler-bug] enter _resolve_serial")
-    flush(stdout)
     _ = network
     first_err::Union{Nothing, Exception} = nothing
     for (i, remote_addr) in pairs(addrs)
@@ -4351,8 +4313,6 @@ function _resolve_serial(
                     return nothing, first_err
                 end
                 try
-                    println("[windows-compiler-bug] before _connect_socketaddr_impl")
-                    flush(stdout)
                     conn = TCP._connect_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state)
                     if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
                         close(conn)
@@ -4476,8 +4436,6 @@ function connect(
         network::AbstractString,
         address::AbstractString,
     )::TCP.Conn
-    println("[windows-compiler-bug] enter HostResolvers.connect")
-    flush(stdout)
     deadline_ns = _connect_deadline_ns(d)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
@@ -4492,8 +4450,6 @@ function connect(
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
-    println("[windows-compiler-bug] resolved addrs")
-    flush(stdout)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
     end
