@@ -453,30 +453,25 @@ end
                 connected = nothing
                 accepted = nothing
                 try
-                    listener_network = Sys.iswindows() ? "tcp6" : "tcp4"
-                    listener_address = Sys.iswindows() ? "[::1]:0" : "127.0.0.1:0"
-                    listener = NC.listen(listener_network, listener_address; backlog = 16)
+                    listener = NC.listen("tcp6", "[::1]:0"; backlog = 16)
                     port = Int(NC.addr(listener).port)
-                    dual_addrs = if Sys.iswindows()
-                        NC.SocketEndpoint[
-                            NC.loopback_addr(port),
-                            NC.loopback_addr6(port),
-                        ]
-                    else
-                        NC.SocketEndpoint[
-                            NC.loopback_addr6(port),
-                            NC.loopback_addr(port),
-                        ]
-                    end
-                    resolver = ND.StaticResolver(hosts = Dict("dual.test" => dual_addrs))
-                    warm_accept = errormonitor(Threads.@spawn NC.accept(listener))
-                    warm_client = NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 1_000_000)
-                    @test _nd_wait_task_done(warm_accept, 2.0) != :timed_out
-                    warm_server = fetch(warm_accept)
-                    _nd_close_quiet!(warm_server)
-                    _nd_close_quiet!(warm_client)
+                    resolver = ND.StaticResolver(
+                        hosts = Dict(
+                            "dual.test" => NC.SocketEndpoint[
+                                NC.loopback_addr(port),
+                                NC.loopback_addr6(port),
+                            ],
+                        ),
+                    )
+                    local_addr = NC.loopback_addr6(0)
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                    connect_task = errormonitor(Threads.@spawn NC.connect("tcp", "dual.test:$port"; resolver = resolver, fallback_delay_ns = 5_000_000_000))
+                    connect_task = errormonitor(Threads.@spawn NC.connect(
+                        "tcp",
+                        "dual.test:$port";
+                        resolver = resolver,
+                        local_addr = local_addr,
+                        fallback_delay_ns = 5_000_000_000,
+                    ))
                     @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
                     @test _nd_wait_task_done(accept_task, 1.5) != :timed_out
                     connected = fetch(connect_task)

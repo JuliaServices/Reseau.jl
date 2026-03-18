@@ -494,13 +494,16 @@ end
             size_ref = Ref(size)
             buf = Vector{UInt8}(undef, Int(size_ref[]))
             rc = GC.@preserve buf size_ref begin
-                @ccall Iphlpapi.GetAdaptersAddresses(
-                    UInt32(_AF_UNSPEC)::UInt32,
-                    (_GAA_FLAG_INCLUDE_PREFIX | _GAA_FLAG_INCLUDE_GATEWAYS)::UInt32,
-                    C_NULL::Ptr{Cvoid},
-                    Ptr{_WindowsIpAdapterAddresses}(pointer(buf))::Ptr{_WindowsIpAdapterAddresses},
-                    size_ref::Ref{UInt32},
-                )::UInt32
+                ccall(
+                    (:GetAdaptersAddresses, _IPHLPAPI),
+                    UInt32,
+                    (UInt32, UInt32, Ptr{Cvoid}, Ptr{_WindowsIpAdapterAddresses}, Ref{UInt32}),
+                    UInt32(_AF_UNSPEC),
+                    (_GAA_FLAG_INCLUDE_PREFIX | _GAA_FLAG_INCLUDE_GATEWAYS),
+                    C_NULL,
+                    Ptr{_WindowsIpAdapterAddresses}(pointer(buf)),
+                    size_ref,
+                )
             end
             if rc == UInt32(0)
                 out = Dict{String, UInt32}()
