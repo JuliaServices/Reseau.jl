@@ -454,7 +454,7 @@ address...)` overloads on the same `TCP.connect` generic.
 Internal callers may also pass `connect_deadline_ns` and `cancel_state` to
 reuse the same implementation for deadline- and race-aware dial paths.
 """
-function connect(
+function _connect_socketaddr_impl(
         remote_addr::SocketAddr;
         local_addr::Union{Nothing, SocketAddr} = nothing,
         connect_deadline_ns::Integer = Int64(0),
@@ -528,6 +528,41 @@ function connect(
     catch
         close(fd)
         rethrow()
+    end
+end
+
+@static if Sys.iswindows()
+    # This entrypoint crosses several nested transport/poller try-catch regions.
+    # Keep inference bounded on Windows to avoid a multithreaded compiler bug
+    # seen in CI.
+    @noinline function connect(
+            remote_addr::SocketAddr;
+            local_addr::Union{Nothing, SocketAddr} = nothing,
+            connect_deadline_ns::Integer = Int64(0),
+            cancel_state = nothing,
+        )::Conn
+        Base.@_nospecializeinfer_meta
+        Base.@nospecialize remote_addr local_addr cancel_state
+        return _connect_socketaddr_impl(
+            remote_addr;
+            local_addr = local_addr,
+            connect_deadline_ns = connect_deadline_ns,
+            cancel_state = cancel_state,
+        )
+    end
+else
+    function connect(
+            remote_addr::SocketAddr;
+            local_addr::Union{Nothing, SocketAddr} = nothing,
+            connect_deadline_ns::Integer = Int64(0),
+            cancel_state = nothing,
+        )::Conn
+        return _connect_socketaddr_impl(
+            remote_addr;
+            local_addr = local_addr,
+            connect_deadline_ns = connect_deadline_ns,
+            cancel_state = cancel_state,
+        )
     end
 end
 

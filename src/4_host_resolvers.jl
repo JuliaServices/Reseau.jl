@@ -1671,7 +1671,7 @@ function _mark_connect_done!(state::DNSRaceState)
     end
 end
 
-function _resolve_serial(
+function _resolve_serial_impl(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
@@ -1739,6 +1739,32 @@ function _resolve_serial(
     end
     first_err === nothing && (first_err = AddressError("missing address", String(address)))
     return nothing, first_err::Exception
+end
+
+@static if Sys.iswindows()
+    @noinline function _resolve_serial(
+            d::HostResolver,
+            network::AbstractString,
+            address::AbstractString,
+            addrs::Vector{TCP.SocketEndpoint},
+            deadline_ns::Int64,
+            state::DNSRaceState,
+        )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+        Base.@_nospecializeinfer_meta
+        Base.@nospecialize d network address addrs state
+        return _resolve_serial_impl(d, network, address, addrs, deadline_ns, state)
+    end
+else
+    function _resolve_serial(
+            d::HostResolver,
+            network::AbstractString,
+            address::AbstractString,
+            addrs::Vector{TCP.SocketEndpoint},
+            deadline_ns::Int64,
+            state::DNSRaceState,
+        )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+        return _resolve_serial_impl(d, network, address, addrs, deadline_ns, state)
+    end
 end
 
 function _resolve_parallel(
@@ -1839,7 +1865,11 @@ Throws `DNSOpError` on failure. The wrapped `err` may be an `AddressError`,
 `DNSTimeoutError`, `UnknownNetworkError`, `SystemError`, or a lower-level poll
 error depending on which phase failed.
 """
-function connect(d::HostResolver, network::AbstractString, address::AbstractString)::TCP.Conn
+function _connect_hostresolver_impl(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+    )::TCP.Conn
     deadline_ns = _connect_deadline_ns(d)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
@@ -1877,6 +1907,26 @@ function connect(d::HostResolver, network::AbstractString, address::AbstractStri
     ))
 end
 
+@static if Sys.iswindows()
+    @noinline function connect(
+            d::HostResolver,
+            network::AbstractString,
+            address::AbstractString,
+        )::TCP.Conn
+        Base.@_nospecializeinfer_meta
+        Base.@nospecialize d network address
+        return _connect_hostresolver_impl(d, network, address)
+    end
+else
+    function connect(
+            d::HostResolver,
+            network::AbstractString,
+            address::AbstractString,
+        )::TCP.Conn
+        return _connect_hostresolver_impl(d, network, address)
+    end
+end
+
 """
     connect(network, address; kwargs...) -> TCP.Conn
 
@@ -1900,7 +1950,10 @@ end
 
 Convenience shorthand for `connect("tcp", address; kwargs...)`.
 """
-function connect(address::AbstractString; kwargs...)::TCP.Conn
+function connect(
+        address::AbstractString;
+        kwargs...,
+    )::TCP.Conn
     return connect("tcp", address; kwargs...)
 end
 
