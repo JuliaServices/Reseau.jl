@@ -1671,7 +1671,7 @@ function _mark_connect_done!(state::DNSRaceState)
     end
 end
 
-function _resolve_serial_impl(
+function _resolve_serial(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
@@ -1701,12 +1701,7 @@ function _resolve_serial_impl(
                     return nothing, first_err
                 end
                 try
-                    conn = TCP.connect(
-                        remote_addr;
-                        local_addr = d.local_addr,
-                        connect_deadline_ns = attempt_deadline,
-                        cancel_state = state,
-                    )
+                    conn = TCP._connect_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state)
                     if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
                         close(conn)
                         continue
@@ -1739,32 +1734,6 @@ function _resolve_serial_impl(
     end
     first_err === nothing && (first_err = AddressError("missing address", String(address)))
     return nothing, first_err::Exception
-end
-
-@static if Sys.iswindows()
-    @noinline function _resolve_serial(
-            d::HostResolver,
-            network::AbstractString,
-            address::AbstractString,
-            addrs::Vector{TCP.SocketEndpoint},
-            deadline_ns::Int64,
-            state::DNSRaceState,
-        )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
-        Base.@_nospecializeinfer_meta
-        Base.@nospecialize d network address addrs state
-        return _resolve_serial_impl(d, network, address, addrs, deadline_ns, state)
-    end
-else
-    function _resolve_serial(
-            d::HostResolver,
-            network::AbstractString,
-            address::AbstractString,
-            addrs::Vector{TCP.SocketEndpoint},
-            deadline_ns::Int64,
-            state::DNSRaceState,
-        )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
-        return _resolve_serial_impl(d, network, address, addrs, deadline_ns, state)
-    end
 end
 
 function _resolve_parallel(
@@ -1865,7 +1834,7 @@ Throws `DNSOpError` on failure. The wrapped `err` may be an `AddressError`,
 `DNSTimeoutError`, `UnknownNetworkError`, `SystemError`, or a lower-level poll
 error depending on which phase failed.
 """
-function _connect_hostresolver_impl(
+function connect(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
@@ -1905,26 +1874,6 @@ function _connect_hostresolver_impl(
         isempty(addrs) ? nothing : addrs[1],
         err === nothing ? AddressError("missing address", String(address)) : err::Exception,
     ))
-end
-
-@static if Sys.iswindows()
-    @noinline function connect(
-            d::HostResolver,
-            network::AbstractString,
-            address::AbstractString,
-        )::TCP.Conn
-        Base.@_nospecializeinfer_meta
-        Base.@nospecialize d network address
-        return _connect_hostresolver_impl(d, network, address)
-    end
-else
-    function connect(
-            d::HostResolver,
-            network::AbstractString,
-            address::AbstractString,
-        )::TCP.Conn
-        return _connect_hostresolver_impl(d, network, address)
-    end
 end
 
 """

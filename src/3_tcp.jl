@@ -346,7 +346,7 @@ end
 
 function _wait_connect_complete!(
         fd::FD,
-        remote_addr::SocketAddr;
+        remote_addr::SocketAddr,
         cancel_state = nothing,
     )
     _connect_wait_register!(cancel_state, fd)
@@ -442,23 +442,11 @@ function open_tcp_fd!(; family::Cint = SocketOps.AF_INET)::FD
     return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = :tcp, is_connected = false)
 end
 
-"""
-    connect(remote_addr; local_addr=nothing)
-
-Connect a TCP connection and return `Conn`.
-
-This is the simplest direct-address API. For host/port strings, name
-resolution, and timeout-aware connect policy, use the `connect(network,
-address...)` overloads on the same `TCP.connect` generic.
-
-Internal callers may also pass `connect_deadline_ns` and `cancel_state` to
-reuse the same implementation for deadline- and race-aware dial paths.
-"""
 function _connect_socketaddr_impl(
-        remote_addr::SocketAddr;
-        local_addr::Union{Nothing, SocketAddr} = nothing,
-        connect_deadline_ns::Integer = Int64(0),
-        cancel_state = nothing,
+        remote_addr::SocketAddr,
+        local_addr::Union{Nothing, SocketAddr},
+        connect_deadline_ns::Int64,
+        cancel_state,
     )::Conn
     family = _addr_family(remote_addr)
     if local_addr !== nothing && _addr_family(local_addr) != family
@@ -483,8 +471,8 @@ function _connect_socketaddr_impl(
             try
                 _wait_connect_complete!(
                     fd,
-                    remote_addr;
-                    cancel_state = cancel_state,
+                    remote_addr,
+                    cancel_state,
                 )
             finally
                 if connect_deadline_ns != 0
@@ -512,8 +500,8 @@ function _connect_socketaddr_impl(
         try
             _wait_connect_complete!(
                 fd,
-                remote_addr;
-                cancel_state = cancel_state,
+                remote_addr,
+                cancel_state,
             )
         finally
             if connect_deadline_ns != 0
@@ -531,39 +519,23 @@ function _connect_socketaddr_impl(
     end
 end
 
-@static if Sys.iswindows()
-    # This entrypoint crosses several nested transport/poller try-catch regions.
-    # Keep inference bounded on Windows to avoid a multithreaded compiler bug
-    # seen in CI.
-    @noinline function connect(
-            remote_addr::SocketAddr;
-            local_addr::Union{Nothing, SocketAddr} = nothing,
-            connect_deadline_ns::Integer = Int64(0),
-            cancel_state = nothing,
-        )::Conn
-        Base.@_nospecializeinfer_meta
-        Base.@nospecialize remote_addr local_addr cancel_state
-        return _connect_socketaddr_impl(
-            remote_addr;
-            local_addr = local_addr,
-            connect_deadline_ns = connect_deadline_ns,
-            cancel_state = cancel_state,
-        )
-    end
-else
-    function connect(
-            remote_addr::SocketAddr;
-            local_addr::Union{Nothing, SocketAddr} = nothing,
-            connect_deadline_ns::Integer = Int64(0),
-            cancel_state = nothing,
-        )::Conn
-        return _connect_socketaddr_impl(
-            remote_addr;
-            local_addr = local_addr,
-            connect_deadline_ns = connect_deadline_ns,
-            cancel_state = cancel_state,
-        )
-    end
+"""
+    connect(remote_addr)
+    connect(remote_addr, local_addr)
+
+Connect a TCP connection and return `Conn`.
+
+This is the direct-address API. The common fast path stays positional so the
+socket-connect entrypoint compiles as a simple method call across platforms.
+For host/port strings, name resolution, and timeout-aware connect policy, use
+the `connect(network, address...)` overloads on the same `TCP.connect` generic.
+"""
+function connect(remote_addr::SocketAddr)::Conn
+    return _connect_socketaddr_impl(remote_addr, nothing, Int64(0), nothing)
+end
+
+function connect(remote_addr::SocketAddr, local_addr::Union{Nothing, SocketAddr})::Conn
+    return _connect_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing)
 end
 
 """
