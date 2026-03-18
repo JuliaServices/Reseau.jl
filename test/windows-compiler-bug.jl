@@ -728,6 +728,16 @@ function set_write_deadline!(fd::FD, deadline_ns::Integer)
     return nothing
 end
 
+function set_deadline!(fd::FD, deadline_ns::Integer)
+    _set_deadline_impl!(fd, deadline_ns, PollMode.READWRITE)
+    return nothing
+end
+
+function set_read_deadline!(fd::FD, deadline_ns::Integer)
+    _set_deadline_impl!(fd, deadline_ns, PollMode.READ)
+    return nothing
+end
+
 function Base.close(fd::FD)
     _fdlock_incref_and_close!(fd.fdlock) || throw(_closing_error(fd.is_file))
     evict!(fd.pd)
@@ -863,6 +873,8 @@ const TCP_NODELAY = Int32(1)
 const SOL_SOCKET = Int32(0xffff)
 const SO_KEEPALIVE = Int32(0x0008)
 const SO_ERROR = Int32(0x1007)
+const SHUT_RD = Int32(0)
+const SHUT_WR = Int32(1)
 
 const _WS2_32 = "Ws2_32"
 const _KERNEL32 = "Kernel32"
@@ -1332,6 +1344,8 @@ else
     end
 end
 
+shutdown_socket(fd::Int32, how::Integer) = nothing
+
 function sockaddr_in(ip::NTuple{4, UInt8}, port::Integer)::SockAddrIn
     return SockAddrIn(
         UInt16(AF_INET),
@@ -1433,6 +1447,18 @@ struct Listener
 end
 
 struct ConnectCanceledError <: Exception end
+
+@inline function _is_connect_pending_errno(errno::Int32)::Bool
+    return errno == Int32(Base.Libc.EINPROGRESS) || errno == Int32(Base.Libc.EALREADY) || errno == Int32(Base.Libc.EINTR)
+end
+
+@inline function _is_temporary_unconnected(err::SystemError)::Bool
+    return err.errnum == Int(Base.Libc.ENOTCONN) || err.errnum == Int(Base.Libc.EINVAL)
+end
+
+function _format_ipv6(ip::NTuple{16, UInt8})::String
+    return join(map(x -> string(x, base = 16, pad = 2), ip), ":")
+end
 
 function loopback_addr(port::Integer)::SocketAddrV4
     return SocketAddrV4((UInt8(127), UInt8(0), UInt8(0), UInt8(1)), UInt16(port))
@@ -1774,6 +1800,67 @@ end
 Base.close(fd::TCP.FD) = close(fd.pfd)
 Base.close(conn::TCP.Conn) = close(conn.fd)
 Base.close(listener::TCP.Listener) = close(listener.fd)
+Base.closewrite(conn::TCP.Conn) = Main.Reseau.SocketOps.shutdown_socket(conn.fd.pfd.sysfd, Main.Reseau.SocketOps.SHUT_WR)
+
+function closeread(conn::TCP.Conn)
+    Main.Reseau.SocketOps.shutdown_socket(conn.fd.pfd.sysfd, Main.Reseau.SocketOps.SHUT_RD)
+    return nothing
+end
+
+function set_deadline!(conn::TCP.Conn, deadline_ns::Integer)
+    Main.Reseau.IOPoll.set_deadline!(conn.fd.pfd, deadline_ns)
+    return nothing
+end
+
+function set_read_deadline!(conn::TCP.Conn, deadline_ns::Integer)
+    Main.Reseau.IOPoll.set_read_deadline!(conn.fd.pfd, deadline_ns)
+    return nothing
+end
+
+function set_write_deadline!(conn::TCP.Conn, deadline_ns::Integer)
+    Main.Reseau.IOPoll.set_write_deadline!(conn.fd.pfd, deadline_ns)
+    return nothing
+end
+
+function set_nodelay!(conn::TCP.Conn, enabled::Bool = true)
+    Main.Reseau.SocketOps.set_sockopt_int(
+        conn.fd.pfd.sysfd,
+        Main.Reseau.SocketOps.IPPROTO_TCP,
+        Main.Reseau.SocketOps.TCP_NODELAY,
+        enabled ? 1 : 0,
+    )
+    return nothing
+end
+
+function set_keepalive!(conn::TCP.Conn, enabled::Bool = true)
+    Main.Reseau.SocketOps.set_sockopt_int(
+        conn.fd.pfd.sysfd,
+        Main.Reseau.SocketOps.SOL_SOCKET,
+        Main.Reseau.SocketOps.SO_KEEPALIVE,
+        enabled ? 1 : 0,
+    )
+    return nothing
+end
+
+@inline function _show_endpoint(io::IO, endpoint::Union{Nothing, TCP.SocketAddr})
+    if endpoint === nothing
+        print(io, "?")
+    elseif endpoint isa TCP.SocketAddrV4
+        addr = endpoint::TCP.SocketAddrV4
+        print(io, join(Int.(addr.ip), "."), ":", addr.port)
+    else
+        addr = endpoint::TCP.SocketAddrV6
+        if addr.scope_id != 0
+            print(io, "[", TCP._format_ipv6(addr.ip), "%", addr.scope_id, "]:", addr.port)
+        else
+            print(io, "[", TCP._format_ipv6(addr.ip), "]:", addr.port)
+        end
+    end
+    return nothing
+end
+
+@inline _show_state(conn::TCP.Conn) = conn.fd.pfd.sysfd >= 0 ? "open" : "closed"
+@inline _show_state(listener::TCP.Listener) = listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
 
 module HostResolvers
 
