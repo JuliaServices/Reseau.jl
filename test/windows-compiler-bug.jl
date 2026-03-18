@@ -862,7 +862,7 @@ end
 
 module SocketOps
 
-export AF_INET, AF_INET6, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_KEEPALIVE, SO_ERROR, SockAddrIn, SockAddrIn6, open_socket, bind_socket, connect_socket, set_nonblocking!, set_sockopt_int, get_socket_error, update_connect_context!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
+export AF_INET, AF_INET6, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_KEEPALIVE, SO_ERROR, SockAddrIn, SockAddrIn6, AcceptPeer, open_socket, bind_socket, connect_socket, set_nonblocking!, set_sockopt_int, get_socket_error, update_connect_context!, sockaddr_in, sockaddr_in_any, sockaddr_in6, sockaddr_in6_any, sockaddr_bytes
 
 const SockLen = Int32
 const AF_INET = Int32(2)
@@ -948,6 +948,8 @@ struct SockAddrIn6
     sin6_addr::NTuple{16, UInt8}
     sin6_scope_id::UInt32
 end
+
+const AcceptPeer = Union{SockAddrIn, SockAddrIn6}
 
 struct _WSAData
     wVersion::UInt16
@@ -1410,8 +1412,28 @@ end
     )
 end
 
+@inline function sockaddr_in_port(addr::SockAddrIn)::UInt16
+    return _hton16(addr.sin_port)
+end
+
 @inline sockaddr_in6_ip(addr::SockAddrIn6)::NTuple{16, UInt8} = addr.sin6_addr
+@inline function sockaddr_in6_port(addr::SockAddrIn6)::UInt16
+    return _hton16(addr.sin6_port)
+end
 @inline sockaddr_in6_scopeid(addr::SockAddrIn6)::UInt32 = addr.sin6_scope_id
+
+listen_socket(fd::Int32, backlog::Integer) = nothing
+get_socket_name_in(fd::Int32)::SockAddrIn = sockaddr_in_any(0)
+get_socket_name_in6(fd::Int32)::SockAddrIn6 = sockaddr_in6_any(0)
+get_peer_name_in(fd::Int32)::SockAddrIn = sockaddr_in((UInt8(127), UInt8(0), UInt8(0), UInt8(1)), 1)
+get_peer_name_in6(fd::Int32)::SockAddrIn6 = sockaddr_in6((
+        UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+        UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+        UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+        UInt8(0), UInt8(0), UInt8(0), UInt8(1),
+    ), 1)
+last_error() = Int32(Base.Libc.EAGAIN)
+recv_from!(fd::Int32, ptr::Ptr{UInt8}, nbytes, flags)::Int = 0
 
 end
 
@@ -1511,6 +1533,35 @@ end
     return SocketOps.sockaddr_in6(addr.ip, Int(addr.port); scope_id = Int(addr.scope_id))
 end
 
+@inline function _from_sockaddr(addr::SocketOps.SockAddrIn)::SocketAddrV4
+    return SocketAddrV4(SocketOps.sockaddr_in_ip(addr), Int(SocketOps.sockaddr_in_port(addr)))
+end
+
+@inline function _from_sockaddr(addr::SocketOps.SockAddrIn6)::SocketAddrV6
+    return SocketAddrV6(
+        SocketOps.sockaddr_in6_ip(addr),
+        Int(SocketOps.sockaddr_in6_port(addr));
+        scope_id = Int(SocketOps.sockaddr_in6_scopeid(addr)),
+    )
+end
+
+@inline function _set_remote_addr_from_accept!(fd::FD, peer_addr::SocketOps.AcceptPeer)
+    if peer_addr isa SocketOps.SockAddrIn
+        fd.raddr = _from_sockaddr(peer_addr::SocketOps.SockAddrIn)
+        return nothing
+    end
+    if peer_addr isa SocketOps.SockAddrIn6
+        fd.raddr = _from_sockaddr(peer_addr::SocketOps.SockAddrIn6)
+        return nothing
+    end
+    _set_remote_addr!(fd)
+    return nothing
+end
+
+@inline function _is_accept_retry_errno(errno::Int32)::Bool
+    return errno == Int32(Base.Libc.EINTR) || errno == Int32(Base.Libc.ECONNABORTED)
+end
+
 function _new_netfd(
         sysfd::Int32;
         family::Int32 = SocketOps.AF_INET,
@@ -1521,8 +1572,36 @@ function _new_netfd(
     return FD(IOPoll.FD(sysfd), family, sotype, net, is_connected, nothing, nothing)
 end
 
+function _set_local_addr!(fd::FD)
+    if fd.family == SocketOps.AF_INET6
+        fd.laddr = _from_sockaddr(SocketOps.get_socket_name_in6(fd.pfd.sysfd))
+        return nothing
+    end
+    fd.laddr = _from_sockaddr(SocketOps.get_socket_name_in(fd.pfd.sysfd))
+    return nothing
+end
+
+function _set_remote_addr!(fd::FD)
+    if fd.family == SocketOps.AF_INET6
+        fd.raddr = _from_sockaddr(SocketOps.get_peer_name_in6(fd.pfd.sysfd))
+        return nothing
+    end
+    fd.raddr = _from_sockaddr(SocketOps.get_peer_name_in(fd.pfd.sysfd))
+    return nothing
+end
+
 function _finalize_connected_addrs!(fd::FD, fallback_remote::SocketAddr)
-    fd.raddr = fallback_remote
+    _set_local_addr!(fd)
+    if fd.raddr === nothing
+        try
+            _set_remote_addr!(fd)
+        catch err
+            if !(err isa SystemError) || !_is_temporary_unconnected(err)
+                rethrow(err)
+            end
+            fd.raddr = fallback_remote
+        end
+    end
     @atomic :release fd.is_connected = true
     return nothing
 end
@@ -1791,8 +1870,12 @@ function accept(listener::Listener)::Conn
         net = listener.fd.net,
         is_connected = true,
     )
-    child.laddr = listener.fd.laddr
-    child.raddr = loopback_addr(1)
+    _set_local_addr!(child)
+    if listener.fd.family == SocketOps.AF_INET6
+        _set_remote_addr_from_accept!(child, SocketOps.get_peer_name_in6(child.pfd.sysfd))
+    else
+        _set_remote_addr_from_accept!(child, SocketOps.get_peer_name_in(child.pfd.sysfd))
+    end
     return Conn(child)
 end
 
@@ -1808,34 +1891,47 @@ function addr(listener::Listener)::Union{Nothing, SocketAddr}
     return listener.fd.laddr
 end
 
+function Base.close(fd::FD)
+    close(fd.pfd)
+    return nothing
 end
 
-Base.close(fd::TCP.FD) = close(fd.pfd)
-Base.close(conn::TCP.Conn) = close(conn.fd)
-Base.close(listener::TCP.Listener) = close(listener.fd)
-Base.closewrite(conn::TCP.Conn) = Main.Reseau.SocketOps.shutdown_socket(conn.fd.pfd.sysfd, Main.Reseau.SocketOps.SHUT_WR)
+function Base.close(conn::Conn)
+    close(conn.fd)
+    return nothing
+end
 
-function closeread(conn::TCP.Conn)
+function Base.close(listener::Listener)
+    close(listener.fd)
+    return nothing
+end
+
+function Base.closewrite(conn::Conn)
+    Main.Reseau.SocketOps.shutdown_socket(conn.fd.pfd.sysfd, Main.Reseau.SocketOps.SHUT_WR)
+    return nothing
+end
+
+function closeread(conn::Conn)
     Main.Reseau.SocketOps.shutdown_socket(conn.fd.pfd.sysfd, Main.Reseau.SocketOps.SHUT_RD)
     return nothing
 end
 
-function set_deadline!(conn::TCP.Conn, deadline_ns::Integer)
+function set_deadline!(conn::Conn, deadline_ns::Integer)
     Main.Reseau.IOPoll.set_deadline!(conn.fd.pfd, deadline_ns)
     return nothing
 end
 
-function set_read_deadline!(conn::TCP.Conn, deadline_ns::Integer)
+function set_read_deadline!(conn::Conn, deadline_ns::Integer)
     Main.Reseau.IOPoll.set_read_deadline!(conn.fd.pfd, deadline_ns)
     return nothing
 end
 
-function set_write_deadline!(conn::TCP.Conn, deadline_ns::Integer)
+function set_write_deadline!(conn::Conn, deadline_ns::Integer)
     Main.Reseau.IOPoll.set_write_deadline!(conn.fd.pfd, deadline_ns)
     return nothing
 end
 
-function set_nodelay!(conn::TCP.Conn, enabled::Bool = true)
+function set_nodelay!(conn::Conn, enabled::Bool = true)
     Main.Reseau.SocketOps.set_sockopt_int(
         conn.fd.pfd.sysfd,
         Main.Reseau.SocketOps.IPPROTO_TCP,
@@ -1845,7 +1941,7 @@ function set_nodelay!(conn::TCP.Conn, enabled::Bool = true)
     return nothing
 end
 
-function set_keepalive!(conn::TCP.Conn, enabled::Bool = true)
+function set_keepalive!(conn::Conn, enabled::Bool = true)
     Main.Reseau.SocketOps.set_sockopt_int(
         conn.fd.pfd.sysfd,
         Main.Reseau.SocketOps.SOL_SOCKET,
@@ -1855,25 +1951,55 @@ function set_keepalive!(conn::TCP.Conn, enabled::Bool = true)
     return nothing
 end
 
-@inline function _show_endpoint(io::IO, endpoint::Union{Nothing, TCP.SocketAddr})
+function _peek_eof(conn::Conn)::Bool
+    pfd = conn.fd.pfd
+    pref = Ref{UInt8}(0x00)
+    n = GC.@preserve pref SocketOps.recv_from!(
+        pfd.sysfd,
+        Base.unsafe_convert(Ptr{UInt8}, pref),
+        Csize_t(1),
+        0,
+    )
+    return n == 0
+end
+
+@inline function _show_endpoint(io::IO, endpoint::Union{Nothing, SocketAddr})
     if endpoint === nothing
         print(io, "?")
-    elseif endpoint isa TCP.SocketAddrV4
-        addr = endpoint::TCP.SocketAddrV4
+    elseif endpoint isa SocketAddrV4
+        addr = endpoint::SocketAddrV4
         print(io, join(Int.(addr.ip), "."), ":", addr.port)
     else
-        addr = endpoint::TCP.SocketAddrV6
+        addr = endpoint::SocketAddrV6
         if addr.scope_id != 0
-            print(io, "[", TCP._format_ipv6(addr.ip), "%", addr.scope_id, "]:", addr.port)
+            print(io, "[", _format_ipv6(addr.ip), "%", addr.scope_id, "]:", addr.port)
         else
-            print(io, "[", TCP._format_ipv6(addr.ip), "]:", addr.port)
+            print(io, "[", _format_ipv6(addr.ip), "]:", addr.port)
         end
     end
     return nothing
 end
 
-@inline _show_state(conn::TCP.Conn) = conn.fd.pfd.sysfd >= 0 ? "open" : "closed"
-@inline _show_state(listener::TCP.Listener) = listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
+@inline _show_state(conn::Conn) = conn.fd.pfd.sysfd >= 0 ? "open" : "closed"
+@inline _show_state(listener::Listener) = listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
+
+function Base.show(io::IO, conn::Conn)
+    print(io, "TCP.Conn(")
+    _show_endpoint(io, local_addr(conn))
+    print(io, " -> ")
+    _show_endpoint(io, remote_addr(conn))
+    print(io, ", ", _show_state(conn), ")")
+    return nothing
+end
+
+function Base.show(io::IO, listener::Listener)
+    print(io, "TCP.Listener(")
+    _show_endpoint(io, addr(listener))
+    print(io, ", ", _show_state(listener), ")")
+    return nothing
+end
+
+end
 
 module HostResolvers
 
