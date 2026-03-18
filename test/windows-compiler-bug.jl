@@ -379,6 +379,24 @@ end
 
 abstract type BackendState end
 
+struct Timespec
+    tv_sec::Int64
+    tv_nsec::Int64
+end
+
+struct Kevent
+    ident::UInt64
+    filter::Int16
+    flags::UInt16
+    fflags::UInt32
+    data::Int64
+    udata::Ptr{Cvoid}
+end
+
+mutable struct KqueueBackendState <: BackendState
+    kq::Int32
+end
+
 mutable struct Poller
     lock::ReentrantLock
     registrations::Dict{Int32, Registration}
@@ -405,22 +423,301 @@ function Poller()
     )
 end
 
+@inline function _time_less(a::TimeEntry, b::TimeEntry)::Bool
+    if a.deadline_ns != b.deadline_ns
+        return a.deadline_ns < b.deadline_ns
+    end
+    if a.kind != b.kind
+        return UInt8(a.kind) < UInt8(b.kind)
+    end
+    if a.kind == TimeEntryKind.DEADLINE
+        apd = a.pollstate::PollState
+        bpd = b.pollstate::PollState
+        if apd.token != bpd.token
+            return apd.token < bpd.token
+        end
+        return UInt8(a.mode) < UInt8(b.mode)
+    end
+    return a.primary_seq < b.primary_seq
+end
+
+@inline function _heap_parent_index(i::Int)::Int
+    return i >>> 1
+end
+
+@inline function _heap_left_index(i::Int)::Int
+    return i << 1
+end
+
+@inline function _heap_right_index(i::Int)::Int
+    return (i << 1) + 1
+end
+
+function _time_swap!(heap::Vector{TimeEntry}, i::Int, j::Int)
+    heap[i], heap[j] = heap[j], heap[i]
+    return nothing
+end
+
+function _time_sift_up!(heap::Vector{TimeEntry}, i::Int)
+    while i > 1
+        parent = _heap_parent_index(i)
+        _time_less(heap[i], heap[parent]) || break
+        _time_swap!(heap, i, parent)
+        i = parent
+    end
+    return nothing
+end
+
+function _time_sift_down!(heap::Vector{TimeEntry}, i::Int)
+    len = length(heap)
+    while true
+        left = _heap_left_index(i)
+        left > len && break
+        smallest = left
+        right = _heap_right_index(i)
+        if right <= len && _time_less(heap[right], heap[left])
+            smallest = right
+        end
+        _time_less(heap[smallest], heap[i]) || break
+        _time_swap!(heap, i, smallest)
+        i = smallest
+    end
+    return nothing
+end
+
+function _time_push_locked!(state::Poller, entry::TimeEntry)
+    heap = state.time_heap
+    push!(heap, entry)
+    _time_sift_up!(heap, length(heap))
+    return nothing
+end
+
+function _time_pop_locked!(state::Poller)::TimeEntry
+    heap = state.time_heap
+    isempty(heap) && throw(ArgumentError("time heap is empty"))
+    entry = heap[1]
+    last = pop!(heap)
+    if !isempty(heap)
+        heap[1] = last
+        _time_sift_down!(heap, 1)
+    end
+    return entry
+end
+
+@inline function _registration_active_locked(state::Poller, pd::PollState)::Bool
+    current = get(() -> nothing, state.registrations_by_token, pd.token)
+    return current !== nothing && current.fd == pd.sysfd && current.pollstate === pd
+end
+
+@inline function _entry_live_locked(state::Poller, entry::TimeEntry)::Bool
+    if entry.kind == TimeEntryKind.DEADLINE
+        pd = entry.pollstate::PollState
+        return _registration_active_locked(state, pd)
+    end
+    timer = entry.timer::TimerState
+    (@atomic :acquire timer.seq) == entry.primary_seq || return false
+    (@atomic :acquire timer.closed) && return false
+    return true
+end
+
+function _discard_stale_time_entries_locked!(state::Poller)
+    while !isempty(state.time_heap)
+        entry = state.time_heap[1]
+        _entry_live_locked(state, entry) && return nothing
+        _ = _time_pop_locked!(state)
+    end
+    return nothing
+end
+
+function _time_peek_locked(state::Poller)
+    _discard_stale_time_entries_locked!(state)
+    isempty(state.time_heap) && return nothing
+    return state.time_heap[1]
+end
+
+@inline function _backend_wake!(state::Poller)::Int32
+    _ = state
+    return Int32(0)
+end
+
+@inline function _maybe_wake_for_earlier_time!(state::Poller, new_earliest::Int64)
+    new_earliest > 0 || return nothing
+    poll_until_ns = @atomic :acquire state.poll_until_ns
+    if poll_until_ns == 0 || new_earliest < poll_until_ns
+        errno = _backend_wake!(state)
+        errno == Int32(0) || _throw_errno("iopoll wake", errno)
+    end
+    return nothing
+end
+
+@inline function _deadline_entry(
+        deadline_ns::Int64,
+        pd::PollState,
+        mode::PollMode.T,
+        rseq::UInt64,
+        wseq::UInt64,
+    )::TimeEntry
+    return TimeEntry(deadline_ns, TimeEntryKind.DEADLINE, pd, nothing, mode, rseq, wseq)
+end
+
+@inline function _timer_entry(deadline_ns::Int64, timer::TimerState, seq::UInt64)::TimeEntry
+    return TimeEntry(deadline_ns, TimeEntryKind.TIMER, nothing, timer, PollMode.READ, seq, UInt64(0))
+end
+
+function _build_deadline_entries(
+        pd::PollState,
+        rd_ns::Int64,
+        wd_ns::Int64,
+        rseq::UInt64,
+        wseq::UInt64,
+    )::Vector{TimeEntry}
+    entries = TimeEntry[]
+    if rd_ns > 0 && wd_ns > 0 && rd_ns == wd_ns
+        push!(entries, _deadline_entry(rd_ns, pd, PollMode.READWRITE, rseq, wseq))
+        return entries
+    end
+    rd_ns > 0 && push!(entries, _deadline_entry(rd_ns, pd, PollMode.READ, rseq, UInt64(0)))
+    wd_ns > 0 && push!(entries, _deadline_entry(wd_ns, pd, PollMode.WRITE, UInt64(0), wseq))
+    return entries
+end
+
 connect!(pfd::FD, addrbuf, addrlen) = nothing
 waitwrite(pd::PollState) = nothing
-schedule_timer!(timer::TimerState, deadline_ns::Int64) = true
-waittimer(timer::TimerState) = false
-_close_timer!(timer::TimerState) = nothing
 function deadline_fire! end
 
 function _drain_expired_time_entries!(state::Poller, now_ns::Int64)
-    _ = state
-    _ = now_ns
+    expired = TimeEntry[]
+    lock(state.lock)
+    try
+        while true
+            entry = _time_peek_locked(state)
+            (entry === nothing || entry.deadline_ns > now_ns) && break
+            push!(expired, _time_pop_locked!(state))
+        end
+    finally
+        unlock(state.lock)
+    end
+    for entry in expired
+        _fire_time_entry!(entry)
+    end
+    return nothing
+end
+
+function schedule_timer!(timer::TimerState, deadline_ns::Int64)::Bool
+    state = init!()
+    (@atomic :acquire state.running) || return false
+    new_earliest = Int64(0)
+    entry = nothing
+    armed = false
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return false
+        @atomic :release timer.deadline_ns = deadline_ns
+        seq = @atomic timer.seq += UInt64(1)
+        entry = _timer_entry(deadline_ns, timer, seq)
+    finally
+        unlock(timer.lock)
+    end
+    lock(state.lock)
+    try
+        if @atomic :acquire state.running
+            _time_push_locked!(state, entry::TimeEntry)
+            new_earliest = (entry::TimeEntry).deadline_ns
+            armed = true
+        end
+    finally
+        unlock(state.lock)
+    end
+    if !armed
+        lock(timer.lock)
+        try
+            if (@atomic :acquire timer.seq) == (entry::TimeEntry).primary_seq && !(@atomic :acquire timer.closed)
+                @atomic :release timer.deadline_ns = Int64(0)
+            end
+        finally
+            unlock(timer.lock)
+        end
+        return false
+    end
+    _maybe_wake_for_earlier_time!(state, new_earliest)
+    return true
+end
+
+function _poll_delay_ns(state::Poller)::Int64
+    deadline_ns = Int64(0)
+    lock(state.lock)
+    try
+        entry = _time_peek_locked(state)
+        deadline_ns = entry === nothing ? Int64(0) : entry.deadline_ns
+        @atomic :release state.poll_until_ns = deadline_ns
+    finally
+        unlock(state.lock)
+    end
+    deadline_ns == 0 && return Int64(-1)
+    now_ns = Int64(time_ns())
+    remaining_ns = deadline_ns - now_ns
+    remaining_ns <= 0 && return Int64(0)
+    return remaining_ns
+end
+
+function _close_timer!(timer::TimerState)
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return nothing
+        @atomic :release timer.closed = true
+        @atomic :release timer.deadline_ns = Int64(0)
+        _ = @atomic timer.seq += UInt64(1)
+    finally
+        unlock(timer.lock)
+    end
+    pollnotify!(timer.waiter, PollWakeReason.CANCELED)
+    return nothing
+end
+
+function waittimer(timer::TimerState)::Bool
+    while true
+        reason = pollwait!(timer.waiter)
+        reason == PollWakeReason.READY && return true
+        (@atomic :acquire timer.closed) && return false
+        (@atomic :acquire timer.deadline_ns) == 0 && return true
+    end
+end
+
+function _timer_fire!(timer::TimerState, seq::UInt64)
+    lock(timer.lock)
+    try
+        (@atomic :acquire timer.closed) && return nothing
+        (@atomic :acquire timer.seq) == seq || return nothing
+        @atomic :release timer.deadline_ns = Int64(0)
+    finally
+        unlock(timer.lock)
+    end
+    pollnotify!(timer.waiter, PollWakeReason.READY)
+    return nothing
+end
+
+@inline function _fire_time_entry!(entry::TimeEntry)
+    if entry.kind == TimeEntryKind.DEADLINE
+        deadline_fire!(
+            entry.pollstate::PollState,
+            entry.mode,
+            entry.primary_seq,
+            entry.secondary_seq,
+        )
+    else
+        _timer_fire!(entry.timer::TimerState, entry.primary_seq)
+    end
     return nothing
 end
 
 function sleep_until_ns(deadline_ns::Integer)
     target_ns = Int64(deadline_ns)
     target_ns <= Int64(time_ns()) && return nothing
+    state = init!()
+    (@atomic :acquire state.running) || return nothing
+    timer = TimerState(target_ns, Int64(0))
+    schedule_timer!(timer, target_ns) || return nothing
+    waittimer(timer)
     return nothing
 end
 
@@ -457,6 +754,22 @@ const POLLER = Ref{Poller}()
 const _POLLER_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
 const _pthread_t = UInt
 
+const FD_CLOEXEC = Int32(1)
+const F_GETFD = Int32(1)
+const F_SETFD = Int32(2)
+const EVFILT_READ = Int16(-1)
+const EVFILT_WRITE = Int16(-2)
+const EVFILT_USER = Int16(-10)
+const EV_ADD = UInt16(0x0001)
+const EV_DELETE = UInt16(0x0002)
+const EV_ENABLE = UInt16(0x0004)
+const EV_CLEAR = UInt16(0x0020)
+const EV_EOF = UInt16(0x8000)
+const EV_ERROR = UInt16(0x4000)
+const NOTE_TRIGGER = UInt32(0x01000000)
+const WAKE_IDENT = UInt64(1)
+const MAX_KQUEUE_EVENTS = 64
+
 const _POLL_NO_ERROR = Int32(0)
 const _POLL_ERR_CLOSING = Int32(1)
 const _POLL_ERR_TIMEOUT = Int32(2)
@@ -476,11 +789,23 @@ function schedule_deadlines!(
         rseq::UInt64,
         wseq::UInt64,
     )
-    _ = pd
-    _ = rd_ns
-    _ = wd_ns
-    _ = rseq
-    _ = wseq
+    isassigned(POLLER) || return nothing
+    state = POLLER[]
+    (@atomic :acquire state.running) || return nothing
+    new_earliest = Int64(0)
+    lock(state.lock)
+    try
+        _registration_active_locked(state, pd) || return nothing
+        for entry in _build_deadline_entries(pd, rd_ns, wd_ns, rseq, wseq)
+            _time_push_locked!(state, entry)
+            if new_earliest == 0 || entry.deadline_ns < new_earliest
+                new_earliest = entry.deadline_ns
+            end
+        end
+    finally
+        unlock(state.lock)
+    end
+    _maybe_wake_for_earlier_time!(state, new_earliest)
     return nothing
 end
 
@@ -501,8 +826,100 @@ function _throw_errno(op::AbstractString, errno::Int32)
     throw(SystemError(op, Int(errno)))
 end
 
+@inline function _merge_wake_reason(
+        current::PollWakeReason.T,
+        incoming::PollWakeReason.T,
+    )::PollWakeReason.T
+    return current == PollWakeReason.READY ? current : incoming
+end
+
 @inline function _runtime_supported()::Bool
     return true
+end
+
+@inline function _is_accept_retry_errno(errno::Int32)::Bool
+    return errno == Int32(Base.Libc.EINTR) || errno == Int32(Base.Libc.ECONNABORTED)
+end
+
+@inline function _fcntl(fd::Int32, cmd::Int32, arg::Int32 = Int32(0))::Int32
+    _ = fd
+    _ = cmd
+    _ = arg
+    return Int32(0)
+end
+
+@inline function _set_close_on_exec!(fd::Int32)
+    _ = fd
+    return nothing
+end
+
+@inline function _set_nonblocking!(fd::Int32, enabled::Bool = true)
+    _ = fd
+    _ = enabled
+    return nothing
+end
+
+@inline function _ns_to_timespec(ns::Int64)::Timespec
+    secs = ns ÷ Int64(1_000_000_000)
+    nsecs = ns % Int64(1_000_000_000)
+    return Timespec(secs, nsecs)
+end
+
+@inline function _make_kevent(
+        ident::UInt64,
+        filter::Int16,
+        flags::UInt16,
+        fflags::UInt32 = UInt32(0),
+        data::Int64 = Int64(0),
+        udata::Ptr{Cvoid} = C_NULL,
+    )::Kevent
+    return Kevent(ident, filter, flags, fflags, data, udata)
+end
+
+@inline function _decode_event_mode(ev::Kevent)::PollMode.T
+    if ev.filter == EVFILT_READ
+        return PollMode.READ
+    elseif ev.filter == EVFILT_WRITE
+        return PollMode.WRITE
+    end
+    return PollMode.READWRITE
+end
+
+function _backend_init!(state::Poller)::Int32
+    state.backend_state = KqueueBackendState(Int32(-1))
+    return Int32(0)
+end
+
+function _backend_close!(state::Poller)
+    state.backend_state = nothing
+    return nothing
+end
+
+function _backend_open_fd!(state::Poller, fd::Int32, mode::PollMode.T, token::UInt64)::Int32
+    _ = state
+    _ = fd
+    _ = mode
+    _ = token
+    return Int32(0)
+end
+
+function _backend_arm_waiter!(state::Poller, registration::Registration, mode::PollMode.T)::Int32
+    _ = state
+    _ = registration
+    _ = mode
+    return Int32(0)
+end
+
+function _backend_close_fd!(state::Poller, fd::Int32)::Int32
+    _ = state
+    _ = fd
+    return Int32(0)
+end
+
+function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
+    _ = state
+    _ = delay_ns
+    return Int32(0)
 end
 
 function _new_iocp_registration(fd::Int32, token::UInt64)::IocpRegistration
@@ -595,12 +1012,15 @@ function register!(
         pollstate::Union{Nothing, PollState} = nothing,
     )::Registration
     _mode_is_empty(mode) && throw(ArgumentError("register! requires READ and/or WRITE mode"))
+    state = init!()
     pd = pollstate === nothing ? PollState(fd) : pollstate::PollState
-    token = _next_token!()
+    token = _next_token!(state)
     registration = Registration(Int32(fd), token, mode, PollWaiter(), PollWaiter(), false)
     registration.pollstate = pd
     pd.sysfd = Int32(fd)
     pd.token = token
+    state.registrations[Int32(fd)] = registration
+    state.registrations_by_token[token] = registration
     _REGISTRATIONS[pd] = registration
     _IOCP_BY_KEY[(Int32(fd), token)] = _new_iocp_registration(Int32(fd), token)
     return registration
@@ -628,11 +1048,23 @@ end
 
 function deregister!(pd::PollState)
     registration = pop!(_REGISTRATIONS, pd, nothing)
+    if isassigned(POLLER)
+        state = POLLER[]
+        delete!(state.registrations, pd.sysfd)
+        registration === nothing || delete!(state.registrations_by_token, registration.token)
+    end
     registration === nothing || pop!(_IOCP_BY_KEY, (registration.fd, registration.token), nothing)
     return nothing
 end
 
 function current_registration(pd::PollState)
+    if isassigned(POLLER)
+        state = POLLER[]
+        registration = get(() -> nothing, state.registrations_by_token, pd.token)
+        if registration !== nothing && registration.fd == pd.sysfd && registration.pollstate === pd
+            return registration
+        end
+    end
     return get(() -> nothing, _REGISTRATIONS, pd)
 end
 
