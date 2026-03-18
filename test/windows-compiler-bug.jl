@@ -37,6 +37,15 @@ Base.@enum T::UInt8 begin
 end
 end
 
+module IocpOpKind
+Base.@enum T::UInt8 begin
+    PROBE_READ = 0x01
+    PROBE_WRITE = 0x02
+    CONNECT = 0x03
+    ACCEPT = 0x04
+end
+end
+
 module PollWaiterState
 Base.@enum T::UInt8 begin
     EMPTY = 0x00
@@ -107,6 +116,36 @@ function Registration(
         event_err::Bool,
     )
     return Registration(fd, token, mode, read_waiter, write_waiter, event_err, PollState(fd, token))
+end
+
+struct Overlapped end
+
+const _ZERO_OVERLAPPED = Overlapped()
+
+mutable struct IocpConnectRequest
+    addrbuf::Vector{UInt8}
+    addrlen::Int32
+end
+
+const IocpRequest = Union{Nothing, IocpConnectRequest}
+
+mutable struct IocpOp
+    storage::Base.RefValue{Overlapped}
+    mode::PollMode.T
+    token::UInt64
+    kind::IocpOpKind.T
+    request::IocpRequest
+    owner::Any
+    @atomic active::Bool
+end
+
+mutable struct IocpRegistration
+    fd::Int32
+    token::UInt64
+    read_op::IocpOp
+    write_op::IocpOp
+    wait_on_success::Bool
+    @atomic closing::Bool
 end
 
 mutable struct RuntimeSema
@@ -303,6 +342,7 @@ const _POLL_ERR_CLOSING = Int32(1)
 const _POLL_ERR_TIMEOUT = Int32(2)
 const _POLL_ERR_NOT_POLLABLE = Int32(3)
 const _REGISTRATIONS = IdDict{PollState, Registration}()
+const _IOCP_BY_KEY = Dict{Tuple{Int32, UInt64}, IocpRegistration}()
 const _NEXT_TOKEN = Ref{UInt64}(UInt64(0))
 
 @inline _mode_has_read(mode::PollMode.T)::Bool = mode == PollMode.READ || mode == PollMode.READWRITE
@@ -329,6 +369,38 @@ end
     return _NEXT_TOKEN[]
 end
 
+function _new_iocp_registration(fd::Int32, token::UInt64)::IocpRegistration
+    read_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.READ, token, IocpOpKind.PROBE_READ, nothing, nothing, false)
+    write_op = IocpOp(Ref(_ZERO_OVERLAPPED), PollMode.WRITE, token, IocpOpKind.PROBE_WRITE, nothing, nothing, false)
+    reg = IocpRegistration(fd, token, read_op, write_op, true, false)
+    read_op.owner = reg
+    write_op.owner = reg
+    return reg
+end
+
+@inline function _set_probe_kind!(op::IocpOp)
+    op.kind = op.mode == PollMode.READ ? IocpOpKind.PROBE_READ : IocpOpKind.PROBE_WRITE
+    op.request = nothing
+    return nothing
+end
+
+@inline function _clear_iocp_op!(op::IocpOp)
+    @atomic :release op.active = false
+    _set_probe_kind!(op)
+    op.storage[] = _ZERO_OVERLAPPED
+    return nothing
+end
+
+function _iocp_op_for_mode(reg::IocpRegistration, mode::PollMode.T)::IocpOp
+    mode == PollMode.READ && return reg.read_op
+    mode == PollMode.WRITE && return reg.write_op
+    throw(ArgumentError("invalid IOCP mode"))
+end
+
+function _lookup_iocp_registration(registration::Registration)::Union{Nothing, IocpRegistration}
+    return get(() -> nothing, _IOCP_BY_KEY, (registration.fd, registration.token))
+end
+
 function register!(
         fd::Integer;
         mode::PollMode.T = PollMode.READWRITE,
@@ -342,6 +414,7 @@ function register!(
     pd.sysfd = Int32(fd)
     pd.token = token
     _REGISTRATIONS[pd] = registration
+    _IOCP_BY_KEY[(Int32(fd), token)] = _new_iocp_registration(Int32(fd), token)
     return registration
 end
 
@@ -366,7 +439,8 @@ function register!(fd::FD)
 end
 
 function deregister!(pd::PollState)
-    pop!(_REGISTRATIONS, pd, nothing)
+    registration = pop!(_REGISTRATIONS, pd, nothing)
+    registration === nothing || pop!(_IOCP_BY_KEY, (registration.fd, registration.token), nothing)
     return nothing
 end
 
@@ -598,22 +672,30 @@ function Base.close(fd::FD)
 end
 
 function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8}, addrlen::Int32)::Int32
-    _ = registration
-    _ = addrbuf
-    _ = addrlen
+    reg = _lookup_iocp_registration(registration)
+    reg === nothing && return Int32(Base.Libc.EBADF)
+    op = reg.write_op
+    op.kind = IocpOpKind.CONNECT
+    op.request = IocpConnectRequest(addrbuf, addrlen)
+    @atomic :release op.active = true
     pollnotify!(registration.write_waiter, PollWakeReason.READY)
     return Int32(0)
 end
 
 function _iocp_finish_connect!(registration::Registration)::Int32
-    _ = registration
+    reg = _lookup_iocp_registration(registration)
+    reg === nothing && return Int32(Base.Libc.EBADF)
+    _clear_iocp_op!(reg.write_op)
     return Int32(0)
 end
 
 function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
-    _ = registration
-    _ = mode
-    return false
+    reg = _lookup_iocp_registration(registration)
+    reg === nothing && return false
+    op = _iocp_op_for_mode(reg, mode)
+    active = @atomic :acquire op.active
+    @atomic :release op.active = false
+    return active
 end
 
 function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
