@@ -1439,6 +1439,132 @@ end
 end
 
 module TLS
+
+using ..TCP
+using ..HostResolvers
+
+const TLS1_2_VERSION = UInt16(0x0303)
+const TLS1_3_VERSION = UInt16(0x0304)
+
+module ClientAuthMode
+Base.@enum T::UInt8 begin
+    NoClientCert = 0
+    RequestClientCert = 1
+    RequireAnyClientCert = 2
+    VerifyClientCertIfGiven = 3
+    RequireAndVerifyClientCert = 4
+end
+end
+
+struct ConfigError <: Exception
+    message::String
+end
+
+struct Config
+    server_name::Union{Nothing, String}
+    verify_peer::Bool
+    client_auth::ClientAuthMode.T
+    cert_file::Union{Nothing, String}
+    key_file::Union{Nothing, String}
+    ca_file::Union{Nothing, String}
+    client_ca_file::Union{Nothing, String}
+    alpn_protocols::Vector{String}
+    handshake_timeout_ns::Int64
+    min_version::Union{Nothing, UInt16}
+    max_version::Union{Nothing, UInt16}
+end
+
+function Config(;
+        server_name::Union{Nothing, AbstractString} = nothing,
+        verify_peer::Bool = true,
+        client_auth::ClientAuthMode.T = ClientAuthMode.NoClientCert,
+        cert_file::Union{Nothing, AbstractString} = nothing,
+        key_file::Union{Nothing, AbstractString} = nothing,
+        ca_file::Union{Nothing, AbstractString} = nothing,
+        client_ca_file::Union{Nothing, AbstractString} = nothing,
+        alpn_protocols::Vector{String} = String[],
+        handshake_timeout_ns::Integer = Int64(0),
+        min_version::Union{Nothing, UInt16} = TLS1_2_VERSION,
+        max_version::Union{Nothing, UInt16} = nothing,
+    )
+    server_name_s = server_name === nothing ? nothing : String(server_name)
+    cert_file_s = cert_file === nothing ? nothing : String(cert_file)
+    key_file_s = key_file === nothing ? nothing : String(key_file)
+    ca_file_s = ca_file === nothing ? nothing : String(ca_file)
+    client_ca_file_s = client_ca_file === nothing ? nothing : String(client_ca_file)
+    has_cert = cert_file_s !== nothing
+    has_key = key_file_s !== nothing
+    has_cert == has_key || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
+    handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
+    return Config(
+        server_name_s,
+        verify_peer,
+        client_auth,
+        cert_file_s,
+        key_file_s,
+        ca_file_s,
+        client_ca_file_s,
+        copy(alpn_protocols),
+        Int64(handshake_timeout_ns),
+        min_version,
+        max_version,
+    )
+end
+
+struct Conn <: IO
+    tcp::TCP.Conn
+    config::Config
+end
+
+struct Listener
+    tcp::TCP.Listener
+    config::Config
+end
+
+function _connect(
+        host_resolver::HostResolvers.HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        config::Config,
+    )::Conn
+    tcp = HostResolvers.connect(host_resolver, network, address)
+    return Conn(tcp, config)
+end
+
+function connect(
+        network::AbstractString,
+        address::AbstractString;
+        timeout_ns::Integer = Int64(0),
+        deadline_ns::Integer = Int64(0),
+        local_addr::Union{Nothing, TCP.SocketEndpoint} = nothing,
+        fallback_delay_ns::Integer = Int64(300_000_000),
+        resolver::HostResolvers.AbstractResolver = HostResolvers.DEFAULT_RESOLVER,
+        policy::HostResolvers.ResolverPolicy = HostResolvers.ResolverPolicy(),
+        kw...
+    )::Conn
+    host_resolver = HostResolvers.HostResolver(; timeout_ns, deadline_ns, local_addr, fallback_delay_ns, resolver, policy)
+    return _connect(host_resolver, network, address, Config(; kw...))
+end
+
+function connect(address::AbstractString; kwargs...)::Conn
+    return connect("tcp", address; kwargs...)
+end
+
+function listen(
+        network::AbstractString,
+        address::AbstractString,
+        config::Config;
+        backlog::Integer = 128,
+        reuseaddr::Bool = true,
+    )::Listener
+    listener = TCP.listen(network, address; backlog = backlog, reuseaddr = reuseaddr)
+    return Listener(listener, config)
+end
+
+Base.isopen(conn::Conn) = true
+Base.close(conn::Conn) = close(conn.tcp)
+Base.close(listener::Listener) = close(listener.tcp)
+
 end
 
 end # module Reseau
