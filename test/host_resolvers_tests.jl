@@ -737,7 +737,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
                 singleflight = ND.SingleflightResolver(resolver)
-                task2 = errormonitor(Threads.@spawn _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1))
+                task2 = errormonitor(@async _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1))
                 client1 = _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1)
                 @test _nd_wait_task_done(task2, 2.0) != :timed_out
                 client2 = fetch(task2)
