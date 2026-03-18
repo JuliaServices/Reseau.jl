@@ -5078,7 +5078,7 @@ end
 
 function _run_full_split_extracted_package_subprocess()::Nothing
     mktempdir() do dir
-        name = "StandalonePkgSplitFullFresh"
+        name = "Reseau"
         _write_full_split_extracted_package(dir, name)
         depot = joinpath(dir, "depot")
         mkpath(depot)
