@@ -6,7 +6,7 @@ export TCP, TLS
 
 module IOPoll
 
-export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close_timer!, sleep
+export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close_timer!, sleep, read!, _read_ptr_some!
 
 struct DeadlineExceededError <: Exception end
 
@@ -115,6 +115,8 @@ schedule_timer!(timer::TimerState, deadline_ns::Int64) = true
 waittimer(timer::TimerState) = false
 _close_timer!(timer::TimerState) = nothing
 sleep(seconds::Real) = nothing
+read!(pfd::FD, buf::Vector{UInt8}) = throw(EOFError())
+_read_ptr_some!(pfd::FD, ptr::Ptr{UInt8}, nbytes::Int) = throw(EOFError())
 
 end
 
@@ -428,6 +430,97 @@ end
 function connect(remote_addr::SocketAddr, local_addr::Union{Nothing, SocketAddr})::Conn
     return _connect_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing)
 end
+
+@inline function _read_some!(conn::Conn, buf::Vector{UInt8})::Int
+    return IOPoll.read!(conn.fd.pfd, buf)
+end
+
+@inline function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+    return IOPoll._read_ptr_some!(conn.fd.pfd, ptr, nbytes)
+end
+
+function _grow_readbytes_target!(buf::Vector{UInt8}, current::Int, nb::Int)::Int
+    newlen = if current == 0
+        min(nb, 1024)
+    else
+        min(nb, current * 2)
+    end
+    resize!(buf, newlen)
+    return newlen
+end
+
+function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
+    remaining = Int(nbytes)
+    offset = 0
+    while remaining > 0
+        n = _read_some!(conn, ptr + offset, remaining)
+        offset += n
+        remaining -= n
+    end
+    return nothing
+end
+
+function Base.read!(conn::Conn, buf::Vector{UInt8})
+    GC.@preserve buf Base.unsafe_read(conn, pointer(buf), UInt(length(buf)))
+    return buf
+end
+
+function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(buf))::Int
+    Base.require_one_based_indexing(buf)
+    requested = Int(nb)
+    requested < 0 && throw(ArgumentError("nb must be >= 0"))
+    requested == 0 && return 0
+
+    original_len = length(buf)
+    current_len = original_len
+    bytes_read = 0
+    while bytes_read < requested
+        if current_len == 0 || bytes_read == current_len
+            current_len = _grow_readbytes_target!(buf, current_len, requested)
+        end
+        chunk_capacity = min(current_len - bytes_read, requested - bytes_read)
+        n = try
+            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), chunk_capacity)
+        catch err
+            ex = err::Exception
+            ex isa EOFError || rethrow(ex)
+            break
+        end
+        bytes_read += n
+    end
+    if current_len > original_len
+        resize!(buf, bytes_read)
+    end
+    return bytes_read
+end
+
+function Base.readavailable(conn::Conn)::Vector{UInt8}
+    buf = Vector{UInt8}(undef, Base.SZ_UNBUFFERED_IO)
+    n = try
+        _read_some!(conn, buf)
+    catch err
+        ex = err::Exception
+        ex isa EOFError || rethrow(ex)
+        return UInt8[]
+    end
+    return resize!(buf, n)
+end
+
+function Base.read(conn::Conn, ::Type{UInt8})::UInt8
+    ref = Ref{UInt8}(0x00)
+    Base.unsafe_read(conn, ref, 1)
+    return ref[]
+end
+
+Base.eof(conn::Conn)::Bool = false
+Base.isopen(conn::Conn)::Bool = true
+Base.flush(::Conn) = nothing
+
+function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
+    return Int(nbytes)
+end
+
+Base.write(conn::Conn, buf::AbstractVector{UInt8}) = Base.unsafe_write(conn, pointer(buf), UInt(length(buf)))
 
 function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
     _ = backlog
