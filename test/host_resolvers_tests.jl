@@ -317,7 +317,7 @@ end
             else
                 @test true
             end
-            @test_throws ND.AddressError ND.lookup_port("tcp", "reseau-unknown-service")
+            @test_throws ND.LookupError ND.lookup_port("tcp", "reseau-unknown-service")
             static_lookup = ND.StaticResolver(
                 services_tcp = Dict("smtp-alt" => 2525),
                 services_udp = Dict("dns-alt" => 5353),
@@ -327,8 +327,8 @@ end
             @test ND.lookup_port(static_lookup, "tcp", "fallbacksvc") == 2626
             udp_fallback = ND.StaticResolver(fallback = ND.StaticResolver(services_udp = Dict("udp-fallback" => 5354)))
             @test ND.lookup_port(udp_fallback, "udp", "udp-fallback") == 5354
-            @test_throws ND.AddressError ND.lookup_port("sctp", "domain")
-            @test_throws ND.AddressError ND.lookup_port(static_lookup, "sctp", "smtp-alt")
+            @test_throws ND.UnknownNetworkError ND.lookup_port("sctp", "domain")
+            @test_throws ND.UnknownNetworkError ND.lookup_port(static_lookup, "sctp", "smtp-alt")
         end
         @testset "resolver policies and static resolver" begin
             v4 = NC.loopback_addr(9000)
@@ -359,7 +359,7 @@ end
             )
             @test length(addrs_v4_only) == 1
             @test addrs_v4_only[1] isa NC.SocketAddrV4
-            @test_throws ND.AddressError ND.resolve_tcp_addrs(
+            @test_throws ND.LookupError ND.resolve_tcp_addrs(
                 resolver,
                 "tcp",
                 "v4.local:echo";
@@ -368,7 +368,7 @@ end
             @test ND._resolve_static_host(resolver, "tcp", "DUAL.LOCAL") == NC.SocketEndpoint[v6, v4]
             fallback_only = ND.StaticResolver(fallback = ND.StaticResolver(hosts = Dict("fallback.only" => NC.SocketEndpoint[NC.loopback_addr(9090)])))
             @test ND._resolve_static_host(fallback_only, "tcp", "fallback.only") == NC.SocketEndpoint[NC.loopback_addr(9090)]
-            @test_throws ND.AddressError ND._resolve_static_host(ND.StaticResolver(), "tcp", "missing.static.test")
+            @test_throws ND.LookupError ND._resolve_static_host(ND.StaticResolver(), "tcp", "missing.static.test")
         end
         @testset "wildcard ordering and self-connect helper" begin
             listen_addrs = ND.resolve_tcp_addrs(ND.DEFAULT_RESOLVER, "tcp", ":0"; op = :listen)
@@ -417,8 +417,8 @@ end
             catch ex
                 ex
             end
-            @test bad_host_err isa ND.AddressError
-            if bad_host_err isa ND.AddressError
+            @test bad_host_err isa ND.LookupError
+            if bad_host_err isa ND.LookupError
                 @test occursin("lookup failed", bad_host_err.err)
             end
         end
@@ -521,8 +521,8 @@ end
                     catch ex
                         ex
                     end
-                    @test err isa ND.DNSOpError
-                    if err isa ND.DNSOpError
+                    @test err isa ND.OpError
+                    if err isa ND.OpError
                         @test err.err isa Exception
                         @test err.addr !== nothing
                     end
@@ -576,9 +576,9 @@ end
                     ex
                 end
                 elapsed_ms = (time_ns() - started_ns) / 1.0e6
-                @test timeout_err isa ND.DNSOpError
-                if timeout_err isa ND.DNSOpError
-                    @test timeout_err.err isa ND.DNSTimeoutError
+                @test timeout_err isa ND.OpError
+                if timeout_err isa ND.OpError
+                    @test timeout_err.err isa ND.DialTimeoutError
                 end
                 @test elapsed_ms < 1_000.0
                 threadcall_resolver = _ThreadcallResolver(UInt32(250), NC.SocketEndpoint[NC.loopback_addr(1)])
@@ -590,9 +590,9 @@ end
                     ex
                 end
                 threadcall_elapsed_ms = (time_ns() - threadcall_started_ns) / 1.0e6
-                @test threadcall_timeout_err isa ND.DNSOpError
-                if threadcall_timeout_err isa ND.DNSOpError
-                    @test threadcall_timeout_err.err isa ND.DNSTimeoutError
+                @test threadcall_timeout_err isa ND.OpError
+                if threadcall_timeout_err isa ND.OpError
+                    @test threadcall_timeout_err.err isa ND.DialTimeoutError
                 end
                 @test threadcall_elapsed_ms < 1_000.0
                 empty_net_err = try
@@ -608,8 +608,8 @@ end
                 catch ex
                     ex
                 end
-                @test err_unknown isa ND.DNSOpError
-                if err_unknown isa ND.DNSOpError
+                @test err_unknown isa ND.OpError
+                if err_unknown isa ND.OpError
                     @test err_unknown.err isa ND.UnknownNetworkError
                 end
                 err_bad_addr = try
@@ -618,8 +618,8 @@ end
                 catch ex
                     ex
                 end
-                @test err_bad_addr isa ND.DNSOpError
-                if err_bad_addr isa ND.DNSOpError
+                @test err_bad_addr isa ND.OpError
+                if err_bad_addr isa ND.OpError
                     @test err_bad_addr.err isa ND.AddressError
                 end
                 past_deadline = Int64(time_ns()) - Int64(1)
@@ -629,9 +629,9 @@ end
                 catch ex
                     ex
                 end
-                @test err_timeout isa ND.DNSOpError
-                if err_timeout isa ND.DNSOpError
-                    @test err_timeout.err isa ND.DNSTimeoutError
+                @test err_timeout isa ND.OpError
+                if err_timeout isa ND.OpError
+                    @test err_timeout.err isa ND.DialTimeoutError
                 end
             end
         end
@@ -703,7 +703,7 @@ end
             ND.resolve_tcp_addrs(evict_cache, "tcp", "host-one.test:80")
             @test evict_parent.calls == 3
 
-            neg_parent = _ErrorResolver(ND.AddressError("lookup failed", "neg.test"); delay_s = 0.0)
+            neg_parent = _ErrorResolver(ND.LookupError("lookup failed", "neg.test"); delay_s = 0.0)
             neg_cache = ND.CachingResolver(neg_parent; ttl_ns = 0, stale_ttl_ns = 0, negative_ttl_ns = 50_000_000, max_hosts = 8)
             err1 = try
                 ND.resolve_tcp_addrs(neg_cache, "tcp", "neg.test:80")
@@ -717,8 +717,8 @@ end
             catch ex
                 ex
             end
-            @test err1 isa ND.AddressError
-            @test err2 isa ND.AddressError
+            @test err1 isa ND.LookupError
+            @test err2 isa ND.LookupError
             @test neg_parent.calls == 1
             @test (@atomic :acquire neg_cache.negative_hits) == 1
             sleep(0.06)
@@ -728,11 +728,11 @@ end
             catch ex
                 ex
             end
-            @test err3 isa ND.AddressError
+            @test err3 isa ND.LookupError
             @test neg_parent.calls == 2
         end
         @testset "singleflight and cache refresh error paths" begin
-            err_resolver = _ErrorResolver(ND.AddressError("lookup failed", "singleflight-error.test"); delay_s = 0.02)
+            err_resolver = _ErrorResolver(ND.LookupError("lookup failed", "singleflight-error.test"); delay_s = 0.02)
             singleflight = ND.SingleflightResolver(err_resolver)
             task1 = errormonitor(Threads.@spawn try
                 ND._resolve_host_ips(singleflight, "tcp", "singleflight-error.test")
@@ -746,13 +746,13 @@ end
             end)
             @test _nd_wait_task_done(task1, 2.0) != :timed_out
             @test _nd_wait_task_done(task2, 2.0) != :timed_out
-            @test fetch(task1) isa ND.AddressError
-            @test fetch(task2) isa ND.AddressError
+            @test fetch(task1) isa ND.LookupError
+            @test fetch(task2) isa ND.LookupError
             @test err_resolver.calls == 1
             @test (@atomic :acquire singleflight.actual_lookups) == 1
             @test (@atomic :acquire singleflight.shared_hits) == 1
 
-            refresh_parent = _ErrorResolver(ND.AddressError("lookup failed", "refresh.test"); delay_s = 0.0)
+            refresh_parent = _ErrorResolver(ND.LookupError("lookup failed", "refresh.test"); delay_s = 0.0)
             refresh_cache = ND.CachingResolver(refresh_parent; ttl_ns = 1_000_000, stale_ttl_ns = 50_000_000, negative_ttl_ns = 50_000_000, max_hosts = 8)
             key = ND._lookup_key("tcp", "refresh.test")
             old_now_ns = Int64(time_ns()) - Int64(100_000_000)
@@ -768,7 +768,7 @@ end
             try
                 entry = refresh_cache.entries[key]
                 @test !entry.refreshing
-                @test entry.err isa ND.AddressError
+                @test entry.err isa ND.LookupError
                 @test entry.result === nothing
             finally
                 unlock(refresh_cache.lock)

@@ -62,6 +62,23 @@ The usual default path is:
 Add `CachingResolver` or `StaticResolver` when you want explicit control over
 lookup reuse or deterministic test-time address mapping.
 
+## Error Types
+
+String-address dialing and listening surface a small set of resolver-layer
+errors:
+
+```@docs; canonical=false
+AddressError
+LookupError
+UnknownNetworkError
+DialTimeoutError
+OpError
+```
+
+`OpError` is the high-level wrapper for connect/listen failures. Its inner
+`err` preserves the more specific cause such as malformed input, lookup
+failure, unsupported network, or a dial timeout.
+
 ## Resolving Explicitly
 
 If you want the concrete address list before dialing, use the explicit helper

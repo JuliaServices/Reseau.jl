@@ -105,8 +105,8 @@ end
                 catch ex
                     ex
                 end
-                @test mismatch_err isa Reseau.HostResolvers.DNSOpError
-                if mismatch_err isa Reseau.HostResolvers.DNSOpError
+                @test mismatch_err isa Reseau.HostResolvers.OpError
+                if mismatch_err isa Reseau.HostResolvers.OpError
                     @test mismatch_err.err isa ArgumentError
                 end
             finally
