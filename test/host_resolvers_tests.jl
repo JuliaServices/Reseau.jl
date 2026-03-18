@@ -192,6 +192,40 @@ end
 
 const _ND_WINDOWS_WARMED = Ref(false)
 
+function _nd_connect_timeout(address::AbstractString, timeout_ns::Integer)::NC.Conn
+    return NC.connect("tcp", String(address); timeout_ns = Int64(timeout_ns))
+end
+
+function _nd_connect_local_fallback(
+        address::AbstractString,
+        resolver::ND.AbstractResolver,
+        local_addr::NC.SocketEndpoint,
+        fallback_delay_ns::Integer,
+    )::NC.Conn
+    return NC.connect(
+        "tcp",
+        String(address);
+        resolver = resolver,
+        local_addr = local_addr,
+        fallback_delay_ns = Int64(fallback_delay_ns),
+    )
+end
+
+function _nd_connect_singleflight(
+        address::AbstractString,
+        resolver::ND.AbstractResolver,
+        timeout_ns::Integer,
+        fallback_delay_ns::Integer,
+    )::NC.Conn
+    return NC.connect(
+        "tcp",
+        String(address);
+        resolver = resolver,
+        timeout_ns = Int64(timeout_ns),
+        fallback_delay_ns = Int64(fallback_delay_ns),
+    )
+end
+
 function _nd_warm_windows_kw_dial_paths!()
     if !(Sys.iswindows() && get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1")
         return nothing
@@ -206,7 +240,7 @@ function _nd_warm_windows_kw_dial_paths!()
         listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 4)
         laddr = NC.addr(listener)::NC.SocketAddrV4
         accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-        client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int(laddr.port)); timeout_ns = 3_000_000_000)
+        client = _nd_connect_timeout(ND.join_host_port("127.0.0.1", Int(laddr.port)), 3_000_000_000)
         @test _nd_wait_task_done(accept_task, 3.0) != :timed_out
         server = fetch(accept_task)
     finally
@@ -228,7 +262,7 @@ function _nd_warm_windows_kw_dial_paths!()
                 ],
             ))
             accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-            client = NC.connect("tcp", "warmup.test:$port"; resolver = resolver, local_addr = NC.loopback_addr6(0), fallback_delay_ns = 5_000_000_000)
+            client = _nd_connect_local_fallback("warmup.test:$port", resolver, NC.loopback_addr6(0), 5_000_000_000)
             @test _nd_wait_task_done(accept_task, 3.0) != :timed_out
             server = fetch(accept_task)
         finally
@@ -503,7 +537,7 @@ end
                     _nd_windows_debug("ipv4 string path: listener ready addr=$(laddr)")
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                     _nd_windows_debug("ipv4 string path: connect start")
-                    client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)); timeout_ns = 1_000_000_000)
+                    client = _nd_connect_timeout(ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)), 1_000_000_000)
                     _nd_windows_debug("ipv4 string path: connect returned client=$(client)")
                     status = _nd_wait_task_done(accept_task, 2.0)
                     _nd_windows_debug("ipv4 string path: accept wait status=$(status)")
@@ -552,12 +586,11 @@ end
                     local_addr = NC.loopback_addr6(0)
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                     _nd_windows_debug("happy-eyeballs: accept task spawned")
-                    connect_task = errormonitor(Threads.@spawn NC.connect(
-                        "tcp",
-                        "dual.test:$port";
-                        resolver = resolver,
-                        local_addr = local_addr,
-                        fallback_delay_ns = 5_000_000_000,
+                    connect_task = errormonitor(Threads.@spawn _nd_connect_local_fallback(
+                        "dual.test:$port",
+                        resolver,
+                        local_addr,
+                        5_000_000_000,
                     ))
                     _nd_windows_debug("happy-eyeballs: connect task spawned")
                     @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
@@ -742,8 +775,8 @@ end
                         conn_b = NC.accept(listener)
                         return conn_a, conn_b
                     end)
-                    task1 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
-                    task2 = errormonitor(Threads.@spawn NC.connect("tcp", "same.test:$(Int(laddr.port))"; resolver = singleflight, timeout_ns = 1_000_000_000, fallback_delay_ns = -1))
+                    task1 = errormonitor(Threads.@spawn _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1))
+                    task2 = errormonitor(Threads.@spawn _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1))
                     @test _nd_wait_task_done(task1, 2.0) != :timed_out
                     @test _nd_wait_task_done(task2, 2.0) != :timed_out
                     client1 = fetch(task1)
