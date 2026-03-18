@@ -4,6 +4,14 @@ module Reseau
 
 export TCP, TLS
 
+const ByteMemory = Vector{UInt8}
+bytememory(n::Integer)::ByteMemory = Vector{UInt8}(undef, Int(n))
+const HAS_CCALL_GCSAFE = false
+
+macro gcsafe_ccall(expr)
+    return esc(expr)
+end
+
 module IOPoll
 
 export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close_timer!, sleep, read!, _read_ptr_some!
@@ -4697,6 +4705,79 @@ Base.isopen(conn::Conn) = true
 Base.close(conn::Conn) = close(conn.tcp)
 Base.close(listener::Listener) = close(listener.tcp)
 
+end
+
+const IP = IOPoll
+const SO = SocketOps
+const NC = TCP
+const ND = HostResolvers
+const TL = TLS
+
+@inline function _pc_is_generating_output()::Bool
+    return false
+end
+
+@inline function _pc_runtime_supported()::Bool
+    return Sys.isapple() || Sys.islinux()
+end
+
+function _pc_socketpair_stream()
+    return Int32(-1), Int32(-1)
+end
+
+function _pc_close_fd(fd::Int32)
+    _ = fd
+    return nothing
+end
+
+function _pc_write_byte(fd::Int32, b::UInt8)
+    _ = fd
+    _ = b
+    return nothing
+end
+
+function _pc_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
+    read!(conn, buf)
+    return length(buf)
+end
+
+function _pc_wait_connect_ready!(fd::Int32)
+    _ = fd
+    return nothing
+end
+
+function _pc_accept_with_retry!(listener::Int32)::Int32
+    _ = listener
+    return Int32(-1)
+end
+
+function _pc_run_eventloops_workload!()
+    return nothing
+end
+
+function _pc_run_internal_poll_workload!()
+    return nothing
+end
+
+function _pc_run_socket_ops_workload!()
+    return nothing
+end
+
+function _pc_run_tcp_workload!()
+    return nothing
+end
+
+function _pc_run_host_resolvers_workload!()
+    return nothing
+end
+
+function _pc_tls_resource_file(name::AbstractString)::Union{Nothing, String}
+    _ = name
+    return nothing
+end
+
+function _pc_run_tls_workload!()
+    return nothing
 end
 
 end # module Reseau
