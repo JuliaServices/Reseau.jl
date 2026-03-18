@@ -687,31 +687,7 @@ function Base.unsafe_read(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     return nothing
 end
 
-"""
-    read!(conn, buf) -> buf
-
-Read exactly `length(buf)` bytes into `buf` or throw `EOFError`.
-
-Use `readbytes!` or `readavailable` when you want a count-returning read that
-may stop early.
-"""
-Base.read!(conn::Conn, buf::Vector{UInt8})
-
-"""
-    readbytes!(conn, buf, nb=length(buf)) -> Int
-
-Read up to `nb` bytes into `buf`, returning the byte count.
-
-Unlike `read!(conn, buf)`, this API may return after a short read or EOF. It is
-the count-returning TCP read entrypoint once `TCP.Conn` follows Julia's `IO`
-contract.
-"""
-function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(buf))::Int
-    Base.require_one_based_indexing(buf)
-    requested = Int(nb)
-    requested < 0 && throw(ArgumentError("nb must be >= 0"))
-    requested == 0 && return 0
-
+function _readbytes_all!(conn::Conn, buf::Vector{UInt8}, requested::Int)::Int
     original_len = length(buf)
     current_len = original_len
     bytes_read = 0
@@ -729,10 +705,75 @@ function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(bu
         end
         bytes_read += n
     end
-    if current_len > original_len
-        resize!(buf, bytes_read)
+    if current_len > original_len && current_len > bytes_read
+        resize!(buf, max(original_len, bytes_read))
     end
     return bytes_read
+end
+
+function _readbytes_some!(conn::Conn, buf::Vector{UInt8}, requested::Int)::Int
+    original_len = length(buf)
+    requested > original_len && resize!(buf, requested)
+    bytes_read = try
+        GC.@preserve buf _read_some!(conn, pointer(buf), requested)
+    catch err
+        ex = err::Exception
+        ex isa EOFError || rethrow(ex)
+        0
+    end
+    current_len = length(buf)
+    if current_len > original_len && current_len > bytes_read
+        resize!(buf, max(original_len, bytes_read))
+    end
+    return bytes_read
+end
+
+"""
+    read!(conn, buf) -> buf
+
+Read exactly `length(buf)` bytes into `buf` or throw `EOFError`.
+
+Use `readbytes!` or `readavailable` when you want a count-returning read that
+may stop early.
+"""
+Base.read!(conn::Conn, buf::Vector{UInt8})
+
+"""
+    readbytes!(conn, buf, nb=length(buf); all::Bool=true) -> Int
+
+Read up to `nb` bytes into `buf`, returning the byte count.
+
+Unlike `read!(conn, buf)`, this API may return after a short read or EOF. It is
+the count-returning TCP read entrypoint once `TCP.Conn` follows Julia's `IO`
+contract.
+
+If `all` is `true` (the default), the call keeps reading until `nb` bytes have
+been transferred, EOF is reached, or an error occurs. If `all` is `false`, at
+most one underlying socket read is performed.
+"""
+function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(buf); all::Bool = true)::Int
+    Base.require_one_based_indexing(buf)
+    requested = Int(nb)
+    requested < 0 && throw(ArgumentError("nb must be >= 0"))
+    requested == 0 && return 0
+    return all ? _readbytes_all!(conn, buf, requested) : _readbytes_some!(conn, buf, requested)
+end
+
+"""
+    read(conn, nb::Integer; all::Bool=true) -> Vector{UInt8}
+
+Read and return up to `nb` bytes from `conn`.
+
+If `all` is `true` (the default), the call keeps reading until `nb` bytes have
+been transferred, EOF is reached, or an error occurs. If `all` is `false`, at
+most one underlying socket read is performed.
+"""
+function Base.read(conn::Conn, nb::Integer; all::Bool = true)::Vector{UInt8}
+    requested = Int(nb)
+    requested < 0 && throw(ArgumentError("nb must be >= 0"))
+    buf = Vector{UInt8}(undef, all && requested == typemax(Int) ? 1024 : requested)
+    n = readbytes!(conn, buf, requested; all = all)
+    return resize!(buf, n)
 end
 
 """

@@ -116,6 +116,48 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "readbytes! and read support single-read mode" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+
+                first_payload = UInt8[0x41, 0x42]
+                @test write(client, first_payload) == length(first_payload)
+                NC.set_read_deadline!(server, time_ns() + 250_000_000)
+                first_buf = Vector{UInt8}(undef, 4)
+                @test readbytes!(server, first_buf, 4; all = false) == length(first_payload)
+                @test first_buf[1:2] == first_payload
+                NC.set_read_deadline!(server, Int64(0))
+
+                second_payload = UInt8[0x43, 0x44]
+                @test write(client, second_payload) == length(second_payload)
+                NC.set_read_deadline!(server, time_ns() + 250_000_000)
+                @test read(server, 4; all = false) == second_payload
+                NC.set_read_deadline!(server, Int64(0))
+
+                third_payload = UInt8[0x45, 0x46]
+                @test write(client, third_payload) == length(third_payload)
+                NC.set_read_deadline!(server, time_ns() + 250_000_000)
+                grown_buf = fill(UInt8(0x00), 3)
+                @test readbytes!(server, grown_buf, 5; all = false) == length(third_payload)
+                @test grown_buf[1:2] == third_payload
+                @test length(grown_buf) == 3
+                NC.set_read_deadline!(server, Int64(0))
+            finally
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "show methods summarize TCP endpoints" begin
             IP.shutdown!()
             listener = nothing
