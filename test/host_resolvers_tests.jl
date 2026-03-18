@@ -190,6 +190,57 @@ function _nd_windows_debug(msg::AbstractString)
     return nothing
 end
 
+const _ND_WINDOWS_WARMED = Ref(false)
+
+function _nd_warm_windows_kw_dial_paths!()
+    if !(Sys.iswindows() && get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1")
+        return nothing
+    end
+    _ND_WINDOWS_WARMED[] && return nothing
+    _ND_WINDOWS_WARMED[] = true
+    _nd_windows_debug("warmup start")
+    listener = nothing
+    client = nothing
+    server = nothing
+    try
+        listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 4)
+        laddr = NC.addr(listener)::NC.SocketAddrV4
+        accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+        client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int(laddr.port)); timeout_ns = 3_000_000_000)
+        @test _nd_wait_task_done(accept_task, 3.0) != :timed_out
+        server = fetch(accept_task)
+    finally
+        _nd_close_quiet!(server)
+        _nd_close_quiet!(client)
+        _nd_close_quiet!(listener)
+    end
+    if _nd_ipv6_supported()
+        listener = nothing
+        client = nothing
+        server = nothing
+        try
+            listener = NC.listen("tcp6", "[::1]:0"; backlog = 4)
+            port = Int((NC.addr(listener)::NC.SocketAddrV6).port)
+            resolver = ND.StaticResolver(hosts = Dict(
+                "warmup.test" => NC.SocketEndpoint[
+                    NC.loopback_addr(port),
+                    NC.loopback_addr6(port),
+                ],
+            ))
+            accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+            client = NC.connect("tcp", "warmup.test:$port"; resolver = resolver, local_addr = NC.loopback_addr6(0), fallback_delay_ns = 5_000_000_000)
+            @test _nd_wait_task_done(accept_task, 3.0) != :timed_out
+            server = fetch(accept_task)
+        finally
+            _nd_close_quiet!(server)
+            _nd_close_quiet!(client)
+            _nd_close_quiet!(listener)
+        end
+    end
+    _nd_windows_debug("warmup done")
+    return nothing
+end
+
 @inline function _nd_skip_windows_t2_kw_dial_tests()::Bool
     debug_enabled = get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1"
     return !debug_enabled && Sys.iswindows() && Threads.nthreads() > 1 && get(ENV, "GITHUB_ACTIONS", "false") == "true"
@@ -438,6 +489,8 @@ end
             if _nd_skip_windows_t2_kw_dial_tests()
                 @test_skip true
             else
+                _nd_warm_windows_kw_dial_paths!()
+                _nd_windows_debug("START testset: connect/listen by address strings (ipv4)")
                 IP.shutdown!()
                 listener = nothing
                 client = nothing
@@ -467,6 +520,7 @@ end
                     _nd_close_quiet!(client)
                     _nd_close_quiet!(listener)
                     IP.shutdown!()
+                    _nd_windows_debug("END testset: connect/listen by address strings (ipv4)")
                 end
             end
         end
@@ -476,6 +530,7 @@ end
             elseif !_nd_ipv6_supported()
                 @test true
             else
+                _nd_windows_debug("START testset: happy-eyeballs fallback launches immediately after primary error")
                 IP.shutdown!()
                 listener = nothing
                 connected = nothing
@@ -511,6 +566,7 @@ end
                     _nd_close_quiet!(connected)
                     _nd_close_quiet!(listener)
                     IP.shutdown!()
+                    _nd_windows_debug("END testset: happy-eyeballs fallback launches immediately after primary error")
                 end
             end
         end
@@ -520,6 +576,7 @@ end
             elseif !_nd_ipv6_supported()
                 @test true
             else
+                _nd_windows_debug("START testset: parallel race returns wrapped error when both families fail")
                 IP.shutdown!()
                 listener = nothing
                 try
@@ -547,6 +604,7 @@ end
                 finally
                     _nd_close_quiet!(listener)
                     IP.shutdown!()
+                    _nd_windows_debug("END testset: parallel race returns wrapped error when both families fail")
                 end
             end
         end
@@ -556,6 +614,7 @@ end
             elseif !_nd_ipv6_supported()
                 @test true
             else
+                _nd_windows_debug("START testset: ipv6 connect/listen path")
                 IP.shutdown!()
                 listener = nothing
                 client = nothing
@@ -578,6 +637,7 @@ end
                     _nd_close_quiet!(client)
                     _nd_close_quiet!(listener)
                     IP.shutdown!()
+                    _nd_windows_debug("END testset: ipv6 connect/listen path")
                 end
             end
         end
@@ -585,6 +645,7 @@ end
             if _nd_skip_windows_t2_kw_dial_tests()
                 @test_skip true
             else
+                _nd_windows_debug("START testset: error typing and wrapping (phase 5C)")
                 slow_resolver = _SlowResolver(0.25, NC.SocketEndpoint[NC.loopback_addr(1)])
                 started_ns = time_ns()
                 timeout_err = try
@@ -651,12 +712,14 @@ end
                 if err_timeout isa ND.OpError
                     @test err_timeout.err isa ND.DialTimeoutError
                 end
+                _nd_windows_debug("END testset: error typing and wrapping (phase 5C)")
             end
         end
         @testset "singleflight resolver coalesces duplicate concurrent lookups" begin
             if _nd_skip_windows_t2_kw_dial_tests()
                 @test_skip true
             else
+                _nd_windows_debug("START testset: singleflight resolver coalesces duplicate concurrent lookups")
                 IP.shutdown!()
                 listener = nothing
                 client1 = nothing
@@ -688,6 +751,7 @@ end
                     _nd_close_quiet!(client1)
                     _nd_close_quiet!(listener)
                     IP.shutdown!()
+                    _nd_windows_debug("END testset: singleflight resolver coalesces duplicate concurrent lookups")
                 end
             end
         end
