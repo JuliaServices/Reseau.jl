@@ -18,6 +18,17 @@ using ..Reseau: ByteMemory
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 
+@inline function _windows_debug_enabled()::Bool
+    return Sys.iswindows() && get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1"
+end
+
+function _windows_debug_log(msg::AbstractString)
+    _windows_debug_enabled() || return nothing
+    println("[windows-debug tcp] ", msg)
+    flush(stdout)
+    return nothing
+end
+
 """
     connect
 
@@ -388,8 +399,10 @@ function _wait_connect_complete!(
             sockaddr = _to_sockaddr(remote_addr)
             addrbuf = SocketOps.sockaddr_bytes(sockaddr)
             addrlen = Int32(sizeof(typeof(sockaddr)))
+            _windows_debug_log("wait_connect_complete start remote=$(remote_addr) deadline=$((@atomic :acquire fd.pfd.pd.wd_ns))")
             while true
                 if _connect_canceled(cancel_state)
+                    _windows_debug_log("wait_connect_complete canceled remote=$(remote_addr)")
                     throw(ConnectCanceledError())
                 end
                 try
@@ -399,12 +412,14 @@ function _wait_connect_complete!(
                     IOPoll.connect!(fd.pfd, addrbuf, addrlen)
                 catch err
                     ex = err::Exception
+                    _windows_debug_log("wait_connect_complete error remote=$(remote_addr) ex=$(typeof(ex))")
                     if ex isa IOPoll.DeadlineExceededError && _connect_canceled(cancel_state)
                         throw(ConnectCanceledError())
                     end
                     rethrow(ex)
                 end
                 _finalize_connected_addrs!(fd, remote_addr)
+                _windows_debug_log("wait_connect_complete success remote=$(remote_addr)")
                 return nothing
             end
         end
@@ -482,6 +497,7 @@ function _connect_socketaddr_impl(
         cancel_state,
     )::Conn
     family = _addr_family(remote_addr)
+    _windows_debug_log("connect_socketaddr_impl start remote=$(remote_addr) local=$(local_addr) deadline=$(connect_deadline_ns)")
     if local_addr !== nothing && _addr_family(local_addr) != family
         throw(ArgumentError("local and remote address families must match"))
     end
@@ -516,6 +532,7 @@ function _connect_socketaddr_impl(
                 end
             end
             _apply_default_tcp_opts!(fd)
+            _windows_debug_log("connect_socketaddr_impl success remote=$(remote_addr)")
             return Conn(fd)
         end
         errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))

@@ -527,17 +527,26 @@ The fd must already be initialized as pollable and have any required local bind
 applied before calling this helper.
 """
 function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
+    debug_windows = Sys.iswindows() && get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1"
     _fd_write_lock!(fd)
     try
         preparewrite(fd.pd, fd.is_file)
         registration = _poll_registration(fd.pd)
+        debug_windows && println("[windows-debug iopoll] connect! submit fd=$(fd.sysfd) token=$(registration.token) deadline=$((@atomic :acquire fd.pd.wd_ns))")
+        debug_windows && flush(stdout)
         errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         try
+            debug_windows && println("[windows-debug iopoll] connect! wait fd=$(fd.sysfd)")
+            debug_windows && flush(stdout)
             pollwait!(registration.write_waiter)
+            debug_windows && println("[windows-debug iopoll] connect! woke fd=$(fd.sysfd) errcode=$(_check_error(fd.pd, PollMode.WRITE))")
+            debug_windows && flush(stdout)
             _convert_poll_error!(_check_error(fd.pd, PollMode.WRITE), fd.is_file)
         catch err
             ex = err::Exception
+            debug_windows && println("[windows-debug iopoll] connect! catch fd=$(fd.sysfd) ex=$(typeof(ex))")
+            debug_windows && flush(stdout)
             if _iocp_cancel_mode!(registration, PollMode.WRITE)
                 pollwait!(registration.write_waiter)
             end
@@ -545,6 +554,8 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
             rethrow(ex)
         end
         errno = _iocp_finish_connect!(registration)
+        debug_windows && println("[windows-debug iopoll] connect! finish fd=$(fd.sysfd) errno=$(errno)")
+        debug_windows && flush(stdout)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         SocketOps.update_connect_context!(fd.sysfd)
     finally

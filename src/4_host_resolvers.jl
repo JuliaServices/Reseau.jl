@@ -24,6 +24,17 @@ using ..Reseau.IOPoll
 using ..Reseau.TCP
 import ..Reseau.TCP: connect, listen
 
+@inline function _windows_debug_enabled()::Bool
+    return Sys.iswindows() && get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1"
+end
+
+function _windows_debug_log(msg::AbstractString)
+    _windows_debug_enabled() || return nothing
+    println("[windows-debug hostres] ", msg)
+    flush(stdout)
+    return nothing
+end
+
 """
     AddressError
 
@@ -1572,6 +1583,7 @@ function _resolve_with_deadline(
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
+    _windows_debug_log("resolve_with_deadline start network=$(network) address=$(address) deadline_ns=$(deadline_ns)")
     mtx = ReentrantLock()
     condition = Threads.Condition(mtx)
     done = Ref(false)
@@ -1583,6 +1595,7 @@ function _resolve_with_deadline(
             done[] && return nothing
             timed_out[] = true
             done[] = true
+            _windows_debug_log("resolve_with_deadline timer fired address=$(address)")
             notify(condition)
         finally
             unlock(mtx)
@@ -1595,6 +1608,7 @@ function _resolve_with_deadline(
         catch err
             _as_exception(err)
         end
+        _windows_debug_log("resolve_with_deadline worker finished address=$(address) result_type=$(typeof(result))")
         lock(mtx)
         try
             done[] && return nothing
@@ -1615,6 +1629,7 @@ function _resolve_with_deadline(
         unlock(mtx)
         _close_timer_task!(timer, timer_task)
     end
+    _windows_debug_log("resolve_with_deadline wake address=$(address) timed_out=$(timed_out[]) result_type=$(typeof(result_ref[]))")
     timed_out[] && throw(DialTimeoutError(String(address)))
     result = result_ref[]
     result === nothing && throw(DialTimeoutError(String(address)))
@@ -1867,6 +1882,7 @@ function connect(
         network::AbstractString,
         address::AbstractString,
     )::TCP.Conn
+    _windows_debug_log("connect start network=$(network) address=$(address)")
     deadline_ns = _connect_deadline_ns(d)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
@@ -1881,6 +1897,7 @@ function connect(
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
+    _windows_debug_log("connect resolved network=$(network) address=$(address) addrs=$(map(string, addrs))")
     if d.local_addr !== nothing
         local_addr = d.local_addr::TCP.SocketEndpoint
         filtered = TCP.SocketEndpoint[]
@@ -1905,6 +1922,7 @@ function connect(
         state = DNSRaceState()
         conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
     end
+    _windows_debug_log("connect dial finished network=$(network) address=$(address) conn_is_nothing=$(conn === nothing) err_type=$(typeof(err))")
     conn !== nothing && return conn
     throw(_wrap_op_error(
         "connect",

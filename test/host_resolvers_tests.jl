@@ -182,8 +182,17 @@ function _nd_ipv6_supported()::Bool
     end
 end
 
+function _nd_windows_debug(msg::AbstractString)
+    if Sys.iswindows() && get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1"
+        println("[windows-debug test] ", msg)
+        flush(stdout)
+    end
+    return nothing
+end
+
 @inline function _nd_skip_windows_t2_kw_dial_tests()::Bool
-    return Sys.iswindows() && Threads.nthreads() > 1 && get(ENV, "GITHUB_ACTIONS", "false") == "true"
+    debug_enabled = get(ENV, "RESEAU_WINDOWS_DEBUG", "0") == "1"
+    return !debug_enabled && Sys.iswindows() && Threads.nthreads() > 1 && get(ENV, "GITHUB_ACTIONS", "false") == "true"
 end
 
 function _nd_named_scope_iface()::Union{Nothing, String}
@@ -435,13 +444,19 @@ end
                 server = nothing
                 accept_task = nothing
                 try
+                    _nd_windows_debug("ipv4 string path: listen start")
                     listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
                     laddr = NC.addr(listener)
+                    _nd_windows_debug("ipv4 string path: listener ready addr=$(laddr)")
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    _nd_windows_debug("ipv4 string path: connect start")
                     client = NC.connect("tcp", ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)); timeout_ns = 1_000_000_000)
+                    _nd_windows_debug("ipv4 string path: connect returned client=$(client)")
                     status = _nd_wait_task_done(accept_task, 2.0)
+                    _nd_windows_debug("ipv4 string path: accept wait status=$(status)")
                     @test status != :timed_out
                     server = fetch(accept_task)
+                    _nd_windows_debug("ipv4 string path: accept fetched server=$(server)")
                     payload = UInt8[0x41, 0x42, 0x43, 0x44]
                     @test write(client, payload) == length(payload)
                     recv_buf = Vector{UInt8}(undef, length(payload))
