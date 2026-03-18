@@ -121,6 +121,23 @@ end
 struct Overlapped end
 
 const _ZERO_OVERLAPPED = Overlapped()
+const _SIO_GET_EXTENSION_FUNCTION_POINTER = UInt32(0xC8000006)
+const _CONNECTEX_LOCK = ReentrantLock()
+const _CONNECTEX_PTR = Ref{Ptr{Cvoid}}(C_NULL)
+
+struct Guid
+    data1::UInt32
+    data2::UInt16
+    data3::UInt16
+    data4::NTuple{8, UInt8}
+end
+
+const _WSAID_CONNECTEX = Guid(
+    0x25a207b9,
+    0xddf3,
+    0x4660,
+    (UInt8(0x8e), UInt8(0xe9), UInt8(0x76), UInt8(0xe5), UInt8(0x8c), UInt8(0x74), UInt8(0x06), UInt8(0x3e)),
+)
 
 mutable struct IocpConnectRequest
     addrbuf::Vector{UInt8}
@@ -378,10 +395,58 @@ function _new_iocp_registration(fd::Int32, token::UInt64)::IocpRegistration
     return reg
 end
 
+@inline function _map_overlapped_errno(err::Int32)::Int32
+    err == Int32(0) && return Int32(0)
+    err == Int32(Base.Libc.EINPROGRESS) && return Int32(Base.Libc.EINPROGRESS)
+    err == Int32(Base.Libc.EAGAIN) && return Int32(Base.Libc.EAGAIN)
+    err == Int32(Base.Libc.EALREADY) && return Int32(Base.Libc.EALREADY)
+    err == Int32(Base.Libc.EADDRNOTAVAIL) && return Int32(Base.Libc.EADDRNOTAVAIL)
+    err == Int32(Base.Libc.ENETUNREACH) && return Int32(Base.Libc.ENETUNREACH)
+    err == Int32(Base.Libc.ECONNABORTED) && return Int32(Base.Libc.ECONNABORTED)
+    err == Int32(Base.Libc.ECONNRESET) && return Int32(Base.Libc.ECONNRESET)
+    err == Int32(Base.Libc.EISCONN) && return Int32(Base.Libc.EISCONN)
+    err == Int32(Base.Libc.ENOTCONN) && return Int32(Base.Libc.ENOTCONN)
+    err == Int32(Base.Libc.ETIMEDOUT) && return Int32(Base.Libc.ETIMEDOUT)
+    err == Int32(Base.Libc.ECONNREFUSED) && return Int32(Base.Libc.ECONNREFUSED)
+    err == Int32(Base.Libc.EHOSTUNREACH) && return Int32(Base.Libc.EHOSTUNREACH)
+    return Int32(Base.Libc.EIO)
+end
+
 @inline function _set_probe_kind!(op::IocpOp)
     op.kind = op.mode == PollMode.READ ? IocpOpKind.PROBE_READ : IocpOpKind.PROBE_WRITE
     op.request = nothing
     return nothing
+end
+
+function _load_connectex_ptr(fd::Int32)::Ptr{Cvoid}
+    ptr = _CONNECTEX_PTR[]
+    ptr != C_NULL && return ptr
+    lock(_CONNECTEX_LOCK)
+    try
+        ptr = _CONNECTEX_PTR[]
+        ptr != C_NULL && return ptr
+        guid_ref = Ref(_WSAID_CONNECTEX)
+        out_ref = Ref{Ptr{Cvoid}}(C_NULL)
+        bytes_ref = Ref{UInt32}(UInt32(0))
+        _ = fd
+        _ = guid_ref
+        _ = out_ref
+        _ = bytes_ref
+        _CONNECTEX_PTR[] = out_ref[]
+        return out_ref[]
+    finally
+        unlock(_CONNECTEX_LOCK)
+    end
+end
+
+@inline function _wsagetoverlappedresult(fd::Int32, op::IocpOp)::Int32
+    bytes_ref = Ref{UInt32}(UInt32(0))
+    flags_ref = Ref{UInt32}(UInt32(0))
+    _ = fd
+    _ = op
+    _ = bytes_ref
+    _ = flags_ref
+    return _map_overlapped_errno(Int32(0))
 end
 
 @inline function _clear_iocp_op!(op::IocpOp)
@@ -705,8 +770,10 @@ function _submit_iocp_op!(registration::Registration, reg::IocpRegistration, op:
     elseif op.kind == IocpOpKind.CONNECT
         request = op.request
         request isa IocpConnectRequest || throw(ArgumentError("missing ConnectEx request"))
+        connectex_ptr = _load_connectex_ptr(reg.fd)
         _ = request.addrbuf
         _ = request.addrlen
+        _ = connectex_ptr
         rc = Int32(0)
     else
         rc = Int32(Base.Libc.ENOSYS)
@@ -737,8 +804,9 @@ function _finish_iocp_mode!(registration::Registration, mode::PollMode.T)::Int32
     reg = _lookup_iocp_registration(registration)
     reg === nothing && return Int32(Base.Libc.EBADF)
     op = _iocp_op_for_mode(reg, mode)
+    result = _wsagetoverlappedresult(registration.fd, op)
     _clear_iocp_op!(op)
-    return Int32(0)
+    return result
 end
 
 function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
