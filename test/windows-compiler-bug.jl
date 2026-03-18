@@ -6,6 +6,26 @@ export DeadlineExceededError
 
 struct DeadlineExceededError <: Exception end
 
+register!(pfd) = nothing
+set_write_deadline!(pfd, deadline_ns::Int64) = nothing
+connect!(pfd, addrbuf, addrlen) = nothing
+waitwrite(pd) = nothing
+
+end
+
+module SocketOps
+
+export AF_INET, AF_INET6, SOCK_STREAM, open_socket, bind_socket, set_nonblocking!, sockaddr_bytes
+
+const AF_INET = Int32(2)
+const AF_INET6 = Int32(23)
+const SOCK_STREAM = Int32(1)
+
+open_socket(family::Int32, sotype::Int32) = Int32(1)
+bind_socket(sysfd::Int32, sockaddr) = nothing
+set_nonblocking!(sysfd::Int32, enabled::Bool) = nothing
+sockaddr_bytes(sockaddr) = UInt8[0x00]
+
 end
 
 module TCP
@@ -29,7 +49,23 @@ end
 
 const SocketEndpoint = Union{SocketAddrV4, SocketAddrV6}
 
-struct Conn end
+mutable struct PollFD
+    sysfd::Int32
+end
+
+mutable struct FD
+    pfd::PollFD
+    family::Int32
+    sotype::Int32
+    net::Symbol
+    @atomic is_connected::Bool
+    laddr::Union{Nothing, SocketAddr}
+    raddr::Union{Nothing, SocketAddr}
+end
+
+struct Conn
+    fd::FD
+end
 
 struct ConnectCanceledError <: Exception end
 
@@ -49,22 +85,141 @@ function loopback_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
     )
 end
 
+@inline _connect_canceled(::Nothing)::Bool = false
+@inline _connect_canceled(::Any)::Bool = false
+@inline _connect_wait_register!(::Any, ::FD) = nothing
+@inline _connect_wait_unregister!(::Any, ::FD) = nothing
+@inline _addr_family(::SocketAddrV4)::Int32 = SocketOps.AF_INET
+@inline _addr_family(::SocketAddrV6)::Int32 = SocketOps.AF_INET6
+@inline _to_sockaddr(addr::SocketAddr) = addr
+
+function _new_netfd(
+        sysfd::Int32;
+        family::Int32 = SocketOps.AF_INET,
+        sotype::Int32 = SocketOps.SOCK_STREAM,
+        net::Symbol = :tcp,
+        is_connected::Bool = false,
+    )::FD
+    return FD(PollFD(sysfd), family, sotype, net, is_connected, nothing, nothing)
+end
+
+function _finalize_connected_addrs!(fd::FD, fallback_remote::SocketAddr)
+    fd.raddr = fallback_remote
+    @atomic :release fd.is_connected = true
+    return nothing
+end
+
+_apply_default_tcp_opts!(fd::FD) = nothing
+
+function _wait_connect_complete!(
+        fd::FD,
+        remote_addr::SocketAddr,
+        cancel_state = nothing,
+    )
+    _connect_wait_register!(cancel_state, fd)
+    try
+        @static if Sys.iswindows()
+            sockaddr = _to_sockaddr(remote_addr)
+            addrbuf = SocketOps.sockaddr_bytes(sockaddr)
+            addrlen = Int32(1)
+            while true
+                if _connect_canceled(cancel_state)
+                    throw(ConnectCanceledError())
+                end
+                try
+                    IOPoll.connect!(fd.pfd, addrbuf, addrlen)
+                catch err
+                    ex = err::Exception
+                    if ex isa IOPoll.DeadlineExceededError && _connect_canceled(cancel_state)
+                        throw(ConnectCanceledError())
+                    end
+                    rethrow(ex)
+                end
+                _finalize_connected_addrs!(fd, remote_addr)
+                return nothing
+            end
+        end
+        while true
+            if _connect_canceled(cancel_state)
+                throw(ConnectCanceledError())
+            end
+            try
+                IOPoll.waitwrite(fd.pfd)
+            catch err
+                ex = err::Exception
+                if ex isa IOPoll.DeadlineExceededError && _connect_canceled(cancel_state)
+                    throw(ConnectCanceledError())
+                end
+                rethrow(ex)
+            end
+            _finalize_connected_addrs!(fd, remote_addr)
+            return nothing
+        end
+    finally
+        _connect_wait_unregister!(cancel_state, fd)
+    end
+end
+
+@inline function _bind_connectex_local!(fd::FD, family::Int32)
+    _ = fd
+    _ = family
+    return nothing
+end
+
+function open_tcp_fd!(; family::Int32 = SocketOps.AF_INET)::FD
+    sysfd = SocketOps.open_socket(family, SocketOps.SOCK_STREAM)
+    return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = :tcp, is_connected = false)
+end
+
 function _connect_socketaddr_impl(
         remote_addr::SocketAddr,
         local_addr::Union{Nothing, SocketAddr},
         attempt_deadline::Int64,
         state,
     )::Conn
-    _ = attempt_deadline
-    _ = state
-    if local_addr isa SocketAddrV6 && remote_addr isa SocketAddrV4
-        throw(ArgumentError("address family mismatch"))
+    family = _addr_family(remote_addr)
+    if local_addr !== nothing && _addr_family(local_addr) != family
+        throw(ArgumentError("local and remote address families must match"))
     end
-    throw(ArgumentError("connect failed"))
+    fd = open_tcp_fd!(; family = family)
+    try
+        if local_addr !== nothing
+            SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
+        elseif Sys.iswindows()
+            _bind_connectex_local!(fd, family)
+        end
+        SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
+        @static if Sys.iswindows()
+            IOPoll.register!(fd.pfd)
+            if attempt_deadline != 0
+                IOPoll.set_write_deadline!(fd.pfd, attempt_deadline)
+            end
+            try
+                _wait_connect_complete!(fd, remote_addr, state)
+            finally
+                if attempt_deadline != 0
+                    try
+                        IOPoll.set_write_deadline!(fd.pfd, Int64(0))
+                    catch
+                    end
+                end
+            end
+            _apply_default_tcp_opts!(fd)
+            return Conn(fd)
+        end
+        IOPoll.register!(fd.pfd)
+        _wait_connect_complete!(fd, remote_addr, state)
+        _apply_default_tcp_opts!(fd)
+        return Conn(fd)
+    catch
+        close(fd)
+        rethrow()
+    end
 end
 
 end
 
+Base.close(fd::TCP.FD) = nothing
 Base.close(::TCP.Conn) = nothing
 
 module HostResolvers
@@ -119,6 +274,13 @@ mutable struct DNSRaceState
         return new(false)
     end
 end
+
+@inline function TCP._connect_canceled(state::DNSRaceState)::Bool
+    return @atomic :acquire state.done
+end
+
+TCP._connect_wait_register!(state::DNSRaceState, fd::TCP.FD) = nothing
+TCP._connect_wait_unregister!(state::DNSRaceState, fd::TCP.FD) = nothing
 
 struct HostResolver{R <: AbstractResolver}
     timeout_ns::Int64
