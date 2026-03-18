@@ -4,7 +4,7 @@ module Reseau
 
 module IOPoll
 
-export DeadlineExceededError, FD
+export DeadlineExceededError, FD, TimerState, schedule_timer!, waittimer, _close_timer!, sleep
 
 struct DeadlineExceededError <: Exception end
 
@@ -12,10 +12,22 @@ mutable struct FD
     sysfd::Int32
 end
 
+mutable struct TimerState
+    deadline_ns::Int64
+    interval_ns::Int64
+    function TimerState(deadline_ns::Int64 = Int64(0), interval_ns::Int64 = Int64(0))
+        return new(deadline_ns, interval_ns)
+    end
+end
+
 register!(pfd) = nothing
 set_write_deadline!(pfd, deadline_ns::Int64) = nothing
 connect!(pfd, addrbuf, addrlen) = nothing
 waitwrite(pd) = nothing
+schedule_timer!(timer::TimerState, deadline_ns::Int64) = true
+waittimer(timer::TimerState) = false
+_close_timer!(timer::TimerState) = nothing
+sleep(seconds::Real) = nothing
 
 end
 
@@ -388,14 +400,26 @@ function _connect_deadline_ns(d::HostResolver)::Int64
     return _min_nonzero(timeout_deadline, d.deadline_ns)
 end
 
+@inline function _dual_stack_enabled(d::HostResolver)::Bool
+    return d.fallback_delay_ns >= 0
+end
+
+@inline function _effective_fallback_delay_ns(d::HostResolver)::Int64
+    if d.fallback_delay_ns > 0
+        return d.fallback_delay_ns
+    end
+    return Int64(300_000_000)
+end
+
 @inline function _use_parallel_race(
         d::HostResolver,
         kind::Symbol,
         fallbacks::Vector{TCP.SocketEndpoint},
     )::Bool
-    _ = d
-    _ = kind
-    return !isempty(fallbacks)
+    _dual_stack_enabled(d) || return false
+    kind == :tcp || return false
+    isempty(fallbacks) && return false
+    return true
 end
 
 @inline function _is_ipv4(addr::TCP.SocketEndpoint)::Bool
@@ -583,6 +607,28 @@ function resolve_tcp_addrs(
     return out
 end
 
+function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
+    timer = IOPoll.TimerState(deadline_ns, Int64(0))
+    IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
+    task = errormonitor(Threads.@spawn begin
+        IOPoll.waittimer(timer) || return nothing
+        f()
+        return nothing
+    end)
+    return timer, task
+end
+
+function _close_timer_task!(
+        timer::Union{Nothing, IOPoll.TimerState},
+        task::Union{Nothing, Task},
+    )
+    timer === nothing && return nothing
+    IOPoll._close_timer!(timer)
+    task === nothing && return nothing
+    wait(task)
+    return nothing
+end
+
 function _resolve_with_deadline(
         d::HostResolver,
         network::AbstractString,
@@ -590,7 +636,56 @@ function _resolve_with_deadline(
         deadline_ns::Int64,
     )::Vector{TCP.SocketEndpoint}
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
-    return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
+    now_ns = Int64(time_ns())
+    now_ns >= deadline_ns && throw(DNSTimeoutError(String(address)))
+    mtx = ReentrantLock()
+    condition = Threads.Condition(mtx)
+    done = Ref(false)
+    timed_out = Ref(false)
+    result_ref = Ref{Union{Nothing, Vector{TCP.SocketEndpoint}, Exception}}(nothing)
+    timer, timer_task = _spawn_timer_task(deadline_ns) do
+        lock(mtx)
+        try
+            done[] && return nothing
+            timed_out[] = true
+            done[] = true
+            notify(condition)
+        finally
+            unlock(mtx)
+        end
+        return nothing
+    end
+    errormonitor(Threads.@spawn begin
+        result = try
+            resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
+        catch err
+            _as_exception(err)
+        end
+        lock(mtx)
+        try
+            done[] && return nothing
+            result_ref[] = result
+            done[] = true
+            notify(condition)
+        finally
+            unlock(mtx)
+        end
+        return nothing
+    end)
+    lock(mtx)
+    try
+        while !done[]
+            wait(condition)
+        end
+    finally
+        unlock(mtx)
+        _close_timer_task!(timer, timer_task)
+    end
+    timed_out[] && throw(DNSTimeoutError(String(address)))
+    result = result_ref[]
+    result === nothing && throw(DNSTimeoutError(String(address)))
+    result isa Exception && throw(result)
+    return result::Vector{TCP.SocketEndpoint}
 end
 
 function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining::Int)::Int64
@@ -606,7 +701,18 @@ function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining
 end
 
 function _partition_addrs(addrs::Vector{TCP.SocketEndpoint})::Tuple{Vector{TCP.SocketEndpoint}, Vector{TCP.SocketEndpoint}}
-    return addrs, TCP.SocketEndpoint[]
+    isempty(addrs) && return TCP.SocketEndpoint[], TCP.SocketEndpoint[]
+    primary_is_v4 = _is_ipv4(addrs[1])
+    primaries = TCP.SocketEndpoint[]
+    fallbacks = TCP.SocketEndpoint[]
+    for addr in addrs
+        if _is_ipv4(addr) == primary_is_v4
+            push!(primaries, addr)
+        else
+            push!(fallbacks, addr)
+        end
+    end
+    return primaries, fallbacks
 end
 
 @inline function _prefer_ipv4_first!(addrs::Vector{TCP.SocketEndpoint}, policy::ResolverPolicy)
@@ -654,6 +760,12 @@ function _mark_connect_done!(state::DNSRaceState)
         end
         return true
     end
+end
+
+struct DNSParallelResult
+    primary::Bool
+    conn::Union{Nothing, TCP.Conn}
+    err::Union{Nothing, Exception}
 end
 
 function _resolve_serial(
@@ -722,6 +834,89 @@ function _resolve_serial(
     return nothing, first_err::Exception
 end
 
+function _resolve_parallel(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        primaries::Vector{TCP.SocketEndpoint},
+        fallbacks::Vector{TCP.SocketEndpoint},
+        deadline_ns::Int64,
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+    state = DNSRaceState()
+    events = Channel{Union{DNSParallelResult, Symbol}}(4)
+    @inline function _emit_event!(event::Union{DNSParallelResult, Symbol})
+        try
+            put!(events, event)
+        catch err
+            ex = _as_exception(err)
+            ex isa InvalidStateException || rethrow(err)
+        end
+        return nothing
+    end
+    function _start_racer(primary::Bool, addrs::Vector{TCP.SocketEndpoint})
+        return errormonitor(Threads.@spawn begin
+            conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
+            _emit_event!(DNSParallelResult(primary, conn, err))
+            return nothing
+        end)
+    end
+    _start_racer(true, primaries)
+    delay_ns = _effective_fallback_delay_ns(d)
+    fallback_timer, fallback_timer_task = _spawn_timer_task(Int64(time_ns()) + delay_ns) do
+        _emit_event!(:fallback_timer)
+    end
+    primary_done = false
+    fallback_done = false
+    fallback_started = false
+    primary_err::Union{Nothing, Exception} = nothing
+    fallback_err::Union{Nothing, Exception} = nothing
+    try
+        while true
+            event = take!(events)
+            if event === :fallback_timer
+                if !fallback_started && !(@atomic :acquire state.done)
+                    fallback_started = true
+                    _start_racer(false, fallbacks)
+                end
+                continue
+            end
+            result = event::DNSParallelResult
+            if result.conn !== nothing
+                _mark_connect_done!(state)
+                return result.conn, nothing
+            end
+            if result.primary
+                primary_done = true
+                if primary_err === nothing
+                    primary_err = result.err
+                end
+                if !fallback_started && !(@atomic :acquire state.done)
+                    fallback_started = true
+                    _close_timer_task!(fallback_timer, fallback_timer_task)
+                    _start_racer(false, fallbacks)
+                end
+            else
+                fallback_done = true
+                if fallback_err === nothing
+                    fallback_err = result.err
+                end
+            end
+            if primary_done && fallback_done
+                primary_err === nothing && (primary_err = fallback_err)
+                primary_err === nothing && (primary_err = AddressError("missing address", String(address)))
+                _mark_connect_done!(state)
+                return nothing, primary_err::Exception
+            end
+        end
+    finally
+        _close_timer_task!(fallback_timer, fallback_timer_task)
+        try
+            close(events)
+        catch
+        end
+    end
+end
+
 function connect(
         d::HostResolver,
         network::AbstractString,
@@ -749,7 +944,7 @@ function connect(
     conn = nothing
     err = nothing
     if _use_parallel_race(d, kind, fallbacks)
-        error("parallel race should not be used in this reproducer")
+        conn, err = _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
     else
         state = DNSRaceState()
         conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
