@@ -601,6 +601,7 @@ function _iocp_submit_connect!(registration::Registration, addrbuf::Vector{UInt8
     _ = registration
     _ = addrbuf
     _ = addrlen
+    pollnotify!(registration.write_waiter, PollWakeReason.READY)
     return Int32(0)
 end
 
