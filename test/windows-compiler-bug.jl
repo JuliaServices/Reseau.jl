@@ -612,6 +612,8 @@ function _iocp_cancel_mode!(registration::Registration, mode::PollMode.T)::Bool
 end
 
 function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
+    println("[windows-compiler-bug] enter IOPoll.connect!")
+    flush(stdout)
     _fd_write_lock!(fd)
     try
         preparewrite(fd.pd, fd.is_file)
@@ -858,6 +860,8 @@ function _wait_connect_complete!(
         remote_addr::SocketAddr,
         cancel_state = nothing,
     )
+    println("[windows-compiler-bug] enter _wait_connect_complete!")
+    flush(stdout)
     _connect_wait_register!(cancel_state, fd)
     try
         @static if Sys.iswindows()
@@ -925,23 +929,39 @@ function _connect_socketaddr_impl(
     println("[windows-compiler-bug] enter _connect_socketaddr_impl")
     flush(stdout)
     family = _addr_family(remote_addr)
+    println("[windows-compiler-bug] computed family")
+    flush(stdout)
     if local_addr !== nothing && _addr_family(local_addr) != family
         throw(ArgumentError("local and remote address families must match"))
     end
+    println("[windows-compiler-bug] local family check done")
+    flush(stdout)
     fd = open_tcp_fd!(; family = family)
+    println("[windows-compiler-bug] opened tcp fd")
+    flush(stdout)
     try
         if local_addr !== nothing
             SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
         elseif Sys.iswindows()
             _bind_connectex_local!(fd, family)
         end
+        println("[windows-compiler-bug] local bind step done")
+        flush(stdout)
         SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
+        println("[windows-compiler-bug] set nonblocking")
+        flush(stdout)
         @static if Sys.iswindows()
             IOPoll.register!(fd.pfd)
+            println("[windows-compiler-bug] registered with iopoll")
+            flush(stdout)
             if attempt_deadline != 0
                 IOPoll.set_write_deadline!(fd.pfd, attempt_deadline)
+                println("[windows-compiler-bug] set write deadline")
+                flush(stdout)
             end
             try
+                println("[windows-compiler-bug] before _wait_connect_complete!")
+                flush(stdout)
                 _wait_connect_complete!(fd, remote_addr, state)
             finally
                 if attempt_deadline != 0
