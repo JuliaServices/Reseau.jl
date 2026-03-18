@@ -532,12 +532,15 @@ end
             else
                 _nd_windows_debug("START testset: happy-eyeballs fallback launches immediately after primary error")
                 IP.shutdown!()
+                _nd_windows_debug("happy-eyeballs: shutdown complete")
                 listener = nothing
                 connected = nothing
                 accepted = nothing
                 try
+                    _nd_windows_debug("happy-eyeballs: listen start")
                     listener = NC.listen("tcp6", "[::1]:0"; backlog = 16)
                     port = Int(NC.addr(listener).port)
+                    _nd_windows_debug("happy-eyeballs: listener ready port=$(port)")
                     resolver = ND.StaticResolver(
                         hosts = Dict(
                             "dual.test" => NC.SocketEndpoint[
@@ -548,6 +551,7 @@ end
                     )
                     local_addr = NC.loopback_addr6(0)
                     accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    _nd_windows_debug("happy-eyeballs: accept task spawned")
                     connect_task = errormonitor(Threads.@spawn NC.connect(
                         "tcp",
                         "dual.test:$port";
@@ -555,10 +559,14 @@ end
                         local_addr = local_addr,
                         fallback_delay_ns = 5_000_000_000,
                     ))
+                    _nd_windows_debug("happy-eyeballs: connect task spawned")
                     @test _nd_wait_task_done(connect_task, 1.5) != :timed_out
+                    _nd_windows_debug("happy-eyeballs: connect task done=$(istaskdone(connect_task))")
                     @test _nd_wait_task_done(accept_task, 1.5) != :timed_out
+                    _nd_windows_debug("happy-eyeballs: accept task done=$(istaskdone(accept_task))")
                     connected = fetch(connect_task)
                     accepted = fetch(accept_task)
+                    _nd_windows_debug("happy-eyeballs: fetched both tasks")
                     @test connected isa NC.Conn
                     @test accepted isa NC.Conn
                 finally
