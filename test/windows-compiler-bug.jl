@@ -4899,6 +4899,20 @@ function _extract_package_module_source(name::AbstractString)::String
     return modsrc
 end
 
+function _extract_block(src::String, start_marker::String, stop_marker::String)::String
+    start_rng = findfirst(start_marker, src)
+    stop_rng = findfirst(stop_marker, src)
+    start_rng === nothing && error("start marker not found: $start_marker")
+    stop_rng === nothing && error("stop marker not found: $stop_marker")
+    return src[first(start_rng):prevind(src, first(stop_rng))]
+end
+
+function _rewrite_extracted_block(str::String, name::AbstractString)::String
+    str = replace(str, "..Reseau" => "..$(name)")
+    str = replace(str, "Main.Reseau" => "Main.$(name)")
+    return str
+end
+
 function _with_extracted_package(f::F) where {F}
     mktempdir() do dir
         name = "StandalonePkg"
@@ -4920,6 +4934,67 @@ function _with_extracted_package(f::F) where {F}
     end
 end
 
+function _with_split_extracted_package(f::F) where {F}
+    src = read(@__FILE__, String)
+    mktempdir() do dir
+        name = "StandalonePkgSplit"
+        uuid = uuid4()
+        pkgid = Base.PkgId(uuid, name)
+        compat = """
+        const ByteMemory = Vector{UInt8}
+        bytememory(n::Integer)::ByteMemory = Vector{UInt8}(undef, Int(n))
+        const HAS_CCALL_GCSAFE = false
+        macro gcsafe_ccall(expr)
+            return esc(expr)
+        end
+        """
+        root = """
+        module $name
+        export TCP, TLS
+        $compat
+        include("1_socket_ops.jl")
+        include("2_iopoll.jl")
+        include("3_tcp.jl")
+        include("4_host_resolvers.jl")
+        include("5_tls.jl")
+        end
+        """
+        write(
+            joinpath(dir, "Project.toml"),
+            "name = \"$name\"\nuuid = \"$(string(uuid))\"\nversion = \"0.1.0\"\n",
+        )
+        mkpath(joinpath(dir, "src"))
+        write(joinpath(dir, "src", "$name.jl"), root)
+        write(
+            joinpath(dir, "src", "1_socket_ops.jl"),
+            _rewrite_extracted_block(_extract_block(src, "module SocketOps", "module TCP"), name),
+        )
+        write(
+            joinpath(dir, "src", "2_iopoll.jl"),
+            _rewrite_extracted_block(_extract_block(src, "module IOPoll", "module SocketOps"), name),
+        )
+        write(
+            joinpath(dir, "src", "3_tcp.jl"),
+            _rewrite_extracted_block(_extract_block(src, "module TCP", "module HostResolvers"), name),
+        )
+        write(
+            joinpath(dir, "src", "4_host_resolvers.jl"),
+            _rewrite_extracted_block(_extract_block(src, "module HostResolvers", "module TLS"), name),
+        )
+        write(
+            joinpath(dir, "src", "5_tls.jl"),
+            _rewrite_extracted_block(_extract_block(src, "module TLS", "end # module Reseau"), name),
+        )
+        pushfirst!(LOAD_PATH, dir)
+        try
+            mod = Base.require(pkgid)
+            return f(mod)
+        finally
+            popfirst!(LOAD_PATH)
+        end
+    end
+end
+
 println("[windows-compiler-bug] julia threads: $(Threads.nthreads())")
 
 @test Reseau.TCP === TCP
@@ -4927,6 +5002,39 @@ println("[windows-compiler-bug] julia threads: $(Threads.nthreads())")
 
 _probe("extracted package kwcall + runtime") do
     _with_extracted_package() do mod
+        c = getproperty(mod, :TCP)
+        kwtt_v4 = (
+            NamedTuple{(:local_addr,), Tuple{getproperty(c, :SocketAddrV4)}},
+            typeof(getproperty(c, :connect)),
+            String,
+            String,
+        )
+        kwtt_v6 = (
+            NamedTuple{(:local_addr,), Tuple{getproperty(c, :SocketAddrV6)}},
+            typeof(getproperty(c, :connect)),
+            String,
+            String,
+        )
+        Base.precompile(Tuple{typeof(Core.kwcall), kwtt_v4...})
+        Base.code_typed(Core.kwcall, kwtt_v4)
+        Base.precompile(Tuple{typeof(Core.kwcall), kwtt_v6...})
+        Base.code_typed(Core.kwcall, kwtt_v6)
+        local_v4 = Base.invokelatest(getproperty(c, :loopback_addr), 0)
+        local_v6 = Base.invokelatest(getproperty(c, :loopback_addr6), 0)
+        try
+            Base.invokelatest(getproperty(c, :connect), "tcp", "127.0.0.1:1"; local_addr = local_v4)
+        catch
+        end
+        try
+            Base.invokelatest(getproperty(c, :connect), "tcp", "127.0.0.1:1"; local_addr = local_v6)
+        catch
+        end
+        return nothing
+    end
+end
+
+_probe("split package kwcall + runtime") do
+    _with_split_extracted_package() do mod
         c = getproperty(mod, :TCP)
         kwtt_v4 = (
             NamedTuple{(:local_addr,), Tuple{getproperty(c, :SocketAddrV4)}},
