@@ -215,9 +215,11 @@ module TCP
 using ..IOPoll
 using ..SocketOps
 
-export connect, SocketAddr, SocketAddrV4, SocketAddrV6, SocketEndpoint, Conn, ConnectCanceledError, loopback_addr, loopback_addr6, _connect_socketaddr_impl
+export connect, listen, accept, SocketAddr, SocketAddrV4, SocketAddrV6, SocketEndpoint, Conn, Listener, ConnectCanceledError, loopback_addr, any_addr, loopback_addr6, any_addr6, local_addr, remote_addr, addr, _connect_socketaddr_impl
 
 function connect end
+function listen end
+function accept end
 
 abstract type SocketAddr end
 
@@ -248,10 +250,18 @@ struct Conn
     fd::FD
 end
 
+struct Listener
+    fd::FD
+end
+
 struct ConnectCanceledError <: Exception end
 
 function loopback_addr(port::Integer)::SocketAddrV4
     return SocketAddrV4((UInt8(127), UInt8(0), UInt8(0), UInt8(1)), UInt16(port))
+end
+
+function any_addr(port::Integer)::SocketAddrV4
+    return SocketAddrV4((UInt8(0), UInt8(0), UInt8(0), UInt8(0)), UInt16(port))
 end
 
 function loopback_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
@@ -264,6 +274,10 @@ function loopback_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
         UInt16(port),
         UInt32(scope_id),
     )
+end
+
+function any_addr6(port::Integer; scope_id::Integer = 0)::SocketAddrV6
+    return SocketAddrV6(ntuple(_ -> UInt8(0), 16), UInt16(port), UInt32(scope_id))
 end
 
 @inline _connect_canceled(::Nothing)::Bool = false
@@ -415,16 +429,58 @@ function connect(remote_addr::SocketAddr, local_addr::Union{Nothing, SocketAddr}
     return _connect_socketaddr_impl(remote_addr, local_addr, Int64(0), nothing)
 end
 
+function listen(local_addr::SocketAddr; backlog::Integer = 128, reuseaddr::Bool = true)::Listener
+    _ = backlog
+    _ = reuseaddr
+    family = _addr_family(local_addr)
+    fd = open_tcp_fd!(; family = family)
+    try
+        SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
+        IOPoll.register!(fd.pfd)
+        fd.laddr = local_addr
+        return Listener(fd)
+    catch
+        close(fd)
+        rethrow()
+    end
+end
+
+function accept(listener::Listener)::Conn
+    child = _new_netfd(
+        Int32(2);
+        family = listener.fd.family,
+        sotype = listener.fd.sotype,
+        net = listener.fd.net,
+        is_connected = true,
+    )
+    child.laddr = listener.fd.laddr
+    child.raddr = loopback_addr(1)
+    return Conn(child)
+end
+
+function local_addr(conn::Conn)::Union{Nothing, SocketAddr}
+    return conn.fd.laddr
+end
+
+function remote_addr(conn::Conn)::Union{Nothing, SocketAddr}
+    return conn.fd.raddr
+end
+
+function addr(listener::Listener)::Union{Nothing, SocketAddr}
+    return listener.fd.laddr
+end
+
 end
 
 Base.close(fd::TCP.FD) = nothing
 Base.close(::TCP.Conn) = nothing
+Base.close(::TCP.Listener) = nothing
 
 module HostResolvers
 
 using ..IOPoll
 using ..TCP
-import ..TCP: connect
+import ..TCP: connect, listen
 
 struct AddressError <: Exception
     err::String
@@ -1273,6 +1329,49 @@ function connect(
         kwargs...,
     )::TCP.Conn
     return connect("tcp", address; kwargs...)
+end
+
+function listen(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString;
+        backlog::Integer = 128,
+        reuseaddr::Bool = true,
+    )::TCP.Listener
+    try
+        _network_kind(network)
+    catch err
+        throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
+    end
+    addrs = try
+        resolve_tcp_addrs(d.resolver, network, address; op = :listen, policy = d.policy)
+    catch err
+        throw(_wrap_op_error("listen", network, nothing, nothing, _as_exception(err)))
+    end
+    first_err::Union{Nothing, Exception} = nothing
+    for local_addr in addrs
+        try
+            return TCP.listen(local_addr; backlog = backlog, reuseaddr = reuseaddr)
+        catch err
+            first_err === nothing && (first_err = _as_exception(err))
+        end
+    end
+    throw(_wrap_op_error(
+        "listen",
+        network,
+        nothing,
+        isempty(addrs) ? nothing : addrs[1],
+        first_err === nothing ? AddressError("missing address", String(address)) : first_err::Exception,
+    ))
+end
+
+function listen(
+        network::AbstractString,
+        address::AbstractString;
+        backlog::Integer = 128,
+        reuseaddr::Bool = true,
+    )::TCP.Listener
+    return listen(HostResolver(), network, address; backlog = backlog, reuseaddr = reuseaddr)
 end
 
 end
