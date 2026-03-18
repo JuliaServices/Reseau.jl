@@ -1,0 +1,35 @@
+name: Windows Compiler Bug
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/windows-compiler-bug.yml'
+      - 'test/windows-compiler-bug.jl'
+  workflow_dispatch:
+
+jobs:
+  repro:
+    name: Julia 1 - windows-latest - x64 - t2 - compiler-bug
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      JULIA_NUM_THREADS: '2'
+      RESEAU_RUN_TLS_TESTS: '1'
+      RESEAU_RUN_NETWORK_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Run windows compiler bug reproducer
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --project=. --startup-file=no --history-file=no test/windows-compiler-bug.jl 2>&1 | tee compiler-bug.log
+          if grep -Eq 'Internal error: during type inference of|BoundsError\(a=Array\{Base\.Compiler\.TryCatchFrame' compiler-bug.log; then
+            echo 'Windows compiler bug reproduced'
+            exit 1
+          fi

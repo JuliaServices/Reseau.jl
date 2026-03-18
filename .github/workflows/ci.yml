@@ -4,6 +4,10 @@ on:
     branches: [main, master]
     tags: ["*"]
   pull_request:
+    paths-ignore:
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/windows-compiler-bug.yml'
+      - 'test/windows-compiler-bug.jl'
   workflow_dispatch:
 jobs:
   test:
