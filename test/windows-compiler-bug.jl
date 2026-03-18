@@ -664,6 +664,68 @@ end
     return addr isa TCP.SocketAddrV6
 end
 
+function _parse_ipv4_literal(host::AbstractString)::Union{Nothing, NTuple{4, UInt8}}
+    parts = split(String(host), '.')
+    length(parts) == 4 || return nothing
+    bytes = UInt8[]
+    for part in parts
+        isempty(part) && return nothing
+        v = tryparse(Int, part)
+        v === nothing && return nothing
+        (0 <= v <= 255) || return nothing
+        push!(bytes, UInt8(v))
+    end
+    return (bytes[1], bytes[2], bytes[3], bytes[4])
+end
+
+function _parse_ipv6_literal(host::AbstractString)::Union{Nothing, NTuple{16, UInt8}}
+    h = String(host)
+    h == "::1" || return nothing
+    return (
+        UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+        UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+        UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+        UInt8(0), UInt8(0), UInt8(0), UInt8(1),
+    )
+end
+
+function _split_host_zone(host::AbstractString)::Tuple{String, String}
+    s = String(host)
+    i = findlast(==('%'), s)
+    i === nothing && return s, ""
+    i == firstindex(s) && return s, ""
+    i == lastindex(s) && throw(AddressError("invalid scoped address zone", s))
+    return s[1:prevind(s, i)], s[nextind(s, i):end]
+end
+
+function _scope_id_from_zone(zone::AbstractString)::UInt32
+    z = String(zone)
+    isempty(z) && return UInt32(0)
+    numeric = tryparse(Int, z)
+    if numeric !== nothing
+        (numeric < 0 || numeric > typemax(UInt32)) && throw(AddressError("invalid scope id", z))
+        return UInt32(numeric)
+    end
+    throw(AddressError("unknown interface zone", z))
+end
+
+function _literal_host_addr(host::AbstractString)::Union{Nothing, TCP.SocketEndpoint}
+    h = String(host)
+    isempty(h) && return nothing
+    host_only, zone = _split_host_zone(h)
+    ip4 = _parse_ipv4_literal(host_only)
+    if ip4 !== nothing
+        isempty(zone) || throw(AddressError("invalid scoped address", h))
+        return TCP.SocketAddrV4(ip4::NTuple{4, UInt8}, 0x0000)
+    end
+    ip6 = _parse_ipv6_literal(host_only)
+    if ip6 !== nothing
+        scope_id = _scope_id_from_zone(zone)
+        return TCP.SocketAddrV6(ip6::NTuple{16, UInt8}, 0x0000, scope_id)
+    end
+    return nothing
+end
+
 function split_host_port(hostport::AbstractString)::Tuple{String, String}
     s = String(hostport)
     i = findlast(==(':'), s)
@@ -796,12 +858,8 @@ end
 
 function _resolve_system_host(host::AbstractString)::Vector{TCP.SocketEndpoint}
     h = String(host)
-    if h == "127.0.0.1"
-        return TCP.SocketEndpoint[TCP.loopback_addr(0)]
-    end
-    if h == "::1"
-        return TCP.SocketEndpoint[TCP.loopback_addr6(0)]
-    end
+    literal = _literal_host_addr(h)
+    literal === nothing || return TCP.SocketEndpoint[literal]
     throw(AddressError("lookup failed", h))
 end
 
@@ -907,6 +965,10 @@ function _resolve_host_ips(
         return _resolve_static_host(resolver::StaticResolver, network, host)
     end
     return _resolve_system_host(host)
+end
+
+function _resolve_host_ips(resolver::AbstractResolver, host::AbstractString)::Vector{TCP.SocketEndpoint}
+    return _resolve_host_ips(resolver, "tcp", host)
 end
 
 function _apply_policy_and_network(
