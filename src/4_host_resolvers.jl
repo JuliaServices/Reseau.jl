@@ -1292,7 +1292,7 @@ function _resolve_cached_host(
     end
     if stale_result !== nothing
         if refresh_needed
-            errormonitor(Threads.@spawn _refresh_cached_host!(resolver, key, String(network), h))
+            errormonitor(@async _refresh_cached_host!(resolver, key, String(network), h))
         end
         return stale_result::Vector{TCP.SocketEndpoint}
     end
@@ -1555,7 +1555,7 @@ end
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
     timer = IOPoll.TimerState(deadline_ns, Int64(0))
     IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
-    task = errormonitor(Threads.@spawn begin
+    task = errormonitor(@async begin
         IOPoll.waittimer(timer) || return nothing
         f()
         return nothing
@@ -1602,7 +1602,7 @@ function _resolve_with_deadline(
         end
         return nothing
     end
-    errormonitor(Threads.@spawn begin
+    errormonitor(@async begin
         result = try
             resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
         catch err
@@ -1799,7 +1799,7 @@ function _resolve_parallel(
         return nothing
     end
     function _start_racer(primary::Bool, addrs::Vector{TCP.SocketEndpoint})
-        return errormonitor(Threads.@spawn begin
+        return errormonitor(@async begin
             conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))
             return nothing
