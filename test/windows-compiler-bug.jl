@@ -4669,6 +4669,8 @@ handshake!(conn::Conn) = conn
 
 end
 
+using PrecompileTools: @compile_workload, @setup_workload
+
 const IP = IOPoll
 const SO = SocketOps
 const NC = TCP
@@ -4676,7 +4678,7 @@ const ND = HostResolvers
 const TL = TLS
 
 @inline function _pc_is_generating_output()::Bool
-    return false
+    return ccall(:jl_generating_output, Cint, ()) == 1
 end
 
 @inline function _pc_runtime_supported()::Bool
@@ -4684,17 +4686,22 @@ end
 end
 
 function _pc_socketpair_stream()
-    return Int32(-1), Int32(-1)
+    fds = Vector{Cint}(undef, 2)
+    ret = ccall(:socketpair, Cint, (Cint, Cint, Cint, Ptr{Cint}), Cint(1), Cint(1), Cint(0), pointer(fds))
+    ret == 0 || throw(SystemError("socketpair", Int(Base.Libc.errno())))
+    return fds[1], fds[2]
 end
 
-function _pc_close_fd(fd::Int32)
-    _ = fd
+function _pc_close_fd(fd::Cint)
+    fd < 0 && return nothing
+    ccall(:close, Cint, (Cint,), fd)
     return nothing
 end
 
-function _pc_write_byte(fd::Int32, b::UInt8)
-    _ = fd
-    _ = b
+function _pc_write_byte(fd::Cint, b::UInt8)
+    buf = Ref{UInt8}(b)
+    n = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd, buf, Csize_t(1))
+    n == Cssize_t(1) || throw(SystemError("write", Int(Base.Libc.errno())))
     return nothing
 end
 
@@ -4703,25 +4710,128 @@ function _pc_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
     return length(buf)
 end
 
-function _pc_wait_connect_ready!(fd::Int32)
-    _ = fd
+function _pc_wait_connect_ready!(fd::Cint)
+    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
+    try
+        IP.arm_waiter!(registration, IP.PollMode.WRITE)
+        IP.pollwait!(registration.write_waiter)
+    finally
+        IP.deregister!(fd)
+    end
     return nothing
 end
 
-function _pc_accept_with_retry!(listener::Int32)::Int32
-    _ = listener
-    return Int32(-1)
+function _pc_accept_with_retry!(listener::Cint)::Cint
+    for _ in 1:5000
+        accepted, _, errno = SO.try_accept_socket(listener)
+        accepted != -1 && return accepted
+        if errno == Int32(Base.Libc.EAGAIN) || errno == Int32(Base.Libc.EWOULDBLOCK)
+            yield()
+            continue
+        end
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("accept", Int(errno)))
+    end
+    throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
 function _pc_run_eventloops_workload!()
+    IP.__init__()
+    @assert isassigned(IP.POLLER)
+    waiter = IP.PollWaiter()
+    IP.pollnotify!(waiter)
+    IP.pollwait!(waiter)
+    _pc_runtime_supported() || return nothing
+    state = IP.Poller()
+    fd0 = Cint(-1)
+    fd1 = Cint(-1)
+    backend_open = false
+    try
+        errno = IP._backend_init!(state)
+        errno == Int32(0) || throw(SystemError("event loop backend init", Int(errno)))
+        backend_open = true
+        fd0, fd1 = _pc_socketpair_stream()
+        token = UInt64(1)
+        registration = IP.Registration(fd0, token, IP.PollMode.READWRITE, IP.PollWaiter(), IP.PollWaiter(), false)
+        state.registrations[fd0] = registration
+        state.registrations_by_token[token] = registration
+        errno = IP._backend_open_fd!(state, fd0, IP.PollMode.READWRITE, token)
+        errno == Int32(0) || throw(SystemError("event loop open fd", Int(errno)))
+        _pc_write_byte(fd1, 0x31)
+        errno = IP._backend_poll_once!(state, Int64(0))
+        errno == Int32(0) || throw(SystemError("event loop poll once", Int(errno)))
+        IP.pollwait!(registration.read_waiter)
+        errno = IP._backend_close_fd!(state, fd0)
+        errno == Int32(0) || throw(SystemError("event loop close fd", Int(errno)))
+    finally
+        _pc_close_fd(fd0)
+        _pc_close_fd(fd1)
+        backend_open && IP._backend_close!(state)
+    end
     return nothing
 end
 
 function _pc_run_internal_poll_workload!()
+    _pc_is_generating_output() && return nothing
+    _pc_runtime_supported() || return nothing
+    fd0, fd1 = _pc_socketpair_stream()
+    ipfd = IP.FD(fd0)
+    fd0 = Cint(-1)
+    try
+        IP._set_nonblocking!(ipfd.sysfd)
+        IP.register!(ipfd)
+        IP.set_read_deadline!(ipfd, time_ns() + 8_000_000)
+        try
+            IP.read!(ipfd, Vector{UInt8}(undef, 1))
+        catch err
+            err isa IP.DeadlineExceededError || rethrow(err)
+        end
+        IP.set_read_deadline!(ipfd, Int64(0))
+        _pc_write_byte(fd1, 0x66)
+        n = IP.read!(ipfd, Vector{UInt8}(undef, 1))
+        n == 1 || error("internal poll workload expected one-byte read")
+    finally
+        ipfd.sysfd >= 0 && close(ipfd)
+        _pc_close_fd(fd1)
+    end
     return nothing
 end
 
 function _pc_run_socket_ops_workload!()
+    _pc_is_generating_output() && return nothing
+    _pc_runtime_supported() || return nothing
+    listener = Cint(-1)
+    client = Cint(-1)
+    accepted = Cint(-1)
+    try
+        listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
+        SO.bind_socket(listener, SO.sockaddr_in_loopback(0))
+        SO.listen_socket(listener, 16)
+        bound = SO.get_socket_name_in(listener)
+        port = Int(SO.sockaddr_in_port(bound))
+        client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        errno = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
+        if errno != Int32(0) && errno != Int32(Base.Libc.EISCONN)
+            if errno != Int32(Base.Libc.EINPROGRESS) && errno != Int32(Base.Libc.EALREADY) && errno != Int32(Base.Libc.EINTR)
+                throw(SystemError("connect", Int(errno)))
+            end
+            _pc_wait_connect_ready!(client)
+            so_error = SO.get_socket_error(client)
+            so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
+        end
+        accepted = _pc_accept_with_retry!(listener)
+        payload = UInt8[0x31, 0x32]
+        nw = GC.@preserve payload SO.write_once!(client, pointer(payload), Csize_t(length(payload)))
+        nw == Cssize_t(length(payload)) || throw(ArgumentError("socket ops workload expected 2-byte write"))
+        recv_buf = Vector{UInt8}(undef, 2)
+        nr = GC.@preserve recv_buf SO.read_once!(accepted, pointer(recv_buf), Csize_t(length(recv_buf)))
+        nr == Cssize_t(length(recv_buf)) || throw(ArgumentError("socket ops workload expected 2-byte read"))
+    finally
+        accepted >= 0 && SO.close_socket_nothrow(accepted)
+        client >= 0 && SO.close_socket_nothrow(client)
+        listener >= 0 && SO.close_socket_nothrow(listener)
+    end
     return nothing
 end
 
@@ -4793,8 +4903,9 @@ function _pc_run_host_resolvers_workload!()
 end
 
 function _pc_tls_resource_file(name::AbstractString)::Union{Nothing, String}
-    _ = name
-    return nothing
+    pkg_root = normpath(joinpath(@__DIR__, ".."))
+    path = joinpath(pkg_root, "test", "resources", name)
+    return isfile(path) ? path : nothing
 end
 
 function _pc_run_tls_workload!()
@@ -4866,6 +4977,23 @@ function _pc_run_tls_workload!()
     return nothing
 end
 
+try
+    @setup_workload begin
+        IP.__init__()
+        @assert isassigned(IP.POLLER)
+        @compile_workload begin
+            _pc_run_eventloops_workload!()
+            _pc_run_internal_poll_workload!()
+            _pc_run_socket_ops_workload!()
+            _pc_run_tcp_workload!()
+            _pc_run_host_resolvers_workload!()
+            _pc_run_tls_workload!()
+        end
+    end
+catch err
+    @info "Ignoring an error that occurred during the precompilation workload" exception = (err, catch_backtrace())
+end
+
 end # module Reseau
 
 using .Reseau: TCP, TLS
@@ -4894,9 +5022,7 @@ function _extract_package_module_source(name::AbstractString)::String
     stop_rng === nothing && error("module Reseau terminator not found")
     modsrc = src[first(start_rng):last(stop_rng)]
     modsrc = replace(modsrc, "module Reseau" => "module $(name)")
-    modsrc = replace(modsrc, "..Reseau" => "..$(name)")
-    modsrc = replace(modsrc, "Main.Reseau" => "Main.$(name)")
-    return modsrc
+    return _rewrite_extracted_block(modsrc, name)
 end
 
 function _extract_block(src::String, start_marker::String, stop_marker::String)::String
@@ -4908,6 +5034,11 @@ function _extract_block(src::String, start_marker::String, stop_marker::String):
 end
 
 function _rewrite_extracted_block(str::String, name::AbstractString)::String
+    str = replace(
+        str,
+        "using PrecompileTools: @compile_workload, @setup_workload" =>
+            "macro compile_workload(expr)\n    return esc(expr)\nend\n\nmacro setup_workload(expr)\n    return esc(expr)\nend",
+    )
     str = replace(str, "..Reseau" => "..$(name)")
     str = replace(str, "Main.Reseau" => "Main.$(name)")
     return str
@@ -4928,7 +5059,17 @@ function _with_extracted_package(f::F) where {F}
         pkgid = Base.PkgId(uuid, name)
         write(
             joinpath(dir, "Project.toml"),
-            "name = \"$name\"\nuuid = \"$(string(uuid))\"\nversion = \"0.1.0\"\n",
+            """
+            name = "$name"
+            uuid = "$(string(uuid))"
+            version = "0.1.0"
+
+            [deps]
+            PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+
+            [compat]
+            PrecompileTools = "1.2"
+            """,
         )
         mkpath(joinpath(dir, "src"))
         write(joinpath(dir, "src", "$name.jl"), _extract_package_module_source(name))
@@ -4969,7 +5110,17 @@ function _with_split_extracted_package(f::F) where {F}
         """
         write(
             joinpath(dir, "Project.toml"),
-            "name = \"$name\"\nuuid = \"$(string(uuid))\"\nversion = \"0.1.0\"\n",
+            """
+            name = "$name"
+            uuid = "$(string(uuid))"
+            version = "0.1.0"
+
+            [deps]
+            PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+
+            [compat]
+            PrecompileTools = "1.2"
+            """,
         )
         mkpath(joinpath(dir, "src"))
         write(joinpath(dir, "src", "$name.jl"), root)
@@ -4991,7 +5142,10 @@ function _with_split_extracted_package(f::F) where {F}
         )
         write(
             joinpath(dir, "src", "5_tls.jl"),
-            _rewrite_extracted_block(_extract_block(src, "module TLS", "end # module Reseau"), name),
+            _rewrite_extracted_block(
+                _extract_block(src, "module TLS", "using PrecompileTools: @compile_workload, @setup_workload"),
+                name,
+            ),
         )
         pushfirst!(LOAD_PATH, dir)
         try
@@ -5028,12 +5182,22 @@ function _write_full_split_extracted_package(dir::AbstractString, name::Abstract
     end
     """
     helpers = _rewrite_extracted_block(
-        _extract_tail_block(src, "const IP = IOPoll", "end # module Reseau"),
+        _extract_tail_block(src, "using PrecompileTools: @compile_workload, @setup_workload", "end # module Reseau"),
         name,
     )
     write(
         joinpath(dir, "Project.toml"),
-        "name = \"$name\"\nuuid = \"$(string(uuid))\"\nversion = \"0.1.0\"\n",
+        """
+        name = "$name"
+        uuid = "$(string(uuid))"
+        version = "0.1.0"
+
+        [deps]
+        PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+
+        [compat]
+        PrecompileTools = "1.2"
+        """,
     )
     mkpath(joinpath(dir, "src"))
     write(joinpath(dir, "src", "$name.jl"), root)
@@ -5056,7 +5220,10 @@ function _write_full_split_extracted_package(dir::AbstractString, name::Abstract
     )
     write(
         joinpath(dir, "src", "5_tls.jl"),
-        _rewrite_extracted_block(_extract_block(src, "module TLS", "const IP = IOPoll"), name),
+        _rewrite_extracted_block(
+            _extract_block(src, "module TLS", "using PrecompileTools: @compile_workload, @setup_workload"),
+            name,
+        ),
     )
     write(joinpath(dir, "src", "6_precompile_workload.jl"), helpers)
     return pkgid
@@ -5082,6 +5249,7 @@ function _run_full_split_extracted_package_subprocess()::Nothing
         _write_full_split_extracted_package(dir, name)
         depot = joinpath(dir, "depot")
         mkpath(depot)
+        depot_path = join([depot; Base.DEPOT_PATH], Sys.iswindows() ? ';' : ':')
         precompile_script = """
         pushfirst!(LOAD_PATH, @__DIR__)
         using $name
@@ -5123,7 +5291,7 @@ function _run_full_split_extracted_package_subprocess()::Nothing
         write(probe_path, probe_script)
         precompile_cmd = `$(Base.julia_cmd()) --project=$(dir) --startup-file=no --history-file=no $(precompile_path)`
         probe_cmd = `$(Base.julia_cmd()) --project=$(dir) --startup-file=no --history-file=no $(probe_path)`
-        env = ("JULIA_DEPOT_PATH" => depot,)
+        env = ("JULIA_DEPOT_PATH" => depot_path,)
         run(setenv(precompile_cmd, env...))
         run(setenv(probe_cmd, env...))
     end
