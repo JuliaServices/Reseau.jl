@@ -5082,7 +5082,12 @@ function _run_full_split_extracted_package_subprocess()::Nothing
         _write_full_split_extracted_package(dir, name)
         depot = joinpath(dir, "depot")
         mkpath(depot)
-        script = """
+        precompile_script = """
+        pushfirst!(LOAD_PATH, @__DIR__)
+        using $name
+        nothing
+        """
+        probe_script = """
         pushfirst!(LOAD_PATH, @__DIR__)
         using $name
         const TCP = $name.TCP
@@ -5112,10 +5117,15 @@ function _run_full_split_extracted_package_subprocess()::Nothing
         end
         nothing
         """
-        script_path = joinpath(dir, "fresh-process-probe.jl")
-        write(script_path, script)
-        cmd = `$(Base.julia_cmd()) --project=$(dir) --startup-file=no --history-file=no $(script_path)`
-        run(setenv(cmd, "JULIA_DEPOT_PATH" => depot))
+        precompile_path = joinpath(dir, "fresh-process-precompile.jl")
+        probe_path = joinpath(dir, "fresh-process-probe.jl")
+        write(precompile_path, precompile_script)
+        write(probe_path, probe_script)
+        precompile_cmd = `$(Base.julia_cmd()) --project=$(dir) --startup-file=no --history-file=no $(precompile_path)`
+        probe_cmd = `$(Base.julia_cmd()) --project=$(dir) --startup-file=no --history-file=no $(probe_path)`
+        env = ("JULIA_DEPOT_PATH" => depot,)
+        run(setenv(precompile_cmd, env...))
+        run(setenv(probe_cmd, env...))
     end
     return nothing
 end
