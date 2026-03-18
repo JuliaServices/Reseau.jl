@@ -922,6 +922,8 @@ function _connect_socketaddr_impl(
         attempt_deadline::Int64,
         state,
     )::Conn
+    println("[windows-compiler-bug] enter _connect_socketaddr_impl")
+    flush(stdout)
     family = _addr_family(remote_addr)
     if local_addr !== nothing && _addr_family(local_addr) != family
         throw(ArgumentError("local and remote address families must match"))
@@ -1826,6 +1828,8 @@ function _resolve_serial(
         deadline_ns::Int64,
         state::DNSRaceState,
     )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+    println("[windows-compiler-bug] enter _resolve_serial")
+    flush(stdout)
     _ = network
     first_err::Union{Nothing, Exception} = nothing
     for (i, remote_addr) in pairs(addrs)
@@ -1849,6 +1853,8 @@ function _resolve_serial(
                     return nothing, first_err
                 end
                 try
+                    println("[windows-compiler-bug] before _connect_socketaddr_impl")
+                    flush(stdout)
                     conn = TCP._connect_socketaddr_impl(remote_addr, d.local_addr, attempt_deadline, state)
                     if d.local_addr === nothing && _is_self_connect(conn) && attempt < max_attempts
                         close(conn)
@@ -1972,6 +1978,8 @@ function connect(
         network::AbstractString,
         address::AbstractString,
     )::TCP.Conn
+    println("[windows-compiler-bug] enter HostResolvers.connect")
+    flush(stdout)
     deadline_ns = _connect_deadline_ns(d)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
@@ -1986,6 +1994,8 @@ function connect(
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
+    println("[windows-compiler-bug] resolved addrs")
+    flush(stdout)
     if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, DNSTimeoutError(String(address))))
     end
