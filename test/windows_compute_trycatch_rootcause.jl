@@ -261,6 +261,112 @@ function install_fixed_compute_trycatch!()
     return nothing
 end
 
+function install_fixed_inference_state!()
+    @eval CC begin
+        function InferenceState(
+            result::InferenceResult,
+            src::Core.CodeInfo,
+            cache_mode::UInt8,
+            interp::AbstractInterpreter,
+        )
+            mi = result.linfo
+            world = get_inference_world(interp)
+            if world == typemax(UInt)
+                error("Entering inference from a generated function with an invalid world")
+            end
+            def = mi.def
+            mod = isa(def, Method) ? def.module : def
+            sptypes = sptypes_from_meth_instance(mi)
+            code = src.code::Vector{Any}
+            cfg = compute_basic_blocks(code)
+            spec_info = SpecInfo(src)
+
+            currbb = currpc = 1
+            ip = BitSet(1)
+            handler_info = Main.compute_trycatch_fixed(code, nothing, TryCatchFrame)
+            nssavalues = src.ssavaluetypes::Int
+            ssavalue_uses = find_ssavalue_uses(code, nssavalues)
+            nstmts = length(code)
+            edges = []
+            stmt_info = CallInfo[NoCallInfo() for _ = 1:nstmts]
+
+            nslots = length(src.slotflags)
+            slottypes = Vector{Any}(undef, nslots)
+            bb_vartables = Union{Nothing, VarTable}[nothing for _ = 1:length(cfg.blocks)]
+            bb_saw_latestworld = Bool[false for _ = 1:length(cfg.blocks)]
+            bb_vartable1 = bb_vartables[1] = VarTable(undef, nslots)
+            argtypes = result.argtypes
+
+            argtypes = va_process_argtypes(typeinf_lattice(interp), argtypes, src.nargs, src.isva)
+
+            nargtypes = length(argtypes)
+            for i = 1:nslots
+                argtyp = (i > nargtypes) ? Bottom : argtypes[i]
+                if argtyp === Bool && has_conditional(typeinf_lattice(interp))
+                    argtyp = Conditional(i, Const(true), Const(false))
+                end
+                slottypes[i] = argtyp
+                bb_vartable1[i] = VarState(argtyp, i > nargtypes)
+            end
+            src.ssavaluetypes = ssavaluetypes = Any[NOT_FOUND for _ = 1:nssavalues]
+            ssaflags = copy(src.ssaflags)
+
+            unreachable = BitSet()
+            pclimitations = IdSet{InferenceState}()
+            limitations = IdSet{InferenceState}()
+            cycle_backedges = Tuple{InferenceState, Int}[]
+            callstack = AbsIntState[]
+            tasks = WorkThunk[]
+
+            valid_worlds = WorldRange(1, get_world_counter())
+            bestguess = Bottom
+            exc_bestguess = Bottom
+            ipo_effects = EFFECTS_TOTAL
+
+            insert_coverage = should_insert_coverage(mod, src.debuginfo)
+            if insert_coverage
+                ipo_effects = Effects(ipo_effects; effect_free = ALWAYS_FALSE)
+            end
+
+            if def isa Method
+                nonoverlayed = is_nonoverlayed(def) ? ALWAYS_TRUE :
+                    is_effect_overridden(def, :consistent_overlay) ? CONSISTENT_OVERLAY :
+                    ALWAYS_FALSE
+                ipo_effects = Effects(ipo_effects; nonoverlayed)
+            end
+
+            restrict_abstract_call_sites = isa(def, Module)
+
+            parentid = frameid = cycleid = 0
+
+            this = new(
+                mi, WorldWithRange(world, valid_worlds), mod, sptypes, slottypes, src, cfg, spec_info,
+                currbb, currpc, ip, handler_info, ssavalue_uses, bb_vartables, bb_saw_latestworld, ssavaluetypes, ssaflags, edges, stmt_info,
+                tasks, pclimitations, limitations, cycle_backedges, callstack, parentid, frameid, cycleid,
+                result, unreachable, bestguess, exc_bestguess, ipo_effects,
+                _time_ns(), 0.0, 0, 0,
+                restrict_abstract_call_sites, cache_mode, insert_coverage,
+                interp,
+            )
+
+            if !iszero(cache_mode & CACHE_MODE_LOCAL)
+                push!(get_inference_cache(interp), result)
+            end
+            if !iszero(cache_mode & CACHE_MODE_GLOBAL)
+                push!(callstack, this)
+                this.cycleid = this.frameid = length(callstack)
+            end
+
+            if src.min_world != 1 || src.max_world != typemax(UInt)
+                update_valid_age!(this, WorldRange(src.min_world, src.max_world))
+            end
+
+            return this
+        end
+    end
+    return nothing
+end
+
 function capture_stderr(f::F) where {F}
     path, io = mktemp()
     value = nothing
@@ -336,6 +442,7 @@ fixed_info = compute_trycatch_fixed(ci.code, nothing, CC.TryCatchFrame)
 println("[rootcause] fixed compute_trycatch handler_count=$(fixed_info === nothing ? 0 : length(fixed_info.handlers))")
 
 install_fixed_compute_trycatch!()
+install_fixed_inference_state!()
 patched = summarize_code_typed(
     "patched _connect_socketaddr_impl",
     NC._connect_socketaddr_impl,
