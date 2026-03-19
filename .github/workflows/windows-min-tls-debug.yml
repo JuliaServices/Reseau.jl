@@ -1,0 +1,30 @@
+name: Windows Min TLS Debug
+
+on:
+  push:
+    branches:
+      - codex/windows-min-codeunits-debug
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-min-tls:
+    name: Julia min - windows-latest - x64 - tls-debug
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      JULIA_NUM_THREADS: 1
+      RESEAU_RUN_TLS_TESTS: '1'
+      RESEAU_RUN_NETWORK_TESTS: '1'
+      RESEAU_TEST_ONLY: tls_tests.jl
+      RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
+      RESEAU_TRIM_BUNDLE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: 'min'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
