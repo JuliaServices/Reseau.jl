@@ -867,9 +867,7 @@ function Base.write(conn::Conn, buf::StridedVector{UInt8})::Int
 end
 
 function Base.write(conn::Conn, buf::Base.CodeUnits{UInt8,<:AbstractString})::Int
-    GC.@preserve buf begin
-        return Int(Base.unsafe_write(conn, pointer(buf), UInt(length(buf))))
-    end
+    return write(conn, buf.s)
 end
 
 function Base.write(conn::Conn, buf::AbstractVector{UInt8})::Int
