@@ -36,7 +36,7 @@ end
                 laddr = NC.addr(listener)
                 @test laddr isa NC.SocketAddrV4
                 @test (laddr::NC.SocketAddrV4).port > 0
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 pre = _nc_wait_task_done(accept_task, 0.05)
                 @test pre == :timed_out
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
@@ -96,7 +96,7 @@ end
             try
                 listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect("tcp", "127.0.0.1:$(Int(laddr.port))"; local_addr = NC.loopback_addr(0))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -128,7 +128,7 @@ end
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -170,7 +170,7 @@ end
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -206,7 +206,7 @@ end
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -282,7 +282,7 @@ end
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
                 status = _nc_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
@@ -309,7 +309,7 @@ end
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
@@ -341,7 +341,7 @@ end
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
                 status = _nc_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
@@ -397,7 +397,7 @@ end
             try
                 listener = NC.listen(NC.loopback_addr(0); backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = errormonitor(@async NC.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server = fetch(accept_task)
