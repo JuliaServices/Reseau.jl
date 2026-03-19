@@ -1,0 +1,125 @@
+name: Windows ICE Precompile Probe
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-ice-probe:
+    name: Julia 1 - windows-latest - x64 - t${{ matrix.threads }} - ${{ matrix.scenario }}
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [baseline, explicit-precompile]
+        threads: [1, 2]
+    env:
+      JULIA_NUM_THREADS: ${{ matrix.threads }}
+      RESEAU_RUN_TLS_TESTS: '1'
+      RESEAU_RUN_NETWORK_TESTS: '1'
+      RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
+      RESEAU_TRIM_BUNDLE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+          arch: x64
+      - name: Prepare isolated depot
+        shell: pwsh
+        run: |
+          $depot = Join-Path $env:RUNNER_TEMP "reseau-ice-${{ matrix.scenario }}-t${{ matrix.threads }}"
+          if (Test-Path $depot) {
+            Remove-Item -Recurse -Force $depot
+          }
+          New-Item -ItemType Directory -Path $depot | Out-Null
+          "JULIA_DEPOT_PATH=$depot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RESEAU_WINDOWS_ICE_SCENARIO=${{ matrix.scenario }}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Precompile package
+        shell: pwsh
+        run: |
+          if ("${{ matrix.scenario }}" -eq "explicit-precompile") {
+            $env:RESEAU_WINDOWS_ICE_PRECOMPILE_PROBE = "1"
+          }
+          & julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()' 2>&1 | Tee-Object -FilePath precompile.log
+      - name: Run public runtime probe
+        shell: pwsh
+        run: |
+          Remove-Item Env:RESEAU_WINDOWS_ICE_PRECOMPILE_PROBE -ErrorAction Ignore
+          & julia --project=. --startup-file=no --history-file=no test/windows_ice_precompile_probe.jl 2>&1 | Tee-Object -FilePath runtime-probe.log
+      - name: Run package test suite
+        shell: pwsh
+        run: |
+          & julia --project=. --startup-file=no --history-file=no -e 'using Pkg; Pkg.test(; coverage=false)' 2>&1 | Tee-Object -FilePath package-tests.log
+      - name: Summarize ICE counts
+        if: always()
+        shell: pwsh
+        run: |
+          function Get-IceFunctions([string]$Path) {
+            if (-not (Test-Path $Path)) {
+              return @()
+            }
+            $lines = Get-Content $Path
+            $hits = @()
+            for ($i = 0; $i -lt ($lines.Count - 1); $i++) {
+              if ($lines[$i] -match 'Internal error: during type inference of') {
+                $hits += $lines[$i + 1].Trim()
+              }
+            }
+            return $hits
+          }
+
+          function Get-IceCount([string]$Path) {
+            if (-not (Test-Path $Path)) {
+              return 0
+            }
+            return @((Select-String -Path $Path -Pattern 'Internal error: during type inference')).Count
+          }
+
+          $precompileCount = Get-IceCount "precompile.log"
+          $runtimeCount = Get-IceCount "runtime-probe.log"
+          $suiteCount = Get-IceCount "package-tests.log"
+
+          $runtimeLines = if (Test-Path "runtime-probe.log") { Get-Content "runtime-probe.log" } else { @() }
+          $pass2Index = -1
+          for ($i = 0; $i -lt $runtimeLines.Count; $i++) {
+            if ($runtimeLines[$i] -eq "[windows-ice-probe] pass=2 begin") {
+              $pass2Index = $i
+              break
+            }
+          }
+          if ($pass2Index -ge 0) {
+            $pass1File = Join-Path $env:RUNNER_TEMP "runtime-pass1.log"
+            $pass2File = Join-Path $env:RUNNER_TEMP "runtime-pass2.log"
+            $runtimeLines[0..($pass2Index - 1)] | Set-Content $pass1File
+            $runtimeLines[$pass2Index..($runtimeLines.Count - 1)] | Set-Content $pass2File
+            $runtimePass1Count = Get-IceCount $pass1File
+            $runtimePass2Count = Get-IceCount $pass2File
+          } else {
+            $runtimePass1Count = $runtimeCount
+            $runtimePass2Count = 0
+          }
+
+          "precompile_ice_count=$precompileCount"
+          "runtime_probe_ice_count=$runtimeCount"
+          "runtime_probe_pass1_ice_count=$runtimePass1Count"
+          "runtime_probe_pass2_ice_count=$runtimePass2Count"
+          "package_test_ice_count=$suiteCount"
+
+          $precompileFunctions = Get-IceFunctions "precompile.log" | Sort-Object -Unique
+          $runtimeFunctions = Get-IceFunctions "runtime-probe.log" | Sort-Object -Unique
+          $suiteFunctions = Get-IceFunctions "package-tests.log" | Sort-Object -Unique
+
+          if ($precompileFunctions.Count -gt 0) {
+            "precompile_unique_functions="
+            $precompileFunctions | ForEach-Object { "  $_" }
+          }
+          if ($runtimeFunctions.Count -gt 0) {
+            "runtime_probe_unique_functions="
+            $runtimeFunctions | ForEach-Object { "  $_" }
+          }
+          if ($suiteFunctions.Count -gt 0) {
+            "package_test_unique_functions="
+            $suiteFunctions | ForEach-Object { "  $_" }
+          }

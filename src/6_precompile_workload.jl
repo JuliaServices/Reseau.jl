@@ -16,6 +16,15 @@ end
     return Sys.isapple() || Sys.islinux()
 end
 
+@inline function _pc_windows_ice_probe_enabled()::Bool
+    return Sys.iswindows() && get(ENV, "RESEAU_WINDOWS_ICE_PRECOMPILE_PROBE", "0") == "1"
+end
+
+@inline function _pc_precompile_signature!(sig::Type{<:Tuple})
+    Base.precompile(sig)
+    return nothing
+end
+
 function _pc_socketpair_stream()
     fds = Vector{Cint}(undef, 2)
     ret = ccall(:socketpair, Cint, (Cint, Cint, Cint, Ptr{Cint}), Cint(1), Cint(1), Cint(0), pointer(fds))
@@ -307,11 +316,53 @@ function _pc_run_tls_workload!()
     return nothing
 end
 
+function _pc_precompile_windows_ice_signatures!()
+    _pc_windows_ice_probe_enabled() || return nothing
+
+    tcp_local_addr_v4 = NamedTuple{(:local_addr,), Tuple{NC.SocketAddrV4}}
+    tcp_local_addr_v6 = NamedTuple{(:local_addr,), Tuple{NC.SocketAddrV6}}
+    tcp_deadline = NamedTuple{(:deadline_ns,), Tuple{Int64}}
+    tcp_resolver_timeout_fallback = NamedTuple{
+        (:resolver, :timeout_ns, :fallback_delay_ns),
+        Tuple{ND.StaticResolver, Int64, Int64},
+    }
+
+    tls_direct_addr = NamedTuple{
+        (:verify_peer, :server_name, :handshake_timeout_ns),
+        Tuple{Bool, String, Int64},
+    }
+    tls_string_system = NamedTuple{
+        (:timeout_ns, :deadline_ns, :local_addr, :fallback_delay_ns, :resolver, :policy, :server_name, :verify_peer, :client_auth, :cert_file, :key_file, :ca_file, :client_ca_file, :alpn_protocols, :handshake_timeout_ns, :min_version, :max_version),
+        Tuple{Int64, Int64, Nothing, Int64, ND.SystemResolver, ND.ResolverPolicy, String, Bool, TL.ClientAuthMode.T, Nothing, Nothing, Nothing, Nothing, Vector{String}, Int64, UInt16, Nothing},
+    }
+    tls_string_singleflight = NamedTuple{
+        (:timeout_ns, :deadline_ns, :local_addr, :fallback_delay_ns, :resolver, :policy, :server_name, :verify_peer, :client_auth, :cert_file, :key_file, :ca_file, :client_ca_file, :alpn_protocols, :handshake_timeout_ns, :min_version, :max_version),
+        Tuple{Int64, Int64, Nothing, Int64, ND.SingleflightResolver{ND.SystemResolver}, ND.ResolverPolicy, String, Bool, TL.ClientAuthMode.T, Nothing, Nothing, Nothing, Nothing, Vector{String}, Int64, UInt16, Nothing},
+    }
+
+    @info "Running Windows ICE precompile signature probe"
+    _pc_precompile_signature!(Tuple{typeof(NC.connect), NC.SocketAddrV4})
+    _pc_precompile_signature!(Tuple{typeof(Core.kwcall), tcp_local_addr_v4, typeof(NC.connect), String, String})
+    _pc_precompile_signature!(Tuple{typeof(Core.kwcall), tcp_local_addr_v6, typeof(NC.connect), String, String})
+    _pc_precompile_signature!(Tuple{typeof(Core.kwcall), tcp_deadline, typeof(NC.connect), String, String})
+    _pc_precompile_signature!(Tuple{typeof(Core.kwcall), tcp_resolver_timeout_fallback, typeof(NC.connect), String, String})
+    _pc_precompile_signature!(Tuple{typeof(NC._connect_socketaddr_impl), NC.SocketAddrV4, NC.SocketAddrV4, Int64, ND.DNSRaceState})
+    _pc_precompile_signature!(Tuple{typeof(NC._connect_socketaddr_impl), NC.SocketAddrV6, NC.SocketAddrV6, Int64, ND.DNSRaceState})
+    _pc_precompile_signature!(Tuple{typeof(NC._connect_socketaddr_impl), NC.SocketAddrV6, Nothing, Int64, ND.DNSRaceState})
+
+    _pc_precompile_signature!(Tuple{typeof(TL.connect), String, String})
+    _pc_precompile_signature!(Tuple{typeof(Core.kwcall), tls_direct_addr, typeof(TL.connect), NC.SocketAddrV4, NC.SocketAddrV4})
+    _pc_precompile_signature!(Tuple{typeof(Core.kwcall), tls_string_system, typeof(TL.connect), String, String})
+    _pc_precompile_signature!(Tuple{typeof(Core.kwcall), tls_string_singleflight, typeof(TL.connect), String, String})
+    return nothing
+end
+
 try
     @setup_workload begin
         IP.__init__()
         @assert isassigned(IP.POLLER)
         @compile_workload begin
+            _pc_precompile_windows_ice_signatures!()
             _pc_run_eventloops_workload!()
             _pc_run_internal_poll_workload!()
             _pc_run_socket_ops_workload!()
