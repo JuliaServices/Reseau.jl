@@ -159,6 +159,138 @@ function debug_compute_trycatch(code::Vector{Any}, bbs::Union{Vector{CC.BasicBlo
     return false
 end
 
+function compute_trycatch_fixed(
+    code::Vector{Any},
+    bbs::Union{Vector{CC.BasicBlock}, Nothing},
+    ::Type{Handler},
+) where {Handler}
+    n = length(code)
+    ip = BitSet()
+    ip.offset = 0
+    push!(ip, n + 1)
+    handler_info = nothing
+
+    for pc = 1:n
+        stmt = code[pc]
+        if isa(stmt, Core.EnterNode)
+            (; handlers, handler_at) = handler_info =
+                (handler_info === nothing ? CC.HandlerInfo{Handler}(Handler[], fill((0, 0), n)) : handler_info)
+            l = stmt.catch_dest
+            (bbs !== nothing) && (l != 0) && (l = first(bbs[l].stmts))
+            push!(handlers, Handler(stmt, pc))
+            handler_id = length(handlers)
+            handler_at[pc + 1] = (handler_id, 0)
+            push!(ip, pc + 1)
+            if l != 0
+                handler_at[l] = (0, handler_id)
+                push!(ip, l)
+            end
+        end
+    end
+
+    handler_info === nothing && return nothing
+    (; handlers, handler_at) = handler_info
+
+    while true
+        pc = CC._bits_findnext(ip.bits, 0)::Int
+        pc > n && break
+        while true
+            pc_next = pc + 1
+            delete!(ip, pc)
+            cur_stacks = handler_at[pc]
+            stmt = code[pc]
+            if isa(stmt, Core.GotoNode)
+                pc_next = stmt.label
+                (bbs !== nothing) && (pc_next = first(bbs[pc_next].stmts))
+            elseif isa(stmt, Core.GotoIfNot)
+                l = stmt.dest::Int
+                (bbs !== nothing) && (l = first(bbs[l].stmts))
+                if handler_at[l] != cur_stacks
+                    handler_at[l] = cur_stacks
+                    push!(ip, l)
+                end
+            elseif isa(stmt, Core.ReturnNode)
+                break
+            elseif isa(stmt, Core.EnterNode)
+                l = stmt.catch_dest
+                (bbs !== nothing) && (l != 0) && (l = first(bbs[l].stmts))
+                if l != 0
+                    handler_at[l] = (cur_stacks[1], handler_at[l][2])
+                end
+                cur_stacks = (handler_at[pc_next][1], cur_stacks[2])
+            elseif isa(stmt, Expr)
+                head = stmt.head
+                if head === :leave
+                    cur_hand = cur_stacks[1]
+                    for arg in stmt.args
+                        arg === nothing && continue
+                        ssa = arg::Core.SSAValue
+                        enter_stmt = code[ssa.id]
+                        enter_stmt === nothing && continue
+                        @assert isa(enter_stmt, Core.EnterNode) "malformed :leave"
+                        cur_hand = handler_at[ssa.id][1]
+                    end
+                    cur_stacks = (cur_hand, cur_stacks[2])
+                    cur_stacks == (0, 0) && break
+                elseif head === :pop_exception
+                    cur_stacks = (cur_stacks[1], handler_at[(stmt.args[1]::Core.SSAValue).id][2])
+                    cur_stacks == (0, 0) && break
+                end
+            end
+
+            pc_next > n && break
+            if handler_at[pc_next] != cur_stacks
+                handler_at[pc_next] = cur_stacks
+            elseif !in(pc_next, ip)
+                break
+            end
+            pc = pc_next
+        end
+    end
+
+    @assert first(ip) == n + 1
+    return handler_info
+end
+
+function install_fixed_compute_trycatch!()
+    @eval CC begin
+        function (::ComputeTryCatch{Handler})(code::Vector{Any}, bbs::Union{Vector{BasicBlock}, Nothing}=nothing) where {Handler}
+            return Main.compute_trycatch_fixed(code, bbs, Handler)
+        end
+    end
+    return nothing
+end
+
+function capture_stderr(f::F) where {F}
+    path, io = mktemp()
+    value = nothing
+    err = nothing
+    try
+        redirect_stderr(io) do
+            try
+                value = f()
+            catch ex
+                err = ex
+            end
+        end
+    finally
+        close(io)
+    end
+    stderr = read(path, String)
+    rm(path; force = true)
+    return (; value, err, stderr)
+end
+
+function summarize_code_typed(label::AbstractString, f, argtypes::Type)
+    result = capture_stderr() do
+        Base.code_typed(f, argtypes; optimize = false)
+    end
+    typed_count = result.value === nothing ? 0 : length(result.value)
+    internal_error = occursin("Internal error: during type inference", result.stderr)
+    println("[rootcause] code_typed $label typed_count=$typed_count internal_error=$internal_error err=$(result.err === nothing ? "nothing" : sprint(showerror, result.err))")
+    return result
+end
+
 function analyze_method(name::AbstractString, f, argtypes::Type)
     println("[rootcause] ===== analyzing $name =====")
     cis = code_lowered(f, argtypes)
@@ -191,6 +323,25 @@ underflow_found |= analyze_method(
     NC._connect_socketaddr_impl,
     Tuple{NC.SocketAddrV4, Nothing, Int64, Nothing},
 )
+
+baseline = summarize_code_typed(
+    "baseline _connect_socketaddr_impl",
+    NC._connect_socketaddr_impl,
+    Tuple{NC.SocketAddrV4, Nothing, Int64, Nothing},
+)
+println("[rootcause] baseline stderr bytes=$(ncodeunits(baseline.stderr))")
+
+ci = only(code_lowered(NC._connect_socketaddr_impl, Tuple{NC.SocketAddrV4, Nothing, Int64, Nothing}))
+fixed_info = compute_trycatch_fixed(ci.code, nothing, CC.TryCatchFrame)
+println("[rootcause] fixed compute_trycatch handler_count=$(fixed_info === nothing ? 0 : length(fixed_info.handlers))")
+
+install_fixed_compute_trycatch!()
+patched = summarize_code_typed(
+    "patched _connect_socketaddr_impl",
+    NC._connect_socketaddr_impl,
+    Tuple{NC.SocketAddrV4, Nothing, Int64, Nothing},
+)
+println("[rootcause] patched stderr bytes=$(ncodeunits(patched.stderr))")
 
 underflow_found || error("expected a ComputeTryCatch underflow, but no underflow was reproduced")
 println("[rootcause] reproduced handler underflow")
