@@ -283,7 +283,7 @@ function Base.close(pd::PollState)
     finally
         unlock(pd.lock)
     end
-    was_pollable && pd.sysfd >= 0 && deregister!(pd.sysfd)
+    was_pollable && pd.sysfd >= 0 && deregister!(pd)
     return nothing
 end
 

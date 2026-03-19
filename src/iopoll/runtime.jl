@@ -256,6 +256,46 @@ function deregister!(fd::Integer)
 end
 
 """
+    deregister!(pd)
+
+Unregister the active runtime-poller registration that matches `pd`'s full
+descriptor identity.
+
+Unlike `deregister!(fd)`, this overload validates the current registration by
+token and `PollState` object identity before removing it. That prevents a stale
+`PollState` close from tearing down a newer registration that happens to reuse
+the same raw fd value after a shutdown/re-register cycle.
+"""
+function deregister!(pd::PollState)
+    isassigned(POLLER) || return nothing
+    state = POLLER[]
+    (@atomic :acquire state.running) || return nothing
+    registration = nothing
+    errno = Int32(0)
+    lock(state.lock)
+    try
+        (@atomic :acquire state.running) || return nothing
+        registration = get(state.registrations_by_token, pd.token, nothing)
+        if registration === nothing
+            return nothing
+        end
+        current = registration::Registration
+        current.fd == pd.sysfd || return nothing
+        current.pollstate === pd || return nothing
+        registered = get(state.registrations, pd.sysfd, nothing)
+        registered === current || return nothing
+        delete!(state.registrations, pd.sysfd)
+        delete!(state.registrations_by_token, current.token)
+        errno = _backend_close_fd!(state, pd.sysfd)
+    finally
+        unlock(state.lock)
+    end
+    registration === nothing || _notify_registration!(registration::Registration, PollMode.READWRITE, PollWakeReason.CANCELED)
+    errno == Int32(0) || _throw_errno("iopoll deregister", errno)
+    return nothing
+end
+
+"""
     arm_waiter!(registration, mode)
 
 Backend hook invoked immediately before waiting so platforms that need explicit

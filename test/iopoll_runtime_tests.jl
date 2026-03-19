@@ -372,6 +372,48 @@ end
             end
         end
         _el_log_test_progress("DONE: stale token suppression")
+        _el_log_test_progress("START: stale pollstate close preserves active registration")
+        @testset "stale pollstate close preserves active registration" begin
+            fd0, fd1 = _el_socketpair_stream()
+            waiter_task = nothing
+            try
+                registration = NP.register!(fd0; mode = NP.PollMode.READ)
+                stale_pd = NP.PollState(fd0, registration.token - UInt64(1))
+                @atomic :release stale_pd.pollable = true
+                close(stale_pd)
+                @test NP.current_registration(registration.pollstate) === registration
+                wait_ch = Channel{Nothing}(1)
+                waiter_task = errormonitor(@async begin
+                    NP.arm_waiter!(registration, NP.PollMode.READ)
+                    NP.pollwait!(registration.read_waiter)
+                    put!(wait_ch, nothing)
+                    return nothing
+                end)
+                sleep(0.02)
+                _el_write_byte(fd1, 0x55)
+                status = timedwait(() -> isready(wait_ch), 2.0; pollint = 0.001)
+                @test status != :timed_out
+                if status != :timed_out
+                    take!(wait_ch)
+                    wait(waiter_task)
+                    @test _el_read_byte(fd0) == 0x55
+                end
+                NP.deregister!(fd0)
+            finally
+                if waiter_task !== nothing && !istaskdone(waiter_task)
+                    try
+                        NP.deregister!(fd0)
+                    catch
+                    end
+                    @test _el_wait_task_done(waiter_task, 1.0) != :timed_out
+                end
+                waiter_task isa Task && istaskdone(waiter_task) && wait(waiter_task)
+                _el_close_fd(fd0)
+                _el_close_fd(fd1)
+                NP.shutdown!()
+            end
+        end
+        _el_log_test_progress("DONE: stale pollstate close preserves active registration")
         _el_log_test_progress("START: shutdown-safe control paths")
         @testset "shutdown-safe control paths" begin
             NP.init!()
