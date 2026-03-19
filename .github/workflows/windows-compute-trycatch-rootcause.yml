@@ -1,0 +1,25 @@
+name: Windows ComputeTryCatch Rootcause
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    name: Julia 1 - windows-latest - x64 - compute-trycatch-rootcause
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      JULIA_NUM_THREADS: 1
+      RESEAU_RUN_TLS_TESTS: '1'
+      RESEAU_RUN_NETWORK_TESTS: '1'
+      RESEAU_TRIM_BUNDLE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Run ComputeTryCatch root-cause probe
+        run: julia --project=. --startup-file=no --history-file=no test/windows_compute_trycatch_rootcause.jl
