@@ -1,9 +1,6 @@
 name: Windows Min TLS Debug
 
 on:
-  push:
-    branches:
-      - codex/windows-min-codeunits-debug
   workflow_dispatch:
 
 jobs:
