@@ -585,9 +585,6 @@ end
                         view_buf = Vector{UInt8}(undef, 3)
                         read!(conn, view_buf)
                         write(conn, view_buf)
-                        server_codeunits_buf = Vector{UInt8}(undef, 2)
-                        read!(conn, server_codeunits_buf)
-                        write(conn, server_codeunits_buf)
                         return conn
                     catch err
                         return err
@@ -609,10 +606,6 @@ end
                 recv_view_buf = Vector{UInt8}(undef, length(payload_view))
                 @test read!(client, recv_view_buf) === recv_view_buf
                 @test recv_view_buf == collect(payload_view)
-                @test write(client, codeunits("hi")) == 2
-                client_codeunits_buf = Vector{UInt8}(undef, 2)
-                @test read!(client, client_codeunits_buf) === client_codeunits_buf
-                @test String(client_codeunits_buf) == "hi"
                 @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
                 server_result = fetch(accept_task)
                 server_result isa Exception && throw(server_result)
@@ -620,6 +613,42 @@ end
                 state = TL.connection_state(client)
                 @test state.handshake_complete
                 @test !isempty(state.version)
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "write accepts string codeunits buffers" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    TL.set_read_deadline!(conn, time_ns() + 5_000_000_000)
+                    server_codeunits_buf = Vector{UInt8}(undef, 2)
+                    read!(conn, server_codeunits_buf)
+                    write(conn, server_codeunits_buf)
+                    return conn
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 10_000_000_000,
+                ))
+                TL.set_read_deadline!(client, time_ns() + 5_000_000_000)
+                @test write(client, codeunits("hi")) == 2
+                client_codeunits_buf = Vector{UInt8}(undef, 2)
+                @test read!(client, client_codeunits_buf) === client_codeunits_buf
+                @test String(client_codeunits_buf) == "hi"
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server = fetch(accept_task)
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
