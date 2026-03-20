@@ -629,8 +629,11 @@ Important behavior notes:
 Throws `EOFError` when the peer cleanly closes a stream whose
 `zero_read_is_eof` flag is set, `DeadlineExceededError` when the read deadline
 expires while waiting, and `SystemError` for OS-level read failures.
+
+`p` may be a `Vector{UInt8}` or any other mutable contiguous byte view accepted
+by `pointer`, such as `@view bytes[2:5]`.
 """
-function read!(fd::FD, p::Vector{UInt8})::Int
+function read!(fd::FD, p::MutableByteBuffer)::Int
     GC.@preserve p begin
         return _read_ptr_some!(fd, pointer(p), length(p))
     end

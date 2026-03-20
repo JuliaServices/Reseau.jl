@@ -125,6 +125,25 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "read accepts contiguous byte views" begin
+            fd0, fd1 = _ip_socketpair_stream()
+            ipfd = IP.FD(fd0)
+            fd0 = Cint(-1)
+            try
+                IP._set_nonblocking!(ipfd.sysfd)
+                IP.register!(ipfd)
+                _ip_write_byte(fd1, 0x6a)
+                backing = fill(UInt8(0x00), 3)
+                buf = @view backing[2:2]
+                n = IP.read!(ipfd, buf)
+                @test n == 1
+                @test backing == UInt8[0x00, 0x6a, 0x00]
+            finally
+                ipfd.sysfd >= 0 && close(ipfd)
+                _ip_close_fd(fd1)
+                IP.shutdown!()
+            end
+        end
         @testset "read deadline timeout" begin
             fd0, fd1 = _ip_socketpair_stream()
             ipfd = IP.FD(fd0)

@@ -13,7 +13,7 @@ module TLS
 
 using OpenSSL_jll
 using NetworkOptions
-using ..Reseau: ByteMemory
+using ..Reseau: ByteMemory, MutableByteBuffer
 using ..Reseau: @gcsafe_ccall
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
@@ -1089,7 +1089,7 @@ end
     return Int(ccall((:SSL_pending, _LIBSSL), Cint, (Ptr{Cvoid},), conn.ssl))
 end
 
-@inline function _read_some!(conn::Conn, buf::Vector{UInt8})::Int
+@inline function _read_some!(conn::Conn, buf::MutableByteBuffer)::Int
     GC.@preserve buf begin
         return _read_some!(conn, pointer(buf), length(buf))
     end
@@ -1231,15 +1231,45 @@ function _readbytes_some!(conn::Conn, buf::Vector{UInt8}, requested::Int)::Int
     return bytes_read
 end
 
+function _readbytes_all!(conn::Conn, buf::MutableByteBuffer, requested::Int)::Int
+    requested <= length(buf) || throw(ArgumentError("nb exceeds fixed-size buffer length"))
+    bytes_read = 0
+    while bytes_read < requested
+        n = try
+            GC.@preserve buf _read_some!(conn, pointer(buf, bytes_read + 1), requested - bytes_read)
+        catch err
+            ex = err::Exception
+            ex isa EOFError || rethrow(ex)
+            break
+        end
+        bytes_read += n
+    end
+    return bytes_read
+end
+
+function _readbytes_some!(conn::Conn, buf::MutableByteBuffer, requested::Int)::Int
+    requested <= length(buf) || throw(ArgumentError("nb exceeds fixed-size buffer length"))
+    return try
+        GC.@preserve buf _read_some!(conn, pointer(buf), requested)
+    catch err
+        ex = err::Exception
+        ex isa EOFError || rethrow(ex)
+        0
+    end
+end
+
 """
     read!(conn, buf) -> buf
 
 Read exactly `length(buf)` decrypted bytes into `buf` or throw `EOFError`.
 
+Because `Conn <: IO`, Base's generic `read!` implementation already supports
+mutable byte views like `@view bytes[2:5]` in addition to plain vectors.
+
 Use `readbytes!` or `readavailable` when you want a count-returning read that
 may stop early.
 """
-Base.read!(conn::Conn, buf::Vector{UInt8})
+Base.read!(conn::Conn, buf)
 
 """
     readbytes!(conn, buf, nb=length(buf); all::Bool=true) -> Int
@@ -1249,8 +1279,12 @@ Read up to `nb` decrypted bytes into `buf`, returning the byte count.
 If `all` is `true` (the default), the call keeps reading until `nb` bytes have
 been transferred, EOF is reached, or an error occurs. If `all` is `false`, at
 most one underlying TLS read is performed.
+
+Resizable `Vector{UInt8}` buffers grow when needed, matching Julia's standard
+`readbytes!` behavior. Fixed-size contiguous byte views must satisfy
+`nb <= length(buf)`.
 """
-function Base.readbytes!(conn::Conn, buf::Vector{UInt8}, nb::Integer = length(buf); all::Bool = true)::Int
+function Base.readbytes!(conn::Conn, buf::MutableByteBuffer, nb::Integer = length(buf); all::Bool = true)::Int
     Base.require_one_based_indexing(buf)
     requested = Int(nb)
     requested < 0 && throw(ArgumentError("nb must be >= 0"))

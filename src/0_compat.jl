@@ -2,9 +2,19 @@
 
 if VERSION < v"1.11"
     const ByteMemory = Vector{UInt8}
+    const MutableByteBuffer = Union{
+        Vector{UInt8},
+        Base.FastContiguousSubArray{UInt8,1,<:Array},
+    }
     bytememory(n::Integer)::ByteMemory = Vector{UInt8}(undef, Int(n))
 else
     const ByteMemory = Memory{UInt8}
+    const MutableByteBuffer = Union{
+        Vector{UInt8},
+        ByteMemory,
+        Base.FastContiguousSubArray{UInt8,1,<:Array},
+        Base.FastContiguousSubArray{UInt8,1,<:Memory},
+    }
     bytememory(n::Integer)::ByteMemory = Memory{UInt8}(undef, Int(n))
 end
 
