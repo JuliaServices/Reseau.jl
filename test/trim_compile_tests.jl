@@ -108,11 +108,12 @@ function _trim_use_bundle()::Bool
     return get(ENV, "RESEAU_TRIM_BUNDLE", default) == "1"
 end
 
-function _trim_output_path(output_name::String)::String
-    isfile(output_name) && return output_name
-    exe_path = "$(output_name).exe"
+function _trim_output_path(dir::String, output_name::String)::String
+    path = joinpath(dir, output_name)
+    isfile(path) && return path
+    exe_path = joinpath(dir, "$(output_name).exe")
     isfile(exe_path) && return exe_path
-    return output_name
+    return path
 end
 
 function _run_trim_case(project_path::String, script_file::String, output_name::String)
@@ -136,9 +137,9 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
             end
             @test trim_errors <= _TRIM_SAFE_ERROR_BUDGET
             @test trim_warnings >= 0
-            output_path = _trim_output_path(output_name)
             if trim_errors == 0
-                run_path = bundle_dir === nothing ? output_path : joinpath(bundle_dir, "bin", output_path)
+                run_dir = bundle_dir === nothing ? pwd() : joinpath(bundle_dir, "bin")
+                run_path = _trim_output_path(run_dir, output_name)
                 @test exit_code == 0
                 @test isfile(run_path)
                 run_cmd = `$(abspath(run_path))`
