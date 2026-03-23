@@ -310,6 +310,11 @@ end
                 registration1 = NP.register!(fd0; mode = NP.PollMode.READ)
                 token1 = registration1.token
                 NP.deregister!(fd0)
+                _el_close_fd(fd0)
+                _el_close_fd(fd1)
+                fd0 = Cint(-1)
+                fd1 = Cint(-1)
+                fd0, fd1 = _el_socketpair_stream()
                 registration2 = NP.register!(fd0; mode = NP.PollMode.READ)
                 token2 = registration2.token
                 @test token2 != token1
