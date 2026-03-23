@@ -377,14 +377,14 @@ function _apply_default_tcp_opts!(fd::FD)
     return nothing
 end
 
-function _wait_connect_complete!(
-        fd::FD,
-        remote_addr::SocketAddr,
-        cancel_state = nothing,
-    )
-    _connect_wait_register!(cancel_state, fd)
-    try
-        @static if Sys.iswindows()
+@static if Sys.iswindows()
+    function _wait_connect_complete!(
+            fd::FD,
+            remote_addr::SocketAddr,
+            cancel_state = nothing,
+        )
+        _connect_wait_register!(cancel_state, fd)
+        try
             sockaddr = _to_sockaddr(remote_addr)
             addrbuf = SocketOps.sockaddr_bytes(sockaddr)
             addrlen = Int32(sizeof(typeof(sockaddr)))
@@ -407,45 +407,57 @@ function _wait_connect_complete!(
                 _finalize_connected_addrs!(fd, remote_addr)
                 return nothing
             end
+        finally
+            _connect_wait_unregister!(cancel_state, fd)
         end
-        while true
-            if _connect_canceled(cancel_state)
-                throw(ConnectCanceledError())
-            end
-            try
-                # Non-blocking connect completion is detected by waiting for
-                # writability, then inspecting `SO_ERROR` to learn whether the
-                # connection actually succeeded.
-                IOPoll.waitwrite(fd.pfd.pd)
-            catch err
-                ex = err::Exception
-                if ex isa IOPoll.DeadlineExceededError && _connect_canceled(cancel_state)
+    end
+else
+    function _wait_connect_complete!(
+            fd::FD,
+            remote_addr::SocketAddr,
+            cancel_state = nothing,
+        )
+        _connect_wait_register!(cancel_state, fd)
+        try
+            while true
+                if _connect_canceled(cancel_state)
                     throw(ConnectCanceledError())
                 end
-                rethrow(ex)
-            end
-            so_error = SocketOps.get_socket_error(fd.pfd.sysfd)
-            _is_connect_pending_errno(so_error) && continue
-            if so_error == Int32(Base.Libc.EISCONN)
-                _finalize_connected_addrs!(fd, remote_addr)
-                return nothing
-            end
-            if so_error == Int32(0)
                 try
-                    _set_remote_addr!(fd)
+                    # Non-blocking connect completion is detected by waiting for
+                    # writability, then inspecting `SO_ERROR` to learn whether the
+                    # connection actually succeeded.
+                    IOPoll.waitwrite(fd.pfd.pd)
+                catch err
+                    ex = err::Exception
+                    if ex isa IOPoll.DeadlineExceededError && _connect_canceled(cancel_state)
+                        throw(ConnectCanceledError())
+                    end
+                    rethrow(ex)
+                end
+                so_error = SocketOps.get_socket_error(fd.pfd.sysfd)
+                _is_connect_pending_errno(so_error) && continue
+                if so_error == Int32(Base.Libc.EISCONN)
                     _finalize_connected_addrs!(fd, remote_addr)
                     return nothing
-                catch err
-                    if err isa SystemError && _is_temporary_unconnected(err)
-                        continue
-                    end
-                    rethrow(err)
                 end
+                if so_error == Int32(0)
+                    try
+                        _set_remote_addr!(fd)
+                        _finalize_connected_addrs!(fd, remote_addr)
+                        return nothing
+                    catch err
+                        if err isa SystemError && _is_temporary_unconnected(err)
+                            continue
+                        end
+                        rethrow(err)
+                    end
+                end
+                throw(SystemError("connect", Int(so_error)))
             end
-            throw(SystemError("connect", Int(so_error)))
+        finally
+            _connect_wait_unregister!(cancel_state, fd)
         end
-    finally
-        _connect_wait_unregister!(cancel_state, fd)
     end
 end
 
@@ -475,28 +487,47 @@ function open_tcp_fd!(; family::Cint = SocketOps.AF_INET)::FD
     return _new_netfd(sysfd; family = family, sotype = SocketOps.SOCK_STREAM, net = :tcp, is_connected = false)
 end
 
-function _connect_socketaddr_impl(
+@inline function _connect_socketaddr_family(
         remote_addr::SocketAddr,
         local_addr::Union{Nothing, SocketAddr},
-        connect_deadline_ns::Int64,
-        cancel_state,
-    )::Conn
+    )::Cint
     family = _addr_family(remote_addr)
     if local_addr !== nothing && _addr_family(local_addr) != family
         throw(ArgumentError("local and remote address families must match"))
     end
-    fd = open_tcp_fd!(; family = family)
+    return family
+end
+
+@inline function _clear_connect_write_deadline!(fd::FD, connect_deadline_ns::Int64)
+    connect_deadline_ns == 0 && return nothing
     try
-        if local_addr !== nothing
-            SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
-        elseif Sys.iswindows()
-            # ConnectEx requires the socket to be bound first, even when the user
-            # did not request a specific local address.
-            _bind_connectex_local!(fd, family)
-        end
-        # Defensive re-assert: keep connect path non-blocking even if platform state drifts.
-        SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
-        @static if Sys.iswindows()
+        IOPoll.set_write_deadline!(fd.pfd, Int64(0))
+    catch
+    end
+    return nothing
+end
+
+# Keep platform selection at top level so the active connect methods do not
+# lower an internal `@static` control-flow island inside nested exception paths.
+@static if Sys.iswindows()
+    function _connect_socketaddr_impl(
+            remote_addr::SocketAddr,
+            local_addr::Union{Nothing, SocketAddr},
+            connect_deadline_ns::Int64,
+            cancel_state,
+        )::Conn
+        family = _connect_socketaddr_family(remote_addr, local_addr)
+        fd = open_tcp_fd!(; family = family)
+        try
+            if local_addr !== nothing
+                SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
+            else
+                # ConnectEx requires the socket to be bound first, even when the user
+                # did not request a specific local address.
+                _bind_connectex_local!(fd, family)
+            end
+            # Defensive re-assert: keep connect path non-blocking even if platform state drifts.
+            SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
             IOPoll.register!(fd.pfd)
             if connect_deadline_ns != 0
                 IOPoll.set_write_deadline!(fd.pfd, connect_deadline_ns)
@@ -508,47 +539,57 @@ function _connect_socketaddr_impl(
                     cancel_state,
                 )
             finally
-                if connect_deadline_ns != 0
-                    try
-                        IOPoll.set_write_deadline!(fd.pfd, Int64(0))
-                    catch
-                    end
-                end
+                _clear_connect_write_deadline!(fd, connect_deadline_ns)
             end
             _apply_default_tcp_opts!(fd)
             return Conn(fd)
+        catch
+            close(fd)
+            rethrow()
         end
-        errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))
-        if errno == Int32(0) || errno == Int32(Base.Libc.EISCONN)
-            IOPoll.register!(fd.pfd)
-            _finalize_connected_addrs!(fd, remote_addr)
-            _apply_default_tcp_opts!(fd)
-            return Conn(fd)
-        end
-        _is_connect_pending_errno(errno) || throw(SystemError("connect", Int(errno)))
-        IOPoll.register!(fd.pfd)
-        if connect_deadline_ns != 0
-            IOPoll.set_write_deadline!(fd.pfd, connect_deadline_ns)
-        end
+    end
+else
+    function _connect_socketaddr_impl(
+            remote_addr::SocketAddr,
+            local_addr::Union{Nothing, SocketAddr},
+            connect_deadline_ns::Int64,
+            cancel_state,
+        )::Conn
+        family = _connect_socketaddr_family(remote_addr, local_addr)
+        fd = open_tcp_fd!(; family = family)
         try
-            _wait_connect_complete!(
-                fd,
-                remote_addr,
-                cancel_state,
-            )
-        finally
-            if connect_deadline_ns != 0
-                try
-                    IOPoll.set_write_deadline!(fd.pfd, Int64(0))
-                catch
-                end
+            if local_addr !== nothing
+                SocketOps.bind_socket(fd.pfd.sysfd, _to_sockaddr(local_addr))
             end
+            # Defensive re-assert: keep connect path non-blocking even if platform state drifts.
+            SocketOps.set_nonblocking!(fd.pfd.sysfd, true)
+            errno = SocketOps.connect_socket(fd.pfd.sysfd, _to_sockaddr(remote_addr))
+            if errno == Int32(0) || errno == Int32(Base.Libc.EISCONN)
+                IOPoll.register!(fd.pfd)
+                _finalize_connected_addrs!(fd, remote_addr)
+                _apply_default_tcp_opts!(fd)
+                return Conn(fd)
+            end
+            _is_connect_pending_errno(errno) || throw(SystemError("connect", Int(errno)))
+            IOPoll.register!(fd.pfd)
+            if connect_deadline_ns != 0
+                IOPoll.set_write_deadline!(fd.pfd, connect_deadline_ns)
+            end
+            try
+                _wait_connect_complete!(
+                    fd,
+                    remote_addr,
+                    cancel_state,
+                )
+            finally
+                _clear_connect_write_deadline!(fd, connect_deadline_ns)
+            end
+            _apply_default_tcp_opts!(fd)
+            return Conn(fd)
+        catch
+            close(fd)
+            rethrow()
         end
-        _apply_default_tcp_opts!(fd)
-        return Conn(fd)
-    catch
-        close(fd)
-        rethrow()
     end
 end
 
