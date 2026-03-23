@@ -1,10 +1,12 @@
 using Test
 using Reseau
+using Libdl
 
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
+const _ND_LIBUV = Libdl.dlpath("libuv")
 
 struct _SlowResolver <: ND.AbstractResolver
     delay_s::Float64
@@ -17,11 +19,7 @@ struct _ThreadcallResolver <: ND.AbstractResolver
 end
 
 function _nd_blocking_sleep_ms(delay_ms::UInt32)
-    @static if Sys.iswindows()
-        Base.@threadcall((:Sleep, "kernel32"), Cvoid, (UInt32,), delay_ms)
-    else
-        Base.@threadcall(:usleep, Cint, (Cuint,), Cuint(delay_ms * UInt32(1000)))
-    end
+    Base.@threadcall((:uv_sleep, _ND_LIBUV), Cvoid, (UInt32,), delay_ms)
     return nothing
 end
 
@@ -182,12 +180,6 @@ function _nd_ipv6_supported()::Bool
     end
 end
 
-@inline function _nd_windows_threaded_ci()::Bool
-    return Sys.iswindows() && Threads.nthreads() > 1 && get(ENV, "GITHUB_ACTIONS", "false") == "true"
-end
-
-const _ND_WINDOWS_WARMED = Ref(false)
-
 function _nd_connect_timeout(address::AbstractString, timeout_ns::Integer)::NC.Conn
     return NC.connect("tcp", String(address); timeout_ns = Int64(timeout_ns))
 end
@@ -222,80 +214,22 @@ function _nd_connect_singleflight(
     )
 end
 
-function _nd_warm_windows_kw_dial_paths!()
-    _nd_windows_threaded_ci() || return nothing
-    _ND_WINDOWS_WARMED[] && return nothing
-    _ND_WINDOWS_WARMED[] = true
-    listener = nothing
-    client = nothing
-    server = nothing
-    try
-        listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 4)
-        laddr = NC.addr(listener)::NC.SocketAddrV4
-        accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-        client = _nd_connect_timeout(ND.join_host_port("127.0.0.1", Int(laddr.port)), 3_000_000_000)
-        @test _nd_wait_task_done(accept_task, 3.0) != :timed_out
-        server = fetch(accept_task)
-    finally
-        _nd_close_quiet!(server)
-        _nd_close_quiet!(client)
-        _nd_close_quiet!(listener)
-        IP.shutdown!()
-    end
-    if _nd_ipv6_supported()
-        listener = nothing
-        client = nothing
-        server = nothing
+function _nd_named_scope_zone()::Union{Nothing, String}
+    candidates = String[]
+    if isdefined(ND, :_update_windows_zone_cache!) && isdefined(ND, :_WINDOWS_ZONE_CACHE_TO_INDEX)
         try
-            listener = NC.listen("tcp6", "[::1]:0"; backlog = 4)
-            port = Int((NC.addr(listener)::NC.SocketAddrV6).port)
-            resolver = ND.StaticResolver(hosts = Dict(
-                "warmup.test" => NC.SocketEndpoint[
-                    NC.loopback_addr(port),
-                    NC.loopback_addr6(port),
-                ],
-            ))
-            accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-            client = _nd_connect_local_fallback("warmup.test:$port", resolver, NC.loopback_addr6(0), 5_000_000_000)
-            @test _nd_wait_task_done(accept_task, 3.0) != :timed_out
-            server = fetch(accept_task)
-        finally
-            _nd_close_quiet!(server)
-            _nd_close_quiet!(client)
-            _nd_close_quiet!(listener)
-            IP.shutdown!()
-        end
-
-        listener = nothing
-        try
-            listener = NC.listen("tcp4", "127.0.0.1:0"; backlog = 4)
-            port = Int((NC.addr(listener)::NC.SocketAddrV4).port)
-            close(listener)
-            listener = nothing
-            resolver = ND.StaticResolver(hosts = Dict(
-                "warmup-fail.test" => NC.SocketEndpoint[
-                    NC.loopback_addr6(port),
-                    NC.loopback_addr(port),
-                ],
-            ))
-            err = try
-                NC.connect("tcp", "warmup-fail.test:$port"; resolver = resolver, timeout_ns = 1_500_000_000, fallback_delay_ns = 1_000_000)
-                nothing
-            catch ex
-                ex
-            end
-            @test err isa ND.OpError
-        finally
-            _nd_close_quiet!(listener)
-            IP.shutdown!()
+            getfield(ND, :_update_windows_zone_cache!)(true)
+            append!(candidates, sort!(collect(keys(getfield(ND, :_WINDOWS_ZONE_CACHE_TO_INDEX)[]))))
+        catch
         end
     end
-    return nothing
-end
-
-function _nd_named_scope_iface()::Union{Nothing, String}
-    Sys.isapple() && return "lo0"
-    Sys.islinux() && return "lo"
+    append!(candidates, ["lo0", "lo", "en0", "eth0", "Loopback", "Loopback Pseudo-Interface 1"])
+    for zone in candidates
+        try
+            ND._scope_id_from_zone(zone) > UInt32(0) && return zone
+        catch
+        end
+    end
     return nothing
 end
 
@@ -370,16 +304,16 @@ end
             @test_throws ND.AddressError ND.split_host_port("host]bad:80")
         end
         @testset "literal host and scope parsing helpers" begin
-            iface = _nd_named_scope_iface()
-            parser_zone = something(iface, "zone0")
+            zone = _nd_named_scope_zone()
+            parser_zone = something(zone, "zone0")
             @test ND._split_host_zone("fe80::1%$parser_zone") == ("fe80::1", parser_zone)
             @test ND._split_host_zone("%$parser_zone") == ("%$parser_zone", "")
             @test_throws ND.AddressError ND._split_host_zone("fe80::1%")
 
             @test ND._scope_id_from_zone("") == UInt32(0)
             @test ND._scope_id_from_zone("7") == UInt32(7)
-            if iface !== nothing
-                @test ND._scope_id_from_zone(iface) > UInt32(0)
+            if zone !== nothing
+                @test ND._scope_id_from_zone(zone) > UInt32(0)
             else
                 @test true
             end
@@ -387,14 +321,14 @@ end
             @test_throws ND.AddressError ND._scope_id_from_zone(string(UInt64(typemax(UInt32)) + UInt64(1)))
             @test_throws ND.AddressError ND._scope_id_from_zone("reseau-no-such-iface")
 
-            scope_literal = iface === nothing ? "fe80::1%7" : "fe80::1%$iface"
-            expected_scope_id = iface === nothing ? UInt32(7) : ND._scope_id_from_zone(iface)
+            scope_literal = zone === nothing ? "fe80::1%7" : "fe80::1%$zone"
+            expected_scope_id = zone === nothing ? UInt32(7) : ND._scope_id_from_zone(zone)
             scoped = ND._literal_host_addr(scope_literal)
             @test scoped isa NC.SocketAddrV6
             if scoped isa NC.SocketAddrV6
                 @test scoped.scope_id == Int(expected_scope_id)
             end
-            invalid_v4_scope = iface === nothing ? "127.0.0.1%7" : "127.0.0.1%$iface"
+            invalid_v4_scope = zone === nothing ? "127.0.0.1%7" : "127.0.0.1%$zone"
             @test_throws ND.AddressError ND._literal_host_addr(invalid_v4_scope)
         end
         @testset "port parser and service lookup" begin
@@ -533,7 +467,6 @@ end
             end
         end
         @testset "connect/listen by address strings (ipv4)" begin
-            _nd_warm_windows_kw_dial_paths!()
             IP.shutdown!()
             listener = nothing
             client = nothing
