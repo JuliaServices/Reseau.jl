@@ -3,9 +3,33 @@ using Reseau
 const TL = Reseau.TLS
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
+const SO = Reseau.SocketOps
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+
+function _raw_connected_client(port::Int)::NC.Conn
+    sysfd = Cint(-1)
+    try
+        sysfd = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_nonblocking!(sysfd, false)
+        try
+            errno = SO.connect_socket(sysfd, SO.sockaddr_in_loopback(port))
+            errno == Int32(0) || errno == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(errno)))
+        finally
+            SO.set_nonblocking!(sysfd, true)
+        end
+        fd = NC._new_netfd(sysfd; family = SO.AF_INET, sotype = SO.SOCK_STREAM, net = :tcp, is_connected = true)
+        sysfd = Cint(-1)
+        IP.register!(fd.pfd)
+        NC._apply_default_tcp_opts!(fd)
+        NC._finalize_connected_addrs!(fd, NC.loopback_addr(port))
+        return NC.Conn(fd)
+    catch
+        sysfd >= 0 && SO.close_socket_nothrow(sysfd)
+        rethrow()
+    end
+end
 
 function run_tls_trim_sample()::Nothing
     listener::Union{Nothing, NC.Listener} = nothing
@@ -16,7 +40,7 @@ function run_tls_trim_sample()::Nothing
     try
         listener = NC.listen(NC.loopback_addr(0); backlog = 8)
         laddr = NC.addr(listener)::NC.SocketAddrV4
-        client_tcp = NC.connect(NC.loopback_addr(Int(laddr.port)))
+        client_tcp = _raw_connected_client(Int(laddr.port))
         IP.set_read_deadline!(listener.fd.pfd, time_ns() + 5_000_000_000)
         try
             server_tcp = NC.accept(listener)

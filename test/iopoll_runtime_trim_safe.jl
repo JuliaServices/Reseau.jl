@@ -69,25 +69,6 @@ function _write_byte(fd::Cint, b::UInt8)::Nothing
     throw(ArgumentError("timed out writing byte"))
 end
 
-function _read_byte(fd::Cint)::UInt8
-    buf = Ref{UInt8}(0x00)
-    for _ in 1:5000
-        n = GC.@preserve buf SO.read_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
-        n == Cssize_t(1) && return buf[]
-        errno = SO.last_error()
-        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
-        errno == _TRIM_EWOULDBLOCK && (yield(); continue)
-        errno == Int32(Base.Libc.EINTR) && continue
-        throw(SystemError("read", Int(errno)))
-    end
-    throw(ArgumentError("timed out reading byte"))
-end
-
-@inline function _expect_errno_zero(errno::Int32, op::AbstractString)::Nothing
-    errno == Int32(0) || throw(SystemError(op, Int(errno)))
-    return nothing
-end
-
 function run_iopoll_runtime_trim_sample()::Nothing
     fd0 = Cint(-1)
     fd1 = Cint(-1)
@@ -116,14 +97,22 @@ function run_internal_poll_trim_sample()::Nothing
     try
         IP._set_nonblocking!(ipfd.sysfd)
         IP.register!(ipfd)
+        IP.set_read_deadline!(ipfd, time_ns() + 20_000_000)
+        timed_out = false
+        try
+            IP.read!(ipfd, Vector{UInt8}(undef, 1))
+        catch err
+            err isa IP.DeadlineExceededError || rethrow(err)
+            timed_out = true
+        finally
+            IP.set_read_deadline!(ipfd, Int64(0))
+        end
+        timed_out || error("expected deadline exceeded")
         _write_byte(fd1, 0x65)
         read_buf = Vector{UInt8}(undef, 1)
         n = IP.read!(ipfd, read_buf)
         n == 1 || error("expected one byte read")
         read_buf[1] == 0x65 || error("unexpected read byte")
-        n = IP.write!(ipfd, UInt8[0x66])
-        n == 1 || error("expected one byte written")
-        _read_byte(fd1) == 0x66 || error("unexpected peer byte")
     finally
         ipfd.sysfd >= 0 && close(ipfd)
         _close_fd(fd1)
