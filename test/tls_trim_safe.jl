@@ -17,7 +17,12 @@ function run_tls_trim_sample()::Nothing
         listener = NC.listen(NC.loopback_addr(0); backlog = 8)
         laddr = NC.addr(listener)::NC.SocketAddrV4
         client_tcp = NC.connect(NC.loopback_addr(Int(laddr.port)))
-        server_tcp = NC.accept(listener)
+        IP.set_read_deadline!(listener.fd.pfd, time_ns() + 5_000_000_000)
+        try
+            server_tcp = NC.accept(listener)
+        finally
+            IP.set_read_deadline!(listener.fd.pfd, Int64(0))
+        end
         client_cfg = TL.Config(verify_peer = false, server_name = "localhost", handshake_timeout_ns = 10_000_000_000)
         server_cfg = TL.Config(
             verify_peer = false,

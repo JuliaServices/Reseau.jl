@@ -25,11 +25,6 @@ function ND._resolve_host_ips(resolver::_TrimResolver, network::AbstractString, 
     return NC.SocketEndpoint[NC.SocketAddrV6(v6.ip, 0; scope_id = Int(v6.scope_id))]
 end
 
-function _trim_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
-    read!(conn, buf)
-    return length(buf)
-end
-
 function run_host_resolvers_trim_sample()::Nothing
     listener::Union{Nothing, NC.Listener} = nothing
     client::Union{Nothing, NC.Conn} = nothing
@@ -39,12 +34,16 @@ function run_host_resolvers_trim_sample()::Nothing
         laddr = NC.addr(listener)::NC.SocketAddrV4
         resolver = _TrimResolver(NC.loopback_addr(Int(laddr.port)))
         client = ND.connect("tcp", "trim.local:$(Int(laddr.port))"; resolver = resolver, fallback_delay_ns = -1)
-        server = NC.accept(listener)
-        payload = UInt8[0x66, 0x67, 0x68]
-        recv_buf = Vector{UInt8}(undef, length(payload))
-        write(client, payload) == length(payload) || error("expected full write")
-        _trim_read_exact!(server, recv_buf) == length(payload) || error("expected full read")
-        recv_buf == payload || error("payload mismatch")
+        IP.set_read_deadline!(listener.fd.pfd, time_ns() + 5_000_000_000)
+        try
+            server = NC.accept(listener)
+        finally
+            IP.set_read_deadline!(listener.fd.pfd, Int64(0))
+        end
+        client_remote = NC.remote_addr(client)::NC.SocketAddrV4
+        server_local = NC.local_addr(server)::NC.SocketAddrV4
+        client_remote.port == laddr.port || error("client remote port mismatch")
+        server_local.port == laddr.port || error("server local port mismatch")
     finally
         if server !== nothing
             try

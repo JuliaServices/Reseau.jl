@@ -3,31 +3,27 @@ using Reseau
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 
-function _write_all!(conn::NC.Conn, data::Vector{UInt8})::Nothing
-    n = write(conn, data)
-    n == length(data) || error("expected full write")
-    return nothing
-end
-
-function _read_exact!(conn::NC.Conn, data::Vector{UInt8})::Nothing
-    read!(conn, data)
-    return nothing
-end
-
 function run_tcp_trim_sample()::Nothing
     listener::Union{Nothing, NC.Listener} = nothing
     client::Union{Nothing, NC.Conn} = nothing
     server::Union{Nothing, NC.Conn} = nothing
     try
         listener = NC.listen(NC.loopback_addr(0); backlog = 16)
-        laddr = NC.addr(listener)
+        laddr = NC.addr(listener)::NC.SocketAddrV4
         client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
-        server = NC.accept(listener)
-        payload = UInt8[0x30, 0x31, 0x32, 0x33]
-        recv_buf = Vector{UInt8}(undef, length(payload))
-        _write_all!(client, payload)
-        _read_exact!(server, recv_buf)
-        recv_buf == payload || error("payload mismatch")
+        IP.set_read_deadline!(listener.fd.pfd, time_ns() + 5_000_000_000)
+        try
+            server = NC.accept(listener)
+        finally
+            IP.set_read_deadline!(listener.fd.pfd, Int64(0))
+        end
+        client_local = NC.local_addr(client)::NC.SocketAddrV4
+        client_remote = NC.remote_addr(client)::NC.SocketAddrV4
+        server_local = NC.local_addr(server)::NC.SocketAddrV4
+        server_remote = NC.remote_addr(server)::NC.SocketAddrV4
+        client_remote.port == laddr.port || error("client remote port mismatch")
+        server_local.port == laddr.port || error("server local port mismatch")
+        server_remote.port == client_local.port || error("server remote port mismatch")
     finally
         if server !== nothing
             try

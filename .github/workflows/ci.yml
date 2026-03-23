@@ -15,7 +15,7 @@ jobs:
       RESEAU_RUN_TLS_TESTS: '1'
       RESEAU_RUN_NETWORK_TESTS: '1'
       RESEAU_TRIM_EXE_TIMEOUT_S: "60.0"
-      RESEAU_TRIM_BUNDLE: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
+      RESEAU_TRIM_BUNDLE: '1'
     strategy:
       fail-fast: false
       matrix:
