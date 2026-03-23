@@ -2,6 +2,7 @@ using Reseau
 
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
+const _SO_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
 
 function _accept_with_retry(listener::Cint)::Cint
     for _ in 1:5000
@@ -17,17 +18,6 @@ function _accept_with_retry(listener::Cint)::Cint
     throw(ArgumentError("timed out waiting for accepted socket"))
 end
 
-function _wait_connect_ready!(fd::Cint)
-    registration = IP.register!(fd; mode = IP.PollMode.WRITE)
-    try
-        IP.arm_waiter!(registration, IP.PollMode.WRITE)
-        IP.pollwait!(registration.write_waiter)
-    finally
-        IP.deregister!(fd)
-    end
-    return nothing
-end
-
 function _write_all!(fd::Cint, data::Vector{UInt8})::Nothing
     offset = 0
     while offset < length(data)
@@ -39,6 +29,7 @@ function _write_all!(fd::Cint, data::Vector{UInt8})::Nothing
         n == 0 && error("expected non-zero write progress")
         errno = Int32(Base.Libc.errno())
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _SO_EWOULDBLOCK && (yield(); continue)
         throw(SystemError("write", Int(errno)))
     end
     return nothing
@@ -55,13 +46,13 @@ function _read_exact!(fd::Cint, data::Vector{UInt8})::Nothing
         n == 0 && error("unexpected EOF")
         errno = Int32(Base.Libc.errno())
         errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _SO_EWOULDBLOCK && (yield(); continue)
         throw(SystemError("read", Int(errno)))
     end
     return nothing
 end
 
 function run_socket_ops_trim_sample()::Nothing
-    (Sys.isapple() || Sys.islinux()) || return nothing
     listener = Cint(-1)
     client = Cint(-1)
     accepted = Cint(-1)
@@ -73,14 +64,12 @@ function run_socket_ops_trim_sample()::Nothing
         bound = SO.get_socket_name_in(listener)
         port = Int(SO.sockaddr_in_port(bound))
         client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
-        errno = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
-        if errno != Int32(0) && errno != Int32(Base.Libc.EISCONN)
-            if errno != Int32(Base.Libc.EINPROGRESS) && errno != Int32(Base.Libc.EALREADY) && errno != Int32(Base.Libc.EINTR)
-                throw(SystemError("connect", Int(errno)))
-            end
-            _wait_connect_ready!(client)
-            so_error = SO.get_socket_error(client)
-            so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
+        SO.set_nonblocking!(client, false)
+        try
+            errno = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
+            errno == Int32(0) || errno == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(errno)))
+        finally
+            SO.set_nonblocking!(client, true)
         end
         accepted = _accept_with_retry(listener)
         payload = UInt8[0x71, 0x72, 0x73]

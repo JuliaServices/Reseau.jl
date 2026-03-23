@@ -15,7 +15,6 @@ function _read_exact!(conn::NC.Conn, data::Vector{UInt8})::Nothing
 end
 
 function run_tcp_trim_sample()::Nothing
-    (Sys.isapple() || Sys.islinux()) || return nothing
     listener::Union{Nothing, NC.Listener} = nothing
     client::Union{Nothing, NC.Conn} = nothing
     server::Union{Nothing, NC.Conn} = nothing

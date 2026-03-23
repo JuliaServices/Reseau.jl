@@ -31,7 +31,6 @@ function _trim_read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Int
 end
 
 function run_host_resolvers_trim_sample()::Nothing
-    (Sys.isapple() || Sys.islinux()) || return nothing
     listener::Union{Nothing, NC.Listener} = nothing
     client::Union{Nothing, NC.Conn} = nothing
     server::Union{Nothing, NC.Conn} = nothing

@@ -8,7 +8,6 @@ const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
 
 function run_tls_trim_sample()::Nothing
-    (Sys.isapple() || Sys.islinux()) || return nothing
     listener::Union{Nothing, NC.Listener} = nothing
     client_tcp::Union{Nothing, NC.Conn} = nothing
     server_tcp::Union{Nothing, NC.Conn} = nothing
