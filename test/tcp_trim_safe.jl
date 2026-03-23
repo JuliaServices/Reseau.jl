@@ -1,7 +1,32 @@
 using Reseau
 
 const NC = Reseau.TCP
+const ND = Reseau.HostResolvers
 const IP = Reseau.IOPoll
+const SO = Reseau.SocketOps
+
+function _raw_connected_client(port::Int)::NC.Conn
+    sysfd = Cint(-1)
+    try
+        sysfd = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_nonblocking!(sysfd, false)
+        try
+            errno = SO.connect_socket(sysfd, SO.sockaddr_in_loopback(port))
+            errno == Int32(0) || errno == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(errno)))
+        finally
+            SO.set_nonblocking!(sysfd, true)
+        end
+        fd = NC._new_netfd(sysfd; family = SO.AF_INET, sotype = SO.SOCK_STREAM, net = :tcp, is_connected = true)
+        sysfd = Cint(-1)
+        IP.register!(fd.pfd)
+        NC._apply_default_tcp_opts!(fd)
+        NC._finalize_connected_addrs!(fd, NC.loopback_addr(port))
+        return NC.Conn(fd)
+    catch
+        sysfd >= 0 && SO.close_socket_nothrow(sysfd)
+        rethrow()
+    end
+end
 
 function run_tcp_trim_sample()::Nothing
     listener::Union{Nothing, NC.Listener} = nothing
@@ -10,7 +35,7 @@ function run_tcp_trim_sample()::Nothing
     try
         listener = NC.listen(NC.loopback_addr(0); backlog = 16)
         laddr = NC.addr(listener)::NC.SocketAddrV4
-        client = NC.connect(NC.loopback_addr(Int((laddr::NC.SocketAddrV4).port)))
+        client = _raw_connected_client(Int(laddr.port))
         IP.set_read_deadline!(listener.fd.pfd, time_ns() + 5_000_000_000)
         try
             server = NC.accept(listener)

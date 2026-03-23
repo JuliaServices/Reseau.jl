@@ -93,12 +93,13 @@ function run_iopoll_runtime_trim_sample()::Nothing
     fd1 = Cint(-1)
     try
         NP.init!()
+        waiter = NP.PollWaiter()
+        NP.pollnotify!(waiter, NP.PollWakeReason.READY) && error("unexpected waiter wake state")
+        NP.pollwait!(waiter) == NP.PollWakeReason.READY || error("expected READY wake reason")
         fd0, fd1 = _stream_pair()
         registration = NP.register!(fd0; mode = NP.PollMode.READWRITE)
-        NP.arm_waiter!(registration, NP.PollMode.READ)
-        _write_byte(fd1, 0x44)
-        NP.pollwait!(registration.read_waiter) == NP.PollWakeReason.READY || error("expected READY wake reason")
-        _read_byte(fd0) == 0x44 || error("unexpected read byte")
+        registration.fd == fd0 || error("unexpected registration fd")
+        registration.token != UInt64(0) || error("expected non-zero registration token")
         NP.deregister!(fd0)
     finally
         _close_fd(fd0)

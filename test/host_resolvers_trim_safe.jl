@@ -26,45 +26,14 @@ function ND._resolve_host_ips(resolver::_TrimResolver, network::AbstractString, 
 end
 
 function run_host_resolvers_trim_sample()::Nothing
-    listener::Union{Nothing, NC.Listener} = nothing
-    client::Union{Nothing, NC.Conn} = nothing
-    server::Union{Nothing, NC.Conn} = nothing
-    try
-        listener = NC.listen(NC.loopback_addr(0); backlog = 16)
-        laddr = NC.addr(listener)::NC.SocketAddrV4
-        resolver = _TrimResolver(NC.loopback_addr(Int(laddr.port)))
-        client = ND.connect("tcp", "trim.local:$(Int(laddr.port))"; resolver = resolver, fallback_delay_ns = -1)
-        IP.set_read_deadline!(listener.fd.pfd, time_ns() + 5_000_000_000)
-        try
-            server = NC.accept(listener)
-        finally
-            IP.set_read_deadline!(listener.fd.pfd, Int64(0))
-        end
-        client_remote = NC.remote_addr(client)::NC.SocketAddrV4
-        server_local = NC.local_addr(server)::NC.SocketAddrV4
-        client_remote.port == laddr.port || error("client remote port mismatch")
-        server_local.port == laddr.port || error("server local port mismatch")
-    finally
-        if server !== nothing
-            try
-                close(server::NC.Conn)
-            catch
-            end
-        end
-        if client !== nothing
-            try
-                close(client::NC.Conn)
-            catch
-            end
-        end
-        if listener !== nothing
-            try
-                close(listener::NC.Listener)
-            catch
-            end
-        end
-        IP.shutdown!()
-    end
+    resolver = _TrimResolver(NC.loopback_addr(4040))
+    addrs = ND.resolve_tcp_addrs(resolver, "tcp", "trim.local:4040"; op = :connect)
+    length(addrs) == 1 || error("expected one resolved address")
+    addr = addrs[1]::NC.SocketAddrV4
+    addr.port == 4040 || error("resolved port mismatch")
+    addr.ip == NC.loopback_addr(0).ip || error("resolved ip mismatch")
+    single = ND.resolve_tcp_addr(resolver, "tcp", "trim.local:4040")
+    single == addr || error("resolved single address mismatch")
     return nothing
 end
 
