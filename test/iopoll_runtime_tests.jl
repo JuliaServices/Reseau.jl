@@ -20,24 +20,12 @@ function _el_socketpair_stream()
         port = Int(SO.sockaddr_in_port(bound))
         _el_log_test_progress("_el_socketpair_stream: connect")
         client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
-        if Sys.iswindows()
-            SO.set_nonblocking!(client, false)
-            try
-                err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
-                err == Int32(0) || err == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(err)))
-            finally
-                SO.set_nonblocking!(client, true)
-            end
-        else
+        SO.set_nonblocking!(client, false)
+        try
             err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
-            if err != Int32(0) && err != Int32(Base.Libc.EISCONN)
-                err == Int32(Base.Libc.EINPROGRESS) || err == Int32(Base.Libc.EALREADY) || err == Int32(Base.Libc.EINTR) || throw(SystemError("connect", Int(err)))
-                _el_log_test_progress("_el_socketpair_stream: wait connect ready")
-                _el_wait_connect_ready!(client)
-                _el_log_test_progress("_el_socketpair_stream: check so_error")
-                so_error = SO.get_socket_error(client)
-                so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
-            end
+            err == Int32(0) || err == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(err)))
+        finally
+            SO.set_nonblocking!(client, true)
         end
         _el_log_test_progress("_el_socketpair_stream: accept")
         accepted, _ = _el_accept_with_retry(listener)
@@ -322,16 +310,6 @@ end
                 registration1 = NP.register!(fd0; mode = NP.PollMode.READ)
                 token1 = registration1.token
                 NP.deregister!(fd0)
-                if Sys.iswindows()
-                    # IOCP association is sticky for the lifetime of a live socket
-                    # handle, so the second registration uses a fresh connected
-                    # socket while still validating that stale tokens are ignored.
-                    _el_close_fd(fd0)
-                    _el_close_fd(fd1)
-                    fd0 = Cint(-1)
-                    fd1 = Cint(-1)
-                    fd0, fd1 = _el_socketpair_stream()
-                end
                 registration2 = NP.register!(fd0; mode = NP.PollMode.READ)
                 token2 = registration2.token
                 @test token2 != token1
@@ -343,8 +321,7 @@ end
                     return nothing
                 end)
                 sleep(0.02)
-                stale_fd = Sys.iswindows() ? Cint(-1) : fd0
-                stale = NP.PollEvent(stale_fd, token1, NP.PollMode.READ, false)
+                stale = NP.PollEvent(Cint(-1), token1, NP.PollMode.READ, false)
                 NP._dispatch_ready_event!(state, stale)
                 stale_status = timedwait(() -> isready(wait_ch), 0.05; pollint = 0.001)
                 @test stale_status == :timed_out

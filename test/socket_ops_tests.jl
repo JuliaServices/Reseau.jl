@@ -46,22 +46,12 @@ function _stream_pair()::Tuple{Cint, Cint}
         bound = SO.get_socket_name_in(listener)
         port = Int(SO.sockaddr_in_port(bound))
         client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
-        if Sys.iswindows()
-            SO.set_nonblocking!(client, false)
-            try
-                err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
-                err == Int32(0) || err == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(err)))
-            finally
-                SO.set_nonblocking!(client, true)
-            end
-        else
+        SO.set_nonblocking!(client, false)
+        try
             err = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
-            if err != Int32(0) && err != Int32(Base.Libc.EISCONN)
-                err == Int32(Base.Libc.EINPROGRESS) || err == Int32(Base.Libc.EALREADY) || err == Int32(Base.Libc.EINTR) || throw(SystemError("connect", Int(err)))
-                _wait_connect_ready!(client)
-                so_error = SO.get_socket_error(client)
-                so_error == Int32(0) || throw(SystemError("connect(SO_ERROR)", Int(so_error)))
-            end
+            err == Int32(0) || err == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(err)))
+        finally
+            SO.set_nonblocking!(client, true)
         end
         accepted, _ = _accept_with_retry(listener)
         stream_client = client
