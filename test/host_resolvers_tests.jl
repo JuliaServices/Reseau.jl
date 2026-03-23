@@ -6,7 +6,10 @@ const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
-const _ND_LIBUV = Libdl.dlpath("libuv")
+const _ND_LIBUV = let
+    path = Libdl.find_library(["libuv", "libuv-2", "libuv.2", "libuv-2.dll", "libuv.dll"])
+    isempty(path) ? "libuv" : path
+end
 
 struct _SlowResolver <: ND.AbstractResolver
     delay_s::Float64
