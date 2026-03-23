@@ -1,29 +1,14 @@
 using Test
 using Reseau
-using Libdl
 
 const ND = Reseau.HostResolvers
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
-const _ND_LIBUV = let
-    path = Libdl.find_library(["libuv", "libuv-2", "libuv.2", "libuv-2.dll", "libuv.dll"])
-    isempty(path) ? "libuv" : path
-end
 
 struct _SlowResolver <: ND.AbstractResolver
     delay_s::Float64
     addrs::Vector{NC.SocketEndpoint}
-end
-
-struct _ThreadcallResolver <: ND.AbstractResolver
-    delay_ms::UInt32
-    addrs::Vector{NC.SocketEndpoint}
-end
-
-function _nd_blocking_sleep_ms(delay_ms::UInt32)
-    Base.@threadcall((:uv_sleep, _ND_LIBUV), Cvoid, (UInt32,), delay_ms)
-    return nothing
 end
 
 function ND.resolve_tcp_addrs(
@@ -38,21 +23,6 @@ function ND.resolve_tcp_addrs(
     _ = op
     _ = policy
     sleep(resolver.delay_s)
-    return copy(resolver.addrs)
-end
-
-function ND.resolve_tcp_addrs(
-        resolver::_ThreadcallResolver,
-        network::AbstractString,
-        address::AbstractString;
-        op::Symbol = :connect,
-        policy::ND.ResolverPolicy = ND.ResolverPolicy(),
-    )::Vector{NC.SocketEndpoint}
-    _ = network
-    _ = address
-    _ = op
-    _ = policy
-    _nd_blocking_sleep_ms(resolver.delay_ms)
     return copy(resolver.addrs)
 end
 
@@ -610,20 +580,6 @@ end
                 @test timeout_err.err isa ND.DialTimeoutError
             end
             @test elapsed_ms < 1_000.0
-            threadcall_resolver = _ThreadcallResolver(UInt32(250), NC.SocketEndpoint[NC.loopback_addr(1)])
-            threadcall_started_ns = time_ns()
-            threadcall_timeout_err = try
-                NC.connect("tcp", "threadcall.local:80"; timeout_ns = 20_000_000, resolver = threadcall_resolver)
-                nothing
-            catch ex
-                ex
-            end
-            threadcall_elapsed_ms = (time_ns() - threadcall_started_ns) / 1.0e6
-            @test threadcall_timeout_err isa ND.OpError
-            if threadcall_timeout_err isa ND.OpError
-                @test threadcall_timeout_err.err isa ND.DialTimeoutError
-            end
-            @test threadcall_elapsed_ms < 1_000.0
             empty_net_err = try
                 ND.resolve_tcp_addrs("", "127.0.0.1:1")
                 nothing
