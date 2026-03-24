@@ -312,7 +312,15 @@ end
 Convenience constructor for the IPv6 wildcard bind address `[::]:port`.
 """
 function sockaddr_in6_any(port::Integer; scope_id::Integer = 0)::SockAddrIn6
-    return sockaddr_in6(ntuple(_ -> UInt8(0), 16), port; scope_id = scope_id)
+    return sockaddr_in6((
+            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+            UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+        ),
+        port;
+        scope_id = scope_id,
+    )
 end
 
 """
