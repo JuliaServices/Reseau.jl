@@ -1021,8 +1021,14 @@ function _apply_policy_and_network(
         addrs::Vector{TCP.SocketEndpoint},
         kind::Symbol,
         policy::ResolverPolicy,
-    )::Vector{TCP.SocketEndpoint}
-    out = TCP.SocketEndpoint[]
+    )
+    out = if kind == :tcp4 || (!policy.allow_ipv6 && policy.allow_ipv4)
+        TCP.SocketAddrV4[]
+    elseif kind == :tcp6 || (!policy.allow_ipv4 && policy.allow_ipv6)
+        TCP.SocketAddrV6[]
+    else
+        TCP.SocketEndpoint[]
+    end
     for addr in addrs
         if kind == :tcp4 && !(addr isa TCP.SocketAddrV4)
             continue
@@ -1409,7 +1415,7 @@ function resolve_tcp_addrs(
         address::AbstractString;
         op::Symbol = :connect,
         policy::ResolverPolicy = ResolverPolicy(),
-    )::Vector{TCP.SocketEndpoint}
+    )
     kind = _network_kind(network)
     addr = String(address)
     op == :connect && isempty(addr) && _addr_error("missing address", addr)
@@ -1422,7 +1428,7 @@ function resolve_tcp_addrs(
     end
     filtered = _apply_policy_and_network(ips, kind, policy)
     isempty(filtered) && _lookup_error("no suitable address", host)
-    out = TCP.SocketEndpoint[]
+    out = empty(similar(filtered))
     for ipaddr in filtered
         push!(out, _with_port(ipaddr, port))
     end
@@ -1434,7 +1440,7 @@ end
 
 Resolve concrete TCP endpoints using `DEFAULT_RESOLVER`.
 """
-function resolve_tcp_addrs(network::AbstractString, address::AbstractString)::Vector{TCP.SocketEndpoint}
+function resolve_tcp_addrs(network::AbstractString, address::AbstractString)
     return resolve_tcp_addrs(DEFAULT_RESOLVER, network, address)
 end
 
@@ -1528,7 +1534,7 @@ end
     return Int64(300_000_000)
 end
 
-@inline function _use_parallel_race(d::HostResolver, kind::Symbol, fallbacks::Vector{TCP.SocketEndpoint})::Bool
+@inline function _use_parallel_race(d::HostResolver, kind::Symbol, fallbacks::AbstractVector{<:TCP.SocketEndpoint})::Bool
     _dual_stack_enabled(d) || return false
     kind == :tcp || return false
     isempty(fallbacks) && return false
@@ -1568,7 +1574,7 @@ function _resolve_with_deadline(
         network::AbstractString,
         address::AbstractString,
         deadline_ns::Int64,
-    )::Vector{TCP.SocketEndpoint}
+    )
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
@@ -1576,7 +1582,7 @@ function _resolve_with_deadline(
     condition = Threads.Condition(mtx)
     done = Ref(false)
     timed_out = Ref(false)
-    result_ref = Ref{Union{Nothing, Vector{TCP.SocketEndpoint}, Exception}}(nothing)
+    result_ref = Ref{Any}(nothing)
     timer, timer_task = _spawn_timer_task(deadline_ns) do
         lock(mtx)
         try
@@ -1619,7 +1625,8 @@ function _resolve_with_deadline(
     result = result_ref[]
     result === nothing && throw(DialTimeoutError(String(address)))
     result isa Exception && throw(result)
-    return result::Vector{TCP.SocketEndpoint}
+    result isa AbstractVector{<:TCP.SocketEndpoint} || throw(ArgumentError("resolver returned unsupported address container"))
+    return result
 end
 
 function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining::Int)::Int64
@@ -1636,11 +1643,11 @@ function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining
     return now_ns + timeout
 end
 
-function _partition_addrs(addrs::Vector{TCP.SocketEndpoint})::Tuple{Vector{TCP.SocketEndpoint}, Vector{TCP.SocketEndpoint}}
-    isempty(addrs) && return TCP.SocketEndpoint[], TCP.SocketEndpoint[]
+function _partition_addrs(addrs::AbstractVector{A}) where {A<:TCP.SocketEndpoint}
+    isempty(addrs) && return A[], A[]
     primary_is_v4 = _is_ipv4(addrs[1])
-    primaries = TCP.SocketEndpoint[]
-    fallbacks = TCP.SocketEndpoint[]
+    primaries = A[]
+    fallbacks = A[]
     for addr in addrs
         if _is_ipv4(addr) == primary_is_v4
             push!(primaries, addr)
@@ -1651,7 +1658,7 @@ function _partition_addrs(addrs::Vector{TCP.SocketEndpoint})::Tuple{Vector{TCP.S
     return primaries, fallbacks
 end
 
-@inline function _prefer_ipv4_first!(addrs::Vector{TCP.SocketEndpoint}, policy::ResolverPolicy)
+@inline function _prefer_ipv4_first!(addrs::AbstractVector{<:TCP.SocketEndpoint}, policy::ResolverPolicy)
     _ = addrs
     _ = policy
     return nothing
@@ -1703,10 +1710,10 @@ function _resolve_serial(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
-        addrs::Vector{TCP.SocketEndpoint},
+        addrs::AbstractVector{A},
         deadline_ns::Int64,
         state::DNSRaceState,
-    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint}
     first_err::Union{Nothing, Exception} = nothing
     for (i, remote_addr) in pairs(addrs)
         if @atomic :acquire state.done
@@ -1768,10 +1775,10 @@ function _resolve_parallel(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
-        primaries::Vector{TCP.SocketEndpoint},
-        fallbacks::Vector{TCP.SocketEndpoint},
+        primaries::AbstractVector{A},
+        fallbacks::AbstractVector{B},
         deadline_ns::Int64,
-    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
     state = DNSRaceState()
     events = Channel{Union{DNSParallelResult, Symbol}}(4)
     @inline function _emit_event!(event::Union{DNSParallelResult, Symbol})
@@ -1783,7 +1790,7 @@ function _resolve_parallel(
         end
         return nothing
     end
-    function _start_racer(primary::Bool, addrs::Vector{TCP.SocketEndpoint})
+    function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
         return errormonitor(@async begin
             conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))

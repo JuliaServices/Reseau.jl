@@ -40,14 +40,14 @@ function run_host_resolvers_trim_sample()::Nothing
     listener::Union{Nothing, NC.Listener} = nothing
     client::Union{Nothing, NC.Conn} = nothing
     server::Union{Nothing, NC.Conn} = nothing
-    resolver = ND.HostResolver(resolver = _TrimResolver(NC.loopback_addr(0)))
+    trim_resolver = _TrimResolver(NC.loopback_addr(0))
+    resolver = ND.HostResolver(resolver = trim_resolver)
     try
-        listener = ND.listen(resolver, "tcp", "trim.local:0"; backlog = 16)
+        listener = ND.listen(resolver, "tcp4", "trim.local:0"; backlog = 16)
         laddr = NC.addr(listener)::NC.SocketAddrV4
         addrstr = ND.join_host_port("trim.local", Int(laddr.port))
-        resolved = ND.resolve_tcp_addr(resolver.resolver.parent, "tcp", addrstr)::NC.SocketAddrV4
-        resolved.port == laddr.port || error("resolved port mismatch")
-        client = NC.connect(resolved)
+        ND.resolve_tcp_addr(trim_resolver, "tcp4", addrstr) isa NC.SocketAddrV4 || error("expected IPv4 resolution")
+        client = ND.connect(resolver, "tcp4", addrstr)
         server = NC.accept(listener)
         payload = UInt8[0x71, 0x72, 0x73]
         write(client, payload) == length(payload) || error("expected HostResolvers payload write")
