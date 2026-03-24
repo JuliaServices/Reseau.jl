@@ -1569,12 +1569,35 @@ function _close_timer_task!(
     return nothing
 end
 
+const _ResolvedConnectAddrs = Union{
+    Vector{TCP.SocketAddrV4},
+    Vector{TCP.SocketAddrV6},
+    Vector{TCP.SocketEndpoint},
+}
+
+function _normalize_resolved_connect_addrs(result)::_ResolvedConnectAddrs
+    if result isa Vector{TCP.SocketAddrV4}
+        return result
+    elseif result isa Vector{TCP.SocketAddrV6}
+        return result
+    elseif result isa Vector{TCP.SocketEndpoint}
+        return result
+    elseif result isa AbstractVector{<:TCP.SocketEndpoint}
+        out = TCP.SocketEndpoint[]
+        for addr in result
+            push!(out, addr)
+        end
+        return out
+    end
+    throw(ArgumentError("resolver returned unsupported address container"))
+end
+
 function _resolve_with_deadline(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
         deadline_ns::Int64,
-    )
+    )::_ResolvedConnectAddrs
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
@@ -1582,7 +1605,7 @@ function _resolve_with_deadline(
     condition = Threads.Condition(mtx)
     done = Ref(false)
     timed_out = Ref(false)
-    result_ref = Ref{Any}(nothing)
+    result_ref = Ref{Union{Nothing, _ResolvedConnectAddrs, Exception}}(nothing)
     timer, timer_task = _spawn_timer_task(deadline_ns) do
         lock(mtx)
         try
@@ -1596,15 +1619,16 @@ function _resolve_with_deadline(
         return nothing
     end
     errormonitor(@async begin
-        result = try
+        resolved_or_err = try
             resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
         catch err
             _as_exception(err)
         end
+        stored_result = resolved_or_err isa Exception ? resolved_or_err : _normalize_resolved_connect_addrs(resolved_or_err)
         lock(mtx)
         try
             done[] && return nothing
-            result_ref[] = result
+            result_ref[] = stored_result
             done[] = true
             notify(condition)
         finally
@@ -1622,11 +1646,50 @@ function _resolve_with_deadline(
         _close_timer_task!(timer, timer_task)
     end
     timed_out[] && throw(DialTimeoutError(String(address)))
-    result = result_ref[]
-    result === nothing && throw(DialTimeoutError(String(address)))
-    result isa Exception && throw(result)
-    result isa AbstractVector{<:TCP.SocketEndpoint} || throw(ArgumentError("resolver returned unsupported address container"))
-    return result
+    resolved = result_ref[]
+    resolved === nothing && throw(DialTimeoutError(String(address)))
+    resolved isa Exception && throw(resolved)
+    resolved isa _ResolvedConnectAddrs || throw(ArgumentError("resolver returned unsupported address container"))
+    return resolved
+end
+
+_coerce_connect_addrs_v4(resolved::Vector{TCP.SocketAddrV4}) = resolved
+_coerce_connect_addrs_v4(::Vector{TCP.SocketAddrV6}) = throw(ArgumentError("resolver returned unexpected address family for tcp4"))
+
+function _coerce_connect_addrs_v4(resolved::Vector{TCP.SocketEndpoint})::Vector{TCP.SocketAddrV4}
+    out = TCP.SocketAddrV4[]
+    for addr in resolved
+        push!(out, addr::TCP.SocketAddrV4)
+    end
+    return out
+end
+
+_coerce_connect_addrs_v6(resolved::Vector{TCP.SocketAddrV6}) = resolved
+_coerce_connect_addrs_v6(::Vector{TCP.SocketAddrV4}) = throw(ArgumentError("resolver returned unexpected address family for tcp6"))
+
+function _coerce_connect_addrs_v6(resolved::Vector{TCP.SocketEndpoint})::Vector{TCP.SocketAddrV6}
+    out = TCP.SocketAddrV6[]
+    for addr in resolved
+        push!(out, addr::TCP.SocketAddrV6)
+    end
+    return out
+end
+
+_coerce_connect_addrs_any(resolved::Vector{TCP.SocketEndpoint}) = resolved
+function _coerce_connect_addrs_any(resolved::Vector{TCP.SocketAddrV4})::Vector{TCP.SocketEndpoint}
+    out = TCP.SocketEndpoint[]
+    for addr in resolved
+        push!(out, addr)
+    end
+    return out
+end
+
+function _coerce_connect_addrs_any(resolved::Vector{TCP.SocketAddrV6})::Vector{TCP.SocketEndpoint}
+    out = TCP.SocketEndpoint[]
+    for addr in resolved
+        push!(out, addr)
+    end
+    return out
 end
 
 function _resolve_connect_addrs(
@@ -1634,50 +1697,32 @@ function _resolve_connect_addrs(
         network::AbstractString,
         address::AbstractString,
         deadline_ns::Int64,
-        kind::Symbol,
-    )
+        ::Val{:tcp4},
+    )::Vector{TCP.SocketAddrV4}
     resolved = _resolve_with_deadline(d, network, address, deadline_ns)
-    if kind == :tcp4
-        if resolved isa Vector{TCP.SocketAddrV4}
-            return resolved
-        elseif resolved isa Vector{TCP.SocketEndpoint}
-            out = TCP.SocketAddrV4[]
-            for addr in resolved
-                push!(out, addr::TCP.SocketAddrV4)
-            end
-            return out
-        else
-            throw(ArgumentError("resolver returned unexpected address family for tcp4"))
-        end
-    elseif kind == :tcp6
-        if resolved isa Vector{TCP.SocketAddrV6}
-            return resolved
-        elseif resolved isa Vector{TCP.SocketEndpoint}
-            out = TCP.SocketAddrV6[]
-            for addr in resolved
-                push!(out, addr::TCP.SocketAddrV6)
-            end
-            return out
-        else
-            throw(ArgumentError("resolver returned unexpected address family for tcp6"))
-        end
-    elseif resolved isa Vector{TCP.SocketEndpoint}
-        return resolved
-    elseif resolved isa Vector{TCP.SocketAddrV4}
-        out = TCP.SocketEndpoint[]
-        for addr in resolved
-            push!(out, addr)
-        end
-        return out
-    elseif resolved isa Vector{TCP.SocketAddrV6}
-        out = TCP.SocketEndpoint[]
-        for addr in resolved
-            push!(out, addr)
-        end
-        return out
-    else
-        throw(ArgumentError("resolver returned unsupported address container"))
-    end
+    return _coerce_connect_addrs_v4(resolved)
+end
+
+function _resolve_connect_addrs(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+        ::Val{:tcp6},
+    )::Vector{TCP.SocketAddrV6}
+    resolved = _resolve_with_deadline(d, network, address, deadline_ns)
+    return _coerce_connect_addrs_v6(resolved)
+end
+
+function _resolve_connect_addrs(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+        ::Val{:tcp},
+    )::Vector{TCP.SocketEndpoint}
+    resolved = _resolve_with_deadline(d, network, address, deadline_ns)
+    return _coerce_connect_addrs_any(resolved)
 end
 
 function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining::Int)::Int64
@@ -1968,6 +2013,36 @@ function _connect_resolved_addrs(
     throw(ArgumentError("resolver returned unsupported address container"))
 end
 
+function _connect_v4(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+    )::TCP.Conn
+    addrs = _resolve_connect_addrs(d, network, address, deadline_ns, Val(:tcp4))
+    return _connect_resolved_addrs_impl(d, network, address, :tcp4, deadline_ns, addrs)
+end
+
+function _connect_v6(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+    )::TCP.Conn
+    addrs = _resolve_connect_addrs(d, network, address, deadline_ns, Val(:tcp6))
+    return _connect_resolved_addrs_impl(d, network, address, :tcp6, deadline_ns, addrs)
+end
+
+function _connect_dualstack(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+    )::TCP.Conn
+    addrs = _resolve_connect_addrs(d, network, address, deadline_ns, Val(:tcp))
+    return _connect_resolved_addrs_impl(d, network, address, :tcp, deadline_ns, addrs)
+end
+
 """
     connect(d, network, address)
 
@@ -1994,12 +2069,17 @@ function connect(
     catch err
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
-    addrs = try
-        _resolve_connect_addrs(d, network, address, deadline_ns, kind)
+    try
+        if kind === :tcp4
+            return _connect_v4(d, network, address, deadline_ns)
+        elseif kind === :tcp6
+            return _connect_v6(d, network, address, deadline_ns)
+        end
+        return _connect_dualstack(d, network, address, deadline_ns)
     catch err
+        err isa OpError && rethrow(err)
         throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
     end
-    return _connect_resolved_addrs(d, network, address, kind, deadline_ns, addrs)
 end
 
 """
