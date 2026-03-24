@@ -412,19 +412,44 @@ function _pc_run_tls_workload!()
     return nothing
 end
 
-try
-    @setup_workload begin
-        IP.__init__()
-        @assert isassigned(IP.POLLER)
-        @compile_workload begin
-            _pc_workload_enabled("eventloops") && _pc_run_eventloops_workload!()
-            _pc_workload_enabled("internal_poll") && _pc_run_internal_poll_workload!()
-            _pc_workload_enabled("socket_ops") && _pc_run_socket_ops_workload!()
-            _pc_workload_enabled("tcp") && _pc_run_tcp_workload!()
-            _pc_workload_enabled("host_resolvers") && _pc_run_host_resolvers_workload!()
-            _pc_workload_enabled("tls") && _pc_run_tls_workload!()
-        end
+@inline function _pc_strict_mode()::Bool
+    return get(ENV, "RESEAU_PRECOMPILE_STRICT", "0") == "1"
+end
+
+function _pc_run_selected_workloads!()::Nothing
+    _pc_workload_enabled("eventloops") && _pc_run_eventloops_workload!()
+    _pc_workload_enabled("internal_poll") && _pc_run_internal_poll_workload!()
+    _pc_workload_enabled("socket_ops") && _pc_run_socket_ops_workload!()
+    _pc_workload_enabled("tcp") && _pc_run_tcp_workload!()
+    _pc_workload_enabled("host_resolvers") && _pc_run_host_resolvers_workload!()
+    _pc_workload_enabled("tls") && _pc_run_tls_workload!()
+    return nothing
+end
+
+function _pc_run_precompile_workloads!()::Nothing
+    IP.__init__()
+    @assert isassigned(IP.POLLER)
+    _pc_run_selected_workloads!()
+    return nothing
+end
+
+function _pc_run_precompile_workloads_with_fallback!()::Nothing
+    try
+        _pc_run_precompile_workloads!()
+    catch err
+        _pc_strict_mode() && rethrow(err)
+        @info "Ignoring an error that occurred during the precompilation workload" exception = (err, catch_backtrace())
     end
-catch err
-    @info "Ignoring an error that occurred during the precompilation workload" exception = (err, catch_backtrace())
+    return nothing
+end
+
+function _run_precompile_workloads_for_tests()::Nothing
+    _pc_run_precompile_workloads!()
+    return nothing
+end
+
+@setup_workload begin
+    @compile_workload begin
+        _pc_run_precompile_workloads_with_fallback!()
+    end
 end
