@@ -253,11 +253,11 @@ Resolver with fixed host/service mappings and optional fallback resolver.
 This is useful in tests and controlled environments where you want deterministic
 name/service lookup without consulting the operating system.
 """
-struct StaticResolver <: AbstractResolver
+struct StaticResolver{F<:Union{Nothing, AbstractResolver}} <: AbstractResolver
     hosts::Dict{String, Vector{TCP.SocketEndpoint}}
     services_tcp::Dict{String, Int}
     services_udp::Dict{String, Int}
-    fallback::Union{Nothing, AbstractResolver}
+    fallback::F
 end
 
 function StaticResolver(;
@@ -266,7 +266,7 @@ function StaticResolver(;
         services_udp::Dict{String, Int} = Dict{String, Int}(),
         fallback::Union{Nothing, AbstractResolver} = nothing,
     )
-    return StaticResolver(copy(hosts), copy(services_tcp), copy(services_udp), fallback)
+    return StaticResolver{typeof(fallback)}(copy(hosts), copy(services_tcp), copy(services_udp), fallback)
 end
 
 const DEFAULT_RESOLVER = SystemResolver()
@@ -984,12 +984,13 @@ function lookup_port(resolver::StaticResolver, network::AbstractString, service:
     port, needs_lookup = parse_port(service)
     if needs_lookup
         n = String(network)
+        fallback = resolver.fallback
         if n == "tcp" || n == "tcp4" || n == "tcp6" || n == "" || n == "ip"
             p = get(() -> nothing, resolver.services_tcp, lowercase(String(service)))
             if p !== nothing
                 port = p::Int
-            elseif resolver.fallback !== nothing
-                return lookup_port(resolver.fallback::AbstractResolver, network, service)
+            elseif fallback !== nothing
+                return lookup_port(fallback, network, service)
             else
                 port = _parse_port_table(_SERVICE_TCP, n, service)
             end
@@ -997,8 +998,8 @@ function lookup_port(resolver::StaticResolver, network::AbstractString, service:
             p = get(() -> nothing, resolver.services_udp, lowercase(String(service)))
             if p !== nothing
                 port = p::Int
-            elseif resolver.fallback !== nothing
-                return lookup_port(resolver.fallback::AbstractResolver, network, service)
+            elseif fallback !== nothing
+                return lookup_port(fallback, network, service)
             else
                 port = _parse_port_table(_SERVICE_UDP, n, service)
             end
@@ -1086,8 +1087,9 @@ function _resolve_static_host(
     literal === nothing || return TCP.SocketEndpoint[literal]
     mapped = get(() -> nothing, resolver.hosts, lowercase(h))
     mapped === nothing || return copy(mapped::Vector{TCP.SocketEndpoint})
-    resolver.fallback === nothing && _lookup_error("no suitable address", h)
-    return _resolve_host_ips(resolver.fallback::AbstractResolver, network, h)
+    fallback = resolver.fallback
+    fallback === nothing && _lookup_error("no suitable address", h)
+    return _resolve_host_ips(fallback, network, h)
 end
 
 function _resolve_host_ips(resolver::AbstractResolver, host::AbstractString)::Vector{TCP.SocketEndpoint}
