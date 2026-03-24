@@ -82,35 +82,19 @@ function _read_byte(fd::Cint)::UInt8
     throw(ArgumentError("timed out reading byte"))
 end
 
-function _wait_task_done(task::Task, timeout_s::Float64 = 2.0)::Bool
-    start_ns = Int64(time_ns())
-    timeout_ns = Int64(timeout_s * 1.0e9)
-    while !istaskdone(task)
-        Int64(time_ns()) - start_ns > timeout_ns && return false
-        yield()
-    end
-    return true
-end
-
 function run_iopoll_runtime_trim_sample()::Nothing
     fd0, fd1 = _stream_pair()
-    waiter_task = nothing
     try
         registration = IP.register!(fd0; mode = IP.PollMode.READWRITE)
-        waiter_task = errormonitor(@async begin
-            IP.arm_waiter!(registration, IP.PollMode.READ)
-            reason = IP.pollwait!(registration.read_waiter)
-            reason == IP.PollWakeReason.READY || error("unexpected wake reason")
-            return nothing
-        end)
+        IP.arm_waiter!(registration, IP.PollMode.READ)
         _write_byte(fd1, 0x44)
-        _wait_task_done(waiter_task, 2.0) || error("timed out waiting for iopoll readiness")
+        reason = IP.pollwait!(registration.read_waiter)
+        reason == IP.PollWakeReason.READY || error("unexpected wake reason")
         _read_byte(fd0) == 0x44 || error("unexpected iopoll read byte")
         combined = IP._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
         length(combined) == 1 || error("expected one combined deadline entry")
         combined[1].mode == IP.PollMode.READWRITE || error("expected combined read/write entry")
     finally
-        waiter_task isa Task && !istaskdone(waiter_task) && wait(waiter_task)
         fd0 >= 0 && IP.deregister!(fd0)
         _close_fd(fd0)
         _close_fd(fd1)

@@ -167,6 +167,8 @@ function _pc_run_eventloops_workload!()
         state.registrations_by_token[token] = registration
         errno = IP._backend_open_fd!(state, fd0, IP.PollMode.READWRITE, token)
         errno == Int32(0) || throw(SystemError("event loop open fd", Int(errno)))
+        errno = IP._backend_arm_waiter!(state, registration, IP.PollMode.READ)
+        errno == Int32(0) || throw(SystemError("event loop arm read waiter", Int(errno)))
         _pc_write_byte(fd1, 0x31)
         ready = false
         for _ in 1:20
