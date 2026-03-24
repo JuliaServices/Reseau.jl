@@ -429,11 +429,6 @@ function _pc_run_precompile_workloads!()::Nothing
     return nothing
 end
 
-function _run_precompile_workloads_for_tests()::Nothing
-    _pc_run_precompile_workloads!()
-    return nothing
-end
-
 @setup_workload begin
     @compile_workload begin
         _pc_run_precompile_workloads!()
