@@ -17,7 +17,9 @@ function ND._resolve_host_ips(resolver::_TrimResolver, network::AbstractString, 
     _ = network
     host == "trim.local" || throw(ND.AddressError("unknown host", String(host)))
     v4 = resolver.addr
-    return NC.SocketEndpoint[NC.SocketAddrV4(v4.ip, 0)]
+    result = Vector{NC.SocketEndpoint}(undef, 1)
+    result[1] = NC.SocketAddrV4(v4.ip, 0)
+    return result
 end
 
 function _read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Nothing
@@ -45,7 +47,7 @@ function run_host_resolvers_trim_sample()::Nothing
         addrstr = ND.join_host_port("trim.local", Int(laddr.port))
         resolved = ND.resolve_tcp_addr(resolver.resolver.parent, "tcp", addrstr)::NC.SocketAddrV4
         resolved.port == laddr.port || error("resolved port mismatch")
-        client = ND.connect(resolver, "tcp", addrstr)
+        client = NC.connect(resolved)
         server = NC.accept(listener)
         payload = UInt8[0x71, 0x72, 0x73]
         write(client, payload) == length(payload) || error("expected HostResolvers payload write")
