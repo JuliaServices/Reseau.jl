@@ -84,18 +84,31 @@ end
 
 function run_iopoll_runtime_trim_sample()::Nothing
     fd0, fd1 = _stream_pair()
+    ipfd = IP.FD(fd0)
+    fd0 = Cint(-1)
     try
-        registration = IP.register!(fd0; mode = IP.PollMode.READWRITE)
-        IP.arm_waiter!(registration, IP.PollMode.READ)
+        IP._set_nonblocking!(ipfd.sysfd)
+        IP.register!(ipfd)
+        deadline_ns = Int64(time_ns()) + Int64(5_000_000_000)
+        IP.set_deadline!(ipfd, deadline_ns)
+        state = IP.POLLER[]
+        deadline_entries = lock(state.lock) do
+            return copy(state.time_heap)
+        end
+        length(deadline_entries) == 1 || error("expected one scheduled deadline entry")
+        deadline_entries[1].pollstate === ipfd.pd || error("expected deadline entry for registered fd")
+        deadline_entries[1].mode == IP.PollMode.READWRITE || error("expected combined read/write deadline mode")
+        IP.set_deadline!(ipfd, Int64(0))
         _write_byte(fd1, 0x44)
-        reason = IP.pollwait!(registration.read_waiter)
-        reason == IP.PollWakeReason.READY || error("unexpected wake reason")
-        _read_byte(fd0) == 0x44 || error("unexpected iopoll read byte")
-        combined = IP._build_deadline_entries(registration.pollstate, Int64(10), Int64(10), UInt64(3), UInt64(5))
+        buf = Vector{UInt8}(undef, 1)
+        n = IP.read!(ipfd, buf)
+        n == 1 || error("expected one-byte iopoll read")
+        buf[1] == 0x44 || error("unexpected iopoll read byte")
+        combined = IP._build_deadline_entries(ipfd.pd, Int64(10), Int64(10), UInt64(3), UInt64(5))
         length(combined) == 1 || error("expected one combined deadline entry")
         combined[1].mode == IP.PollMode.READWRITE || error("expected combined read/write entry")
     finally
-        fd0 >= 0 && IP.deregister!(fd0)
+        ipfd.sysfd >= 0 && close(ipfd)
         _close_fd(fd0)
         _close_fd(fd1)
         IP.shutdown!()
