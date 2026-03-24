@@ -3,18 +3,11 @@ using Reseau
 const TL = Reseau.TLS
 const NC = Reseau.TCP
 const IP = Reseau.IOPoll
-const SO = Reseau.SocketOps
-const _LIBSSL = TL._LIBSSL
-const _SSL_ERROR_WANT_READ = TL._SSL_ERROR_WANT_READ
-const _SSL_ERROR_WANT_WRITE = TL._SSL_ERROR_WANT_WRITE
-const _SSL_ERROR_SYSCALL = TL._SSL_ERROR_SYSCALL
-const _tls_make_tls_error = TL._make_tls_error
-const _tls_set_handshake_complete! = TL._set_handshake_complete!
-const _tls_handshake_complete = TL._handshake_complete
-const _tls_socket_would_block = TL._is_socket_would_block
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS_SERVER_LISTENER = Ref{Union{Nothing, TL.Listener}}(nothing)
+const _TLS_SERVER_CONN = Ref{Union{Nothing, TL.Conn}}(nothing)
 
 function _close_quiet!(x)
     x === nothing && return nothing
@@ -30,64 +23,51 @@ function _read_exact!(conn::TL.Conn, buf::Vector{UInt8})::Nothing
     return nothing
 end
 
-function _handshake_step!(conn::TL.Conn)::Bool
-    _tls_handshake_complete(conn) && return true
-    ret = ccall((:SSL_do_handshake, _LIBSSL), Cint, (Ptr{Cvoid},), conn.ssl)
-    if ret == 1
-        _tls_set_handshake_complete!(conn)
-        return true
-    end
-    ssl_err = ccall((:SSL_get_error, _LIBSSL), Cint, (Ptr{Cvoid}, Cint), conn.ssl, ret)
-    if ssl_err == _SSL_ERROR_WANT_READ || ssl_err == _SSL_ERROR_WANT_WRITE
-        return false
-    end
-    if ssl_err == _SSL_ERROR_SYSCALL
-        errno = SO.last_error()
-        _tls_socket_would_block(errno) && return false
-        errno == Int32(0) && throw(TL.TLSError("handshake", ssl_err, "unexpected EOF", nothing))
-        throw(TL.TLSError("handshake", ssl_err, "syscall errno=$(errno)", nothing))
-    end
-    throw(_tls_make_tls_error("handshake", Int32(ssl_err)))
+function _tls_client_connect(addr::NC.SocketAddrV4)::TL.Conn
+    return TL.connect(
+        addr;
+        server_name = "localhost",
+        verify_peer = false,
+        handshake_timeout_ns = 10_000_000_000,
+    )
 end
 
-function _handshake_pair!(client::TL.Conn, server::TL.Conn; max_iters::Int = 10_000)::Nothing
-    client_done = _tls_handshake_complete(client)
-    server_done = _tls_handshake_complete(server)
-    for _ in 1:max_iters
-        client_done || (client_done = _handshake_step!(client))
-        server_done || (server_done = _handshake_step!(server))
-        client_done && server_done && return nothing
-        yield()
-    end
-    error("timed out driving TLS handshake pair")
+function _tls_server_task_entry()::Nothing
+    listener = _TLS_SERVER_LISTENER[]::TL.Listener
+    conn = TL.accept(listener)
+    TL.handshake!(conn)
+    _TLS_SERVER_CONN[] = conn
+    return nothing
 end
+
+Base.Experimental.entrypoint(_tls_server_task_entry, ())
 
 function run_tls_trim_sample()::Nothing
     listener::Union{Nothing, TL.Listener} = nothing
-    client_tcp::Union{Nothing, NC.Conn} = nothing
     client::Union{Nothing, TL.Conn} = nothing
     server::Union{Nothing, TL.Conn} = nothing
+    server_task::Union{Nothing, Task} = nothing
     try
-        server_cfg = TL.Config(
-            verify_peer = false,
-            cert_file = _TLS_CERT_PATH,
-            key_file = _TLS_KEY_PATH,
-            handshake_timeout_ns = 10_000_000_000,
-        )
-        listener = TL.listen(NC.loopback_addr(0), server_cfg; backlog = 8)
-        laddr = TL.addr(listener)::NC.SocketAddrV4
-        client_tcp = NC.connect(NC.loopback_addr(Int(laddr.port)))
-        server = TL.accept(listener)
-        client = TL.client(
-            client_tcp,
+        listener = TL.listen(
+            NC.loopback_addr(0),
             TL.Config(
                 verify_peer = false,
-                server_name = "localhost",
+                cert_file = _TLS_CERT_PATH,
+                key_file = _TLS_KEY_PATH,
                 handshake_timeout_ns = 10_000_000_000,
-            ),
+            );
+            backlog = 8,
         )
-        client_tcp = nothing
-        _handshake_pair!(client, server)
+        _TLS_SERVER_LISTENER[] = listener
+        _TLS_SERVER_CONN[] = nothing
+        laddr = TL.addr(listener)::NC.SocketAddrV4
+        server_task = errormonitor(Task(_tls_server_task_entry))
+        schedule(server_task)
+        client = _tls_client_connect(NC.loopback_addr(Int(laddr.port)))
+        status = IP.timedwait(() -> istaskdone(server_task::Task), 10.0; pollint = 0.001)
+        status == :timed_out && error("timed out waiting for TLS server task")
+        wait(server_task)
+        server = _TLS_SERVER_CONN[]::TL.Conn
         TL.connection_state(client).handshake_complete || error("client handshake incomplete")
         TL.connection_state(server).handshake_complete || error("server handshake incomplete")
         payload = UInt8[0x54, 0x4c, 0x53]
@@ -96,9 +76,10 @@ function run_tls_trim_sample()::Nothing
         _read_exact!(server, recv_buf)
         recv_buf == payload || error("TLS payload mismatch")
     finally
+        _TLS_SERVER_LISTENER[] = nothing
+        _TLS_SERVER_CONN[] = nothing
         _close_quiet!(server)
         _close_quiet!(client)
-        _close_quiet!(client_tcp)
         _close_quiet!(listener)
     end
     return nothing
