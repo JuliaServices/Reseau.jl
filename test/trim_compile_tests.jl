@@ -1,14 +1,6 @@
 using Test
 
-const _TRIM_SAFE_ERROR_BUDGET = @static if Sys.isapple()
-    0
-elseif Sys.iswindows()
-    0
-elseif Sys.islinux()
-    0
-else
-    typemax(Int)
-end
+const _TRIM_SAFE_ERROR_BUDGET = 0
 
 const _TRIM_SUPPORTED = VERSION >= v"1.12.0-rc1"
 const _TRIM_PRE_RELEASE = !isempty(VERSION.prerelease)
@@ -96,7 +88,7 @@ function _maybe_print_output(header::String, output::String)
 end
 
 function _trim_executable_timeout_s()::Float64
-    default = Sys.iswindows() ? "120.0" : "30.0"
+    default = "60.0"
     return parse(Float64, get(ENV, "RESEAU_TRIM_EXE_TIMEOUT_S", default))
 end
 
@@ -112,8 +104,16 @@ function _trim_selected_workloads(workloads::Vector{Tuple{String, String}})::Vec
 end
 
 function _trim_use_bundle()::Bool
-    default = Sys.iswindows() ? "1" : "0"
+    default = "1"
     return get(ENV, "RESEAU_TRIM_BUNDLE", default) == "1"
+end
+
+function _trim_output_path(dir::String, output_name::String)::String
+    path = joinpath(dir, output_name)
+    isfile(path) && return path
+    exe_path = joinpath(dir, "$(output_name).exe")
+    isfile(exe_path) && return exe_path
+    return path
 end
 
 function _run_trim_case(project_path::String, script_file::String, output_name::String)
@@ -137,12 +137,13 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
             end
             @test trim_errors <= _TRIM_SAFE_ERROR_BUDGET
             @test trim_warnings >= 0
-            output_path = Sys.iswindows() ? "$(output_name).exe" : output_name
             if trim_errors == 0
-                run_path = bundle_dir === nothing ? output_path : joinpath(bundle_dir, "bin", output_path)
+                run_dir = bundle_dir === nothing ? pwd() : joinpath(bundle_dir, "bin")
+                run_path = _trim_output_path(run_dir, output_name)
                 @test exit_code == 0
                 @test isfile(run_path)
-                run_cmd = Sys.iswindows() ? `$(abspath(run_path))` : `$(abspath(run_path))`
+                helper_julia = joinpath(Sys.BINDIR, Base.julia_exename())
+                run_cmd = setenv(`$(abspath(run_path))`, "RESEAU_TRIM_HELPER_JULIA" => helper_julia)
                 run_timeout_s = _trim_executable_timeout_s()
                 run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd; timeout_s = run_timeout_s)
                 run_timed_out && _trim_timeout_error("executable run", script_file, run_output)

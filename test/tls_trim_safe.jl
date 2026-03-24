@@ -6,60 +6,81 @@ const IP = Reseau.IOPoll
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS_SERVER_LISTENER = Ref{Union{Nothing, TL.Listener}}(nothing)
+const _TLS_SERVER_CONN = Ref{Union{Nothing, TL.Conn}}(nothing)
+
+function _close_quiet!(x)
+    x === nothing && return nothing
+    try
+        close(x)
+    catch
+    end
+    return nothing
+end
+
+function _read_exact!(conn::TL.Conn, buf::Vector{UInt8})::Nothing
+    read!(conn, buf)
+    return nothing
+end
+
+function _tls_client_connect(addr::NC.SocketAddrV4)::TL.Conn
+    return TL.connect(
+        addr;
+        server_name = "localhost",
+        verify_peer = false,
+        handshake_timeout_ns = 10_000_000_000,
+    )
+end
+
+function _tls_server_task_entry()::Nothing
+    listener = _TLS_SERVER_LISTENER[]::TL.Listener
+    conn = TL.accept(listener)
+    TL.handshake!(conn)
+    _TLS_SERVER_CONN[] = conn
+    return nothing
+end
+
+Base.Experimental.entrypoint(_tls_server_task_entry, ())
 
 function run_tls_trim_sample()::Nothing
-    (Sys.isapple() || Sys.islinux()) || return nothing
-    listener::Union{Nothing, NC.Listener} = nothing
-    client_tcp::Union{Nothing, NC.Conn} = nothing
-    server_tcp::Union{Nothing, NC.Conn} = nothing
-    client_tls::Union{Nothing, TL.Conn} = nothing
-    server_tls::Union{Nothing, TL.Conn} = nothing
+    listener::Union{Nothing, TL.Listener} = nothing
+    client::Union{Nothing, TL.Conn} = nothing
+    server::Union{Nothing, TL.Conn} = nothing
+    server_task::Union{Nothing, Task} = nothing
     try
-        listener = NC.listen(NC.loopback_addr(0); backlog = 8)
-        laddr = NC.addr(listener)::NC.SocketAddrV4
-        client_tcp = NC.connect(NC.loopback_addr(Int(laddr.port)))
-        server_tcp = NC.accept(listener)
-        client_cfg = TL.Config(verify_peer = false, server_name = "localhost", handshake_timeout_ns = 10_000_000_000)
-        server_cfg = TL.Config(
-            verify_peer = false,
-            cert_file = _TLS_CERT_PATH,
-            key_file = _TLS_KEY_PATH,
-            handshake_timeout_ns = 10_000_000_000,
+        listener = TL.listen(
+            NC.loopback_addr(0),
+            TL.Config(
+                verify_peer = false,
+                cert_file = _TLS_CERT_PATH,
+                key_file = _TLS_KEY_PATH,
+                handshake_timeout_ns = 10_000_000_000,
+            );
+            backlog = 8,
         )
-        client_tls = TL.client(client_tcp, client_cfg)
-        server_tls = TL.server(server_tcp, server_cfg)
-        _ = TL.connection_state(client_tls)
-        _ = TL.connection_state(server_tls)
+        _TLS_SERVER_LISTENER[] = listener
+        _TLS_SERVER_CONN[] = nothing
+        laddr = TL.addr(listener)::NC.SocketAddrV4
+        server_task = errormonitor(Task(_tls_server_task_entry))
+        schedule(server_task)
+        client = _tls_client_connect(NC.loopback_addr(Int(laddr.port)))
+        status = IP.timedwait(() -> istaskdone(server_task::Task), 10.0; pollint = 0.001)
+        status == :timed_out && error("timed out waiting for TLS server task")
+        wait(server_task)
+        server = _TLS_SERVER_CONN[]::TL.Conn
+        TL.connection_state(client).handshake_complete || error("client handshake incomplete")
+        TL.connection_state(server).handshake_complete || error("server handshake incomplete")
+        payload = UInt8[0x54, 0x4c, 0x53]
+        write(client, payload) == length(payload) || error("expected TLS payload write")
+        recv_buf = Vector{UInt8}(undef, length(payload))
+        _read_exact!(server, recv_buf)
+        recv_buf == payload || error("TLS payload mismatch")
     finally
-        if server_tls !== nothing
-            try
-                close(server_tls::TL.Conn)
-            catch
-            end
-        elseif server_tcp !== nothing
-            try
-                close(server_tcp::NC.Conn)
-            catch
-            end
-        end
-        if client_tls !== nothing
-            try
-                close(client_tls::TL.Conn)
-            catch
-            end
-        elseif client_tcp !== nothing
-            try
-                close(client_tcp::NC.Conn)
-            catch
-            end
-        end
-        if listener !== nothing
-            try
-                close(listener::NC.Listener)
-            catch
-            end
-        end
-        IP.shutdown!()
+        _TLS_SERVER_LISTENER[] = nothing
+        _TLS_SERVER_CONN[] = nothing
+        _close_quiet!(server)
+        _close_quiet!(client)
+        _close_quiet!(listener)
     end
     return nothing
 end

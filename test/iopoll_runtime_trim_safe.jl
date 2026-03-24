@@ -1,107 +1,131 @@
 using Reseau
 
-const NP = Reseau.IOPoll
 const IP = Reseau.IOPoll
+const SO = Reseau.SocketOps
+const _TRIM_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
+const _IOPOLL_TRIM_FD = Ref{Union{Nothing, IP.FD}}(nothing)
+const _IOPOLL_TRIM_BUF = Ref{Vector{UInt8}}(UInt8[])
+const _IOPOLL_TRIM_ENTERED = Ref(false)
+const _IOPOLL_TRIM_NREAD = Ref(0)
 
-@static if !Sys.iswindows()
+function _accept_with_retry(listener::Cint)::Cint
+    for _ in 1:5000
+        accepted, _, errno = SO.try_accept_socket(listener)
+        accepted != -1 && return accepted
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _TRIM_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("accept", Int(errno)))
+    end
+    throw(ArgumentError("timed out waiting for accepted socket"))
+end
 
-function _socketpair_stream()::Tuple{Cint, Cint}
-    fds = Vector{Cint}(undef, 2)
-    ret = ccall(:socketpair, Cint, (Cint, Cint, Cint, Ptr{Cint}), Cint(1), Cint(1), Cint(0), pointer(fds))
-    ret == 0 || throw(SystemError("socketpair", Int(Base.Libc.errno())))
-    return fds[1], fds[2]
+function _stream_pair()::Tuple{Cint, Cint}
+    listener = Cint(-1)
+    client = Cint(-1)
+    accepted = Cint(-1)
+    try
+        listener = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_sockopt_int(listener, SO.SOL_SOCKET, SO.SO_REUSEADDR, 1)
+        SO.bind_socket(listener, SO.sockaddr_in_loopback(0))
+        SO.listen_socket(listener, 32)
+        bound = SO.get_socket_name_in(listener)
+        port = Int(SO.sockaddr_in_port(bound))
+        client = SO.open_socket(SO.AF_INET, SO.SOCK_STREAM)
+        SO.set_nonblocking!(client, false)
+        try
+            errno = SO.connect_socket(client, SO.sockaddr_in_loopback(port))
+            errno == Int32(0) || errno == Int32(Base.Libc.EISCONN) || throw(SystemError("connect", Int(errno)))
+        finally
+            SO.set_nonblocking!(client, true)
+        end
+        accepted = _accept_with_retry(listener)
+        stream_client = client
+        stream_server = accepted
+        client = Cint(-1)
+        accepted = Cint(-1)
+        return stream_client, stream_server
+    finally
+        accepted >= 0 && SO.close_socket_nothrow(accepted)
+        client >= 0 && SO.close_socket_nothrow(client)
+        listener >= 0 && SO.close_socket_nothrow(listener)
+    end
 end
 
 function _close_fd(fd::Cint)::Nothing
     fd < 0 && return nothing
-    ccall(:close, Cint, (Cint,), fd)
+    SO.close_socket_nothrow(fd)
     return nothing
 end
 
 function _write_byte(fd::Cint, b::UInt8)::Nothing
     buf = Ref{UInt8}(b)
-    n = ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd, buf, Csize_t(1))
-    n == Cssize_t(1) || throw(SystemError("write", Int(Base.Libc.errno())))
+    for _ in 1:5000
+        n = GC.@preserve buf SO.write_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
+        n == Cssize_t(1) && return nothing
+        errno = SO.last_error()
+        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
+        errno == _TRIM_EWOULDBLOCK && (yield(); continue)
+        errno == Int32(Base.Libc.EINTR) && continue
+        throw(SystemError("write", Int(errno)))
+    end
+    throw(ArgumentError("timed out writing byte"))
+end
+
+function _iopoll_trim_reader_task_entry()::Nothing
+    fd = _IOPOLL_TRIM_FD[]::IP.FD
+    buf = _IOPOLL_TRIM_BUF[]
+    _IOPOLL_TRIM_ENTERED[] = true
+    _IOPOLL_TRIM_NREAD[] = IP.read!(fd, buf)
     return nothing
 end
 
-@inline function _expect_errno_zero(errno::Int32, op::AbstractString)::Nothing
-    errno == Int32(0) || throw(SystemError(op, Int(errno)))
-    return nothing
-end
+Base.Experimental.entrypoint(_iopoll_trim_reader_task_entry, ())
 
 function run_iopoll_runtime_trim_sample()::Nothing
-    (Sys.isapple() || Sys.islinux()) || return nothing
-    state = NP.Poller()
-    fd0 = Cint(-1)
-    fd1 = Cint(-1)
-    backend_open = false
-    try
-        _expect_errno_zero(NP._backend_init!(state), "event loop kqueue init")
-        backend_open = true
-        fd0, fd1 = _socketpair_stream()
-        token = UInt64(1)
-        registration = NP.Registration(fd0, token, NP.PollMode.READWRITE, NP.PollWaiter(), NP.PollWaiter(), false)
-        state.registrations[fd0] = registration
-        state.registrations_by_token[token] = registration
-        _expect_errno_zero(NP._backend_open_fd!(state, fd0, NP.PollMode.READWRITE, token), "event loop open fd")
-        _write_byte(fd1, 0x44)
-        _expect_errno_zero(NP._backend_poll_once!(state, Int64(0)), "event loop poll once")
-        NP.pollwait!(registration.read_waiter)
-        _expect_errno_zero(NP._backend_close_fd!(state, fd0), "event loop close fd")
-    finally
-        _close_fd(fd0)
-        _close_fd(fd1)
-        backend_open && NP._backend_close!(state)
-    end
-    return nothing
-end
-
-function run_internal_poll_trim_sample()::Nothing
-    (Sys.isapple() || Sys.islinux()) || return nothing
-    fd0, fd1 = _socketpair_stream()
+    fd0, fd1 = _stream_pair()
     ipfd = IP.FD(fd0)
     fd0 = Cint(-1)
+    reader_task::Union{Nothing, Task} = nothing
     try
         IP.register!(ipfd)
-        _write_byte(fd1, 0x65)
-        read_buf = Vector{UInt8}(undef, 1)
-        n = IP.read!(ipfd, read_buf)
-        n == 1 || error("expected one byte read")
-        read_buf[1] == 0x65 || error("unexpected read byte")
-        n = IP.write!(ipfd, UInt8[0x66])
-        n == 1 || error("expected one byte written")
-        peer = Ref{UInt8}(0x00)
-        peer_n = ccall(:read, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd1, peer, Csize_t(1))
-        peer_n == Cssize_t(1) || throw(SystemError("read", Int(Base.Libc.errno())))
-        peer[] == 0x66 || error("unexpected peer byte")
+        IP.set_read_deadline!(ipfd, Int64(time_ns()) + Int64(50_000_000))
+        try
+            IP.read!(ipfd, Vector{UInt8}(undef, 1))
+            error("expected read deadline timeout")
+        catch err
+            err isa IP.DeadlineExceededError || rethrow(err)
+        end
+        IP.set_read_deadline!(ipfd, Int64(0))
+        _IOPOLL_TRIM_FD[] = ipfd
+        _IOPOLL_TRIM_BUF[] = Vector{UInt8}(undef, 1)
+        _IOPOLL_TRIM_ENTERED[] = false
+        _IOPOLL_TRIM_NREAD[] = 0
+        reader_task = errormonitor(Task(_iopoll_trim_reader_task_entry))
+        schedule(reader_task)
+        start_status = IP.timedwait(() -> _IOPOLL_TRIM_ENTERED[], 5.0; pollint = 0.001)
+        start_status == :timed_out && error("timed out waiting for iopoll reader task")
+        _write_byte(fd1, 0x44)
+        done_status = IP.timedwait(() -> istaskdone(reader_task::Task), 5.0; pollint = 0.001)
+        done_status == :timed_out && error("timed out waiting for iopoll read wake")
+        wait(reader_task)
+        _IOPOLL_TRIM_NREAD[] == 1 || error("expected one-byte iopoll read")
+        _IOPOLL_TRIM_BUF[][1] == 0x44 || error("unexpected iopoll read byte")
     finally
+        _IOPOLL_TRIM_FD[] = nothing
+        _IOPOLL_TRIM_BUF[] = UInt8[]
+        _IOPOLL_TRIM_ENTERED[] = false
+        _IOPOLL_TRIM_NREAD[] = 0
         ipfd.sysfd >= 0 && close(ipfd)
+        _close_fd(fd0)
         _close_fd(fd1)
     end
     return nothing
-end
-
-else
-
-function run_iopoll_runtime_trim_sample()::Nothing
-    return nothing
-end
-
-function run_internal_poll_trim_sample()::Nothing
-    return nothing
-end
-
 end
 
 function @main(args::Vector{String})::Cint
     _ = args
-    try
-        run_iopoll_runtime_trim_sample()
-        run_internal_poll_trim_sample()
-    finally
-        NP.shutdown!()
-    end
+    run_iopoll_runtime_trim_sample()
     return 0
 end
 

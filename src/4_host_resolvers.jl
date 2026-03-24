@@ -253,11 +253,11 @@ Resolver with fixed host/service mappings and optional fallback resolver.
 This is useful in tests and controlled environments where you want deterministic
 name/service lookup without consulting the operating system.
 """
-struct StaticResolver <: AbstractResolver
+struct StaticResolver{F<:Union{Nothing, AbstractResolver}} <: AbstractResolver
     hosts::Dict{String, Vector{TCP.SocketEndpoint}}
     services_tcp::Dict{String, Int}
     services_udp::Dict{String, Int}
-    fallback::Union{Nothing, AbstractResolver}
+    fallback::F
 end
 
 function StaticResolver(;
@@ -266,7 +266,7 @@ function StaticResolver(;
         services_udp::Dict{String, Int} = Dict{String, Int}(),
         fallback::Union{Nothing, AbstractResolver} = nothing,
     )
-    return StaticResolver(copy(hosts), copy(services_tcp), copy(services_udp), fallback)
+    return StaticResolver{typeof(fallback)}(copy(hosts), copy(services_tcp), copy(services_udp), fallback)
 end
 
 const DEFAULT_RESOLVER = SystemResolver()
@@ -984,12 +984,13 @@ function lookup_port(resolver::StaticResolver, network::AbstractString, service:
     port, needs_lookup = parse_port(service)
     if needs_lookup
         n = String(network)
+        fallback = resolver.fallback
         if n == "tcp" || n == "tcp4" || n == "tcp6" || n == "" || n == "ip"
             p = get(() -> nothing, resolver.services_tcp, lowercase(String(service)))
             if p !== nothing
                 port = p::Int
-            elseif resolver.fallback !== nothing
-                return lookup_port(resolver.fallback::AbstractResolver, network, service)
+            elseif fallback !== nothing
+                return lookup_port(fallback, network, service)
             else
                 port = _parse_port_table(_SERVICE_TCP, n, service)
             end
@@ -997,8 +998,8 @@ function lookup_port(resolver::StaticResolver, network::AbstractString, service:
             p = get(() -> nothing, resolver.services_udp, lowercase(String(service)))
             if p !== nothing
                 port = p::Int
-            elseif resolver.fallback !== nothing
-                return lookup_port(resolver.fallback::AbstractResolver, network, service)
+            elseif fallback !== nothing
+                return lookup_port(fallback, network, service)
             else
                 port = _parse_port_table(_SERVICE_UDP, n, service)
             end
@@ -1021,8 +1022,14 @@ function _apply_policy_and_network(
         addrs::Vector{TCP.SocketEndpoint},
         kind::Symbol,
         policy::ResolverPolicy,
-    )::Vector{TCP.SocketEndpoint}
-    out = TCP.SocketEndpoint[]
+    )
+    out = if kind == :tcp4 || (!policy.allow_ipv6 && policy.allow_ipv4)
+        TCP.SocketAddrV4[]
+    elseif kind == :tcp6 || (!policy.allow_ipv4 && policy.allow_ipv6)
+        TCP.SocketAddrV6[]
+    else
+        TCP.SocketEndpoint[]
+    end
     for addr in addrs
         if kind == :tcp4 && !(addr isa TCP.SocketAddrV4)
             continue
@@ -1080,8 +1087,9 @@ function _resolve_static_host(
     literal === nothing || return TCP.SocketEndpoint[literal]
     mapped = get(() -> nothing, resolver.hosts, lowercase(h))
     mapped === nothing || return copy(mapped::Vector{TCP.SocketEndpoint})
-    resolver.fallback === nothing && _lookup_error("no suitable address", h)
-    return _resolve_host_ips(resolver.fallback::AbstractResolver, network, h)
+    fallback = resolver.fallback
+    fallback === nothing && _lookup_error("no suitable address", h)
+    return _resolve_host_ips(fallback, network, h)
 end
 
 function _resolve_host_ips(resolver::AbstractResolver, host::AbstractString)::Vector{TCP.SocketEndpoint}
@@ -1409,7 +1417,7 @@ function resolve_tcp_addrs(
         address::AbstractString;
         op::Symbol = :connect,
         policy::ResolverPolicy = ResolverPolicy(),
-    )::Vector{TCP.SocketEndpoint}
+    )
     kind = _network_kind(network)
     addr = String(address)
     op == :connect && isempty(addr) && _addr_error("missing address", addr)
@@ -1422,7 +1430,7 @@ function resolve_tcp_addrs(
     end
     filtered = _apply_policy_and_network(ips, kind, policy)
     isempty(filtered) && _lookup_error("no suitable address", host)
-    out = TCP.SocketEndpoint[]
+    out = empty(similar(filtered))
     for ipaddr in filtered
         push!(out, _with_port(ipaddr, port))
     end
@@ -1434,7 +1442,7 @@ end
 
 Resolve concrete TCP endpoints using `DEFAULT_RESOLVER`.
 """
-function resolve_tcp_addrs(network::AbstractString, address::AbstractString)::Vector{TCP.SocketEndpoint}
+function resolve_tcp_addrs(network::AbstractString, address::AbstractString)
     return resolve_tcp_addrs(DEFAULT_RESOLVER, network, address)
 end
 
@@ -1528,7 +1536,7 @@ end
     return Int64(300_000_000)
 end
 
-@inline function _use_parallel_race(d::HostResolver, kind::Symbol, fallbacks::Vector{TCP.SocketEndpoint})::Bool
+@inline function _use_parallel_race(d::HostResolver, kind::Symbol, fallbacks::AbstractVector{<:TCP.SocketEndpoint})::Bool
     _dual_stack_enabled(d) || return false
     kind == :tcp || return false
     isempty(fallbacks) && return false
@@ -1563,12 +1571,35 @@ function _close_timer_task!(
     return nothing
 end
 
+const _ResolvedConnectAddrs = Union{
+    Vector{TCP.SocketAddrV4},
+    Vector{TCP.SocketAddrV6},
+    Vector{TCP.SocketEndpoint},
+}
+
+function _normalize_resolved_connect_addrs(result)::_ResolvedConnectAddrs
+    if result isa Vector{TCP.SocketAddrV4}
+        return result
+    elseif result isa Vector{TCP.SocketAddrV6}
+        return result
+    elseif result isa Vector{TCP.SocketEndpoint}
+        return result
+    elseif result isa AbstractVector{<:TCP.SocketEndpoint}
+        out = TCP.SocketEndpoint[]
+        for addr in result
+            push!(out, addr)
+        end
+        return out
+    end
+    throw(ArgumentError("resolver returned unsupported address container"))
+end
+
 function _resolve_with_deadline(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
         deadline_ns::Int64,
-    )::Vector{TCP.SocketEndpoint}
+    )::_ResolvedConnectAddrs
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
@@ -1576,7 +1607,7 @@ function _resolve_with_deadline(
     condition = Threads.Condition(mtx)
     done = Ref(false)
     timed_out = Ref(false)
-    result_ref = Ref{Union{Nothing, Vector{TCP.SocketEndpoint}, Exception}}(nothing)
+    result_ref = Ref{Union{Nothing, _ResolvedConnectAddrs, Exception}}(nothing)
     timer, timer_task = _spawn_timer_task(deadline_ns) do
         lock(mtx)
         try
@@ -1590,15 +1621,16 @@ function _resolve_with_deadline(
         return nothing
     end
     errormonitor(@async begin
-        result = try
+        resolved_or_err = try
             resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
         catch err
             _as_exception(err)
         end
+        stored_result = resolved_or_err isa Exception ? resolved_or_err : _normalize_resolved_connect_addrs(resolved_or_err)
         lock(mtx)
         try
             done[] && return nothing
-            result_ref[] = result
+            result_ref[] = stored_result
             done[] = true
             notify(condition)
         finally
@@ -1616,10 +1648,83 @@ function _resolve_with_deadline(
         _close_timer_task!(timer, timer_task)
     end
     timed_out[] && throw(DialTimeoutError(String(address)))
-    result = result_ref[]
-    result === nothing && throw(DialTimeoutError(String(address)))
-    result isa Exception && throw(result)
-    return result::Vector{TCP.SocketEndpoint}
+    resolved = result_ref[]
+    resolved === nothing && throw(DialTimeoutError(String(address)))
+    resolved isa Exception && throw(resolved)
+    resolved isa _ResolvedConnectAddrs || throw(ArgumentError("resolver returned unsupported address container"))
+    return resolved
+end
+
+_coerce_connect_addrs_v4(resolved::Vector{TCP.SocketAddrV4}) = resolved
+_coerce_connect_addrs_v4(::Vector{TCP.SocketAddrV6}) = throw(ArgumentError("resolver returned unexpected address family for tcp4"))
+
+function _coerce_connect_addrs_v4(resolved::Vector{TCP.SocketEndpoint})::Vector{TCP.SocketAddrV4}
+    out = TCP.SocketAddrV4[]
+    for addr in resolved
+        push!(out, addr::TCP.SocketAddrV4)
+    end
+    return out
+end
+
+_coerce_connect_addrs_v6(resolved::Vector{TCP.SocketAddrV6}) = resolved
+_coerce_connect_addrs_v6(::Vector{TCP.SocketAddrV4}) = throw(ArgumentError("resolver returned unexpected address family for tcp6"))
+
+function _coerce_connect_addrs_v6(resolved::Vector{TCP.SocketEndpoint})::Vector{TCP.SocketAddrV6}
+    out = TCP.SocketAddrV6[]
+    for addr in resolved
+        push!(out, addr::TCP.SocketAddrV6)
+    end
+    return out
+end
+
+_coerce_connect_addrs_any(resolved::Vector{TCP.SocketEndpoint}) = resolved
+function _coerce_connect_addrs_any(resolved::Vector{TCP.SocketAddrV4})::Vector{TCP.SocketEndpoint}
+    out = TCP.SocketEndpoint[]
+    for addr in resolved
+        push!(out, addr)
+    end
+    return out
+end
+
+function _coerce_connect_addrs_any(resolved::Vector{TCP.SocketAddrV6})::Vector{TCP.SocketEndpoint}
+    out = TCP.SocketEndpoint[]
+    for addr in resolved
+        push!(out, addr)
+    end
+    return out
+end
+
+function _resolve_connect_addrs(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+        ::Val{:tcp4},
+    )::Vector{TCP.SocketAddrV4}
+    resolved = _resolve_with_deadline(d, network, address, deadline_ns)
+    return _coerce_connect_addrs_v4(resolved)
+end
+
+function _resolve_connect_addrs(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+        ::Val{:tcp6},
+    )::Vector{TCP.SocketAddrV6}
+    resolved = _resolve_with_deadline(d, network, address, deadline_ns)
+    return _coerce_connect_addrs_v6(resolved)
+end
+
+function _resolve_connect_addrs(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+        ::Val{:tcp},
+    )::Vector{TCP.SocketEndpoint}
+    resolved = _resolve_with_deadline(d, network, address, deadline_ns)
+    return _coerce_connect_addrs_any(resolved)
 end
 
 function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining::Int)::Int64
@@ -1636,11 +1741,11 @@ function _partial_deadline_ns(now_ns::Int64, deadline_ns::Int64, addrs_remaining
     return now_ns + timeout
 end
 
-function _partition_addrs(addrs::Vector{TCP.SocketEndpoint})::Tuple{Vector{TCP.SocketEndpoint}, Vector{TCP.SocketEndpoint}}
-    isempty(addrs) && return TCP.SocketEndpoint[], TCP.SocketEndpoint[]
+function _partition_addrs(addrs::AbstractVector{A}) where {A<:TCP.SocketEndpoint}
+    isempty(addrs) && return A[], A[]
     primary_is_v4 = _is_ipv4(addrs[1])
-    primaries = TCP.SocketEndpoint[]
-    fallbacks = TCP.SocketEndpoint[]
+    primaries = A[]
+    fallbacks = A[]
     for addr in addrs
         if _is_ipv4(addr) == primary_is_v4
             push!(primaries, addr)
@@ -1651,7 +1756,7 @@ function _partition_addrs(addrs::Vector{TCP.SocketEndpoint})::Tuple{Vector{TCP.S
     return primaries, fallbacks
 end
 
-@inline function _prefer_ipv4_first!(addrs::Vector{TCP.SocketEndpoint}, policy::ResolverPolicy)
+@inline function _prefer_ipv4_first!(addrs::AbstractVector{<:TCP.SocketEndpoint}, policy::ResolverPolicy)
     _ = addrs
     _ = policy
     return nothing
@@ -1703,10 +1808,10 @@ function _resolve_serial(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
-        addrs::Vector{TCP.SocketEndpoint},
+        addrs::AbstractVector{A},
         deadline_ns::Int64,
         state::DNSRaceState,
-    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint}
     first_err::Union{Nothing, Exception} = nothing
     for (i, remote_addr) in pairs(addrs)
         if @atomic :acquire state.done
@@ -1768,10 +1873,10 @@ function _resolve_parallel(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
-        primaries::Vector{TCP.SocketEndpoint},
-        fallbacks::Vector{TCP.SocketEndpoint},
+        primaries::AbstractVector{A},
+        fallbacks::AbstractVector{B},
         deadline_ns::Int64,
-    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}}
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
     state = DNSRaceState()
     events = Channel{Union{DNSParallelResult, Symbol}}(4)
     @inline function _emit_event!(event::Union{DNSParallelResult, Symbol})
@@ -1783,7 +1888,7 @@ function _resolve_parallel(
         end
         return nothing
     end
-    function _start_racer(primary::Bool, addrs::Vector{TCP.SocketEndpoint})
+    function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
         return errormonitor(@async begin
             conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))
@@ -1850,40 +1955,35 @@ function _resolve_parallel(
     end
 end
 
-"""
-    connect(d, network, address)
-
-Connect a TCP connection from a `host:port` string.
-
-This resolves the address, applies deadline and policy rules, optionally runs a
-dual-stack race, and returns a connected `TCP.Conn`.
-
-Throws `OpError` on failure. The wrapped `err` may be an `AddressError`,
-`LookupError`, `DialTimeoutError`, `UnknownNetworkError`, `SystemError`, or a
-lower-level poll error depending on which phase failed.
-"""
-function connect(
+function _resolve_serial_families(
         d::HostResolver,
         network::AbstractString,
         address::AbstractString,
-    )::TCP.Conn
-    deadline_ns = _connect_deadline_ns(d)
-    if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
-        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
-    end
-    kind = try
-        _network_kind(network)
-    catch err
-        throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
-    end
-    addrs = try
-        _resolve_with_deadline(d, network, address, deadline_ns)
-    catch err
-        throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
-    end
+        primaries::AbstractVector{A},
+        fallbacks::AbstractVector{B},
+        deadline_ns::Int64,
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
+    primary_state = DNSRaceState()
+    conn, err = _resolve_serial(d, network, address, primaries, deadline_ns, primary_state)
+    conn !== nothing && return conn, nothing
+    isempty(fallbacks) && return nothing, err
+    fallback_state = DNSRaceState()
+    fallback_conn, fallback_err = _resolve_serial(d, network, address, fallbacks, deadline_ns, fallback_state)
+    fallback_conn !== nothing && return fallback_conn, nothing
+    return nothing, err === nothing ? fallback_err : err
+end
+
+function _connect_resolved_addrs_impl(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        kind::Symbol,
+        deadline_ns::Int64,
+        addrs::Vector{A},
+    )::TCP.Conn where {A<:TCP.SocketEndpoint}
     if d.local_addr !== nothing
         local_addr = d.local_addr::TCP.SocketEndpoint
-        filtered = TCP.SocketEndpoint[]
+        filtered = A[]
         for addr in addrs
             _same_addr_family(addr, local_addr) && push!(filtered, addr)
         end
@@ -1913,6 +2013,176 @@ function connect(
         isempty(addrs) ? nothing : addrs[1],
         err === nothing ? AddressError("missing address", String(address)) : err::Exception,
     ))
+end
+
+function _connect_resolved_addrs_impl(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        kind::Symbol,
+        deadline_ns::Int64,
+        addrs::Vector{TCP.SocketEndpoint},
+    )::TCP.Conn
+    if d.local_addr !== nothing
+        local_addr = d.local_addr::TCP.SocketEndpoint
+        if local_addr isa TCP.SocketAddrV4
+            filtered = TCP.SocketAddrV4[]
+            for addr in addrs
+                addr isa TCP.SocketAddrV4 && push!(filtered, addr)
+            end
+            if isempty(filtered)
+                throw(_wrap_op_error("connect", network, local_addr, nothing, ArgumentError("local and remote address families must match")))
+            end
+            return _connect_resolved_addrs_impl(d, network, address, kind, deadline_ns, filtered)
+        else
+            filtered = TCP.SocketAddrV6[]
+            for addr in addrs
+                addr isa TCP.SocketAddrV6 && push!(filtered, addr::TCP.SocketAddrV6)
+            end
+            if isempty(filtered)
+                throw(_wrap_op_error("connect", network, local_addr, nothing, ArgumentError("local and remote address families must match")))
+            end
+            return _connect_resolved_addrs_impl(d, network, address, kind, deadline_ns, filtered)
+        end
+    end
+    if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
+        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
+    end
+    _prefer_ipv4_first!(addrs, d.policy)
+    primary_is_v4 = !isempty(addrs) && addrs[1] isa TCP.SocketAddrV4
+    if primary_is_v4
+        primaries = TCP.SocketAddrV4[]
+        fallbacks = TCP.SocketAddrV6[]
+        for addr in addrs
+            if addr isa TCP.SocketAddrV4
+                push!(primaries, addr)
+            else
+                push!(fallbacks, addr::TCP.SocketAddrV6)
+            end
+        end
+        conn, err = if _use_parallel_race(d, kind, fallbacks)
+            _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+        else
+            _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+        end
+        conn !== nothing && return conn
+        throw(_wrap_op_error(
+            "connect",
+            network,
+            d.local_addr,
+            isempty(primaries) ? (isempty(fallbacks) ? nothing : fallbacks[1]) : primaries[1],
+            err === nothing ? AddressError("missing address", String(address)) : err::Exception,
+        ))
+    end
+    primaries = TCP.SocketAddrV6[]
+    fallbacks = TCP.SocketAddrV4[]
+    for addr in addrs
+        if addr isa TCP.SocketAddrV6
+            push!(primaries, addr)
+        else
+            push!(fallbacks, addr::TCP.SocketAddrV4)
+        end
+    end
+    conn, err = if _use_parallel_race(d, kind, fallbacks)
+        _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+    else
+        _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+    end
+    conn !== nothing && return conn
+    throw(_wrap_op_error(
+        "connect",
+        network,
+        d.local_addr,
+        isempty(primaries) ? (isempty(fallbacks) ? nothing : fallbacks[1]) : primaries[1],
+        err === nothing ? AddressError("missing address", String(address)) : err::Exception,
+    ))
+end
+
+function _connect_resolved_addrs(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        kind::Symbol,
+        deadline_ns::Int64,
+        addrs,
+    )::TCP.Conn
+    if addrs isa Vector{TCP.SocketAddrV4}
+        return _connect_resolved_addrs_impl(d, network, address, kind, deadline_ns, addrs)
+    elseif addrs isa Vector{TCP.SocketAddrV6}
+        return _connect_resolved_addrs_impl(d, network, address, kind, deadline_ns, addrs)
+    elseif addrs isa Vector{TCP.SocketEndpoint}
+        return _connect_resolved_addrs_impl(d, network, address, kind, deadline_ns, addrs)
+    end
+    throw(ArgumentError("resolver returned unsupported address container"))
+end
+
+function _connect_v4(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+    )::TCP.Conn
+    addrs = _resolve_connect_addrs(d, network, address, deadline_ns, Val(:tcp4))
+    return _connect_resolved_addrs_impl(d, network, address, :tcp4, deadline_ns, addrs)
+end
+
+function _connect_v6(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+    )::TCP.Conn
+    addrs = _resolve_connect_addrs(d, network, address, deadline_ns, Val(:tcp6))
+    return _connect_resolved_addrs_impl(d, network, address, :tcp6, deadline_ns, addrs)
+end
+
+function _connect_dualstack(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        deadline_ns::Int64,
+    )::TCP.Conn
+    addrs = _resolve_connect_addrs(d, network, address, deadline_ns, Val(:tcp))
+    return _connect_resolved_addrs_impl(d, network, address, :tcp, deadline_ns, addrs)
+end
+
+"""
+    connect(d, network, address)
+
+Connect a TCP connection from a `host:port` string.
+
+This resolves the address, applies deadline and policy rules, optionally runs a
+dual-stack race, and returns a connected `TCP.Conn`.
+
+Throws `OpError` on failure. The wrapped `err` may be an `AddressError`,
+`LookupError`, `DialTimeoutError`, `UnknownNetworkError`, `SystemError`, or a
+lower-level poll error depending on which phase failed.
+"""
+function connect(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+    )::TCP.Conn
+    deadline_ns = _connect_deadline_ns(d)
+    if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
+        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
+    end
+    kind = try
+        _network_kind(network)
+    catch err
+        throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
+    end
+    try
+        if kind === :tcp4
+            return _connect_v4(d, network, address, deadline_ns)
+        elseif kind === :tcp6
+            return _connect_v6(d, network, address, deadline_ns)
+        end
+        return _connect_dualstack(d, network, address, deadline_ns)
+    catch err
+        err isa OpError && rethrow(err)
+        throw(_wrap_op_error("connect", network, d.local_addr, nothing, _as_exception(err)))
+    end
 end
 
 """
