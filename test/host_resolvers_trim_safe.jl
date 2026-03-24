@@ -61,7 +61,6 @@ function run_host_resolvers_trim_sample()::Nothing
         _close_quiet!(server)
         _close_quiet!(client)
         _close_quiet!(listener)
-        IP.shutdown!()
     end
     return nothing
 end

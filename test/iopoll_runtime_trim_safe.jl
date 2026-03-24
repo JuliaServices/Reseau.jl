@@ -111,7 +111,6 @@ function run_iopoll_runtime_trim_sample()::Nothing
         ipfd.sysfd >= 0 && close(ipfd)
         _close_fd(fd0)
         _close_fd(fd1)
-        IP.shutdown!()
     end
     return nothing
 end

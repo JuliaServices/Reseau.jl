@@ -81,7 +81,6 @@ function run_socket_ops_trim_sample()::Nothing
         accepted >= 0 && SO.close_socket_nothrow(accepted)
         client >= 0 && SO.close_socket_nothrow(client)
         listener >= 0 && SO.close_socket_nothrow(listener)
-        IP.shutdown!()
     end
     return nothing
 end

@@ -42,7 +42,6 @@ function run_tcp_trim_sample()::Nothing
         _close_quiet!(server)
         _close_quiet!(client)
         _close_quiet!(listener)
-        IP.shutdown!()
     end
     return nothing
 end

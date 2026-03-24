@@ -100,7 +100,6 @@ function run_tls_trim_sample()::Nothing
         _close_quiet!(client)
         _close_quiet!(client_tcp)
         _close_quiet!(listener)
-        IP.shutdown!()
     end
     return nothing
 end
