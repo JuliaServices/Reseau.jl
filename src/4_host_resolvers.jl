@@ -1953,6 +1953,24 @@ function _resolve_parallel(
     end
 end
 
+function _resolve_serial_families(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        primaries::AbstractVector{A},
+        fallbacks::AbstractVector{B},
+        deadline_ns::Int64,
+    )::Tuple{Union{Nothing, TCP.Conn}, Union{Nothing, Exception}} where {A<:TCP.SocketEndpoint, B<:TCP.SocketEndpoint}
+    primary_state = DNSRaceState()
+    conn, err = _resolve_serial(d, network, address, primaries, deadline_ns, primary_state)
+    conn !== nothing && return conn, nothing
+    isempty(fallbacks) && return nothing, err
+    fallback_state = DNSRaceState()
+    fallback_conn, fallback_err = _resolve_serial(d, network, address, fallbacks, deadline_ns, fallback_state)
+    fallback_conn !== nothing && return fallback_conn, nothing
+    return nothing, err === nothing ? fallback_err : err
+end
+
 function _connect_resolved_addrs_impl(
         d::HostResolver,
         network::AbstractString,
@@ -1991,6 +2009,89 @@ function _connect_resolved_addrs_impl(
         network,
         d.local_addr,
         isempty(addrs) ? nothing : addrs[1],
+        err === nothing ? AddressError("missing address", String(address)) : err::Exception,
+    ))
+end
+
+function _connect_resolved_addrs_impl(
+        d::HostResolver,
+        network::AbstractString,
+        address::AbstractString,
+        kind::Symbol,
+        deadline_ns::Int64,
+        addrs::Vector{TCP.SocketEndpoint},
+    )::TCP.Conn
+    if d.local_addr !== nothing
+        local_addr = d.local_addr::TCP.SocketEndpoint
+        if local_addr isa TCP.SocketAddrV4
+            filtered = TCP.SocketAddrV4[]
+            for addr in addrs
+                addr isa TCP.SocketAddrV4 && push!(filtered, addr)
+            end
+            if isempty(filtered)
+                throw(_wrap_op_error("connect", network, local_addr, nothing, ArgumentError("local and remote address families must match")))
+            end
+            return _connect_resolved_addrs_impl(d, network, address, kind, deadline_ns, filtered)
+        else
+            filtered = TCP.SocketAddrV6[]
+            for addr in addrs
+                addr isa TCP.SocketAddrV6 && push!(filtered, addr::TCP.SocketAddrV6)
+            end
+            if isempty(filtered)
+                throw(_wrap_op_error("connect", network, local_addr, nothing, ArgumentError("local and remote address families must match")))
+            end
+            return _connect_resolved_addrs_impl(d, network, address, kind, deadline_ns, filtered)
+        end
+    end
+    if deadline_ns != 0 && Int64(time_ns()) >= deadline_ns
+        throw(_wrap_op_error("connect", network, d.local_addr, nothing, DialTimeoutError(String(address))))
+    end
+    _prefer_ipv4_first!(addrs, d.policy)
+    primary_is_v4 = !isempty(addrs) && addrs[1] isa TCP.SocketAddrV4
+    if primary_is_v4
+        primaries = TCP.SocketAddrV4[]
+        fallbacks = TCP.SocketAddrV6[]
+        for addr in addrs
+            if addr isa TCP.SocketAddrV4
+                push!(primaries, addr)
+            else
+                push!(fallbacks, addr::TCP.SocketAddrV6)
+            end
+        end
+        conn, err = if _use_parallel_race(d, kind, fallbacks)
+            _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+        else
+            _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+        end
+        conn !== nothing && return conn
+        throw(_wrap_op_error(
+            "connect",
+            network,
+            d.local_addr,
+            isempty(primaries) ? (isempty(fallbacks) ? nothing : fallbacks[1]) : primaries[1],
+            err === nothing ? AddressError("missing address", String(address)) : err::Exception,
+        ))
+    end
+    primaries = TCP.SocketAddrV6[]
+    fallbacks = TCP.SocketAddrV4[]
+    for addr in addrs
+        if addr isa TCP.SocketAddrV6
+            push!(primaries, addr)
+        else
+            push!(fallbacks, addr::TCP.SocketAddrV4)
+        end
+    end
+    conn, err = if _use_parallel_race(d, kind, fallbacks)
+        _resolve_parallel(d, network, address, primaries, fallbacks, deadline_ns)
+    else
+        _resolve_serial_families(d, network, address, primaries, fallbacks, deadline_ns)
+    end
+    conn !== nothing && return conn
+    throw(_wrap_op_error(
+        "connect",
+        network,
+        d.local_addr,
+        isempty(primaries) ? (isempty(fallbacks) ? nothing : fallbacks[1]) : primaries[1],
         err === nothing ? AddressError("missing address", String(address)) : err::Exception,
     ))
 end
