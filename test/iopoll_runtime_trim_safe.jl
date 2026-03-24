@@ -3,6 +3,10 @@ using Reseau
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 const _TRIM_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
+const _IOPOLL_TRIM_FD = Ref{Union{Nothing, IP.FD}}(nothing)
+const _IOPOLL_TRIM_BUF = Ref{Vector{UInt8}}(UInt8[])
+const _IOPOLL_TRIM_ENTERED = Ref(false)
+const _IOPOLL_TRIM_NREAD = Ref(0)
 
 function _accept_with_retry(listener::Cint)::Cint
     for _ in 1:5000
@@ -68,46 +72,50 @@ function _write_byte(fd::Cint, b::UInt8)::Nothing
     throw(ArgumentError("timed out writing byte"))
 end
 
-function _read_byte(fd::Cint)::UInt8
-    buf = Ref{UInt8}(0x00)
-    for _ in 1:5000
-        n = GC.@preserve buf SO.read_once!(fd, Base.unsafe_convert(Ptr{UInt8}, buf), Csize_t(1))
-        n == Cssize_t(1) && return buf[]
-        errno = SO.last_error()
-        errno == Int32(Base.Libc.EAGAIN) && (yield(); continue)
-        errno == _TRIM_EWOULDBLOCK && (yield(); continue)
-        errno == Int32(Base.Libc.EINTR) && continue
-        throw(SystemError("read", Int(errno)))
-    end
-    throw(ArgumentError("timed out reading byte"))
+function _iopoll_trim_reader_task_entry()::Nothing
+    fd = _IOPOLL_TRIM_FD[]::IP.FD
+    buf = _IOPOLL_TRIM_BUF[]
+    _IOPOLL_TRIM_ENTERED[] = true
+    _IOPOLL_TRIM_NREAD[] = IP.read!(fd, buf)
+    return nothing
 end
+
+Base.Experimental.entrypoint(_iopoll_trim_reader_task_entry, ())
 
 function run_iopoll_runtime_trim_sample()::Nothing
     fd0, fd1 = _stream_pair()
     ipfd = IP.FD(fd0)
     fd0 = Cint(-1)
+    reader_task::Union{Nothing, Task} = nothing
     try
-        IP._set_nonblocking!(ipfd.sysfd)
         IP.register!(ipfd)
-        deadline_ns = Int64(time_ns()) + Int64(5_000_000_000)
-        IP.set_deadline!(ipfd, deadline_ns)
-        state = IP.POLLER[]
-        deadline_entries = lock(state.lock) do
-            return copy(state.time_heap)
+        IP.set_read_deadline!(ipfd, Int64(time_ns()) + Int64(50_000_000))
+        try
+            IP.read!(ipfd, Vector{UInt8}(undef, 1))
+            error("expected read deadline timeout")
+        catch err
+            err isa IP.DeadlineExceededError || rethrow(err)
         end
-        length(deadline_entries) == 1 || error("expected one scheduled deadline entry")
-        deadline_entries[1].pollstate === ipfd.pd || error("expected deadline entry for registered fd")
-        deadline_entries[1].mode == IP.PollMode.READWRITE || error("expected combined read/write deadline mode")
-        IP.set_deadline!(ipfd, Int64(0))
+        IP.set_read_deadline!(ipfd, Int64(0))
+        _IOPOLL_TRIM_FD[] = ipfd
+        _IOPOLL_TRIM_BUF[] = Vector{UInt8}(undef, 1)
+        _IOPOLL_TRIM_ENTERED[] = false
+        _IOPOLL_TRIM_NREAD[] = 0
+        reader_task = errormonitor(Task(_iopoll_trim_reader_task_entry))
+        schedule(reader_task)
+        start_status = IP.timedwait(() -> _IOPOLL_TRIM_ENTERED[], 5.0; pollint = 0.001)
+        start_status == :timed_out && error("timed out waiting for iopoll reader task")
         _write_byte(fd1, 0x44)
-        buf = Vector{UInt8}(undef, 1)
-        n = IP.read!(ipfd, buf)
-        n == 1 || error("expected one-byte iopoll read")
-        buf[1] == 0x44 || error("unexpected iopoll read byte")
-        combined = IP._build_deadline_entries(ipfd.pd, Int64(10), Int64(10), UInt64(3), UInt64(5))
-        length(combined) == 1 || error("expected one combined deadline entry")
-        combined[1].mode == IP.PollMode.READWRITE || error("expected combined read/write entry")
+        done_status = IP.timedwait(() -> istaskdone(reader_task::Task), 5.0; pollint = 0.001)
+        done_status == :timed_out && error("timed out waiting for iopoll read wake")
+        wait(reader_task)
+        _IOPOLL_TRIM_NREAD[] == 1 || error("expected one-byte iopoll read")
+        _IOPOLL_TRIM_BUF[][1] == 0x44 || error("unexpected iopoll read byte")
     finally
+        _IOPOLL_TRIM_FD[] = nothing
+        _IOPOLL_TRIM_BUF[] = UInt8[]
+        _IOPOLL_TRIM_ENTERED[] = false
+        _IOPOLL_TRIM_NREAD[] = 0
         ipfd.sysfd >= 0 && close(ipfd)
         _close_fd(fd0)
         _close_fd(fd1)
