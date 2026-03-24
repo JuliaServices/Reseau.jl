@@ -412,10 +412,6 @@ function _pc_run_tls_workload!()
     return nothing
 end
 
-@inline function _pc_strict_mode()::Bool
-    return get(ENV, "RESEAU_PRECOMPILE_STRICT", "0") == "1"
-end
-
 function _pc_run_selected_workloads!()::Nothing
     _pc_workload_enabled("eventloops") && _pc_run_eventloops_workload!()
     _pc_workload_enabled("internal_poll") && _pc_run_internal_poll_workload!()
@@ -433,16 +429,6 @@ function _pc_run_precompile_workloads!()::Nothing
     return nothing
 end
 
-function _pc_run_precompile_workloads_with_fallback!()::Nothing
-    try
-        _pc_run_precompile_workloads!()
-    catch err
-        _pc_strict_mode() && rethrow(err)
-        @info "Ignoring an error that occurred during the precompilation workload" exception = (err, catch_backtrace())
-    end
-    return nothing
-end
-
 function _run_precompile_workloads_for_tests()::Nothing
     _pc_run_precompile_workloads!()
     return nothing
@@ -450,6 +436,6 @@ end
 
 @setup_workload begin
     @compile_workload begin
-        _pc_run_precompile_workloads_with_fallback!()
+        _pc_run_precompile_workloads!()
     end
 end

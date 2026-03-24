@@ -22,7 +22,7 @@ function _pc_capture_command(cmd::Cmd)
     return exit_code, output
 end
 
-function _pc_strict_using_reseau_exit_code()::Tuple{Int, String}
+function _pc_using_reseau_exit_code()::Tuple{Int, String}
     julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
     project_path = normpath(joinpath(@__DIR__, ".."))
     return mktempdir() do depot_path
@@ -33,10 +33,7 @@ function _pc_strict_using_reseau_exit_code()::Tuple{Int, String}
             depot_expr,
             "); using Pkg; Pkg.instantiate(); using Reseau",
         )
-        env = Dict(
-            "JULIA_PKG_PRECOMPILE_AUTO" => "0",
-            "RESEAU_PRECOMPILE_STRICT" => "1",
-        )
+        env = Dict("JULIA_PKG_PRECOMPILE_AUTO" => "0")
         cmd = setenv(
             `$julia_exe --project=$project_path --startup-file=no --history-file=no -e $code`,
             env,
@@ -50,10 +47,9 @@ end
         @test Reseau._run_precompile_workloads_for_tests() === nothing
     end
 
-    @testset "fresh package precompile succeeds in strict mode" begin
-        exit_code, output = _pc_strict_using_reseau_exit_code()
+    @testset "fresh package precompile succeeds" begin
+        exit_code, output = _pc_using_reseau_exit_code()
         exit_code == 0 || println(output)
         @test exit_code == 0
-        @test !occursin("Ignoring an error that occurred during the precompilation workload", output)
     end
 end
