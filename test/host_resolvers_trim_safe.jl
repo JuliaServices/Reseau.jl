@@ -5,7 +5,7 @@ const NC = Reseau.TCP
 const IP = Reseau.IOPoll
 
 struct _TrimResolver <: ND.AbstractResolver
-    addr::NC.SocketEndpoint
+    addr::NC.SocketAddrV4
 end
 
 function ND.lookup_port(::_TrimResolver, network::AbstractString, service::AbstractString)::Int
@@ -16,13 +16,8 @@ end
 function ND._resolve_host_ips(resolver::_TrimResolver, network::AbstractString, host::AbstractString)::Vector{NC.SocketEndpoint}
     _ = network
     host == "trim.local" || throw(ND.AddressError("unknown host", String(host)))
-    addr = resolver.addr
-    if addr isa NC.SocketAddrV4
-        v4 = addr::NC.SocketAddrV4
-        return NC.SocketEndpoint[NC.SocketAddrV4(v4.ip, 0)]
-    end
-    v6 = addr::NC.SocketAddrV6
-    return NC.SocketEndpoint[NC.SocketAddrV6(v6.ip, 0; scope_id = Int(v6.scope_id))]
+    v4 = resolver.addr
+    return NC.SocketEndpoint[NC.SocketAddrV4(v4.ip, 0)]
 end
 
 function _read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Nothing
