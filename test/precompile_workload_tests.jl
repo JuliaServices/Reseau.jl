@@ -26,13 +26,19 @@ function _pc_strict_using_reseau_exit_code()::Tuple{Int, String}
     julia_exe = joinpath(Sys.BINDIR, Base.julia_exename())
     project_path = normpath(joinpath(@__DIR__, ".."))
     return mktempdir() do depot_path
+        depots = [depot_path; Base.DEPOT_PATH]
+        depot_expr = repr(depots)
+        code = string(
+            "empty!(DEPOT_PATH); append!(DEPOT_PATH, ",
+            depot_expr,
+            "); using Pkg; Pkg.instantiate(); using Reseau",
+        )
         env = Dict(
-            "JULIA_DEPOT_PATH" => string(depot_path, Base.Filesystem.path_separator, join(Base.DEPOT_PATH, Base.Filesystem.path_separator)),
             "JULIA_PKG_PRECOMPILE_AUTO" => "0",
             "RESEAU_PRECOMPILE_STRICT" => "1",
         )
         cmd = setenv(
-            `$julia_exe --project=$project_path --startup-file=no --history-file=no -e 'using Pkg; Pkg.instantiate(); using Reseau'`,
+            `$julia_exe --project=$project_path --startup-file=no --history-file=no -e $code`,
             env,
         )
         return _pc_capture_command(cmd)

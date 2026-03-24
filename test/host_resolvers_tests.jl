@@ -566,7 +566,7 @@ end
             end
         end
         @testset "error typing and wrapping (phase 5C)" begin
-            slow_resolver = _SlowResolver(0.25, NC.SocketEndpoint[NC.loopback_addr(1)])
+            slow_resolver = _SlowResolver(2.5, NC.SocketEndpoint[NC.loopback_addr(1)])
             started_ns = time_ns()
             timeout_err = try
                 NC.connect("tcp", "slow.local:80"; timeout_ns = 20_000_000, resolver = slow_resolver)
@@ -579,7 +579,7 @@ end
             if timeout_err isa ND.OpError
                 @test timeout_err.err isa ND.DialTimeoutError
             end
-            @test elapsed_ms < 1_000.0
+            @test elapsed_ms < 1_500.0
             empty_net_err = try
                 ND.resolve_tcp_addrs("", "127.0.0.1:1")
                 nothing
