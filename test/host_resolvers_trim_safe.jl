@@ -25,15 +25,44 @@ function ND._resolve_host_ips(resolver::_TrimResolver, network::AbstractString, 
     return NC.SocketEndpoint[NC.SocketAddrV6(v6.ip, 0; scope_id = Int(v6.scope_id))]
 end
 
+function _read_exact!(conn::NC.Conn, buf::Vector{UInt8})::Nothing
+    read!(conn, buf)
+    return nothing
+end
+
+function _close_quiet!(x)
+    x === nothing && return nothing
+    try
+        close(x)
+    catch
+    end
+    return nothing
+end
+
 function run_host_resolvers_trim_sample()::Nothing
-    resolver = _TrimResolver(NC.loopback_addr(4040))
-    addrs = ND.resolve_tcp_addrs(resolver, "tcp", "trim.local:4040"; op = :connect)
-    length(addrs) == 1 || error("expected one resolved address")
-    addr = addrs[1]::NC.SocketAddrV4
-    addr.port == 4040 || error("resolved port mismatch")
-    addr.ip == NC.loopback_addr(0).ip || error("resolved ip mismatch")
-    single = ND.resolve_tcp_addr(resolver, "tcp", "trim.local:4040")
-    single == addr || error("resolved single address mismatch")
+    listener::Union{Nothing, NC.Listener} = nothing
+    client::Union{Nothing, NC.Conn} = nothing
+    server::Union{Nothing, NC.Conn} = nothing
+    resolver = ND.HostResolver(resolver = _TrimResolver(NC.loopback_addr(0)))
+    try
+        listener = ND.listen(resolver, "tcp", "trim.local:0"; backlog = 16)
+        laddr = NC.addr(listener)::NC.SocketAddrV4
+        addrstr = ND.join_host_port("trim.local", Int(laddr.port))
+        resolved = ND.resolve_tcp_addr(resolver.resolver.parent, "tcp", addrstr)::NC.SocketAddrV4
+        resolved.port == laddr.port || error("resolved port mismatch")
+        client = ND.connect(resolver, "tcp", addrstr)
+        server = NC.accept(listener)
+        payload = UInt8[0x71, 0x72, 0x73]
+        write(client, payload) == length(payload) || error("expected HostResolvers payload write")
+        recv_buf = Vector{UInt8}(undef, length(payload))
+        _read_exact!(server, recv_buf)
+        recv_buf == payload || error("HostResolvers payload mismatch")
+    finally
+        _close_quiet!(server)
+        _close_quiet!(client)
+        _close_quiet!(listener)
+        IP.shutdown!()
+    end
     return nothing
 end
 

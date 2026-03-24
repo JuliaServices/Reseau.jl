@@ -142,7 +142,8 @@ function _run_trim_case(project_path::String, script_file::String, output_name::
                 run_path = _trim_output_path(run_dir, output_name)
                 @test exit_code == 0
                 @test isfile(run_path)
-                run_cmd = `$(abspath(run_path))`
+                helper_julia = joinpath(Sys.BINDIR, Base.julia_exename())
+                run_cmd = setenv(`$(abspath(run_path))`, "RESEAU_TRIM_HELPER_JULIA" => helper_julia)
                 run_timeout_s = _trim_executable_timeout_s()
                 run_exit, run_output, run_timed_out = _run_trim_executable(run_cmd; timeout_s = run_timeout_s)
                 run_timed_out && _trim_timeout_error("executable run", script_file, run_output)

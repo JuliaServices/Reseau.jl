@@ -245,15 +245,17 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
             ev.events == UInt32(0) && continue
             event_data = _epoll_event_data(ev)
             if event_data == _WAKE_TOKEN
-                if delay_ns != 0
-                    one = Ref{UInt64}(0)
-                    _ = @gcsafe_ccall read(
-                        epoll.wakefd::Cint,
-                        one::Ref{UInt64},
-                        Csize_t(sizeof(UInt64))::Csize_t,
-                    )::Cssize_t
-                    @atomic :release epoll.wake_sig = UInt32(0)
-                end
+                # Match the IOCP wake path: once the eventfd wake is consumed,
+                # always drain it and clear the coalescing latch. Leaving the
+                # latch set after a zero-timeout poll can suppress the next
+                # real wake and strand later timers/deadline updates.
+                one = Ref{UInt64}(0)
+                _ = @gcsafe_ccall read(
+                    epoll.wakefd::Cint,
+                    one::Ref{UInt64},
+                    Csize_t(sizeof(UInt64))::Csize_t,
+                )::Cssize_t
+                @atomic :release epoll.wake_sig = UInt32(0)
                 continue
             end
             mode = _decode_epoll_mode(ev.events)

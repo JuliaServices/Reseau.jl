@@ -252,7 +252,11 @@ function _backend_poll_once!(state::Poller, delay_ns::Int64)::Int32
     for i in 1:n
         ev = events[i]
         if ev.filter == EVFILT_USER && ev.ident == kqueue.wake_ident
-            delay_ns != 0 && (@atomic :release kqueue.wake_sig = UInt32(0))
+            # Match the IOCP wake path: once the EVFILT_USER wake is consumed,
+            # always clear the coalescing latch. Leaving it set after a
+            # zero-timeout poll can suppress the next real wake and strand
+            # later shutdown/deadline updates behind a blocking kevent wait.
+            @atomic :release kqueue.wake_sig = UInt32(0)
             continue
         end
         mode = _decode_event_mode(ev.filter, ev.flags)
