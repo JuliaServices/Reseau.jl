@@ -86,6 +86,16 @@ TCP.set_read_deadline!(conn, time_ns() + 5_000_000_000)
 close(conn)
 ```
 
+Listeners use the same `set_deadline!` name for `accept` deadlines:
+
+```julia
+using Reseau
+
+listener = TCP.listen(TCP.loopback_addr(0))
+TCP.set_deadline!(listener, time_ns() + 5_000_000_000)
+close(listener)
+```
+
 ### TLS client
 
 ```julia

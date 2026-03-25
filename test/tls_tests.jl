@@ -518,6 +518,37 @@ end
                 IP.shutdown!()
             end
         end
+        @testset "listener deadline, open state, and local_addr alias" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                @test isopen(listener)
+                @test TL.local_addr(listener) == laddr
+
+                TL.set_deadline!(listener, Int64(time_ns()) - Int64(1))
+                @test_throws IP.DeadlineExceededError TL.accept(listener)
+
+                TL.set_deadline!(listener, Int64(0))
+                accept_task = errormonitor(Threads.@spawn TL.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                @test server isa TL.Conn
+
+                @test close(listener) === nothing
+                @test !isopen(listener)
+                @test close(listener) === nothing
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "SSL_CTX is reused for equivalent client configs" begin
             IP.shutdown!()
             listener = nothing

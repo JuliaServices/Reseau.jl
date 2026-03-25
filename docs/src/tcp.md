@@ -69,6 +69,8 @@ Base.read!(::Conn, ::Vector{UInt8})
 Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
 Base.readavailable(::Conn)
 Base.eof(::Conn)
+Base.isopen(::Conn)
+Base.isopen(::Listener)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
@@ -81,6 +83,8 @@ The key contract is:
 - `read!(conn, buf)` fills `buf` or throws `EOFError`, just like other Julia `IO` types.
 - `readbytes!(conn, buf, nb)` and `readavailable(conn)` are the count-returning entrypoints when you want short-read behavior.
 - `write(conn, buf)` writes the full payload unless an error or deadline interrupts the operation.
+- `close(conn)` and `close(listener)` are idempotent, which keeps cleanup paths safe in `finally` blocks.
+- `isopen(conn)` and `isopen(listener)` report whether the underlying socket is still live.
 
 ## Deadlines, Socket Options, and Address Inspection
 
@@ -101,6 +105,11 @@ addr
 Use absolute monotonic nanoseconds from `time_ns()` for deadline APIs. Setting
 a deadline to `0` clears it, while setting it to a time in the past makes the
 next blocking wait time out immediately.
+
+Listeners use the same `set_deadline!` name for `accept` deadlines. That
+deadline applies only to `accept(listener)`; established connections still use
+their own per-connection deadline state. `local_addr(listener)` is also
+available as a discoverable alias for `addr(listener)`.
 
 ## Where To Go Next
 
