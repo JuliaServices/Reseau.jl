@@ -532,7 +532,15 @@ end
                 TL.set_deadline!(listener, Int64(time_ns()) - Int64(1))
                 @test_throws IP.DeadlineExceededError TL.accept(listener)
 
-                TL.set_deadline!(listener, Int64(0))
+                if Sys.iswindows()
+                    # AcceptEx does not reliably support immediately reusing the same
+                    # listener after a timed-out accept cancellation.
+                    close(listener)
+                    listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 8)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                else
+                    TL.set_deadline!(listener, Int64(0))
+                end
                 accept_task = errormonitor(Threads.@spawn TL.accept(listener))
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
