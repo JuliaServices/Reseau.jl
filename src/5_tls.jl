@@ -1352,6 +1352,11 @@ function Base.eof(conn::Conn)::Bool
     return _peek_eof(conn)
 end
 
+"""
+    isopen(conn) -> Bool
+
+Return `true` while both the TLS state and underlying TCP transport remain open.
+"""
 function Base.isopen(conn::Conn)::Bool
     return !_is_closed(conn) && conn.ssl != C_NULL && isopen(conn.tcp)
 end
@@ -1603,6 +1608,19 @@ function set_deadline!(conn::Conn, deadline_ns::Integer)
 end
 
 """
+    set_deadline!(listener, deadline_ns)
+
+Set the accept deadline on the underlying TCP listener.
+
+This affects `accept(listener)` only. The returned `Conn` still uses its own
+connection and handshake deadlines afterward.
+"""
+function set_deadline!(listener::Listener, deadline_ns::Integer)
+    TCP.set_deadline!(listener.listener, deadline_ns)
+    return nothing
+end
+
+"""
     set_read_deadline!(conn, deadline_ns)
 
 Set the read deadline on the underlying transport. See `set_deadline!` for the timestamp
@@ -1631,6 +1649,17 @@ Return the local `TCP.SocketAddr` for the wrapped transport.
 """
 function local_addr(conn::Conn)
     return TCP.local_addr(conn.tcp)
+end
+
+"""
+    local_addr(listener)
+
+Return the local listening address for the wrapped TCP listener.
+
+This is an alias for `addr(listener)`.
+"""
+function local_addr(listener::Listener)
+    return addr(listener)
 end
 
 """
@@ -1729,9 +1758,18 @@ function accept(listener::Listener)::Conn
 end
 
 """
+    isopen(listener) -> Bool
+
+Return `true` while the wrapped TCP listener remains open.
+"""
+function Base.isopen(listener::Listener)::Bool
+    return isopen(listener.listener)
+end
+
+"""
     close(listener)
 
-Close the underlying TCP listener. Returns `nothing`.
+Close the underlying TCP listener. Repeated closes are treated as no-ops.
 """
 function Base.close(listener::Listener)
     close(listener.listener)

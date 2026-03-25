@@ -346,7 +346,38 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "blocked read unblocks on conn close and repeated close errors" begin
+        @testset "listener deadline, open state, and local_addr alias" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = NC.listen(NC.loopback_addr(0); backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                @test isopen(listener)
+                @test NC.local_addr(listener) == laddr
+
+                NC.set_deadline!(listener, Int64(time_ns()) - Int64(1))
+                @test_throws IP.DeadlineExceededError NC.accept(listener)
+
+                NC.set_deadline!(listener, Int64(0))
+                accept_task = errormonitor(@async NC.accept(listener))
+                client = NC.connect(NC.loopback_addr(Int(laddr.port)))
+                @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
+                server = fetch(accept_task)
+                @test server isa NC.Conn
+
+                @test close(listener) === nothing
+                @test !isopen(listener)
+                @test close(listener) === nothing
+            finally
+                _close_quiet!(server)
+                _close_quiet!(client)
+                _close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "blocked read unblocks on conn close and close stays idempotent" begin
             IP.shutdown!()
             listener = nothing
             client = nothing
@@ -370,16 +401,16 @@ end
                 end)
                 pre = _nc_wait_task_done(read_task, 0.05)
                 @test pre == :timed_out
-                close(server)
-                @test_throws IP.NetClosingError close(server)
+                @test close(server) === nothing
+                @test close(server) === nothing
                 done = _nc_wait_task_done(read_task, 2.0)
                 @test done != :timed_out
                 if done != :timed_out
                     err = fetch(read_task)
                     @test err isa IP.NetClosingError
                 end
-                close(listener)
-                @test_throws IP.NetClosingError close(listener)
+                @test close(listener) === nothing
+                @test close(listener) === nothing
             finally
                 _close_quiet!(server)
                 _close_quiet!(client)

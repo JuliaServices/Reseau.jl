@@ -892,6 +892,11 @@ function Base.eof(conn::Conn)::Bool
     return _peek_eof(conn)
 end
 
+"""
+    isopen(conn) -> Bool
+
+Return `true` while `conn` still owns an open socket.
+"""
 function Base.isopen(conn::Conn)::Bool
     return conn.fd.pfd.sysfd >= 0
 end
@@ -1024,8 +1029,22 @@ end
 Close a net descriptor. Repeated closes are treated as no-op.
 """
 function Base.close(fd::FD)
-    close(fd.pfd)
+    try
+        close(fd.pfd)
+    catch err
+        ex = err::Exception
+        ex isa IOPoll.NetClosingError || rethrow(ex)
+    end
     return nothing
+end
+
+"""
+    isopen(listener) -> Bool
+
+Return `true` while `listener` still owns an open listening socket.
+"""
+function Base.isopen(listener::Listener)::Bool
+    return listener.fd.pfd.sysfd >= 0
 end
 
 """
@@ -1043,6 +1062,24 @@ After the deadline is reached, blocking `read!`/`write` operations fail with
 """
 function set_deadline!(conn::Conn, deadline_ns::Integer)
     IOPoll.set_deadline!(conn.fd.pfd, deadline_ns)
+    return nothing
+end
+
+"""
+    set_deadline!(listener, deadline_ns)
+
+Set the accept deadline on `listener`.
+
+- `deadline_ns` uses the same absolute monotonic `time_ns()` clock as connection
+  deadlines.
+- `deadline_ns == 0` disables accept timeouts.
+- `deadline_ns <= time_ns()` causes the next blocking `accept` to time out
+  immediately.
+
+This affects `accept(listener)` only.
+"""
+function set_deadline!(listener::Listener, deadline_ns::Integer)
+    IOPoll.set_read_deadline!(listener.fd.pfd, deadline_ns)
     return nothing
 end
 
@@ -1115,6 +1152,17 @@ Return the cached local endpoint for `conn`, if known.
 """
 function local_addr(conn::Conn)::Union{Nothing, SocketAddr}
     return conn.fd.laddr
+end
+
+"""
+    local_addr(listener) -> Union{Nothing, SocketAddr}
+
+Return the listener's bound local endpoint.
+
+This is an alias for `addr(listener)`.
+"""
+function local_addr(listener::Listener)::Union{Nothing, SocketAddr}
+    return addr(listener)
 end
 
 """

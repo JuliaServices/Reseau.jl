@@ -75,6 +75,8 @@ Base.read!(::Conn, ::Vector{UInt8})
 Base.readbytes!(::Conn, ::Vector{UInt8}, ::Integer)
 Base.readavailable(::Conn)
 Base.eof(::Conn)
+Base.isopen(::Conn)
+Base.isopen(::Listener)
 Base.write(::Conn, ::AbstractVector{UInt8})
 Base.close(::Conn)
 Base.close(::Listener)
@@ -96,12 +98,17 @@ Two details matter in practice:
   model matches [TCP](@ref tcp-manual) exactly.
 - A timed-out TLS write is treated as a permanent write failure because partial
   record emission leaves future writes unsafe.
+- `close(conn)` and `close(listener)` are idempotent, and `isopen` is available
+  on both TLS connections and listeners.
 
 ## Practical Usage Notes
 
 - If `server_name` is omitted, [`connect`](@ref) derives it from the dial target when possible so SNI and certificate verification use that host name automatically.
 - If `ca_file` is omitted for outbound verification, Reseau falls back to `NetworkOptions.ca_roots_path()` when that path is available.
 - [`connection_state`](@ref) does not force the handshake to run; it reports the current negotiated state as-is.
+- [`set_deadline!`](@ref) also applies to `TLS.Listener`, where it sets the
+  `accept` deadline only. `local_addr(listener)` is available as an alias for
+  [`addr`](@ref).
 
 ## Where To Go Next
 

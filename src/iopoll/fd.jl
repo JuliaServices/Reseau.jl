@@ -413,6 +413,28 @@ function waitcancelled(pd::PollState, mode::PollMode.T)
 end
 
 """
+Wait for an in-flight Windows overlapped operation to complete.
+
+Unlike generic readiness waits, overlapped operations are already submitted
+before this helper runs. A stale canceled wake from an earlier deadline update
+must therefore be ignored until the current poll state reports a real error or
+the actual completion notification arrives.
+"""
+function _wait_iocp_completion!(registration::Registration, pd::PollState, mode::PollMode.T, is_file::Bool = false)
+    waiter = mode == PollMode.WRITE ? registration.write_waiter : registration.read_waiter
+    while true
+        reason = pollwait!(waiter)
+        err = _check_error(pd, mode)
+        if reason == PollWakeReason.READY
+            _convert_poll_error!(err, is_file)
+            return nothing
+        end
+        err == _POLL_NO_ERROR && continue
+        _convert_poll_error!(err, is_file)
+    end
+end
+
+"""
 Set both read and write deadlines for `fd`.
 
 `deadline_ns` is interpreted as an absolute `time_ns()`-style monotonic
@@ -534,8 +556,7 @@ function connect!(fd::FD, addrbuf::Vector{UInt8}, addrlen::Int32)
         errno = _iocp_submit_connect!(registration, addrbuf, addrlen)
         errno == Int32(0) || throw(SystemError("connectex", Int(errno)))
         try
-            pollwait!(registration.write_waiter)
-            _convert_poll_error!(_check_error(fd.pd, PollMode.WRITE), fd.is_file)
+            _wait_iocp_completion!(registration, fd.pd, PollMode.WRITE, fd.is_file)
         catch err
             ex = err::Exception
             if _iocp_cancel_mode!(registration, PollMode.WRITE)
@@ -574,8 +595,7 @@ function accept!(fd::FD, family::Cint, sotype::Cint)::Tuple{Cint, SocketOps.Acce
                     throw(SystemError("acceptex", Int(errno)))
                 end
                 try
-                    pollwait!(registration.read_waiter)
-                    _convert_poll_error!(_check_error(fd.pd, PollMode.READ), fd.is_file)
+                    _wait_iocp_completion!(registration, fd.pd, PollMode.READ, fd.is_file)
                 catch err
                     ex = err::Exception
                     if _iocp_cancel_mode!(registration, PollMode.READ)

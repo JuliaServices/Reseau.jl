@@ -172,6 +172,16 @@ function _nd_connect_local_fallback(
     )
 end
 
+function _nd_spawn_accept(listener::NC.Listener)::Task
+    return Threads.@spawn begin
+        try
+            return NC.accept(listener)
+        catch ex
+            return ex
+        end
+    end
+end
+
 function _nd_connect_singleflight(
         address::AbstractString,
         resolver::ND.AbstractResolver,
@@ -448,11 +458,12 @@ end
             try
                 listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 16)
                 laddr = NC.addr(listener)
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                accept_task = _nd_spawn_accept(listener)
                 client = _nd_connect_timeout(ND.join_host_port("127.0.0.1", Int((laddr::NC.SocketAddrV4).port)), 1_000_000_000)
                 status = _nd_wait_task_done(accept_task, 2.0)
                 @test status != :timed_out
                 server = fetch(accept_task)
+                server isa Exception && throw(server)
                 payload = UInt8[0x41, 0x42, 0x43, 0x44]
                 @test write(client, payload) == length(payload)
                 recv_buf = Vector{UInt8}(undef, length(payload))
@@ -548,10 +559,11 @@ end
                 try
                     listener = NC.listen("tcp6", "[::1]:0"; backlog = 16)
                     laddr = NC.addr(listener)::NC.SocketAddrV6
-                    accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                    accept_task = _nd_spawn_accept(listener)
                     client = NC.connect("tcp6", ND.join_host_port("::1", Int(laddr.port)); timeout_ns = 1_000_000_000)
                     @test _nd_wait_task_done(accept_task, 2.0) != :timed_out
                     server = fetch(accept_task)
+                    server isa Exception && throw(server)
                     payload = UInt8[0x90, 0x91, 0x92]
                     @test write(client, payload) == length(payload)
                     recv_buf = Vector{UInt8}(undef, length(payload))
