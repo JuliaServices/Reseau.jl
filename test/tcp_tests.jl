@@ -141,35 +141,27 @@ end
 
                 first_payload = UInt8[0x41, 0x42]
                 @test write(client, first_payload) == length(first_payload)
-                NC.set_read_deadline!(server, time_ns() + 250_000_000)
                 first_buf = Vector{UInt8}(undef, 4)
                 @test readbytes!(server, first_buf, 4; all = false) == length(first_payload)
                 @test first_buf[1:2] == first_payload
-                NC.set_read_deadline!(server, Int64(0))
 
                 second_payload = UInt8[0x43, 0x44]
                 @test write(client, second_payload) == length(second_payload)
-                NC.set_read_deadline!(server, time_ns() + 250_000_000)
                 @test read(server, 4; all = false) == second_payload
-                NC.set_read_deadline!(server, Int64(0))
 
                 third_payload = UInt8[0x45, 0x46]
                 @test write(client, third_payload) == length(third_payload)
-                NC.set_read_deadline!(server, time_ns() + 250_000_000)
                 grown_buf = fill(UInt8(0x00), 3)
                 @test readbytes!(server, grown_buf, 5; all = false) == length(third_payload)
                 @test grown_buf[1:2] == third_payload
                 @test length(grown_buf) == 3
-                NC.set_read_deadline!(server, Int64(0))
 
                 fourth_payload = UInt8[0x47, 0x48]
                 @test write(client, fourth_payload) == length(fourth_payload)
-                NC.set_read_deadline!(server, time_ns() + 250_000_000)
                 view_backing = fill(UInt8(0x00), 5)
                 view_buf = @view view_backing[2:4]
                 @test readbytes!(server, view_buf, 3; all = false) == length(fourth_payload)
                 @test view_backing == UInt8[0x00, 0x47, 0x48, 0x00, 0x00]
-                NC.set_read_deadline!(server, Int64(0))
             finally
                 _close_quiet!(server)
                 _close_quiet!(client)
