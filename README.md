@@ -215,3 +215,11 @@ On Windows, fully compiled or `--trim=safe` executables should bundle dependent
 artifacts and JLLs so runtime libraries like OpenSSL are available next to the
 built executable. The trim-compile tests in `test/trim_compile_tests.jl`
 exercise that path directly.
+
+## Development Note
+
+This rewrite made significant use of AI assistance for the initial Go-to-Julia
+porting work and early implementation passes. The public API shape, interface
+choices, and package-facing behavior have been reviewed and refined by human
+maintainers; the documented `TCP` and `TLS` surfaces should be treated as the
+authoritative contract.
