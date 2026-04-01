@@ -95,6 +95,7 @@ external timeout wrappers:
 set_deadline!
 set_read_deadline!
 set_write_deadline!
+DeadlineExceededError
 set_nodelay!
 set_keepalive!
 local_addr
@@ -105,6 +106,22 @@ addr
 Use absolute monotonic nanoseconds from `time_ns()` for deadline APIs. Setting
 a deadline to `0` clears it, while setting it to a time in the past makes the
 next blocking wait time out immediately.
+
+Deadline expiry is surfaced as [`TCP.DeadlineExceededError`](@ref). Catch that
+alias instead of reaching into `Reseau.IOPoll` directly:
+
+```julia
+try
+    TCP.set_read_deadline!(conn, time_ns() + 100_000_000)
+    read!(conn, buf)
+catch err
+    if err isa TCP.DeadlineExceededError
+        TCP.set_read_deadline!(conn, 0) # clear or move the deadline before retrying
+    else
+        rethrow()
+    end
+end
+```
 
 Listeners use the same `set_deadline!` name for `accept` deadlines. That
 deadline applies only to `accept(listener)`; established connections still use

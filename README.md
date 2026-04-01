@@ -96,6 +96,28 @@ TCP.set_deadline!(listener, time_ns() + 5_000_000_000)
 close(listener)
 ```
 
+When a TCP deadline expires, Reseau raises `TCP.DeadlineExceededError` so
+downstream code can catch the timeout without reaching into internal modules:
+
+```julia
+using Reseau
+
+try
+    TCP.set_read_deadline!(conn, time_ns() + 100_000_000)
+    read!(conn, Vector{UInt8}(undef, 1))
+catch err
+    if err isa TCP.DeadlineExceededError
+        TCP.set_read_deadline!(conn, 0) # clear or move the deadline before retrying
+    else
+        rethrow()
+    end
+end
+```
+
+TLS exposes the same timeout type as `TLS.DeadlineExceededError` for direct
+transport waits like `accept(listener)`. Higher-level TLS operations may wrap
+that timeout in `TLSError` or `TLSHandshakeTimeoutError`.
+
 ### TLS client
 
 ```julia

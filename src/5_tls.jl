@@ -8,6 +8,7 @@ This layer provides:
 - `Conn` wrappers that can handshake eagerly or lazily on first I/O
 - deadline handling delegated to the wrapped transport so TLS retries follow
   the same timeout model as plain TCP
+- transport timeout handling is available as `TLS.DeadlineExceededError`
 """
 module TLS
 
@@ -19,6 +20,18 @@ using ..Reseau.IOPoll
 using ..Reseau.SocketOps
 using ..Reseau.TCP
 using ..Reseau.HostResolvers
+
+"""
+    DeadlineExceededError
+
+Alias for the transport deadline timeout type used by `TLS`.
+
+Catch `TLS.DeadlineExceededError` for direct listener `accept` timeouts and when
+inspecting `TLSError.cause`. Higher-level TLS operations may wrap deadline
+expiry in `TLSError` or `TLSHandshakeTimeoutError` so callers can keep
+operation-specific handling.
+"""
+const DeadlineExceededError = IOPoll.DeadlineExceededError
 
 const _LIBSSL = OpenSSL_jll.libssl
 const _LIBCRYPTO = OpenSSL_jll.libcrypto
@@ -1613,7 +1626,8 @@ end
 Set the accept deadline on the underlying TCP listener.
 
 This affects `accept(listener)` only. The returned `Conn` still uses its own
-connection and handshake deadlines afterward.
+connection and handshake deadlines afterward. Expired accept waits throw
+`DeadlineExceededError`.
 """
 function set_deadline!(listener::Listener, deadline_ns::Integer)
     TCP.set_deadline!(listener.listener, deadline_ns)
@@ -1750,7 +1764,8 @@ end
 
 Accept one inbound TCP connection and wrap it in server-side TLS state.
 
-The returned `Conn` has not handshaken yet.
+The returned `Conn` has not handshaken yet. If the listener deadline expires,
+`accept(listener)` throws `DeadlineExceededError`.
 """
 function accept(listener::Listener)::Conn
     tcp = TCP.accept(listener.listener)
