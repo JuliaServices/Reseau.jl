@@ -395,6 +395,143 @@ const _WSATRY_AGAIN = Cint(11002)
 const _WSATYPE_NOT_FOUND = Cint(10109)
 const _DNS_ERROR_RCODE_NAME_ERROR = Cint(9003)
 const _DNS_INFO_NO_RECORDS = Cint(9501)
+const _ADDRINFO_POOL_SIZE = 4
+const _ADDRINFO_POOL_CAPACITY = 64
+const _ADDRINFO_THREAD_ENTRY_C = Ref{Ptr{Cvoid}}(C_NULL)
+const _ADDRINFO_POOL_LOCK = ReentrantLock()
+const _ADDRINFO_STARTED_THREADS = Ref{Int}(0)
+
+mutable struct _AddrInfoFuture
+    lock::ReentrantLock
+    cond::Threads.Condition
+    hostname::String
+    flags::Cint
+    ret::Cint
+    done::Bool
+    err::Union{Nothing,Exception}
+    addr_info_ptr::Ptr{_AddrInfo}
+end
+
+function _AddrInfoFuture(hostname::String, flags::Cint)
+    lock = ReentrantLock()
+    return _AddrInfoFuture(lock, Threads.Condition(lock), hostname, flags, Cint(0), false, nothing, C_NULL)
+end
+
+const _ADDRINFO_WORK_QUEUE = Ref{Channel{_AddrInfoFuture}}()
+
+@inline function _addr_info_future_result_ptr(future::_AddrInfoFuture)::Ptr{Ptr{_AddrInfo}}
+    base = Ptr{UInt8}(pointer_from_objref(future))
+    return Ptr{Ptr{_AddrInfo}}(base + fieldoffset(_AddrInfoFuture, 8))
+end
+
+function _prepare_addrinfo_hints!(hints::Ref{_AddrInfo}, flags::Cint)::Nothing
+    hints_ptr = Base.unsafe_convert(Ptr{_AddrInfo}, hints)
+    Base.Libc.memset(hints_ptr, 0, sizeof(_AddrInfo))
+    hints_bytes = Ptr{UInt8}(hints_ptr)
+    unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(_AddrInfo, 1)), flags)
+    unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(_AddrInfo, 2)), _AF_UNSPEC)
+    unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(_AddrInfo, 3)), _SOCK_STREAM)
+    return nothing
+end
+
+function _ccall_getaddrinfo(hostname::String, hints::Ref{_AddrInfo}, result_ptr::Ptr{Ptr{_AddrInfo}})::Cint
+    null_service = Ptr{UInt8}(C_NULL)
+    return @static if Sys.iswindows()
+        ccall((:getaddrinfo, "Ws2_32"), Cint,
+            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
+            hostname,
+            null_service,
+            hints,
+            result_ptr,
+        )
+    else
+        ccall(:getaddrinfo, Cint,
+            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
+            hostname,
+            null_service,
+            hints,
+            result_ptr,
+        )
+    end
+end
+
+function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
+    ret = Cint(0)
+    err = nothing
+    try
+        hints = Ref{_AddrInfo}()
+        GC.@preserve future hints begin
+            _prepare_addrinfo_hints!(hints, future.flags)
+            unsafe_store!(_addr_info_future_result_ptr(future), C_NULL)
+            ret = _ccall_getaddrinfo(future.hostname, hints, _addr_info_future_result_ptr(future))
+        end
+    catch ex
+        err = ex::Exception
+    end
+    lock(future.lock)
+    try
+        future.ret = ret
+        if err === nothing
+            future.err = nothing
+        else
+            future.err = err::Exception
+        end
+        future.done = true
+        notify(future.cond)
+    finally
+        unlock(future.lock)
+    end
+    return nothing
+end
+
+function _addrinfo_worker_entry(arg::Ptr{Cvoid})::Ptr{Cvoid}
+    work_queue = unsafe_pointer_to_objref(arg)::Channel{_AddrInfoFuture}
+    try
+        for future in work_queue
+            _run_addrinfo_future!(future)
+        end
+    catch
+    end
+    return C_NULL
+end
+
+function _ensure_addrinfo_pool!()::Channel{_AddrInfoFuture}
+    lock(_ADDRINFO_POOL_LOCK)
+    try
+        if !isassigned(_ADDRINFO_WORK_QUEUE)
+            _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+            _ADDRINFO_STARTED_THREADS[] = 0
+        end
+        work_queue = _ADDRINFO_WORK_QUEUE[]
+        while _ADDRINFO_STARTED_THREADS[] < _ADDRINFO_POOL_SIZE
+            next_idx = _ADDRINFO_STARTED_THREADS[] + 1
+            IOPoll._spawn_detached_thread("reseau-getaddrinfo-$next_idx", _ADDRINFO_THREAD_ENTRY_C, work_queue)
+            _ADDRINFO_STARTED_THREADS[] = next_idx
+        end
+        return work_queue
+    finally
+        unlock(_ADDRINFO_POOL_LOCK)
+    end
+end
+
+function _wait_addrinfo_future!(future::_AddrInfoFuture)::Cint
+    lock(future.lock)
+    try
+        while !future.done
+            wait(future.cond)
+        end
+        future.err === nothing || throw(future.err::Exception)
+        return future.ret
+    finally
+        unlock(future.lock)
+    end
+end
+
+function __init__()
+    _ADDRINFO_THREAD_ENTRY_C[] = @cfunction(_addrinfo_worker_entry, Ptr{Cvoid}, (Ptr{Cvoid},))
+    _ADDRINFO_WORK_QUEUE[] = Channel{_AddrInfoFuture}(_ADDRINFO_POOL_CAPACITY)
+    _ADDRINFO_STARTED_THREADS[] = 0
+end
 
 @static if Sys.iswindows()
     const _IPHLPAPI = "Iphlpapi"
@@ -603,40 +740,15 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
     SocketOps.ensure_winsock!()
     addresses = TCP.SocketEndpoint[]
     hostname_s = String(hostname)
-    null_service = Ptr{UInt8}(C_NULL)
-    hints = Ref{_AddrInfo}()
-    hints_ptr = Base.unsafe_convert(Ptr{_AddrInfo}, hints)
-    Base.Libc.memset(hints_ptr, 0, sizeof(_AddrInfo))
-    hints_bytes = Ptr{UInt8}(hints_ptr)
-    GC.@preserve hints begin
-        unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(_AddrInfo, 1)), flags)
-        unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(_AddrInfo, 2)), _AF_UNSPEC)
-        unsafe_store!(Ptr{Cint}(hints_bytes + fieldoffset(_AddrInfo, 3)), _SOCK_STREAM)
-    end
-    result_ptr = Ref{Ptr{_AddrInfo}}(C_NULL)
-    # `getaddrinfo` can block inside the system resolver stack. Run it on Julia's
-    # libuv worker pool so hostname resolution does not occupy a Julia scheduler
-    # thread while callers wait on timeout/deadline machinery.
-    ret = @static if Sys.iswindows()
-        @threadcall((:getaddrinfo, "Ws2_32"), Cint,
-            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
-            hostname_s,
-            null_service,
-            hints,
-            result_ptr,
-        )
-    else
-        @threadcall(:getaddrinfo, Cint,
-            (Cstring, Cstring, Ptr{_AddrInfo}, Ptr{Ptr{_AddrInfo}}),
-            hostname_s,
-            null_service,
-            hints,
-            result_ptr,
-        )
-    end
+    future = _AddrInfoFuture(hostname_s, flags)
+    # `getaddrinfo` can block inside the system resolver stack. Run it on a
+    # small dedicated worker pool so hostname resolution does not occupy a Julia
+    # scheduler thread while callers wait on timeout/deadline machinery.
+    put!(_ensure_addrinfo_pool!(), future)
+    ret = _wait_addrinfo_future!(future)
     ret == 0 || _lookup_error("lookup failed: $(_gai_error_string(ret))", hostname_s)
     try
-        current = result_ptr[]
+        current = future.addr_info_ptr
         while current != C_NULL
             ai = unsafe_load(current)
             if ai.ai_addr != C_NULL
@@ -655,11 +767,11 @@ function _native_getaddrinfo(hostname::AbstractString; flags::Cint = Cint(0))::V
             current = ai.ai_next
         end
     finally
-        if result_ptr[] != C_NULL
+        if future.addr_info_ptr != C_NULL
             @static if Sys.iswindows()
-                ccall((:freeaddrinfo, "Ws2_32"), Cvoid, (Ptr{_AddrInfo},), result_ptr[])
+                ccall((:freeaddrinfo, "Ws2_32"), Cvoid, (Ptr{_AddrInfo},), future.addr_info_ptr)
             else
-                ccall(:freeaddrinfo, Cvoid, (Ptr{_AddrInfo},), result_ptr[])
+                ccall(:freeaddrinfo, Cvoid, (Ptr{_AddrInfo},), future.addr_info_ptr)
             end
         end
     end

@@ -433,6 +433,9 @@ end
             @test ND._HR_AF_INET6 == SO.AF_INET6
             native = ND._native_getaddrinfo("localhost"; flags = ND._AI_ALL | ND._AI_V4MAPPED)
             @test all(x -> x isa NC.SocketEndpoint, native)
+            concurrent_native = fetch.([Threads.@spawn ND._native_getaddrinfo("localhost"; flags = ND._AI_ALL | ND._AI_V4MAPPED) for _ in 1:8])
+            @test all(result -> !isempty(result), concurrent_native)
+            @test all(result -> all(x -> x isa NC.SocketEndpoint, result), concurrent_native)
             addrs = ND.resolve_tcp_addrs("tcp", "localhost:80")
             @test any(a -> a isa NC.SocketAddrV4, addrs)
             if _nd_ipv6_supported()
