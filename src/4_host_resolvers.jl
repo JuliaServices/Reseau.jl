@@ -402,8 +402,7 @@ const _ADDRINFO_POOL_LOCK = ReentrantLock()
 const _ADDRINFO_STARTED_THREADS = Ref{Int}(0)
 
 mutable struct _AddrInfoFuture
-    lock::ReentrantLock
-    cond::Threads.Condition
+    notify::Threads.Condition
     hostname::String
     flags::Cint
     ret::Cint
@@ -413,15 +412,14 @@ mutable struct _AddrInfoFuture
 end
 
 function _AddrInfoFuture(hostname::String, flags::Cint)
-    lock = ReentrantLock()
-    return _AddrInfoFuture(lock, Threads.Condition(lock), hostname, flags, Cint(0), false, nothing, C_NULL)
+    return _AddrInfoFuture(Threads.Condition(), hostname, flags, Cint(0), false, nothing, C_NULL)
 end
 
 const _ADDRINFO_WORK_QUEUE = Ref{Channel{_AddrInfoFuture}}()
 
 @inline function _addr_info_future_result_ptr(future::_AddrInfoFuture)::Ptr{Ptr{_AddrInfo}}
     base = Ptr{UInt8}(pointer_from_objref(future))
-    return Ptr{Ptr{_AddrInfo}}(base + fieldoffset(_AddrInfoFuture, 8))
+    return Ptr{Ptr{_AddrInfo}}(base + fieldoffset(_AddrInfoFuture, 7))
 end
 
 function _prepare_addrinfo_hints!(hints::Ref{_AddrInfo}, flags::Cint)::Nothing
@@ -468,7 +466,7 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
     catch ex
         err = ex::Exception
     end
-    lock(future.lock)
+    lock(future.notify)
     try
         future.ret = ret
         if err === nothing
@@ -477,9 +475,9 @@ function _run_addrinfo_future!(future::_AddrInfoFuture)::Nothing
             future.err = err::Exception
         end
         future.done = true
-        notify(future.cond)
+        notify(future.notify)
     finally
-        unlock(future.lock)
+        unlock(future.notify)
     end
     return nothing
 end
@@ -515,15 +513,15 @@ function _ensure_addrinfo_pool!()::Channel{_AddrInfoFuture}
 end
 
 function _wait_addrinfo_future!(future::_AddrInfoFuture)::Cint
-    lock(future.lock)
+    lock(future.notify)
     try
         while !future.done
-            wait(future.cond)
+            wait(future.notify)
         end
         future.err === nothing || throw(future.err::Exception)
         return future.ret
     finally
-        unlock(future.lock)
+        unlock(future.notify)
     end
 end
 
