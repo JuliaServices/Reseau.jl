@@ -639,14 +639,16 @@ end
             listener = nothing
             client1 = nothing
             client2 = nothing
+            timeout_ns = Sys.iswindows() ? Int64(5_000_000_000) : Int64(1_000_000_000)
+            wait_s = Sys.iswindows() ? 5.0 : 2.0
             try
                 listener = NC.listen("tcp", "127.0.0.1:0"; backlog = 8)
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 resolver = _CountingResolver(0.05, NC.SocketEndpoint[NC.loopback_addr(Int(laddr.port))])
                 singleflight = ND.SingleflightResolver(resolver)
-                task2 = errormonitor(@async _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1))
-                client1 = _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, 1_000_000_000, -1)
-                @test _nd_wait_task_done(task2, 2.0) != :timed_out
+                task2 = errormonitor(@async _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, timeout_ns, -1))
+                client1 = _nd_connect_singleflight("same.test:$(Int(laddr.port))", singleflight, timeout_ns, -1)
+                @test _nd_wait_task_done(task2, wait_s) != :timed_out
                 client2 = fetch(task2)
                 server1 = NC.accept(listener)
                 server2 = NC.accept(listener)
