@@ -11,12 +11,25 @@ including:
   `SO_ERROR`
 - accept returns already-initialized child descriptors that are ready for the
   same poll-driven read/write paths as outbound connections
+- deadline expiry is surfaced as `TCP.DeadlineExceededError` for transport I/O
 """
 module TCP
 
 using ..Reseau: ByteMemory, MutableByteBuffer
 using ..Reseau.IOPoll
 using ..Reseau.SocketOps
+
+"""
+    DeadlineExceededError
+
+Raised when blocking TCP I/O or `accept(listener)` exceeds the active deadline.
+
+Catch `TCP.DeadlineExceededError` when a deadline set by `set_deadline!`,
+`set_read_deadline!`, or `set_write_deadline!` expires. This aliases the
+underlying poller timeout type so downstream code does not need to depend on
+`Reseau.IOPoll` directly.
+"""
+const DeadlineExceededError = IOPoll.DeadlineExceededError
 
 """
     connect
@@ -648,8 +661,8 @@ end
 
 Accept a new `Conn` from `listener`.
 
-Throws `SystemError`, `IOPoll.DeadlineExceededError`, or other poll/transport
-errors if the underlying accept path fails.
+Throws `SystemError`, `DeadlineExceededError`, or other poll/transport errors if
+the underlying accept path fails.
 """
 function accept(listener::Listener)::Conn
     listener_fd = listener.fd
@@ -1058,7 +1071,7 @@ Set both read and write deadlines on `conn`.
 - `deadline_ns <= time_ns()` marks both sides as immediately timed out.
 
 After the deadline is reached, blocking `read!`/`write` operations fail with
-`IOPoll.DeadlineExceededError` until the deadline is cleared or moved forward.
+`DeadlineExceededError` until the deadline is cleared or moved forward.
 """
 function set_deadline!(conn::Conn, deadline_ns::Integer)
     IOPoll.set_deadline!(conn.fd.pfd, deadline_ns)

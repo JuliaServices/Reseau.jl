@@ -25,6 +25,7 @@ end
 
 @testset "TCP phase 4" begin
         @test NC.Conn <: IO
+        @test NC.DeadlineExceededError === IP.DeadlineExceededError
         @testset "connect/listen/accept and address snapshots" begin
             IP.shutdown!()
             listener = nothing
@@ -302,7 +303,7 @@ end
                 @test status != :timed_out
                 server = fetch(accept_task)
                 NC.set_read_deadline!(server, time_ns() + 30_000_000)
-                @test_throws IP.DeadlineExceededError read!(server, Vector{UInt8}(undef, 1))
+                @test_throws NC.DeadlineExceededError read!(server, Vector{UInt8}(undef, 1))
                 NC.set_read_deadline!(server, Int64(0))
                 @test write(client, UInt8[0x77]) == 1
                 recv_buf = Vector{UInt8}(undef, 1)
@@ -358,7 +359,7 @@ end
                 @test NC.local_addr(listener) == laddr
 
                 NC.set_deadline!(listener, Int64(time_ns()) - Int64(1))
-                @test_throws IP.DeadlineExceededError NC.accept(listener)
+                @test_throws NC.DeadlineExceededError NC.accept(listener)
 
                 NC.set_deadline!(listener, Int64(0))
                 accept_task = errormonitor(@async NC.accept(listener))

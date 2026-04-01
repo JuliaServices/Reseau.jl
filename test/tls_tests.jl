@@ -82,6 +82,8 @@ end
 
 @testset "TLS phase 6" begin
         @test TL.Conn <: IO
+        @test TL.DeadlineExceededError === NC.DeadlineExceededError
+        @test TL.DeadlineExceededError === IP.DeadlineExceededError
         _tls_trace("START: config validation")
         @testset "config validation" begin
             cfg_default = TL.Config()
@@ -530,7 +532,7 @@ end
                 @test TL.local_addr(listener) == laddr
 
                 TL.set_deadline!(listener, Int64(time_ns()) - Int64(1))
-                @test_throws IP.DeadlineExceededError TL.accept(listener)
+                @test_throws TL.DeadlineExceededError TL.accept(listener)
 
                 TL.set_deadline!(listener, Int64(0))
                 accept_task = errormonitor(Threads.@spawn TL.accept(listener))

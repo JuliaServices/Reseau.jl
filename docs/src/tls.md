@@ -29,6 +29,7 @@ Listener
 ConfigError
 TLSError
 TLSHandshakeTimeoutError
+DeadlineExceededError
 ```
 
 `ClientAuthMode` is an enum-like policy surface with the following cases:
@@ -100,6 +101,12 @@ Two details matter in practice:
   record emission leaves future writes unsafe.
 - `close(conn)` and `close(listener)` are idempotent, and `isopen` is available
   on both TLS connections and listeners.
+
+[`TLS.DeadlineExceededError`](@ref) is the public alias for the underlying
+transport timeout type. `accept(listener)` throws it directly when the listener
+deadline expires. Higher-level TLS operations may instead raise
+[`TLSError`](@ref) with the timeout in `cause`, or a handshake-specific
+[`TLSHandshakeTimeoutError`](@ref).
 
 ## Practical Usage Notes
 

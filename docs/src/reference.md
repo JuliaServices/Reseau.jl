@@ -66,6 +66,7 @@ Base.closewrite(::Conn)
 set_deadline!
 set_read_deadline!
 set_write_deadline!
+DeadlineExceededError
 set_nodelay!
 set_keepalive!
 local_addr
@@ -89,6 +90,7 @@ Listener
 ConfigError
 TLSError
 TLSHandshakeTimeoutError
+DeadlineExceededError
 ```
 
 ### Client and Server Construction
