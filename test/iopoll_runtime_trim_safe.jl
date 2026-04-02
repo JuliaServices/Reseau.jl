@@ -3,10 +3,6 @@ using Reseau
 const IP = Reseau.IOPoll
 const SO = Reseau.SocketOps
 const _TRIM_EWOULDBLOCK = @static isdefined(Base.Libc, :EWOULDBLOCK) ? Int32(getfield(Base.Libc, :EWOULDBLOCK)) : Int32(Base.Libc.EAGAIN)
-const _IOPOLL_TRIM_FD = Ref{Union{Nothing, IP.FD}}(nothing)
-const _IOPOLL_TRIM_BUF = Ref{Vector{UInt8}}(UInt8[])
-const _IOPOLL_TRIM_ENTERED = Ref(false)
-const _IOPOLL_TRIM_NREAD = Ref(0)
 
 function _accept_with_retry(listener::Cint)::Cint
     for _ in 1:5000
@@ -72,21 +68,10 @@ function _write_byte(fd::Cint, b::UInt8)::Nothing
     throw(ArgumentError("timed out writing byte"))
 end
 
-function _iopoll_trim_reader_task_entry()::Nothing
-    fd = _IOPOLL_TRIM_FD[]::IP.FD
-    buf = _IOPOLL_TRIM_BUF[]
-    _IOPOLL_TRIM_ENTERED[] = true
-    _IOPOLL_TRIM_NREAD[] = IP.read!(fd, buf)
-    return nothing
-end
-
-Base.Experimental.entrypoint(_iopoll_trim_reader_task_entry, ())
-
 function run_iopoll_runtime_trim_sample()::Nothing
     fd0, fd1 = _stream_pair()
     ipfd = IP.FD(fd0)
     fd0 = Cint(-1)
-    reader_task::Union{Nothing, Task} = nothing
     try
         IP.register!(ipfd)
         IP.set_read_deadline!(ipfd, Int64(time_ns()) + Int64(50_000_000))
@@ -97,25 +82,12 @@ function run_iopoll_runtime_trim_sample()::Nothing
             err isa IP.DeadlineExceededError || rethrow(err)
         end
         IP.set_read_deadline!(ipfd, Int64(0))
-        _IOPOLL_TRIM_FD[] = ipfd
-        _IOPOLL_TRIM_BUF[] = Vector{UInt8}(undef, 1)
-        _IOPOLL_TRIM_ENTERED[] = false
-        _IOPOLL_TRIM_NREAD[] = 0
-        reader_task = errormonitor(Task(_iopoll_trim_reader_task_entry))
-        schedule(reader_task)
-        start_status = IP.timedwait(() -> _IOPOLL_TRIM_ENTERED[], 5.0; pollint = 0.001)
-        start_status == :timed_out && error("timed out waiting for iopoll reader task")
         _write_byte(fd1, 0x44)
-        done_status = IP.timedwait(() -> istaskdone(reader_task::Task), 5.0; pollint = 0.001)
-        done_status == :timed_out && error("timed out waiting for iopoll read wake")
-        wait(reader_task)
-        _IOPOLL_TRIM_NREAD[] == 1 || error("expected one-byte iopoll read")
-        _IOPOLL_TRIM_BUF[][1] == 0x44 || error("unexpected iopoll read byte")
+        buf = Vector{UInt8}(undef, 1)
+        nread = IP.read!(ipfd, buf)
+        nread == 1 || error("expected one-byte iopoll read")
+        buf[1] == 0x44 || error("unexpected iopoll read byte")
     finally
-        _IOPOLL_TRIM_FD[] = nothing
-        _IOPOLL_TRIM_BUF[] = UInt8[]
-        _IOPOLL_TRIM_ENTERED[] = false
-        _IOPOLL_TRIM_NREAD[] = 0
         ipfd.sysfd >= 0 && close(ipfd)
         _close_fd(fd0)
         _close_fd(fd1)

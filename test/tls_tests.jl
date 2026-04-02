@@ -153,80 +153,69 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "version fallback helpers and connect config inference" begin
-            old_has_min = TL._HAS_SSL_CTX_SET_MIN_PROTO_VERSION[]
-            old_has_max = TL._HAS_SSL_CTX_SET_MAX_PROTO_VERSION[]
-            method = ccall((:TLS_method, TL._LIBSSL), Ptr{Cvoid}, ())
+        @testset "version helpers and connect config inference" begin
+            method = ccall((:TLS_method, TL._LIBSSL_PATH), Ptr{Cvoid}, ())
             function _ctx_new_for_test()
-                ctx = ccall((:SSL_CTX_new, TL._LIBSSL), Ptr{Cvoid}, (Ptr{Cvoid},), method)
+                ctx = ccall((:SSL_CTX_new, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), method)
                 ctx == C_NULL && error("expected SSL_CTX")
                 return ctx
             end
-            function _ctx_options_for_test(ctx::Ptr{Cvoid})
-                return ccall((:SSL_CTX_get_options, TL._LIBSSL), Culong, (Ptr{Cvoid},), ctx)
+            function _ctx_version_for_test(ctx::Ptr{Cvoid}, ctrl::Cint)
+                return UInt16(ccall(
+                    (:SSL_CTX_ctrl, TL._LIBSSL_PATH),
+                    Clong,
+                    (Ptr{Cvoid}, Cint, Clong, Ptr{Cvoid}),
+                    ctx,
+                    ctrl,
+                    Clong(0),
+                    C_NULL,
+                ))
             end
-            TL._HAS_SSL_CTX_SET_MIN_PROTO_VERSION[] = false
-            TL._HAS_SSL_CTX_SET_MAX_PROTO_VERSION[] = false
+            ctx = _ctx_new_for_test()
             try
-                ctx = _ctx_new_for_test()
-                try
-                    TL._set_ctx_min_version!(ctx, TL.TLS1_1_VERSION)
-                    opts = _ctx_options_for_test(ctx)
-                    @test (opts & TL._SSL_OP_NO_TLSv1) != 0
-                finally
-                    ccall((:SSL_CTX_free, TL._LIBSSL), Cvoid, (Ptr{Cvoid},), ctx)
-                end
-
-                ctx = _ctx_new_for_test()
-                try
-                    TL._set_ctx_min_version!(ctx, TL.TLS1_3_VERSION)
-                    opts = _ctx_options_for_test(ctx)
-                    @test (opts & TL._SSL_OP_NO_TLSv1) != 0
-                    @test (opts & TL._SSL_OP_NO_TLSv1_1) != 0
-                    @test (opts & TL._SSL_OP_NO_TLSv1_2) != 0
-                finally
-                    ccall((:SSL_CTX_free, TL._LIBSSL), Cvoid, (Ptr{Cvoid},), ctx)
-                end
-
-                ctx = _ctx_new_for_test()
-                try
-                    TL._set_ctx_max_version!(ctx, TL.TLS1_2_VERSION)
-                    opts = _ctx_options_for_test(ctx)
-                    @test (opts & TL._SSL_OP_NO_TLSv1_3) != 0
-                finally
-                    ccall((:SSL_CTX_free, TL._LIBSSL), Cvoid, (Ptr{Cvoid},), ctx)
-                end
-
-                ctx = _ctx_new_for_test()
-                try
-                    TL._set_ctx_max_version!(ctx, TL.TLS1_1_VERSION)
-                    opts = _ctx_options_for_test(ctx)
-                    @test (opts & TL._SSL_OP_NO_TLSv1_2) != 0
-                    @test (opts & TL._SSL_OP_NO_TLSv1_3) != 0
-                finally
-                    ccall((:SSL_CTX_free, TL._LIBSSL), Cvoid, (Ptr{Cvoid},), ctx)
-                end
-
-                ctx = _ctx_new_for_test()
-                try
-                    TL._set_ctx_max_version!(ctx, TL.TLS1_0_VERSION)
-                    opts = _ctx_options_for_test(ctx)
-                    @test (opts & TL._SSL_OP_NO_TLSv1_1) != 0
-                    @test (opts & TL._SSL_OP_NO_TLSv1_2) != 0
-                    @test (opts & TL._SSL_OP_NO_TLSv1_3) != 0
-                finally
-                    ccall((:SSL_CTX_free, TL._LIBSSL), Cvoid, (Ptr{Cvoid},), ctx)
-                end
-
-                ctx = _ctx_new_for_test()
-                try
-                    @test_throws TL.ConfigError TL._set_ctx_min_version!(ctx, UInt16(0x9999))
-                finally
-                    ccall((:SSL_CTX_free, TL._LIBSSL), Cvoid, (Ptr{Cvoid},), ctx)
-                end
+                TL._set_ctx_min_version!(ctx, TL.TLS1_1_VERSION)
+                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_1_VERSION
             finally
-                TL._HAS_SSL_CTX_SET_MIN_PROTO_VERSION[] = old_has_min
-                TL._HAS_SSL_CTX_SET_MAX_PROTO_VERSION[] = old_has_max
+                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+            end
+
+            ctx = _ctx_new_for_test()
+            try
+                TL._set_ctx_min_version!(ctx, TL.TLS1_3_VERSION)
+                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_3_VERSION
+            finally
+                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+            end
+
+            ctx = _ctx_new_for_test()
+            try
+                TL._set_ctx_max_version!(ctx, TL.TLS1_2_VERSION)
+                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_2_VERSION
+            finally
+                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+            end
+
+            ctx = _ctx_new_for_test()
+            try
+                TL._set_ctx_max_version!(ctx, TL.TLS1_1_VERSION)
+                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_1_VERSION
+            finally
+                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+            end
+
+            ctx = _ctx_new_for_test()
+            try
+                TL._set_ctx_max_version!(ctx, TL.TLS1_0_VERSION)
+                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_0_VERSION
+            finally
+                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+            end
+
+            ctx = _ctx_new_for_test()
+            try
+                @test_throws TL.TLSError TL._set_ctx_min_version!(ctx, UInt16(0x9999))
+            finally
+                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
             end
 
             payload = UInt8[0x61, 0x62, 0x63]
@@ -391,7 +380,7 @@ end
                     cert_file = _TLS_CERT_PATH,
                     key_file = _TLS_KEY_PATH,
                 ))
-                cert_ptr = ccall((:SSL_get_certificate, TL._LIBSSL), Ptr{Cvoid}, (Ptr{Cvoid},), client_tls.ssl)
+                cert_ptr = ccall((:SSL_get_certificate, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), client_tls.ssl)
                 @test cert_ptr != C_NULL
             finally
                 _tls_close_quiet!(client_tls)
@@ -1030,7 +1019,7 @@ end
                     close(conn)
                     return nothing
                 end)
-                host_resolver = ND.HostResolver(timeout_ns = 100_000_000)
+                host_resolver = ND.HostResolver(timeout_ns = 250_000_000)
                 cfg = TL.Config(
                     verify_peer = false,
                     server_name = "localhost",
