@@ -872,13 +872,22 @@ function _parse_ipv6_literal(host::AbstractString)::Union{Nothing, NTuple{16, UI
     )
 end
 
+@inline function _find_last_ascii_delim(s::String, delim::UInt8)::Int
+    bytes = codeunits(s)
+    for i in ncodeunits(s):-1:1
+        bytes[i] == delim && return i
+    end
+    return 0
+end
+
 function _split_host_zone(host::AbstractString)::Tuple{String, String}
     s = String(host)
-    i = findlast(==('%'), s)
-    i === nothing && return s, ""
+    i = _find_last_ascii_delim(s, UInt8('%'))
+    i == 0 && return s, ""
     i == firstindex(s) && return s, ""
-    i == lastindex(s) && _addr_error("invalid scoped address zone", s)
-    return s[1:prevind(s, i)], s[nextind(s, i):end]
+    i == ncodeunits(s) && _addr_error("invalid scoped address zone", s)
+    bytes = codeunits(s)
+    return String(copy(bytes[1:i-1])), String(copy(bytes[i+1:end]))
 end
 
 function _scope_id_from_zone(zone::AbstractString)::UInt32
@@ -951,8 +960,8 @@ Throws `AddressError` if the string is malformed.
 """
 function split_host_port(hostport::AbstractString)::Tuple{String, String}
     s = String(hostport)
-    i = findlast(==(':'), s)
-    i === nothing && _addr_error("missing port in address", s)
+    i = _find_last_ascii_delim(s, UInt8(':'))
+    i == 0 && _addr_error("missing port in address", s)
     first_i = firstindex(s)
     last_i = lastindex(s)
     j = first_i
