@@ -61,7 +61,7 @@ function run_tls_trim_sample()::Nothing
         _TLS_SERVER_LISTENER[] = listener
         _TLS_SERVER_CONN[] = nothing
         laddr = TL.addr(listener)::NC.SocketAddrV4
-        server_task = errormonitor(Task(_tls_server_task_entry))
+        server_task = Task(_tls_server_task_entry)
         schedule(server_task)
         client = _tls_client_connect(NC.loopback_addr(Int(laddr.port)))
         status = IP.timedwait(() -> istaskdone(server_task::Task), 10.0; pollint = 0.001)
