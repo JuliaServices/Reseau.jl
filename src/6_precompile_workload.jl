@@ -355,11 +355,11 @@ function _pc_tls_client_config()::TL.Config
 end
 
 function _pc_tls_accept_task(listener::TL.Listener)::Task
-    return errormonitor(@async begin
+    return @async begin
         conn = TL.accept(listener)
         TL.handshake!(conn)
         return conn
-    end)
+    end
 end
 
 function _pc_tls_connect_client(addr::NC.SocketAddrV4, config::TL.Config)::TL.Conn

@@ -17,7 +17,7 @@ function ND.resolve_tcp_addrs(
         address::AbstractString;
         op::Symbol = :connect,
         policy::ND.ResolverPolicy = ND.ResolverPolicy(),
-    )::Vector{NC.SocketEndpoint}
+    )::ND.ResolvedConnectAddrs
     _ = network
     _ = address
     _ = op
@@ -43,7 +43,7 @@ function ND.resolve_tcp_addrs(
         address::AbstractString;
         op::Symbol = :connect,
         policy::ND.ResolverPolicy = ND.ResolverPolicy(),
-    )::Vector{NC.SocketEndpoint}
+    )::ND.ResolvedConnectAddrs
     _ = network
     _ = address
     _ = op
@@ -75,7 +75,7 @@ function ND.resolve_tcp_addrs(
         address::AbstractString;
         op::Symbol = :connect,
         policy::ND.ResolverPolicy = ND.ResolverPolicy(),
-    )::Vector{NC.SocketEndpoint}
+    )::ND.ResolvedConnectAddrs
     _ = network
     _ = address
     _ = op
@@ -108,7 +108,7 @@ function ND.resolve_tcp_addrs(
         address::AbstractString;
         op::Symbol = :connect,
         policy::ND.ResolverPolicy = ND.ResolverPolicy(),
-    )::Vector{NC.SocketEndpoint}
+    )::ND.ResolvedConnectAddrs
     _ = network
     _ = address
     _ = op

@@ -1408,7 +1408,7 @@ function _resolve_cached_host(
     end
     if stale_result !== nothing
         if refresh_needed
-            errormonitor(@async _refresh_cached_host!(resolver, key, String(network), h))
+            @async _refresh_cached_host!(resolver, key, String(network), h)
         end
         return stale_result::Vector{TCP.SocketEndpoint}
     end
@@ -1524,8 +1524,11 @@ Keyword arguments:
   `:resolve`
 - `policy`: address-family filtering and ordering policy
 
-Returns a `Vector{TCP.SocketEndpoint}` in the order that subsequent connection
-logic should attempt.
+Returns a `ResolvedConnectAddrs` container in the order that subsequent
+connection logic should attempt.
+
+Custom resolver methods extending `resolve_tcp_addrs(::AbstractResolver, ...)`
+should return `ResolvedConnectAddrs` directly.
 
 Throws `AddressError`, `LookupError`, or `UnknownNetworkError` when parsing or
 resolution fails.
@@ -1536,7 +1539,7 @@ function resolve_tcp_addrs(
         address::AbstractString;
         op::Symbol = :connect,
         policy::ResolverPolicy = ResolverPolicy(),
-    )
+    )::ResolvedConnectAddrs
     kind = _network_kind(network)
     addr = String(address)
     op == :connect && isempty(addr) && _addr_error("missing address", addr)
@@ -1557,7 +1560,7 @@ function resolve_tcp_addrs(
 end
 
 """
-    resolve_tcp_addrs(network, address) -> Vector{TCP.SocketEndpoint}
+    resolve_tcp_addrs(network, address) -> ResolvedConnectAddrs
 
 Resolve concrete TCP endpoints using `DEFAULT_RESOLVER`.
 """
@@ -1671,11 +1674,11 @@ end
 function _spawn_timer_task(f::F, deadline_ns::Int64) where {F}
     timer = IOPoll.TimerState(deadline_ns, Int64(0))
     IOPoll.schedule_timer!(timer, deadline_ns) || return nothing, nothing
-    task = errormonitor(@async begin
+    task = @async begin
         IOPoll.waittimer(timer) || return nothing
         f()
         return nothing
-    end)
+    end
     return timer, task
 end
 
@@ -1690,27 +1693,61 @@ function _close_timer_task!(
     return nothing
 end
 
-const _ResolvedConnectAddrs = Union{
+"""
+    ResolvedConnectAddrs
+
+Concrete address-container contract for `resolve_tcp_addrs`.
+
+Custom `resolve_tcp_addrs(::AbstractResolver, ...)` methods should return one of
+these concrete vector types directly.
+"""
+const ResolvedConnectAddrs = Union{
     Vector{TCP.SocketAddrV4},
     Vector{TCP.SocketAddrV6},
     Vector{TCP.SocketEndpoint},
 }
 
-function _normalize_resolved_connect_addrs(result)::_ResolvedConnectAddrs
-    if result isa Vector{TCP.SocketAddrV4}
-        return result
-    elseif result isa Vector{TCP.SocketAddrV6}
-        return result
-    elseif result isa Vector{TCP.SocketEndpoint}
-        return result
-    elseif result isa AbstractVector{<:TCP.SocketEndpoint}
-        out = TCP.SocketEndpoint[]
-        for addr in result
-            push!(out, addr)
-        end
-        return out
+mutable struct _ResolvedConnectAddrsFuture
+    notify::Threads.Condition
+    done::Bool
+    result::Union{Nothing,ResolvedConnectAddrs}
+    err::Union{Nothing,Exception}
+end
+
+function _ResolvedConnectAddrsFuture()
+    return _ResolvedConnectAddrsFuture(Threads.Condition(), false, nothing, nothing)
+end
+
+function _notify_resolved_connect_addrs_future!(
+        future::_ResolvedConnectAddrsFuture,
+        value::ResolvedConnectAddrs,
+    )::Nothing
+    lock(future.notify)
+    try
+        future.done && return nothing
+        future.result = value::ResolvedConnectAddrs
+        future.err = nothing
+        future.done = true
+        notify(future.notify)
+    finally
+        unlock(future.notify)
     end
-    throw(ArgumentError("resolver returned unsupported address container"))
+    return nothing
+end
+
+function _wait_resolved_connect_addrs_future!(future::_ResolvedConnectAddrsFuture)::ResolvedConnectAddrs
+    lock(future.notify)
+    try
+        while !future.done
+            wait(future.notify)
+        end
+        future.err === nothing || throw(future.err::Exception)
+        result = future.result
+        result isa ResolvedConnectAddrs || throw(ArgumentError("resolver returned unsupported address container"))
+        return result
+    finally
+        unlock(future.notify)
+    end
 end
 
 function _resolve_with_deadline(
@@ -1718,60 +1755,47 @@ function _resolve_with_deadline(
         network::AbstractString,
         address::AbstractString,
         deadline_ns::Int64,
-    )::_ResolvedConnectAddrs
+    )::ResolvedConnectAddrs
     deadline_ns == 0 && return resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
     now_ns = Int64(time_ns())
     now_ns >= deadline_ns && throw(DialTimeoutError(String(address)))
-    mtx = ReentrantLock()
-    condition = Threads.Condition(mtx)
-    done = Ref(false)
-    timed_out = Ref(false)
-    result_ref = Ref{Union{Nothing, _ResolvedConnectAddrs, Exception}}(nothing)
+    future = _ResolvedConnectAddrsFuture()
     timer, timer_task = _spawn_timer_task(deadline_ns) do
-        lock(mtx)
+        timeout_ex = DialTimeoutError(String(address))
+        lock(future.notify)
         try
-            done[] && return nothing
-            timed_out[] = true
-            done[] = true
-            notify(condition)
+            if !future.done
+                future.result = nothing
+                future.err = timeout_ex
+                future.done = true
+                notify(future.notify)
+            end
         finally
-            unlock(mtx)
+            unlock(future.notify)
         end
         return nothing
     end
-    errormonitor(@async begin
-        resolved_or_err = try
-            resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy)
-        catch err
-            _as_exception(err)
-        end
-        stored_result = resolved_or_err isa Exception ? resolved_or_err : _normalize_resolved_connect_addrs(resolved_or_err)
-        lock(mtx)
+    @async try
+        _notify_resolved_connect_addrs_future!(future, resolve_tcp_addrs(d.resolver, network, address; op = :connect, policy = d.policy))
+    catch err
+        ex = err::Exception
+        lock(future.notify)
         try
-            done[] && return nothing
-            result_ref[] = stored_result
-            done[] = true
-            notify(condition)
+            if !future.done
+                future.result = nothing
+                future.err = ex
+                future.done = true
+                notify(future.notify)
+            end
         finally
-            unlock(mtx)
+            unlock(future.notify)
         end
-        return nothing
-    end)
-    lock(mtx)
+    end
     try
-        while !done[]
-            wait(condition)
-        end
+        return _wait_resolved_connect_addrs_future!(future)
     finally
-        unlock(mtx)
         _close_timer_task!(timer, timer_task)
     end
-    timed_out[] && throw(DialTimeoutError(String(address)))
-    resolved = result_ref[]
-    resolved === nothing && throw(DialTimeoutError(String(address)))
-    resolved isa Exception && throw(resolved)
-    resolved isa _ResolvedConnectAddrs || throw(ArgumentError("resolver returned unsupported address container"))
-    return resolved
 end
 
 _coerce_connect_addrs_v4(resolved::Vector{TCP.SocketAddrV4}) = resolved
@@ -2008,11 +2032,11 @@ function _resolve_parallel(
         return nothing
     end
     function _start_racer(primary::Bool, addrs::AbstractVector{<:TCP.SocketEndpoint})
-        return errormonitor(@async begin
+        return @async begin
             conn, err = _resolve_serial(d, network, address, addrs, deadline_ns, state)
             _emit_event!(DNSParallelResult(primary, conn, err))
             return nothing
-        end)
+        end
     end
     _start_racer(true, primaries)
     delay_ns = _effective_fallback_delay_ns(d)
