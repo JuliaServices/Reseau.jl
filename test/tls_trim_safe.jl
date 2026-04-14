@@ -48,6 +48,7 @@ function run_tls_trim_sample()::Nothing
     server::Union{Nothing, TL.Conn} = nothing
     server_task::Union{Nothing, Task} = nothing
     try
+        Reseau._pc_run_tls_handshake_messages_workload!()
         listener = TL.listen(
             NC.loopback_addr(0),
             TL.Config(

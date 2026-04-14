@@ -379,7 +379,109 @@ function _pc_tls_connect_client(addr::NC.SocketAddrV4, config::TL.Config)::TL.Co
     )
 end
 
+function _pc_run_tls_handshake_messages_workload!()::Nothing
+    client_hello = TL._ClientHelloMsg()
+    client_hello.vers = TL.TLS1_2_VERSION
+    client_hello.random = collect(UInt8(0x00):UInt8(0x1f))
+    client_hello.session_id = UInt8[0xaa, 0xbb, 0xcc]
+    client_hello.cipher_suites = UInt16[0x1301, 0x1302, 0xc02f]
+    client_hello.server_name = "localhost"
+    client_hello.ocsp_stapling = true
+    client_hello.supported_curves = UInt16[0x001d, 0x0017]
+    client_hello.supported_points = UInt8[0x00]
+    client_hello.ticket_supported = true
+    client_hello.session_ticket = UInt8[0x10, 0x11]
+    client_hello.supported_signature_algorithms = UInt16[0x0403, 0x0804]
+    client_hello.supported_signature_algorithms_cert = UInt16[0x0403]
+    client_hello.secure_renegotiation_supported = true
+    client_hello.secure_renegotiation = UInt8[0x20]
+    client_hello.extended_master_secret = true
+    client_hello.alpn_protocols = ["h2", "http/1.1"]
+    client_hello.scts = true
+    client_hello.supported_versions = UInt16[TL.TLS1_3_VERSION, TL.TLS1_2_VERSION]
+    client_hello.cookie = UInt8[0x30, 0x31]
+    client_hello.key_shares = [TL._TLSKeyShare(0x001d, UInt8[0x40, 0x41, 0x42])]
+    client_hello.early_data = true
+    client_hello.psk_modes = UInt8[TL._TLS_PSK_MODE_DHE]
+    client_hello.psk_identities = [TL._TLSPSKIdentity(UInt8[0x50, 0x51], 0x01020304)]
+    client_hello.psk_binders = [UInt8[0x60, 0x61, 0x62, 0x63]]
+    client_hello.quic_transport_parameters = UInt8[0x70, 0x71]
+    client_hello.encrypted_client_hello = UInt8[0x80, 0x81]
+
+    server_hello = TL._ServerHelloMsg()
+    server_hello.vers = TL.TLS1_2_VERSION
+    server_hello.random = collect(UInt8(0x80):UInt8(0x9f))
+    server_hello.session_id = UInt8[0x01, 0x02]
+    server_hello.cipher_suite = 0x1301
+    server_hello.compression_method = TL._TLS_COMPRESSION_NONE
+    server_hello.ocsp_stapling = true
+    server_hello.ticket_supported = true
+    server_hello.secure_renegotiation_supported = true
+    server_hello.secure_renegotiation = UInt8[0x03, 0x04]
+    server_hello.extended_master_secret = true
+    server_hello.alpn_protocol = "h2"
+    server_hello.scts = [UInt8[0x05, 0x06, 0x07]]
+    server_hello.supported_version = TL.TLS1_3_VERSION
+    server_hello.server_share = TL._TLSKeyShare(0x001d, UInt8[0x08, 0x09])
+    server_hello.selected_identity_present = true
+    server_hello.selected_identity = 0x0001
+    server_hello.supported_points = UInt8[0x00]
+    server_hello.encrypted_client_hello = UInt8[0x0a, 0x0b]
+    server_hello.server_name_ack = true
+
+    encrypted_extensions = TL._EncryptedExtensionsMsg()
+    encrypted_extensions.alpn_protocol = "h2"
+    encrypted_extensions.quic_transport_parameters = UInt8[0x01, 0x02, 0x03]
+    encrypted_extensions.early_data = true
+    encrypted_extensions.ech_retry_configs = UInt8[0x04, 0x05]
+    encrypted_extensions.server_name_ack = true
+
+    finished = TL._FinishedMsg(UInt8[0x10, 0x11, 0x12, 0x13])
+
+    transcript_write = TL._TranscriptHash(TL._HASH_SHA256)
+    client_bytes = TL._write_handshake_message(client_hello, transcript_write)
+    server_bytes = TL._write_handshake_message(server_hello, transcript_write)
+    encrypted_extensions_bytes = TL._write_handshake_message(encrypted_extensions, transcript_write)
+    finished_bytes = TL._write_handshake_message(finished, transcript_write)
+
+    client_without_binders = TL._marshal_client_hello_without_binders(client_hello)
+    length(client_without_binders) < length(client_bytes) || throw(ArgumentError("handshake workload expected binderless client hello prefix"))
+
+    parsed_client = TL._unmarshal_handshake_message(client_bytes)
+    parsed_server = TL._unmarshal_handshake_message(server_bytes)
+    parsed_encrypted_extensions = TL._unmarshal_handshake_message(encrypted_extensions_bytes)
+    parsed_finished = TL._unmarshal_handshake_message(finished_bytes)
+    parsed_client isa TL._ClientHelloMsg || throw(ArgumentError("handshake workload expected parsed client hello"))
+    parsed_server isa TL._ServerHelloMsg || throw(ArgumentError("handshake workload expected parsed server hello"))
+    parsed_encrypted_extensions isa TL._EncryptedExtensionsMsg || throw(ArgumentError("handshake workload expected parsed encrypted extensions"))
+    parsed_finished isa TL._FinishedMsg || throw(ArgumentError("handshake workload expected parsed finished"))
+
+    transcript_read = TL._TranscriptHash(TL._HASH_SHA256)
+    TL._unmarshal_handshake_message(client_bytes, transcript_read) isa TL._ClientHelloMsg || throw(ArgumentError("handshake workload expected transcript client hello"))
+    TL._unmarshal_handshake_message(server_bytes, transcript_read) isa TL._ServerHelloMsg || throw(ArgumentError("handshake workload expected transcript server hello"))
+    TL._unmarshal_handshake_message(encrypted_extensions_bytes, transcript_read) isa TL._EncryptedExtensionsMsg || throw(ArgumentError("handshake workload expected transcript encrypted extensions"))
+    TL._unmarshal_handshake_message(finished_bytes, transcript_read) isa TL._FinishedMsg || throw(ArgumentError("handshake workload expected transcript finished"))
+
+    transcript_parsed = TL._TranscriptHash(TL._HASH_SHA256)
+    TL._transcript_update_handshake!(transcript_parsed, parsed_client)
+    TL._transcript_update_handshake!(transcript_parsed, parsed_server)
+    TL._transcript_update_handshake!(transcript_parsed, parsed_encrypted_extensions)
+    TL._transcript_update_handshake!(transcript_parsed, parsed_finished)
+
+    write_digest = TL._transcript_digest(transcript_write)
+    read_digest = TL._transcript_digest(transcript_read)
+    parsed_digest = TL._transcript_digest(transcript_parsed)
+    write_digest == read_digest || throw(ArgumentError("handshake workload transcript mismatch"))
+    write_digest == parsed_digest || throw(ArgumentError("handshake workload parsed transcript mismatch"))
+
+    TL._update_client_hello_binders!(parsed_client, [UInt8[0xa0, 0xa1, 0xa2, 0xa3]])
+    rebound_client_bytes = TL._marshal_handshake_message(parsed_client)
+    length(rebound_client_bytes) == length(client_bytes) || throw(ArgumentError("handshake workload rebound client hello length mismatch"))
+    return nothing
+end
+
 function _pc_run_tls_workload!()
+    _pc_run_tls_handshake_messages_workload!()
     _pc_runtime_supported() || return nothing
     cert_path = _pc_tls_resource_file("unittests.crt")
     key_path = _pc_tls_resource_file("unittests.key")

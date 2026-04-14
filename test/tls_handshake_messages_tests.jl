@@ -21,6 +21,142 @@ function _rand_optional_bytes(rng::AbstractRNG, max_len::Int; present::Bool = ra
     return rand(rng, UInt8, len)
 end
 
+_copy_tls_key_shares(key_shares::Vector{TLH._TLSKeyShare}) = [TLH._TLSKeyShare(share.group, copy(share.data)) for share in key_shares]
+_copy_tls_psk_identities(psk_identities::Vector{TLH._TLSPSKIdentity}) = [TLH._TLSPSKIdentity(copy(identity.label), identity.obfuscated_ticket_age) for identity in psk_identities]
+_copy_tls_byte_vectors(byte_vectors::Vector{Vector{UInt8}}) = [copy(bytes) for bytes in byte_vectors]
+
+function _client_hello_msg(;
+    original::Union{Nothing, AbstractVector{UInt8}} = nothing,
+    vers::UInt16 = TLH.TLS1_2_VERSION,
+    random::AbstractVector{UInt8} = zeros(UInt8, 32),
+    session_id::AbstractVector{UInt8} = UInt8[],
+    cipher_suites::Vector{UInt16} = UInt16[],
+    compression_methods::AbstractVector{UInt8} = UInt8[TLH._TLS_COMPRESSION_NONE],
+    server_name::AbstractString = "",
+    ocsp_stapling::Bool = false,
+    supported_curves::Vector{UInt16} = UInt16[],
+    supported_points::AbstractVector{UInt8} = UInt8[],
+    ticket_supported::Bool = false,
+    session_ticket::AbstractVector{UInt8} = UInt8[],
+    supported_signature_algorithms::Vector{UInt16} = UInt16[],
+    supported_signature_algorithms_cert::Vector{UInt16} = UInt16[],
+    secure_renegotiation_supported::Bool = false,
+    secure_renegotiation::AbstractVector{UInt8} = UInt8[],
+    extended_master_secret::Bool = false,
+    alpn_protocols::Vector{String} = String[],
+    scts::Bool = false,
+    supported_versions::Vector{UInt16} = UInt16[],
+    cookie::AbstractVector{UInt8} = UInt8[],
+    key_shares::Vector{TLH._TLSKeyShare} = TLH._TLSKeyShare[],
+    early_data::Bool = false,
+    psk_modes::AbstractVector{UInt8} = UInt8[],
+    psk_identities::Vector{TLH._TLSPSKIdentity} = TLH._TLSPSKIdentity[],
+    psk_binders::Vector{Vector{UInt8}} = Vector{UInt8}[],
+    quic_transport_parameters::Union{Nothing, AbstractVector{UInt8}} = nothing,
+    encrypted_client_hello::AbstractVector{UInt8} = UInt8[],
+    extensions::Vector{UInt16} = UInt16[],
+)
+    return TLH._ClientHelloMsg(
+        original === nothing ? nothing : Vector{UInt8}(original),
+        vers,
+        Vector{UInt8}(random),
+        Vector{UInt8}(session_id),
+        copy(cipher_suites),
+        Vector{UInt8}(compression_methods),
+        String(server_name),
+        ocsp_stapling,
+        copy(supported_curves),
+        Vector{UInt8}(supported_points),
+        ticket_supported,
+        Vector{UInt8}(session_ticket),
+        copy(supported_signature_algorithms),
+        copy(supported_signature_algorithms_cert),
+        secure_renegotiation_supported,
+        Vector{UInt8}(secure_renegotiation),
+        extended_master_secret,
+        copy(alpn_protocols),
+        scts,
+        copy(supported_versions),
+        Vector{UInt8}(cookie),
+        _copy_tls_key_shares(key_shares),
+        early_data,
+        Vector{UInt8}(psk_modes),
+        _copy_tls_psk_identities(psk_identities),
+        _copy_tls_byte_vectors(psk_binders),
+        quic_transport_parameters === nothing ? nothing : Vector{UInt8}(quic_transport_parameters),
+        Vector{UInt8}(encrypted_client_hello),
+        copy(extensions),
+    )
+end
+
+function _server_hello_msg(;
+    original::Union{Nothing, AbstractVector{UInt8}} = nothing,
+    vers::UInt16 = TLH.TLS1_2_VERSION,
+    random::AbstractVector{UInt8} = zeros(UInt8, 32),
+    session_id::AbstractVector{UInt8} = UInt8[],
+    cipher_suite::UInt16 = UInt16(0),
+    compression_method::UInt8 = TLH._TLS_COMPRESSION_NONE,
+    ocsp_stapling::Bool = false,
+    ticket_supported::Bool = false,
+    secure_renegotiation_supported::Bool = false,
+    secure_renegotiation::AbstractVector{UInt8} = UInt8[],
+    extended_master_secret::Bool = false,
+    alpn_protocol::AbstractString = "",
+    scts::Vector{Vector{UInt8}} = Vector{UInt8}[],
+    supported_version::UInt16 = UInt16(0),
+    server_share::Union{Nothing, TLH._TLSKeyShare} = nothing,
+    selected_identity_present::Bool = false,
+    selected_identity::UInt16 = UInt16(0),
+    supported_points::AbstractVector{UInt8} = UInt8[],
+    encrypted_client_hello::AbstractVector{UInt8} = UInt8[],
+    server_name_ack::Bool = false,
+    cookie::AbstractVector{UInt8} = UInt8[],
+    selected_group::UInt16 = UInt16(0),
+)
+    return TLH._ServerHelloMsg(
+        original === nothing ? nothing : Vector{UInt8}(original),
+        vers,
+        Vector{UInt8}(random),
+        Vector{UInt8}(session_id),
+        cipher_suite,
+        compression_method,
+        ocsp_stapling,
+        ticket_supported,
+        secure_renegotiation_supported,
+        Vector{UInt8}(secure_renegotiation),
+        extended_master_secret,
+        String(alpn_protocol),
+        _copy_tls_byte_vectors(scts),
+        supported_version,
+        server_share === nothing ? nothing : TLH._TLSKeyShare(server_share.group, copy(server_share.data)),
+        selected_identity_present,
+        selected_identity,
+        Vector{UInt8}(supported_points),
+        Vector{UInt8}(encrypted_client_hello),
+        server_name_ack,
+        Vector{UInt8}(cookie),
+        selected_group,
+    )
+end
+
+function _encrypted_extensions_msg(;
+    alpn_protocol::AbstractString = "",
+    quic_transport_parameters::Union{Nothing, AbstractVector{UInt8}} = nothing,
+    early_data::Bool = false,
+    ech_retry_configs::AbstractVector{UInt8} = UInt8[],
+    server_name_ack::Bool = false,
+)
+    return TLH._EncryptedExtensionsMsg(
+        String(alpn_protocol),
+        quic_transport_parameters === nothing ? nothing : Vector{UInt8}(quic_transport_parameters),
+        early_data,
+        Vector{UInt8}(ech_retry_configs),
+        server_name_ack,
+    )
+end
+
+_finished_msg(; verify_data::AbstractVector{UInt8} = UInt8[]) = TLH._FinishedMsg(Vector{UInt8}(verify_data))
+
 function _random_client_hello(rng::AbstractRNG)
     cipher_suites = rand(rng, UInt16, rand(rng, 1:6))
     for i in eachindex(cipher_suites)
@@ -39,7 +175,7 @@ function _random_client_hello(rng::AbstractRNG)
 
     quic_transport_parameters = _rand_optional_bytes(rng, 10)
 
-    return TLH._ClientHelloMsg(
+    return _client_hello_msg(
         vers = rand(rng, UInt16),
         random = rand(rng, UInt8, 32),
         session_id = rand(rng, UInt8, rand(rng, 0:32)),
@@ -73,7 +209,7 @@ end
 function _random_server_hello(rng::AbstractRNG)
     with_server_share = rand(rng, Bool)
     secure_renegotiation_supported = rand(rng, Bool)
-    return TLH._ServerHelloMsg(
+    return _server_hello_msg(
         vers = rand(rng, UInt16),
         random = rand(rng, UInt8, 32),
         session_id = rand(rng, UInt8, rand(rng, 0:32)),
@@ -99,7 +235,7 @@ function _random_server_hello(rng::AbstractRNG)
 end
 
 function _random_encrypted_extensions(rng::AbstractRNG)
-    return TLH._EncryptedExtensionsMsg(
+    return _encrypted_extensions_msg(
         alpn_protocol = rand(rng, Bool) ? _rand_ascii(rng, rand(rng, 1:8)) : "",
         quic_transport_parameters = _rand_optional_bytes(rng, 10),
         early_data = rand(rng, Bool),
@@ -108,7 +244,7 @@ function _random_encrypted_extensions(rng::AbstractRNG)
     )
 end
 
-_random_finished(rng::AbstractRNG) = TLH._FinishedMsg(verify_data = rand(rng, UInt8, rand(rng, 12:48)))
+_random_finished(rng::AbstractRNG) = _finished_msg(verify_data = rand(rng, UInt8, rand(rng, 12:48)))
 
 function _find_subsequence(haystack::AbstractVector{UInt8}, needle::AbstractVector{UInt8})
     isempty(needle) && return 1
@@ -179,7 +315,7 @@ end
 
 @testset "TLS handshake messages phase 1" begin
     @testset "rich ClientHello roundtrips and binder helpers follow Go ordering" begin
-        client_hello = TLH._ClientHelloMsg(
+        client_hello = _client_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = collect(UInt8(0x00):UInt8(0x1f)),
             session_id = UInt8[0xaa, 0xbb, 0xcc],
@@ -256,7 +392,7 @@ end
     end
 
     @testset "ServerHello variants roundtrip and preserve original bytes" begin
-        server_hello = TLH._ServerHelloMsg(
+        server_hello = _server_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = collect(UInt8(0x80):UInt8(0x9f)),
             session_id = UInt8[0x01, 0x02],
@@ -286,7 +422,7 @@ end
         @test parsed_server.original == bytes
         @test TLH._handshake_transcript_bytes(parsed_server) == bytes
 
-        hello_retry = TLH._ServerHelloMsg(
+        hello_retry = _server_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = fill(UInt8(0xee), 32),
             cipher_suite = 0x1301,
@@ -300,7 +436,7 @@ end
         @test hrr_parsed isa TLH._ServerHelloMsg
         @test (hrr_parsed::TLH._ServerHelloMsg) == hello_retry
 
-        invalid = TLH._ServerHelloMsg(
+        invalid = _server_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = fill(UInt8(0xaa), 32),
             cipher_suite = 0x1301,
@@ -312,14 +448,14 @@ end
     end
 
     @testset "EncryptedExtensions and Finished roundtrip" begin
-        encrypted_extensions = TLH._EncryptedExtensionsMsg(
+        encrypted_extensions = _encrypted_extensions_msg(
             alpn_protocol = "http/1.1",
             quic_transport_parameters = UInt8[0x01, 0x02, 0x03],
             early_data = true,
             ech_retry_configs = UInt8[0x04, 0x05],
             server_name_ack = true,
         )
-        finished = TLH._FinishedMsg(verify_data = UInt8[0x10, 0x11, 0x12, 0x13])
+        finished = _finished_msg(verify_data = UInt8[0x10, 0x11, 0x12, 0x13])
 
         ee_bytes = TLH._marshal_handshake_message(encrypted_extensions)
         fin_bytes = TLH._marshal_handshake_message(finished)
@@ -330,14 +466,14 @@ end
     end
 
     @testset "Transcript hooks match raw wire bytes" begin
-        client_hello = TLH._ClientHelloMsg(
+        client_hello = _client_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = collect(UInt8(0x01):UInt8(0x20)),
             cipher_suites = UInt16[0x1301],
             compression_methods = UInt8[TLH._TLS_COMPRESSION_NONE],
             supported_versions = UInt16[TLH.TLS1_3_VERSION],
         )
-        server_hello = TLH._ServerHelloMsg(
+        server_hello = _server_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = collect(UInt8(0x21):UInt8(0x40)),
             cipher_suite = 0x1301,
@@ -345,8 +481,8 @@ end
             supported_version = TLH.TLS1_3_VERSION,
             server_share = TLH._TLSKeyShare(0x001d, UInt8[0x01, 0x02, 0x03]),
         )
-        encrypted_extensions = TLH._EncryptedExtensionsMsg(alpn_protocol = "h2")
-        finished = TLH._FinishedMsg(verify_data = UInt8[0xaa, 0xbb, 0xcc, 0xdd])
+        encrypted_extensions = _encrypted_extensions_msg(alpn_protocol = "h2")
+        finished = _finished_msg(verify_data = UInt8[0xaa, 0xbb, 0xcc, 0xdd])
 
         transcript_write = TLH._TranscriptHash(TLH._HASH_SHA256)
         client_bytes = TLH._write_handshake_message(client_hello, transcript_write)
@@ -380,7 +516,7 @@ end
         @test TLH._unmarshal_handshake_message(client_hello_duplicate) === nothing
         @test TLH._unmarshal_handshake_message(server_hello_duplicate) === nothing
 
-        valid_server_hello = TLH._ServerHelloMsg(
+        valid_server_hello = _server_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = zeros(UInt8, 32),
             cipher_suite = 0x1301,
@@ -393,7 +529,7 @@ end
         empty_sct_list = _replace_server_hello_sct_with_empty_list(valid_server_hello_bytes)
         @test TLH._unmarshal_handshake_message(empty_sct_list) === nothing
 
-        zero_length_sct = TLH._ServerHelloMsg(
+        zero_length_sct = _server_hello_msg(
             vers = TLH.TLS1_2_VERSION,
             random = zeros(UInt8, 32),
             cipher_suite = 0x1301,
@@ -404,7 +540,7 @@ end
     end
 
     @testset "Framing rejects truncation, oversize messages, and unknown types" begin
-        finished = TLH._FinishedMsg(verify_data = UInt8[0x01, 0x02, 0x03])
+        finished = _finished_msg(verify_data = UInt8[0x01, 0x02, 0x03])
         finished_bytes = TLH._marshal_handshake_message(finished)
 
         @test TLH._unmarshal_handshake_message(finished_bytes[1:(end - 1)]) === nothing

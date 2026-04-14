@@ -47,8 +47,6 @@ end
 Base.:(==)(a::_TLSKeyShare, b::_TLSKeyShare) = a.group == b.group && a.data == b.data
 Base.:(==)(a::_TLSPSKIdentity, b::_TLSPSKIdentity) = a.label == b.label && a.obfuscated_ticket_age == b.obfuscated_ticket_age
 
-_copy_key_shares(key_shares::Vector{_TLSKeyShare}) = [_TLSKeyShare(share.group, copy(share.data)) for share in key_shares]
-_copy_psk_identities(psk_identities::Vector{_TLSPSKIdentity}) = [_TLSPSKIdentity(copy(identity.label), identity.obfuscated_ticket_age) for identity in psk_identities]
 _copy_byte_vectors(byte_vectors::Vector{Vector{UInt8}}) = [copy(bytes) for bytes in byte_vectors]
 
 mutable struct _ClientHelloMsg <: _HandshakeMessage
@@ -83,67 +81,37 @@ mutable struct _ClientHelloMsg <: _HandshakeMessage
     extensions::Vector{UInt16}
 end
 
-function _ClientHelloMsg(;
-    original::Union{Nothing, AbstractVector{UInt8}} = nothing,
-    vers::UInt16 = TLS1_2_VERSION,
-    random::AbstractVector{UInt8} = zeros(UInt8, 32),
-    session_id::AbstractVector{UInt8} = UInt8[],
-    cipher_suites::Vector{UInt16} = UInt16[],
-    compression_methods::AbstractVector{UInt8} = UInt8[_TLS_COMPRESSION_NONE],
-    server_name::AbstractString = "",
-    ocsp_stapling::Bool = false,
-    supported_curves::Vector{UInt16} = UInt16[],
-    supported_points::AbstractVector{UInt8} = UInt8[],
-    ticket_supported::Bool = false,
-    session_ticket::AbstractVector{UInt8} = UInt8[],
-    supported_signature_algorithms::Vector{UInt16} = UInt16[],
-    supported_signature_algorithms_cert::Vector{UInt16} = UInt16[],
-    secure_renegotiation_supported::Bool = false,
-    secure_renegotiation::AbstractVector{UInt8} = UInt8[],
-    extended_master_secret::Bool = false,
-    alpn_protocols::Vector{String} = String[],
-    scts::Bool = false,
-    supported_versions::Vector{UInt16} = UInt16[],
-    cookie::AbstractVector{UInt8} = UInt8[],
-    key_shares::Vector{_TLSKeyShare} = _TLSKeyShare[],
-    early_data::Bool = false,
-    psk_modes::AbstractVector{UInt8} = UInt8[],
-    psk_identities::Vector{_TLSPSKIdentity} = _TLSPSKIdentity[],
-    psk_binders::Vector{Vector{UInt8}} = Vector{UInt8}[],
-    quic_transport_parameters::Union{Nothing, AbstractVector{UInt8}} = nothing,
-    encrypted_client_hello::AbstractVector{UInt8} = UInt8[],
-    extensions::Vector{UInt16} = UInt16[],
-)
+function _ClientHelloMsg(original::Union{Nothing, Vector{UInt8}} = nothing)
     return _ClientHelloMsg(
-        original === nothing ? nothing : Vector{UInt8}(original),
-        vers,
-        Vector{UInt8}(random),
-        Vector{UInt8}(session_id),
-        copy(cipher_suites),
-        Vector{UInt8}(compression_methods),
-        String(server_name),
-        ocsp_stapling,
-        copy(supported_curves),
-        Vector{UInt8}(supported_points),
-        ticket_supported,
-        Vector{UInt8}(session_ticket),
-        copy(supported_signature_algorithms),
-        copy(supported_signature_algorithms_cert),
-        secure_renegotiation_supported,
-        Vector{UInt8}(secure_renegotiation),
-        extended_master_secret,
-        copy(alpn_protocols),
-        scts,
-        copy(supported_versions),
-        Vector{UInt8}(cookie),
-        _copy_key_shares(key_shares),
-        early_data,
-        Vector{UInt8}(psk_modes),
-        _copy_psk_identities(psk_identities),
-        _copy_byte_vectors(psk_binders),
-        quic_transport_parameters === nothing ? nothing : Vector{UInt8}(quic_transport_parameters),
-        Vector{UInt8}(encrypted_client_hello),
-        copy(extensions),
+        original,
+        TLS1_2_VERSION,
+        zeros(UInt8, 32),
+        UInt8[],
+        UInt16[],
+        UInt8[_TLS_COMPRESSION_NONE],
+        "",
+        false,
+        UInt16[],
+        UInt8[],
+        false,
+        UInt8[],
+        UInt16[],
+        UInt16[],
+        false,
+        UInt8[],
+        false,
+        String[],
+        false,
+        UInt16[],
+        UInt8[],
+        _TLSKeyShare[],
+        false,
+        UInt8[],
+        _TLSPSKIdentity[],
+        Vector{UInt8}[],
+        nothing,
+        UInt8[],
+        UInt16[],
     )
 end
 
@@ -201,53 +169,30 @@ mutable struct _ServerHelloMsg <: _HandshakeMessage
     selected_group::UInt16
 end
 
-function _ServerHelloMsg(;
-    original::Union{Nothing, AbstractVector{UInt8}} = nothing,
-    vers::UInt16 = TLS1_2_VERSION,
-    random::AbstractVector{UInt8} = zeros(UInt8, 32),
-    session_id::AbstractVector{UInt8} = UInt8[],
-    cipher_suite::UInt16 = UInt16(0),
-    compression_method::UInt8 = _TLS_COMPRESSION_NONE,
-    ocsp_stapling::Bool = false,
-    ticket_supported::Bool = false,
-    secure_renegotiation_supported::Bool = false,
-    secure_renegotiation::AbstractVector{UInt8} = UInt8[],
-    extended_master_secret::Bool = false,
-    alpn_protocol::AbstractString = "",
-    scts::Vector{Vector{UInt8}} = Vector{UInt8}[],
-    supported_version::UInt16 = UInt16(0),
-    server_share::Union{Nothing, _TLSKeyShare} = nothing,
-    selected_identity_present::Bool = false,
-    selected_identity::UInt16 = UInt16(0),
-    supported_points::AbstractVector{UInt8} = UInt8[],
-    encrypted_client_hello::AbstractVector{UInt8} = UInt8[],
-    server_name_ack::Bool = false,
-    cookie::AbstractVector{UInt8} = UInt8[],
-    selected_group::UInt16 = UInt16(0),
-)
+function _ServerHelloMsg(original::Union{Nothing, Vector{UInt8}} = nothing)
     return _ServerHelloMsg(
-        original === nothing ? nothing : Vector{UInt8}(original),
-        vers,
-        Vector{UInt8}(random),
-        Vector{UInt8}(session_id),
-        cipher_suite,
-        compression_method,
-        ocsp_stapling,
-        ticket_supported,
-        secure_renegotiation_supported,
-        Vector{UInt8}(secure_renegotiation),
-        extended_master_secret,
-        String(alpn_protocol),
-        _copy_byte_vectors(scts),
-        supported_version,
-        server_share === nothing ? nothing : _TLSKeyShare(server_share.group, copy(server_share.data)),
-        selected_identity_present,
-        selected_identity,
-        Vector{UInt8}(supported_points),
-        Vector{UInt8}(encrypted_client_hello),
-        server_name_ack,
-        Vector{UInt8}(cookie),
-        selected_group,
+        original,
+        TLS1_2_VERSION,
+        zeros(UInt8, 32),
+        UInt8[],
+        UInt16(0),
+        _TLS_COMPRESSION_NONE,
+        false,
+        false,
+        false,
+        UInt8[],
+        false,
+        "",
+        Vector{UInt8}[],
+        UInt16(0),
+        nothing,
+        false,
+        UInt16(0),
+        UInt8[],
+        UInt8[],
+        false,
+        UInt8[],
+        UInt16(0),
     )
 end
 
@@ -282,21 +227,7 @@ mutable struct _EncryptedExtensionsMsg <: _HandshakeMessage
     server_name_ack::Bool
 end
 
-function _EncryptedExtensionsMsg(;
-    alpn_protocol::AbstractString = "",
-    quic_transport_parameters::Union{Nothing, AbstractVector{UInt8}} = nothing,
-    early_data::Bool = false,
-    ech_retry_configs::AbstractVector{UInt8} = UInt8[],
-    server_name_ack::Bool = false,
-)
-    return _EncryptedExtensionsMsg(
-        String(alpn_protocol),
-        quic_transport_parameters === nothing ? nothing : Vector{UInt8}(quic_transport_parameters),
-        early_data,
-        Vector{UInt8}(ech_retry_configs),
-        server_name_ack,
-    )
-end
+_EncryptedExtensionsMsg() = _EncryptedExtensionsMsg("", nothing, false, UInt8[], false)
 
 Base.:(==)(a::_EncryptedExtensionsMsg, b::_EncryptedExtensionsMsg) =
     a.alpn_protocol == b.alpn_protocol &&
@@ -309,7 +240,8 @@ mutable struct _FinishedMsg <: _HandshakeMessage
     verify_data::Vector{UInt8}
 end
 
-_FinishedMsg(; verify_data::AbstractVector{UInt8} = UInt8[]) = _FinishedMsg(Vector{UInt8}(verify_data))
+_FinishedMsg() = _FinishedMsg(UInt8[])
+_FinishedMsg(verify_data::AbstractVector{UInt8}) = _FinishedMsg(Vector{UInt8}(verify_data))
 Base.:(==)(a::_FinishedMsg, b::_FinishedMsg) = a.verify_data == b.verify_data
 
 mutable struct _HandshakeReader
@@ -317,6 +249,7 @@ mutable struct _HandshakeReader
     pos::Int
 end
 
+_HandshakeReader(data::Vector{UInt8}) = _HandshakeReader(data, 1)
 _HandshakeReader(data::AbstractVector{UInt8}) = _HandshakeReader(Vector{UInt8}(data), 1)
 
 @inline function _reader_empty(reader::_HandshakeReader)::Bool
@@ -349,13 +282,19 @@ function _read_bytes!(reader::_HandshakeReader, n::Int)::Union{Vector{UInt8}, No
     n < 0 && return nothing
     n == 0 && return UInt8[]
     reader.pos + n - 1 > length(reader.data) && return nothing
-    out = copy(@view(reader.data[reader.pos:(reader.pos + n - 1)]))
+    out = Vector{UInt8}(undef, n)
+    copyto!(out, 1, reader.data, reader.pos, n)
     reader.pos += n
     return out
 end
 
 @inline function _read_remaining_bytes!(reader::_HandshakeReader)::Vector{UInt8}
     return _read_bytes!(reader, length(reader.data) - reader.pos + 1)::Vector{UInt8}
+end
+
+@inline function _skip_remaining!(reader::_HandshakeReader)::Nothing
+    reader.pos = length(reader.data) + 1
+    return nothing
 end
 
 function _read_u8_length_prefixed_bytes!(reader::_HandshakeReader)::Union{Vector{UInt8}, Nothing}
@@ -376,14 +315,6 @@ function _read_u16_length_prefixed_reader!(reader::_HandshakeReader)::Union{_Han
     return _HandshakeReader(bytes)
 end
 
-function _bytes_to_string(bytes::AbstractVector{UInt8})::Union{String, Nothing}
-    try
-        return String(Vector{UInt8}(bytes))
-    catch
-        return nothing
-    end
-end
-
 @inline function _append_u8!(buf::Vector{UInt8}, v::Integer)
     push!(buf, UInt8(v))
     return nothing
@@ -402,11 +333,6 @@ end
 function _append_u24!(buf::Vector{UInt8}, v::Int)
     0 <= v <= 0x00ff_ffff || throw(ArgumentError("uint24 value out of range: $(v)"))
     push!(buf, UInt8(v >> 16), UInt8((v >> 8) & 0xff), UInt8(v & 0xff))
-    return nothing
-end
-
-@inline function _append_bytes!(buf::Vector{UInt8}, bytes::AbstractVector{UInt8})
-    append!(buf, bytes)
     return nothing
 end
 
@@ -453,28 +379,27 @@ function _append_extension!(f::F, buf::Vector{UInt8}, extension::UInt16) where {
     return nothing
 end
 
+function _append_extension!(buf::Vector{UInt8}, extension::UInt16)
+    _append_u16!(buf, extension)
+    push!(buf, 0x00, 0x00)
+    return nothing
+end
+
 function _append_fixed_bytes!(buf::Vector{UInt8}, bytes::AbstractVector{UInt8}, expected_len::Int, label::AbstractString)
     length(bytes) == expected_len || throw(ArgumentError("invalid $(label) length: expected $(expected_len), got $(length(bytes))"))
-    _append_bytes!(buf, bytes)
+    append!(buf, bytes)
     return nothing
 end
 
 function _copy_valid_handshake_frame(data::AbstractVector{UInt8})::Union{Vector{UInt8}, Nothing}
     length(data) < 4 && return nothing
-    raw = Vector{UInt8}(data)
-    body_len = (Int(raw[2]) << 16) | (Int(raw[3]) << 8) | Int(raw[4])
+    body_len = (Int(data[2]) << 16) | (Int(data[3]) << 8) | Int(data[4])
     body_len <= _MAX_HANDSHAKE_SIZE || throw(ArgumentError("tls: handshake message of length $(body_len) bytes exceeds maximum of $(_MAX_HANDSHAKE_SIZE) bytes"))
-    length(raw) == body_len + 4 || return nothing
-    return raw
+    length(data) == body_len + 4 || return nothing
+    return Vector{UInt8}(data)
 end
 
-@inline _handshake_type(::Type{_ClientHelloMsg}) = _HANDSHAKE_TYPE_CLIENT_HELLO
-@inline _handshake_type(::Type{_ServerHelloMsg}) = _HANDSHAKE_TYPE_SERVER_HELLO
-@inline _handshake_type(::Type{_EncryptedExtensionsMsg}) = _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS
-@inline _handshake_type(::Type{_FinishedMsg}) = _HANDSHAKE_TYPE_FINISHED
-@inline _handshake_type(msg::_HandshakeMessage) = _handshake_type(typeof(msg))
-
-function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
+function _marshal_client_hello(msg::_ClientHelloMsg)::Vector{UInt8}
     !isempty(msg.psk_identities) && length(msg.psk_identities) != length(msg.psk_binders) &&
         throw(ArgumentError("client hello psk_identities and psk_binders must have the same length"))
 
@@ -484,7 +409,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
             _append_u16_length_prefixed!(exts_buf) do name_list_buf
                 _append_u8!(name_list_buf, 0)
                 _append_u16_length_prefixed!(name_list_buf) do server_name_buf
-                    _append_bytes!(server_name_buf, codeunits(msg.server_name))
+                    append!(server_name_buf, codeunits(msg.server_name))
                 end
             end
         end
@@ -492,34 +417,34 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
     if !isempty(msg.supported_points)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_SUPPORTED_POINTS) do exts_buf
             _append_u8_length_prefixed!(exts_buf) do points_buf
-                _append_bytes!(points_buf, msg.supported_points)
+                append!(points_buf, msg.supported_points)
             end
         end
     end
     if msg.ticket_supported
         _append_extension!(exts, _HANDSHAKE_EXTENSION_SESSION_TICKET) do exts_buf
-            _append_bytes!(exts_buf, msg.session_ticket)
+            append!(exts_buf, msg.session_ticket)
         end
     end
     if msg.secure_renegotiation_supported
         _append_extension!(exts, _HANDSHAKE_EXTENSION_RENEGOTIATION_INFO) do exts_buf
             _append_u8_length_prefixed!(exts_buf) do info_buf
-                _append_bytes!(info_buf, msg.secure_renegotiation)
+                append!(info_buf, msg.secure_renegotiation)
             end
         end
     end
-    msg.extended_master_secret && _append_extension!(exts, _HANDSHAKE_EXTENSION_EXTENDED_MASTER_SECRET) do _ end
-    msg.scts && _append_extension!(exts, _HANDSHAKE_EXTENSION_SCT) do _ end
-    msg.early_data && _append_extension!(exts, _HANDSHAKE_EXTENSION_EARLY_DATA) do _ end
+    msg.extended_master_secret && _append_extension!(exts, _HANDSHAKE_EXTENSION_EXTENDED_MASTER_SECRET)
+    msg.scts && _append_extension!(exts, _HANDSHAKE_EXTENSION_SCT)
+    msg.early_data && _append_extension!(exts, _HANDSHAKE_EXTENSION_EARLY_DATA)
     if msg.quic_transport_parameters !== nothing
         quic_transport_parameters = msg.quic_transport_parameters::Vector{UInt8}
         _append_extension!(exts, _HANDSHAKE_EXTENSION_QUIC_TRANSPORT_PARAMETERS) do exts_buf
-            _append_bytes!(exts_buf, quic_transport_parameters)
+            append!(exts_buf, quic_transport_parameters)
         end
     end
     if !isempty(msg.encrypted_client_hello)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_ENCRYPTED_CLIENT_HELLO) do exts_buf
-            _append_bytes!(exts_buf, msg.encrypted_client_hello)
+            append!(exts_buf, msg.encrypted_client_hello)
         end
     end
     if msg.ocsp_stapling
@@ -561,7 +486,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
             _append_u16_length_prefixed!(exts_buf) do protocol_list_buf
                 for protocol in msg.alpn_protocols
                     _append_u8_length_prefixed!(protocol_list_buf) do protocol_buf
-                        _append_bytes!(protocol_buf, codeunits(protocol))
+                        append!(protocol_buf, codeunits(protocol))
                     end
                 end
             end
@@ -579,7 +504,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
     if !isempty(msg.cookie)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_COOKIE) do exts_buf
             _append_u16_length_prefixed!(exts_buf) do cookie_buf
-                _append_bytes!(cookie_buf, msg.cookie)
+                append!(cookie_buf, msg.cookie)
             end
         end
     end
@@ -589,7 +514,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
                 for share in msg.key_shares
                     _append_u16!(shares_buf, share.group)
                     _append_u16_length_prefixed!(shares_buf) do share_buf
-                        _append_bytes!(share_buf, share.data)
+                        append!(share_buf, share.data)
                     end
                 end
             end
@@ -598,7 +523,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
     if !isempty(msg.psk_modes)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_PSK_MODES) do exts_buf
             _append_u8_length_prefixed!(exts_buf) do modes_buf
-                _append_bytes!(modes_buf, msg.psk_modes)
+                append!(modes_buf, msg.psk_modes)
             end
         end
     end
@@ -607,7 +532,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
             _append_u16_length_prefixed!(exts_buf) do identities_buf
                 for identity in msg.psk_identities
                     _append_u16_length_prefixed!(identities_buf) do label_buf
-                        _append_bytes!(label_buf, identity.label)
+                        append!(label_buf, identity.label)
                     end
                     _append_u32!(identities_buf, identity.obfuscated_ticket_age)
                 end
@@ -615,7 +540,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
             _append_u16_length_prefixed!(exts_buf) do binders_buf
                 for binder in msg.psk_binders
                     _append_u8_length_prefixed!(binders_buf) do binder_buf
-                        _append_bytes!(binder_buf, binder)
+                        append!(binder_buf, binder)
                     end
                 end
             end
@@ -628,7 +553,7 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
         _append_u16!(body_buf, msg.vers)
         _append_fixed_bytes!(body_buf, msg.random, 32, "client hello random")
         _append_u8_length_prefixed!(body_buf) do session_id_buf
-            _append_bytes!(session_id_buf, msg.session_id)
+            append!(session_id_buf, msg.session_id)
         end
         _append_u16_length_prefixed!(body_buf) do cipher_suites_buf
             for cipher_suite in msg.cipher_suites
@@ -636,16 +561,16 @@ function _marshal_handshake_message(msg::_ClientHelloMsg)::Vector{UInt8}
             end
         end
         _append_u8_length_prefixed!(body_buf) do compression_methods_buf
-            _append_bytes!(compression_methods_buf, msg.compression_methods)
+            append!(compression_methods_buf, msg.compression_methods)
         end
         !isempty(exts) && _append_u16_length_prefixed!(body_buf) do extensions_buf
-            _append_bytes!(extensions_buf, exts)
+            append!(extensions_buf, exts)
         end
     end
     return out
 end
 
-function _marshal_client_hello_without_binders(msg::_ClientHelloMsg)::Vector{UInt8}
+function _marshal_client_hello_without_binders(msg::_ClientHelloMsg)
     isempty(msg.psk_identities) && return _handshake_transcript_bytes(msg)
 
     binders_len = 2
@@ -655,7 +580,8 @@ function _marshal_client_hello_without_binders(msg::_ClientHelloMsg)::Vector{UIn
 
     full_message = _handshake_transcript_bytes(msg)
     binders_len <= length(full_message) || throw(ArgumentError("client hello binders exceed message length"))
-    return full_message[1:(end - binders_len)]
+    prefix_len = length(full_message) - binders_len
+    return @view full_message[1:prefix_len]
 end
 
 function _update_client_hello_binders!(msg::_ClientHelloMsg, psk_binders::Vector{Vector{UInt8}})
@@ -668,26 +594,26 @@ function _update_client_hello_binders!(msg::_ClientHelloMsg, psk_binders::Vector
     return nothing
 end
 
-function _marshal_handshake_message(msg::_ServerHelloMsg)::Vector{UInt8}
+function _marshal_server_hello(msg::_ServerHelloMsg)::Vector{UInt8}
     msg.server_share !== nothing && msg.selected_group != 0x0000 &&
         throw(ArgumentError("server hello cannot encode both server_share and selected_group"))
 
     exts = UInt8[]
-    msg.ocsp_stapling && _append_extension!(exts, _HANDSHAKE_EXTENSION_STATUS_REQUEST) do _ end
-    msg.ticket_supported && _append_extension!(exts, _HANDSHAKE_EXTENSION_SESSION_TICKET) do _ end
+    msg.ocsp_stapling && _append_extension!(exts, _HANDSHAKE_EXTENSION_STATUS_REQUEST)
+    msg.ticket_supported && _append_extension!(exts, _HANDSHAKE_EXTENSION_SESSION_TICKET)
     if msg.secure_renegotiation_supported
         _append_extension!(exts, _HANDSHAKE_EXTENSION_RENEGOTIATION_INFO) do exts_buf
             _append_u8_length_prefixed!(exts_buf) do info_buf
-                _append_bytes!(info_buf, msg.secure_renegotiation)
+                append!(info_buf, msg.secure_renegotiation)
             end
         end
     end
-    msg.extended_master_secret && _append_extension!(exts, _HANDSHAKE_EXTENSION_EXTENDED_MASTER_SECRET) do _ end
+    msg.extended_master_secret && _append_extension!(exts, _HANDSHAKE_EXTENSION_EXTENDED_MASTER_SECRET)
     if !isempty(msg.alpn_protocol)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_ALPN) do exts_buf
             _append_u16_length_prefixed!(exts_buf) do protocol_list_buf
                 _append_u8_length_prefixed!(protocol_list_buf) do protocol_buf
-                    _append_bytes!(protocol_buf, codeunits(msg.alpn_protocol))
+                    append!(protocol_buf, codeunits(msg.alpn_protocol))
                 end
             end
         end
@@ -697,7 +623,7 @@ function _marshal_handshake_message(msg::_ServerHelloMsg)::Vector{UInt8}
             _append_u16_length_prefixed!(exts_buf) do scts_buf
                 for sct in msg.scts
                     _append_u16_length_prefixed!(scts_buf) do sct_buf
-                        _append_bytes!(sct_buf, sct)
+                        append!(sct_buf, sct)
                     end
                 end
             end
@@ -711,7 +637,7 @@ function _marshal_handshake_message(msg::_ServerHelloMsg)::Vector{UInt8}
         _append_extension!(exts, _HANDSHAKE_EXTENSION_KEY_SHARE) do exts_buf
             _append_u16!(exts_buf, server_share.group)
             _append_u16_length_prefixed!(exts_buf) do share_buf
-                _append_bytes!(share_buf, server_share.data)
+                append!(share_buf, server_share.data)
             end
         end
     end
@@ -723,7 +649,7 @@ function _marshal_handshake_message(msg::_ServerHelloMsg)::Vector{UInt8}
     if !isempty(msg.cookie)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_COOKIE) do exts_buf
             _append_u16_length_prefixed!(exts_buf) do cookie_buf
-                _append_bytes!(cookie_buf, msg.cookie)
+                append!(cookie_buf, msg.cookie)
             end
         end
     end
@@ -735,16 +661,16 @@ function _marshal_handshake_message(msg::_ServerHelloMsg)::Vector{UInt8}
     if !isempty(msg.supported_points)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_SUPPORTED_POINTS) do exts_buf
             _append_u8_length_prefixed!(exts_buf) do points_buf
-                _append_bytes!(points_buf, msg.supported_points)
+                append!(points_buf, msg.supported_points)
             end
         end
     end
     if !isempty(msg.encrypted_client_hello)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_ENCRYPTED_CLIENT_HELLO) do exts_buf
-            _append_bytes!(exts_buf, msg.encrypted_client_hello)
+            append!(exts_buf, msg.encrypted_client_hello)
         end
     end
-    msg.server_name_ack && _append_extension!(exts, _HANDSHAKE_EXTENSION_SERVER_NAME) do _ end
+    msg.server_name_ack && _append_extension!(exts, _HANDSHAKE_EXTENSION_SERVER_NAME)
 
     out = UInt8[]
     _append_u8!(out, _HANDSHAKE_TYPE_SERVER_HELLO)
@@ -752,18 +678,18 @@ function _marshal_handshake_message(msg::_ServerHelloMsg)::Vector{UInt8}
         _append_u16!(body_buf, msg.vers)
         _append_fixed_bytes!(body_buf, msg.random, 32, "server hello random")
         _append_u8_length_prefixed!(body_buf) do session_id_buf
-            _append_bytes!(session_id_buf, msg.session_id)
+            append!(session_id_buf, msg.session_id)
         end
         _append_u16!(body_buf, msg.cipher_suite)
         _append_u8!(body_buf, msg.compression_method)
         !isempty(exts) && _append_u16_length_prefixed!(body_buf) do extensions_buf
-            _append_bytes!(extensions_buf, exts)
+            append!(extensions_buf, exts)
         end
     end
     return out
 end
 
-function _marshal_handshake_message(msg::_EncryptedExtensionsMsg)::Vector{UInt8}
+function _marshal_encrypted_extensions(msg::_EncryptedExtensionsMsg)::Vector{UInt8}
     out = UInt8[]
     _append_u8!(out, _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS)
     _append_u24_length_prefixed!(out) do body_buf
@@ -772,7 +698,7 @@ function _marshal_handshake_message(msg::_EncryptedExtensionsMsg)::Vector{UInt8}
                 _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_ALPN) do exts_buf
                     _append_u16_length_prefixed!(exts_buf) do protocol_list_buf
                         _append_u8_length_prefixed!(protocol_list_buf) do protocol_buf
-                            _append_bytes!(protocol_buf, codeunits(msg.alpn_protocol))
+                            append!(protocol_buf, codeunits(msg.alpn_protocol))
                         end
                     end
                 end
@@ -780,32 +706,32 @@ function _marshal_handshake_message(msg::_EncryptedExtensionsMsg)::Vector{UInt8}
             if msg.quic_transport_parameters !== nothing
                 quic_transport_parameters = msg.quic_transport_parameters::Vector{UInt8}
                 _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_QUIC_TRANSPORT_PARAMETERS) do exts_buf
-                    _append_bytes!(exts_buf, quic_transport_parameters)
+                    append!(exts_buf, quic_transport_parameters)
                 end
             end
-            msg.early_data && _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_EARLY_DATA) do _ end
+            msg.early_data && _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_EARLY_DATA)
             if !isempty(msg.ech_retry_configs)
                 _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_ENCRYPTED_CLIENT_HELLO) do exts_buf
-                    _append_bytes!(exts_buf, msg.ech_retry_configs)
+                    append!(exts_buf, msg.ech_retry_configs)
                 end
             end
-            msg.server_name_ack && _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_SERVER_NAME) do _ end
+            msg.server_name_ack && _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_SERVER_NAME)
         end
     end
     return out
 end
 
-function _marshal_handshake_message(msg::_FinishedMsg)::Vector{UInt8}
+function _marshal_finished(msg::_FinishedMsg)::Vector{UInt8}
     out = UInt8[]
     _append_u8!(out, _HANDSHAKE_TYPE_FINISHED)
     _append_u24_length_prefixed!(out) do body_buf
-        _append_bytes!(body_buf, msg.verify_data)
+        append!(body_buf, msg.verify_data)
     end
     return out
 end
 
 function _unmarshal_client_hello(data::Vector{UInt8})::Union{_ClientHelloMsg, Nothing}
-    msg = _ClientHelloMsg(original = data)
+    msg = _ClientHelloMsg(data)
     reader = _HandshakeReader(data)
     _read_u8!(reader) == _HANDSHAKE_TYPE_CLIENT_HELLO || return nothing
     _read_u24!(reader) == length(data) - 4 || return nothing
@@ -856,8 +782,9 @@ function _unmarshal_client_hello(data::Vector{UInt8})::Union{_ClientHelloMsg, No
                 (name_type === nothing || server_name_bytes === nothing || isempty(server_name_bytes)) && return nothing
                 name_type == 0x00 || continue
                 isempty(msg.server_name) || return nothing
-                server_name = _bytes_to_string(server_name_bytes)
-                (server_name === nothing || endswith(server_name, ".")) && return nothing
+                isvalid(String, server_name_bytes) || return nothing
+                server_name = String(server_name_bytes)
+                endswith(server_name, ".") && return nothing
                 msg.server_name = server_name
             end
         elseif extension == _HANDSHAKE_EXTENSION_STATUS_REQUEST
@@ -914,8 +841,8 @@ function _unmarshal_client_hello(data::Vector{UInt8})::Union{_ClientHelloMsg, No
             while !_reader_empty(protocol_list_reader)
                 protocol_bytes = _read_u8_length_prefixed_bytes!(protocol_list_reader)
                 (protocol_bytes === nothing || isempty(protocol_bytes)) && return nothing
-                protocol = _bytes_to_string(protocol_bytes)
-                protocol === nothing && return nothing
+                isvalid(String, protocol_bytes) || return nothing
+                protocol = String(protocol_bytes)
                 push!(msg.alpn_protocols, protocol)
             end
         elseif extension == _HANDSHAKE_EXTENSION_SCT
@@ -974,7 +901,7 @@ function _unmarshal_client_hello(data::Vector{UInt8})::Union{_ClientHelloMsg, No
         elseif extension == _HANDSHAKE_EXTENSION_ENCRYPTED_CLIENT_HELLO
             msg.encrypted_client_hello = _read_remaining_bytes!(ext_reader)
         else
-            _read_remaining_bytes!(ext_reader)
+            _skip_remaining!(ext_reader)
         end
 
         _reader_empty(ext_reader) || return nothing
@@ -984,7 +911,7 @@ function _unmarshal_client_hello(data::Vector{UInt8})::Union{_ClientHelloMsg, No
 end
 
 function _unmarshal_server_hello(data::Vector{UInt8})::Union{_ServerHelloMsg, Nothing}
-    msg = _ServerHelloMsg(original = data)
+    msg = _ServerHelloMsg(data)
     reader = _HandshakeReader(data)
     _read_u8!(reader) == _HANDSHAKE_TYPE_SERVER_HELLO || return nothing
     _read_u24!(reader) == length(data) - 4 || return nothing
@@ -1030,8 +957,8 @@ function _unmarshal_server_hello(data::Vector{UInt8})::Union{_ServerHelloMsg, No
             (protocol_list_reader === nothing || _reader_empty(protocol_list_reader)) && return nothing
             protocol_bytes = _read_u8_length_prefixed_bytes!(protocol_list_reader)
             (protocol_bytes === nothing || isempty(protocol_bytes) || !_reader_empty(protocol_list_reader)) && return nothing
-            protocol = _bytes_to_string(protocol_bytes)
-            protocol === nothing && return nothing
+            isvalid(String, protocol_bytes) || return nothing
+            protocol = String(protocol_bytes)
             msg.alpn_protocol = protocol
         elseif extension == _HANDSHAKE_EXTENSION_SCT
             scts_reader = _read_u16_length_prefixed_reader!(ext_reader)
@@ -1076,7 +1003,7 @@ function _unmarshal_server_hello(data::Vector{UInt8})::Union{_ServerHelloMsg, No
             _reader_empty(ext_reader) || return nothing
             msg.server_name_ack = true
         else
-            _read_remaining_bytes!(ext_reader)
+            _skip_remaining!(ext_reader)
         end
 
         _reader_empty(ext_reader) || return nothing
@@ -1107,8 +1034,8 @@ function _unmarshal_encrypted_extensions(data::Vector{UInt8})::Union{_EncryptedE
             (protocol_list_reader === nothing || _reader_empty(protocol_list_reader)) && return nothing
             protocol_bytes = _read_u8_length_prefixed_bytes!(protocol_list_reader)
             (protocol_bytes === nothing || isempty(protocol_bytes) || !_reader_empty(protocol_list_reader)) && return nothing
-            protocol = _bytes_to_string(protocol_bytes)
-            protocol === nothing && return nothing
+            isvalid(String, protocol_bytes) || return nothing
+            protocol = String(protocol_bytes)
             msg.alpn_protocol = protocol
         elseif extension == _HANDSHAKE_EXTENSION_QUIC_TRANSPORT_PARAMETERS
             msg.quic_transport_parameters = _read_remaining_bytes!(ext_reader)
@@ -1120,7 +1047,7 @@ function _unmarshal_encrypted_extensions(data::Vector{UInt8})::Union{_EncryptedE
             _reader_empty(ext_reader) || return nothing
             msg.server_name_ack = true
         else
-            _read_remaining_bytes!(ext_reader)
+            _skip_remaining!(ext_reader)
         end
 
         _reader_empty(ext_reader) || return nothing
@@ -1136,20 +1063,21 @@ function _unmarshal_finished(data::Vector{UInt8})::Union{_FinishedMsg, Nothing}
     body_len === nothing && return nothing
     verify_data = _read_bytes!(reader, body_len)
     (verify_data === nothing || !_reader_empty(reader)) && return nothing
-    return _FinishedMsg(verify_data = verify_data)
+    return _FinishedMsg(verify_data)
 end
 
 function _unmarshal_handshake_message(data::AbstractVector{UInt8}, transcript::Union{Nothing, _TranscriptHash} = nothing)::Union{_HandshakeMessage, Nothing}
     raw = _copy_valid_handshake_frame(data)
     raw === nothing && return nothing
 
-    msg = if raw[1] == _HANDSHAKE_TYPE_CLIENT_HELLO
+    handshake_type = raw[1]
+    msg = if handshake_type == _HANDSHAKE_TYPE_CLIENT_HELLO
         _unmarshal_client_hello(raw)
-    elseif raw[1] == _HANDSHAKE_TYPE_SERVER_HELLO
+    elseif handshake_type == _HANDSHAKE_TYPE_SERVER_HELLO
         _unmarshal_server_hello(raw)
-    elseif raw[1] == _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS
+    elseif handshake_type == _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS
         _unmarshal_encrypted_extensions(raw)
-    elseif raw[1] == _HANDSHAKE_TYPE_FINISHED
+    elseif handshake_type == _HANDSHAKE_TYPE_FINISHED
         _unmarshal_finished(raw)
     else
         nothing
@@ -1160,18 +1088,33 @@ function _unmarshal_handshake_message(data::AbstractVector{UInt8}, transcript::U
     return msg
 end
 
-function _handshake_transcript_bytes(msg::_ClientHelloMsg)::Vector{UInt8}
-    msg.original === nothing && return _marshal_handshake_message(msg)
-    return copy(msg.original::Vector{UInt8})
+function _marshal_handshake_message(msg::_HandshakeMessage)::Vector{UInt8}
+    if msg isa _ClientHelloMsg
+        return _marshal_client_hello(msg)
+    elseif msg isa _ServerHelloMsg
+        return _marshal_server_hello(msg)
+    elseif msg isa _EncryptedExtensionsMsg
+        return _marshal_encrypted_extensions(msg)
+    elseif msg isa _FinishedMsg
+        return _marshal_finished(msg)
+    end
+    error("unsupported handshake message type: $(typeof(msg))")
 end
 
-function _handshake_transcript_bytes(msg::_ServerHelloMsg)::Vector{UInt8}
-    msg.original === nothing && return _marshal_handshake_message(msg)
-    return copy(msg.original::Vector{UInt8})
+function _handshake_transcript_bytes(msg::_HandshakeMessage)::Vector{UInt8}
+    if msg isa _ClientHelloMsg
+        original = msg.original
+        return original === nothing ? _marshal_client_hello(msg) : copy(original)
+    elseif msg isa _ServerHelloMsg
+        original = msg.original
+        return original === nothing ? _marshal_server_hello(msg) : copy(original)
+    elseif msg isa _EncryptedExtensionsMsg
+        return _marshal_encrypted_extensions(msg)
+    elseif msg isa _FinishedMsg
+        return _marshal_finished(msg)
+    end
+    error("unsupported handshake message type: $(typeof(msg))")
 end
-
-@inline _handshake_transcript_bytes(msg::_EncryptedExtensionsMsg)::Vector{UInt8} = _marshal_handshake_message(msg)
-@inline _handshake_transcript_bytes(msg::_FinishedMsg)::Vector{UInt8} = _marshal_handshake_message(msg)
 
 function _write_handshake_message(msg::_HandshakeMessage, transcript::Union{Nothing, _TranscriptHash} = nothing)::Vector{UInt8}
     data = _marshal_handshake_message(msg)

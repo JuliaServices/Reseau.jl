@@ -77,8 +77,12 @@ end
     return SHA.digest!(ctx)
 end
 
+@inline function _copy_hash_context(ctx::CTX)::CTX where {CTX<:SHA.SHA_CTX}
+    return CTX(copy(ctx.state), ctx.bytecount, copy(ctx.buffer), ctx.used)
+end
+
 @inline function _hash_context_digest(ctx::CTX)::Vector{UInt8} where {CTX<:SHA.SHA_CTX}
-    return SHA.digest!(deepcopy(ctx))
+    return SHA.digest!(_copy_hash_context(ctx))
 end
 
 @inline function _hmac_data(hash_kind::_TLSHashKind, key::AbstractVector{UInt8}, data::AbstractVector{UInt8})::Vector{UInt8}
