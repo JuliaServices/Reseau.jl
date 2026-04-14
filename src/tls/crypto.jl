@@ -11,6 +11,10 @@ struct _TLS13CipherSpec
     iv_length::Int
 end
 
+const _TLS13_AES_128_GCM_SHA256_ID = UInt16(0x1301)
+const _TLS13_AES_256_GCM_SHA384_ID = UInt16(0x1302)
+const _TLS13_CHACHA20_POLY1305_SHA256_ID = UInt16(0x1303)
+
 const _TLS13_AES_128_GCM_SHA256 = _TLS13CipherSpec(_HASH_SHA256, 16, 12)
 const _TLS13_AES_256_GCM_SHA384 = _TLS13CipherSpec(_HASH_SHA384, 32, 12)
 const _TLS13_CHACHA20_POLY1305_SHA256 = _TLS13CipherSpec(_HASH_SHA256, 32, 12)
@@ -45,6 +49,13 @@ end
 struct _TLS13ExporterMasterSecret
     hash_kind::_TLSHashKind
     secret::Vector{UInt8}
+end
+
+@inline function _tls13_cipher_spec(cipher_suite::UInt16)::Union{_TLS13CipherSpec, Nothing}
+    cipher_suite == _TLS13_AES_128_GCM_SHA256_ID && return _TLS13_AES_128_GCM_SHA256
+    cipher_suite == _TLS13_AES_256_GCM_SHA384_ID && return _TLS13_AES_256_GCM_SHA384
+    cipher_suite == _TLS13_CHACHA20_POLY1305_SHA256_ID && return _TLS13_CHACHA20_POLY1305_SHA256
+    return nothing
 end
 
 @inline function _hash_len(hash_kind::_TLSHashKind)::Int

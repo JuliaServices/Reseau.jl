@@ -2,7 +2,11 @@ const _MAX_HANDSHAKE_SIZE = 65536
 
 const _HANDSHAKE_TYPE_CLIENT_HELLO = UInt8(1)
 const _HANDSHAKE_TYPE_SERVER_HELLO = UInt8(2)
+const _HANDSHAKE_TYPE_NEW_SESSION_TICKET = UInt8(4)
 const _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS = UInt8(8)
+const _HANDSHAKE_TYPE_CERTIFICATE = UInt8(11)
+const _HANDSHAKE_TYPE_CERTIFICATE_REQUEST = UInt8(13)
+const _HANDSHAKE_TYPE_CERTIFICATE_VERIFY = UInt8(15)
 const _HANDSHAKE_TYPE_FINISHED = UInt8(20)
 
 const _TLS_COMPRESSION_NONE = UInt8(0)
@@ -21,6 +25,7 @@ const _HANDSHAKE_EXTENSION_EARLY_DATA = UInt16(42)
 const _HANDSHAKE_EXTENSION_SUPPORTED_VERSIONS = UInt16(43)
 const _HANDSHAKE_EXTENSION_COOKIE = UInt16(44)
 const _HANDSHAKE_EXTENSION_PSK_MODES = UInt16(45)
+const _HANDSHAKE_EXTENSION_CERTIFICATE_AUTHORITIES = UInt16(47)
 const _HANDSHAKE_EXTENSION_SIGNATURE_ALGORITHMS_CERT = UInt16(50)
 const _HANDSHAKE_EXTENSION_KEY_SHARE = UInt16(51)
 const _HANDSHAKE_EXTENSION_QUIC_TRANSPORT_PARAMETERS = UInt16(57)
@@ -236,6 +241,69 @@ Base.:(==)(a::_EncryptedExtensionsMsg, b::_EncryptedExtensionsMsg) =
     a.ech_retry_configs == b.ech_retry_configs &&
     a.server_name_ack == b.server_name_ack
 
+mutable struct _CertificateRequestMsgTLS13 <: _HandshakeMessage
+    ocsp_stapling::Bool
+    scts::Bool
+    supported_signature_algorithms::Vector{UInt16}
+    supported_signature_algorithms_cert::Vector{UInt16}
+    certificate_authorities::Vector{Vector{UInt8}}
+end
+
+_CertificateRequestMsgTLS13() = _CertificateRequestMsgTLS13(false, false, UInt16[], UInt16[], Vector{UInt8}[])
+
+Base.:(==)(a::_CertificateRequestMsgTLS13, b::_CertificateRequestMsgTLS13) =
+    a.ocsp_stapling == b.ocsp_stapling &&
+    a.scts == b.scts &&
+    a.supported_signature_algorithms == b.supported_signature_algorithms &&
+    a.supported_signature_algorithms_cert == b.supported_signature_algorithms_cert &&
+    a.certificate_authorities == b.certificate_authorities
+
+mutable struct _CertificateMsgTLS13 <: _HandshakeMessage
+    certificates::Vector{Vector{UInt8}}
+    ocsp_stapling::Bool
+    ocsp_staple::Union{Nothing, Vector{UInt8}}
+    scts::Bool
+    signed_certificate_timestamps::Vector{Vector{UInt8}}
+end
+
+_CertificateMsgTLS13() = _CertificateMsgTLS13(Vector{UInt8}[], false, nothing, false, Vector{UInt8}[])
+
+Base.:(==)(a::_CertificateMsgTLS13, b::_CertificateMsgTLS13) =
+    a.certificates == b.certificates &&
+    a.ocsp_stapling == b.ocsp_stapling &&
+    a.ocsp_staple == b.ocsp_staple &&
+    a.scts == b.scts &&
+    a.signed_certificate_timestamps == b.signed_certificate_timestamps
+
+mutable struct _CertificateVerifyMsg <: _HandshakeMessage
+    signature_algorithm::UInt16
+    signature::Vector{UInt8}
+end
+
+_CertificateVerifyMsg() = _CertificateVerifyMsg(UInt16(0), UInt8[])
+_CertificateVerifyMsg(signature_algorithm::UInt16, signature::AbstractVector{UInt8}) = _CertificateVerifyMsg(signature_algorithm, Vector{UInt8}(signature))
+
+Base.:(==)(a::_CertificateVerifyMsg, b::_CertificateVerifyMsg) =
+    a.signature_algorithm == b.signature_algorithm &&
+    a.signature == b.signature
+
+mutable struct _NewSessionTicketMsgTLS13 <: _HandshakeMessage
+    lifetime::UInt32
+    age_add::UInt32
+    nonce::Vector{UInt8}
+    label::Vector{UInt8}
+    max_early_data::UInt32
+end
+
+_NewSessionTicketMsgTLS13() = _NewSessionTicketMsgTLS13(UInt32(0), UInt32(0), UInt8[], UInt8[], UInt32(0))
+
+Base.:(==)(a::_NewSessionTicketMsgTLS13, b::_NewSessionTicketMsgTLS13) =
+    a.lifetime == b.lifetime &&
+    a.age_add == b.age_add &&
+    a.nonce == b.nonce &&
+    a.label == b.label &&
+    a.max_early_data == b.max_early_data
+
 mutable struct _FinishedMsg <: _HandshakeMessage
     verify_data::Vector{UInt8}
 end
@@ -309,8 +377,20 @@ function _read_u16_length_prefixed_bytes!(reader::_HandshakeReader)::Union{Vecto
     return _read_bytes!(reader, Int(n))
 end
 
+function _read_u24_length_prefixed_bytes!(reader::_HandshakeReader)::Union{Vector{UInt8}, Nothing}
+    n = _read_u24!(reader)
+    n === nothing && return nothing
+    return _read_bytes!(reader, n)
+end
+
 function _read_u16_length_prefixed_reader!(reader::_HandshakeReader)::Union{_HandshakeReader, Nothing}
     bytes = _read_u16_length_prefixed_bytes!(reader)
+    bytes === nothing && return nothing
+    return _HandshakeReader(bytes)
+end
+
+function _read_u24_length_prefixed_reader!(reader::_HandshakeReader)::Union{_HandshakeReader, Nothing}
+    bytes = _read_u24_length_prefixed_bytes!(reader)
     bytes === nothing && return nothing
     return _HandshakeReader(bytes)
 end
@@ -721,6 +801,128 @@ function _marshal_encrypted_extensions(msg::_EncryptedExtensionsMsg)::Vector{UIn
     return out
 end
 
+function _marshal_certificate_request_tls13(msg::_CertificateRequestMsgTLS13)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_CERTIFICATE_REQUEST)
+    _append_u24_length_prefixed!(out) do body_buf
+        _append_u8!(body_buf, 0)
+        _append_u16_length_prefixed!(body_buf) do extensions_buf
+            msg.ocsp_stapling && _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_STATUS_REQUEST)
+            msg.scts && _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_SCT)
+            if !isempty(msg.supported_signature_algorithms)
+                _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_SIGNATURE_ALGORITHMS) do exts_buf
+                    _append_u16_length_prefixed!(exts_buf) do sigalgs_buf
+                        for sigalg in msg.supported_signature_algorithms
+                            _append_u16!(sigalgs_buf, sigalg)
+                        end
+                    end
+                end
+            end
+            if !isempty(msg.supported_signature_algorithms_cert)
+                _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_SIGNATURE_ALGORITHMS_CERT) do exts_buf
+                    _append_u16_length_prefixed!(exts_buf) do sigalgs_buf
+                        for sigalg in msg.supported_signature_algorithms_cert
+                            _append_u16!(sigalgs_buf, sigalg)
+                        end
+                    end
+                end
+            end
+            if !isempty(msg.certificate_authorities)
+                _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_CERTIFICATE_AUTHORITIES) do exts_buf
+                    _append_u16_length_prefixed!(exts_buf) do authorities_buf
+                        for authority in msg.certificate_authorities
+                            _append_u16_length_prefixed!(authorities_buf) do authority_buf
+                                append!(authority_buf, authority)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function _marshal_certificate_tls13(msg::_CertificateMsgTLS13)::Vector{UInt8}
+    msg.ocsp_stapling && (msg.ocsp_staple === nothing || isempty(msg.ocsp_staple::Vector{UInt8})) &&
+        throw(ArgumentError("tls13 certificate message requires a non-empty OCSP staple when ocsp_stapling is set"))
+    msg.scts && isempty(msg.signed_certificate_timestamps) &&
+        throw(ArgumentError("tls13 certificate message requires a non-empty SCT list when scts is set"))
+
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_CERTIFICATE)
+    _append_u24_length_prefixed!(out) do body_buf
+        _append_u8!(body_buf, 0)
+        _append_u24_length_prefixed!(body_buf) do certificates_buf
+            for i in eachindex(msg.certificates)
+                certificate = msg.certificates[i]
+                _append_u24_length_prefixed!(certificates_buf) do certificate_buf
+                    append!(certificate_buf, certificate)
+                end
+                _append_u16_length_prefixed!(certificates_buf) do extensions_buf
+                    i == firstindex(msg.certificates) || return nothing
+                    if msg.ocsp_stapling
+                        ocsp_staple = msg.ocsp_staple::Vector{UInt8}
+                        _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_STATUS_REQUEST) do exts_buf
+                            _append_u8!(exts_buf, _TLS_STATUS_TYPE_OCSP)
+                            _append_u24_length_prefixed!(exts_buf) do staple_buf
+                                append!(staple_buf, ocsp_staple)
+                            end
+                        end
+                    end
+                    if msg.scts
+                        _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_SCT) do exts_buf
+                            _append_u16_length_prefixed!(exts_buf) do scts_buf
+                                for sct in msg.signed_certificate_timestamps
+                                    _append_u16_length_prefixed!(scts_buf) do sct_buf
+                                        append!(sct_buf, sct)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function _marshal_certificate_verify(msg::_CertificateVerifyMsg)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_CERTIFICATE_VERIFY)
+    _append_u24_length_prefixed!(out) do body_buf
+        _append_u16!(body_buf, msg.signature_algorithm)
+        _append_u16_length_prefixed!(body_buf) do signature_buf
+            append!(signature_buf, msg.signature)
+        end
+    end
+    return out
+end
+
+function _marshal_new_session_ticket_tls13(msg::_NewSessionTicketMsgTLS13)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_NEW_SESSION_TICKET)
+    _append_u24_length_prefixed!(out) do body_buf
+        _append_u32!(body_buf, msg.lifetime)
+        _append_u32!(body_buf, msg.age_add)
+        _append_u8_length_prefixed!(body_buf) do nonce_buf
+            append!(nonce_buf, msg.nonce)
+        end
+        _append_u16_length_prefixed!(body_buf) do label_buf
+            append!(label_buf, msg.label)
+        end
+        _append_u16_length_prefixed!(body_buf) do extensions_buf
+            if msg.max_early_data > 0
+                _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_EARLY_DATA) do exts_buf
+                    _append_u32!(exts_buf, msg.max_early_data)
+                end
+            end
+        end
+    end
+    return out
+end
+
 function _marshal_finished(msg::_FinishedMsg)::Vector{UInt8}
     out = UInt8[]
     _append_u8!(out, _HANDSHAKE_TYPE_FINISHED)
@@ -1056,6 +1258,164 @@ function _unmarshal_encrypted_extensions(data::Vector{UInt8})::Union{_EncryptedE
     return msg
 end
 
+function _unmarshal_certificate_request_tls13(data::Vector{UInt8})::Union{_CertificateRequestMsgTLS13, Nothing}
+    msg = _CertificateRequestMsgTLS13()
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_CERTIFICATE_REQUEST || return nothing
+    _read_u24!(reader) == length(data) - 4 || return nothing
+
+    context = _read_u8_length_prefixed_bytes!(reader)
+    extensions_reader = _read_u16_length_prefixed_reader!(reader)
+    (context === nothing || !isempty(context) || extensions_reader === nothing || !_reader_empty(reader)) && return nothing
+
+    seen_extensions = Set{UInt16}()
+    while !_reader_empty(extensions_reader)
+        extension = _read_u16!(extensions_reader)
+        ext_reader = _read_u16_length_prefixed_reader!(extensions_reader)
+        (extension === nothing || ext_reader === nothing) && return nothing
+        in(extension, seen_extensions) && return nothing
+        push!(seen_extensions, extension)
+
+        if extension == _HANDSHAKE_EXTENSION_STATUS_REQUEST
+            msg.ocsp_stapling = true
+        elseif extension == _HANDSHAKE_EXTENSION_SCT
+            msg.scts = true
+        elseif extension == _HANDSHAKE_EXTENSION_SIGNATURE_ALGORITHMS
+            sigalgs_reader = _read_u16_length_prefixed_reader!(ext_reader)
+            (sigalgs_reader === nothing || _reader_empty(sigalgs_reader)) && return nothing
+            msg.supported_signature_algorithms = UInt16[]
+            while !_reader_empty(sigalgs_reader)
+                sigalg = _read_u16!(sigalgs_reader)
+                sigalg === nothing && return nothing
+                push!(msg.supported_signature_algorithms, sigalg)
+            end
+        elseif extension == _HANDSHAKE_EXTENSION_SIGNATURE_ALGORITHMS_CERT
+            sigalgs_reader = _read_u16_length_prefixed_reader!(ext_reader)
+            (sigalgs_reader === nothing || _reader_empty(sigalgs_reader)) && return nothing
+            msg.supported_signature_algorithms_cert = UInt16[]
+            while !_reader_empty(sigalgs_reader)
+                sigalg = _read_u16!(sigalgs_reader)
+                sigalg === nothing && return nothing
+                push!(msg.supported_signature_algorithms_cert, sigalg)
+            end
+        elseif extension == _HANDSHAKE_EXTENSION_CERTIFICATE_AUTHORITIES
+            authorities_reader = _read_u16_length_prefixed_reader!(ext_reader)
+            (authorities_reader === nothing || _reader_empty(authorities_reader)) && return nothing
+            msg.certificate_authorities = Vector{UInt8}[]
+            while !_reader_empty(authorities_reader)
+                authority = _read_u16_length_prefixed_bytes!(authorities_reader)
+                (authority === nothing || isempty(authority)) && return nothing
+                push!(msg.certificate_authorities, authority)
+            end
+        else
+            _skip_remaining!(ext_reader)
+        end
+
+        _reader_empty(ext_reader) || return nothing
+    end
+
+    return msg
+end
+
+function _unmarshal_certificate_tls13(data::Vector{UInt8})::Union{_CertificateMsgTLS13, Nothing}
+    msg = _CertificateMsgTLS13()
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_CERTIFICATE || return nothing
+    _read_u24!(reader) == length(data) - 4 || return nothing
+
+    context = _read_u8_length_prefixed_bytes!(reader)
+    certificates_reader = _read_u24_length_prefixed_reader!(reader)
+    (context === nothing || !isempty(context) || certificates_reader === nothing || !_reader_empty(reader)) && return nothing
+
+    msg.certificates = Vector{UInt8}[]
+    while !_reader_empty(certificates_reader)
+        certificate = _read_u24_length_prefixed_bytes!(certificates_reader)
+        extensions_reader = _read_u16_length_prefixed_reader!(certificates_reader)
+        (certificate === nothing || extensions_reader === nothing) && return nothing
+        push!(msg.certificates, certificate)
+        leaf_certificate = length(msg.certificates) == 1
+
+        while !_reader_empty(extensions_reader)
+            extension = _read_u16!(extensions_reader)
+            ext_reader = _read_u16_length_prefixed_reader!(extensions_reader)
+            (extension === nothing || ext_reader === nothing) && return nothing
+
+            if !leaf_certificate
+                _skip_remaining!(ext_reader)
+            elseif extension == _HANDSHAKE_EXTENSION_STATUS_REQUEST
+                status_type = _read_u8!(ext_reader)
+                ocsp_staple = _read_u24_length_prefixed_bytes!(ext_reader)
+                (status_type === nothing || status_type != _TLS_STATUS_TYPE_OCSP || ocsp_staple === nothing || isempty(ocsp_staple)) && return nothing
+                msg.ocsp_stapling = true
+                msg.ocsp_staple = ocsp_staple
+            elseif extension == _HANDSHAKE_EXTENSION_SCT
+                scts_reader = _read_u16_length_prefixed_reader!(ext_reader)
+                (scts_reader === nothing || _reader_empty(scts_reader)) && return nothing
+                msg.signed_certificate_timestamps = Vector{UInt8}[]
+                while !_reader_empty(scts_reader)
+                    sct = _read_u16_length_prefixed_bytes!(scts_reader)
+                    (sct === nothing || isempty(sct)) && return nothing
+                    push!(msg.signed_certificate_timestamps, sct)
+                end
+                msg.scts = true
+            else
+                _skip_remaining!(ext_reader)
+            end
+
+            _reader_empty(ext_reader) || return nothing
+        end
+    end
+
+    return msg
+end
+
+function _unmarshal_certificate_verify(data::Vector{UInt8})::Union{_CertificateVerifyMsg, Nothing}
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_CERTIFICATE_VERIFY || return nothing
+    _read_u24!(reader) == length(data) - 4 || return nothing
+    signature_algorithm = _read_u16!(reader)
+    signature = _read_u16_length_prefixed_bytes!(reader)
+    (signature_algorithm === nothing || signature === nothing || !_reader_empty(reader)) && return nothing
+    return _CertificateVerifyMsg(signature_algorithm, signature)
+end
+
+function _unmarshal_new_session_ticket_tls13(data::Vector{UInt8})::Union{_NewSessionTicketMsgTLS13, Nothing}
+    msg = _NewSessionTicketMsgTLS13()
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_NEW_SESSION_TICKET || return nothing
+    _read_u24!(reader) == length(data) - 4 || return nothing
+
+    lifetime = _read_u32!(reader)
+    age_add = _read_u32!(reader)
+    nonce = _read_u8_length_prefixed_bytes!(reader)
+    label = _read_u16_length_prefixed_bytes!(reader)
+    extensions_reader = _read_u16_length_prefixed_reader!(reader)
+    (lifetime === nothing || age_add === nothing || nonce === nothing || label === nothing || extensions_reader === nothing || !_reader_empty(reader)) && return nothing
+
+    msg.lifetime = lifetime
+    msg.age_add = age_add
+    msg.nonce = nonce
+    msg.label = label
+
+    while !_reader_empty(extensions_reader)
+        extension = _read_u16!(extensions_reader)
+        ext_reader = _read_u16_length_prefixed_reader!(extensions_reader)
+        (extension === nothing || ext_reader === nothing) && return nothing
+
+        if extension == _HANDSHAKE_EXTENSION_EARLY_DATA
+            max_early_data = _read_u32!(ext_reader)
+            max_early_data === nothing && return nothing
+            msg.max_early_data = max_early_data
+        else
+            _skip_remaining!(ext_reader)
+        end
+
+        _reader_empty(ext_reader) || return nothing
+    end
+
+    return msg
+end
+
 function _unmarshal_finished(data::Vector{UInt8})::Union{_FinishedMsg, Nothing}
     reader = _HandshakeReader(data)
     _read_u8!(reader) == _HANDSHAKE_TYPE_FINISHED || return nothing
@@ -1075,8 +1435,16 @@ function _unmarshal_handshake_message(data::AbstractVector{UInt8}, transcript::U
         _unmarshal_client_hello(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_SERVER_HELLO
         _unmarshal_server_hello(raw)
+    elseif handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
+        _unmarshal_new_session_ticket_tls13(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS
         _unmarshal_encrypted_extensions(raw)
+    elseif handshake_type == _HANDSHAKE_TYPE_CERTIFICATE
+        _unmarshal_certificate_tls13(raw)
+    elseif handshake_type == _HANDSHAKE_TYPE_CERTIFICATE_REQUEST
+        _unmarshal_certificate_request_tls13(raw)
+    elseif handshake_type == _HANDSHAKE_TYPE_CERTIFICATE_VERIFY
+        _unmarshal_certificate_verify(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_FINISHED
         _unmarshal_finished(raw)
     else
@@ -1093,8 +1461,16 @@ function _marshal_handshake_message(msg::_HandshakeMessage)::Vector{UInt8}
         return _marshal_client_hello(msg)
     elseif msg isa _ServerHelloMsg
         return _marshal_server_hello(msg)
+    elseif msg isa _NewSessionTicketMsgTLS13
+        return _marshal_new_session_ticket_tls13(msg)
     elseif msg isa _EncryptedExtensionsMsg
         return _marshal_encrypted_extensions(msg)
+    elseif msg isa _CertificateMsgTLS13
+        return _marshal_certificate_tls13(msg)
+    elseif msg isa _CertificateRequestMsgTLS13
+        return _marshal_certificate_request_tls13(msg)
+    elseif msg isa _CertificateVerifyMsg
+        return _marshal_certificate_verify(msg)
     elseif msg isa _FinishedMsg
         return _marshal_finished(msg)
     end
@@ -1108,8 +1484,16 @@ function _handshake_transcript_bytes(msg::_HandshakeMessage)::Vector{UInt8}
     elseif msg isa _ServerHelloMsg
         original = msg.original
         return original === nothing ? _marshal_server_hello(msg) : copy(original)
+    elseif msg isa _NewSessionTicketMsgTLS13
+        return _marshal_new_session_ticket_tls13(msg)
     elseif msg isa _EncryptedExtensionsMsg
         return _marshal_encrypted_extensions(msg)
+    elseif msg isa _CertificateMsgTLS13
+        return _marshal_certificate_tls13(msg)
+    elseif msg isa _CertificateRequestMsgTLS13
+        return _marshal_certificate_request_tls13(msg)
+    elseif msg isa _CertificateVerifyMsg
+        return _marshal_certificate_verify(msg)
     elseif msg isa _FinishedMsg
         return _marshal_finished(msg)
     end

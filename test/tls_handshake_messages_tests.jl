@@ -155,6 +155,61 @@ function _encrypted_extensions_msg(;
     )
 end
 
+function _certificate_request_msg_tls13(;
+    ocsp_stapling::Bool = false,
+    scts::Bool = false,
+    supported_signature_algorithms::Vector{UInt16} = UInt16[],
+    supported_signature_algorithms_cert::Vector{UInt16} = UInt16[],
+    certificate_authorities::Vector{Vector{UInt8}} = Vector{UInt8}[],
+)
+    return TLH._CertificateRequestMsgTLS13(
+        ocsp_stapling,
+        scts,
+        copy(supported_signature_algorithms),
+        copy(supported_signature_algorithms_cert),
+        _copy_tls_byte_vectors(certificate_authorities),
+    )
+end
+
+function _certificate_msg_tls13(;
+    certificates::Vector{Vector{UInt8}} = Vector{UInt8}[],
+    ocsp_stapling::Bool = false,
+    ocsp_staple::Union{Nothing, AbstractVector{UInt8}} = nothing,
+    scts::Bool = false,
+    signed_certificate_timestamps::Vector{Vector{UInt8}} = Vector{UInt8}[],
+)
+    return TLH._CertificateMsgTLS13(
+        _copy_tls_byte_vectors(certificates),
+        ocsp_stapling,
+        ocsp_staple === nothing ? nothing : Vector{UInt8}(ocsp_staple),
+        scts,
+        _copy_tls_byte_vectors(signed_certificate_timestamps),
+    )
+end
+
+function _certificate_verify_msg(;
+    signature_algorithm::UInt16 = UInt16(0),
+    signature::AbstractVector{UInt8} = UInt8[],
+)
+    return TLH._CertificateVerifyMsg(signature_algorithm, Vector{UInt8}(signature))
+end
+
+function _new_session_ticket_msg_tls13(;
+    lifetime::UInt32 = UInt32(0),
+    age_add::UInt32 = UInt32(0),
+    nonce::AbstractVector{UInt8} = UInt8[],
+    label::AbstractVector{UInt8} = UInt8[],
+    max_early_data::UInt32 = UInt32(0),
+)
+    return TLH._NewSessionTicketMsgTLS13(
+        lifetime,
+        age_add,
+        Vector{UInt8}(nonce),
+        Vector{UInt8}(label),
+        max_early_data,
+    )
+end
+
 _finished_msg(; verify_data::AbstractVector{UInt8} = UInt8[]) = TLH._FinishedMsg(Vector{UInt8}(verify_data))
 
 function _random_client_hello(rng::AbstractRNG)
@@ -244,6 +299,45 @@ function _random_encrypted_extensions(rng::AbstractRNG)
     )
 end
 
+function _random_certificate_request_tls13(rng::AbstractRNG)
+    return _certificate_request_msg_tls13(
+        ocsp_stapling = rand(rng, Bool),
+        scts = rand(rng, Bool),
+        supported_signature_algorithms = rand(rng, UInt16, rand(rng, 0:4)),
+        supported_signature_algorithms_cert = rand(rng, UInt16, rand(rng, 0:4)),
+        certificate_authorities = [rand(rng, UInt8, rand(rng, 1:10)) for _ in 1:rand(rng, 0:3)],
+    )
+end
+
+function _random_certificate_tls13(rng::AbstractRNG)
+    ocsp_stapling = rand(rng, Bool)
+    scts = rand(rng, Bool)
+    return _certificate_msg_tls13(
+        certificates = [rand(rng, UInt8, rand(rng, 1:32)) for _ in 1:rand(rng, 1:3)],
+        ocsp_stapling = ocsp_stapling,
+        ocsp_staple = ocsp_stapling ? rand(rng, UInt8, rand(rng, 1:20)) : nothing,
+        scts = scts,
+        signed_certificate_timestamps = scts ? [rand(rng, UInt8, rand(rng, 1:20)) for _ in 1:rand(rng, 1:3)] : Vector{UInt8}[],
+    )
+end
+
+function _random_certificate_verify(rng::AbstractRNG)
+    return _certificate_verify_msg(
+        signature_algorithm = rand(rng, UInt16),
+        signature = rand(rng, UInt8, rand(rng, 0:24)),
+    )
+end
+
+function _random_new_session_ticket_tls13(rng::AbstractRNG)
+    return _new_session_ticket_msg_tls13(
+        lifetime = rand(rng, UInt32),
+        age_add = rand(rng, UInt32),
+        nonce = rand(rng, UInt8, rand(rng, 0:12)),
+        label = rand(rng, UInt8, rand(rng, 0:32)),
+        max_early_data = rand(rng, Bool) ? rand(rng, UInt32) : UInt32(0),
+    )
+end
+
 _random_finished(rng::AbstractRNG) = _finished_msg(verify_data = rand(rng, UInt8, rand(rng, 12:48)))
 
 function _find_subsequence(haystack::AbstractVector{UInt8}, needle::AbstractVector{UInt8})
@@ -313,7 +407,7 @@ function _replace_server_hello_sct_with_empty_list(bytes::Vector{UInt8})
     error("SCT extension not found")
 end
 
-@testset "TLS handshake messages phase 1" begin
+@testset "TLS handshake messages phases 1-2" begin
     @testset "rich ClientHello roundtrips and binder helpers follow Go ordering" begin
         client_hello = _client_hello_msg(
             vers = TLH.TLS1_2_VERSION,
@@ -465,6 +559,48 @@ end
         @test TLH._handshake_transcript_bytes(finished) == fin_bytes
     end
 
+    @testset "TLS 1.3 Certificate*, CertificateRequest, and NewSessionTicket roundtrip" begin
+        certificate_request = _certificate_request_msg_tls13(
+            ocsp_stapling = true,
+            scts = true,
+            supported_signature_algorithms = UInt16[0x0403, 0x0804],
+            supported_signature_algorithms_cert = UInt16[0x0403],
+            certificate_authorities = [UInt8[0x01, 0x02, 0x03], UInt8[0x04, 0x05]],
+        )
+        certificate = _certificate_msg_tls13(
+            certificates = [UInt8[0x10, 0x11, 0x12], UInt8[0x20, 0x21]],
+            ocsp_stapling = true,
+            ocsp_staple = UInt8[0x30, 0x31, 0x32],
+            scts = true,
+            signed_certificate_timestamps = [UInt8[0x40, 0x41], UInt8[0x50, 0x51, 0x52]],
+        )
+        certificate_verify = _certificate_verify_msg(
+            signature_algorithm = 0x0804,
+            signature = UInt8[0x60, 0x61, 0x62, 0x63],
+        )
+        new_session_ticket = _new_session_ticket_msg_tls13(
+            lifetime = 0x01020304,
+            age_add = 0x05060708,
+            nonce = UInt8[0x70, 0x71],
+            label = UInt8[0x80, 0x81, 0x82],
+            max_early_data = 0x0a0b0c0d,
+        )
+
+        cert_req_bytes = TLH._marshal_handshake_message(certificate_request)
+        cert_bytes = TLH._marshal_handshake_message(certificate)
+        cert_verify_bytes = TLH._marshal_handshake_message(certificate_verify)
+        ticket_bytes = TLH._marshal_handshake_message(new_session_ticket)
+
+        @test TLH._unmarshal_handshake_message(cert_req_bytes) == certificate_request
+        @test TLH._unmarshal_handshake_message(cert_bytes) == certificate
+        @test TLH._unmarshal_handshake_message(cert_verify_bytes) == certificate_verify
+        @test TLH._unmarshal_handshake_message(ticket_bytes) == new_session_ticket
+        @test TLH._handshake_transcript_bytes(certificate_request) == cert_req_bytes
+        @test TLH._handshake_transcript_bytes(certificate) == cert_bytes
+        @test TLH._handshake_transcript_bytes(certificate_verify) == cert_verify_bytes
+        @test TLH._handshake_transcript_bytes(new_session_ticket) == ticket_bytes
+    end
+
     @testset "Transcript hooks match raw wire bytes" begin
         client_hello = _client_hello_msg(
             vers = TLH.TLS1_2_VERSION,
@@ -537,6 +673,16 @@ end
             scts = [UInt8[]],
         )
         @test TLH._unmarshal_handshake_message(TLH._marshal_handshake_message(zero_length_sct)) === nothing
+
+        empty_certificate_scts = _certificate_msg_tls13(
+            certificates = [UInt8[0x01, 0x02, 0x03]],
+            scts = true,
+            signed_certificate_timestamps = [UInt8[]],
+        )
+        @test TLH._unmarshal_handshake_message(TLH._marshal_handshake_message(empty_certificate_scts)) === nothing
+
+        bad_certificate = _tls_hm_hexbytes("0b000006010000020102")
+        @test TLH._unmarshal_handshake_message(bad_certificate) === nothing
     end
 
     @testset "Framing rejects truncation, oversize messages, and unknown types" begin
@@ -568,6 +714,30 @@ end
             parsed_ee = TLH._unmarshal_handshake_message(encrypted_extensions_bytes)
             @test parsed_ee isa TLH._EncryptedExtensionsMsg
             @test (parsed_ee::TLH._EncryptedExtensionsMsg) == encrypted_extensions
+
+            certificate_request = _random_certificate_request_tls13(rng)
+            certificate_request_bytes = TLH._marshal_handshake_message(certificate_request)
+            parsed_certificate_request = TLH._unmarshal_handshake_message(certificate_request_bytes)
+            @test parsed_certificate_request isa TLH._CertificateRequestMsgTLS13
+            @test (parsed_certificate_request::TLH._CertificateRequestMsgTLS13) == certificate_request
+
+            certificate = _random_certificate_tls13(rng)
+            certificate_bytes = TLH._marshal_handshake_message(certificate)
+            parsed_certificate = TLH._unmarshal_handshake_message(certificate_bytes)
+            @test parsed_certificate isa TLH._CertificateMsgTLS13
+            @test (parsed_certificate::TLH._CertificateMsgTLS13) == certificate
+
+            certificate_verify = _random_certificate_verify(rng)
+            certificate_verify_bytes = TLH._marshal_handshake_message(certificate_verify)
+            parsed_certificate_verify = TLH._unmarshal_handshake_message(certificate_verify_bytes)
+            @test parsed_certificate_verify isa TLH._CertificateVerifyMsg
+            @test (parsed_certificate_verify::TLH._CertificateVerifyMsg) == certificate_verify
+
+            new_session_ticket = _random_new_session_ticket_tls13(rng)
+            new_session_ticket_bytes = TLH._marshal_handshake_message(new_session_ticket)
+            parsed_new_session_ticket = TLH._unmarshal_handshake_message(new_session_ticket_bytes)
+            @test parsed_new_session_ticket isa TLH._NewSessionTicketMsgTLS13
+            @test (parsed_new_session_ticket::TLH._NewSessionTicketMsgTLS13) == new_session_ticket
 
             finished = _random_finished(rng)
             finished_bytes = TLH._marshal_handshake_message(finished)
