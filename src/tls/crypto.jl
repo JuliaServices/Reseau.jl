@@ -78,7 +78,11 @@ end
 end
 
 @inline function _copy_hash_context(ctx::CTX)::CTX where {CTX<:SHA.SHA_CTX}
-    return CTX(copy(ctx.state), ctx.bytecount, copy(ctx.buffer), ctx.used)
+    @static if VERSION >= v"1.12.0-rc1"
+        return CTX(copy(ctx.state), ctx.bytecount, copy(ctx.buffer), ctx.used)
+    else
+        return deepcopy(ctx)
+    end
 end
 
 @inline function _hash_context_digest(ctx::CTX)::Vector{UInt8} where {CTX<:SHA.SHA_CTX}
