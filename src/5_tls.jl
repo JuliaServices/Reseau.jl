@@ -69,6 +69,7 @@ const TLS1_2_VERSION = UInt16(0x0303)
 const TLS1_3_VERSION = UInt16(0x0304)
 
 include("tls/crypto.jl")
+include("tls/handshake_messages.jl")
 
 module ClientAuthMode
 Base.@enum T::UInt8 begin
