@@ -68,6 +68,8 @@ const TLS1_1_VERSION = UInt16(0x0302)
 const TLS1_2_VERSION = UInt16(0x0303)
 const TLS1_3_VERSION = UInt16(0x0304)
 
+include("tls/crypto.jl")
+
 module ClientAuthMode
 Base.@enum T::UInt8 begin
     NoClientCert = 0

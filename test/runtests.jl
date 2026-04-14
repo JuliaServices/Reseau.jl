@@ -27,6 +27,7 @@ test_files = [
     "socket_ops_tests.jl",
     "tcp_tests.jl",
     "host_resolvers_tests.jl",
+    "tls_crypto_tests.jl",
     "tls_tests.jl",
     "trim_compile_tests.jl",
 ]
