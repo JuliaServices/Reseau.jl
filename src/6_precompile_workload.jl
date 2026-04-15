@@ -382,78 +382,91 @@ end
 function _pc_tls13_client_hello()::TL._ClientHelloMsg
     client_hello = TL._ClientHelloMsg()
     client_hello.vers = TL.TLS1_2_VERSION
-    client_hello.random = collect(UInt8(0x00):UInt8(0x1f))
-    client_hello.session_id = UInt8[0xaa, 0xbb, 0xcc, 0xdd]
+    client_hello.random = collect(UInt8(0x20):UInt8(0x3f))
+    client_hello.session_id = UInt8[0xba, 0xdb, 0xee, 0xf0]
     client_hello.cipher_suites = UInt16[TL._TLS13_AES_128_GCM_SHA256_ID]
     client_hello.compression_methods = UInt8[TL._TLS_COMPRESSION_NONE]
     client_hello.server_name = "localhost"
     client_hello.alpn_protocols = ["h2"]
     client_hello.supported_versions = UInt16[TL.TLS1_3_VERSION]
-    client_hello.key_shares = [TL._TLSKeyShare(0x001d, UInt8[0x01, 0x02, 0x03, 0x04])]
-    client_hello.psk_modes = UInt8[TL._TLS_PSK_MODE_DHE]
-    client_hello.psk_identities = [TL._TLSPSKIdentity(UInt8[0x50, 0x51, 0x52], 0x01020304)]
-    client_hello.psk_binders = [zeros(UInt8, 32)]
+    client_hello.supported_curves = UInt16[0x001d, 0x0017]
+    client_hello.supported_signature_algorithms = UInt16[0x0804]
+    client_hello.supported_signature_algorithms_cert = UInt16[0x0804]
     return client_hello
 end
 
-function _pc_tls13_server_hello(session_id::Vector{UInt8})::TL._ServerHelloMsg
-    server_hello = TL._ServerHelloMsg()
-    server_hello.vers = TL.TLS1_2_VERSION
-    server_hello.random = collect(UInt8(0x80):UInt8(0x9f))
-    server_hello.session_id = copy(session_id)
-    server_hello.cipher_suite = TL._TLS13_AES_128_GCM_SHA256_ID
-    server_hello.compression_method = TL._TLS_COMPRESSION_NONE
-    server_hello.supported_version = TL.TLS1_3_VERSION
-    server_hello.server_share = TL._TLSKeyShare(0x001d, UInt8[0x05, 0x06, 0x07, 0x08])
-    server_hello.selected_identity_present = true
-    server_hello.selected_identity = UInt16(0)
-    return server_hello
+function _pc_tls13_server_hello(session_id::Vector{UInt8}, group::UInt16, server_share::Vector{UInt8})::TL._ServerHelloMsg
+    msg = TL._ServerHelloMsg()
+    msg.vers = TL.TLS1_2_VERSION
+    msg.random = collect(UInt8(0x60):UInt8(0x7f))
+    msg.session_id = copy(session_id)
+    msg.cipher_suite = TL._TLS13_AES_128_GCM_SHA256_ID
+    msg.compression_method = TL._TLS_COMPRESSION_NONE
+    msg.supported_version = TL.TLS1_3_VERSION
+    msg.server_share = TL._TLSKeyShare(group, copy(server_share))
+    return msg
+end
+
+function _pc_tls13_hello_retry_request(session_id::Vector{UInt8}, selected_group::UInt16)::TL._ServerHelloMsg
+    msg = TL._ServerHelloMsg()
+    msg.vers = TL.TLS1_2_VERSION
+    msg.random = copy(TL._HELLO_RETRY_REQUEST_RANDOM)
+    msg.session_id = copy(session_id)
+    msg.cipher_suite = TL._TLS13_AES_128_GCM_SHA256_ID
+    msg.compression_method = TL._TLS_COMPRESSION_NONE
+    msg.supported_version = TL.TLS1_3_VERSION
+    msg.cookie = UInt8[0xa1, 0xa2, 0xa3]
+    msg.selected_group = selected_group
+    return msg
+end
+
+function _pc_tls13_server_certificate_request()::TL._CertificateRequestMsgTLS13
+    msg = TL._CertificateRequestMsgTLS13()
+    msg.supported_signature_algorithms = UInt16[0x0804]
+    msg.supported_signature_algorithms_cert = UInt16[0x0804]
+    return msg
+end
+
+function _pc_tls13_server_certificate()::TL._CertificateMsgTLS13
+    msg = TL._CertificateMsgTLS13()
+    msg.certificates = [UInt8[0x30, 0x82, 0x01, 0x01], UInt8[0x30, 0x82, 0x02, 0x02]]
+    return msg
+end
+
+function _pc_tls13_key_share_provider()::TL._TLS13ScriptedKeyShareProvider
+    return TL._TLS13ScriptedKeyShareProvider(
+        TL._TLSKeyShare(0x001d, UInt8[0x11, 0x12, 0x13, 0x14]),
+        UInt8[0x21, 0x22, 0x23, 0x24],
+        UInt8[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38],
+        TL._TLSKeyShare(0x0017, UInt8[0x41, 0x42, 0x43, 0x44]),
+        UInt8[0x51, 0x52, 0x53, 0x54],
+        UInt8[0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68],
+    )
 end
 
 function _pc_run_tls13_client_handshake_workload!()::Nothing
-    certificate_request = TL._CertificateRequestMsgTLS13()
-    certificate_request.ocsp_stapling = true
-    certificate_request.scts = true
-    certificate_request.supported_signature_algorithms = UInt16[0x0403, 0x0804]
-    certificate_request.supported_signature_algorithms_cert = UInt16[0x0403]
-    certificate_request.certificate_authorities = [UInt8[0x01, 0x02, 0x03], UInt8[0x04, 0x05]]
-    TL._unmarshal_handshake_message(TL._marshal_handshake_message(certificate_request)) == certificate_request ||
-        throw(ArgumentError("TLS 1.3 workload certificate request roundtrip mismatch"))
+    client_hello = _pc_tls13_client_hello()
+    key_share_provider = _pc_tls13_key_share_provider()
+    TL._tls13_prepare_initial_client_hello!(key_share_provider, client_hello)
 
-    certificate = TL._CertificateMsgTLS13()
-    certificate.certificates = [UInt8[0x10, 0x11, 0x12], UInt8[0x20, 0x21]]
-    certificate.ocsp_stapling = true
-    certificate.ocsp_staple = UInt8[0x30, 0x31, 0x32]
-    certificate.scts = true
-    certificate.signed_certificate_timestamps = [UInt8[0x40, 0x41], UInt8[0x50, 0x51, 0x52]]
-    TL._unmarshal_handshake_message(TL._marshal_handshake_message(certificate)) == certificate ||
-        throw(ArgumentError("TLS 1.3 workload certificate roundtrip mismatch"))
+    initial_client_hello_bytes = TL._marshal_handshake_message(client_hello)
+    hrr = _pc_tls13_hello_retry_request(client_hello.session_id, key_share_provider.retry_share.group)
+    hrr_bytes = TL._marshal_handshake_message(hrr)
 
-    certificate_verify = TL._CertificateVerifyMsg()
-    certificate_verify.signature_algorithm = 0x0804
-    certificate_verify.signature = UInt8[0x60, 0x61, 0x62, 0x63]
-    TL._unmarshal_handshake_message(TL._marshal_handshake_message(certificate_verify)) == certificate_verify ||
-        throw(ArgumentError("TLS 1.3 workload certificate verify roundtrip mismatch"))
+    TL._tls13_process_hello_retry_request!(key_share_provider, client_hello, hrr)
+    retry_client_hello_bytes = TL._marshal_handshake_message(client_hello)
 
-    shared_secret = UInt8[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]
-    psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
-
-    expected_client_hello = _pc_tls13_client_hello()
-    early_secret = TL._tls13_early_secret(TL._HASH_SHA256, psk)
-    binder_key = TL._tls13_resumption_binder_key(early_secret)
-    binder_transcript = TL._TranscriptHash(TL._HASH_SHA256; buffer_handshake = false)
-    TL._transcript_update!(binder_transcript, TL._marshal_client_hello_without_binders(expected_client_hello))
-    binder = TL._tls13_finished_verify_data(TL._HASH_SHA256, binder_key, binder_transcript)
-    TL._update_client_hello_binders!(expected_client_hello, [binder])
-    client_bytes = TL._marshal_handshake_message(expected_client_hello)
-
-    server_hello = _pc_tls13_server_hello(expected_client_hello.session_id)
-    server_hello_bytes = TL._marshal_handshake_message(server_hello)
     transcript = TL._TranscriptHash(TL._HASH_SHA256)
-    TL._transcript_update!(transcript, client_bytes)
+    TL._transcript_update!(transcript, TL._tls13_message_hash_frame(TL._hash_data(TL._HASH_SHA256, initial_client_hello_bytes)))
+    TL._transcript_update!(transcript, hrr_bytes)
+    TL._transcript_update!(transcript, retry_client_hello_bytes)
+
+    server_hello = _pc_tls13_server_hello(client_hello.session_id, key_share_provider.retry_share.group, copy(key_share_provider.retry_expected_server_share))
+    server_hello_bytes = TL._marshal_handshake_message(server_hello)
     TL._transcript_update!(transcript, server_hello_bytes)
 
-    handshake_secret = TL._tls13_handshake_secret(early_secret, shared_secret)
+    early_secret = TL._tls13_early_secret(TL._HASH_SHA256, UInt8[])
+    handshake_secret = TL._tls13_handshake_secret(early_secret, key_share_provider.retry_shared_secret)
     client_handshake_traffic_secret = TL._tls13_client_handshake_traffic_secret(handshake_secret, transcript)
     server_handshake_traffic_secret = TL._tls13_server_handshake_traffic_secret(handshake_secret, transcript)
 
@@ -462,11 +475,34 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     encrypted_extensions_bytes = TL._marshal_handshake_message(encrypted_extensions)
     TL._transcript_update!(transcript, encrypted_extensions_bytes)
 
+    certificate_request = _pc_tls13_server_certificate_request()
+    certificate_request_bytes = TL._marshal_handshake_message(certificate_request)
+    TL._transcript_update!(transcript, certificate_request_bytes)
+
+    certificate = _pc_tls13_server_certificate()
+    certificate_bytes = TL._marshal_handshake_message(certificate)
+    TL._transcript_update!(transcript, certificate_bytes)
+
+    signed_message = TL._tls13_signed_message(TL._TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
+    certificate_verify = TL._CertificateVerifyMsg(0x0804, UInt8[0xb1, 0xb2, 0xb3, 0xb4, 0xb5])
+    certificate_verify_bytes = TL._marshal_handshake_message(certificate_verify)
+    TL._transcript_update!(transcript, certificate_verify_bytes)
+
     server_finished = TL._FinishedMsg(TL._tls13_finished_verify_data(TL._TLS13_AES_128_GCM_SHA256, server_handshake_traffic_secret, transcript))
     server_finished_bytes = TL._marshal_handshake_message(server_finished)
     TL._transcript_update!(transcript, server_finished_bytes)
 
-    client_finished_bytes = TL._marshal_handshake_message(TL._FinishedMsg(TL._tls13_finished_verify_data(TL._TLS13_AES_128_GCM_SHA256, client_handshake_traffic_secret, transcript)))
+    transcript_for_client = TL._TranscriptHash(TL._HASH_SHA256)
+    transcript_bytes = TL._transcript_buffered_bytes(transcript)::Vector{UInt8}
+    TL._transcript_update!(transcript_for_client, transcript_bytes)
+
+    client_certificate = TL._CertificateMsgTLS13()
+    client_certificate_bytes = TL._marshal_certificate_tls13(client_certificate)
+    TL._transcript_update!(transcript_for_client, client_certificate_bytes)
+
+    client_finished = TL._FinishedMsg(TL._tls13_finished_verify_data(TL._TLS13_AES_128_GCM_SHA256, client_handshake_traffic_secret, transcript_for_client))
+    client_finished_bytes = TL._marshal_handshake_message(client_finished)
+
     master_secret = TL._tls13_master_secret(handshake_secret)
     client_application_traffic_secret = TL._tls13_client_application_traffic_secret(master_secret, transcript)
     server_application_traffic_secret = TL._tls13_server_application_traffic_secret(master_secret, transcript)
@@ -480,21 +516,71 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     new_session_ticket.max_early_data = 0x0b0c0d0e
     new_session_ticket_bytes = TL._marshal_handshake_message(new_session_ticket)
 
-    state = TL._TLS13ClientHandshakeState(_pc_tls13_client_hello(), TL._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)::TL._TLS13ClientHandshakeState{TL._HASH_SHA256}
-    io = TL._HandshakeMessageFlightIO([server_hello_bytes, encrypted_extensions_bytes, server_finished_bytes, new_session_ticket_bytes])
-    TL._client_handshake_tls13!(state, io)
+    verifier = TL._TLS13ScriptedCertificateVerifier(
+        certificate.certificates,
+        client_hello.server_name,
+        certificate_verify.signature_algorithm,
+        signed_message,
+        certificate_verify.signature,
+    )
 
-    state.complete || throw(ArgumentError("TLS 1.3 workload expected complete handshake"))
-    state.using_psk || throw(ArgumentError("TLS 1.3 workload expected PSK handshake"))
-    state.client_protocol == "h2" || throw(ArgumentError("TLS 1.3 workload expected ALPN selection"))
-    io.outbound == [client_bytes, client_finished_bytes] || throw(ArgumentError("TLS 1.3 workload outbound flight mismatch"))
-    state.client_handshake_traffic_secret == client_handshake_traffic_secret || throw(ArgumentError("TLS 1.3 workload client handshake secret mismatch"))
-    state.server_handshake_traffic_secret == server_handshake_traffic_secret || throw(ArgumentError("TLS 1.3 workload server handshake secret mismatch"))
-    state.client_application_traffic_secret == client_application_traffic_secret || throw(ArgumentError("TLS 1.3 workload client application secret mismatch"))
-    state.server_application_traffic_secret == server_application_traffic_secret || throw(ArgumentError("TLS 1.3 workload server application secret mismatch"))
-    state.exporter_master_secret == exporter_master_secret || throw(ArgumentError("TLS 1.3 workload exporter secret mismatch"))
-    state.peer_new_session_tickets == [new_session_ticket] || throw(ArgumentError("TLS 1.3 workload session ticket mismatch"))
-    TL._securezero_tls13_client_handshake_state!(state)
+    inbound = [
+        hrr_bytes,
+        server_hello_bytes,
+        encrypted_extensions_bytes,
+        certificate_request_bytes,
+        certificate_bytes,
+        certificate_verify_bytes,
+        server_finished_bytes,
+        new_session_ticket_bytes,
+    ]
+    outbound = [
+        initial_client_hello_bytes,
+        retry_client_hello_bytes,
+        client_certificate_bytes,
+        client_finished_bytes,
+    ]
+
+    state_client_hello = _pc_tls13_client_hello()
+    state_key_share_provider = _pc_tls13_key_share_provider()
+    TL._tls13_prepare_initial_client_hello!(state_key_share_provider, state_client_hello)
+    state_transcript = TL._TranscriptHash(TL._HASH_SHA256)
+    state = TL._new_tls13_client_handshake_state(
+        Val{TL._HASH_SHA256}(),
+        state_client_hello,
+        TL._TLS13_AES_128_GCM_SHA256_ID,
+        TL._TLS13_AES_128_GCM_SHA256,
+        state_key_share_provider,
+        verifier,
+        state_transcript,
+    )::TL._TLS13ClientHandshakeState{
+        TL._HASH_SHA256,
+        typeof(state_transcript),
+        TL._TLS13ScriptedKeyShareProvider,
+        TL._TLS13ScriptedCertificateVerifier,
+    }
+    io = TL._HandshakeMessageFlightIO(inbound)
+    try
+        TL._client_handshake_tls13!(state, io)
+        state.complete || throw(ArgumentError("TLS 1.3 workload expected complete handshake"))
+        !state.using_psk || throw(ArgumentError("TLS 1.3 workload expected certificate handshake"))
+        state.client_protocol == "h2" || throw(ArgumentError("TLS 1.3 workload expected ALPN selection"))
+        state.have_certificate_request || throw(ArgumentError("TLS 1.3 workload expected CertificateRequest"))
+        state.have_server_certificate || throw(ArgumentError("TLS 1.3 workload expected Certificate"))
+        state.have_server_certificate_verify || throw(ArgumentError("TLS 1.3 workload expected CertificateVerify"))
+        io.outbound == outbound || throw(ArgumentError("TLS 1.3 workload outbound flight mismatch"))
+        state.client_handshake_traffic_secret == client_handshake_traffic_secret || throw(ArgumentError("TLS 1.3 workload client handshake secret mismatch"))
+        state.server_handshake_traffic_secret == server_handshake_traffic_secret || throw(ArgumentError("TLS 1.3 workload server handshake secret mismatch"))
+        state.client_application_traffic_secret == client_application_traffic_secret || throw(ArgumentError("TLS 1.3 workload client application secret mismatch"))
+        state.server_application_traffic_secret == server_application_traffic_secret || throw(ArgumentError("TLS 1.3 workload server application secret mismatch"))
+        state.exporter_master_secret == exporter_master_secret || throw(ArgumentError("TLS 1.3 workload exporter secret mismatch"))
+        state.peer_new_session_tickets == [new_session_ticket] || throw(ArgumentError("TLS 1.3 workload session ticket mismatch"))
+    finally
+        TL._destroy_tls13_secret!(master_secret)
+        TL._destroy_tls13_secret!(handshake_secret)
+        TL._destroy_tls13_secret!(early_secret)
+        TL._securezero_tls13_client_handshake_state!(state)
+    end
     return nothing
 end
 

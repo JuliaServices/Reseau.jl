@@ -5,6 +5,11 @@ const _HELLO_RETRY_REQUEST_RANDOM = UInt8[
     0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
 ]
 
+const _HANDSHAKE_TYPE_MESSAGE_HASH = UInt8(254)
+const _TLS13_SERVER_SIGNATURE_CONTEXT = "TLS 1.3, server CertificateVerify\0"
+const _TLS13_CLIENT_SIGNATURE_CONTEXT = "TLS 1.3, client CertificateVerify\0"
+const _TLS13_SIGNATURE_PADDING = fill(UInt8(0x20), 64)
+
 mutable struct _HandshakeMessageFlightIO
     inbound::Vector{Vector{UInt8}}
     inbound_pos::Int
@@ -25,14 +30,206 @@ function _read_handshake_bytes!(io::_HandshakeMessageFlightIO)::Vector{UInt8}
     return raw
 end
 
-mutable struct _TLS13ClientHandshakeState{HK, TR<:_TranscriptHash}
+struct _TLS13StaticSharedSecretProvider
+    shared_secret::Vector{UInt8}
+end
+
+_TLS13StaticSharedSecretProvider(shared_secret::AbstractVector{UInt8}) =
+    _TLS13StaticSharedSecretProvider(Vector{UInt8}(shared_secret))
+
+struct _TLS13ScriptedKeyShareProvider
+    initial_share::_TLSKeyShare
+    initial_expected_server_share::Vector{UInt8}
+    initial_shared_secret::Vector{UInt8}
+    has_retry_share::Bool
+    retry_share::_TLSKeyShare
+    retry_expected_server_share::Vector{UInt8}
+    retry_shared_secret::Vector{UInt8}
+end
+
+function _TLS13ScriptedKeyShareProvider(
+    initial_share::_TLSKeyShare,
+    initial_expected_server_share::AbstractVector{UInt8},
+    initial_shared_secret::AbstractVector{UInt8},
+)
+    return _TLS13ScriptedKeyShareProvider(
+        _TLSKeyShare(initial_share.group, copy(initial_share.data)),
+        Vector{UInt8}(initial_expected_server_share),
+        Vector{UInt8}(initial_shared_secret),
+        false,
+        _TLSKeyShare(UInt16(0), UInt8[]),
+        UInt8[],
+        UInt8[],
+    )
+end
+
+function _TLS13ScriptedKeyShareProvider(
+    initial_share::_TLSKeyShare,
+    initial_expected_server_share::AbstractVector{UInt8},
+    initial_shared_secret::AbstractVector{UInt8},
+    retry_share::_TLSKeyShare,
+    retry_expected_server_share::AbstractVector{UInt8},
+    retry_shared_secret::AbstractVector{UInt8},
+)
+    return _TLS13ScriptedKeyShareProvider(
+        _TLSKeyShare(initial_share.group, copy(initial_share.data)),
+        Vector{UInt8}(initial_expected_server_share),
+        Vector{UInt8}(initial_shared_secret),
+        true,
+        _TLSKeyShare(retry_share.group, copy(retry_share.data)),
+        Vector{UInt8}(retry_expected_server_share),
+        Vector{UInt8}(retry_shared_secret),
+    )
+end
+
+struct _TLS13NoCertificateVerifier end
+
+struct _TLS13ScriptedCertificateVerifier
+    certificates::Vector{Vector{UInt8}}
+    server_name::String
+    signature_algorithm::UInt16
+    signed_message::Vector{UInt8}
+    signature::Vector{UInt8}
+end
+
+function _TLS13ScriptedCertificateVerifier(
+    certificates::Vector{Vector{UInt8}},
+    server_name::AbstractString,
+    signature_algorithm::UInt16,
+    signed_message::AbstractVector{UInt8},
+    signature::AbstractVector{UInt8},
+)
+    return _TLS13ScriptedCertificateVerifier(
+        [copy(cert) for cert in certificates],
+        String(server_name),
+        signature_algorithm,
+        Vector{UInt8}(signed_message),
+        Vector{UInt8}(signature),
+    )
+end
+
+@inline _copy_tls13_key_share(share::_TLSKeyShare) = _TLSKeyShare(share.group, copy(share.data))
+
+function _tls13_prepare_initial_client_hello!(::_TLS13StaticSharedSecretProvider, ::_ClientHelloMsg)::Nothing
+    return nothing
+end
+
+function _tls13_prepare_initial_client_hello!(provider::_TLS13ScriptedKeyShareProvider, hello::_ClientHelloMsg)::Nothing
+    hello.key_shares = [_copy_tls13_key_share(provider.initial_share)]
+    return nothing
+end
+
+function _tls13_resolve_server_shared_secret(provider::_TLS13StaticSharedSecretProvider, ::_TLSKeyShare)::Vector{UInt8}
+    return copy(provider.shared_secret)
+end
+
+function _tls13_resolve_server_shared_secret(provider::_TLS13ScriptedKeyShareProvider, server_share::_TLSKeyShare)::Vector{UInt8}
+    if server_share.group == provider.initial_share.group &&
+       server_share.data == provider.initial_expected_server_share
+        return copy(provider.initial_shared_secret)
+    end
+    if provider.has_retry_share &&
+       server_share.group == provider.retry_share.group &&
+       server_share.data == provider.retry_expected_server_share
+        return copy(provider.retry_shared_secret)
+    end
+    throw(ArgumentError("tls13 client handshake received an unexpected server key share"))
+end
+
+function _tls13_process_hello_retry_request!(
+    ::_TLS13StaticSharedSecretProvider,
+    ::_ClientHelloMsg,
+    ::_ServerHelloMsg,
+)::Nothing
+    throw(ArgumentError("tls13 client handshake HelloRetryRequest requires a key share provider"))
+end
+
+function _tls13_process_hello_retry_request!(
+    provider::_TLS13ScriptedKeyShareProvider,
+    hello::_ClientHelloMsg,
+    server_hello::_ServerHelloMsg,
+)::Nothing
+    selected_group = server_hello.selected_group
+    if !isempty(server_hello.cookie)
+        hello.cookie = copy(server_hello.cookie)
+    end
+    selected_group == 0x0000 && return nothing
+    in(selected_group, hello.supported_curves) || throw(ArgumentError("tls: server selected unsupported group"))
+    for key_share in hello.key_shares
+        key_share.group == selected_group && throw(ArgumentError("tls: server sent an unnecessary HelloRetryRequest key_share"))
+    end
+    provider.has_retry_share || throw(ArgumentError("tls13 client handshake is missing a retry key share"))
+    provider.retry_share.group == selected_group || throw(ArgumentError("tls13 client handshake has no retry key share for the selected group"))
+    hello.key_shares = [_copy_tls13_key_share(provider.retry_share)]
+    return nothing
+end
+
+function _tls13_verify_server_certificates!(::_TLS13NoCertificateVerifier, ::_CertificateMsgTLS13, ::AbstractString)::Nothing
+    throw(ArgumentError("tls13 client handshake certificate path requires a certificate verifier"))
+end
+
+function _tls13_verify_server_certificates!(
+    verifier::_TLS13ScriptedCertificateVerifier,
+    certificate_msg::_CertificateMsgTLS13,
+    server_name::AbstractString,
+)::Nothing
+    certificate_msg.certificates == verifier.certificates || throw(ArgumentError("tls13 client handshake received an unexpected certificate chain"))
+    verifier.server_name == server_name || throw(ArgumentError("tls13 client handshake verifier expected a different server name"))
+    return nothing
+end
+
+function _tls13_verify_server_certificate_signature!(
+    ::_TLS13NoCertificateVerifier,
+    ::_TranscriptHash,
+    ::_CertificateVerifyMsg,
+)::Nothing
+    throw(ArgumentError("tls13 client handshake certificate path requires a certificate verifier"))
+end
+
+function _tls13_verify_server_certificate_signature!(
+    verifier::_TLS13ScriptedCertificateVerifier,
+    transcript::_TranscriptHash,
+    certificate_verify::_CertificateVerifyMsg,
+)::Nothing
+    certificate_verify.signature_algorithm == verifier.signature_algorithm ||
+        throw(ArgumentError("tls13 client handshake received an unexpected certificate verify signature algorithm"))
+    signed = _tls13_signed_message(_TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
+    signed == verifier.signed_message || throw(ArgumentError("tls13 client handshake computed an unexpected certificate verify transcript"))
+    _constant_time_equals(certificate_verify.signature, verifier.signature) ||
+        throw(ArgumentError("tls13 client handshake received an invalid certificate verify signature"))
+    return nothing
+end
+
+function _securezero_tls13_key_share_provider!(provider::_TLS13StaticSharedSecretProvider)::Nothing
+    _securezero!(provider.shared_secret)
+    return nothing
+end
+
+function _securezero_tls13_key_share_provider!(provider::_TLS13ScriptedKeyShareProvider)::Nothing
+    _securezero!(provider.initial_shared_secret)
+    _securezero!(provider.retry_shared_secret)
+    return nothing
+end
+
+function _securezero_tls13_certificate_verifier!(::_TLS13NoCertificateVerifier)::Nothing
+    return nothing
+end
+
+function _securezero_tls13_certificate_verifier!(::_TLS13ScriptedCertificateVerifier)::Nothing
+    return nothing
+end
+
+mutable struct _TLS13ClientHandshakeState{HK, TR<:_TranscriptHash, KP, CV}
     client_hello::_ClientHelloMsg
     cipher_suite::UInt16
     cipher_spec::_TLS13CipherSpec
+    key_share_provider::KP
+    certificate_verifier::CV
     shared_secret::Vector{UInt8}
     psk::Vector{UInt8}
     has_psk::Bool
     transcript::TR
+    server_hello_raw::Vector{UInt8}
     server_hello::_ServerHelloMsg
     have_server_hello::Bool
     encrypted_extensions::_EncryptedExtensionsMsg
@@ -62,6 +259,8 @@ mutable struct _TLS13ClientHandshakeState{HK, TR<:_TranscriptHash}
 end
 
 function _securezero_tls13_client_handshake_state!(state::_TLS13ClientHandshakeState)::Nothing
+    _securezero_tls13_key_share_provider!(state.key_share_provider)
+    _securezero_tls13_certificate_verifier!(state.certificate_verifier)
     _securezero!(state.shared_secret)
     _securezero!(state.psk)
     _securezero!(state.early_secret)
@@ -79,15 +278,26 @@ function _securezero_tls13_client_handshake_state!(state::_TLS13ClientHandshakeS
     return nothing
 end
 
-function _new_tls13_client_handshake_state(client_hello::_ClientHelloMsg, cipher_suite::UInt16, cipher_spec::_TLS13CipherSpec, shared_secret::Vector{UInt8}, transcript::TR) where {TR<:_TranscriptHash}
-    return _TLS13ClientHandshakeState{cipher_spec.hash_kind, TR}(
+function _new_tls13_client_handshake_state(
+    ::Val{HK},
+    client_hello::_ClientHelloMsg,
+    cipher_suite::UInt16,
+    cipher_spec::_TLS13CipherSpec,
+    key_share_provider,
+    certificate_verifier,
+    transcript::TR,
+) where {HK, TR<:_TranscriptHash}
+    return _TLS13ClientHandshakeState{HK, TR, typeof(key_share_provider), typeof(certificate_verifier)}(
         client_hello,
         cipher_suite,
         cipher_spec,
-        shared_secret,
+        key_share_provider,
+        certificate_verifier,
+        UInt8[],
         UInt8[],
         false,
         transcript,
+        UInt8[],
         _ServerHelloMsg(),
         false,
         _EncryptedExtensionsMsg(),
@@ -117,20 +327,28 @@ function _new_tls13_client_handshake_state(client_hello::_ClientHelloMsg, cipher
     )
 end
 
-function _TLS13ClientHandshakeState(client_hello::_ClientHelloMsg, cipher_suite::UInt16, shared_secret::AbstractVector{UInt8})
-    shared_secret_bytes = Vector{UInt8}(shared_secret)
-    isempty(shared_secret_bytes) && throw(ArgumentError("tls13 client handshake requires a non-empty shared secret"))
+function _TLS13ClientHandshakeState(client_hello::_ClientHelloMsg, cipher_suite::UInt16, key_share_provider, certificate_verifier)
+    _tls13_prepare_initial_client_hello!(key_share_provider, client_hello)
     if cipher_suite == _TLS13_AES_128_GCM_SHA256_ID
         transcript = _TranscriptHash(_HASH_SHA256)
-        return _new_tls13_client_handshake_state(client_hello, cipher_suite, _TLS13_AES_128_GCM_SHA256, shared_secret_bytes, transcript)
+        return _new_tls13_client_handshake_state(Val{_HASH_SHA256}(), client_hello, cipher_suite, _TLS13_AES_128_GCM_SHA256, key_share_provider, certificate_verifier, transcript)
     elseif cipher_suite == _TLS13_AES_256_GCM_SHA384_ID
         transcript = _TranscriptHash(_HASH_SHA384)
-        return _new_tls13_client_handshake_state(client_hello, cipher_suite, _TLS13_AES_256_GCM_SHA384, shared_secret_bytes, transcript)
+        return _new_tls13_client_handshake_state(Val{_HASH_SHA384}(), client_hello, cipher_suite, _TLS13_AES_256_GCM_SHA384, key_share_provider, certificate_verifier, transcript)
     elseif cipher_suite == _TLS13_CHACHA20_POLY1305_SHA256_ID
         transcript = _TranscriptHash(_HASH_SHA256)
-        return _new_tls13_client_handshake_state(client_hello, cipher_suite, _TLS13_CHACHA20_POLY1305_SHA256, shared_secret_bytes, transcript)
+        return _new_tls13_client_handshake_state(Val{_HASH_SHA256}(), client_hello, cipher_suite, _TLS13_CHACHA20_POLY1305_SHA256, key_share_provider, certificate_verifier, transcript)
     end
     throw(ArgumentError("unsupported TLS 1.3 cipher suite: $(string(cipher_suite, base = 16))"))
+end
+
+function _TLS13ClientHandshakeState(client_hello::_ClientHelloMsg, cipher_suite::UInt16, shared_secret::AbstractVector{UInt8})
+    return _TLS13ClientHandshakeState(
+        client_hello,
+        cipher_suite,
+        _TLS13StaticSharedSecretProvider(shared_secret),
+        _TLS13NoCertificateVerifier(),
+    )
 end
 
 function _TLS13ClientHandshakeState(client_hello::_ClientHelloMsg, cipher_suite::UInt16, shared_secret::AbstractVector{UInt8}, psk::AbstractVector{UInt8})
@@ -140,7 +358,16 @@ function _TLS13ClientHandshakeState(client_hello::_ClientHelloMsg, cipher_suite:
     return state
 end
 
-function _compute_and_update_psk_binders!(state::_TLS13ClientHandshakeState{HK})::Nothing where {HK}
+function _new_tls13_binder_transcript(hash_kind::_TLSHashKind)
+    hash_kind == _HASH_SHA256 && return _TranscriptHash(_HASH_SHA256; buffer_handshake = false)
+    hash_kind == _HASH_SHA384 && return _TranscriptHash(_HASH_SHA384; buffer_handshake = false)
+    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+end
+
+function _compute_and_update_psk_binders!(
+    state::_TLS13ClientHandshakeState{HK},
+    prefix_transcript::Union{Nothing, _TranscriptHash} = nothing,
+)::Nothing where {HK}
     state.has_psk || return nothing
     length(state.client_hello.psk_identities) == 1 || throw(ArgumentError("tls13 client handshake expects exactly one PSK identity"))
     length(state.client_hello.psk_binders) == 1 || throw(ArgumentError("tls13 client handshake expects exactly one PSK binder"))
@@ -150,7 +377,12 @@ function _compute_and_update_psk_binders!(state::_TLS13ClientHandshakeState{HK})
 
     early_secret = _tls13_early_secret(HK, state.psk)
     binder_key = _tls13_resumption_binder_key(early_secret)
-    binder_transcript = HK == _HASH_SHA256 ? _TranscriptHash(_HASH_SHA256; buffer_handshake = false) : _TranscriptHash(_HASH_SHA384; buffer_handshake = false)
+    binder_transcript = _new_tls13_binder_transcript(HK)
+    if prefix_transcript !== nothing
+        prefix_bytes = _transcript_buffered_bytes(prefix_transcript)
+        prefix_bytes === nothing && throw(ArgumentError("tls13 client handshake needs buffered transcript bytes to recompute PSK binders"))
+        _transcript_update!(binder_transcript, prefix_bytes)
+    end
     _transcript_update!(binder_transcript, _marshal_client_hello_without_binders(state.client_hello))
     try
         binder = _tls13_finished_verify_data(HK, binder_key, binder_transcript)
@@ -199,16 +431,49 @@ function _read_server_hello!(state::_TLS13ClientHandshakeState, io::_HandshakeMe
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_server_hello(raw)
     msg === nothing && throw(ArgumentError("tls13 client handshake expected ServerHello"))
-    _transcript_update!(state.transcript, raw)
+    state.server_hello_raw = raw
     state.server_hello = msg
     state.have_server_hello = true
     _check_server_hello_or_hrr!(state)
     return nothing
 end
 
+@inline function _tls13_message_hash_frame(digest::AbstractVector{UInt8})::Vector{UInt8}
+    length(digest) <= 0xff || throw(ArgumentError("tls13 message_hash digest too long"))
+    out = UInt8[_HANDSHAKE_TYPE_MESSAGE_HASH, 0x00, 0x00, UInt8(length(digest))]
+    append!(out, digest)
+    return out
+end
+
+function _tls13_reset_transcript_for_hrr!(state::_TLS13ClientHandshakeState{HK})::Nothing where {HK}
+    ch_hash = _transcript_digest(state.transcript)
+    new_transcript = HK == _HASH_SHA256 ? _TranscriptHash(_HASH_SHA256) : _TranscriptHash(_HASH_SHA384)
+    _transcript_update!(new_transcript, _tls13_message_hash_frame(ch_hash))
+    _transcript_update!(new_transcript, state.server_hello_raw)
+    state.transcript = new_transcript
+    return nothing
+end
+
+function _process_hello_retry_request!(state::_TLS13ClientHandshakeState{HK}, io::_HandshakeMessageFlightIO)::Nothing where {HK}
+    server_hello = state.server_hello
+    (server_hello.selected_group == 0x0000 && isempty(server_hello.cookie)) &&
+        throw(ArgumentError("tls: server sent an unnecessary HelloRetryRequest message"))
+    server_hello.server_share === nothing || throw(ArgumentError("tls: received malformed key_share extension"))
+    _tls13_process_hello_retry_request!(state.key_share_provider, state.client_hello, server_hello)
+    state.client_hello.early_data && (state.client_hello.early_data = false)
+    _tls13_reset_transcript_for_hrr!(state)
+    state.has_psk && _compute_and_update_psk_binders!(state, state.transcript)
+    raw = _marshal_client_hello(state.client_hello)
+    _transcript_update!(state.transcript, raw)
+    push!(io.outbound, raw)
+    _read_server_hello!(state, io)
+    state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && throw(ArgumentError("tls: server sent two HelloRetryRequest messages"))
+    return nothing
+end
+
 function _process_server_hello!(state::_TLS13ClientHandshakeState)::Nothing
     server_hello = state.server_hello
-    server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && throw(ArgumentError("tls13 client handshake does not yet implement HelloRetryRequest"))
+    server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && throw(ArgumentError("tls13 client handshake still has a HelloRetryRequest pending"))
     isempty(server_hello.cookie) || throw(ArgumentError("tls: server sent a cookie in a normal ServerHello"))
     server_hello.selected_group == 0x0000 || throw(ArgumentError("tls: malformed key_share extension"))
     server_hello.server_share === nothing && throw(ArgumentError("tls: server did not send a key share"))
@@ -224,17 +489,21 @@ function _process_server_hello!(state::_TLS13ClientHandshakeState)::Nothing
     end
     supported_group || throw(ArgumentError("tls: server selected unsupported group"))
 
-    if !server_hello.selected_identity_present
-        throw(ArgumentError("tls13 client handshake certificate path is not implemented yet"))
-    end
+    _securezero!(state.shared_secret)
+    state.shared_secret = _tls13_resolve_server_shared_secret(state.key_share_provider, server_share)
+    state.using_psk = false
 
-    state.has_psk || throw(ArgumentError("tls: server selected a PSK without a client PSK"))
-    Int(server_hello.selected_identity) < length(state.client_hello.psk_identities) || throw(ArgumentError("tls: server selected an invalid PSK"))
-    state.using_psk = true
+    if state.server_hello.selected_identity_present
+        state.has_psk || throw(ArgumentError("tls: server selected a PSK without a client PSK"))
+        Int(state.server_hello.selected_identity) < length(state.client_hello.psk_identities) ||
+            throw(ArgumentError("tls: server selected an invalid PSK"))
+        state.using_psk = true
+    end
     return nothing
 end
 
 function _establish_handshake_keys!(state::_TLS13ClientHandshakeState{HK})::Nothing where {HK}
+    isempty(state.shared_secret) && throw(ArgumentError("tls13 client handshake needs a shared secret before establishing handshake keys"))
     early_secret = state.using_psk ? _tls13_early_secret(HK, state.psk) : _tls13_early_secret(HK, UInt8[])
     handshake_secret = _tls13_handshake_secret(early_secret, state.shared_secret)
     master_secret = _tls13_master_secret(handshake_secret)
@@ -283,6 +552,53 @@ function _read_server_parameters!(state::_TLS13ClientHandshakeState, io::_Handsh
     return nothing
 end
 
+function _tls13_signed_message(context::AbstractString, transcript::_TranscriptHash)::Vector{UInt8}
+    transcript_digest = _transcript_digest(transcript)
+    out = UInt8[]
+    sizehint!(out, length(_TLS13_SIGNATURE_PADDING) + sizeof(context) + length(transcript_digest))
+    append!(out, _TLS13_SIGNATURE_PADDING)
+    append!(out, codeunits(context))
+    append!(out, transcript_digest)
+    return out
+end
+
+function _read_server_certificate!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+    state.using_psk && return nothing
+
+    raw = _read_handshake_bytes!(io)
+    msg = _unmarshal_handshake_message(raw)
+    msg === nothing && throw(ArgumentError("tls13 client handshake expected Certificate or CertificateRequest"))
+
+    if msg isa _CertificateRequestMsgTLS13
+        state.certificate_request = msg
+        state.have_certificate_request = true
+        _transcript_update!(state.transcript, raw)
+        raw = _read_handshake_bytes!(io)
+        msg = _unmarshal_certificate_tls13(raw)
+        msg === nothing && throw(ArgumentError("tls13 client handshake expected Certificate after CertificateRequest"))
+    end
+
+    certificate = msg isa _CertificateMsgTLS13 ? msg : nothing
+    certificate === nothing && throw(ArgumentError("tls13 client handshake expected Certificate"))
+    isempty(certificate.certificates) && throw(ArgumentError("tls: received empty certificates message"))
+
+    _transcript_update!(state.transcript, raw)
+    state.server_certificate = certificate
+    state.have_server_certificate = true
+    _tls13_verify_server_certificates!(state.certificate_verifier, certificate, state.client_hello.server_name)
+
+    raw = _read_handshake_bytes!(io)
+    certificate_verify = _unmarshal_certificate_verify(raw)
+    certificate_verify === nothing && throw(ArgumentError("tls13 client handshake expected CertificateVerify"))
+    in(certificate_verify.signature_algorithm, state.client_hello.supported_signature_algorithms) ||
+        throw(ArgumentError("tls: certificate used with invalid signature algorithm"))
+    _tls13_verify_server_certificate_signature!(state.certificate_verifier, state.transcript, certificate_verify)
+    state.server_certificate_verify = certificate_verify
+    state.have_server_certificate_verify = true
+    _transcript_update!(state.transcript, raw)
+    return nothing
+end
+
 function _read_server_finished!(state::_TLS13ClientHandshakeState{HK}, io::_HandshakeMessageFlightIO)::Nothing where {HK}
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_finished(raw)
@@ -300,6 +616,14 @@ function _read_server_finished!(state::_TLS13ClientHandshakeState{HK}, io::_Hand
     state.client_application_traffic_secret = _tls13_derive_secret(HK, state.master_secret, "c ap traffic", state.transcript)
     state.server_application_traffic_secret = _tls13_derive_secret(HK, state.master_secret, "s ap traffic", state.transcript)
     state.exporter_master_secret = _tls13_derive_secret(HK, state.master_secret, "exp master", state.transcript)
+    return nothing
+end
+
+function _send_client_certificate!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+    state.have_certificate_request || return nothing
+    raw = _marshal_certificate_tls13(_CertificateMsgTLS13())
+    _transcript_update!(state.transcript, raw)
+    push!(io.outbound, raw)
     return nothing
 end
 
@@ -327,10 +651,14 @@ function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io::_Handsh
     state.complete && throw(ArgumentError("tls13 client handshake already complete"))
     _write_client_hello!(state, io)
     _read_server_hello!(state, io)
+    state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && _process_hello_retry_request!(state, io)
+    _transcript_update!(state.transcript, state.server_hello_raw)
     _process_server_hello!(state)
     _establish_handshake_keys!(state)
     _read_server_parameters!(state, io)
+    _read_server_certificate!(state, io)
     _read_server_finished!(state, io)
+    _send_client_certificate!(state, io)
     _send_client_finished!(state, io)
     state.complete = true
     _read_post_handshake_messages!(state, io)
