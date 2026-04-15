@@ -219,16 +219,31 @@ function _securezero_tls13_certificate_verifier!(::_TLS13ScriptedCertificateVeri
     return nothing
 end
 
-mutable struct _TLS13ClientHandshakeState{HK, TR<:_TranscriptHash, KP, CV}
+const _TLS13TranscriptState = Union{
+    _TranscriptHash{SHA.SHA2_256_CTX},
+    _TranscriptHash{SHA.SHA2_384_CTX},
+}
+
+const _TLS13KeyShareProviderState = Union{
+    _TLS13StaticSharedSecretProvider,
+    _TLS13ScriptedKeyShareProvider,
+}
+
+const _TLS13CertificateVerifierState = Union{
+    _TLS13NoCertificateVerifier,
+    _TLS13ScriptedCertificateVerifier,
+}
+
+mutable struct _TLS13ClientHandshakeState{HK}
     client_hello::_ClientHelloMsg
     cipher_suite::UInt16
     cipher_spec::_TLS13CipherSpec
-    key_share_provider::KP
-    certificate_verifier::CV
+    key_share_provider::_TLS13KeyShareProviderState
+    certificate_verifier::_TLS13CertificateVerifierState
     shared_secret::Vector{UInt8}
     psk::Vector{UInt8}
     has_psk::Bool
-    transcript::TR
+    transcript::_TLS13TranscriptState
     server_hello_raw::Vector{UInt8}
     server_hello::_ServerHelloMsg
     have_server_hello::Bool
@@ -285,9 +300,9 @@ function _new_tls13_client_handshake_state(
     cipher_spec::_TLS13CipherSpec,
     key_share_provider,
     certificate_verifier,
-    transcript::TR,
-) where {HK, TR<:_TranscriptHash}
-    return _TLS13ClientHandshakeState{HK, TR, typeof(key_share_provider), typeof(certificate_verifier)}(
+    transcript::_TLS13TranscriptState,
+) where {HK}
+    return _TLS13ClientHandshakeState{HK}(
         client_hello,
         cipher_suite,
         cipher_spec,

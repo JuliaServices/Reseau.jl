@@ -553,12 +553,7 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
         state_key_share_provider,
         verifier,
         state_transcript,
-    )::TL._TLS13ClientHandshakeState{
-        TL._HASH_SHA256,
-        typeof(state_transcript),
-        TL._TLS13ScriptedKeyShareProvider,
-        TL._TLS13ScriptedCertificateVerifier,
-    }
+    )::TL._TLS13ClientHandshakeState{TL._HASH_SHA256}
     io = TL._HandshakeMessageFlightIO(inbound)
     try
         TL._client_handshake_tls13!(state, io)
