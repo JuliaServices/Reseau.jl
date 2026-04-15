@@ -20,12 +20,12 @@ const _TLS13_TEST_SERVER_X25519_PRIVATE_KEY = UInt8[
     0x19, 0x0a, 0xfb, 0xec, 0xdd, 0xce, 0xbf, 0xa0,
 ]
 
-function _tls13_psk_client_hello()
+function _tls13_psk_client_hello(; cipher_suite::UInt16 = TLHC._TLS13_AES_128_GCM_SHA256_ID, binder_len::Int = 32)
     msg = TLHC._ClientHelloMsg()
     msg.vers = TLHC.TLS1_2_VERSION
     msg.random = collect(UInt8(0x00):UInt8(0x1f))
     msg.session_id = UInt8[0xaa, 0xbb, 0xcc, 0xdd]
-    msg.cipher_suites = UInt16[TLHC._TLS13_AES_128_GCM_SHA256_ID]
+    msg.cipher_suites = UInt16[cipher_suite]
     msg.compression_methods = UInt8[TLHC._TLS_COMPRESSION_NONE]
     msg.server_name = "localhost"
     msg.alpn_protocols = ["h2"]
@@ -33,16 +33,21 @@ function _tls13_psk_client_hello()
     msg.key_shares = [TLHC._TLSKeyShare(0x001d, UInt8[0x01, 0x02, 0x03, 0x04])]
     msg.psk_modes = UInt8[TLHC._TLS_PSK_MODE_DHE]
     msg.psk_identities = [TLHC._TLSPSKIdentity(UInt8[0x50, 0x51, 0x52], 0x01020304)]
-    msg.psk_binders = [zeros(UInt8, 32)]
+    msg.psk_binders = [zeros(UInt8, binder_len)]
     return msg
 end
 
-function _tls13_psk_server_hello(session_id::Vector{UInt8}; group::UInt16 = 0x001d, selected_identity_present::Bool = true)
+function _tls13_psk_server_hello(
+    session_id::Vector{UInt8};
+    cipher_suite::UInt16 = TLHC._TLS13_AES_128_GCM_SHA256_ID,
+    group::UInt16 = 0x001d,
+    selected_identity_present::Bool = true,
+)
     msg = TLHC._ServerHelloMsg()
     msg.vers = TLHC.TLS1_2_VERSION
     msg.random = collect(UInt8(0x80):UInt8(0x9f))
     msg.session_id = copy(session_id)
-    msg.cipher_suite = TLHC._TLS13_AES_128_GCM_SHA256_ID
+    msg.cipher_suite = cipher_suite
     msg.compression_method = TLHC._TLS_COMPRESSION_NONE
     msg.supported_version = TLHC.TLS1_3_VERSION
     msg.server_share = TLHC._TLSKeyShare(group, UInt8[0x05, 0x06, 0x07, 0x08])
@@ -52,18 +57,22 @@ function _tls13_psk_server_hello(session_id::Vector{UInt8}; group::UInt16 = 0x00
 end
 
 function _compute_tls13_psk_server_flight(client_hello::TLHC._ClientHelloMsg, shared_secret::Vector{UInt8}, psk::Vector{UInt8})
-    early_secret = TLHC._tls13_early_secret(TLHC._HASH_SHA256, psk)
+    cipher_suite = client_hello.cipher_suites[1]
+    cipher_spec = TLHC._tls13_cipher_spec(cipher_suite)::TLHC._TLS13CipherSpec
+    hash_kind = cipher_spec.hash_kind
+
+    early_secret = TLHC._tls13_early_secret(hash_kind, psk)
     binder_key = TLHC._tls13_resumption_binder_key(early_secret)
-    binder_transcript = TLHC._TranscriptHash(TLHC._HASH_SHA256; buffer_handshake = false)
+    binder_transcript = TLHC._TranscriptHash(hash_kind; buffer_handshake = false)
     TLHC._transcript_update!(binder_transcript, TLHC._marshal_client_hello_without_binders(client_hello))
-    binder = TLHC._tls13_finished_verify_data(TLHC._HASH_SHA256, binder_key, binder_transcript)
+    binder = TLHC._tls13_finished_verify_data(hash_kind, binder_key, binder_transcript)
     TLHC._update_client_hello_binders!(client_hello, [binder])
 
     client_bytes = TLHC._marshal_handshake_message(client_hello)
-    server_hello = _tls13_psk_server_hello(client_hello.session_id)
+    server_hello = _tls13_psk_server_hello(client_hello.session_id; cipher_suite)
     server_hello_bytes = TLHC._marshal_handshake_message(server_hello)
 
-    transcript = TLHC._TranscriptHash(TLHC._HASH_SHA256)
+    transcript = TLHC._TranscriptHash(hash_kind)
     TLHC._transcript_update!(transcript, client_bytes)
     TLHC._transcript_update!(transcript, server_hello_bytes)
 
@@ -76,11 +85,11 @@ function _compute_tls13_psk_server_flight(client_hello::TLHC._ClientHelloMsg, sh
     encrypted_extensions_bytes = TLHC._marshal_handshake_message(encrypted_extensions)
     TLHC._transcript_update!(transcript, encrypted_extensions_bytes)
 
-    server_finished = TLHC._FinishedMsg(TLHC._tls13_finished_verify_data(TLHC._TLS13_AES_128_GCM_SHA256, server_handshake_traffic_secret, transcript))
+    server_finished = TLHC._FinishedMsg(TLHC._tls13_finished_verify_data(cipher_spec, server_handshake_traffic_secret, transcript))
     server_finished_bytes = TLHC._marshal_handshake_message(server_finished)
     TLHC._transcript_update!(transcript, server_finished_bytes)
 
-    client_finished = TLHC._FinishedMsg(TLHC._tls13_finished_verify_data(TLHC._TLS13_AES_128_GCM_SHA256, client_handshake_traffic_secret, transcript))
+    client_finished = TLHC._FinishedMsg(TLHC._tls13_finished_verify_data(cipher_spec, client_handshake_traffic_secret, transcript))
     client_finished_bytes = TLHC._marshal_handshake_message(client_finished)
 
     master_secret = TLHC._tls13_master_secret(handshake_secret)
@@ -89,7 +98,7 @@ function _compute_tls13_psk_server_flight(client_hello::TLHC._ClientHelloMsg, sh
     exporter_master_secret = TLHC._tls13_exporter_secret_for_test(TLHC._tls13_exporter_master_secret(master_secret, transcript))
 
     ticket = TLHC._NewSessionTicketMsgTLS13()
-    ticket.lifetime = 0x01020304
+    ticket.lifetime = 0x00015180
     ticket.age_add = 0x05060708
     ticket.nonce = UInt8[0x90, 0x91]
     ticket.label = UInt8[0xa0, 0xa1, 0xa2]
@@ -276,7 +285,7 @@ function _compute_tls13_certificate_server_flight(
     exporter_master_secret = TLHC._tls13_exporter_secret_for_test(TLHC._tls13_exporter_master_secret(master_secret, transcript))
 
     ticket = TLHC._NewSessionTicketMsgTLS13()
-    ticket.lifetime = 0x01020304
+    ticket.lifetime = 0x00015180
     ticket.age_add = 0x05060708
     ticket.nonce = UInt8[0x90, 0x91]
     ticket.label = UInt8[0xa0, 0xa1, 0xa2]
@@ -381,7 +390,7 @@ function _compute_tls13_real_certificate_server_flight(client_hello::TLHC._Clien
     exporter_master_secret = TLHC._tls13_exporter_secret_for_test(TLHC._tls13_exporter_master_secret(master_secret, transcript))
 
     ticket = TLHC._NewSessionTicketMsgTLS13()
-    ticket.lifetime = 0x01020304
+    ticket.lifetime = 0x00015180
     ticket.age_add = 0x05060708
     ticket.nonce = UInt8[0x90, 0x91]
     ticket.label = UInt8[0xa0, 0xa1, 0xa2]
@@ -406,6 +415,7 @@ end
 
 @testset "TLS 1.3 client handshake phases 2-4" begin
     @testset "OpenSSL primitive helpers cover the real provider path" begin
+        @test TLHC._x25519_pkey_id() > 0
         client_pkey = TLHC._tls13_x25519_private_key_from_bytes(_TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
         client_secret = UInt8[]
         server_secret = UInt8[]
@@ -453,6 +463,39 @@ end
         @test !state.have_server_certificate_verify
         @test state.have_server_finished
         @test state.have_client_finished
+        @test io.outbound == [expected.client_bytes, expected.client_finished_bytes]
+        @test state.client_handshake_traffic_secret == expected.client_handshake_traffic_secret
+        @test state.server_handshake_traffic_secret == expected.server_handshake_traffic_secret
+        @test state.client_application_traffic_secret == expected.client_application_traffic_secret
+        @test state.server_application_traffic_secret == expected.server_application_traffic_secret
+        @test state.exporter_master_secret == expected.exporter_master_secret
+        @test state.peer_new_session_tickets == [expected.ticket]
+    end
+
+    @testset "detached PSK SHA-384 handshake exercises the alternate hash schedule" begin
+        shared_secret = collect(UInt8(0x31):UInt8(0x50))
+        psk = collect(UInt8(0x41):UInt8(0x70))
+
+        expected_client_hello = _tls13_psk_client_hello(
+            cipher_suite = TLHC._TLS13_AES_256_GCM_SHA384_ID,
+            binder_len = 48,
+        )
+        expected = _compute_tls13_psk_server_flight(expected_client_hello, shared_secret, psk)
+
+        state = TLHC._TLS13ClientHandshakeState(
+            _tls13_psk_client_hello(
+                cipher_suite = TLHC._TLS13_AES_256_GCM_SHA384_ID,
+                binder_len = 48,
+            ),
+            TLHC._TLS13_AES_256_GCM_SHA384_ID,
+            shared_secret,
+            psk,
+        )
+        io = TLHC._HandshakeMessageFlightIO(expected.inbound)
+        TLHC._client_handshake_tls13!(state, io)
+
+        @test state.complete
+        @test state.using_psk
         @test io.outbound == [expected.client_bytes, expected.client_finished_bytes]
         @test state.client_handshake_traffic_secret == expected.client_handshake_traffic_secret
         @test state.server_handshake_traffic_secret == expected.server_handshake_traffic_secret
@@ -529,6 +572,38 @@ end
         @test !state.have_client_finished
     end
 
+    @testset "unsupported certificate verify algorithms are rejected" begin
+        key_share_provider = _tls13_openssl_key_share_provider()
+        expected = _compute_tls13_real_certificate_server_flight(_tls13_cert_client_hello())
+        bad_certificate_verify = TLHC._CertificateVerifyMsg(
+            TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA384,
+            copy(expected.certificate_verify.signature),
+        )
+        inbound = copy(expected.inbound)
+        inbound[4] = TLHC._marshal_handshake_message(bad_certificate_verify)
+
+        state = TLHC._TLS13ClientHandshakeState(_tls13_cert_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, TLHC._TLS13OpenSSLCertificateVerifier())
+        io = TLHC._HandshakeMessageFlightIO(inbound)
+
+        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        @test length(io.outbound) == 1
+        @test !state.have_client_finished
+    end
+
+    @testset "empty certificate chains are rejected before certificate verification" begin
+        key_share_provider = _tls13_openssl_key_share_provider()
+        expected = _compute_tls13_real_certificate_server_flight(_tls13_cert_client_hello())
+        inbound = copy(expected.inbound)
+        inbound[3] = TLHC._marshal_handshake_message(TLHC._CertificateMsgTLS13())
+
+        state = TLHC._TLS13ClientHandshakeState(_tls13_cert_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, TLHC._TLS13OpenSSLCertificateVerifier())
+        io = TLHC._HandshakeMessageFlightIO(inbound)
+
+        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        @test length(io.outbound) == 1
+        @test !state.have_client_finished
+    end
+
     @testset "server finished mismatches are rejected before client finished" begin
         shared_secret = UInt8[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]
         psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
@@ -540,5 +615,24 @@ end
 
         @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
         @test length(io.outbound) == 1
+    end
+
+    @testset "post-handshake tickets reject invalid lifetimes" begin
+        shared_secret = UInt8[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]
+        psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
+        expected = _compute_tls13_psk_server_flight(_tls13_psk_client_hello(), shared_secret, psk)
+        bad_ticket = TLHC._NewSessionTicketMsgTLS13()
+        bad_ticket.lifetime = TLHC._TLS13_MAX_SESSION_TICKET_LIFETIME + UInt32(1)
+        bad_ticket.age_add = 0x05060708
+        bad_ticket.nonce = UInt8[0x90, 0x91]
+        bad_ticket.label = UInt8[0xa0, 0xa1, 0xa2]
+        bad_ticket.max_early_data = 0x0b0c0d0e
+        inbound = copy(expected.inbound)
+        inbound[end] = TLHC._marshal_handshake_message(bad_ticket)
+
+        state = TLHC._TLS13ClientHandshakeState(_tls13_psk_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)
+        io = TLHC._HandshakeMessageFlightIO(inbound)
+
+        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
     end
 end

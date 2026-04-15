@@ -24,6 +24,8 @@ const _TLS12_EXTENDED_MASTER_SECRET_LABEL = "extended master secret"
 const _TLS12_KEY_EXPANSION_LABEL = "key expansion"
 const _TLS12_CLIENT_FINISHED_LABEL = "client finished"
 const _TLS12_SERVER_FINISHED_LABEL = "server finished"
+const _EMPTY_SHA256_DIGEST = SHA.sha256(UInt8[])
+const _EMPTY_SHA384_DIGEST = SHA.sha384(UInt8[])
 
 mutable struct _TranscriptHash{CTX<:SHA.SHA_CTX}
     hash_kind::_TLSHashKind
@@ -37,10 +39,14 @@ end
 end
 
 @inline function _constant_time_equals(a::AbstractVector{UInt8}, b::AbstractVector{UInt8})::Bool
-    length(a) == length(b) || return false
-    diff = UInt8(0)
-    @inbounds for i in eachindex(a, b)
-        diff |= xor(a[i], b[i])
+    len_a = length(a)
+    len_b = length(b)
+    diff = UInt(len_a ⊻ len_b)
+    max_len = max(len_a, len_b)
+    @inbounds for i in 1:max_len
+        ai = i <= len_a ? a[i] : UInt8(0)
+        bi = i <= len_b ? b[i] : UInt8(0)
+        diff |= UInt(xor(ai, bi))
     end
     return iszero(diff)
 end
@@ -105,8 +111,9 @@ end
 end
 
 @inline function _empty_hash_digest(hash_kind::_TLSHashKind)::Vector{UInt8}
-    ctx = _new_hash_context(hash_kind)
-    return SHA.digest!(ctx)
+    hash_kind == _HASH_SHA256 && return copy(_EMPTY_SHA256_DIGEST)
+    hash_kind == _HASH_SHA384 && return copy(_EMPTY_SHA384_DIGEST)
+    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
 end
 
 @inline function _hash_data(hash_kind::_TLSHashKind, data::AbstractVector{UInt8})::Vector{UInt8}
@@ -117,6 +124,8 @@ end
 
 @inline function _copy_hash_context(ctx::CTX)::CTX where {CTX<:SHA.SHA_CTX}
     @static if VERSION >= v"1.12.0-rc1"
+        # This mirrors the current SHA stdlib context layout directly so we can
+        # snapshot transcript state without mutating the live hash context.
         return CTX(copy(ctx.state), ctx.bytecount, copy(ctx.buffer), ctx.used)
     else
         return deepcopy(ctx)
@@ -175,6 +184,7 @@ function _p_hash(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, seed::A
     out_len == 0 && return UInt8[]
     secret_bytes = Vector{UInt8}(secret)
     seed_bytes = Vector{UInt8}(seed)
+    a = UInt8[]
     try
         a = _hmac_data(hash_kind, secret_bytes, seed_bytes)
         out = UInt8[]
@@ -183,12 +193,26 @@ function _p_hash(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, seed::A
             ctx = _new_hmac_context(hash_kind, secret_bytes)
             SHA.update!(ctx, a)
             isempty(seed_bytes) || SHA.update!(ctx, seed_bytes)
-            append!(out, SHA.digest!(ctx))
-            a = _hmac_data(hash_kind, secret_bytes, a)
+            block = SHA.digest!(ctx)
+            try
+                append!(out, block)
+            finally
+                _securezero!(block)
+            end
+            next_a = _hmac_data(hash_kind, secret_bytes, a)
+            _securezero!(a)
+            a = next_a
+        end
+        if length(out) > out_len
+            for i in (out_len + 1):length(out)
+                out[i] = 0x00
+            end
         end
         resize!(out, out_len)
         return out
     finally
+        _securezero!(a)
+        _securezero!(seed_bytes)
         _securezero!(secret_bytes)
     end
 end
@@ -218,19 +242,23 @@ function _tls12_keys_from_master_secret(hash_kind::_TLSHashKind, master_secret::
     seed = vcat(Vector{UInt8}(server_random), Vector{UInt8}(client_random))
     n = 2 * mac_len + 2 * key_len + 2 * iv_len
     key_material = _tls12_prf(hash_kind, master_secret, _TLS12_KEY_EXPANSION_LABEL, seed, n)
-    idx = 1
-    client_mac = key_material[idx:(idx + mac_len - 1)]
-    idx += mac_len
-    server_mac = key_material[idx:(idx + mac_len - 1)]
-    idx += mac_len
-    client_key = key_material[idx:(idx + key_len - 1)]
-    idx += key_len
-    server_key = key_material[idx:(idx + key_len - 1)]
-    idx += key_len
-    client_iv = key_material[idx:(idx + iv_len - 1)]
-    idx += iv_len
-    server_iv = key_material[idx:(idx + iv_len - 1)]
-    return client_mac, server_mac, client_key, server_key, client_iv, server_iv
+    try
+        idx = 1
+        client_mac = key_material[idx:(idx + mac_len - 1)]
+        idx += mac_len
+        server_mac = key_material[idx:(idx + mac_len - 1)]
+        idx += mac_len
+        client_key = key_material[idx:(idx + key_len - 1)]
+        idx += key_len
+        server_key = key_material[idx:(idx + key_len - 1)]
+        idx += key_len
+        client_iv = key_material[idx:(idx + iv_len - 1)]
+        idx += iv_len
+        server_iv = key_material[idx:(idx + iv_len - 1)]
+        return client_mac, server_mac, client_key, server_key, client_iv, server_iv
+    finally
+        _securezero!(key_material)
+    end
 end
 
 function _tls12_export_keying_material(hash_kind::_TLSHashKind, master_secret::AbstractVector{UInt8}, client_random::AbstractVector{UInt8}, server_random::AbstractVector{UInt8}, label::AbstractString, context::Union{Nothing, AbstractVector{UInt8}}, out_len::Int)::Vector{UInt8}
@@ -278,16 +306,27 @@ function _hkdf_expand(hash_kind::_TLSHashKind, prk::AbstractVector{UInt8}, info:
     out = UInt8[]
     sizehint!(out, out_len)
     prev = UInt8[]
-    for counter in 1:nblocks
-        ctx = _new_hmac_context(hash_kind, prk)
-        isempty(prev) || SHA.update!(ctx, prev)
-        isempty(info) || SHA.update!(ctx, info)
-        SHA.update!(ctx, UInt8[counter])
-        prev = SHA.digest!(ctx)
-        append!(out, prev)
+    try
+        for counter in 1:nblocks
+            ctx = _new_hmac_context(hash_kind, prk)
+            isempty(prev) || SHA.update!(ctx, prev)
+            isempty(info) || SHA.update!(ctx, info)
+            SHA.update!(ctx, UInt8[counter])
+            next_prev = SHA.digest!(ctx)
+            _securezero!(prev)
+            prev = next_prev
+            append!(out, prev)
+        end
+        if length(out) > out_len
+            for i in (out_len + 1):length(out)
+                out[i] = 0x00
+            end
+        end
+        resize!(out, out_len)
+        return out
+    finally
+        _securezero!(prev)
     end
-    resize!(out, out_len)
-    return out
 end
 
 function _tls13_expand_label(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, label::AbstractString, context::AbstractVector{UInt8}, out_len::Int)::Vector{UInt8}

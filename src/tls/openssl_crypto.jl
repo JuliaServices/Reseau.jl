@@ -12,7 +12,20 @@ const _TLS_SIGNATURE_RSA_PSS_PSS_SHA512 = UInt16(0x080b)
 const _TLS_GROUP_SECP256R1 = UInt16(0x0017)
 const _TLS_GROUP_X25519 = UInt16(0x001d)
 
-const _X25519_PKEY_ID = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "X25519")
+const _X25519_PKEY_ID = Ref{Cint}(0)
+
+function _init_x25519_pkey_id!()::Cint
+    nid = _X25519_PKEY_ID[]
+    nid > 0 && return nid
+    nid = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "X25519")
+    nid > 0 || throw(ArgumentError("failed to initialize OpenSSL X25519 provider"))
+    _X25519_PKEY_ID[] = nid
+    return nid
+end
+
+@inline function _x25519_pkey_id()::Cint
+    return _init_x25519_pkey_id!()
+end
 
 @inline function _openssl_require_nonnull(ptr::Ptr{Cvoid}, op::AbstractString)::Ptr{Cvoid}
     ptr == C_NULL && throw(_make_tls_error(String(op), Int32(0)))
@@ -234,7 +247,7 @@ function _tls13_x25519_private_key_from_bytes(private_key::AbstractVector{UInt8}
             (:EVP_PKEY_new_raw_private_key, _LIBCRYPTO_PATH),
             Ptr{Cvoid},
             (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-            _X25519_PKEY_ID,
+            _x25519_pkey_id(),
             C_NULL,
             pointer(private_bytes),
             Csize_t(length(private_bytes)),
@@ -246,7 +259,7 @@ function _tls13_x25519_private_key_from_bytes(private_key::AbstractVector{UInt8}
 end
 
 function _tls13_x25519_generate_private_key()::Ptr{Cvoid}
-    ctx = ccall((:EVP_PKEY_CTX_new_id, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint, Ptr{Cvoid}), _X25519_PKEY_ID, C_NULL)
+    ctx = ccall((:EVP_PKEY_CTX_new_id, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint, Ptr{Cvoid}), _x25519_pkey_id(), C_NULL)
     _openssl_require_nonnull(ctx, "EVP_PKEY_CTX_new_id(X25519)")
     try
         ok = ccall((:EVP_PKEY_keygen_init, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ctx)
@@ -294,7 +307,7 @@ function _tls13_x25519_peer_public_key(peer_public_key::AbstractVector{UInt8})::
         (:EVP_PKEY_new_raw_public_key, _LIBCRYPTO_PATH),
         Ptr{Cvoid},
         (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-        _X25519_PKEY_ID,
+        _x25519_pkey_id(),
         C_NULL,
         pointer(peer_bytes),
         Csize_t(length(peer_bytes)),

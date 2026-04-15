@@ -9,6 +9,7 @@ const _HANDSHAKE_TYPE_MESSAGE_HASH = UInt8(254)
 const _TLS13_SERVER_SIGNATURE_CONTEXT = "TLS 1.3, server CertificateVerify\0"
 const _TLS13_CLIENT_SIGNATURE_CONTEXT = "TLS 1.3, client CertificateVerify\0"
 const _TLS13_SIGNATURE_PADDING = fill(UInt8(0x20), 64)
+const _TLS13_MAX_SESSION_TICKET_LIFETIME = UInt32(7 * 24 * 60 * 60)
 
 mutable struct _HandshakeMessageFlightIO
     inbound::Vector{Vector{UInt8}}
@@ -750,6 +751,10 @@ function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io::_
         raw = _read_handshake_bytes!(io)
         msg = _unmarshal_new_session_ticket_tls13(raw)
         msg === nothing && throw(ArgumentError("tls13 client handshake expected only NewSessionTicket post-handshake messages"))
+        msg.lifetime == 0x00000000 && continue
+        msg.lifetime <= _TLS13_MAX_SESSION_TICKET_LIFETIME ||
+            throw(ArgumentError("tls: received a session ticket with invalid lifetime"))
+        isempty(msg.label) && throw(ArgumentError("tls: received a session ticket with empty opaque ticket label"))
         push!(state.peer_new_session_tickets, msg)
     end
     return nothing

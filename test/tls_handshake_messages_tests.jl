@@ -324,7 +324,7 @@ end
 function _random_certificate_verify(rng::AbstractRNG)
     return _certificate_verify_msg(
         signature_algorithm = rand(rng, UInt16),
-        signature = rand(rng, UInt8, rand(rng, 0:24)),
+        signature = rand(rng, UInt8, rand(rng, 1:24)),
     )
 end
 
@@ -645,6 +645,40 @@ end
         @test TLH._transcript_digest(transcript_parsed) == expected
     end
 
+    @testset "Parsed handshake messages own copied frame bytes" begin
+        client_hello = _client_hello_msg(
+            vers = TLH.TLS1_2_VERSION,
+            random = collect(UInt8(0x01):UInt8(0x20)),
+            cipher_suites = UInt16[0x1301],
+            compression_methods = UInt8[TLH._TLS_COMPRESSION_NONE],
+            supported_versions = UInt16[TLH.TLS1_3_VERSION],
+        )
+        server_hello = _server_hello_msg(
+            vers = TLH.TLS1_2_VERSION,
+            random = collect(UInt8(0x21):UInt8(0x40)),
+            cipher_suite = 0x1301,
+            compression_method = TLH._TLS_COMPRESSION_NONE,
+            supported_version = TLH.TLS1_3_VERSION,
+            server_share = TLH._TLSKeyShare(0x001d, UInt8[0x01, 0x02, 0x03]),
+        )
+
+        client_bytes = TLH._marshal_handshake_message(client_hello)
+        server_bytes = TLH._marshal_handshake_message(server_hello)
+        expected_client_bytes = copy(client_bytes)
+        expected_server_bytes = copy(server_bytes)
+
+        parsed_client = TLH._unmarshal_handshake_message(client_bytes)::TLH._ClientHelloMsg
+        parsed_server = TLH._unmarshal_handshake_message(server_bytes)::TLH._ServerHelloMsg
+
+        client_bytes[5] = xor(client_bytes[5], 0xff)
+        server_bytes[5] = xor(server_bytes[5], 0xff)
+
+        @test parsed_client.original == expected_client_bytes
+        @test parsed_server.original == expected_server_bytes
+        @test TLH._handshake_transcript_bytes(parsed_client) == expected_client_bytes
+        @test TLH._handshake_transcript_bytes(parsed_server) == expected_server_bytes
+    end
+
     @testset "Go-derived malformed vectors are rejected" begin
         client_hello_duplicate = _tls_hm_hexbytes("010000440303000000000000000000000000000000000000000000000000000000000000000000000000001c0000000a000800000568656c6c6f0000000a000800000568656c6c6f")
         server_hello_duplicate = _tls_hm_hexbytes("02000030030300000000000000000000000000000000000000000000000000000000000000000000000000080005000000050000")
@@ -690,6 +724,12 @@ end
             signed_certificate_timestamps = [UInt8[]],
         )
         @test TLH._unmarshal_handshake_message(TLH._marshal_handshake_message(empty_certificate_scts)) === nothing
+
+        empty_certificate_verify = _certificate_verify_msg(
+            signature_algorithm = 0x0804,
+            signature = UInt8[],
+        )
+        @test TLH._unmarshal_handshake_message(TLH._marshal_handshake_message(empty_certificate_verify)) === nothing
 
         bad_certificate = _tls_hm_hexbytes("0b000006010000020102")
         @test TLH._unmarshal_handshake_message(bad_certificate) === nothing

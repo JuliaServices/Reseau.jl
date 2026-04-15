@@ -324,6 +324,10 @@ _HandshakeReader(data::AbstractVector{UInt8}) = _HandshakeReader(Vector{UInt8}(d
     return reader.pos > length(reader.data)
 end
 
+@inline function _reader_remaining(reader::_HandshakeReader)::Int
+    return length(reader.data) - reader.pos + 1
+end
+
 @inline function _read_u8!(reader::_HandshakeReader)::Union{UInt8, Nothing}
     reader.pos > length(reader.data) && return nothing
     out = reader.data[reader.pos]
@@ -486,7 +490,7 @@ function _copy_valid_handshake_frame(data::AbstractVector{UInt8})::Union{Vector{
     body_len = (Int(data[2]) << 16) | (Int(data[3]) << 8) | Int(data[4])
     body_len <= _MAX_HANDSHAKE_SIZE || throw(ArgumentError("tls: handshake message of length $(body_len) bytes exceeds maximum of $(_MAX_HANDSHAKE_SIZE) bytes"))
     length(data) == body_len + 4 || return nothing
-    return data isa Vector{UInt8} ? data : Vector{UInt8}(data)
+    return copy(data)
 end
 
 function _marshal_client_hello(msg::_ClientHelloMsg)::Vector{UInt8}
@@ -1192,7 +1196,7 @@ function _unmarshal_server_hello(data::Vector{UInt8})::Union{_ServerHelloMsg, No
             (cookie === nothing || isempty(cookie)) && return nothing
             msg.cookie = cookie
         elseif extension == _HANDSHAKE_EXTENSION_KEY_SHARE
-            if length(ext_reader.data) == 2
+            if _reader_remaining(ext_reader) == 2
                 selected_group = _read_u16!(ext_reader)
                 selected_group === nothing && return nothing
                 msg.selected_group = selected_group
@@ -1387,7 +1391,7 @@ function _unmarshal_certificate_verify(data::Vector{UInt8})::Union{_CertificateV
     _read_u24!(reader) == length(data) - 4 || return nothing
     signature_algorithm = _read_u16!(reader)
     signature = _read_u16_length_prefixed_bytes!(reader)
-    (signature_algorithm === nothing || signature === nothing || !_reader_empty(reader)) && return nothing
+    (signature_algorithm === nothing || signature === nothing || isempty(signature) || !_reader_empty(reader)) && return nothing
     return _CertificateVerifyMsg(signature_algorithm, signature)
 end
 

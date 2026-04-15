@@ -396,6 +396,7 @@ function __init__()
         Culong(0)::Culong,
         C_NULL::Ptr{Cvoid},
     )::Cint
+    _init_x25519_pkey_id!()
     _VERIFY_ALLOW_ALL_CB[] = @cfunction(_verify_allow_all_cb, Cint, (Cint, Ptr{Cvoid}))
     _ALPN_SELECT_CB[] = @cfunction(_ssl_alpn_select_cb, Cint, (Ptr{Cvoid}, Ptr{Ptr{UInt8}}, Ptr{UInt8}, Ptr{UInt8}, Cuint, Ptr{Cvoid}))
     atexit(_free_ssl_ctx_cache!)
