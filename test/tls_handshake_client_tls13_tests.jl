@@ -2,6 +2,23 @@ using Test
 using Reseau
 
 const TLHC = Reseau.TLS
+const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
+const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS13_TEST_CERT_PEM = read(_TLS_CERT_PATH)
+const _TLS13_TEST_KEY_PEM = read(_TLS_KEY_PATH)
+const _TLS13_TEST_CERT_DER = TLHC._tls13_openssl_certificate_der(_TLS13_TEST_CERT_PEM)
+const _TLS13_TEST_CLIENT_X25519_PRIVATE_KEY = UInt8[
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+    0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0xff, 0xee,
+    0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66,
+]
+const _TLS13_TEST_SERVER_X25519_PRIVATE_KEY = UInt8[
+    0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18,
+    0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90,
+    0x91, 0x82, 0x73, 0x64, 0x55, 0x46, 0x37, 0x28,
+    0x19, 0x0a, 0xfb, 0xec, 0xdd, 0xce, 0xbf, 0xa0,
+]
 
 function _tls13_psk_client_hello()
     msg = TLHC._ClientHelloMsg()
@@ -103,8 +120,8 @@ function _tls13_cert_client_hello(; supported_curves::Vector{UInt16} = UInt16[0x
     msg.alpn_protocols = ["h2"]
     msg.supported_versions = UInt16[TLHC.TLS1_3_VERSION]
     msg.supported_curves = copy(supported_curves)
-    msg.supported_signature_algorithms = UInt16[0x0804]
-    msg.supported_signature_algorithms_cert = UInt16[0x0804]
+    msg.supported_signature_algorithms = UInt16[TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256]
+    msg.supported_signature_algorithms_cert = UInt16[TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256]
     return msg
 end
 
@@ -135,16 +152,18 @@ end
 
 function _tls13_server_certificate()
     msg = TLHC._CertificateMsgTLS13()
-    msg.certificates = [UInt8[0x30, 0x82, 0x01, 0x01], UInt8[0x30, 0x82, 0x02, 0x02]]
+    msg.certificates = [copy(_TLS13_TEST_CERT_DER)]
     return msg
 end
 
 function _tls13_server_certificate_request()
     msg = TLHC._CertificateRequestMsgTLS13()
-    msg.supported_signature_algorithms = UInt16[0x0804]
-    msg.supported_signature_algorithms_cert = UInt16[0x0804]
+    msg.supported_signature_algorithms = UInt16[TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256]
+    msg.supported_signature_algorithms_cert = UInt16[TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256]
     return msg
 end
+
+_tls13_openssl_key_share_provider() = TLHC._TLS13OpenSSLKeyShareProvider(fixed_private_key = _TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
 
 function _tls13_scripted_key_share_provider(; hello_retry::Bool = false)
     initial_share = TLHC._TLSKeyShare(0x001d, UInt8[0x11, 0x12, 0x13, 0x14])
@@ -289,7 +308,131 @@ function _compute_tls13_certificate_server_flight(
     )
 end
 
-@testset "TLS 1.3 client handshake phases 2-3" begin
+function _compute_tls13_real_certificate_server_flight(client_hello::TLHC._ClientHelloMsg; certificate_request::Bool = false)
+    key_share_provider = _tls13_openssl_key_share_provider()
+    TLHC._tls13_prepare_initial_client_hello!(key_share_provider, client_hello)
+    client_hello_bytes = TLHC._marshal_handshake_message(client_hello)
+    outbound = [client_hello_bytes]
+    transcript = TLHC._TranscriptHash(TLHC._HASH_SHA256)
+    TLHC._transcript_update!(transcript, client_hello_bytes)
+
+    client_share = client_hello.key_shares[1]::TLHC._TLSKeyShare
+    server_share, shared_secret = TLHC._tls13_openssl_x25519_server_share_and_secret(client_share.data, _TLS13_TEST_SERVER_X25519_PRIVATE_KEY)
+    server_hello = _tls13_certificate_server_hello(client_hello.session_id, server_share.group, copy(server_share.data))
+    server_hello_bytes = TLHC._marshal_handshake_message(server_hello)
+    inbound = [server_hello_bytes]
+    TLHC._transcript_update!(transcript, server_hello_bytes)
+
+    early_secret = TLHC._tls13_early_secret(TLHC._HASH_SHA256, UInt8[])
+    handshake_secret = TLHC._tls13_handshake_secret(early_secret, shared_secret)
+    client_handshake_traffic_secret = TLHC._tls13_client_handshake_traffic_secret(handshake_secret, transcript)
+    server_handshake_traffic_secret = TLHC._tls13_server_handshake_traffic_secret(handshake_secret, transcript)
+
+    encrypted_extensions = TLHC._EncryptedExtensionsMsg()
+    encrypted_extensions.alpn_protocol = "h2"
+    encrypted_extensions_bytes = TLHC._marshal_handshake_message(encrypted_extensions)
+    push!(inbound, encrypted_extensions_bytes)
+    TLHC._transcript_update!(transcript, encrypted_extensions_bytes)
+
+    cert_req = nothing
+    if certificate_request
+        cert_req = _tls13_server_certificate_request()
+        cert_req_bytes = TLHC._marshal_handshake_message(cert_req)
+        push!(inbound, cert_req_bytes)
+        TLHC._transcript_update!(transcript, cert_req_bytes)
+    end
+
+    certificate = _tls13_server_certificate()
+    certificate_bytes = TLHC._marshal_handshake_message(certificate)
+    push!(inbound, certificate_bytes)
+    TLHC._transcript_update!(transcript, certificate_bytes)
+
+    signed_message = TLHC._tls13_signed_message(TLHC._TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
+    certificate_verify = TLHC._CertificateVerifyMsg(
+        TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
+        TLHC._tls13_openssl_sign_from_pem(TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed_message, _TLS13_TEST_KEY_PEM),
+    )
+    certificate_verify_bytes = TLHC._marshal_handshake_message(certificate_verify)
+    push!(inbound, certificate_verify_bytes)
+    TLHC._transcript_update!(transcript, certificate_verify_bytes)
+
+    server_finished = TLHC._FinishedMsg(TLHC._tls13_finished_verify_data(TLHC._TLS13_AES_128_GCM_SHA256, server_handshake_traffic_secret, transcript))
+    server_finished_bytes = TLHC._marshal_handshake_message(server_finished)
+    push!(inbound, server_finished_bytes)
+    TLHC._transcript_update!(transcript, server_finished_bytes)
+
+    transcript_for_client = TLHC._TranscriptHash(TLHC._HASH_SHA256)
+    transcript_bytes = TLHC._transcript_buffered_bytes(transcript)::Vector{UInt8}
+    TLHC._transcript_update!(transcript_for_client, transcript_bytes)
+
+    if certificate_request
+        client_certificate_bytes = TLHC._marshal_certificate_tls13(TLHC._CertificateMsgTLS13())
+        TLHC._transcript_update!(transcript_for_client, client_certificate_bytes)
+        push!(outbound, client_certificate_bytes)
+    end
+
+    client_finished = TLHC._FinishedMsg(TLHC._tls13_finished_verify_data(TLHC._TLS13_AES_128_GCM_SHA256, client_handshake_traffic_secret, transcript_for_client))
+    client_finished_bytes = TLHC._marshal_handshake_message(client_finished)
+    push!(outbound, client_finished_bytes)
+
+    master_secret = TLHC._tls13_master_secret(handshake_secret)
+    client_application_traffic_secret = TLHC._tls13_client_application_traffic_secret(master_secret, transcript)
+    server_application_traffic_secret = TLHC._tls13_server_application_traffic_secret(master_secret, transcript)
+    exporter_master_secret = TLHC._tls13_exporter_secret_for_test(TLHC._tls13_exporter_master_secret(master_secret, transcript))
+
+    ticket = TLHC._NewSessionTicketMsgTLS13()
+    ticket.lifetime = 0x01020304
+    ticket.age_add = 0x05060708
+    ticket.nonce = UInt8[0x90, 0x91]
+    ticket.label = UInt8[0xa0, 0xa1, 0xa2]
+    ticket.max_early_data = 0x0b0c0d0e
+    ticket_bytes = TLHC._marshal_handshake_message(ticket)
+    push!(inbound, ticket_bytes)
+
+    return (
+        inbound = inbound,
+        outbound = outbound,
+        client_handshake_traffic_secret = client_handshake_traffic_secret,
+        server_handshake_traffic_secret = server_handshake_traffic_secret,
+        client_application_traffic_secret = client_application_traffic_secret,
+        server_application_traffic_secret = server_application_traffic_secret,
+        exporter_master_secret = exporter_master_secret,
+        ticket = ticket,
+        certificate_request = cert_req,
+        certificate = certificate,
+        certificate_verify = certificate_verify,
+    )
+end
+
+@testset "TLS 1.3 client handshake phases 2-4" begin
+    @testset "OpenSSL primitive helpers cover the real provider path" begin
+        client_pkey = TLHC._tls13_x25519_private_key_from_bytes(_TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
+        client_secret = UInt8[]
+        server_secret = UInt8[]
+        pubkey = Ptr{Cvoid}(C_NULL)
+        try
+            client_share = TLHC._tls13_x25519_public_key(client_pkey)
+            server_share, server_secret = TLHC._tls13_openssl_x25519_server_share_and_secret(client_share, _TLS13_TEST_SERVER_X25519_PRIVATE_KEY)
+            client_secret = TLHC._tls13_x25519_shared_secret(client_pkey, server_share.data)
+            @test server_share.group == TLHC._TLS_GROUP_X25519
+            @test client_secret == server_secret
+
+            signed = collect(UInt8(0x10):UInt8(0x4f))
+            signature = TLHC._tls13_openssl_sign_from_pem(TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, _TLS13_TEST_KEY_PEM)
+            pubkey = TLHC._tls13_pubkey_from_der_certificate(_TLS13_TEST_CERT_DER)
+            @test TLHC._tls13_openssl_verify_signature(pubkey, TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, signature)
+
+            bad_signature = copy(signature)
+            bad_signature[end] = xor(bad_signature[end], 0xff)
+            @test !TLHC._tls13_openssl_verify_signature(pubkey, TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, bad_signature)
+        finally
+            TLHC._free_evp_pkey!(client_pkey)
+            TLHC._free_evp_pkey!(pubkey)
+            TLHC._securezero!(client_secret)
+            TLHC._securezero!(server_secret)
+        end
+    end
+
     @testset "detached PSK client handshake mirrors Go-style sequencing" begin
         shared_secret = UInt8[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]
         psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
@@ -319,12 +462,12 @@ end
         @test state.peer_new_session_tickets == [expected.ticket]
     end
 
-    @testset "certificate-authenticated client handshake mirrors Go-style sequencing" begin
+    @testset "certificate-authenticated client handshake uses real OpenSSL crypto" begin
         client_hello = _tls13_cert_client_hello()
-        key_share_provider = _tls13_scripted_key_share_provider()
-        expected = _compute_tls13_certificate_server_flight(_tls13_cert_client_hello(), _tls13_scripted_key_share_provider())
+        key_share_provider = _tls13_openssl_key_share_provider()
+        expected = _compute_tls13_real_certificate_server_flight(_tls13_cert_client_hello())
 
-        state = TLHC._TLS13ClientHandshakeState(client_hello, TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, expected.verifier)
+        state = TLHC._TLS13ClientHandshakeState(client_hello, TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, TLHC._TLS13OpenSSLCertificateVerifier())
         io = TLHC._HandshakeMessageFlightIO(expected.inbound)
         TLHC._client_handshake_tls13!(state, io)
 
@@ -371,14 +514,14 @@ end
     end
 
     @testset "certificate verify mismatches are rejected before client finished" begin
-        key_share_provider = _tls13_scripted_key_share_provider()
-        expected = _compute_tls13_certificate_server_flight(_tls13_cert_client_hello(), _tls13_scripted_key_share_provider())
+        key_share_provider = _tls13_openssl_key_share_provider()
+        expected = _compute_tls13_real_certificate_server_flight(_tls13_cert_client_hello())
         bad_certificate_verify = copy(expected.inbound[4])
         bad_certificate_verify[end] = xor(bad_certificate_verify[end], 0xff)
         inbound = copy(expected.inbound)
         inbound[4] = bad_certificate_verify
 
-        state = TLHC._TLS13ClientHandshakeState(_tls13_cert_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, expected.verifier)
+        state = TLHC._TLS13ClientHandshakeState(_tls13_cert_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, TLHC._TLS13OpenSSLCertificateVerifier())
         io = TLHC._HandshakeMessageFlightIO(inbound)
 
         @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)

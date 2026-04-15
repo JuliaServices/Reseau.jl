@@ -108,9 +108,39 @@ function _TLS13ScriptedCertificateVerifier(
     )
 end
 
+mutable struct _TLS13OpenSSLKeyShareProvider
+    fixed_private_key::Vector{UInt8}
+    has_fixed_private_key::Bool
+    private_key::Ptr{Cvoid}
+end
+
+function _TLS13OpenSSLKeyShareProvider(; fixed_private_key::Union{Nothing, AbstractVector{UInt8}} = nothing)
+    return _TLS13OpenSSLKeyShareProvider(
+        fixed_private_key === nothing ? UInt8[] : Vector{UInt8}(fixed_private_key),
+        fixed_private_key !== nothing,
+        C_NULL,
+    )
+end
+
+mutable struct _TLS13OpenSSLCertificateVerifier
+    leaf_public_key::Ptr{Cvoid}
+end
+
+_TLS13OpenSSLCertificateVerifier() = _TLS13OpenSSLCertificateVerifier(C_NULL)
+
 @inline _copy_tls13_key_share(share::_TLSKeyShare) = _TLSKeyShare(share.group, copy(share.data))
 
 function _tls13_prepare_initial_client_hello!(::_TLS13StaticSharedSecretProvider, ::_ClientHelloMsg)::Nothing
+    return nothing
+end
+
+function _tls13_prepare_initial_client_hello!(provider::_TLS13OpenSSLKeyShareProvider, hello::_ClientHelloMsg)::Nothing
+    in(_TLS_GROUP_X25519, hello.supported_curves) || throw(ArgumentError("tls13 client handshake requires X25519 in supported_curves for the OpenSSL key share provider"))
+    provider.private_key == C_NULL || _free_evp_pkey!(provider.private_key)
+    provider.private_key = provider.has_fixed_private_key ?
+        _tls13_x25519_private_key_from_bytes(provider.fixed_private_key) :
+        _tls13_x25519_generate_private_key()
+    hello.key_shares = [_TLSKeyShare(_TLS_GROUP_X25519, _tls13_x25519_public_key(provider.private_key))]
     return nothing
 end
 
@@ -121,6 +151,12 @@ end
 
 function _tls13_resolve_server_shared_secret(provider::_TLS13StaticSharedSecretProvider, ::_TLSKeyShare)::Vector{UInt8}
     return copy(provider.shared_secret)
+end
+
+function _tls13_resolve_server_shared_secret(provider::_TLS13OpenSSLKeyShareProvider, server_share::_TLSKeyShare)::Vector{UInt8}
+    provider.private_key == C_NULL && throw(ArgumentError("tls13 client handshake is missing an X25519 private key"))
+    server_share.group == _TLS_GROUP_X25519 || throw(ArgumentError("tls13 client handshake OpenSSL key share provider only supports X25519 today"))
+    return _tls13_x25519_shared_secret(provider.private_key, server_share.data)
 end
 
 function _tls13_resolve_server_shared_secret(provider::_TLS13ScriptedKeyShareProvider, server_share::_TLSKeyShare)::Vector{UInt8}
@@ -142,6 +178,25 @@ function _tls13_process_hello_retry_request!(
     ::_ServerHelloMsg,
 )::Nothing
     throw(ArgumentError("tls13 client handshake HelloRetryRequest requires a key share provider"))
+end
+
+function _tls13_process_hello_retry_request!(
+    provider::_TLS13OpenSSLKeyShareProvider,
+    hello::_ClientHelloMsg,
+    server_hello::_ServerHelloMsg,
+)::Nothing
+    selected_group = server_hello.selected_group
+    if !isempty(server_hello.cookie)
+        hello.cookie = copy(server_hello.cookie)
+    end
+    selected_group == 0x0000 && return nothing
+    in(selected_group, hello.supported_curves) || throw(ArgumentError("tls: server selected unsupported group"))
+    for key_share in hello.key_shares
+        key_share.group == selected_group && throw(ArgumentError("tls: server sent an unnecessary HelloRetryRequest key_share"))
+    end
+    provider.private_key == C_NULL || _free_evp_pkey!(provider.private_key)
+    provider.private_key = C_NULL
+    throw(ArgumentError("tls13 client handshake OpenSSL key share provider only supports X25519 today"))
 end
 
 function _tls13_process_hello_retry_request!(
@@ -169,6 +224,17 @@ function _tls13_verify_server_certificates!(::_TLS13NoCertificateVerifier, ::_Ce
 end
 
 function _tls13_verify_server_certificates!(
+    verifier::_TLS13OpenSSLCertificateVerifier,
+    certificate_msg::_CertificateMsgTLS13,
+    ::AbstractString,
+)::Nothing
+    isempty(certificate_msg.certificates) && throw(ArgumentError("tls: received empty certificates message"))
+    verifier.leaf_public_key == C_NULL || _free_evp_pkey!(verifier.leaf_public_key)
+    verifier.leaf_public_key = _tls13_pubkey_from_der_certificate(certificate_msg.certificates[1])
+    return nothing
+end
+
+function _tls13_verify_server_certificates!(
     verifier::_TLS13ScriptedCertificateVerifier,
     certificate_msg::_CertificateMsgTLS13,
     server_name::AbstractString,
@@ -184,6 +250,18 @@ function _tls13_verify_server_certificate_signature!(
     ::_CertificateVerifyMsg,
 )::Nothing
     throw(ArgumentError("tls13 client handshake certificate path requires a certificate verifier"))
+end
+
+function _tls13_verify_server_certificate_signature!(
+    verifier::_TLS13OpenSSLCertificateVerifier,
+    transcript::_TranscriptHash,
+    certificate_verify::_CertificateVerifyMsg,
+)::Nothing
+    verifier.leaf_public_key == C_NULL && throw(ArgumentError("tls13 client handshake certificate verifier has no leaf public key"))
+    signed = _tls13_signed_message(_TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
+    _tls13_openssl_verify_signature(verifier.leaf_public_key, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
+        throw(ArgumentError("tls13 client handshake received an invalid certificate verify signature"))
+    return nothing
 end
 
 function _tls13_verify_server_certificate_signature!(
@@ -205,6 +283,13 @@ function _securezero_tls13_key_share_provider!(provider::_TLS13StaticSharedSecre
     return nothing
 end
 
+function _securezero_tls13_key_share_provider!(provider::_TLS13OpenSSLKeyShareProvider)::Nothing
+    provider.private_key == C_NULL || _free_evp_pkey!(provider.private_key)
+    provider.private_key = C_NULL
+    provider.has_fixed_private_key && _securezero!(provider.fixed_private_key)
+    return nothing
+end
+
 function _securezero_tls13_key_share_provider!(provider::_TLS13ScriptedKeyShareProvider)::Nothing
     _securezero!(provider.initial_shared_secret)
     _securezero!(provider.retry_shared_secret)
@@ -212,6 +297,12 @@ function _securezero_tls13_key_share_provider!(provider::_TLS13ScriptedKeyShareP
 end
 
 function _securezero_tls13_certificate_verifier!(::_TLS13NoCertificateVerifier)::Nothing
+    return nothing
+end
+
+function _securezero_tls13_certificate_verifier!(verifier::_TLS13OpenSSLCertificateVerifier)::Nothing
+    verifier.leaf_public_key == C_NULL || _free_evp_pkey!(verifier.leaf_public_key)
+    verifier.leaf_public_key = C_NULL
     return nothing
 end
 
@@ -226,11 +317,13 @@ const _TLS13TranscriptState = Union{
 
 const _TLS13KeyShareProviderState = Union{
     _TLS13StaticSharedSecretProvider,
+    _TLS13OpenSSLKeyShareProvider,
     _TLS13ScriptedKeyShareProvider,
 }
 
 const _TLS13CertificateVerifierState = Union{
     _TLS13NoCertificateVerifier,
+    _TLS13OpenSSLCertificateVerifier,
     _TLS13ScriptedCertificateVerifier,
 }
 
