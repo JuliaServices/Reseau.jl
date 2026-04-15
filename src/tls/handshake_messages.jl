@@ -346,6 +346,16 @@ end
     return out
 end
 
+@inline function _read_u32!(reader::_HandshakeReader)::Union{UInt32, Nothing}
+    reader.pos + 3 > length(reader.data) && return nothing
+    b1 = UInt32(reader.data[reader.pos])
+    b2 = UInt32(reader.data[reader.pos + 1])
+    b3 = UInt32(reader.data[reader.pos + 2])
+    b4 = UInt32(reader.data[reader.pos + 3])
+    reader.pos += 4
+    return (b1 << 24) | (b2 << 16) | (b3 << 8) | b4
+end
+
 function _read_bytes!(reader::_HandshakeReader, n::Int)::Union{Vector{UInt8}, Nothing}
     n < 0 && return nothing
     n == 0 && return UInt8[]
@@ -677,6 +687,8 @@ end
 function _marshal_server_hello(msg::_ServerHelloMsg)::Vector{UInt8}
     msg.server_share !== nothing && msg.selected_group != 0x0000 &&
         throw(ArgumentError("server hello cannot encode both server_share and selected_group"))
+    msg.server_share !== nothing && isempty((msg.server_share::_TLSKeyShare).data) &&
+        throw(ArgumentError("server hello key share data must be non-empty"))
 
     exts = UInt8[]
     msg.ocsp_stapling && _append_extension!(exts, _HANDSHAKE_EXTENSION_STATUS_REQUEST)
@@ -1187,7 +1199,7 @@ function _unmarshal_server_hello(data::Vector{UInt8})::Union{_ServerHelloMsg, No
             else
                 group = _read_u16!(ext_reader)
                 key_share_data = _read_u16_length_prefixed_bytes!(ext_reader)
-                (group === nothing || key_share_data === nothing) && return nothing
+                (group === nothing || key_share_data === nothing || isempty(key_share_data)) && return nothing
                 msg.server_share = _TLSKeyShare(group, key_share_data)
             end
         elseif extension == _HANDSHAKE_EXTENSION_PRE_SHARED_KEY
@@ -1510,14 +1522,4 @@ function _transcript_update_handshake!(transcript::_TranscriptHash, msg::_Handsh
     data = _handshake_transcript_bytes(msg)
     _transcript_update!(transcript, data)
     return data
-end
-
-function _read_u32!(reader::_HandshakeReader)::Union{UInt32, Nothing}
-    reader.pos + 3 > length(reader.data) && return nothing
-    b1 = UInt32(reader.data[reader.pos])
-    b2 = UInt32(reader.data[reader.pos + 1])
-    b3 = UInt32(reader.data[reader.pos + 2])
-    b4 = UInt32(reader.data[reader.pos + 3])
-    reader.pos += 4
-    return (b1 << 24) | (b2 << 16) | (b3 << 8) | b4
 end

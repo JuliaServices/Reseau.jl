@@ -133,6 +133,7 @@ const _TLS13_FINISHED_VECTORS = (
         @test TLC._tls12_export_keying_material(TLC._HASH_SHA256, master, v.client_random, v.server_random, "resau exporter", UInt8[0x63, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74], 32) == v.ekm_context
         @test TLC._tls12_export_keying_material(TLC._HASH_SHA256, master, v.client_random, v.server_random, "resau exporter", nothing, 32) == v.ekm_no_context
         @test_throws ArgumentError TLC._tls12_export_keying_material(TLC._HASH_SHA256, master, v.client_random, v.server_random, "master secret", nothing, 16)
+        @test_throws ArgumentError TLC._tls12_export_keying_material(TLC._HASH_SHA256, master, v.client_random, v.server_random, "extended master secret", nothing, 16)
         @test_throws ArgumentError TLC._tls12_export_keying_material(TLC._HASH_SHA256, master, v.client_random, v.server_random, "resau exporter", fill(UInt8(0x61), 1 << 16), 16)
     end
 
@@ -204,5 +205,11 @@ const _TLS13_FINISHED_VECTORS = (
         @test TLC._tls13_finished_verify_data(TLC._HASH_SHA256, v.base_key, transcript) == v.verify_data
         exporter = TLC._TLS13ExporterMasterSecret(TLC._HASH_SHA256, _TLS13_ACVP_VECTORS.exporter_master_secret)
         @test TLC._tls13_exporter(exporter, "resau export", codeunits("phase0-export-context"), 24) == v.exporter_output
+    end
+
+    @testset "constant-time byte comparisons" begin
+        @test TLC._constant_time_equals(UInt8[0x01, 0x02, 0x03], UInt8[0x01, 0x02, 0x03])
+        @test !TLC._constant_time_equals(UInt8[0x01, 0x02, 0x03], UInt8[0x01, 0x02, 0x04])
+        @test !TLC._constant_time_equals(UInt8[0x01, 0x02], UInt8[0x01, 0x02, 0x03])
     end
 end

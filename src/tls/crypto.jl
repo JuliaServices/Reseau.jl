@@ -31,25 +31,68 @@ mutable struct _TranscriptHash{CTX<:SHA.SHA_CTX}
     buffer::Union{Nothing, Vector{UInt8}}
 end
 
-struct _TLS13EarlySecret
-    hash_kind::_TLSHashKind
-    secret::Vector{UInt8}
+@inline function _securezero!(bytes::Vector{UInt8})::Nothing
+    isempty(bytes) || Base.securezero!(bytes)
+    return nothing
 end
 
-struct _TLS13HandshakeSecret
-    hash_kind::_TLSHashKind
-    secret::Vector{UInt8}
+@inline function _constant_time_equals(a::AbstractVector{UInt8}, b::AbstractVector{UInt8})::Bool
+    length(a) == length(b) || return false
+    diff = UInt8(0)
+    @inbounds for i in eachindex(a, b)
+        diff |= xor(a[i], b[i])
+    end
+    return iszero(diff)
 end
 
-struct _TLS13MasterSecret
-    hash_kind::_TLSHashKind
-    secret::Vector{UInt8}
+function _finalize_tls13_secret!(secret)::Nothing
+    _securezero!(getfield(secret, :secret))
+    return nothing
 end
 
-struct _TLS13ExporterMasterSecret
+mutable struct _TLS13EarlySecret
     hash_kind::_TLSHashKind
     secret::Vector{UInt8}
+    function _TLS13EarlySecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
+        out = new(hash_kind, secret)
+        finalizer(_finalize_tls13_secret!, out)
+        return out
+    end
 end
+_TLS13EarlySecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13EarlySecret(hash_kind, Vector{UInt8}(secret))
+
+mutable struct _TLS13HandshakeSecret
+    hash_kind::_TLSHashKind
+    secret::Vector{UInt8}
+    function _TLS13HandshakeSecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
+        out = new(hash_kind, secret)
+        finalizer(_finalize_tls13_secret!, out)
+        return out
+    end
+end
+_TLS13HandshakeSecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13HandshakeSecret(hash_kind, Vector{UInt8}(secret))
+
+mutable struct _TLS13MasterSecret
+    hash_kind::_TLSHashKind
+    secret::Vector{UInt8}
+    function _TLS13MasterSecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
+        out = new(hash_kind, secret)
+        finalizer(_finalize_tls13_secret!, out)
+        return out
+    end
+end
+_TLS13MasterSecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13MasterSecret(hash_kind, Vector{UInt8}(secret))
+
+mutable struct _TLS13ExporterMasterSecret
+    hash_kind::_TLSHashKind
+    secret::Vector{UInt8}
+    function _TLS13ExporterMasterSecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
+        out = new(hash_kind, secret)
+        finalizer(_finalize_tls13_secret!, out)
+        return out
+    end
+end
+_TLS13ExporterMasterSecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13ExporterMasterSecret(hash_kind, Vector{UInt8}(secret))
 
 @inline function _tls13_cipher_spec(cipher_suite::UInt16)::Union{_TLS13CipherSpec, Nothing}
     cipher_suite == _TLS13_AES_128_GCM_SHA256_ID && return _TLS13_AES_128_GCM_SHA256
@@ -72,9 +115,13 @@ end
 
 @inline function _new_hmac_context(hash_kind::_TLSHashKind, key::AbstractVector{UInt8})
     key_bytes = key isa Vector{UInt8} ? copy(key) : Vector{UInt8}(key)
-    hash_kind == _HASH_SHA256 && return SHA.HMAC_CTX(SHA.SHA256_CTX(), key_bytes)
-    hash_kind == _HASH_SHA384 && return SHA.HMAC_CTX(SHA.SHA384_CTX(), key_bytes)
-    throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    try
+        hash_kind == _HASH_SHA256 && return SHA.HMAC_CTX(SHA.SHA256_CTX(), key_bytes)
+        hash_kind == _HASH_SHA384 && return SHA.HMAC_CTX(SHA.SHA384_CTX(), key_bytes)
+        throw(ArgumentError("unsupported TLS hash kind: $(hash_kind)"))
+    finally
+        _securezero!(key_bytes)
+    end
 end
 
 @inline function _empty_hash_digest(hash_kind::_TLSHashKind)::Vector{UInt8}
@@ -148,20 +195,31 @@ function _p_hash(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, seed::A
     out_len == 0 && return UInt8[]
     secret_bytes = Vector{UInt8}(secret)
     seed_bytes = Vector{UInt8}(seed)
-    a = _hmac_data(hash_kind, secret_bytes, seed_bytes)
-    out = UInt8[]
-    sizehint!(out, out_len)
-    while length(out) < out_len
-        append!(out, _hmac_data(hash_kind, secret_bytes, vcat(a, seed_bytes)))
-        a = _hmac_data(hash_kind, secret_bytes, a)
+    try
+        a = _hmac_data(hash_kind, secret_bytes, seed_bytes)
+        out = UInt8[]
+        sizehint!(out, out_len)
+        while length(out) < out_len
+            ctx = _new_hmac_context(hash_kind, secret_bytes)
+            SHA.update!(ctx, a)
+            isempty(seed_bytes) || SHA.update!(ctx, seed_bytes)
+            append!(out, SHA.digest!(ctx))
+            a = _hmac_data(hash_kind, secret_bytes, a)
+        end
+        resize!(out, out_len)
+        return out
+    finally
+        _securezero!(secret_bytes)
     end
-    resize!(out, out_len)
-    return out
 end
 
 function _tls12_prf(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, label::AbstractString, seed::AbstractVector{UInt8}, out_len::Int)::Vector{UInt8}
-    label_bytes = Vector{UInt8}(codeunits(label))
-    label_seed = vcat(label_bytes, Vector{UInt8}(seed))
+    label_bytes = codeunits(label)
+    seed_bytes = Vector{UInt8}(seed)
+    label_seed = UInt8[]
+    sizehint!(label_seed, length(label_bytes) + length(seed_bytes))
+    append!(label_seed, label_bytes)
+    append!(label_seed, seed_bytes)
     return _p_hash(hash_kind, secret, label_seed, out_len)
 end
 
@@ -200,12 +258,13 @@ function _tls12_export_keying_material(hash_kind::_TLSHashKind, master_secret::A
     label == _TLS12_CLIENT_FINISHED_LABEL && throw(ArgumentError("reserved ExportKeyingMaterial label: $(label)"))
     label == _TLS12_SERVER_FINISHED_LABEL && throw(ArgumentError("reserved ExportKeyingMaterial label: $(label)"))
     label == _TLS12_MASTER_SECRET_LABEL && throw(ArgumentError("reserved ExportKeyingMaterial label: $(label)"))
+    label == _TLS12_EXTENDED_MASTER_SECRET_LABEL && throw(ArgumentError("reserved ExportKeyingMaterial label: $(label)"))
     label == _TLS12_KEY_EXPANSION_LABEL && throw(ArgumentError("reserved ExportKeyingMaterial label: $(label)"))
     seed = vcat(Vector{UInt8}(client_random), Vector{UInt8}(server_random))
     if context !== nothing
         length(context) < (1 << 16) || throw(ArgumentError("ExportKeyingMaterial context too long"))
-        append!(seed, UInt8((length(context) >> 8) & 0xff))
-        append!(seed, UInt8(length(context) & 0xff))
+        push!(seed, UInt8((length(context) >> 8) & 0xff))
+        push!(seed, UInt8(length(context) & 0xff))
         append!(seed, context)
     end
     return _tls12_prf(hash_kind, master_secret, label, seed, out_len)
@@ -222,7 +281,12 @@ end
 function _hkdf_extract(hash_kind::_TLSHashKind, ikm::Union{Nothing, AbstractVector{UInt8}}, salt::Union{Nothing, AbstractVector{UInt8}})::Vector{UInt8}
     ikm_bytes = ikm === nothing ? zeros(UInt8, _hash_len(hash_kind)) : Vector{UInt8}(ikm)
     salt_bytes = salt === nothing ? zeros(UInt8, _hash_len(hash_kind)) : Vector{UInt8}(salt)
-    return _hmac_data(hash_kind, salt_bytes, ikm_bytes)
+    try
+        return _hmac_data(hash_kind, salt_bytes, ikm_bytes)
+    finally
+        _securezero!(ikm_bytes)
+        _securezero!(salt_bytes)
+    end
 end
 
 function _hkdf_expand(hash_kind::_TLSHashKind, prk::AbstractVector{UInt8}, info::AbstractVector{UInt8}, out_len::Int)::Vector{UInt8}
@@ -282,7 +346,11 @@ end
 
 function _tls13_handshake_secret(secret::_TLS13EarlySecret, shared_secret::AbstractVector{UInt8})
     derived = _tls13_derive_secret(secret.hash_kind, secret.secret, "derived", nothing)
-    return _TLS13HandshakeSecret(secret.hash_kind, _hkdf_extract(secret.hash_kind, shared_secret, derived))
+    try
+        return _TLS13HandshakeSecret(secret.hash_kind, _hkdf_extract(secret.hash_kind, shared_secret, derived))
+    finally
+        _securezero!(derived)
+    end
 end
 
 @inline function _tls13_client_handshake_traffic_secret(secret::_TLS13HandshakeSecret, transcript)::Vector{UInt8}
@@ -295,7 +363,11 @@ end
 
 function _tls13_master_secret(secret::_TLS13HandshakeSecret)
     derived = _tls13_derive_secret(secret.hash_kind, secret.secret, "derived", nothing)
-    return _TLS13MasterSecret(secret.hash_kind, _hkdf_extract(secret.hash_kind, nothing, derived))
+    try
+        return _TLS13MasterSecret(secret.hash_kind, _hkdf_extract(secret.hash_kind, nothing, derived))
+    finally
+        _securezero!(derived)
+    end
 end
 
 @inline function _tls13_client_application_traffic_secret(secret::_TLS13MasterSecret, transcript)::Vector{UInt8}
@@ -326,7 +398,11 @@ function _tls13_exporter(secret::_TLS13ExporterMasterSecret, label::AbstractStri
     out_len >= 0 || throw(ArgumentError("out_len must be >= 0"))
     exporter_secret = _tls13_derive_secret(secret.hash_kind, secret.secret, label, nothing)
     context_hash = _hash_data(secret.hash_kind, context)
-    return _tls13_expand_label(secret.hash_kind, exporter_secret, "exporter", context_hash, out_len)
+    try
+        return _tls13_expand_label(secret.hash_kind, exporter_secret, "exporter", context_hash, out_len)
+    finally
+        _securezero!(exporter_secret)
+    end
 end
 
 @inline function _tls13_next_traffic_secret(hash_kind::_TLSHashKind, traffic_secret::AbstractVector{UInt8})::Vector{UInt8}
@@ -345,7 +421,11 @@ end
 
 function _tls13_finished_verify_data(hash_kind::_TLSHashKind, base_key::AbstractVector{UInt8}, transcript)::Vector{UInt8}
     finished_key = _tls13_expand_label(hash_kind, base_key, "finished", UInt8[], _hash_len(hash_kind))
-    return _hmac_data(hash_kind, finished_key, _transcript_hash_input(hash_kind, transcript))
+    try
+        return _hmac_data(hash_kind, finished_key, _transcript_hash_input(hash_kind, transcript))
+    finally
+        _securezero!(finished_key)
+    end
 end
 
 @inline function _tls13_finished_verify_data(spec::_TLS13CipherSpec, base_key::AbstractVector{UInt8}, transcript)::Vector{UInt8}

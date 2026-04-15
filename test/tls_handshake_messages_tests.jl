@@ -278,7 +278,7 @@ function _random_server_hello(rng::AbstractRNG)
         alpn_protocol = rand(rng, Bool) ? _rand_ascii(rng, rand(rng, 1:8)) : "",
         scts = [rand(rng, UInt8, rand(rng, 1:10)) for _ in 1:rand(rng, 0:2)],
         supported_version = rand(rng, Bool) ? rand(rng, UInt16) : UInt16(0),
-        server_share = with_server_share && rand(rng, Bool) ? TLH._TLSKeyShare(rand(rng, UInt16), rand(rng, UInt8, rand(rng, 0:16))) : nothing,
+        server_share = with_server_share && rand(rng, Bool) ? TLH._TLSKeyShare(rand(rng, UInt16), rand(rng, UInt8, rand(rng, 1:16))) : nothing,
         selected_identity_present = rand(rng, Bool),
         selected_identity = rand(rng, UInt16),
         supported_points = rand(rng, Bool) ? rand(rng, UInt8, rand(rng, 1:4)) : UInt8[],
@@ -673,6 +673,16 @@ end
             scts = [UInt8[]],
         )
         @test TLH._unmarshal_handshake_message(TLH._marshal_handshake_message(zero_length_sct)) === nothing
+
+        empty_server_share = _server_hello_msg(
+            vers = TLH.TLS1_2_VERSION,
+            random = zeros(UInt8, 32),
+            cipher_suite = 0x1301,
+            compression_method = TLH._TLS_COMPRESSION_NONE,
+            supported_version = TLH.TLS1_3_VERSION,
+            server_share = TLH._TLSKeyShare(0x001d, UInt8[]),
+        )
+        @test_throws ArgumentError TLH._marshal_handshake_message(empty_server_share)
 
         empty_certificate_scts = _certificate_msg_tls13(
             certificates = [UInt8[0x01, 0x02, 0x03]],

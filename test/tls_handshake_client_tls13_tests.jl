@@ -69,7 +69,7 @@ function _compute_tls13_psk_server_flight(client_hello::TLHC._ClientHelloMsg, sh
     master_secret = TLHC._tls13_master_secret(handshake_secret)
     client_application_traffic_secret = TLHC._tls13_client_application_traffic_secret(master_secret, transcript)
     server_application_traffic_secret = TLHC._tls13_server_application_traffic_secret(master_secret, transcript)
-    exporter_master_secret = TLHC._tls13_exporter_master_secret(master_secret, transcript).secret
+    exporter_master_secret = TLHC._tls13_exporter_secret_for_test(TLHC._tls13_exporter_master_secret(master_secret, transcript))
 
     ticket = TLHC._NewSessionTicketMsgTLS13()
     ticket.lifetime = 0x01020304
@@ -144,6 +144,39 @@ end
 
         io = TLHC._HandshakeMessageFlightIO([server_hello_bytes])
         state = TLHC._TLS13ClientHandshakeState(_tls13_psk_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)
+
+        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        @test length(io.outbound) == 1
+    end
+
+    @testset "HelloRetryRequest is rejected explicitly for now" begin
+        shared_secret = UInt8[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]
+        psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
+        hello_retry = _tls13_psk_server_hello(UInt8[0xaa, 0xbb, 0xcc, 0xdd])
+        hello_retry.random = copy(TLHC._HELLO_RETRY_REQUEST_RANDOM)
+        hello_retry.cookie = UInt8[0x01, 0x02, 0x03]
+        hello_retry.server_share = nothing
+        hello_retry.selected_group = 0x001d
+        io = TLHC._HandshakeMessageFlightIO([TLHC._marshal_handshake_message(hello_retry)])
+        state = TLHC._TLS13ClientHandshakeState(_tls13_psk_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)
+
+        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        @test length(io.outbound) == 1
+    end
+
+    @testset "accepted early data is rejected until that path is implemented" begin
+        shared_secret = UInt8[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]
+        psk = UInt8[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]
+        client_hello = _tls13_psk_client_hello()
+        client_hello.early_data = true
+        expected = _compute_tls13_psk_server_flight(client_hello, shared_secret, psk)
+        encrypted_extensions = TLHC._EncryptedExtensionsMsg()
+        encrypted_extensions.alpn_protocol = "h2"
+        encrypted_extensions.early_data = true
+        encrypted_extensions_bytes = TLHC._marshal_handshake_message(encrypted_extensions)
+        io = TLHC._HandshakeMessageFlightIO([expected.inbound[1], encrypted_extensions_bytes, expected.inbound[3]])
+        state = TLHC._TLS13ClientHandshakeState(_tls13_psk_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)
+        state.client_hello.early_data = true
 
         @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
         @test length(io.outbound) == 1

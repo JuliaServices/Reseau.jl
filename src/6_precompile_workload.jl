@@ -470,7 +470,7 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     master_secret = TL._tls13_master_secret(handshake_secret)
     client_application_traffic_secret = TL._tls13_client_application_traffic_secret(master_secret, transcript)
     server_application_traffic_secret = TL._tls13_server_application_traffic_secret(master_secret, transcript)
-    exporter_master_secret = TL._tls13_exporter_master_secret(master_secret, transcript).secret
+    exporter_master_secret = TL._tls13_exporter_secret_for_test(TL._tls13_exporter_master_secret(master_secret, transcript))
 
     new_session_ticket = TL._NewSessionTicketMsgTLS13()
     new_session_ticket.lifetime = 0x01020304
@@ -480,7 +480,7 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     new_session_ticket.max_early_data = 0x0b0c0d0e
     new_session_ticket_bytes = TL._marshal_handshake_message(new_session_ticket)
 
-    state = TL._TLS13ClientHandshakeState(_pc_tls13_client_hello(), TL._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)
+    state = TL._TLS13ClientHandshakeState(_pc_tls13_client_hello(), TL._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)::TL._TLS13ClientHandshakeState{TL._HASH_SHA256}
     io = TL._HandshakeMessageFlightIO([server_hello_bytes, encrypted_extensions_bytes, server_finished_bytes, new_session_ticket_bytes])
     TL._client_handshake_tls13!(state, io)
 
@@ -494,6 +494,7 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     state.server_application_traffic_secret == server_application_traffic_secret || throw(ArgumentError("TLS 1.3 workload server application secret mismatch"))
     state.exporter_master_secret == exporter_master_secret || throw(ArgumentError("TLS 1.3 workload exporter secret mismatch"))
     state.peer_new_session_tickets == [new_session_ticket] || throw(ArgumentError("TLS 1.3 workload session ticket mismatch"))
+    TL._securezero_tls13_client_handshake_state!(state)
     return nothing
 end
 
