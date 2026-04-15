@@ -1,6 +1,9 @@
 const _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256 = UInt16(0x0403)
 const _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384 = UInt16(0x0503)
 const _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512 = UInt16(0x0603)
+const _TLS_SIGNATURE_RSA_PKCS1_SHA256 = UInt16(0x0401)
+const _TLS_SIGNATURE_RSA_PKCS1_SHA384 = UInt16(0x0501)
+const _TLS_SIGNATURE_RSA_PKCS1_SHA512 = UInt16(0x0601)
 const _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256 = UInt16(0x0804)
 const _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384 = UInt16(0x0805)
 const _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512 = UInt16(0x0806)
@@ -52,6 +55,11 @@ end
     return nothing
 end
 
+@inline function _free_evp_cipher_ctx!(ctx::Ptr{Cvoid})::Nothing
+    ctx == C_NULL || ccall((:EVP_CIPHER_CTX_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+    return nothing
+end
+
 @inline function _free_bio!(bio::Ptr{Cvoid})::Nothing
     bio == C_NULL || ccall((:BIO_free, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), bio)
     return nothing
@@ -59,6 +67,21 @@ end
 
 @inline function _free_x509!(x509::Ptr{Cvoid})::Nothing
     x509 == C_NULL || ccall((:X509_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), x509)
+    return nothing
+end
+
+@inline function _free_x509_store!(store::Ptr{Cvoid})::Nothing
+    store == C_NULL || ccall((:X509_STORE_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), store)
+    return nothing
+end
+
+@inline function _free_x509_store_ctx!(ctx::Ptr{Cvoid})::Nothing
+    ctx == C_NULL || ccall((:X509_STORE_CTX_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+    return nothing
+end
+
+@inline function _free_openssl_stack!(stack::Ptr{Cvoid})::Nothing
+    stack == C_NULL || ccall((:OPENSSL_sk_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), stack)
     return nothing
 end
 
@@ -82,6 +105,10 @@ struct _TLS13RSAPSSParams
     saltlen::Vector{UInt8}
     params::Vector{_OpenSSLParam}
 end
+
+const _EVP_CTRL_AEAD_SET_IVLEN = Cint(0x9)
+const _EVP_CTRL_AEAD_GET_TAG = Cint(0x10)
+const _EVP_CTRL_AEAD_SET_TAG = Cint(0x11)
 
 @inline function _tls13_signature_verify_spec(signature_algorithm::UInt16)::_TLS13SignatureVerifySpec
     signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256 && return _TLS13SignatureVerifySpec(256, false, false)
@@ -245,6 +272,121 @@ function _tls13_pubkey_from_der_certificate(cert_der::AbstractVector{UInt8})::Pt
         return _openssl_require_nonnull(pkey, "X509_get_pubkey")
     finally
         _free_x509!(x509)
+    end
+end
+
+function _tls13_load_verify_locations!(store::Ptr{Cvoid}, ca_path::AbstractString)::Nothing
+    ok = if isdir(ca_path)
+        ccall(
+            (:X509_STORE_load_locations, _LIBCRYPTO_PATH),
+            Cint,
+            (Ptr{Cvoid}, Cstring, Cstring),
+            store,
+            C_NULL,
+            ca_path,
+        )
+    else
+        ccall(
+            (:X509_STORE_load_locations, _LIBCRYPTO_PATH),
+            Cint,
+            (Ptr{Cvoid}, Cstring, Cstring),
+            store,
+            ca_path,
+            C_NULL,
+        )
+    end
+    _openssl_require_ok(ok, "X509_STORE_load_locations")
+    return nothing
+end
+
+function _tls13_verify_server_certificate_chain(
+    certificates::Vector{Vector{UInt8}},
+    server_name::AbstractString;
+    verify_peer::Bool,
+    ca_file::Union{Nothing, String},
+)::Ptr{Cvoid}
+    isempty(certificates) && throw(ArgumentError("tls: received empty certificates message"))
+    x509s = Ptr{Cvoid}[]
+    store = Ptr{Cvoid}(C_NULL)
+    store_ctx = Ptr{Cvoid}(C_NULL)
+    untrusted = Ptr{Cvoid}(C_NULL)
+    try
+        for cert in certificates
+            push!(x509s, _tls13_load_x509_der(cert))
+        end
+        leaf = x509s[1]
+        if verify_peer
+            ca_file === nothing && throw(ArgumentError("tls: certificate verification requires a CA roots path"))
+            store = ccall((:X509_STORE_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+            _openssl_require_nonnull(store, "X509_STORE_new")
+            _tls13_load_verify_locations!(store, ca_file::String)
+            store_ctx = ccall((:X509_STORE_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+            _openssl_require_nonnull(store_ctx, "X509_STORE_CTX_new")
+            if length(x509s) > 1
+                untrusted = ccall((:OPENSSL_sk_new_null, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+                _openssl_require_nonnull(untrusted, "OPENSSL_sk_new_null")
+                for x509 in @view x509s[2:end]
+                    ok = ccall((:OPENSSL_sk_push, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), untrusted, x509)
+                    ok > 0 || throw(_make_tls_error("OPENSSL_sk_push", Int32(ok)))
+                end
+            end
+            ok = ccall(
+                (:X509_STORE_CTX_init, _LIBCRYPTO_PATH),
+                Cint,
+                (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+                store_ctx,
+                store,
+                leaf,
+                untrusted,
+            )
+            _openssl_require_ok(ok, "X509_STORE_CTX_init")
+            ok = ccall((:X509_STORE_CTX_set_default, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cstring), store_ctx, "ssl_server")
+            _openssl_require_ok(ok, "X509_STORE_CTX_set_default")
+            param = ccall((:X509_STORE_CTX_get0_param, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), store_ctx)
+            _openssl_require_nonnull(param, "X509_STORE_CTX_get0_param")
+            normalized_server_name = String(server_name)
+            if !isempty(normalized_server_name)
+                if _is_ip_literal_name(normalized_server_name)
+                    verify_ip = _verify_ip(normalized_server_name)
+                    ok = ccall(
+                        (:X509_VERIFY_PARAM_set1_ip_asc, _LIBCRYPTO_PATH),
+                        Cint,
+                        (Ptr{Cvoid}, Cstring),
+                        param,
+                        verify_ip,
+                    )
+                    _openssl_require_ok(ok, "X509_VERIFY_PARAM_set1_ip_asc")
+                else
+                    verify_name = _verify_name(normalized_server_name)
+                    ok = ccall(
+                        (:X509_VERIFY_PARAM_set1_host, _LIBCRYPTO_PATH),
+                        Cint,
+                        (Ptr{Cvoid}, Cstring, Csize_t),
+                        param,
+                        verify_name,
+                        Csize_t(length(verify_name)),
+                    )
+                    _openssl_require_ok(ok, "X509_VERIFY_PARAM_set1_host")
+                end
+            end
+            ok = ccall((:X509_verify_cert, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
+            if ok != 1
+                err = ccall((:X509_STORE_CTX_get_error, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
+                depth = ccall((:X509_STORE_CTX_get_error_depth, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
+                msg_ptr = ccall((:X509_verify_cert_error_string, _LIBCRYPTO_PATH), Cstring, (Clong,), Clong(err))
+                msg = msg_ptr == C_NULL ? "unknown certificate verification failure" : unsafe_string(msg_ptr)
+                throw(ArgumentError("tls: certificate verification failed at depth $(depth): $(msg)"))
+            end
+        end
+        pkey = ccall((:X509_get_pubkey, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), leaf)
+        return _openssl_require_nonnull(pkey, "X509_get_pubkey")
+    finally
+        _free_x509_store_ctx!(store_ctx)
+        _free_openssl_stack!(untrusted)
+        _free_x509_store!(store)
+        for x509 in x509s
+            _free_x509!(x509)
+        end
     end
 end
 
@@ -586,5 +728,133 @@ function _tls13_openssl_sign_from_pem(signature_algorithm::UInt16, signed::Abstr
         return _tls13_openssl_sign_signature(pkey, signature_algorithm, signed)
     finally
         _free_evp_pkey!(pkey)
+    end
+end
+
+@inline function _tls13_record_cipher(spec::_TLS13CipherSpec)::Ptr{Cvoid}
+    spec == _TLS13_AES_128_GCM_SHA256 && return ccall((:EVP_aes_128_gcm, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+    spec == _TLS13_AES_256_GCM_SHA384 && return ccall((:EVP_aes_256_gcm, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+    throw(ArgumentError("tls13 native record layer only supports AES-GCM cipher suites"))
+end
+
+function _tls13_encrypt_record_aead(
+    spec::_TLS13CipherSpec,
+    key::AbstractVector{UInt8},
+    iv::AbstractVector{UInt8},
+    additional_data::AbstractVector{UInt8},
+    plaintext::AbstractVector{UInt8},
+)::Vector{UInt8}
+    key_bytes = key isa Vector{UInt8} ? key : Vector{UInt8}(key)
+    iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
+    aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
+    plaintext_bytes = plaintext isa Vector{UInt8} ? plaintext : Vector{UInt8}(plaintext)
+    ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+    _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
+    ciphertext = Vector{UInt8}(undef, length(plaintext_bytes) + 16)
+    tag = Vector{UInt8}(undef, 16)
+    out_len = Ref{Cint}(0)
+    total = 0
+    try
+        cipher = _tls13_record_cipher(spec)
+        ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
+        _openssl_require_ok(ok, "EVP_EncryptInit_ex")
+        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(length(iv_bytes)), C_NULL)
+        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
+        GC.@preserve key_bytes iv_bytes begin
+            ok = ccall((:EVP_EncryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
+            _openssl_require_ok(ok, "EVP_EncryptInit_ex(key/iv)")
+        end
+        if !isempty(aad_bytes)
+            GC.@preserve aad_bytes begin
+                ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, pointer(aad_bytes), Cint(length(aad_bytes)))
+                _openssl_require_ok(ok, "EVP_EncryptUpdate(aad)")
+            end
+        end
+        if !isempty(plaintext_bytes)
+            GC.@preserve plaintext_bytes ciphertext begin
+                ok = ccall((:EVP_EncryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, pointer(ciphertext), out_len, pointer(plaintext_bytes), Cint(length(plaintext_bytes)))
+                _openssl_require_ok(ok, "EVP_EncryptUpdate")
+            end
+            total += Int(out_len[])
+        end
+        GC.@preserve ciphertext begin
+            ok = ccall((:EVP_EncryptFinal_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}), ctx, pointer(ciphertext, total + 1), out_len)
+            _openssl_require_ok(ok, "EVP_EncryptFinal_ex")
+        end
+        total += Int(out_len[])
+        GC.@preserve tag begin
+            ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_GET_TAG, Cint(length(tag)), pointer(tag))
+            _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(GET_TAG)")
+        end
+        resize!(ciphertext, total)
+        append!(ciphertext, tag)
+        return ciphertext
+    finally
+        _free_evp_cipher_ctx!(ctx)
+    end
+end
+
+function _tls13_decrypt_record_aead(
+    spec::_TLS13CipherSpec,
+    key::AbstractVector{UInt8},
+    iv::AbstractVector{UInt8},
+    additional_data::AbstractVector{UInt8},
+    ciphertext_and_tag::AbstractVector{UInt8},
+)::Union{Vector{UInt8}, Nothing}
+    length(ciphertext_and_tag) >= 16 || throw(ArgumentError("tls: TLS 1.3 ciphertext is missing the authentication tag"))
+    key_bytes = key isa Vector{UInt8} ? key : Vector{UInt8}(key)
+    iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
+    aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
+    ciphertext_len = length(ciphertext_and_tag) - 16
+    ciphertext = Vector{UInt8}(undef, ciphertext_len)
+    copyto!(ciphertext, 1, ciphertext_and_tag, 1, ciphertext_len)
+    tag = Vector{UInt8}(undef, 16)
+    copyto!(tag, 1, ciphertext_and_tag, ciphertext_len + 1, 16)
+    plaintext = Vector{UInt8}(undef, ciphertext_len)
+    ctx = ccall((:EVP_CIPHER_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+    _openssl_require_nonnull(ctx, "EVP_CIPHER_CTX_new")
+    out_len = Ref{Cint}(0)
+    total = 0
+    try
+        cipher = _tls13_record_cipher(spec)
+        ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, cipher, C_NULL, Ptr{UInt8}(C_NULL), Ptr{UInt8}(C_NULL))
+        _openssl_require_ok(ok, "EVP_DecryptInit_ex")
+        ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_IVLEN, Cint(length(iv_bytes)), C_NULL)
+        _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_IVLEN)")
+        GC.@preserve key_bytes iv_bytes begin
+            ok = ccall((:EVP_DecryptInit_ex, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Ptr{UInt8}), ctx, C_NULL, C_NULL, pointer(key_bytes), pointer(iv_bytes))
+            _openssl_require_ok(ok, "EVP_DecryptInit_ex(key/iv)")
+        end
+        if !isempty(aad_bytes)
+            GC.@preserve aad_bytes begin
+                ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, Ptr{UInt8}(C_NULL), out_len, pointer(aad_bytes), Cint(length(aad_bytes)))
+                _openssl_require_ok(ok, "EVP_DecryptUpdate(aad)")
+            end
+        end
+        if !isempty(ciphertext)
+            GC.@preserve ciphertext plaintext begin
+                ok = ccall((:EVP_DecryptUpdate, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}, Ptr{UInt8}, Cint), ctx, pointer(plaintext), out_len, pointer(ciphertext), Cint(length(ciphertext)))
+                _openssl_require_ok(ok, "EVP_DecryptUpdate")
+            end
+            total += Int(out_len[])
+        end
+        GC.@preserve tag begin
+            ok = ccall((:EVP_CIPHER_CTX_ctrl, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cint, Cint, Ptr{Cvoid}), ctx, _EVP_CTRL_AEAD_SET_TAG, Cint(length(tag)), pointer(tag))
+            _openssl_require_ok(ok, "EVP_CIPHER_CTX_ctrl(SET_TAG)")
+        end
+        final_ok = GC.@preserve plaintext ccall(
+            (:EVP_DecryptFinal_ex, _LIBCRYPTO_PATH),
+            Cint,
+            (Ptr{Cvoid}, Ptr{UInt8}, Ref{Cint}),
+            ctx,
+            pointer(plaintext, total + 1),
+            out_len,
+        )
+        final_ok == 1 || return nothing
+        total += Int(out_len[])
+        resize!(plaintext, total)
+        return plaintext
+    finally
+        _free_evp_cipher_ctx!(ctx)
     end
 end

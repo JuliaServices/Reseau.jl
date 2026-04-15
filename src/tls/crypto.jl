@@ -351,7 +351,7 @@ function _tls13_derive_secret(hash_kind::_TLSHashKind, secret::AbstractVector{UI
     return _tls13_expand_label(hash_kind, secret, label, context, _hash_len(hash_kind))
 end
 
-function _tls13_early_secret(hash_kind::_TLSHashKind, psk::AbstractVector{UInt8})
+function _tls13_early_secret(hash_kind::_TLSHashKind, psk::Union{Nothing, AbstractVector{UInt8}})
     return _TLS13EarlySecret(hash_kind, _hkdf_extract(hash_kind, psk, nothing))
 end
 

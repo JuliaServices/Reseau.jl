@@ -459,7 +459,7 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     server_hello_bytes = TL._marshal_handshake_message(server_hello)
     TL._transcript_update!(transcript, server_hello_bytes)
 
-    early_secret = TL._tls13_early_secret(TL._HASH_SHA256, UInt8[])
+    early_secret = TL._tls13_early_secret(TL._HASH_SHA256, nothing)
     handshake_secret = TL._tls13_handshake_secret(early_secret, shared_secret)
     client_handshake_traffic_secret = TL._tls13_client_handshake_traffic_secret(handshake_secret, transcript)
     server_handshake_traffic_secret = TL._tls13_server_handshake_traffic_secret(handshake_secret, transcript)

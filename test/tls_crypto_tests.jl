@@ -85,6 +85,9 @@ const _TLS13_FINISHED_VECTORS = (
     exporter_output = _tls_hexbytes("49563554eec99118ba93ac31bea69ae70afd409294820191"),
 )
 
+const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
+    _tls_hexbytes("33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a")
+
 @testset "TLS crypto phase 0" begin
     @testset "transcript hashing matches chunked updates" begin
         chunk1 = UInt8[0x61, 0x62]
@@ -195,6 +198,11 @@ const _TLS13_FINISHED_VECTORS = (
 
         TLC._transcript_update!(transcript, v.finished_client_random)
         @test TLC._tls13_resumption_master_secret(master, transcript) == v.resumption_master_secret
+    end
+
+    @testset "TLS 1.3 absent-PSK early secret follows Go semantics" begin
+        @test TLC._tls13_early_secret(TLC._HASH_SHA256, nothing).secret == _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256
+        @test TLC._tls13_early_secret(TLC._HASH_SHA256, UInt8[]).secret != _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256
     end
 
     @testset "TLS 1.3 finished MAC and exporter helpers" begin

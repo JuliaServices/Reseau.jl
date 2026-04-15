@@ -24,6 +24,27 @@ _HandshakeMessageFlightIO(inbound::Vector{Vector{UInt8}}) = _HandshakeMessageFli
     return length(io.inbound) - io.inbound_pos + 1
 end
 
+@inline function _write_handshake_bytes!(io::_HandshakeMessageFlightIO, raw::Vector{UInt8})::Nothing
+    push!(io.outbound, raw)
+    return nothing
+end
+
+@inline function _tls13_send_dummy_change_cipher_spec!(::_HandshakeMessageFlightIO)::Nothing
+    return nothing
+end
+
+@inline function _tls13_on_handshake_keys!(::_HandshakeMessageFlightIO, _state)::Nothing
+    return nothing
+end
+
+@inline function _tls13_on_server_finished!(::_HandshakeMessageFlightIO, _state)::Nothing
+    return nothing
+end
+
+@inline function _tls13_on_client_finished!(::_HandshakeMessageFlightIO, _state)::Nothing
+    return nothing
+end
+
 function _read_handshake_bytes!(io::_HandshakeMessageFlightIO)::Vector{UInt8}
     io.inbound_pos <= length(io.inbound) || throw(EOFError("tls13 handshake queue exhausted"))
     raw = io.inbound[io.inbound_pos]
@@ -124,10 +145,21 @@ function _TLS13OpenSSLKeyShareProvider(; fixed_private_key::Union{Nothing, Abstr
 end
 
 mutable struct _TLS13OpenSSLCertificateVerifier
+    verify_peer::Bool
+    ca_file::Union{Nothing, String}
     leaf_public_key::Ptr{Cvoid}
 end
 
-_TLS13OpenSSLCertificateVerifier() = _TLS13OpenSSLCertificateVerifier(C_NULL)
+function _TLS13OpenSSLCertificateVerifier(;
+    verify_peer::Bool = false,
+    ca_file::Union{Nothing, AbstractString} = nothing,
+)
+    return _TLS13OpenSSLCertificateVerifier(
+        verify_peer,
+        ca_file === nothing ? nothing : String(ca_file),
+        C_NULL,
+    )
+end
 
 @inline _copy_tls13_key_share(share::_TLSKeyShare) = _TLSKeyShare(share.group, copy(share.data))
 
@@ -227,11 +259,16 @@ end
 function _tls13_verify_server_certificates!(
     verifier::_TLS13OpenSSLCertificateVerifier,
     certificate_msg::_CertificateMsgTLS13,
-    ::AbstractString,
+    server_name::AbstractString,
 )::Nothing
     isempty(certificate_msg.certificates) && throw(ArgumentError("tls: received empty certificates message"))
     verifier.leaf_public_key == C_NULL || _free_evp_pkey!(verifier.leaf_public_key)
-    verifier.leaf_public_key = _tls13_pubkey_from_der_certificate(certificate_msg.certificates[1])
+    verifier.leaf_public_key = _tls13_verify_server_certificate_chain(
+        certificate_msg.certificates,
+        server_name;
+        verify_peer = verifier.verify_peer,
+        ca_file = verifier.ca_file,
+    )
     return nothing
 end
 
@@ -500,14 +537,14 @@ function _compute_and_update_psk_binders!(
     return nothing
 end
 
-function _write_client_hello!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+function _write_client_hello!(state::_TLS13ClientHandshakeState, io)::Nothing
     in(TLS1_3_VERSION, state.client_hello.supported_versions) || throw(ArgumentError("tls13 client handshake requires supported_versions to include TLS 1.3"))
     in(state.cipher_suite, state.client_hello.cipher_suites) || throw(ArgumentError("tls13 client handshake requires the selected cipher suite in ClientHello"))
     isempty(state.client_hello.key_shares) && throw(ArgumentError("tls13 client handshake requires at least one key share"))
     state.has_psk && _compute_and_update_psk_binders!(state)
     raw = _marshal_client_hello(state.client_hello)
     _transcript_update!(state.transcript, raw)
-    push!(io.outbound, raw)
+    _write_handshake_bytes!(io, raw)
     return nothing
 end
 
@@ -531,7 +568,7 @@ function _check_server_hello_or_hrr!(state::_TLS13ClientHandshakeState)::Nothing
     return nothing
 end
 
-function _read_server_hello!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+function _read_server_hello!(state::_TLS13ClientHandshakeState, io)::Nothing
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_server_hello(raw)
     msg === nothing && throw(ArgumentError("tls13 client handshake expected ServerHello"))
@@ -558,7 +595,7 @@ function _tls13_reset_transcript_for_hrr!(state::_TLS13ClientHandshakeState{HK})
     return nothing
 end
 
-function _process_hello_retry_request!(state::_TLS13ClientHandshakeState{HK}, io::_HandshakeMessageFlightIO)::Nothing where {HK}
+function _process_hello_retry_request!(state::_TLS13ClientHandshakeState{HK}, io)::Nothing where {HK}
     server_hello = state.server_hello
     (server_hello.selected_group == 0x0000 && isempty(server_hello.cookie)) &&
         throw(ArgumentError("tls: server sent an unnecessary HelloRetryRequest message"))
@@ -569,7 +606,7 @@ function _process_hello_retry_request!(state::_TLS13ClientHandshakeState{HK}, io
     state.has_psk && _compute_and_update_psk_binders!(state, state.transcript)
     raw = _marshal_client_hello(state.client_hello)
     _transcript_update!(state.transcript, raw)
-    push!(io.outbound, raw)
+    _write_handshake_bytes!(io, raw)
     _read_server_hello!(state, io)
     state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && throw(ArgumentError("tls: server sent two HelloRetryRequest messages"))
     return nothing
@@ -608,7 +645,7 @@ end
 
 function _establish_handshake_keys!(state::_TLS13ClientHandshakeState{HK})::Nothing where {HK}
     isempty(state.shared_secret) && throw(ArgumentError("tls13 client handshake needs a shared secret before establishing handshake keys"))
-    early_secret = state.using_psk ? _tls13_early_secret(HK, state.psk) : _tls13_early_secret(HK, UInt8[])
+    early_secret = state.using_psk ? _tls13_early_secret(HK, state.psk) : _tls13_early_secret(HK, nothing)
     handshake_secret = _tls13_handshake_secret(early_secret, state.shared_secret)
     master_secret = _tls13_master_secret(handshake_secret)
     try
@@ -628,7 +665,7 @@ function _establish_handshake_keys!(state::_TLS13ClientHandshakeState{HK})::Noth
     return nothing
 end
 
-function _read_server_parameters!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+function _read_server_parameters!(state::_TLS13ClientHandshakeState, io)::Nothing
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_encrypted_extensions(raw)
     msg === nothing && throw(ArgumentError("tls13 client handshake expected EncryptedExtensions"))
@@ -664,7 +701,7 @@ function _tls13_signed_message(context::AbstractString, transcript::_TranscriptH
     return out
 end
 
-function _read_server_certificate!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+function _read_server_certificate!(state::_TLS13ClientHandshakeState, io)::Nothing
     state.using_psk && return nothing
 
     raw = _read_handshake_bytes!(io)
@@ -701,7 +738,7 @@ function _read_server_certificate!(state::_TLS13ClientHandshakeState, io::_Hands
     return nothing
 end
 
-function _read_server_finished!(state::_TLS13ClientHandshakeState{HK}, io::_HandshakeMessageFlightIO)::Nothing where {HK}
+function _read_server_finished!(state::_TLS13ClientHandshakeState{HK}, io)::Nothing where {HK}
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_finished(raw)
     msg === nothing && throw(ArgumentError("tls13 client handshake expected Finished"))
@@ -725,25 +762,25 @@ function _read_server_finished!(state::_TLS13ClientHandshakeState{HK}, io::_Hand
     return nothing
 end
 
-function _send_client_certificate!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+function _send_client_certificate!(state::_TLS13ClientHandshakeState, io)::Nothing
     state.have_certificate_request || return nothing
     raw = _marshal_certificate_tls13(_CertificateMsgTLS13())
     _transcript_update!(state.transcript, raw)
-    push!(io.outbound, raw)
+    _write_handshake_bytes!(io, raw)
     return nothing
 end
 
-function _send_client_finished!(state::_TLS13ClientHandshakeState{HK}, io::_HandshakeMessageFlightIO)::Nothing where {HK}
+function _send_client_finished!(state::_TLS13ClientHandshakeState{HK}, io)::Nothing where {HK}
     verify_data = _tls13_finished_verify_data(HK, state.client_handshake_traffic_secret, state.transcript)
     state.client_finished = _FinishedMsg(verify_data)
     state.have_client_finished = true
     raw = _marshal_finished(state.client_finished)
     _transcript_update!(state.transcript, raw)
-    push!(io.outbound, raw)
+    _write_handshake_bytes!(io, raw)
     return nothing
 end
 
-function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io)::Nothing
     while _remaining_handshake_messages(io) > 0
         raw = _read_handshake_bytes!(io)
         msg = _unmarshal_new_session_ticket_tls13(raw)
@@ -757,19 +794,26 @@ function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io::_
     return nothing
 end
 
-function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
+function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io)::Nothing
     state.complete && throw(ArgumentError("tls13 client handshake already complete"))
     _write_client_hello!(state, io)
     _read_server_hello!(state, io)
-    state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && _process_hello_retry_request!(state, io)
+    if state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM
+        _tls13_send_dummy_change_cipher_spec!(io)
+        _process_hello_retry_request!(state, io)
+    end
     _transcript_update!(state.transcript, state.server_hello_raw)
     _process_server_hello!(state)
+    _tls13_send_dummy_change_cipher_spec!(io)
     _establish_handshake_keys!(state)
+    _tls13_on_handshake_keys!(io, state)
     _read_server_parameters!(state, io)
     _read_server_certificate!(state, io)
     _read_server_finished!(state, io)
+    _tls13_on_server_finished!(io, state)
     _send_client_certificate!(state, io)
     _send_client_finished!(state, io)
+    _tls13_on_client_finished!(io, state)
     state.complete = true
     _read_post_handshake_messages!(state, io)
     return nothing

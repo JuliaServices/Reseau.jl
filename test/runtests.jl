@@ -30,6 +30,7 @@ test_files = [
     "tls_crypto_tests.jl",
     "tls_handshake_messages_tests.jl",
     "tls_handshake_client_tls13_tests.jl",
+    "tls_native_tls13_tests.jl",
     "tls_tests.jl",
     "trim_compile_tests.jl",
 ]

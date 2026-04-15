@@ -229,7 +229,7 @@ function _compute_tls13_certificate_server_flight(
     push!(inbound, server_hello_bytes)
     TLHC._transcript_update!(transcript, server_hello_bytes)
 
-    early_secret = TLHC._tls13_early_secret(TLHC._HASH_SHA256, UInt8[])
+    early_secret = TLHC._tls13_early_secret(TLHC._HASH_SHA256, nothing)
     handshake_secret = TLHC._tls13_handshake_secret(early_secret, shared_secret)
     client_handshake_traffic_secret = TLHC._tls13_client_handshake_traffic_secret(handshake_secret, transcript)
     server_handshake_traffic_secret = TLHC._tls13_server_handshake_traffic_secret(handshake_secret, transcript)
@@ -332,7 +332,7 @@ function _compute_tls13_real_certificate_server_flight(client_hello::TLHC._Clien
     inbound = [server_hello_bytes]
     TLHC._transcript_update!(transcript, server_hello_bytes)
 
-    early_secret = TLHC._tls13_early_secret(TLHC._HASH_SHA256, UInt8[])
+    early_secret = TLHC._tls13_early_secret(TLHC._HASH_SHA256, nothing)
     handshake_secret = TLHC._tls13_handshake_secret(early_secret, shared_secret)
     client_handshake_traffic_secret = TLHC._tls13_client_handshake_traffic_secret(handshake_secret, transcript)
     server_handshake_traffic_secret = TLHC._tls13_server_handshake_traffic_secret(handshake_secret, transcript)

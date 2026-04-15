@@ -1,0 +1,452 @@
+const _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC = UInt8(20)
+const _TLS_RECORD_TYPE_ALERT = UInt8(21)
+const _TLS_RECORD_TYPE_HANDSHAKE = UInt8(22)
+const _TLS_RECORD_TYPE_APPLICATION_DATA = UInt8(23)
+
+const _TLS_ALERT_LEVEL_WARNING = UInt8(1)
+const _TLS_ALERT_CLOSE_NOTIFY = UInt8(0)
+const _TLS13_AEAD_TAG_SIZE = 16
+const _TLS13_MAX_PLAINTEXT = 16_384
+const _TLS13_MAX_CIPHERTEXT = _TLS13_MAX_PLAINTEXT + 256
+const _TLS13_HANDSHAKE_TYPE_KEY_UPDATE = UInt8(24)
+const _TLS13_KEY_UPDATE_NOT_REQUESTED = UInt8(0)
+const _TLS13_KEY_UPDATE_REQUESTED = UInt8(1)
+const _TLS13_DUMMY_CHANGE_CIPHER_SPEC = UInt8[0x01]
+
+mutable struct _TLS13RecordCipherState
+    spec::_TLS13CipherSpec
+    traffic_secret::Vector{UInt8}
+    key::Vector{UInt8}
+    iv::Vector{UInt8}
+    seq::UInt64
+    exhausted::Bool
+end
+
+function _TLS13RecordCipherState(spec::_TLS13CipherSpec, traffic_secret::AbstractVector{UInt8})
+    key, iv = _tls13_traffic_key(spec, traffic_secret)
+    return _TLS13RecordCipherState(
+        spec,
+        Vector{UInt8}(traffic_secret),
+        key,
+        iv,
+        UInt64(0),
+        false,
+    )
+end
+
+mutable struct _TLS13NativeClientState
+    read_cipher::Union{Nothing, _TLS13RecordCipherState}
+    write_cipher::Union{Nothing, _TLS13RecordCipherState}
+    handshake_buffer::Vector{UInt8}
+    handshake_buffer_pos::Int
+    plaintext_buffer::Vector{UInt8}
+    plaintext_buffer_pos::Int
+    peer_close_notify::Bool
+    sent_close_notify::Bool
+    sent_dummy_ccs::Bool
+end
+
+_TLS13NativeClientState() = _TLS13NativeClientState(
+    nothing,
+    nothing,
+    UInt8[],
+    1,
+    UInt8[],
+    1,
+    false,
+    false,
+    false,
+)
+
+mutable struct _TLS13HandshakeRecordIO
+    tcp::TCP.Conn
+    state::_TLS13NativeClientState
+end
+
+@inline function _tls13_buffer_available(buf::Vector{UInt8}, pos::Int)::Int
+    return max(0, length(buf) - pos + 1)
+end
+
+function _tls13_compact_buffer!(buf::Vector{UInt8}, pos::Int)::Int
+    pos <= 1 && return 1
+    if pos > length(buf)
+        empty!(buf)
+        return 1
+    end
+    remaining = length(buf) - pos + 1
+    copyto!(buf, 1, buf, pos, remaining)
+    resize!(buf, remaining)
+    return 1
+end
+
+function _securezero_tls13_record_cipher!(cipher::_TLS13RecordCipherState)::Nothing
+    _securezero!(cipher.traffic_secret)
+    _securezero!(cipher.key)
+    _securezero!(cipher.iv)
+    cipher.seq = UInt64(0)
+    cipher.exhausted = false
+    return nothing
+end
+
+function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState)::Nothing
+    if state.read_cipher !== nothing
+        _securezero_tls13_record_cipher!(state.read_cipher::_TLS13RecordCipherState)
+        state.read_cipher = nothing
+    end
+    if state.write_cipher !== nothing
+        _securezero_tls13_record_cipher!(state.write_cipher::_TLS13RecordCipherState)
+        state.write_cipher = nothing
+    end
+    _securezero!(state.handshake_buffer)
+    _securezero!(state.plaintext_buffer)
+    empty!(state.handshake_buffer)
+    empty!(state.plaintext_buffer)
+    state.handshake_buffer_pos = 1
+    state.plaintext_buffer_pos = 1
+    state.peer_close_notify = false
+    state.sent_close_notify = false
+    state.sent_dummy_ccs = false
+    return nothing
+end
+
+function _tls13_set_read_cipher!(state::_TLS13NativeClientState, spec::_TLS13CipherSpec, traffic_secret::AbstractVector{UInt8})::Nothing
+    if state.read_cipher !== nothing
+        _securezero_tls13_record_cipher!(state.read_cipher::_TLS13RecordCipherState)
+    end
+    state.read_cipher = _TLS13RecordCipherState(spec, traffic_secret)
+    return nothing
+end
+
+function _tls13_set_write_cipher!(state::_TLS13NativeClientState, spec::_TLS13CipherSpec, traffic_secret::AbstractVector{UInt8})::Nothing
+    if state.write_cipher !== nothing
+        _securezero_tls13_record_cipher!(state.write_cipher::_TLS13RecordCipherState)
+    end
+    state.write_cipher = _TLS13RecordCipherState(spec, traffic_secret)
+    return nothing
+end
+
+function _tls13_advance_read_cipher!(state::_TLS13NativeClientState)::Nothing
+    cipher = state.read_cipher
+    cipher === nothing && throw(ArgumentError("tls: missing TLS 1.3 read traffic keys"))
+    cipher_state = cipher::_TLS13RecordCipherState
+    next_secret = _tls13_next_traffic_secret(cipher_state.spec, cipher_state.traffic_secret)
+    try
+        _tls13_set_read_cipher!(state, cipher_state.spec, next_secret)
+    finally
+        _securezero!(next_secret)
+    end
+    return nothing
+end
+
+function _tls13_advance_write_cipher!(state::_TLS13NativeClientState)::Nothing
+    cipher = state.write_cipher
+    cipher === nothing && throw(ArgumentError("tls: missing TLS 1.3 write traffic keys"))
+    cipher_state = cipher::_TLS13RecordCipherState
+    next_secret = _tls13_next_traffic_secret(cipher_state.spec, cipher_state.traffic_secret)
+    try
+        _tls13_set_write_cipher!(state, cipher_state.spec, next_secret)
+    finally
+        _securezero!(next_secret)
+    end
+    return nothing
+end
+
+function _tls13_nonce(iv::AbstractVector{UInt8}, seq::UInt64)::Vector{UInt8}
+    nonce = Vector{UInt8}(iv)
+    @inbounds for i in 0:7
+        nonce[end - i] = xor(nonce[end - i], UInt8((seq >> (8 * i)) & 0xff))
+    end
+    return nonce
+end
+
+@inline function _tls13_record_header(content_type::UInt8, payload_len::Int)::Vector{UInt8}
+    payload_len <= 0xffff || throw(ArgumentError("tls: record payload too large"))
+    return UInt8[
+        content_type,
+        UInt8(TLS1_2_VERSION >> 8),
+        UInt8(TLS1_2_VERSION & 0xff),
+        UInt8(payload_len >> 8),
+        UInt8(payload_len & 0xff),
+    ]
+end
+
+function _tls13_write_tls_plaintext!(tcp::TCP.Conn, content_type::UInt8, payload::AbstractVector{UInt8}, record_version::UInt16 = TLS1_0_VERSION)::Nothing
+    header = UInt8[
+        content_type,
+        UInt8(record_version >> 8),
+        UInt8(record_version & 0xff),
+        UInt8(length(payload) >> 8),
+        UInt8(length(payload) & 0xff),
+    ]
+    try
+        write(tcp, header)
+        isempty(payload) || write(tcp, payload)
+    finally
+        _securezero!(header)
+    end
+    return nothing
+end
+
+function _tls13_write_record!(tcp::TCP.Conn, cipher::Union{Nothing, _TLS13RecordCipherState}, inner_type::UInt8, payload::AbstractVector{UInt8})::Nothing
+    length(payload) <= _TLS13_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.3 record plaintext exceeds the maximum record size"))
+    if cipher === nothing
+        _tls13_write_tls_plaintext!(tcp, inner_type, payload)
+        return nothing
+    end
+    cipher_state = cipher::_TLS13RecordCipherState
+    cipher_state.exhausted && throw(ArgumentError("tls: TLS 1.3 write traffic secret exhausted"))
+    inner = Vector{UInt8}(undef, length(payload) + 1)
+    if !isempty(payload)
+        copyto!(inner, 1, payload, 1, length(payload))
+    end
+    inner[end] = inner_type
+    nonce = _tls13_nonce(cipher_state.iv, cipher_state.seq)
+    header = UInt8[]
+    ciphertext = UInt8[]
+    try
+        ciphertext = _tls13_encrypt_record_aead(
+            cipher_state.spec,
+            cipher_state.key,
+            nonce,
+            _tls13_record_header(_TLS_RECORD_TYPE_APPLICATION_DATA, length(inner) + _TLS13_AEAD_TAG_SIZE),
+            inner,
+        )
+        header = _tls13_record_header(_TLS_RECORD_TYPE_APPLICATION_DATA, length(ciphertext))
+        write(tcp, header)
+        write(tcp, ciphertext)
+        if cipher_state.seq == typemax(UInt64)
+            cipher_state.exhausted = true
+        else
+            cipher_state.seq += UInt64(1)
+        end
+    finally
+        _securezero!(inner)
+        _securezero!(nonce)
+        _securezero!(header)
+        _securezero!(ciphertext)
+    end
+    return nothing
+end
+
+function _tls13_process_alert!(state::_TLS13NativeClientState, alert::AbstractVector{UInt8})::Nothing
+    length(alert) == 2 || throw(ArgumentError("tls: malformed TLS 1.3 alert"))
+    alert_desc = alert[2]
+    if alert_desc != _TLS_ALERT_CLOSE_NOTIFY
+        alert_level = alert[1]
+        level_name = if alert_level == _TLS_ALERT_LEVEL_WARNING
+            "warning"
+        elseif alert_level == UInt8(2)
+            "fatal"
+        else
+            "unknown"
+        end
+        throw(ArgumentError("tls: received $level_name TLS 1.3 alert $(Int(alert_desc))"))
+    end
+    state.peer_close_notify = true
+    return nothing
+end
+
+function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::Vector{UInt8})::Nothing
+    idx = length(inner)
+    while idx >= 1 && inner[idx] == 0x00
+        idx -= 1
+    end
+    idx >= 1 || throw(ArgumentError("tls: TLS 1.3 record is missing an inner content type"))
+    content_type = inner[idx]
+    payload_len = idx - 1
+    if content_type == _TLS_RECORD_TYPE_HANDSHAKE
+        payload_len == 0 || append!(state.handshake_buffer, @view(inner[1:payload_len]))
+        return nothing
+    end
+    if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
+        payload_len == 0 || append!(state.plaintext_buffer, @view(inner[1:payload_len]))
+        return nothing
+    end
+    if content_type == _TLS_RECORD_TYPE_ALERT
+        payload = payload_len == 0 ? UInt8[] : Vector{UInt8}(@view(inner[1:payload_len]))
+        try
+            _tls13_process_alert!(state, payload)
+        finally
+            _securezero!(payload)
+        end
+        return nothing
+    end
+    throw(ArgumentError("tls: received unexpected TLS 1.3 inner record type $(Int(content_type))"))
+end
+
+function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
+    header = Vector{UInt8}(undef, 5)
+    read!(tcp, header)
+    payload_len = (Int(header[4]) << 8) | Int(header[5])
+    payload_len <= _TLS13_MAX_CIPHERTEXT || throw(ArgumentError("tls: received oversized TLS 1.3 record"))
+    payload = Vector{UInt8}(undef, payload_len)
+    try
+        payload_len == 0 || read!(tcp, payload)
+        content_type = header[1]
+        if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
+            payload_len == 1 && payload[1] == 0x01 || throw(ArgumentError("tls: malformed ChangeCipherSpec record"))
+            return nothing
+        end
+        if state.read_cipher === nothing
+            if content_type == _TLS_RECORD_TYPE_HANDSHAKE
+                payload_len == 0 || append!(state.handshake_buffer, payload)
+                return nothing
+            end
+            if content_type == _TLS_RECORD_TYPE_ALERT
+                _tls13_process_alert!(state, payload)
+                return nothing
+            end
+            throw(ArgumentError("tls: received unexpected plaintext TLS 1.3 record type $(Int(content_type))"))
+        end
+        content_type == _TLS_RECORD_TYPE_APPLICATION_DATA ||
+            throw(ArgumentError("tls: received unexpected TLS 1.3 record type $(Int(content_type))"))
+        cipher = state.read_cipher::_TLS13RecordCipherState
+        cipher.exhausted && throw(ArgumentError("tls: TLS 1.3 read traffic secret exhausted"))
+        nonce = _tls13_nonce(cipher.iv, cipher.seq)
+        plaintext = try
+            _tls13_decrypt_record_aead(cipher.spec, cipher.key, nonce, header, payload)
+        finally
+            _securezero!(nonce)
+        end
+        plaintext === nothing && throw(ArgumentError("tls: invalid TLS 1.3 record authentication tag"))
+        try
+            _tls13_process_inner_plaintext!(state, plaintext::Vector{UInt8})
+        finally
+            _securezero!(plaintext::Vector{UInt8})
+        end
+        if cipher.seq == typemax(UInt64)
+            cipher.exhausted = true
+        else
+            cipher.seq += UInt64(1)
+        end
+    finally
+        _securezero!(header)
+        _securezero!(payload)
+    end
+    return nothing
+end
+
+function _tls13_try_take_handshake_message!(state::_TLS13NativeClientState)::Union{Nothing, Vector{UInt8}}
+    available = _tls13_buffer_available(state.handshake_buffer, state.handshake_buffer_pos)
+    available == 0 && return nothing
+    available >= 4 || return nothing
+    pos = state.handshake_buffer_pos
+    msg_len = 4 +
+        (Int(state.handshake_buffer[pos + 1]) << 16) +
+        (Int(state.handshake_buffer[pos + 2]) << 8) +
+        Int(state.handshake_buffer[pos + 3])
+    msg_len <= _MAX_HANDSHAKE_SIZE || throw(ArgumentError("tls: received oversized handshake message"))
+    available >= msg_len || return nothing
+    raw = Vector{UInt8}(undef, msg_len)
+    copyto!(raw, 1, state.handshake_buffer, pos, msg_len)
+    state.handshake_buffer_pos += msg_len
+    state.handshake_buffer_pos = _tls13_compact_buffer!(state.handshake_buffer, state.handshake_buffer_pos)
+    return raw
+end
+
+@inline function _tls13_parse_key_update(raw::Vector{UInt8})::Union{Nothing, Bool}
+    length(raw) == 5 || return nothing
+    raw[1] == _TLS13_HANDSHAKE_TYPE_KEY_UPDATE || return nothing
+    raw[2] == 0x00 || return nothing
+    raw[3] == 0x00 || return nothing
+    raw[4] == 0x01 || return nothing
+    request_update = raw[5]
+    request_update == _TLS13_KEY_UPDATE_NOT_REQUESTED && return false
+    request_update == _TLS13_KEY_UPDATE_REQUESTED && return true
+    return nothing
+end
+
+@inline function _tls13_key_update_message(request_update::Bool)::Vector{UInt8}
+    return UInt8[
+        _TLS13_HANDSHAKE_TYPE_KEY_UPDATE,
+        0x00,
+        0x00,
+        0x01,
+        request_update ? _TLS13_KEY_UPDATE_REQUESTED : _TLS13_KEY_UPDATE_NOT_REQUESTED,
+    ]
+end
+
+function _tls13_handle_key_update!(tcp::TCP.Conn, state::_TLS13NativeClientState, request_update::Bool)::Nothing
+    if request_update
+        raw = _tls13_key_update_message(false)
+        try
+            _tls13_write_record!(tcp, state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw)
+            _tls13_advance_write_cipher!(state)
+        finally
+            _securezero!(raw)
+        end
+    end
+    _tls13_advance_read_cipher!(state)
+    return nothing
+end
+
+function _tls13_handle_post_handshake_messages!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
+    while true
+        raw = _tls13_try_take_handshake_message!(state)
+        raw === nothing && return nothing
+        handshake_type = raw[1]
+        if handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
+            msg = _unmarshal_new_session_ticket_tls13(raw)
+            msg === nothing && throw(ArgumentError("tls: unexpected post-handshake TLS 1.3 message"))
+            msg.lifetime == 0x00000000 && continue
+            msg.lifetime <= _TLS13_MAX_SESSION_TICKET_LIFETIME ||
+                throw(ArgumentError("tls: received a session ticket with invalid lifetime"))
+            isempty(msg.label) && throw(ArgumentError("tls: received a session ticket with empty opaque ticket label"))
+            continue
+        end
+        if handshake_type == _TLS13_HANDSHAKE_TYPE_KEY_UPDATE
+            request_update = _tls13_parse_key_update(raw)
+            request_update === nothing && throw(ArgumentError("tls: malformed TLS 1.3 key update message"))
+            _tls13_handle_key_update!(tcp, state, request_update::Bool)
+            continue
+        end
+        throw(ArgumentError("tls: unexpected post-handshake TLS 1.3 message"))
+    end
+end
+
+@inline function _remaining_handshake_messages(::_TLS13HandshakeRecordIO)::Int
+    return 0
+end
+
+function _read_handshake_bytes!(io::_TLS13HandshakeRecordIO)::Vector{UInt8}
+    while true
+        raw = _tls13_try_take_handshake_message!(io.state)
+        raw !== nothing && return raw
+        io.state.peer_close_notify && throw(EOFError())
+        _tls13_read_record!(io.tcp, io.state)
+    end
+end
+
+function _write_handshake_bytes!(io::_TLS13HandshakeRecordIO, raw::Vector{UInt8})::Nothing
+    raw_pos = 1
+    raw_len = length(raw)
+    while raw_pos <= raw_len
+        raw_end = min(raw_pos + _TLS13_MAX_PLAINTEXT - 1, raw_len)
+        _tls13_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, @view(raw[raw_pos:raw_end]))
+        raw_pos = raw_end + 1
+    end
+    return nothing
+end
+
+function _tls13_send_dummy_change_cipher_spec!(io::_TLS13HandshakeRecordIO)::Nothing
+    io.state.sent_dummy_ccs && return nothing
+    _tls13_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS13_DUMMY_CHANGE_CIPHER_SPEC, TLS1_2_VERSION)
+    io.state.sent_dummy_ccs = true
+    return nothing
+end
+
+function _tls13_on_handshake_keys!(io::_TLS13HandshakeRecordIO, state::_TLS13ClientHandshakeState)::Nothing
+    _tls13_set_read_cipher!(io.state, state.cipher_spec, state.server_handshake_traffic_secret)
+    _tls13_set_write_cipher!(io.state, state.cipher_spec, state.client_handshake_traffic_secret)
+    return nothing
+end
+
+function _tls13_on_server_finished!(io::_TLS13HandshakeRecordIO, state::_TLS13ClientHandshakeState)::Nothing
+    _tls13_set_read_cipher!(io.state, state.cipher_spec, state.server_application_traffic_secret)
+    return nothing
+end
+
+function _tls13_on_client_finished!(io::_TLS13HandshakeRecordIO, state::_TLS13ClientHandshakeState)::Nothing
+    _tls13_set_write_cipher!(io.state, state.cipher_spec, state.client_application_traffic_secret)
+    return nothing
+end
