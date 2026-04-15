@@ -476,7 +476,7 @@ function _copy_valid_handshake_frame(data::AbstractVector{UInt8})::Union{Vector{
     body_len = (Int(data[2]) << 16) | (Int(data[3]) << 8) | Int(data[4])
     body_len <= _MAX_HANDSHAKE_SIZE || throw(ArgumentError("tls: handshake message of length $(body_len) bytes exceeds maximum of $(_MAX_HANDSHAKE_SIZE) bytes"))
     length(data) == body_len + 4 || return nothing
-    return Vector{UInt8}(data)
+    return data isa Vector{UInt8} ? data : Vector{UInt8}(data)
 end
 
 function _marshal_client_hello(msg::_ClientHelloMsg)::Vector{UInt8}

@@ -14,27 +14,6 @@ end
 _HandshakeMessageFlightIO() = _HandshakeMessageFlightIO(Vector{UInt8}[], 1, Vector{UInt8}[])
 _HandshakeMessageFlightIO(inbound::Vector{Vector{UInt8}}) = _HandshakeMessageFlightIO(inbound, 1, Vector{UInt8}[])
 
-@inline function _contains_u16(values::Vector{UInt16}, value::UInt16)::Bool
-    for candidate in values
-        candidate == value && return true
-    end
-    return false
-end
-
-@inline function _contains_u8(values::Vector{UInt8}, value::UInt8)::Bool
-    for candidate in values
-        candidate == value && return true
-    end
-    return false
-end
-
-@inline function _contains_string(values::Vector{String}, value::String)::Bool
-    for candidate in values
-        candidate == value && return true
-    end
-    return false
-end
-
 @inline function _remaining_handshake_messages(io::_HandshakeMessageFlightIO)::Int
     return length(io.inbound) - io.inbound_pos + 1
 end
@@ -186,9 +165,9 @@ function _compute_and_update_psk_binders!(state::_TLS13ClientHandshakeState{HK})
     state.has_psk || return nothing
     length(state.client_hello.psk_identities) == 1 || throw(ArgumentError("tls13 client handshake expects exactly one PSK identity"))
     length(state.client_hello.psk_binders) == 1 || throw(ArgumentError("tls13 client handshake expects exactly one PSK binder"))
-    _contains_u16(state.client_hello.supported_versions, TLS1_3_VERSION) || throw(ArgumentError("tls13 client handshake requires supported_versions to include TLS 1.3"))
-    _contains_u16(state.client_hello.cipher_suites, state.cipher_suite) || throw(ArgumentError("tls13 client handshake requires the selected cipher suite in ClientHello"))
-    _contains_u8(state.client_hello.psk_modes, _TLS_PSK_MODE_DHE) || throw(ArgumentError("tls13 client handshake requires the DHE PSK mode"))
+    in(TLS1_3_VERSION, state.client_hello.supported_versions) || throw(ArgumentError("tls13 client handshake requires supported_versions to include TLS 1.3"))
+    in(state.cipher_suite, state.client_hello.cipher_suites) || throw(ArgumentError("tls13 client handshake requires the selected cipher suite in ClientHello"))
+    in(_TLS_PSK_MODE_DHE, state.client_hello.psk_modes) || throw(ArgumentError("tls13 client handshake requires the DHE PSK mode"))
 
     early_secret = _tls13_early_secret(HK, state.psk)
     binder_key = _tls13_resumption_binder_key(early_secret)
@@ -201,8 +180,8 @@ function _compute_and_update_psk_binders!(state::_TLS13ClientHandshakeState{HK})
 end
 
 function _write_client_hello!(state::_TLS13ClientHandshakeState, io::_HandshakeMessageFlightIO)::Nothing
-    _contains_u16(state.client_hello.supported_versions, TLS1_3_VERSION) || throw(ArgumentError("tls13 client handshake requires supported_versions to include TLS 1.3"))
-    _contains_u16(state.client_hello.cipher_suites, state.cipher_suite) || throw(ArgumentError("tls13 client handshake requires the selected cipher suite in ClientHello"))
+    in(TLS1_3_VERSION, state.client_hello.supported_versions) || throw(ArgumentError("tls13 client handshake requires supported_versions to include TLS 1.3"))
+    in(state.cipher_suite, state.client_hello.cipher_suites) || throw(ArgumentError("tls13 client handshake requires the selected cipher suite in ClientHello"))
     isempty(state.client_hello.key_shares) && throw(ArgumentError("tls13 client handshake requires at least one key share"))
     state.has_psk && _compute_and_update_psk_binders!(state)
     raw = _marshal_client_hello(state.client_hello)
@@ -227,7 +206,7 @@ function _check_server_hello_or_hrr!(state::_TLS13ClientHandshakeState)::Nothing
     server_hello.session_id == state.client_hello.session_id || throw(ArgumentError("tls: server did not echo the legacy session ID"))
     server_hello.compression_method == _TLS_COMPRESSION_NONE || throw(ArgumentError("tls: server sent non-zero legacy TLS compression method"))
     server_hello.cipher_suite == state.cipher_suite || throw(ArgumentError("tls: server chose an unexpected cipher suite"))
-    _contains_u16(state.client_hello.cipher_suites, server_hello.cipher_suite) || throw(ArgumentError("tls: server chose an unconfigured cipher suite"))
+    in(server_hello.cipher_suite, state.client_hello.cipher_suites) || throw(ArgumentError("tls: server chose an unconfigured cipher suite"))
     return nothing
 end
 
@@ -295,7 +274,7 @@ function _read_server_parameters!(state::_TLS13ClientHandshakeState, io::_Handsh
     server_protocol = msg.alpn_protocol
     if !isempty(server_protocol)
         isempty(state.client_hello.alpn_protocols) && throw(ArgumentError("tls: server advertised unrequested ALPN extension"))
-        _contains_string(state.client_hello.alpn_protocols, server_protocol) || throw(ArgumentError("tls: server selected unadvertised ALPN protocol"))
+        in(server_protocol, state.client_hello.alpn_protocols) || throw(ArgumentError("tls: server selected unadvertised ALPN protocol"))
     end
 
     (state.client_hello.quic_transport_parameters === nothing) == (msg.quic_transport_parameters === nothing) ||
