@@ -45,52 +45,32 @@ end
     return iszero(diff)
 end
 
-function _finalize_tls13_secret!(secret)::Nothing
+function _destroy_tls13_secret!(secret)::Nothing
     _securezero!(getfield(secret, :secret))
     return nothing
 end
 
-mutable struct _TLS13EarlySecret
+struct _TLS13EarlySecret
     hash_kind::_TLSHashKind
     secret::Vector{UInt8}
-    function _TLS13EarlySecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
-        out = new(hash_kind, secret)
-        finalizer(_finalize_tls13_secret!, out)
-        return out
-    end
 end
 _TLS13EarlySecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13EarlySecret(hash_kind, Vector{UInt8}(secret))
 
-mutable struct _TLS13HandshakeSecret
+struct _TLS13HandshakeSecret
     hash_kind::_TLSHashKind
     secret::Vector{UInt8}
-    function _TLS13HandshakeSecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
-        out = new(hash_kind, secret)
-        finalizer(_finalize_tls13_secret!, out)
-        return out
-    end
 end
 _TLS13HandshakeSecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13HandshakeSecret(hash_kind, Vector{UInt8}(secret))
 
-mutable struct _TLS13MasterSecret
+struct _TLS13MasterSecret
     hash_kind::_TLSHashKind
     secret::Vector{UInt8}
-    function _TLS13MasterSecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
-        out = new(hash_kind, secret)
-        finalizer(_finalize_tls13_secret!, out)
-        return out
-    end
 end
 _TLS13MasterSecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13MasterSecret(hash_kind, Vector{UInt8}(secret))
 
-mutable struct _TLS13ExporterMasterSecret
+struct _TLS13ExporterMasterSecret
     hash_kind::_TLSHashKind
     secret::Vector{UInt8}
-    function _TLS13ExporterMasterSecret(hash_kind::_TLSHashKind, secret::Vector{UInt8})
-        out = new(hash_kind, secret)
-        finalizer(_finalize_tls13_secret!, out)
-        return out
-    end
 end
 _TLS13ExporterMasterSecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13ExporterMasterSecret(hash_kind, Vector{UInt8}(secret))
 

@@ -159,7 +159,7 @@ function _compute_and_update_psk_binders!(state::_TLS13ClientHandshakeState{HK})
         state.early_secret = copy(early_secret.secret)
     finally
         _securezero!(binder_key)
-        _finalize_tls13_secret!(early_secret)
+        _destroy_tls13_secret!(early_secret)
     end
     return nothing
 end
@@ -250,9 +250,9 @@ function _establish_handshake_keys!(state::_TLS13ClientHandshakeState{HK})::Noth
         state.client_handshake_traffic_secret = _tls13_client_handshake_traffic_secret(handshake_secret, state.transcript)
         state.server_handshake_traffic_secret = _tls13_server_handshake_traffic_secret(handshake_secret, state.transcript)
     finally
-        _finalize_tls13_secret!(master_secret)
-        _finalize_tls13_secret!(handshake_secret)
-        _finalize_tls13_secret!(early_secret)
+        _destroy_tls13_secret!(master_secret)
+        _destroy_tls13_secret!(handshake_secret)
+        _destroy_tls13_secret!(early_secret)
     end
     return nothing
 end
