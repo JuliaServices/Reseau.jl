@@ -76,6 +76,13 @@ struct _OpenSSLParam
     return_size::Csize_t
 end
 
+struct _TLS13RSAPSSParams
+    pad_mode::Vector{UInt8}
+    mgf1_digest::Vector{UInt8}
+    saltlen::Vector{UInt8}
+    params::Vector{_OpenSSLParam}
+end
+
 @inline function _tls13_signature_verify_spec(signature_algorithm::UInt16)::_TLS13SignatureVerifySpec
     signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256 && return _TLS13SignatureVerifySpec(256, false, false)
     signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384 && return _TLS13SignatureVerifySpec(384, false, false)
@@ -98,7 +105,7 @@ end
     throw(ArgumentError("unsupported TLS 1.3 signature digest size: $(spec.digest_bits)"))
 end
 
-function _tls13_rsa_pss_params(md_name::String)
+function _tls13_rsa_pss_params(md_name::String)::_TLS13RSAPSSParams
     pad_mode = UInt8[b"pss"..., 0x00]
     mgf1_digest = Vector{UInt8}(codeunits(md_name))
     push!(mgf1_digest, 0x00)
@@ -131,7 +138,7 @@ function _tls13_rsa_pss_params(md_name::String)
         )
     end
     params[4] = ccall((:OSSL_PARAM_construct_end, _LIBCRYPTO_PATH), _OpenSSLParam, ())
-    return pad_mode, mgf1_digest, saltlen, params
+    return _TLS13RSAPSSParams(pad_mode, mgf1_digest, saltlen, params)
 end
 
 function _tls13_load_private_key_pem(key_pem::AbstractVector{UInt8})::Ptr{Cvoid}
@@ -166,24 +173,26 @@ function _tls13_load_x509_pem(cert_pem::AbstractVector{UInt8})::Ptr{Cvoid}
     cert_bytes = Vector{UInt8}(cert_pem)
     bio = Ptr{Cvoid}(C_NULL)
     try
-        bio = GC.@preserve cert_bytes ccall(
-            (:BIO_new_mem_buf, _LIBCRYPTO_PATH),
-            Ptr{Cvoid},
-            (Ptr{UInt8}, Cint),
-            pointer(cert_bytes),
-            Cint(length(cert_bytes)),
-        )
-        _openssl_require_nonnull(bio, "BIO_new_mem_buf")
-        x509 = ccall(
-            (:PEM_read_bio_X509, _LIBCRYPTO_PATH),
-            Ptr{Cvoid},
-            (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
-            bio,
-            C_NULL,
-            C_NULL,
-            C_NULL,
-        )
-        return _openssl_require_nonnull(x509, "PEM_read_bio_X509")
+        return GC.@preserve cert_bytes begin
+            bio = ccall(
+                (:BIO_new_mem_buf, _LIBCRYPTO_PATH),
+                Ptr{Cvoid},
+                (Ptr{UInt8}, Cint),
+                pointer(cert_bytes),
+                Cint(length(cert_bytes)),
+            )
+            _openssl_require_nonnull(bio, "BIO_new_mem_buf")
+            x509 = ccall(
+                (:PEM_read_bio_X509, _LIBCRYPTO_PATH),
+                Ptr{Cvoid},
+                (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, Ptr{Cvoid}, Ptr{Cvoid}),
+                bio,
+                C_NULL,
+                C_NULL,
+                C_NULL,
+            )
+            return _openssl_require_nonnull(x509, "PEM_read_bio_X509")
+        end
     finally
         _free_bio!(bio)
     end
@@ -399,8 +408,8 @@ function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm
         pctx_ref = Ref{Ptr{Cvoid}}(C_NULL)
         md_name = _tls13_signature_md_name(spec)::String
         if spec.rsa_pss
-            pad_mode, mgf1_digest, saltlen, params = _tls13_rsa_pss_params(md_name)
-            ok = GC.@preserve pad_mode mgf1_digest saltlen params ccall(
+            pss_params = _tls13_rsa_pss_params(md_name)
+            ok = GC.@preserve pss_params ccall(
                 (:EVP_DigestVerifyInit_ex, _LIBCRYPTO_PATH),
                 Cint,
                 (Ptr{Cvoid}, Ref{Ptr{Cvoid}}, Cstring, Ptr{Cvoid}, Cstring, Ptr{Cvoid}, Ptr{_OpenSSLParam}),
@@ -410,7 +419,7 @@ function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm
                 C_NULL,
                 C_NULL,
                 pubkey,
-                pointer(params),
+                pointer(pss_params.params),
             )
         else
             ok = ccall(
@@ -512,8 +521,8 @@ function _tls13_openssl_sign_signature(pkey::Ptr{Cvoid}, signature_algorithm::UI
         pctx_ref = Ref{Ptr{Cvoid}}(C_NULL)
         md_name = _tls13_signature_md_name(spec)::String
         if spec.rsa_pss
-            pad_mode, mgf1_digest, saltlen, params = _tls13_rsa_pss_params(md_name)
-            ok = GC.@preserve pad_mode mgf1_digest saltlen params ccall(
+            pss_params = _tls13_rsa_pss_params(md_name)
+            ok = GC.@preserve pss_params ccall(
                 (:EVP_DigestSignInit_ex, _LIBCRYPTO_PATH),
                 Cint,
                 (Ptr{Cvoid}, Ref{Ptr{Cvoid}}, Cstring, Ptr{Cvoid}, Cstring, Ptr{Cvoid}, Ptr{_OpenSSLParam}),
@@ -523,7 +532,7 @@ function _tls13_openssl_sign_signature(pkey::Ptr{Cvoid}, signature_algorithm::UI
                 C_NULL,
                 C_NULL,
                 pkey,
-                pointer(params),
+                pointer(pss_params.params),
             )
         else
             ok = ccall(

@@ -354,7 +354,6 @@ mutable struct _TLS13ClientHandshakeState{HK}
     client_finished::_FinishedMsg
     have_client_finished::Bool
     using_psk::Bool
-    early_secret::Vector{UInt8}
     handshake_secret::Vector{UInt8}
     master_secret::Vector{UInt8}
     client_handshake_traffic_secret::Vector{UInt8}
@@ -372,7 +371,6 @@ function _securezero_tls13_client_handshake_state!(state::_TLS13ClientHandshakeS
     _securezero_tls13_certificate_verifier!(state.certificate_verifier)
     _securezero!(state.shared_secret)
     _securezero!(state.psk)
-    _securezero!(state.early_secret)
     _securezero!(state.handshake_secret)
     _securezero!(state.master_secret)
     _securezero!(state.client_handshake_traffic_secret)
@@ -422,7 +420,6 @@ function _new_tls13_client_handshake_state(
         _FinishedMsg(),
         false,
         false,
-        UInt8[],
         UInt8[],
         UInt8[],
         UInt8[],
@@ -496,8 +493,6 @@ function _compute_and_update_psk_binders!(
     try
         binder = _tls13_finished_verify_data(HK, binder_key, binder_transcript)
         _update_client_hello_binders!(state.client_hello, [binder])
-        _securezero!(state.early_secret)
-        state.early_secret = copy(early_secret.secret)
     finally
         _securezero!(binder_key)
         _destroy_tls13_secret!(early_secret)
@@ -617,10 +612,8 @@ function _establish_handshake_keys!(state::_TLS13ClientHandshakeState{HK})::Noth
     handshake_secret = _tls13_handshake_secret(early_secret, state.shared_secret)
     master_secret = _tls13_master_secret(handshake_secret)
     try
-        _securezero!(state.early_secret)
         _securezero!(state.handshake_secret)
         _securezero!(state.master_secret)
-        state.early_secret = copy(early_secret.secret)
         state.handshake_secret = copy(handshake_secret.secret)
         state.master_secret = copy(master_secret.secret)
         _securezero!(state.client_handshake_traffic_secret)
@@ -713,7 +706,11 @@ function _read_server_finished!(state::_TLS13ClientHandshakeState{HK}, io::_Hand
     msg = _unmarshal_finished(raw)
     msg === nothing && throw(ArgumentError("tls13 client handshake expected Finished"))
     expected_verify_data = _tls13_finished_verify_data(HK, state.server_handshake_traffic_secret, state.transcript)
-    _constant_time_equals(msg.verify_data, expected_verify_data) || throw(ArgumentError("tls: invalid server finished hash"))
+    try
+        _constant_time_equals(msg.verify_data, expected_verify_data) || throw(ArgumentError("tls: invalid server finished hash"))
+    finally
+        _securezero!(expected_verify_data)
+    end
 
     state.server_finished = msg
     state.have_server_finished = true
