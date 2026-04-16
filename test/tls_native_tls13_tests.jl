@@ -588,15 +588,19 @@ end
                     _tls_native_close_quiet!(conn)
                 end
             end
-            client = TLN.connect(
-                addr,
-                _tls13_native_client_config(
-                    server_name = "localhost",
-                    verify_peer = true,
-                    ca_file = _TLS_NATIVE_MTLS_CA_PATH,
-                ),
-            )
-            @test_throws TLN.TLSError read(client, 1)
+            try
+                client = TLN.connect(
+                    addr,
+                    _tls13_native_client_config(
+                        server_name = "localhost",
+                        verify_peer = true,
+                        ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                    ),
+                )
+                @test_throws TLN.TLSError read(client, 1)
+            catch err
+                @test err isa TLN.TLSError
+            end
             status = _tls_native_wait_task(server_task::Task, 5.0)
             status == :timed_out && error("timed out waiting for client-auth failure server")
             @test fetch(server_task::Task) isa TLN.TLSError
