@@ -58,6 +58,8 @@ function run_tls_trim_sample()::Nothing
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
                 handshake_timeout_ns = 10_000_000_000,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_3_VERSION,
             );
             backlog = 8,
         )
