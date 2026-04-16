@@ -581,10 +581,6 @@ function _make_tls_error(op::AbstractString, code::Int32)::TLSError
     return TLSError(String(op), code, _openssl_error_message(), nothing)
 end
 
-function _wrap_tls_exception(op::AbstractString, err::Exception)::TLSError
-    return TLSError(String(op), Int32(0), "unexpected TLS failure", err)
-end
-
 function _encode_alpn_protocols(protocols::Vector{String})::Vector{UInt8}
     out = UInt8[]
     for proto in protocols
@@ -1250,6 +1246,9 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
         state.client_certificate_chain = client_certificate_chain
         state.client_private_key = client_private_key
         _client_handshake_tls13!(state, io)
+        if state.using_psk
+            _tls13_session_cache_put!(conn.config._client_session_cache, cache_key, nothing)
+        end
         negotiated_alpn = isempty(state.client_protocol) ? nothing : state.client_protocol
         _securezero!(native_state.resumption_secret)
         for cert in native_state.session_certificates
@@ -1405,7 +1404,10 @@ function handshake!(conn::Conn)
             if ex isa IOPoll.NetClosingError || _is_closed(conn)
                 throw(_closed_error("handshake", ex))
             end
-            throw(_wrap_tls_exception("handshake", ex))
+            if ex isa ArgumentError
+                throw(TLSError("handshake", Int32(0), (ex::ArgumentError).msg::String, ex))
+            end
+            throw(TLSError("handshake", Int32(0), "unexpected TLS failure", ex))
         end
     finally
         unlock(conn.handshake_lock)
@@ -1489,7 +1491,10 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("read", ex))
         end
-        throw(_wrap_tls_exception("read", ex))
+        if ex isa ArgumentError
+            throw(TLSError("read", Int32(0), (ex::ArgumentError).msg::String, ex))
+        end
+        throw(TLSError("read", Int32(0), "unexpected TLS failure", ex))
     finally
         unlock(conn.read_lock)
     end
@@ -1542,7 +1547,10 @@ function _peek_eof(conn::Conn)::Bool
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("peek", ex))
         end
-        throw(_wrap_tls_exception("peek", ex))
+        if ex isa ArgumentError
+            throw(TLSError("peek", Int32(0), (ex::ArgumentError).msg::String, ex))
+        end
+        throw(TLSError("peek", Int32(0), "unexpected TLS failure", ex))
     finally
         unlock(conn.read_lock)
     end
@@ -1829,7 +1837,10 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("write", ex))
         end
-        throw(_wrap_tls_exception("write", ex))
+        if ex isa ArgumentError
+            throw(TLSError("write", Int32(0), (ex::ArgumentError).msg::String, ex))
+        end
+        throw(TLSError("write", Int32(0), "unexpected TLS failure", ex))
     finally
         unlock(conn.write_lock)
     end
@@ -2004,7 +2015,10 @@ function Base.closewrite(conn::Conn)
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("closewrite", ex))
         end
-        throw(_wrap_tls_exception("closewrite", ex))
+        if ex isa ArgumentError
+            throw(TLSError("closewrite", Int32(0), (ex::ArgumentError).msg::String, ex))
+        end
+        throw(TLSError("closewrite", Int32(0), "unexpected TLS failure", ex))
     finally
         unlock(conn.write_lock)
     end
@@ -2153,7 +2167,7 @@ function _tls13_has_resumable_session(config::Config, tcp::TCP.Conn)::Bool
     config.session_tickets_disabled && return false
     cache_key = _tls13_client_session_cache_key(config, tcp)
     isempty(cache_key) && return false
-    session = _tls13_session_cache_get(config._client_session_cache, cache_key)
+    session = _tls13_session_cache_peek(config._client_session_cache, cache_key)
     session === nothing && return false
     try
         session.version == TLS1_3_VERSION || return false
@@ -2354,12 +2368,11 @@ function _connect_client(tcp::TCP.Conn, config::Config, deadline_ns::Int64 = Int
     tls_conn = try
         client(tcp, config)
     catch err
-        ex = _as_exception(err)
         try
             close(tcp)
         catch
         end
-        ex isa Exception && rethrow()
+        rethrow()
     end
     try
         if deadline_ns != 0
@@ -2371,12 +2384,11 @@ function _connect_client(tcp::TCP.Conn, config::Config, deadline_ns::Int64 = Int
         end
         return tls_conn
     catch err
-        ex = _as_exception(err)
         try
             close(tls_conn)
         catch
         end
-        ex isa Exception && rethrow()
+        rethrow()
     end
 end
 

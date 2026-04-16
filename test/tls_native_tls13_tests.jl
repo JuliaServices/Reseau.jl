@@ -366,6 +366,38 @@ end
         end
     end
 
+    @testset "native client leaves ALPN unset without overlap" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(alpn_protocols = ["h2"]))
+            client = TLN.connect(
+                addr;
+                server_name = "localhost",
+                verify_peer = false,
+                alpn_protocols = ["http/1.1"],
+                min_version = TLN.TLS1_3_VERSION,
+                max_version = TLN.TLS1_3_VERSION,
+                handshake_timeout_ns = 10_000_000_000,
+            )
+            _finish_tls13_native_server!(server_task::Task)
+            server = fetch(server_task::Task)
+            @test isnothing(TLN.connection_state(client).alpn_protocol)
+            @test isnothing(TLN.connection_state(server).alpn_protocol)
+            payload = UInt8[0x55, 0x66]
+            @test write(client, payload) == length(payload)
+            @test read(server, length(payload)) == payload
+        finally
+            _tls_native_close_quiet!(server)
+            _tls_native_close_quiet!(client)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "native client negotiates AES_256_GCM_SHA384" begin
         IPN.shutdown!()
         listener = nothing
@@ -494,6 +526,196 @@ end
         finally
             _tls_native_close_quiet!(client2)
             _tls_native_close_quiet!(client1)
+            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+                wait(server_task::Task)
+            end
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server RequestClientCert accepts clients without certificates" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(
+                cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                client_auth = TLN.ClientAuthMode.RequestClientCert,
+                client_ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+            ))
+            client = TLN.connect(addr, _tls13_native_client_config(
+                server_name = "localhost",
+                verify_peer = true,
+                ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+            ))
+            _finish_tls13_native_server!(server_task::Task)
+            server = fetch(server_task::Task)
+            @test TLN.connection_state(client).handshake_complete
+            @test TLN.connection_state(server).handshake_complete
+            payload = UInt8[0x31, 0x32]
+            @test write(client, payload) == length(payload)
+            @test read(server, length(payload)) == payload
+        finally
+            _tls_native_close_quiet!(server)
+            _tls_native_close_quiet!(client)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server VerifyClientCertIfGiven accepts clients without certificates" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(
+                cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                client_auth = TLN.ClientAuthMode.VerifyClientCertIfGiven,
+                client_ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+            ))
+            client = TLN.connect(addr, _tls13_native_client_config(
+                server_name = "localhost",
+                verify_peer = true,
+                ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+            ))
+            _finish_tls13_native_server!(server_task::Task)
+            server = fetch(server_task::Task)
+            @test TLN.connection_state(client).handshake_complete
+            @test TLN.connection_state(server).handshake_complete
+            payload = UInt8[0x41, 0x42]
+            @test write(client, payload) == length(payload)
+            @test read(server, length(payload)) == payload
+        finally
+            _tls_native_close_quiet!(server)
+            _tls_native_close_quiet!(client)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server VerifyClientCertIfGiven verifies provided client certificates" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(
+                cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                client_auth = TLN.ClientAuthMode.VerifyClientCertIfGiven,
+                client_ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+            ))
+            client = TLN.connect(addr, _tls13_native_client_config(
+                server_name = "localhost",
+                verify_peer = true,
+                ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                cert_file = _TLS_NATIVE_MTLS_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_CLIENT_KEY_PATH,
+            ))
+            _finish_tls13_native_server!(server_task::Task)
+            server = fetch(server_task::Task)
+            @test TLN.connection_state(client).handshake_complete
+            @test TLN.connection_state(server).handshake_complete
+            payload = UInt8[0x51, 0x52]
+            @test write(client, payload) == length(payload)
+            @test read(server, length(payload)) == payload
+        finally
+            _tls_native_close_quiet!(server)
+            _tls_native_close_quiet!(client)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server RequireAnyClientCert accepts provided client certificates" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(
+                cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                client_auth = TLN.ClientAuthMode.RequireAnyClientCert,
+                client_ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+            ))
+            client = TLN.connect(addr, _tls13_native_client_config(
+                server_name = "localhost",
+                verify_peer = true,
+                ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                cert_file = _TLS_NATIVE_MTLS_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_CLIENT_KEY_PATH,
+            ))
+            _finish_tls13_native_server!(server_task::Task)
+            server = fetch(server_task::Task)
+            @test TLN.connection_state(client).handshake_complete
+            @test TLN.connection_state(server).handshake_complete
+            payload = UInt8[0x61, 0x62]
+            @test write(client, payload) == length(payload)
+            @test read(server, length(payload)) == payload
+        finally
+            _tls_native_close_quiet!(server)
+            _tls_native_close_quiet!(client)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server rejects missing client certificate when any certificate is required" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server_task = nothing
+        try
+            listener = TLN.listen(
+                NCN.loopback_addr(0),
+                _tls13_native_server_config(
+                    cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                    key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                    client_auth = TLN.ClientAuthMode.RequireAnyClientCert,
+                    client_ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                );
+                backlog = 8,
+            )
+            addr = TLN.addr(listener)::NCN.SocketAddrV4
+            server_task = Threads.@spawn begin
+                conn = TLN.accept(listener)
+                try
+                    TLN.handshake!(conn)
+                    return :ok
+                catch err
+                    return err
+                finally
+                    _tls_native_close_quiet!(conn)
+                end
+            end
+            try
+                client = TLN.connect(
+                    addr,
+                    _tls13_native_client_config(
+                        server_name = "localhost",
+                        verify_peer = true,
+                        ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                    ),
+                )
+                @test_throws TLN.TLSError read(client, 1)
+            catch err
+                @test err isa TLN.TLSError
+            end
+            status = _tls_native_wait_task(server_task::Task, 5.0)
+            status == :timed_out && error("timed out waiting for require-any-client-cert failure server")
+            @test fetch(server_task::Task) isa TLN.TLSError
+        finally
+            _tls_native_close_quiet!(client)
             if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
                 wait(server_task::Task)
             end

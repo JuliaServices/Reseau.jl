@@ -10,6 +10,8 @@ const _TLS13_SERVER_SIGNATURE_CONTEXT = "TLS 1.3, server CertificateVerify\0"
 const _TLS13_CLIENT_SIGNATURE_CONTEXT = "TLS 1.3, client CertificateVerify\0"
 const _TLS13_SIGNATURE_PADDING = fill(UInt8(0x20), 64)
 const _TLS13_MAX_SESSION_TICKET_LIFETIME = UInt32(7 * 24 * 60 * 60)
+const _TLS13_DOWNGRADE_CANARY_TLS12 = UInt8[0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01]
+const _TLS13_DOWNGRADE_CANARY_TLS11 = UInt8[0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00]
 
 mutable struct _HandshakeMessageFlightIO
     inbound::Vector{Vector{UInt8}}
@@ -155,6 +157,18 @@ function _tls13_session_cache_get(cache::_TLS13ClientSessionCache, key::Abstract
         session === nothing && return nothing
         deleteat!(cache.order, findall(==(key_s), cache.order))
         pushfirst!(cache.order, key_s)
+        return _copy_tls13_client_session(session::_TLS13ClientSession)
+    finally
+        unlock(cache.lock)
+    end
+end
+
+function _tls13_session_cache_peek(cache::_TLS13ClientSessionCache, key::AbstractString)::Union{Nothing, _TLS13ClientSession}
+    key_s = String(key)
+    lock(cache.lock)
+    try
+        session = get(cache.entries, key_s, nothing)
+        session === nothing && return nothing
         return _copy_tls13_client_session(session::_TLS13ClientSession)
     finally
         unlock(cache.lock)
@@ -811,6 +825,11 @@ function _check_server_hello_or_hrr!(state::_TLS13ClientHandshakeState)::Nothing
     server_hello = state.server_hello
     server_hello.supported_version == TLS1_3_VERSION || throw(ArgumentError("tls: server selected TLS 1.3 using an invalid supported_version"))
     server_hello.vers == TLS1_2_VERSION || throw(ArgumentError("tls: server sent an incorrect legacy version"))
+    if server_hello.random != _HELLO_RETRY_REQUEST_RANDOM
+        random_tail = @view server_hello.random[25:32]
+        (random_tail == _TLS13_DOWNGRADE_CANARY_TLS12 || random_tail == _TLS13_DOWNGRADE_CANARY_TLS11) &&
+            throw(ArgumentError("tls: downgrade attempt detected"))
+    end
 
     (server_hello.ocsp_stapling ||
      server_hello.ticket_supported ||
@@ -881,8 +900,8 @@ function _process_hello_retry_request!(state::_TLS13ClientHandshakeState, io)::N
                     copy(session.ticket),
                     UInt32(mod(ticket_age_ms + UInt64(session.age_add), UInt64(1) << 32)),
                 )
+                _compute_and_update_psk_binders!(state, _tls13_selected_transcript(state))
             end
-            _compute_and_update_psk_binders!(state, _tls13_selected_transcript(state))
         else
             state.client_hello.psk_identities = _TLSPSKIdentity[]
             state.client_hello.psk_binders = Vector{UInt8}[]

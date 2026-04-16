@@ -556,6 +556,14 @@ function _tls13_x25519_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::A
             _openssl_require_ok(ok, "EVP_PKEY_derive")
         end
         resize!(out, Int(out_len[]))
+        all_zero = UInt8(0)
+        @inbounds for byte in out
+            all_zero |= byte
+        end
+        if iszero(all_zero)
+            _securezero!(out)
+            throw(ArgumentError("tls: invalid X25519 shared secret"))
+        end
         return out
     finally
         _free_evp_pkey_ctx!(ctx)
@@ -681,6 +689,8 @@ function _tls13_p256_public_key(pkey::Ptr{Cvoid})::Vector{UInt8}
 end
 
 function _tls13_p256_peer_public_key(peer_public_key::AbstractVector{UInt8})::Ptr{Cvoid}
+    length(peer_public_key) == 65 || throw(ArgumentError("tls13 P-256 public key must be 65 bytes in uncompressed form"))
+    peer_public_key[1] == 0x04 || throw(ArgumentError("tls13 P-256 public key must use the uncompressed point format"))
     peer_bytes = Vector{UInt8}(peer_public_key)
     ec_key = Ptr{Cvoid}(C_NULL)
     point = Ptr{Cvoid}(C_NULL)

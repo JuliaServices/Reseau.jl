@@ -443,12 +443,26 @@ end
             @test server_share.group == TLHC._TLS_GROUP_X25519
             @test client_secret == server_secret
 
+            for peer_point in (
+                zeros(UInt8, 32),
+                hex2bytes("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
+            )
+                err = try
+                    TLHC._tls13_x25519_shared_secret(client_pkey, peer_point)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TLHC.TLSError || err isa ArgumentError
+            end
+
             client_p256_pkey = TLHC._tls13_p256_private_key_from_bytes(_TLS13_TEST_CLIENT_P256_PRIVATE_KEY)
             client_p256_share = TLHC._tls13_p256_public_key(client_p256_pkey)
             server_p256_share, server_p256_secret = TLHC._tls13_openssl_p256_server_share_and_secret(client_p256_share, _TLS13_TEST_SERVER_P256_PRIVATE_KEY)
             client_p256_secret = TLHC._tls13_p256_shared_secret(client_p256_pkey, server_p256_share.data)
             @test server_p256_share.group == TLHC._TLS_GROUP_SECP256R1
             @test client_p256_secret == server_p256_secret
+            @test_throws ArgumentError TLHC._tls13_p256_peer_public_key(vcat(UInt8[0x02], zeros(UInt8, 32)))
 
             signed = collect(UInt8(0x10):UInt8(0x4f))
             signature = TLHC._tls13_openssl_sign_from_pem(TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, _TLS13_TEST_KEY_PEM)
@@ -626,6 +640,26 @@ end
         @test retried_hello.psk_identities == TLHC._TLSPSKIdentity[]
         @test retried_hello.psk_binders == Vector{UInt8}[]
         @test state.cipher_suite == TLHC._TLS13_AES_128_GCM_SHA256_ID
+    end
+
+    @testset "downgrade sentinels in TLS 1.3 ServerHello are rejected" begin
+        key_share_provider = _tls13_scripted_key_share_provider()
+        client_hello = _tls13_cert_client_hello()
+        state = TLHC._TLS13ClientHandshakeState(
+            client_hello,
+            TLHC._TLS13_AES_128_GCM_SHA256_ID,
+            key_share_provider,
+            TLHC._TLS13NoCertificateVerifier(),
+        )
+        server_hello = _tls13_certificate_server_hello(
+            client_hello.session_id,
+            key_share_provider.initial_share.group,
+            copy(key_share_provider.initial_expected_server_share),
+        )
+        copyto!(server_hello.random, 25, TLHC._TLS13_DOWNGRADE_CANARY_TLS12, 1, 8)
+        state.server_hello = server_hello
+        state.have_server_hello = true
+        @test_throws ArgumentError TLHC._check_server_hello_or_hrr!(state)
     end
 
     @testset "certificate verify mismatches are rejected before client finished" begin

@@ -128,18 +128,30 @@ end
 
 @inline _tls13_server_session_cache_key(label::AbstractVector{UInt8}) = bytes2hex(label)
 
-function _tls13_server_session_cache_get(cache::_TLS13ServerSessionCache, label::AbstractVector{UInt8})::Union{Nothing, _TLS13ServerSession}
+function _tls13_server_session_cache_peek(cache::_TLS13ServerSessionCache, label::AbstractVector{UInt8})::Union{Nothing, _TLS13ServerSession}
     key_s = _tls13_server_session_cache_key(label)
     lock(cache.lock)
     try
         session = get(cache.entries, key_s, nothing)
         session === nothing && return nothing
-        deleteat!(cache.order, findall(==(key_s), cache.order))
-        pushfirst!(cache.order, key_s)
         return _copy_tls13_server_session(session::_TLS13ServerSession)
     finally
         unlock(cache.lock)
     end
+end
+
+function _tls13_server_session_cache_delete!(cache::_TLS13ServerSessionCache, label::AbstractVector{UInt8})::Nothing
+    key_s = _tls13_server_session_cache_key(label)
+    lock(cache.lock)
+    try
+        session = pop!(cache.entries, key_s, nothing)
+        session === nothing && return nothing
+        deleteat!(cache.order, findall(==(key_s), cache.order))
+        _securezero_tls13_server_session!(session::_TLS13ServerSession)
+    finally
+        unlock(cache.lock)
+    end
+    return nothing
 end
 
 function _tls13_server_session_cache_put!(cache::_TLS13ServerSessionCache, session::Union{Nothing, _TLS13ServerSession})::Nothing
@@ -467,7 +479,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
     max_identities = min(length(state.client_hello.psk_identities), _TLS13_MAX_CLIENT_PSK_IDENTITIES)
     for i in 1:max_identities
         identity = state.client_hello.psk_identities[i]
-        session = _tls13_server_session_cache_get(config._server_session_cache, identity.label)
+        session = _tls13_server_session_cache_peek(config._server_session_cache, identity.label)
         session === nothing && continue
         early_secret = _TLS13EarlySecret(state.cipher_spec.hash_kind, UInt8[])
         binder_key = UInt8[]
@@ -481,7 +493,9 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
             session_spec === nothing && continue
             session_spec.hash_kind == state.cipher_spec.hash_kind || continue
             session.alpn_protocol == state.selected_alpn || continue
-            _tls13_server_session_client_auth_ok(session, config) || continue
+            # Mirror Go here: without 0-RTT support, `obfuscated_ticket_age` does not
+            # gate resumption, so binder validation and ticket lifetime remain the
+            # relevant checks.
             early_secret = _tls13_early_secret(state.cipher_spec.hash_kind, session.secret)
             binder_key = _tls13_resumption_binder_key(early_secret)
             binder_transcript = _new_tls13_binder_transcript(state.cipher_spec.hash_kind)
@@ -492,12 +506,14 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
             _transcript_update!(binder_transcript, _marshal_client_hello_without_binders(state.client_hello))
             binder = _tls13_finished_verify_data(state.cipher_spec.hash_kind, binder_key, binder_transcript)
             _constant_time_equals(state.client_hello.psk_binders[i], binder) || continue
+            _tls13_server_session_client_auth_ok(session, config) || continue
             state.psk = copy(session.secret)
             state.using_psk = true
             state.resumption_session = session
             state.selected_psk_identity = UInt16(i - 1)
             state.has_selected_psk_identity = true
             state.peer_certificates = [copy(cert) for cert in session.client_certificates]
+            _tls13_server_session_cache_delete!(config._server_session_cache, identity.label)
             selected = true
             return nothing
         finally
@@ -689,6 +705,8 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
     _tls13_should_send_session_tickets(state, config) || return nothing
     hash_kind = state.cipher_spec.hash_kind
     resumption_secret = _tls13_derive_secret(hash_kind, state.master_secret, "res master", state.transcript)
+    # We only issue one ticket per connection today, so a zero ticket nonce mirrors
+    # Go's current TLS 1.3 server behavior.
     nonce = UInt8[]
     label = rand(Random.RandomDevice(), UInt8, 32)
     psk = UInt8[]

@@ -8,6 +8,7 @@ const _TLS_ALERT_CLOSE_NOTIFY = UInt8(0)
 const _TLS13_AEAD_TAG_SIZE = 16
 const _TLS13_MAX_PLAINTEXT = 16_384
 const _TLS13_MAX_CIPHERTEXT = _TLS13_MAX_PLAINTEXT + 256
+const _TLS13_MAX_HANDSHAKE_BUFFER = _MAX_HANDSHAKE_SIZE + _TLS13_MAX_PLAINTEXT
 const _TLS13_HANDSHAKE_TYPE_KEY_UPDATE = UInt8(24)
 const _TLS13_KEY_UPDATE_NOT_REQUESTED = UInt8(0)
 const _TLS13_KEY_UPDATE_REQUESTED = UInt8(1)
@@ -283,7 +284,11 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
     content_type = inner[idx]
     payload_len = idx - 1
     if content_type == _TLS_RECORD_TYPE_HANDSHAKE
-        payload_len == 0 || append!(state.handshake_buffer, @view(inner[1:payload_len]))
+        if payload_len != 0
+            append!(state.handshake_buffer, @view(inner[1:payload_len]))
+            length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
+                throw(ArgumentError("tls: received too much buffered TLS 1.3 handshake data"))
+        end
         return nothing
     end
     if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
@@ -317,7 +322,11 @@ function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Not
         end
         if state.read_cipher === nothing
             if content_type == _TLS_RECORD_TYPE_HANDSHAKE
-                payload_len == 0 || append!(state.handshake_buffer, payload)
+                if payload_len != 0
+                    append!(state.handshake_buffer, payload)
+                    length(state.handshake_buffer) <= _TLS13_MAX_HANDSHAKE_BUFFER ||
+                        throw(ArgumentError("tls: received too much buffered TLS 1.3 handshake data"))
+                end
                 return nothing
             end
             if content_type == _TLS_RECORD_TYPE_ALERT
@@ -455,9 +464,7 @@ function _tls13_handle_post_handshake_messages!(tcp::TCP.Conn, state::_TLS13Nati
         raw === nothing && return nothing
         handshake_type = raw[1]
         if handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
-            msg = _tls13_validate_new_session_ticket(raw)
-            msg.lifetime == 0x00000000 && continue
-            continue
+            throw(ArgumentError("tls: NewSessionTicket handling requires TLS.Conn context"))
         end
         if handshake_type == _TLS13_HANDSHAKE_TYPE_KEY_UPDATE
             request_update = _tls13_parse_key_update(raw)
