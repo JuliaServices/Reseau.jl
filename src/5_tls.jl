@@ -190,6 +190,7 @@ struct Config
     max_version::Union{Nothing, UInt16}
     session_tickets_disabled::Bool
     _client_session_cache::_TLS13ClientSessionCache
+    _server_session_cache::_TLS13ServerSessionCache
 end
 
 struct _SSLContextKey
@@ -260,6 +261,7 @@ function Config(;
         max_version,
         session_tickets_disabled,
         _TLS13ClientSessionCache(session_cache_capacity),
+        _TLS13ServerSessionCache(session_cache_capacity),
     )
 end
 
@@ -547,6 +549,7 @@ function _config_with_server_name(config::Config, server_name::String)::Config
         config.max_version,
         config.session_tickets_disabled,
         config._client_session_cache,
+        config._server_session_cache,
     )
 end
 
@@ -912,9 +915,7 @@ function _ssl_new(ctx::Ptr{Cvoid}, tcp::TCP.Conn, config::Config; is_server::Boo
 end
 
 @inline function _native_tls13_client_enabled(config::Config)::Bool
-    return config.cert_file === nothing &&
-        config.key_file === nothing &&
-        config.min_version == TLS1_3_VERSION &&
+    return config.min_version == TLS1_3_VERSION &&
         (config.max_version === nothing || config.max_version == TLS1_3_VERSION)
 end
 
@@ -937,6 +938,7 @@ function _tls13_client_hello(config::Config)::_ClientHelloMsg
     hello.supported_points = UInt8[0x00]
     hello.supported_versions = UInt16[TLS1_3_VERSION]
     hello.supported_curves = UInt16[_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1]
+    hello.psk_modes = UInt8[_TLS_PSK_MODE_DHE]
     hello.supported_signature_algorithms = UInt16[
         _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
         _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
@@ -972,6 +974,17 @@ function _native_tls13_certificate_verifier(config::Config)::_TLS13OpenSSLCertif
         verify_peer = config.verify_peer,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
     )
+end
+
+function _native_tls13_client_identity(config::Config)::Tuple{Vector{Vector{UInt8}}, Ptr{Cvoid}}
+    config.cert_file === nothing && return Vector{Vector{UInt8}}(), C_NULL
+    cert_pem = _read_tls_file_bytes(config.cert_file::String)
+    key_pem = _read_tls_file_bytes(config.key_file::String)
+    try
+        return _tls13_load_x509_pem_chain(cert_pem), _tls13_load_private_key_pem(key_pem)
+    finally
+        _securezero!(key_pem)
+    end
 end
 
 @inline function _tls13_client_session_cache_key(config::Config, tcp::TCP.Conn)::String
@@ -1230,7 +1243,12 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
     )
     native_state = _native_tls13_state(conn)
     io = _TLS13HandshakeRecordIO(conn.tcp, native_state)
+    client_certificate_chain = Vector{Vector{UInt8}}()
+    client_private_key = Ptr{Cvoid}(C_NULL)
     try
+        client_certificate_chain, client_private_key = _native_tls13_client_identity(conn.config)
+        state.client_certificate_chain = client_certificate_chain
+        state.client_private_key = client_private_key
         _client_handshake_tls13!(state, io)
         negotiated_alpn = isempty(state.client_protocol) ? nothing : state.client_protocol
         _securezero!(native_state.resumption_secret)

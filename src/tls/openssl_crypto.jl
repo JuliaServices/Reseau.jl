@@ -341,11 +341,12 @@ function _tls13_load_verify_locations!(store::Ptr{Cvoid}, ca_path::AbstractStrin
     return nothing
 end
 
-function _tls13_verify_server_certificate_chain(
-    certificates::Vector{Vector{UInt8}},
-    server_name::AbstractString;
+function _tls13_verify_certificate_chain(
+    certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,
     ca_file::Union{Nothing, String},
+    purpose::AbstractString,
+    peer_name::AbstractString = "",
 )::Ptr{Cvoid}
     isempty(certificates) && throw(ArgumentError("tls: received empty certificates message"))
     x509s = Ptr{Cvoid}[]
@@ -382,14 +383,14 @@ function _tls13_verify_server_certificate_chain(
                 untrusted,
             )
             _openssl_require_ok(ok, "X509_STORE_CTX_init")
-            ok = ccall((:X509_STORE_CTX_set_default, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cstring), store_ctx, "ssl_server")
+            ok = ccall((:X509_STORE_CTX_set_default, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cstring), store_ctx, purpose)
             _openssl_require_ok(ok, "X509_STORE_CTX_set_default")
             param = ccall((:X509_STORE_CTX_get0_param, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), store_ctx)
             _openssl_require_nonnull(param, "X509_STORE_CTX_get0_param")
-            normalized_server_name = String(server_name)
-            if !isempty(normalized_server_name)
-                if _is_ip_literal_name(normalized_server_name)
-                    verify_ip = _verify_ip(normalized_server_name)
+            normalized_peer_name = String(peer_name)
+            if !isempty(normalized_peer_name)
+                if _is_ip_literal_name(normalized_peer_name)
+                    verify_ip = _verify_ip(normalized_peer_name)
                     ok = ccall(
                         (:X509_VERIFY_PARAM_set1_ip_asc, _LIBCRYPTO_PATH),
                         Cint,
@@ -399,7 +400,7 @@ function _tls13_verify_server_certificate_chain(
                     )
                     _openssl_require_ok(ok, "X509_VERIFY_PARAM_set1_ip_asc")
                 else
-                    verify_name = _verify_name(normalized_server_name)
+                    verify_name = _verify_name(normalized_peer_name)
                     ok = ccall(
                         (:X509_VERIFY_PARAM_set1_host, _LIBCRYPTO_PATH),
                         Cint,
@@ -430,6 +431,34 @@ function _tls13_verify_server_certificate_chain(
             _free_x509!(x509)
         end
     end
+end
+
+function _tls13_verify_server_certificate_chain(
+    certificates::Vector{Vector{UInt8}},
+    server_name::AbstractString;
+    verify_peer::Bool,
+    ca_file::Union{Nothing, String},
+)::Ptr{Cvoid}
+    return _tls13_verify_certificate_chain(
+        certificates;
+        verify_peer,
+        ca_file,
+        purpose = "ssl_server",
+        peer_name = server_name,
+    )
+end
+
+function _tls13_verify_client_certificate_chain(
+    certificates::Vector{Vector{UInt8}};
+    verify_peer::Bool,
+    ca_file::Union{Nothing, String},
+)::Ptr{Cvoid}
+    return _tls13_verify_certificate_chain(
+        certificates;
+        verify_peer,
+        ca_file,
+        purpose = "ssl_client",
+    )
 end
 
 function _tls13_x25519_private_key_from_bytes(private_key::AbstractVector{UInt8})::Ptr{Cvoid}

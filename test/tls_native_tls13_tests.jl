@@ -7,6 +7,11 @@ const IPN = Reseau.IOPoll
 
 const _TLS_NATIVE_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_NATIVE_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS_NATIVE_MTLS_CA_PATH = joinpath(@__DIR__, "resources", "native_tls_ca.crt")
+const _TLS_NATIVE_MTLS_SERVER_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_server.crt")
+const _TLS_NATIVE_MTLS_SERVER_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_server.key")
+const _TLS_NATIVE_MTLS_CLIENT_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_client.crt")
+const _TLS_NATIVE_MTLS_CLIENT_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_client.key")
 
 function _tls_native_close_quiet!(x)
     x === nothing && return nothing
@@ -68,27 +73,43 @@ function _tls13_native_client_config(;
     server_name::Union{Nothing, String} = "localhost",
     ca_file::Union{Nothing, String} = nothing,
     alpn_protocols::Vector{String} = String[],
+    cert_file::Union{Nothing, String} = nothing,
+    key_file::Union{Nothing, String} = nothing,
+    session_tickets_disabled::Bool = false,
 )
     return TLN.Config(
         server_name = server_name,
         verify_peer = verify_peer,
         ca_file = ca_file,
+        cert_file = cert_file,
+        key_file = key_file,
         alpn_protocols = copy(alpn_protocols),
         min_version = TLN.TLS1_3_VERSION,
         max_version = TLN.TLS1_3_VERSION,
         handshake_timeout_ns = 10_000_000_000,
+        session_tickets_disabled = session_tickets_disabled,
     )
 end
 
-function _tls13_native_server_config(; alpn_protocols::Vector{String} = String[])
+function _tls13_native_server_config(;
+    alpn_protocols::Vector{String} = String[],
+    client_auth::TLN.ClientAuthMode.T = TLN.ClientAuthMode.NoClientCert,
+    client_ca_file::Union{Nothing, String} = nothing,
+    session_tickets_disabled::Bool = false,
+    cert_file::String = _TLS_NATIVE_CERT_PATH,
+    key_file::String = _TLS_NATIVE_KEY_PATH,
+)
     return TLN.Config(
         verify_peer = false,
-        cert_file = _TLS_NATIVE_CERT_PATH,
-        key_file = _TLS_NATIVE_KEY_PATH,
+        cert_file = cert_file,
+        key_file = key_file,
+        client_auth = client_auth,
+        client_ca_file = client_ca_file,
         alpn_protocols = copy(alpn_protocols),
         handshake_timeout_ns = 10_000_000_000,
         min_version = TLN.TLS1_3_VERSION,
         max_version = TLN.TLS1_3_VERSION,
+        session_tickets_disabled = session_tickets_disabled,
     )
 end
 
@@ -143,7 +164,7 @@ end
 @testset "TLS native TLS1.3 client" begin
     @test TLN._native_tls13_client_enabled(_tls13_native_client_config())
     @test !TLN._native_tls13_client_enabled(TLN.Config(server_name = "localhost", verify_peer = false))
-    @test !TLN._native_tls13_client_enabled(TLN.Config(
+    @test TLN._native_tls13_client_enabled(TLN.Config(
         server_name = "localhost",
         verify_peer = false,
         cert_file = _TLS_NATIVE_CERT_PATH,
@@ -438,7 +459,7 @@ end
         client2 = nothing
         server_task = nothing
         try
-            listener = TLN.listen(NCN.loopback_addr(0), _tls13_openssl_server_config(); backlog = 8)
+            listener = TLN.listen(NCN.loopback_addr(0), _tls13_native_server_config(); backlog = 8)
             addr = TLN.addr(listener)::NCN.SocketAddrV4
             server_task = Threads.@spawn begin
                 conns = TLN.Conn[]
@@ -473,7 +494,117 @@ end
         finally
             _tls_native_close_quiet!(client2)
             _tls_native_close_quiet!(client1)
-            server_task isa Task && wait(server_task)
+            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+                wait(server_task::Task)
+            end
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native mutual TLS roundtrip and resumption" begin
+        IPN.shutdown!()
+        listener = nothing
+        client1 = nothing
+        client2 = nothing
+        server_task = nothing
+        try
+            server_config = _tls13_native_server_config(
+                cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                client_auth = TLN.ClientAuthMode.RequireAndVerifyClientCert,
+                client_ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+            )
+            listener = TLN.listen(NCN.loopback_addr(0), server_config; backlog = 8)
+            addr = TLN.addr(listener)::NCN.SocketAddrV4
+            server_task = Threads.@spawn begin
+                conns = TLN.Conn[]
+                for i in 1:2
+                    conn = TLN.accept(listener)
+                    TLN.handshake!(conn)
+                    push!(conns, conn)
+                    write(conn, UInt8[UInt8(0x10 + i)])
+                    close(conn)
+                end
+                return conns
+            end
+            client_config = _tls13_native_client_config(
+                server_name = "localhost",
+                verify_peer = true,
+                ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                cert_file = _TLS_NATIVE_MTLS_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_MTLS_CLIENT_KEY_PATH,
+            )
+            client1 = TLN.connect(addr, client_config)
+            @test read(client1, 1) == UInt8[0x11]
+            @test eof(client1)
+            @test !TLN.connection_state(client1).did_resume
+            @test TLN.connection_state(client1).has_resumable_session
+
+            client2 = TLN.connect(addr, client_config)
+            @test read(client2, 1) == UInt8[0x12]
+            @test eof(client2)
+            @test TLN.connection_state(client2).did_resume
+
+            status = _tls_native_wait_task(server_task::Task, 5.0)
+            status == :timed_out && error("timed out waiting for mutual TLS resumption server")
+            wait(server_task::Task)
+        finally
+            _tls_native_close_quiet!(client2)
+            _tls_native_close_quiet!(client1)
+            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+                wait(server_task::Task)
+            end
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server rejects missing client certificate when required" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server_task = nothing
+        try
+            listener = TLN.listen(
+                NCN.loopback_addr(0),
+                _tls13_native_server_config(
+                    cert_file = _TLS_NATIVE_MTLS_SERVER_CERT_PATH,
+                    key_file = _TLS_NATIVE_MTLS_SERVER_KEY_PATH,
+                    client_auth = TLN.ClientAuthMode.RequireAndVerifyClientCert,
+                    client_ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                );
+                backlog = 8,
+            )
+            addr = TLN.addr(listener)::NCN.SocketAddrV4
+            server_task = Threads.@spawn begin
+                conn = TLN.accept(listener)
+                try
+                    TLN.handshake!(conn)
+                    return :ok
+                catch err
+                    return err
+                finally
+                    _tls_native_close_quiet!(conn)
+                end
+            end
+            client = TLN.connect(
+                addr,
+                _tls13_native_client_config(
+                    server_name = "localhost",
+                    verify_peer = true,
+                    ca_file = _TLS_NATIVE_MTLS_CA_PATH,
+                ),
+            )
+            @test_throws TLN.TLSError read(client, 1)
+            status = _tls_native_wait_task(server_task::Task, 5.0)
+            status == :timed_out && error("timed out waiting for client-auth failure server")
+            @test fetch(server_task::Task) isa TLN.TLSError
+        finally
+            _tls_native_close_quiet!(client)
+            if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out
+                wait(server_task::Task)
+            end
             _tls_native_close_quiet!(listener)
             IPN.shutdown!()
         end
