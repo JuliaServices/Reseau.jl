@@ -1,3 +1,25 @@
+function _read_tls_file_bytes(path::String)::Vector{UInt8}
+    file = ccall(:fopen, Ptr{Cvoid}, (Cstring, Cstring), path, "rb")
+    file == C_NULL && throw(SystemError("fopen", Base.Libc.errno()))
+    bytes = UInt8[]
+    chunk = Vector{UInt8}(undef, 8192)
+    try
+        while true
+            n = Int(ccall(:fread, Csize_t, (Ptr{UInt8}, Csize_t, Csize_t, Ptr{Cvoid}), chunk, 1, length(chunk), file))
+            if n == 0
+                ccall(:feof, Cint, (Ptr{Cvoid},), file) != 0 && return bytes
+                ccall(:ferror, Cint, (Ptr{Cvoid},), file) == 0 && return bytes
+                throw(SystemError("fread", Base.Libc.errno()))
+            end
+            offset = length(bytes)
+            resize!(bytes, offset + n)
+            copyto!(bytes, offset + 1, chunk, 1, n)
+        end
+    finally
+        ccall(:fclose, Cint, (Ptr{Cvoid},), file)
+    end
+end
+
 mutable struct _TLS13ServerHandshakeState
     client_hello::_ClientHelloMsg
     client_hello_raw::Vector{UInt8}
@@ -29,8 +51,8 @@ end
 function _TLS13ServerHandshakeState(config)::_TLS13ServerHandshakeState
     cert_file = config.cert_file === nothing ? throw(ArgumentError("tls13 native server requires cert_file")) : (config.cert_file::String)
     key_file = config.key_file === nothing ? throw(ArgumentError("tls13 native server requires key_file")) : (config.key_file::String)
-    cert_pem = read(cert_file)
-    key_pem = read(key_file)
+    cert_pem = _read_tls_file_bytes(cert_file)
+    key_pem = _read_tls_file_bytes(key_file)
     certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
     private_key = _tls13_load_private_key_pem(key_pem)
     _securezero!(key_pem)
