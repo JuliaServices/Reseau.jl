@@ -346,6 +346,9 @@ end
             @test client_native_state.write_cipher !== nothing
             @test (client_native_state.read_cipher::TLN._TLS13RecordCipherState).spec == TLN._TLS13_AES_256_GCM_SHA384
             @test client_native_state.session_cipher_suite == TLN._TLS13_AES_256_GCM_SHA384_ID
+            server_reply = UInt8[0x93]
+            @test write(server, server_reply) == length(server_reply)
+            @test read(client, length(server_reply)) == server_reply
             payload = UInt8[0x26, 0x56]
             @test write(client, payload) == length(payload)
             @test read(server, length(payload)) == payload

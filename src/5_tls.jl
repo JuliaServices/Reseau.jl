@@ -553,6 +553,11 @@ function _openssl_error_message()::String
     return String(buf[1:msg_len])
 end
 
+@inline function _clear_openssl_error_queue!()::Nothing
+    ccall((:ERR_clear_error, _LIBCRYPTO_PATH), Cvoid, ())
+    return nothing
+end
+
 function _make_tls_error(op::AbstractString, code::Int32)::TLSError
     return TLSError(String(op), code, _openssl_error_message(), nothing)
 end
@@ -1324,6 +1329,7 @@ function handshake!(conn::Conn)
                 end
                 while true
                     _ensure_open!(conn, "handshake")
+                    _clear_openssl_error_queue!()
                     ret = @gcsafe_ccall _LIBSSL_PATH.SSL_do_handshake(
                         conn.ssl::Ptr{Cvoid},
                     )::Cint
@@ -1412,6 +1418,7 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         end
         while true
             chunk_len = min(nbytes, typemax(Cint))
+            _clear_openssl_error_queue!()
             ret = @gcsafe_ccall _LIBSSL_PATH.SSL_read(
                 conn.ssl::Ptr{Cvoid},
                 ptr::Ptr{UInt8},
@@ -1744,6 +1751,7 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
         total = 0
         while total < nbytes_int
             chunk_len = min(nbytes_int - total, typemax(Cint))
+            _clear_openssl_error_queue!()
             wrote = @gcsafe_ccall _LIBSSL_PATH.SSL_write(
                 conn.ssl::Ptr{Cvoid},
                 (ptr + total)::Ptr{UInt8},
@@ -1829,6 +1837,7 @@ function _ssl_shutdown!(conn::Conn)
     catch
     end
     for _ in 1:4
+        _clear_openssl_error_queue!()
         ret = @gcsafe_ccall _LIBSSL_PATH.SSL_shutdown(
             conn.ssl::Ptr{Cvoid},
         )::Cint
