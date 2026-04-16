@@ -44,6 +44,14 @@ mutable struct _TLS13NativeClientState
     peer_close_notify::Bool
     sent_close_notify::Bool
     sent_dummy_ccs::Bool
+    resumption_secret::Vector{UInt8}
+    session_certificates::Vector{Vector{UInt8}}
+    session_cipher_suite::UInt16
+    session_cache_key::String
+    session_alpn::String
+    did_resume::Bool
+    did_hello_retry_request::Bool
+    curve_id::UInt16
 end
 
 _TLS13NativeClientState() = _TLS13NativeClientState(
@@ -56,6 +64,14 @@ _TLS13NativeClientState() = _TLS13NativeClientState(
     false,
     false,
     false,
+    UInt8[],
+    Vector{Vector{UInt8}}(),
+    UInt16(0),
+    "",
+    "",
+    false,
+    false,
+    UInt16(0),
 )
 
 mutable struct _TLS13HandshakeRecordIO
@@ -99,13 +115,25 @@ function _securezero_tls13_native_client_state!(state::_TLS13NativeClientState):
     end
     _securezero!(state.handshake_buffer)
     _securezero!(state.plaintext_buffer)
+    _securezero!(state.resumption_secret)
+    for cert in state.session_certificates
+        _securezero!(cert)
+    end
     empty!(state.handshake_buffer)
     empty!(state.plaintext_buffer)
+    empty!(state.resumption_secret)
+    empty!(state.session_certificates)
     state.handshake_buffer_pos = 1
     state.plaintext_buffer_pos = 1
     state.peer_close_notify = false
     state.sent_close_notify = false
     state.sent_dummy_ccs = false
+    state.session_cipher_suite = UInt16(0)
+    state.session_cache_key = ""
+    state.session_alpn = ""
+    state.did_resume = false
+    state.did_hello_retry_request = false
+    state.curve_id = UInt16(0)
     return nothing
 end
 
@@ -380,24 +408,82 @@ function _tls13_handle_key_update!(tcp::TCP.Conn, state::_TLS13NativeClientState
     return nothing
 end
 
+function _tls13_store_new_session_ticket!(conn, msg::_NewSessionTicketMsgTLS13)::Nothing
+    conn.config.session_tickets_disabled && return nothing
+    state = _native_tls13_state(conn)
+    isempty(state.resumption_secret) && return nothing
+    isempty(state.session_cache_key) && return nothing
+    state.session_cipher_suite == UInt16(0) && return nothing
+    cipher_spec = _tls13_cipher_spec(state.session_cipher_suite)
+    cipher_spec === nothing && throw(ArgumentError("tls: cannot store a session ticket for an unsupported cipher suite"))
+    hash_kind = cipher_spec.hash_kind
+    psk = _tls13_expand_label(hash_kind, state.resumption_secret, "resumption", msg.nonce, _hash_len(hash_kind))
+    try
+        now_s = UInt64(floor(time()))
+        session = _owned_tls13_client_session(
+            TLS1_3_VERSION,
+            state.session_cipher_suite,
+            now_s,
+            now_s + UInt64(msg.lifetime),
+            msg.age_add,
+            msg.label,
+            psk,
+            state.session_certificates,
+            state.session_alpn,
+        )
+        _tls13_session_cache_put!(conn.config._client_session_cache, state.session_cache_key, session)
+        _securezero_tls13_client_session!(session)
+    finally
+        _securezero!(psk)
+    end
+    return nothing
+end
+
+function _tls13_validate_new_session_ticket(raw::Vector{UInt8})::_NewSessionTicketMsgTLS13
+    msg = _unmarshal_new_session_ticket_tls13(raw)
+    msg === nothing && throw(ArgumentError("tls: unexpected post-handshake TLS 1.3 message"))
+    msg.lifetime == 0x00000000 && return msg
+    msg.lifetime <= _TLS13_MAX_SESSION_TICKET_LIFETIME ||
+        throw(ArgumentError("tls: received a session ticket with invalid lifetime"))
+    isempty(msg.label) && throw(ArgumentError("tls: received a session ticket with empty opaque ticket label"))
+    return msg
+end
+
 function _tls13_handle_post_handshake_messages!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
     while true
         raw = _tls13_try_take_handshake_message!(state)
         raw === nothing && return nothing
         handshake_type = raw[1]
         if handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
-            msg = _unmarshal_new_session_ticket_tls13(raw)
-            msg === nothing && throw(ArgumentError("tls: unexpected post-handshake TLS 1.3 message"))
+            msg = _tls13_validate_new_session_ticket(raw)
             msg.lifetime == 0x00000000 && continue
-            msg.lifetime <= _TLS13_MAX_SESSION_TICKET_LIFETIME ||
-                throw(ArgumentError("tls: received a session ticket with invalid lifetime"))
-            isempty(msg.label) && throw(ArgumentError("tls: received a session ticket with empty opaque ticket label"))
             continue
         end
         if handshake_type == _TLS13_HANDSHAKE_TYPE_KEY_UPDATE
             request_update = _tls13_parse_key_update(raw)
             request_update === nothing && throw(ArgumentError("tls: malformed TLS 1.3 key update message"))
             _tls13_handle_key_update!(tcp, state, request_update::Bool)
+            continue
+        end
+        throw(ArgumentError("tls: unexpected post-handshake TLS 1.3 message"))
+    end
+end
+
+function _tls13_handle_post_handshake_messages!(conn, state::_TLS13NativeClientState)::Nothing
+    while true
+        raw = _tls13_try_take_handshake_message!(state)
+        raw === nothing && return nothing
+        handshake_type = raw[1]
+        if handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
+            msg = _tls13_validate_new_session_ticket(raw)
+            msg.lifetime == 0x00000000 && continue
+            _tls13_store_new_session_ticket!(conn, msg)
+            continue
+        end
+        if handshake_type == _TLS13_HANDSHAKE_TYPE_KEY_UPDATE
+            request_update = _tls13_parse_key_update(raw)
+            request_update === nothing && throw(ArgumentError("tls: malformed TLS 1.3 key update message"))
+            _tls13_handle_key_update!(conn.tcp, state, request_update::Bool)
             continue
         end
         throw(ArgumentError("tls: unexpected post-handshake TLS 1.3 message"))

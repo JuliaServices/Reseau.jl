@@ -19,6 +19,18 @@ const _TLS13_TEST_SERVER_X25519_PRIVATE_KEY = UInt8[
     0x91, 0x82, 0x73, 0x64, 0x55, 0x46, 0x37, 0x28,
     0x19, 0x0a, 0xfb, 0xec, 0xdd, 0xce, 0xbf, 0xa0,
 ]
+const _TLS13_TEST_CLIENT_P256_PRIVATE_KEY = UInt8[
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+]
+const _TLS13_TEST_SERVER_P256_PRIVATE_KEY = UInt8[
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+]
 
 function _tls13_psk_client_hello(; cipher_suite::UInt16 = TLHC._TLS13_AES_128_GCM_SHA256_ID, binder_len::Int = 32)
     msg = TLHC._ClientHelloMsg()
@@ -172,7 +184,7 @@ function _tls13_server_certificate_request()
     return msg
 end
 
-_tls13_openssl_key_share_provider() = TLHC._TLS13OpenSSLKeyShareProvider(fixed_private_key = _TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
+_tls13_openssl_key_share_provider() = TLHC._TLS13OpenSSLKeyShareProvider(fixed_x25519_private_key = _TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
 
 function _tls13_scripted_key_share_provider(; hello_retry::Bool = false)
     initial_share = TLHC._TLSKeyShare(0x001d, UInt8[0x11, 0x12, 0x13, 0x14])
@@ -416,9 +428,13 @@ end
 @testset "TLS 1.3 client handshake phases 2-4" begin
     @testset "OpenSSL primitive helpers cover the real provider path" begin
         @test TLHC._x25519_pkey_id() > 0
+        @test TLHC._p256_group_nid() > 0
         client_pkey = TLHC._tls13_x25519_private_key_from_bytes(_TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
         client_secret = UInt8[]
         server_secret = UInt8[]
+        client_p256_pkey = Ptr{Cvoid}(C_NULL)
+        client_p256_secret = UInt8[]
+        server_p256_secret = UInt8[]
         pubkey = Ptr{Cvoid}(C_NULL)
         try
             client_share = TLHC._tls13_x25519_public_key(client_pkey)
@@ -426,6 +442,13 @@ end
             client_secret = TLHC._tls13_x25519_shared_secret(client_pkey, server_share.data)
             @test server_share.group == TLHC._TLS_GROUP_X25519
             @test client_secret == server_secret
+
+            client_p256_pkey = TLHC._tls13_p256_private_key_from_bytes(_TLS13_TEST_CLIENT_P256_PRIVATE_KEY)
+            client_p256_share = TLHC._tls13_p256_public_key(client_p256_pkey)
+            server_p256_share, server_p256_secret = TLHC._tls13_openssl_p256_server_share_and_secret(client_p256_share, _TLS13_TEST_SERVER_P256_PRIVATE_KEY)
+            client_p256_secret = TLHC._tls13_p256_shared_secret(client_p256_pkey, server_p256_share.data)
+            @test server_p256_share.group == TLHC._TLS_GROUP_SECP256R1
+            @test client_p256_secret == server_p256_secret
 
             signed = collect(UInt8(0x10):UInt8(0x4f))
             signature = TLHC._tls13_openssl_sign_from_pem(TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, _TLS13_TEST_KEY_PEM)
@@ -437,9 +460,12 @@ end
             @test !TLHC._tls13_openssl_verify_signature(pubkey, TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, bad_signature)
         finally
             TLHC._free_evp_pkey!(client_pkey)
+            TLHC._free_evp_pkey!(client_p256_pkey)
             TLHC._free_evp_pkey!(pubkey)
             TLHC._securezero!(client_secret)
             TLHC._securezero!(server_secret)
+            TLHC._securezero!(client_p256_secret)
+            TLHC._securezero!(server_p256_secret)
         end
     end
 
@@ -554,6 +580,52 @@ end
         @test io.outbound == expected.outbound
         @test length(io.outbound) == 4
         @test state.peer_new_session_tickets == [expected.ticket]
+    end
+
+    @testset "HelloRetryRequest drops PSK binders when the selected suite hash changes" begin
+        client_hello = _tls13_psk_client_hello(
+            cipher_suite = TLHC._TLS13_AES_256_GCM_SHA384_ID,
+            binder_len = 48,
+        )
+        client_hello.cipher_suites = UInt16[
+            TLHC._TLS13_AES_256_GCM_SHA384_ID,
+            TLHC._TLS13_AES_128_GCM_SHA256_ID,
+        ]
+        client_hello.supported_curves = UInt16[TLHC._TLS_GROUP_X25519, TLHC._TLS_GROUP_SECP256R1]
+        key_share_provider = _tls13_scripted_key_share_provider(; hello_retry = true)
+        state = TLHC._TLS13ClientHandshakeState(
+            client_hello,
+            TLHC._TLS13_AES_128_GCM_SHA256_ID,
+            key_share_provider,
+            TLHC._TLS13NoCertificateVerifier(),
+        )
+        state.psk = collect(UInt8(0x41):UInt8(0x70))
+        state.has_psk = true
+        state.psk_cipher_suite = TLHC._TLS13_AES_256_GCM_SHA384_ID
+        state.psk_cipher_spec = TLHC._tls13_cipher_spec(TLHC._TLS13_AES_256_GCM_SHA384_ID)
+
+        retry_server_hello = _tls13_certificate_server_hello(
+            client_hello.session_id,
+            key_share_provider.retry_share.group,
+            copy(key_share_provider.retry_expected_server_share),
+        )
+        io = TLHC._HandshakeMessageFlightIO([
+            TLHC._marshal_handshake_message(retry_server_hello),
+        ])
+
+        TLHC._write_client_hello!(state, io)
+        state.server_hello = _tls13_hello_retry_request(client_hello.session_id, key_share_provider.retry_share.group, UInt8[0xa1, 0xa2])
+        state.server_hello_raw = TLHC._marshal_handshake_message(state.server_hello)
+        state.have_server_hello = true
+        TLHC._check_server_hello_or_hrr!(state)
+        TLHC._process_hello_retry_request!(state, io)
+
+        retried_hello = TLHC._unmarshal_client_hello(io.outbound[2])::TLHC._ClientHelloMsg
+        @test !state.has_psk
+        @test state.did_hello_retry_request
+        @test retried_hello.psk_identities == TLHC._TLSPSKIdentity[]
+        @test retried_hello.psk_binders == Vector{UInt8}[]
+        @test state.cipher_suite == TLHC._TLS13_AES_128_GCM_SHA256_ID
     end
 
     @testset "certificate verify mismatches are rejected before client finished" begin

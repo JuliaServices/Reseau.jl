@@ -187,6 +187,8 @@ struct Config
     handshake_timeout_ns::Int64
     min_version::Union{Nothing, UInt16}
     max_version::Union{Nothing, UInt16}
+    session_tickets_disabled::Bool
+    _client_session_cache::_TLS13ClientSessionCache
 end
 
 struct _SSLContextKey
@@ -226,6 +228,8 @@ function Config(;
         handshake_timeout_ns::Integer = Int64(0),
         min_version::Union{Nothing, UInt16} = TLS1_2_VERSION,
         max_version::Union{Nothing, UInt16} = nothing,
+        session_tickets_disabled::Bool = false,
+        session_cache_capacity::Integer = 64,
     )
     # Normalize to owned `String` storage so shared configs do not depend on caller-owned
     # string buffers or views.
@@ -250,6 +254,8 @@ function Config(;
         Int64(handshake_timeout_ns),
         min_version,
         max_version,
+        session_tickets_disabled,
+        _TLS13ClientSessionCache(session_cache_capacity),
     )
 end
 
@@ -403,6 +409,7 @@ function __init__()
         C_NULL::Ptr{Cvoid},
     )::Cint
     _init_x25519_pkey_id!()
+    _init_p256_group_nid!()
     _VERIFY_ALLOW_ALL_CB[] = @cfunction(_verify_allow_all_cb, Cint, (Cint, Ptr{Cvoid}))
     _ALPN_SELECT_CB[] = @cfunction(_ssl_alpn_select_cb, Cint, (Ptr{Cvoid}, Ptr{Ptr{UInt8}}, Ptr{UInt8}, Ptr{UInt8}, Cuint, Ptr{Cvoid}))
     atexit(_free_ssl_ctx_cache!)
@@ -511,17 +518,19 @@ end
 
 function _config_with_server_name(config::Config, server_name::String)::Config
     return Config(
-        server_name = server_name,
-        verify_peer = config.verify_peer,
-        client_auth = config.client_auth,
-        cert_file = config.cert_file,
-        key_file = config.key_file,
-        ca_file = config.ca_file,
-        client_ca_file = config.client_ca_file,
-        alpn_protocols = config.alpn_protocols,
-        handshake_timeout_ns = config.handshake_timeout_ns,
-        min_version = config.min_version,
-        max_version = config.max_version,
+        server_name,
+        config.verify_peer,
+        config.client_auth,
+        config.cert_file,
+        config.key_file,
+        config.ca_file,
+        config.client_ca_file,
+        copy(config.alpn_protocols),
+        config.handshake_timeout_ns,
+        config.min_version,
+        config.max_version,
+        config.session_tickets_disabled,
+        config._client_session_cache,
     )
 end
 
@@ -562,6 +571,34 @@ function _encode_alpn_protocols(protocols::Vector{String})::Vector{UInt8}
         append!(out, bytes)
     end
     return out
+end
+
+function _append_session_context_string!(out::Vector{UInt8}, value::Union{Nothing, String})::Nothing
+    if value === nothing
+        _append_u32!(out, 0x00000000)
+        return nothing
+    end
+    bytes = codeunits(value::String)
+    _append_u32!(out, UInt32(length(bytes)))
+    append!(out, bytes)
+    return nothing
+end
+
+function _server_session_id_context(config::Config)::Vector{UInt8}
+    material = UInt8[]
+    _append_session_context_string!(material, config.cert_file)
+    _append_session_context_string!(material, config.key_file)
+    _append_session_context_string!(material, config.client_ca_file)
+    push!(material, Base.Enums.bitcast(UInt8, config.client_auth))
+    _append_u32!(material, UInt32(length(config.alpn_protocols)))
+    for proto in config.alpn_protocols
+        proto_bytes = codeunits(proto)
+        _append_u32!(material, UInt32(length(proto_bytes)))
+        append!(material, proto_bytes)
+    end
+    _append_u16!(material, config.min_version === nothing ? 0x0000 : config.min_version::UInt16)
+    _append_u16!(material, config.max_version === nothing ? 0x0000 : config.max_version::UInt16)
+    return SHA.sha256(material)
 end
 
 function _validate_config(config::Config; is_server::Bool)
@@ -728,6 +765,16 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
             ok == 1 || throw(_make_tls_error("SSL_CTX_use_PrivateKey_file", Int32(ok)))
             ok = ccall((:SSL_CTX_check_private_key, _LIBSSL_PATH), Cint, (Ptr{Cvoid},), ctx)
             ok == 1 || throw(_make_tls_error("SSL_CTX_check_private_key", Int32(ok)))
+            session_id_context = _server_session_id_context(config)
+            ok = GC.@preserve session_id_context ccall(
+                (:SSL_CTX_set_session_id_context, _LIBSSL_PATH),
+                Cint,
+                (Ptr{Cvoid}, Ptr{UInt8}, Cuint),
+                ctx,
+                pointer(session_id_context),
+                Cuint(length(session_id_context)),
+            )
+            ok == 1 || throw(_make_tls_error("SSL_CTX_set_session_id_context", Int32(ok)))
             if !isempty(config.alpn_protocols)
                 cb = _ALPN_SELECT_CB[]
                 cb == C_NULL && throw(ConfigError("ALPN select callback is not initialized"))
@@ -856,14 +903,19 @@ function _tls13_client_hello(config::Config)::_ClientHelloMsg
     hello.vers = TLS1_2_VERSION
     hello.random = rand(rng, UInt8, 32)
     hello.session_id = rand(rng, UInt8, 32)
-    hello.cipher_suites = UInt16[_TLS13_AES_128_GCM_SHA256_ID]
+    hello.cipher_suites = UInt16[
+        _TLS13_AES_128_GCM_SHA256_ID,
+        _TLS13_CHACHA20_POLY1305_SHA256_ID,
+        _TLS13_AES_256_GCM_SHA384_ID,
+    ]
     hello.compression_methods = UInt8[_TLS_COMPRESSION_NONE]
     hello.server_name = config.server_name === nothing ? "" : String(config.server_name)
     hello.ocsp_stapling = true
+    hello.ticket_supported = true
     hello.alpn_protocols = copy(config.alpn_protocols)
     hello.supported_points = UInt8[0x00]
     hello.supported_versions = UInt16[TLS1_3_VERSION]
-    hello.supported_curves = UInt16[_TLS_GROUP_X25519]
+    hello.supported_curves = UInt16[_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1]
     hello.supported_signature_algorithms = UInt16[
         _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
         _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
@@ -899,6 +951,72 @@ function _native_tls13_certificate_verifier(config::Config)::_TLS13OpenSSLCertif
         verify_peer = config.verify_peer,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
     )
+end
+
+@inline function _tls13_client_session_cache_key(config::Config, tcp::TCP.Conn)::String
+    if config.server_name !== nothing && !isempty(config.server_name::String)
+        return config.server_name::String
+    end
+    raddr = TCP.remote_addr(tcp)
+    raddr === nothing && return ""
+    if raddr isa TCP.SocketAddrV4
+        return string(raddr::TCP.SocketAddrV4)
+    end
+    return string(raddr::TCP.SocketAddrV6)
+end
+
+function _tls13_try_load_client_session(config::Config, cache_key::AbstractString, hello::_ClientHelloMsg)::Union{Nothing, _TLS13ClientSession}
+    config.session_tickets_disabled && return nothing
+    isempty(cache_key) && return nothing
+    session = _tls13_session_cache_get(config._client_session_cache, cache_key)
+    session === nothing && return nothing
+    now_s = UInt64(floor(time()))
+    if session.version != TLS1_3_VERSION || now_s > session.use_by_s
+        _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
+        _securezero_tls13_client_session!(session)
+        return nothing
+    end
+    session_spec = _tls13_cipher_spec(session.cipher_suite)
+    if session_spec === nothing
+        _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
+        _securezero_tls13_client_session!(session)
+        return nothing
+    end
+    offered_ok = false
+    for offered_suite in hello.cipher_suites
+        offered_spec = _tls13_cipher_spec(offered_suite)
+        offered_spec === nothing && continue
+        if offered_spec.hash_kind == session_spec.hash_kind
+            offered_ok = true
+            break
+        end
+    end
+    if !offered_ok
+        _securezero_tls13_client_session!(session)
+        return nothing
+    end
+    if config.verify_peer
+        pkey = Ptr{Cvoid}(C_NULL)
+        try
+            pkey = _tls13_verify_server_certificate_chain(
+                session.certificates,
+                config.server_name === nothing ? "" : config.server_name::String;
+                verify_peer = true,
+                ca_file = _effective_ca_file(config; is_server = false),
+            )
+        catch
+            _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
+            _securezero_tls13_client_session!(session)
+            return nothing
+        finally
+            _free_evp_pkey!(pkey)
+        end
+    end
+    ticket_age_ms = floor(UInt64, max(0.0, time() - Float64(session.created_at_s)) * 1000.0)
+    hello.psk_modes = UInt8[_TLS_PSK_MODE_DHE]
+    hello.psk_identities = [_TLSPSKIdentity(copy(session.ticket), UInt32(mod(ticket_age_ms + UInt64(session.age_add), UInt64(1) << 32)))]
+    hello.psk_binders = [zeros(UInt8, _hash_len(session_spec.hash_kind))]
+    return session
 end
 
 function _new_native_tls13_client_conn(tcp::TCP.Conn, config::Config)::Conn
@@ -1068,16 +1186,43 @@ function _wait_ssl_ready!(conn::Conn, ssl_err::Cint, op::AbstractString)
 end
 
 function _native_tls13_handshake!(conn::Conn)::Nothing
+    cache_key = _tls13_client_session_cache_key(conn.config, conn.tcp)
+    client_hello = _tls13_client_hello(conn.config)
+    session = _tls13_try_load_client_session(conn.config, cache_key, client_hello)
     state = _TLS13ClientHandshakeState(
-        _tls13_client_hello(conn.config),
-        _TLS13_AES_128_GCM_SHA256_ID,
+        client_hello,
         _TLS13OpenSSLKeyShareProvider(),
         _native_tls13_certificate_verifier(conn.config),
+        session,
     )
-    io = _TLS13HandshakeRecordIO(conn.tcp, _native_tls13_state(conn))
+    native_state = _native_tls13_state(conn)
+    io = _TLS13HandshakeRecordIO(conn.tcp, native_state)
     try
         _client_handshake_tls13!(state, io)
         negotiated_alpn = isempty(state.client_protocol) ? nothing : state.client_protocol
+        _securezero!(native_state.resumption_secret)
+        for cert in native_state.session_certificates
+            _securezero!(cert)
+        end
+        empty!(native_state.resumption_secret)
+        empty!(native_state.session_certificates)
+        native_state.resumption_secret = _tls13_derive_secret(
+            state.cipher_spec.hash_kind,
+            state.master_secret,
+            "res master",
+            _tls13_selected_transcript(state),
+        )
+        if state.using_psk && state.resumption_session !== nothing
+            native_state.session_certificates = [copy(cert) for cert in (state.resumption_session::_TLS13ClientSession).certificates]
+        else
+            native_state.session_certificates = [copy(cert) for cert in state.server_certificate.certificates]
+        end
+        native_state.session_cipher_suite = state.cipher_suite
+        native_state.session_cache_key = cache_key
+        native_state.session_alpn = negotiated_alpn === nothing ? "" : negotiated_alpn::String
+        native_state.did_resume = state.using_psk
+        native_state.did_hello_retry_request = state.did_hello_retry_request
+        native_state.curve_id = state.server_hello.server_share === nothing ? UInt16(0) : (state.server_hello.server_share::_TLSKeyShare).group
         _set_handshake_complete!(conn, "TLSv1.3", negotiated_alpn)
     finally
         _securezero_tls13_client_handshake_state!(state)
@@ -1224,7 +1369,7 @@ end
 function _native_tls13_fill_plaintext!(conn::Conn)::Nothing
     state = _native_tls13_state(conn)
     while true
-        _tls13_handle_post_handshake_messages!(conn.tcp, state)
+        _tls13_handle_post_handshake_messages!(conn, state)
         _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
         state.peer_close_notify && throw(EOFError())
         _tls13_read_record!(conn.tcp, state)
@@ -1312,7 +1457,7 @@ function _peek_eof(conn::Conn)::Bool
         if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
             state = _native_tls13_state(conn)
             while true
-                _tls13_handle_post_handshake_messages!(conn.tcp, state)
+                _tls13_handle_post_handshake_messages!(conn, state)
                 _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
                 state.peer_close_notify && return true
                 _tls13_read_record!(conn.tcp, state)
@@ -2146,8 +2291,16 @@ function connect(remote_addr::TCP.SocketAddr; kw...)::Conn
     return _connect(remote_addr, nothing, Config(; kw...))
 end
 
+function connect(remote_addr::TCP.SocketAddr, config::Config)::Conn
+    return _connect(remote_addr, nothing, config)
+end
+
 function connect(remote_addr::TCP.SocketAddr, local_addr::Union{Nothing, TCP.SocketAddr}; kw...)::Conn
     return _connect(remote_addr, local_addr, Config(; kw...))
+end
+
+function connect(remote_addr::TCP.SocketAddr, local_addr::Union{Nothing, TCP.SocketAddr}, config::Config)::Conn
+    return _connect(remote_addr, local_addr, config)
 end
 
 """
@@ -2195,6 +2348,21 @@ function connect(
     return _connect(host_resolver, network, address, Config(; kw...))
 end
 
+function connect(
+        network::AbstractString,
+        address::AbstractString,
+        config::Config;
+        timeout_ns::Integer = Int64(0),
+        deadline_ns::Integer = Int64(0),
+        local_addr::Union{Nothing, TCP.SocketEndpoint} = nothing,
+        fallback_delay_ns::Integer = Int64(300_000_000),
+        resolver::HostResolvers.AbstractResolver = HostResolvers.DEFAULT_RESOLVER,
+        policy::HostResolvers.ResolverPolicy = HostResolvers.ResolverPolicy(),
+    )::Conn
+    host_resolver = HostResolvers.HostResolver(; timeout_ns, deadline_ns, local_addr, fallback_delay_ns, resolver, policy)
+    return _connect(host_resolver, network, address, config)
+end
+
 """
     connect(address; kwargs...) -> Conn
 
@@ -2202,6 +2370,10 @@ Convenience shorthand for `connect("tcp", address; kwargs...)`.
 """
 function connect(address::AbstractString; kwargs...)::Conn
     return connect("tcp", address; kwargs...)
+end
+
+function connect(address::AbstractString, config::Config)::Conn
+    return connect("tcp", address, config)
 end
 
 """

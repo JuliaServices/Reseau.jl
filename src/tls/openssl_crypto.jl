@@ -16,6 +16,7 @@ const _TLS_GROUP_SECP256R1 = UInt16(0x0017)
 const _TLS_GROUP_X25519 = UInt16(0x001d)
 
 const _X25519_PKEY_ID = Ref{Cint}(0)
+const _P256_GROUP_NID = Ref{Cint}(0)
 
 function _init_x25519_pkey_id!()::Cint
     nid = _X25519_PKEY_ID[]
@@ -28,6 +29,19 @@ end
 
 @inline function _x25519_pkey_id()::Cint
     return _init_x25519_pkey_id!()
+end
+
+function _init_p256_group_nid!()::Cint
+    nid = _P256_GROUP_NID[]
+    nid > 0 && return nid
+    nid = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "prime256v1")
+    nid > 0 || throw(ArgumentError("failed to initialize OpenSSL P-256 provider"))
+    _P256_GROUP_NID[] = nid
+    return nid
+end
+
+@inline function _p256_group_nid()::Cint
+    return _init_p256_group_nid!()
 end
 
 @inline function _openssl_require_nonnull(ptr::Ptr{Cvoid}, op::AbstractString)::Ptr{Cvoid}
@@ -82,6 +96,26 @@ end
 
 @inline function _free_openssl_stack!(stack::Ptr{Cvoid})::Nothing
     stack == C_NULL || ccall((:OPENSSL_sk_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), stack)
+    return nothing
+end
+
+@inline function _free_ec_key!(key::Ptr{Cvoid})::Nothing
+    key == C_NULL || ccall((:EC_KEY_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), key)
+    return nothing
+end
+
+@inline function _free_ec_point!(point::Ptr{Cvoid})::Nothing
+    point == C_NULL || ccall((:EC_POINT_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), point)
+    return nothing
+end
+
+@inline function _free_bn!(bn::Ptr{Cvoid})::Nothing
+    bn == C_NULL || ccall((:BN_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), bn)
+    return nothing
+end
+
+@inline function _free_bn_ctx!(ctx::Ptr{Cvoid})::Nothing
+    ctx == C_NULL || ccall((:BN_CTX_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), ctx)
     return nothing
 end
 
@@ -503,6 +537,182 @@ function _tls13_openssl_x25519_server_share_and_secret(client_share::AbstractVec
     end
 end
 
+function _tls13_p256_private_key_from_bytes(private_key::AbstractVector{UInt8})::Ptr{Cvoid}
+    length(private_key) == 32 || throw(ArgumentError("tls13 P-256 private key must be 32 bytes"))
+    private_bytes = Vector{UInt8}(private_key)
+    ec_key = Ptr{Cvoid}(C_NULL)
+    private_bn = Ptr{Cvoid}(C_NULL)
+    point = Ptr{Cvoid}(C_NULL)
+    bn_ctx = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _p256_group_nid())
+        _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-256)")
+        private_bn = GC.@preserve private_bytes ccall(
+            (:BN_bin2bn, _LIBCRYPTO_PATH),
+            Ptr{Cvoid},
+            (Ptr{UInt8}, Cint, Ptr{Cvoid}),
+            pointer(private_bytes),
+            Cint(length(private_bytes)),
+            C_NULL,
+        )
+        _openssl_require_nonnull(private_bn, "BN_bin2bn")
+        _openssl_require_ok(ccall((:EC_KEY_set_private_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ec_key, private_bn), "EC_KEY_set_private_key(P-256)")
+        group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(group, "EC_KEY_get0_group(P-256)")
+        point = ccall((:EC_POINT_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), group)
+        _openssl_require_nonnull(point, "EC_POINT_new(P-256)")
+        bn_ctx = ccall((:BN_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(bn_ctx, "BN_CTX_new")
+        _openssl_require_ok(ccall((:EC_POINT_mul, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), group, point, private_bn, C_NULL, C_NULL, bn_ctx), "EC_POINT_mul(P-256)")
+        _openssl_require_ok(ccall((:EC_KEY_set_public_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ec_key, point), "EC_KEY_set_public_key(P-256)")
+        pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        _openssl_require_ok(ccall((:EVP_PKEY_set1_EC_KEY, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, ec_key), "EVP_PKEY_set1_EC_KEY(P-256)")
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        _free_evp_pkey!(pkey)
+        _free_bn_ctx!(bn_ctx)
+        _free_ec_point!(point)
+        _free_bn!(private_bn)
+        _free_ec_key!(ec_key)
+        _securezero!(private_bytes)
+    end
+end
+
+function _tls13_p256_generate_private_key()::Ptr{Cvoid}
+    ec_key = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _p256_group_nid())
+        _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-256)")
+        _openssl_require_ok(ccall((:EC_KEY_generate_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ec_key), "EC_KEY_generate_key(P-256)")
+        pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        _openssl_require_ok(ccall((:EVP_PKEY_set1_EC_KEY, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, ec_key), "EVP_PKEY_set1_EC_KEY(P-256)")
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        _free_evp_pkey!(pkey)
+        _free_ec_key!(ec_key)
+    end
+end
+
+function _tls13_p256_public_key(pkey::Ptr{Cvoid})::Vector{UInt8}
+    ec_key = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EVP_PKEY_get1_EC_KEY, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), pkey)
+        _openssl_require_nonnull(ec_key, "EVP_PKEY_get1_EC_KEY")
+        group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(group, "EC_KEY_get0_group(P-256)")
+        point = ccall((:EC_KEY_get0_public_key, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(point, "EC_KEY_get0_public_key(P-256)")
+        out_len = ccall(
+            (:EC_POINT_point2oct, _LIBCRYPTO_PATH),
+            Csize_t,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+            group,
+            point,
+            Cint(4),
+            Ptr{UInt8}(C_NULL),
+            Csize_t(0),
+            C_NULL,
+        )
+        out_len > 0 || throw(_make_tls_error("EC_POINT_point2oct(P-256)", Int32(out_len)))
+        out = Vector{UInt8}(undef, Int(out_len))
+        GC.@preserve out begin
+            wrote = ccall(
+                (:EC_POINT_point2oct, _LIBCRYPTO_PATH),
+                Csize_t,
+                (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+                group,
+                point,
+                Cint(4),
+                pointer(out),
+                Csize_t(length(out)),
+                C_NULL,
+            )
+            Int(wrote) == length(out) || throw(_make_tls_error("EC_POINT_point2oct(P-256)", Int32(wrote)))
+        end
+        return out
+    finally
+        _free_ec_key!(ec_key)
+    end
+end
+
+function _tls13_p256_peer_public_key(peer_public_key::AbstractVector{UInt8})::Ptr{Cvoid}
+    peer_bytes = Vector{UInt8}(peer_public_key)
+    ec_key = Ptr{Cvoid}(C_NULL)
+    point = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _p256_group_nid())
+        _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-256)")
+        group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(group, "EC_KEY_get0_group(P-256)")
+        point = ccall((:EC_POINT_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), group)
+        _openssl_require_nonnull(point, "EC_POINT_new(P-256)")
+        ok = GC.@preserve peer_bytes ccall(
+            (:EC_POINT_oct2point, _LIBCRYPTO_PATH),
+            Cint,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+            group,
+            point,
+            pointer(peer_bytes),
+            Csize_t(length(peer_bytes)),
+            C_NULL,
+        )
+        _openssl_require_ok(ok, "EC_POINT_oct2point(P-256)")
+        _openssl_require_ok(ccall((:EC_KEY_set_public_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ec_key, point), "EC_KEY_set_public_key(P-256)")
+        pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        _openssl_require_ok(ccall((:EVP_PKEY_set1_EC_KEY, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, ec_key), "EVP_PKEY_set1_EC_KEY(P-256)")
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        _free_evp_pkey!(pkey)
+        _free_ec_point!(point)
+        _free_ec_key!(ec_key)
+    end
+end
+
+function _tls13_p256_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::AbstractVector{UInt8})::Vector{UInt8}
+    peer_pkey = _tls13_p256_peer_public_key(peer_public_key)
+    ctx = Ptr{Cvoid}(C_NULL)
+    try
+        ctx = ccall((:EVP_PKEY_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}), private_key, C_NULL)
+        _openssl_require_nonnull(ctx, "EVP_PKEY_CTX_new(P-256)")
+        _openssl_require_ok(ccall((:EVP_PKEY_derive_init, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ctx), "EVP_PKEY_derive_init(P-256)")
+        _openssl_require_ok(ccall((:EVP_PKEY_derive_set_peer, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ctx, peer_pkey), "EVP_PKEY_derive_set_peer(P-256)")
+        out_len = Ref{Csize_t}(0)
+        _openssl_require_ok(ccall((:EVP_PKEY_derive, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Csize_t}), ctx, Ptr{UInt8}(C_NULL), out_len), "EVP_PKEY_derive(P-256)")
+        out = Vector{UInt8}(undef, Int(out_len[]))
+        GC.@preserve out begin
+            _openssl_require_ok(ccall((:EVP_PKEY_derive, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ref{Csize_t}), ctx, pointer(out), out_len), "EVP_PKEY_derive(P-256)")
+        end
+        resize!(out, Int(out_len[]))
+        return out
+    finally
+        _free_evp_pkey_ctx!(ctx)
+        _free_evp_pkey!(peer_pkey)
+    end
+end
+
+function _tls13_openssl_p256_server_share_and_secret(client_share::AbstractVector{UInt8}, server_private_key::AbstractVector{UInt8})
+    pkey = _tls13_p256_private_key_from_bytes(server_private_key)
+    try
+        share = _TLSKeyShare(_TLS_GROUP_SECP256R1, _tls13_p256_public_key(pkey))
+        secret = _tls13_p256_shared_secret(pkey, client_share)
+        return share, secret
+    finally
+        _free_evp_pkey!(pkey)
+    end
+end
+
 function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
     spec = _tls13_signature_verify_spec(signature_algorithm)
     if spec.direct
@@ -734,7 +944,8 @@ end
 @inline function _tls13_record_cipher(spec::_TLS13CipherSpec)::Ptr{Cvoid}
     spec == _TLS13_AES_128_GCM_SHA256 && return ccall((:EVP_aes_128_gcm, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
     spec == _TLS13_AES_256_GCM_SHA384 && return ccall((:EVP_aes_256_gcm, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-    throw(ArgumentError("tls13 native record layer only supports AES-GCM cipher suites"))
+    spec == _TLS13_CHACHA20_POLY1305_SHA256 && return ccall((:EVP_chacha20_poly1305, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+    throw(ArgumentError("tls13 native record layer only supports AES-GCM and ChaCha20-Poly1305 cipher suites"))
 end
 
 function _tls13_encrypt_record_aead(

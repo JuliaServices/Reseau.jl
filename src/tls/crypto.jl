@@ -185,9 +185,10 @@ function _p_hash(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, seed::A
     secret_bytes = Vector{UInt8}(secret)
     seed_bytes = Vector{UInt8}(seed)
     a = UInt8[]
+    out = UInt8[]
+    success = false
     try
         a = _hmac_data(hash_kind, secret_bytes, seed_bytes)
-        out = UInt8[]
         sizehint!(out, out_len)
         while length(out) < out_len
             ctx = _new_hmac_context(hash_kind, secret_bytes)
@@ -209,8 +210,10 @@ function _p_hash(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, seed::A
             end
         end
         resize!(out, out_len)
+        success = true
         return out
     finally
+        success || _securezero!(out)
         _securezero!(a)
         _securezero!(seed_bytes)
         _securezero!(secret_bytes)
@@ -306,6 +309,7 @@ function _hkdf_expand(hash_kind::_TLSHashKind, prk::AbstractVector{UInt8}, info:
     out = UInt8[]
     sizehint!(out, out_len)
     prev = UInt8[]
+    success = false
     try
         for counter in 1:nblocks
             ctx = _new_hmac_context(hash_kind, prk)
@@ -323,8 +327,10 @@ function _hkdf_expand(hash_kind::_TLSHashKind, prk::AbstractVector{UInt8}, info:
             end
         end
         resize!(out, out_len)
+        success = true
         return out
     finally
+        success || _securezero!(out)
         _securezero!(prev)
     end
 end

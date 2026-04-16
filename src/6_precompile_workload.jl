@@ -343,6 +343,8 @@ function _pc_tls_server_config(cert_path::String, key_path::String)::TL.Config
         cert_file = cert_path,
         key_file = key_path,
         handshake_timeout_ns = 1_000_000_000,
+        min_version = TL.TLS1_3_VERSION,
+        max_version = TL.TLS1_3_VERSION,
     )
 end
 
@@ -351,6 +353,8 @@ function _pc_tls_client_config()::TL.Config
         verify_peer = false,
         server_name = "localhost",
         handshake_timeout_ns = 1_000_000_000,
+        min_version = TL.TLS1_3_VERSION,
+        max_version = TL.TLS1_3_VERSION,
     )
 end
 
@@ -384,12 +388,16 @@ function _pc_tls13_client_hello()::TL._ClientHelloMsg
     client_hello.vers = TL.TLS1_2_VERSION
     client_hello.random = collect(UInt8(0x20):UInt8(0x3f))
     client_hello.session_id = UInt8[0xba, 0xdb, 0xee, 0xf0]
-    client_hello.cipher_suites = UInt16[TL._TLS13_AES_128_GCM_SHA256_ID]
+    client_hello.cipher_suites = UInt16[
+        TL._TLS13_AES_128_GCM_SHA256_ID,
+        TL._TLS13_CHACHA20_POLY1305_SHA256_ID,
+        TL._TLS13_AES_256_GCM_SHA384_ID,
+    ]
     client_hello.compression_methods = UInt8[TL._TLS_COMPRESSION_NONE]
     client_hello.server_name = "localhost"
     client_hello.alpn_protocols = ["h2"]
     client_hello.supported_versions = UInt16[TL.TLS1_3_VERSION]
-    client_hello.supported_curves = UInt16[TL._TLS_GROUP_X25519]
+    client_hello.supported_curves = UInt16[TL._TLS_GROUP_X25519, TL._TLS_GROUP_SECP256R1]
     client_hello.supported_signature_algorithms = UInt16[TL._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256]
     client_hello.supported_signature_algorithms_cert = UInt16[TL._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256]
     return client_hello
@@ -443,7 +451,7 @@ end
 
 function _pc_run_tls13_client_handshake_workload!()::Nothing
     client_hello = _pc_tls13_client_hello()
-    key_share_provider = TL._TLS13OpenSSLKeyShareProvider(fixed_private_key = _PC_TLS13_CLIENT_X25519_PRIVATE_KEY)
+    key_share_provider = TL._TLS13OpenSSLKeyShareProvider(fixed_x25519_private_key = _PC_TLS13_CLIENT_X25519_PRIVATE_KEY)
     transcript = TL._TranscriptHash(TL._HASH_SHA256)
     early_secret = TL._TLS13EarlySecret(TL._HASH_SHA256, UInt8[])
     handshake_secret = TL._TLS13HandshakeSecret(TL._HASH_SHA256, UInt8[])
@@ -473,6 +481,7 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     certificate_bytes = TL._marshal_handshake_message(certificate)
     TL._transcript_update!(transcript, certificate_bytes)
 
+    signed_message = TL._tls13_signed_message(TL._TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
     certificate_verify = TL._CertificateVerifyMsg(
         TL._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
         _pc_tls13_certificate_verify_signature(),
@@ -518,13 +527,20 @@ function _pc_run_tls13_client_handshake_workload!()::Nothing
     ]
 
     state_client_hello = _pc_tls13_client_hello()
-    state_key_share_provider = TL._TLS13OpenSSLKeyShareProvider(fixed_private_key = _PC_TLS13_CLIENT_X25519_PRIVATE_KEY)
+    state_key_share_provider = TL._TLS13OpenSSLKeyShareProvider(fixed_x25519_private_key = _PC_TLS13_CLIENT_X25519_PRIVATE_KEY)
+    verifier = TL._TLS13ScriptedCertificateVerifier(
+        certificate.certificates,
+        state_client_hello.server_name,
+        certificate_verify.signature_algorithm,
+        signed_message,
+        certificate_verify.signature,
+    )
     state = TL._TLS13ClientHandshakeState(
         state_client_hello,
         TL._TLS13_AES_128_GCM_SHA256_ID,
         state_key_share_provider,
-        TL._TLS13OpenSSLCertificateVerifier(),
-    )::TL._TLS13ClientHandshakeState{TL._HASH_SHA256}
+        verifier,
+    )::TL._TLS13ClientHandshakeState
     io = TL._HandshakeMessageFlightIO(inbound)
     try
         TL._client_handshake_tls13!(state, io)
@@ -574,6 +590,10 @@ function _pc_run_tls_workload!()
         server = fetch(accept_task)
         payload = UInt8[0x54, 0x4c, 0x53]
         recv_buf = Vector{UInt8}(undef, 3)
+        client.mode == TL._TLS_CONN_MODE_NATIVE_TLS13_CLIENT ||
+            throw(ArgumentError("TLS precompile workload expected native TLS 1.3 client mode"))
+        ((client.native_state::TL._TLS13NativeClientState).did_resume) &&
+            throw(ArgumentError("TLS precompile workload did not expect first connection resumption"))
         written = write(client, payload)
         written == 3 || throw(ArgumentError("TLS precompile workload expected 3-byte write"))
         read!(server, recv_buf)
