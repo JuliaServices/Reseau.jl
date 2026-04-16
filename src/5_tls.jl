@@ -74,6 +74,7 @@ include("tls/openssl_crypto.jl")
 include("tls/handshake_messages.jl")
 include("tls/handshake_client_tls13.jl")
 include("tls/record_tls13.jl")
+include("tls/handshake_server_tls13.jl")
 
 module ClientAuthMode
 Base.@enum T::UInt8 begin
@@ -215,6 +216,9 @@ const _CTX_CACHE_MAX = Ref(128)
 const _CTX_SERVER_ALPN = Dict{Ptr{Cvoid}, _ALPNServerData}()
 const _TLS_CONN_MODE_OPENSSL = UInt8(0)
 const _TLS_CONN_MODE_NATIVE_TLS13_CLIENT = UInt8(1)
+const _TLS_CONN_MODE_NATIVE_TLS13_SERVER = UInt8(2)
+
+@inline _is_native_tls13_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT || mode == _TLS_CONN_MODE_NATIVE_TLS13_SERVER
 
 function Config(;
         server_name::Union{Nothing, AbstractString} = nothing,
@@ -312,11 +316,23 @@ Fields:
 - `handshake_complete`: whether the TLS handshake has finished successfully.
 - `version`: negotiated TLS protocol version string as reported by OpenSSL.
 - `alpn_protocol`: negotiated ALPN protocol, or `nothing` if ALPN was not used.
+- `cipher_suite`: negotiated cipher suite name, or `nothing` if it is not available.
+- `using_native_tls13`: whether the connection is using the native TLS 1.3 path.
+- `did_resume`: whether the connection resumed a previously cached TLS session.
+- `did_hello_retry_request`: whether the handshake observed a TLS 1.3 HelloRetryRequest.
+- `has_resumable_session`: whether this connection currently has a cached resumable TLS 1.3 session.
+- `curve`: negotiated TLS 1.3 key share group name, or `nothing` if it is not available.
 """
 struct ConnectionState
     handshake_complete::Bool
     version::String
     alpn_protocol::Union{Nothing, String}
+    cipher_suite::Union{Nothing, String}
+    using_native_tls13::Bool
+    did_resume::Bool
+    did_hello_retry_request::Bool
+    has_resumable_session::Bool
+    curve::Union{Nothing, String}
 end
 
 """
@@ -1024,14 +1040,13 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
     return session
 end
 
-function _new_native_tls13_client_conn(tcp::TCP.Conn, config::Config)::Conn
-    _validate_config(config; is_server = false)
+function _new_native_tls13_conn(tcp::TCP.Conn, config::Config; is_server::Bool)::Conn
     return Conn(
         tcp,
         C_NULL,
         C_NULL,
-        _TLS_CONN_MODE_NATIVE_TLS13_CLIENT,
-        false,
+        is_server ? _TLS_CONN_MODE_NATIVE_TLS13_SERVER : _TLS_CONN_MODE_NATIVE_TLS13_CLIENT,
+        is_server,
         config,
         _TLS13NativeClientState(),
         ReentrantLock(),
@@ -1043,6 +1058,16 @@ function _new_native_tls13_client_conn(tcp::TCP.Conn, config::Config)::Conn
         "",
         nothing,
     )
+end
+
+function _new_native_tls13_client_conn(tcp::TCP.Conn, config::Config)::Conn
+    _validate_config(config; is_server = false)
+    return _new_native_tls13_conn(tcp, config; is_server = false)
+end
+
+function _new_native_tls13_server_conn(tcp::TCP.Conn, config::Config)::Conn
+    _validate_config(config; is_server = true)
+    return _new_native_tls13_conn(tcp, config; is_server = true)
 end
 
 function _new_openssl_conn(tcp::TCP.Conn, config::Config; is_server::Bool)::Conn
@@ -1093,11 +1118,14 @@ The handshake is deferred until `handshake!` or the first read/write operation.
 Throws `ConfigError` or `TLSError` if the TLS state cannot be initialized.
 """
 function server(tcp::TCP.Conn, config::Config)::Conn
+    if _native_tls13_server_enabled(config)
+        return _new_native_tls13_server_conn(tcp, config)
+    end
     return _new_openssl_conn(tcp, config; is_server = true)
 end
 
 function _free_native_handles!(conn::Conn)
-    if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+    if _is_native_tls13_mode(conn.mode)
         if conn.native_state !== nothing
             _securezero_tls13_native_client_state!(conn.native_state::_TLS13NativeClientState)
             conn.native_state = nothing
@@ -1157,7 +1185,7 @@ end
 
 function _ensure_open!(conn::Conn, op::AbstractString)
     _is_closed(conn) && throw(_closed_error(op))
-    if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+    if _is_native_tls13_mode(conn.mode)
         conn.native_state === nothing && throw(_closed_error(op))
         return nothing
     end
@@ -1190,7 +1218,7 @@ function _wait_ssl_ready!(conn::Conn, ssl_err::Cint, op::AbstractString)
     return false
 end
 
-function _native_tls13_handshake!(conn::Conn)::Nothing
+function _native_tls13_client_handshake!(conn::Conn)::Nothing
     cache_key = _tls13_client_session_cache_key(conn.config, conn.tcp)
     client_hello = _tls13_client_hello(conn.config)
     session = _tls13_try_load_client_session(conn.config, cache_key, client_hello)
@@ -1323,8 +1351,12 @@ function handshake!(conn::Conn)
         _handshake_complete(conn) && return nothing
         try
             _with_handshake_deadline(conn) do
-                if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
-                    _native_tls13_handshake!(conn)
+                if _is_native_tls13_mode(conn.mode)
+                    if conn.is_server
+                        _native_tls13_server_handshake!(conn)
+                    else
+                        _native_tls13_client_handshake!(conn)
+                    end
                     return nothing
                 end
                 while true
@@ -1395,7 +1427,7 @@ function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)
 end
 
 @inline function _pending_plaintext(conn::Conn)::Int
-    conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT && return _native_tls13_pending_plaintext(conn)
+    _is_native_tls13_mode(conn.mode) && return _native_tls13_pending_plaintext(conn)
     conn.ssl == C_NULL && return 0
     return Int(ccall((:SSL_pending, _LIBSSL_PATH), Cint, (Ptr{Cvoid},), conn.ssl))
 end
@@ -1413,7 +1445,7 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
     lock(conn.read_lock)
     try
         _ensure_open!(conn, "read")
-        if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+        if _is_native_tls13_mode(conn.mode)
             return _native_tls13_take_plaintext!(conn, ptr, nbytes)
         end
         while true
@@ -1461,7 +1493,7 @@ function _peek_eof(conn::Conn)::Bool
     lock(conn.read_lock)
     try
         _ensure_open!(conn, "peek")
-        if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+        if _is_native_tls13_mode(conn.mode)
             state = _native_tls13_state(conn)
             while true
                 _tls13_handle_post_handshake_messages!(conn, state)
@@ -1682,7 +1714,7 @@ end
 Return `true` while both the TLS state and underlying TCP transport remain open.
 """
 function Base.isopen(conn::Conn)::Bool
-    if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+    if _is_native_tls13_mode(conn.mode)
         return !_is_closed(conn) && conn.native_state !== nothing && isopen(conn.tcp)
     end
     return !_is_closed(conn) && conn.ssl != C_NULL && isopen(conn.tcp)
@@ -1745,7 +1777,7 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
     try
         _ensure_open!(conn, "write")
         conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
-        if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+        if _is_native_tls13_mode(conn.mode)
             return _native_tls13_write_application!(conn, ptr, nbytes_int)
         end
         total = 0
@@ -1891,10 +1923,10 @@ closing the socket. The method is idempotent and returns `nothing`.
 """
 function Base.close(conn::Conn)
     _mark_closed!(conn) || return nothing
-    if _handshake_complete(conn) && (conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT || conn.ssl != C_NULL)
+    if _handshake_complete(conn) && (_is_native_tls13_mode(conn.mode) || conn.ssl != C_NULL)
         if _try_lock_close_path!(conn)
             try
-                if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+                if _is_native_tls13_mode(conn.mode)
                     _native_tls13_shutdown!(conn)
                 else
                     _ssl_shutdown!(conn)
@@ -1941,7 +1973,7 @@ function Base.closewrite(conn::Conn)
     lock(conn.write_lock)
     try
         _ensure_open!(conn, "closewrite")
-        if conn.mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+        if _is_native_tls13_mode(conn.mode)
             _native_tls13_shutdown!(conn)
         else
             _ssl_shutdown!(conn)
@@ -2074,6 +2106,46 @@ function _ssl_alpn_protocol(conn::Conn)::Union{Nothing, String}
     return unsafe_string(Ptr{Cchar}(data), len)
 end
 
+function _ssl_cipher_suite(conn::Conn)::Union{Nothing, String}
+    cipher = ccall((:SSL_get_current_cipher, _LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), conn.ssl)
+    cipher == C_NULL && return nothing
+    name = ccall((:SSL_CIPHER_get_name, _LIBSSL_PATH), Cstring, (Ptr{Cvoid},), cipher)
+    name == C_NULL && return nothing
+    return unsafe_string(name)
+end
+
+@inline function _ssl_session_reused(conn::Conn)::Bool
+    return ccall((:SSL_session_reused, _LIBSSL_PATH), Cint, (Ptr{Cvoid},), conn.ssl) == 1
+end
+
+@inline function _tls13_cipher_suite_name(cipher_suite::UInt16)::Union{Nothing, String}
+    cipher_suite == _TLS13_AES_128_GCM_SHA256_ID && return "TLS_AES_128_GCM_SHA256"
+    cipher_suite == _TLS13_AES_256_GCM_SHA384_ID && return "TLS_AES_256_GCM_SHA384"
+    cipher_suite == _TLS13_CHACHA20_POLY1305_SHA256_ID && return "TLS_CHACHA20_POLY1305_SHA256"
+    return nothing
+end
+
+@inline function _tls_group_name(group::UInt16)::Union{Nothing, String}
+    group == _TLS_GROUP_X25519 && return "X25519"
+    group == _TLS_GROUP_SECP256R1 && return "P-256"
+    return nothing
+end
+
+function _tls13_has_resumable_session(config::Config, tcp::TCP.Conn)::Bool
+    config.session_tickets_disabled && return false
+    cache_key = _tls13_client_session_cache_key(config, tcp)
+    isempty(cache_key) && return false
+    session = _tls13_session_cache_get(config._client_session_cache, cache_key)
+    session === nothing && return false
+    try
+        session.version == TLS1_3_VERSION || return false
+        _tls13_cipher_spec(session.cipher_suite) === nothing && return false
+        return UInt64(floor(time())) <= session.use_by_s
+    finally
+        _securezero_tls13_client_session!(session)
+    end
+end
+
 """
     connection_state(conn) -> ConnectionState
 
@@ -2083,10 +2155,42 @@ This does not force a handshake; if the handshake has not yet run, the returned
 `ConnectionState` reports `handshake_complete=false`.
 """
 function connection_state(conn::Conn)::ConnectionState
+    if _is_native_tls13_mode(conn.mode)
+        resumed = false
+        did_hrr = false
+        resumable = false
+        cipher_suite = nothing
+        curve = nothing
+        if conn.native_state !== nothing
+            native_state = conn.native_state::_TLS13NativeClientState
+            resumed = native_state.did_resume
+            did_hrr = native_state.did_hello_retry_request
+            resumable = conn.is_server ? false : _tls13_has_resumable_session(conn.config, conn.tcp)
+            cipher_suite = native_state.session_cipher_suite == UInt16(0) ? nothing : _tls13_cipher_suite_name(native_state.session_cipher_suite)
+            curve = native_state.curve_id == UInt16(0) ? nothing : _tls_group_name(native_state.curve_id)
+        end
+        return ConnectionState(
+            _handshake_complete(conn),
+            conn.negotiated_version,
+            conn.negotiated_alpn,
+            cipher_suite,
+            true,
+            resumed,
+            did_hrr,
+            resumable,
+            curve,
+        )
+    end
     return ConnectionState(
         _handshake_complete(conn),
         conn.negotiated_version,
         conn.negotiated_alpn,
+        _handshake_complete(conn) && conn.ssl != C_NULL ? _ssl_cipher_suite(conn) : nothing,
+        false,
+        _handshake_complete(conn) && conn.ssl != C_NULL ? _ssl_session_reused(conn) : false,
+        false,
+        false,
+        nothing,
     )
 end
 
@@ -2165,7 +2269,7 @@ end
 
 @inline _show_role(conn::Conn) = conn.is_server ? "server" : "client"
 @inline _show_state(listener::Listener) = listener.listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
-@inline _show_closed(conn::Conn) = _is_closed(conn) || conn.ssl == C_NULL || conn.tcp.fd.pfd.sysfd < 0
+@inline _show_closed(conn::Conn) = _is_closed(conn) || (!_is_native_tls13_mode(conn.mode) && conn.ssl == C_NULL) || conn.tcp.fd.pfd.sysfd < 0
 
 function Base.show(io::IO, conn::Conn)
     print(io, "TLS.Conn(")

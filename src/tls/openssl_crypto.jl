@@ -27,10 +27,6 @@ function _init_x25519_pkey_id!()::Cint
     return nid
 end
 
-@inline function _x25519_pkey_id()::Cint
-    return _init_x25519_pkey_id!()
-end
-
 function _init_p256_group_nid!()::Cint
     nid = _P256_GROUP_NID[]
     nid > 0 && return nid
@@ -38,10 +34,6 @@ function _init_p256_group_nid!()::Cint
     nid > 0 || throw(ArgumentError("failed to initialize OpenSSL P-256 provider"))
     _P256_GROUP_NID[] = nid
     return nid
-end
-
-@inline function _p256_group_nid()::Cint
-    return _init_p256_group_nid!()
 end
 
 @inline function _openssl_require_nonnull(ptr::Ptr{Cvoid}, op::AbstractString)::Ptr{Cvoid}
@@ -299,6 +291,16 @@ function _tls13_openssl_certificate_der(cert_pem::AbstractVector{UInt8})::Vector
     end
 end
 
+function _tls13_load_x509_pem_chain(cert_pem::AbstractVector{UInt8})::Vector{Vector{UInt8}}
+    cert_text = String(cert_pem)
+    certificates = Vector{Vector{UInt8}}()
+    for matched in eachmatch(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----"s, cert_text)
+        push!(certificates, _tls13_openssl_certificate_der(Vector{UInt8}(codeunits(matched.match))))
+    end
+    isempty(certificates) && throw(ArgumentError("tls: certificate file does not contain any PEM certificate blocks"))
+    return certificates
+end
+
 function _tls13_pubkey_from_der_certificate(cert_der::AbstractVector{UInt8})::Ptr{Cvoid}
     x509 = _tls13_load_x509_der(cert_der)
     try
@@ -307,6 +309,12 @@ function _tls13_pubkey_from_der_certificate(cert_der::AbstractVector{UInt8})::Pt
     finally
         _free_x509!(x509)
     end
+end
+
+function _tls13_pkey_type_name(pkey::Ptr{Cvoid})::String
+    name = ccall((:EVP_PKEY_get0_type_name, _LIBCRYPTO_PATH), Cstring, (Ptr{Cvoid},), pkey)
+    name == C_NULL && throw(ArgumentError("tls: OpenSSL private key has no type name"))
+    return unsafe_string(name)
 end
 
 function _tls13_load_verify_locations!(store::Ptr{Cvoid}, ca_path::AbstractString)::Nothing
@@ -432,7 +440,7 @@ function _tls13_x25519_private_key_from_bytes(private_key::AbstractVector{UInt8}
             (:EVP_PKEY_new_raw_private_key, _LIBCRYPTO_PATH),
             Ptr{Cvoid},
             (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-            _x25519_pkey_id(),
+            _init_x25519_pkey_id!(),
             C_NULL,
             pointer(private_bytes),
             Csize_t(length(private_bytes)),
@@ -444,7 +452,7 @@ function _tls13_x25519_private_key_from_bytes(private_key::AbstractVector{UInt8}
 end
 
 function _tls13_x25519_generate_private_key()::Ptr{Cvoid}
-    ctx = ccall((:EVP_PKEY_CTX_new_id, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint, Ptr{Cvoid}), _x25519_pkey_id(), C_NULL)
+    ctx = ccall((:EVP_PKEY_CTX_new_id, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint, Ptr{Cvoid}), _init_x25519_pkey_id!(), C_NULL)
     _openssl_require_nonnull(ctx, "EVP_PKEY_CTX_new_id(X25519)")
     try
         ok = ccall((:EVP_PKEY_keygen_init, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ctx)
@@ -492,7 +500,7 @@ function _tls13_x25519_peer_public_key(peer_public_key::AbstractVector{UInt8})::
         (:EVP_PKEY_new_raw_public_key, _LIBCRYPTO_PATH),
         Ptr{Cvoid},
         (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
-        _x25519_pkey_id(),
+        _init_x25519_pkey_id!(),
         C_NULL,
         pointer(peer_bytes),
         Csize_t(length(peer_bytes)),
@@ -546,7 +554,7 @@ function _tls13_p256_private_key_from_bytes(private_key::AbstractVector{UInt8}):
     bn_ctx = Ptr{Cvoid}(C_NULL)
     pkey = Ptr{Cvoid}(C_NULL)
     try
-        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _p256_group_nid())
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _init_p256_group_nid!())
         _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-256)")
         private_bn = GC.@preserve private_bytes ccall(
             (:BN_bin2bn, _LIBCRYPTO_PATH),
@@ -586,7 +594,7 @@ function _tls13_p256_generate_private_key()::Ptr{Cvoid}
     ec_key = Ptr{Cvoid}(C_NULL)
     pkey = Ptr{Cvoid}(C_NULL)
     try
-        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _p256_group_nid())
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _init_p256_group_nid!())
         _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-256)")
         _openssl_require_ok(ccall((:EC_KEY_generate_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ec_key), "EC_KEY_generate_key(P-256)")
         pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
@@ -649,7 +657,7 @@ function _tls13_p256_peer_public_key(peer_public_key::AbstractVector{UInt8})::Pt
     point = Ptr{Cvoid}(C_NULL)
     pkey = Ptr{Cvoid}(C_NULL)
     try
-        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _p256_group_nid())
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _init_p256_group_nid!())
         _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name(P-256)")
         group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
         _openssl_require_nonnull(group, "EC_KEY_get0_group(P-256)")

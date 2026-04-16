@@ -475,6 +475,7 @@ function _tls13_handle_post_handshake_messages!(conn, state::_TLS13NativeClientS
         raw === nothing && return nothing
         handshake_type = raw[1]
         if handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
+            conn.is_server && throw(ArgumentError("tls: unexpected post-handshake TLS 1.3 message"))
             msg = _tls13_validate_new_session_ticket(raw)
             msg.lifetime == 0x00000000 && continue
             _tls13_store_new_session_ticket!(conn, msg)

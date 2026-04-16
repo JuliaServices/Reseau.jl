@@ -87,6 +87,18 @@ function _tls13_native_server_config(; alpn_protocols::Vector{String} = String[]
         key_file = _TLS_NATIVE_KEY_PATH,
         alpn_protocols = copy(alpn_protocols),
         handshake_timeout_ns = 10_000_000_000,
+        min_version = TLN.TLS1_3_VERSION,
+        max_version = TLN.TLS1_3_VERSION,
+    )
+end
+
+function _tls13_openssl_server_config(; alpn_protocols::Vector{String} = String[])
+    return TLN.Config(
+        verify_peer = false,
+        cert_file = _TLS_NATIVE_CERT_PATH,
+        key_file = _TLS_NATIVE_KEY_PATH,
+        alpn_protocols = copy(alpn_protocols),
+        handshake_timeout_ns = 10_000_000_000,
     )
 end
 
@@ -139,6 +151,7 @@ end
         min_version = TLN.TLS1_3_VERSION,
         max_version = TLN.TLS1_3_VERSION,
     ))
+    @test TLN._native_tls13_server_enabled(_tls13_native_server_config())
 
     @testset "record layer fragments oversized handshake payloads" begin
         IPN.shutdown!()
@@ -308,11 +321,16 @@ end
             _finish_tls13_native_server!(server_task::Task)
             server = fetch(server_task::Task)
             @test client.mode == TLN._TLS_CONN_MODE_NATIVE_TLS13_CLIENT
-            @test server.mode == TLN._TLS_CONN_MODE_OPENSSL
+            @test server.mode == TLN._TLS_CONN_MODE_NATIVE_TLS13_SERVER
             client_state = TLN.connection_state(client)
+            server_state = TLN.connection_state(server)
             @test client_state.handshake_complete
             @test client_state.version == "TLSv1.3"
             @test client_state.alpn_protocol == "h2"
+            @test client_state.using_native_tls13
+            @test server_state.handshake_complete
+            @test server_state.using_native_tls13
+            @test server_state.alpn_protocol == "h2"
             payload = UInt8[0x01, 0x02, 0x03, 0x04]
             @test write(client, payload) == length(payload)
             @test read(server, length(payload)) == payload
@@ -335,7 +353,7 @@ end
         server_task = nothing
         try
             listener, addr, server_task, _ = _start_tls13_native_server(
-                _tls13_native_server_config();
+                _tls13_openssl_server_config();
                 configure = conn -> _tls_native_set_server_ciphersuites!(conn, "TLS_AES_256_GCM_SHA384"),
             )
             client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
@@ -345,7 +363,7 @@ end
             @test client_native_state.read_cipher !== nothing
             @test client_native_state.write_cipher !== nothing
             @test (client_native_state.read_cipher::TLN._TLS13RecordCipherState).spec == TLN._TLS13_AES_256_GCM_SHA384
-            @test client_native_state.session_cipher_suite == TLN._TLS13_AES_256_GCM_SHA384_ID
+            @test TLN.connection_state(client).cipher_suite == "TLS_AES_256_GCM_SHA384"
             server_reply = UInt8[0x93]
             @test write(server, server_reply) == length(server_reply)
             @test read(client, length(server_reply)) == server_reply
@@ -368,7 +386,7 @@ end
         server_task = nothing
         try
             listener, addr, server_task, _ = _start_tls13_native_server(
-                _tls13_native_server_config();
+                _tls13_openssl_server_config();
                 configure = conn -> _tls_native_set_server_ciphersuites!(conn, "TLS_CHACHA20_POLY1305_SHA256"),
             )
             client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
@@ -378,7 +396,7 @@ end
             @test client_native_state.read_cipher !== nothing
             @test client_native_state.write_cipher !== nothing
             @test (client_native_state.read_cipher::TLN._TLS13RecordCipherState).spec == TLN._TLS13_CHACHA20_POLY1305_SHA256
-            @test client_native_state.session_cipher_suite == TLN._TLS13_CHACHA20_POLY1305_SHA256_ID
+            @test TLN.connection_state(client).cipher_suite == "TLS_CHACHA20_POLY1305_SHA256"
             payload = UInt8[0xca, 0xfe, 0x13]
             @test write(client, payload) == length(payload)
             @test read(server, length(payload)) == payload
@@ -397,14 +415,14 @@ end
         server_task = nothing
         try
             listener, addr, server_task, _ = _start_tls13_native_server(
-                _tls13_native_server_config();
+                _tls13_openssl_server_config();
                 configure = conn -> _tls_native_set_server_groups_list!(conn, "P-256"),
             )
             client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
             _finish_tls13_native_server!(server_task::Task)
-            client_native_state = client.native_state::TLN._TLS13NativeClientState
-            @test client_native_state.did_hello_retry_request
-            @test client_native_state.curve_id == TLN._TLS_GROUP_SECP256R1
+            client_state = TLN.connection_state(client)
+            @test client_state.did_hello_retry_request
+            @test client_state.curve == "P-256"
         finally
             _tls_native_close_quiet!(client)
             server_task isa Task && _finish_tls13_native_server!(server_task)
@@ -420,7 +438,7 @@ end
         client2 = nothing
         server_task = nothing
         try
-            listener = TLN.listen(NCN.loopback_addr(0), _tls13_native_server_config(); backlog = 8)
+            listener = TLN.listen(NCN.loopback_addr(0), _tls13_openssl_server_config(); backlog = 8)
             addr = TLN.addr(listener)::NCN.SocketAddrV4
             server_task = Threads.@spawn begin
                 conns = TLN.Conn[]
@@ -441,12 +459,13 @@ end
             client1 = TLN.connect(addr, client_config)
             @test read(client1, 1) == UInt8[0x01]
             @test eof(client1)
-            @test !((client1.native_state::TLN._TLS13NativeClientState).did_resume)
+            @test !TLN.connection_state(client1).did_resume
+            @test TLN.connection_state(client1).has_resumable_session
 
             client2 = TLN.connect(addr, client_config)
             @test read(client2, 1) == UInt8[0x02]
             @test eof(client2)
-            @test (client2.native_state::TLN._TLS13NativeClientState).did_resume
+            @test TLN.connection_state(client2).did_resume
 
             status = _tls_native_wait_task(server_task::Task, 5.0)
             status == :timed_out && error("timed out waiting for TLS session resumption server")

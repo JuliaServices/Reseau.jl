@@ -427,8 +427,8 @@ end
 
 @testset "TLS 1.3 client handshake phases 2-4" begin
     @testset "OpenSSL primitive helpers cover the real provider path" begin
-        @test TLHC._x25519_pkey_id() > 0
-        @test TLHC._p256_group_nid() > 0
+        @test TLHC._init_x25519_pkey_id!() > 0
+        @test TLHC._init_p256_group_nid!() > 0
         client_pkey = TLHC._tls13_x25519_private_key_from_bytes(_TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
         client_secret = UInt8[]
         server_secret = UInt8[]

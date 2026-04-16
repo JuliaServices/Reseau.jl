@@ -590,9 +590,13 @@ function _pc_run_tls_workload!()
         server = fetch(accept_task)
         payload = UInt8[0x54, 0x4c, 0x53]
         recv_buf = Vector{UInt8}(undef, 3)
-        client.mode == TL._TLS_CONN_MODE_NATIVE_TLS13_CLIENT ||
+        client_state = TL.connection_state(client)
+        server_state = TL.connection_state(server)
+        client_state.using_native_tls13 ||
             throw(ArgumentError("TLS precompile workload expected native TLS 1.3 client mode"))
-        ((client.native_state::TL._TLS13NativeClientState).did_resume) &&
+        server_state.using_native_tls13 ||
+            throw(ArgumentError("TLS precompile workload expected native TLS 1.3 server mode"))
+        client_state.did_resume &&
             throw(ArgumentError("TLS precompile workload did not expect first connection resumption"))
         written = write(client, payload)
         written == 3 || throw(ArgumentError("TLS precompile workload expected 3-byte write"))
