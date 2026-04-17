@@ -8,6 +8,7 @@ mutable struct _TLS12ServerHandshakeState
     curve_id::UInt16
     selected_signature_algorithm::UInt16
     selected_alpn::String
+    send_downgrade_canary::Bool
 end
 
 function _TLS12ServerHandshakeState(config)::_TLS12ServerHandshakeState
@@ -32,6 +33,7 @@ function _TLS12ServerHandshakeState(config)::_TLS12ServerHandshakeState
         UInt16(0),
         UInt16(0),
         "",
+        false,
     )
 end
 
@@ -85,8 +87,7 @@ end
     return in(UInt8(0x00), client_hello.supported_points)
 end
 
-function _tls12_read_client_hello!(state::_TLS12ServerHandshakeState, io::_TLS12HandshakeRecordIO)::Vector{UInt8}
-    raw = _read_handshake_bytes!(io)
+function _tls12_set_client_hello!(state::_TLS12ServerHandshakeState, raw::Vector{UInt8})::Nothing
     client_hello = _unmarshal_client_hello(raw)
     client_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls12 server handshake expected ClientHello")
     versions = client_hello.supported_versions
@@ -109,6 +110,12 @@ function _tls12_read_client_hello!(state::_TLS12ServerHandshakeState, io::_TLS12
     isempty(client_hello.supported_signature_algorithms) &&
         _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not advertise TLS 1.2 signature algorithms")
     state.client_hello = client_hello
+    return nothing
+end
+
+function _tls12_read_client_hello!(state::_TLS12ServerHandshakeState, io::_TLS12HandshakeRecordIO)::Vector{UInt8}
+    raw = _read_handshake_bytes!(io)
+    _tls12_set_client_hello!(state, raw)
     return raw
 end
 
@@ -132,7 +139,12 @@ function _tls12_send_server_hello!(
     rng = Random.RandomDevice()
     server_hello = _ServerHelloMsg()
     server_hello.vers = TLS1_2_VERSION
-    server_hello.random = rand(rng, UInt8, 32)
+    if state.send_downgrade_canary
+        server_hello.random = rand(rng, UInt8, 24)
+        append!(server_hello.random, _TLS13_DOWNGRADE_CANARY_TLS12)
+    else
+        server_hello.random = rand(rng, UInt8, 32)
+    end
     server_hello.session_id = UInt8[]
     server_hello.cipher_suite = state.cipher_suite
     server_hello.compression_method = _TLS_COMPRESSION_NONE
@@ -337,8 +349,12 @@ function _server_handshake_tls12_for_suite!(
     return nothing
 end
 
-function _server_handshake_tls12!(state::_TLS12ServerHandshakeState, io::_TLS12HandshakeRecordIO, config)::Nothing
-    raw_client_hello = _tls12_read_client_hello!(state, io)
+function _server_handshake_tls12_after_client_hello!(
+    state::_TLS12ServerHandshakeState,
+    io::_TLS12HandshakeRecordIO,
+    config,
+    raw_client_hello::Vector{UInt8},
+)::Nothing
     _tls12_select_server_parameters!(state, config)
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
         transcript = _TranscriptHash(_HASH_SHA256)
@@ -362,6 +378,11 @@ function _server_handshake_tls12!(state::_TLS12ServerHandshakeState, io::_TLS12H
         )
     end
     _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 cipher suite")
+end
+
+function _server_handshake_tls12!(state::_TLS12ServerHandshakeState, io::_TLS12HandshakeRecordIO, config)::Nothing
+    raw_client_hello = _tls12_read_client_hello!(state, io)
+    return _server_handshake_tls12_after_client_hello!(state, io, config, raw_client_hello)
 end
 
 function _native_tls12_server_handshake!(conn)::Nothing

@@ -864,14 +864,19 @@ function _check_server_hello_or_hrr!(state::_TLS13ClientHandshakeState)::Nothing
     return nothing
 end
 
-function _read_server_hello!(state::_TLS13ClientHandshakeState, io)::Nothing
-    raw = _read_handshake_bytes!(io)
+function _tls13_set_server_hello!(state::_TLS13ClientHandshakeState, raw::Vector{UInt8})::Nothing
     msg = _unmarshal_server_hello(raw)
     msg === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected ServerHello")
     state.server_hello_raw = raw
     state.server_hello = msg
     state.have_server_hello = true
     _check_server_hello_or_hrr!(state)
+    return nothing
+end
+
+function _read_server_hello!(state::_TLS13ClientHandshakeState, io)::Nothing
+    raw = _read_handshake_bytes!(io)
+    _tls13_set_server_hello!(state, raw)
     return nothing
 end
 
@@ -1155,10 +1160,7 @@ function _read_post_handshake_messages!(state::_TLS13ClientHandshakeState, io)::
     return nothing
 end
 
-function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io)::Nothing
-    state.complete && throw(ArgumentError("tls13 client handshake already complete"))
-    _write_client_hello!(state, io)
-    _read_server_hello!(state, io)
+function _client_handshake_tls13_after_server_hello!(state::_TLS13ClientHandshakeState, io)::Nothing
     if state.server_hello.random == _HELLO_RETRY_REQUEST_RANDOM
         _tls13_send_dummy_change_cipher_spec!(io)
         _process_hello_retry_request!(state, io)
@@ -1182,4 +1184,11 @@ function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io)::Nothin
     state.complete = true
     _read_post_handshake_messages!(state, io)
     return nothing
+end
+
+function _client_handshake_tls13!(state::_TLS13ClientHandshakeState, io)::Nothing
+    state.complete && throw(ArgumentError("tls13 client handshake already complete"))
+    _write_client_hello!(state, io)
+    _read_server_hello!(state, io)
+    return _client_handshake_tls13_after_server_hello!(state, io)
 end

@@ -129,6 +129,28 @@ function _tls13_openssl_server_config(; alpn_protocols::Vector{String} = String[
     )
 end
 
+function _start_tls13_openssl_server(config::TLN.Config; configure = nothing)
+    listener = NCN.listen(NCN.loopback_addr(0); backlog = 8)
+    addr = NCN.addr(listener)::NCN.SocketAddrV4
+    server_ref = Ref{Union{Nothing, TLN.Conn}}(nothing)
+    task = Threads.@spawn begin
+        tcp = NCN.accept(listener)
+        conn = TLN._new_openssl_conn(tcp, config; is_server = true)
+        server_ref[] = conn
+        configure === nothing || configure(conn)
+        TLN.handshake!(conn)
+        return conn
+    end
+    return listener, addr, task, server_ref
+end
+
+function _connect_tls13_openssl_client(addr::NCN.SocketAddrV4, config::TLN.Config)::TLN.Conn
+    tcp = NCN.connect(addr)
+    conn = TLN._new_openssl_conn(tcp, config; is_server = false)
+    TLN.handshake!(conn)
+    return conn
+end
+
 function _tls_native_set_server_ciphersuites!(conn::TLN.Conn, suites::AbstractString)::Nothing
     ok = ccall((:SSL_set_ciphersuites, TLN._LIBSSL_PATH), Cint, (Ptr{Cvoid}, Cstring), conn.ssl, suites)
     ok == 1 || throw(TLN._make_tls_error("SSL_set_ciphersuites", Int32(ok)))
@@ -411,7 +433,7 @@ end
         server = nothing
         server_task = nothing
         try
-            listener, addr, server_task, _ = _start_tls13_native_server(
+            listener, addr, server_task, _ = _start_tls13_openssl_server(
                 _tls13_openssl_server_config();
                 configure = conn -> _tls_native_set_server_ciphersuites!(conn, "TLS_AES_256_GCM_SHA384"),
             )
@@ -444,7 +466,7 @@ end
         server = nothing
         server_task = nothing
         try
-            listener, addr, server_task, _ = _start_tls13_native_server(
+            listener, addr, server_task, _ = _start_tls13_openssl_server(
                 _tls13_openssl_server_config();
                 configure = conn -> _tls_native_set_server_ciphersuites!(conn, "TLS_CHACHA20_POLY1305_SHA256"),
             )
@@ -473,7 +495,7 @@ end
         client = nothing
         server_task = nothing
         try
-            listener, addr, server_task, _ = _start_tls13_native_server(
+            listener, addr, server_task, _ = _start_tls13_openssl_server(
                 _tls13_openssl_server_config();
                 configure = conn -> _tls_native_set_server_groups_list!(conn, "P-256"),
             )
@@ -530,7 +552,7 @@ end
         server_task = nothing
         try
             listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config())
-            client = TLN.connect(addr, TLN.Config(
+            client = _connect_tls13_openssl_client(addr, TLN.Config(
                 server_name = "localhost",
                 verify_peer = false,
                 handshake_timeout_ns = 10_000_000_000,

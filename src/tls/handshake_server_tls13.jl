@@ -373,14 +373,19 @@ function _tls13_illegal_client_hello_change(client_hello::_ClientHelloMsg, first
         client_hello.extensions != first_hello.extensions
 end
 
-function _read_client_hello!(state::_TLS13ServerHandshakeState, io)::Nothing
-    raw = _read_handshake_bytes!(io)
+function _tls13_set_client_hello!(state::_TLS13ServerHandshakeState, raw::Vector{UInt8})::Nothing
     client_hello = _unmarshal_client_hello(raw)
     client_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected ClientHello")
     in(TLS1_3_VERSION, client_hello.supported_versions) || _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: client did not offer TLS 1.3")
     in(_TLS_COMPRESSION_NONE, client_hello.compression_methods) || _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client sent unsupported compression methods")
     state.client_hello = client_hello
     state.client_hello_raw = raw
+    return nothing
+end
+
+function _read_client_hello!(state::_TLS13ServerHandshakeState, io)::Nothing
+    raw = _read_handshake_bytes!(io)
+    _tls13_set_client_hello!(state, raw)
     return nothing
 end
 
@@ -748,9 +753,7 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
     return nothing
 end
 
-function _server_handshake_tls13!(state::_TLS13ServerHandshakeState, io, config)::Nothing
-    state.complete && throw(ArgumentError("tls13 server handshake already complete"))
-    _read_client_hello!(state, io)
+function _server_handshake_tls13_after_client_hello!(state::_TLS13ServerHandshakeState, io, config)::Nothing
     _prepare_server_negotiation!(state, io, config)
     _check_for_resumption!(state, config)
     _send_server_hello!(state, io)
@@ -772,6 +775,12 @@ function _server_handshake_tls13!(state::_TLS13ServerHandshakeState, io, config)
     state.complete = true
     _send_new_session_ticket!(state, io, config)
     return nothing
+end
+
+function _server_handshake_tls13!(state::_TLS13ServerHandshakeState, io, config)::Nothing
+    state.complete && throw(ArgumentError("tls13 server handshake already complete"))
+    _read_client_hello!(state, io)
+    return _server_handshake_tls13_after_client_hello!(state, io, config)
 end
 
 function _native_tls13_server_handshake!(conn)::Nothing

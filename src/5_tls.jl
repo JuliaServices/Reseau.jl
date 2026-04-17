@@ -232,10 +232,13 @@ const _TLS_CONN_MODE_NATIVE_TLS13_CLIENT = UInt8(1)
 const _TLS_CONN_MODE_NATIVE_TLS13_SERVER = UInt8(2)
 const _TLS_CONN_MODE_NATIVE_TLS12_CLIENT = UInt8(3)
 const _TLS_CONN_MODE_NATIVE_TLS12_SERVER = UInt8(4)
+const _TLS_CONN_MODE_NATIVE_AUTO_CLIENT = UInt8(5)
+const _TLS_CONN_MODE_NATIVE_AUTO_SERVER = UInt8(6)
 
 @inline _is_native_tls13_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT || mode == _TLS_CONN_MODE_NATIVE_TLS13_SERVER
 @inline _is_native_tls12_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS12_CLIENT || mode == _TLS_CONN_MODE_NATIVE_TLS12_SERVER
-@inline _is_native_mode(mode::UInt8) = _is_native_tls13_mode(mode) || _is_native_tls12_mode(mode)
+@inline _is_native_auto_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_AUTO_CLIENT || mode == _TLS_CONN_MODE_NATIVE_AUTO_SERVER
+@inline _is_native_mode(mode::UInt8) = _is_native_tls13_mode(mode) || _is_native_tls12_mode(mode) || _is_native_auto_mode(mode)
 
 function Config(;
         server_name::Union{Nothing, AbstractString} = nothing,
@@ -993,6 +996,83 @@ end
     return config.min_version == TLS1_2_VERSION && config.max_version == TLS1_2_VERSION
 end
 
+@inline function _config_allows_tls_version(config::Config, version::UInt16)::Bool
+    if config.min_version !== nothing && version < (config.min_version::UInt16)
+        return false
+    end
+    if config.max_version !== nothing && version > (config.max_version::UInt16)
+        return false
+    end
+    return true
+end
+
+function _native_supported_versions(config::Config)::Vector{UInt16}
+    versions = UInt16[]
+    _config_allows_tls_version(config, TLS1_3_VERSION) && push!(versions, TLS1_3_VERSION)
+    _config_allows_tls_version(config, TLS1_2_VERSION) && push!(versions, TLS1_2_VERSION)
+    return versions
+end
+
+@inline function _native_tls_mixed_versions(config::Config)::Bool
+    return _config_allows_tls_version(config, TLS1_2_VERSION) &&
+        _config_allows_tls_version(config, TLS1_3_VERSION) &&
+        !_native_tls13_only(config) &&
+        !_native_tls12_only(config)
+end
+
+@inline function _native_tls_auto_client_enabled(config::Config)::Bool
+    return _native_tls_mixed_versions(config) &&
+        config.cert_file === nothing &&
+        config.key_file === nothing
+end
+
+@inline function _native_tls_auto_server_enabled(config::Config)::Bool
+    return _native_tls_mixed_versions(config) &&
+        config.cert_file !== nothing &&
+        config.key_file !== nothing &&
+        config.client_auth == ClientAuthMode.NoClientCert
+end
+
+function _tls_supported_versions_from_max(max_version::UInt16)::Vector{UInt16}
+    versions = UInt16[]
+    max_version >= TLS1_3_VERSION && push!(versions, TLS1_3_VERSION)
+    max_version >= TLS1_2_VERSION && push!(versions, TLS1_2_VERSION)
+    return versions
+end
+
+function _tls_client_hello_supported_versions(client_hello::_ClientHelloMsg)::Vector{UInt16}
+    versions = client_hello.supported_versions
+    if isempty(versions)
+        if client_hello.vers >= TLS1_3_VERSION
+            return UInt16[TLS1_2_VERSION]
+        end
+        return _tls_supported_versions_from_max(client_hello.vers)
+    end
+    return versions
+end
+
+function _tls_mutual_supported_version(config::Config, peer_versions::AbstractVector{UInt16})::UInt16
+    for version in _native_supported_versions(config)
+        in(version, peer_versions) && return version
+    end
+    _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: peer offered only unsupported native TLS versions")
+end
+
+function _tls_pick_client_version(config::Config, server_hello::_ServerHelloMsg)::UInt16
+    peer_version = server_hello.supported_version == UInt16(0) ? server_hello.vers : server_hello.supported_version
+    in(peer_version, _native_supported_versions(config)) ||
+        _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server negotiated an unsupported TLS version")
+    if peer_version != TLS1_3_VERSION && server_hello.supported_version != UInt16(0)
+        _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server sent supported_versions for a pre-TLS 1.3 handshake")
+    end
+    if _config_allows_tls_version(config, TLS1_3_VERSION) && peer_version <= TLS1_2_VERSION
+        random_tail = @view server_hello.random[25:32]
+        (random_tail == _TLS13_DOWNGRADE_CANARY_TLS12 || random_tail == _TLS13_DOWNGRADE_CANARY_TLS11) &&
+            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: downgrade attempt detected")
+    end
+    return peer_version
+end
+
 function _tls13_client_hello(config::Config)::_ClientHelloMsg
     rng = Random.RandomDevice()
     hello = _ClientHelloMsg()
@@ -1040,6 +1120,35 @@ function _tls13_client_hello(config::Config)::_ClientHelloMsg
     hello.secure_renegotiation_supported = true
     hello.extended_master_secret = true
     hello.scts = true
+    return hello
+end
+
+function _tls_auto_client_hello(config::Config)::_ClientHelloMsg
+    hello = _tls13_client_hello(config)
+    hello.supported_versions = UInt16[TLS1_3_VERSION, TLS1_2_VERSION]
+    hello.cipher_suites = UInt16[
+        _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+        _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
+        _TLS13_AES_128_GCM_SHA256_ID,
+        _TLS13_CHACHA20_POLY1305_SHA256_ID,
+        _TLS13_AES_256_GCM_SHA384_ID,
+    ]
+    hello.supported_signature_algorithms = UInt16[
+        _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
+        _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+        _TLS_SIGNATURE_ED25519,
+        _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384,
+        _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512,
+        _TLS_SIGNATURE_RSA_PSS_PSS_SHA256,
+        _TLS_SIGNATURE_RSA_PSS_PSS_SHA384,
+        _TLS_SIGNATURE_RSA_PSS_PSS_SHA512,
+        _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384,
+        _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512,
+        _TLS_SIGNATURE_RSA_PKCS1_SHA256,
+        _TLS_SIGNATURE_RSA_PKCS1_SHA384,
+        _TLS_SIGNATURE_RSA_PKCS1_SHA512,
+    ]
+    hello.supported_signature_algorithms_cert = copy(hello.supported_signature_algorithms)
     return hello
 end
 
@@ -1189,6 +1298,36 @@ function _new_native_tls13_server_conn(tcp::TCP.Conn, config::Config)::Conn
     return _new_native_tls13_conn(tcp, config; is_server = true)
 end
 
+function _new_native_tls_auto_conn(tcp::TCP.Conn, config::Config; is_server::Bool)::Conn
+    return Conn(
+        tcp,
+        C_NULL,
+        C_NULL,
+        is_server ? _TLS_CONN_MODE_NATIVE_AUTO_SERVER : _TLS_CONN_MODE_NATIVE_AUTO_CLIENT,
+        is_server,
+        config,
+        _TLS13NativeClientState(),
+        ReentrantLock(),
+        ReentrantLock(),
+        ReentrantLock(),
+        false,
+        false,
+        nothing,
+        "",
+        nothing,
+    )
+end
+
+function _new_native_tls_auto_client_conn(tcp::TCP.Conn, config::Config)::Conn
+    _validate_config(config; is_server = false)
+    return _new_native_tls_auto_conn(tcp, config; is_server = false)
+end
+
+function _new_native_tls_auto_server_conn(tcp::TCP.Conn, config::Config)::Conn
+    _validate_config(config; is_server = true)
+    return _new_native_tls_auto_conn(tcp, config; is_server = true)
+end
+
 function _new_openssl_conn(tcp::TCP.Conn, config::Config; is_server::Bool)::Conn
     ctx = _shared_ssl_ctx(config; is_server = is_server)
     ssl = _ssl_new(ctx, tcp, config; is_server = is_server)
@@ -1227,6 +1366,9 @@ function client(tcp::TCP.Conn, config::Config)::Conn
     if _native_tls12_only(config)
         return _new_native_tls12_client_conn(tcp, config)
     end
+    if _native_tls_auto_client_enabled(config)
+        return _new_native_tls_auto_client_conn(tcp, config)
+    end
     return _new_openssl_conn(tcp, config; is_server = false)
 end
 
@@ -1246,11 +1388,14 @@ function server(tcp::TCP.Conn, config::Config)::Conn
     if _native_tls12_server_enabled(config)
         return _new_native_tls12_server_conn(tcp, config)
     end
+    if _native_tls_auto_server_enabled(config)
+        return _new_native_tls_auto_server_conn(tcp, config)
+    end
     return _new_openssl_conn(tcp, config; is_server = true)
 end
 
 function _free_native_handles!(conn::Conn)
-    if _is_native_tls13_mode(conn.mode)
+    if _is_native_tls13_mode(conn.mode) || _is_native_auto_mode(conn.mode)
         if conn.native_state !== nothing
             _securezero_tls13_native_client_state!(conn.native_state::_TLS13NativeClientState)
             conn.native_state = nothing
@@ -1323,6 +1468,23 @@ end
     return state::_TLS12NativeState
 end
 
+function _tls12_take_initial_state!(state13::_TLS13NativeClientState)::_TLS12NativeState
+    state12 = _TLS12NativeState()
+    state12.handshake_buffer = state13.handshake_buffer
+    state12.handshake_buffer_pos = state13.handshake_buffer_pos
+    state12.plaintext_buffer = state13.plaintext_buffer
+    state12.plaintext_buffer_pos = state13.plaintext_buffer_pos
+    state12.peer_close_notify = state13.peer_close_notify
+    state12.sent_close_notify = state13.sent_close_notify
+    state13.handshake_buffer = UInt8[]
+    state13.handshake_buffer_pos = 1
+    state13.plaintext_buffer = UInt8[]
+    state13.plaintext_buffer_pos = 1
+    state13.peer_close_notify = false
+    state13.sent_close_notify = false
+    return state12
+end
+
 function _ensure_open!(conn::Conn, op::AbstractString)
     _is_closed(conn) && throw(_closed_error(op))
     if _is_native_mode(conn.mode)
@@ -1377,34 +1539,7 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
         state.client_certificate_chain = client_certificate_chain
         state.client_private_key = client_private_key
         _client_handshake_tls13!(state, io)
-        if state.using_psk
-            _tls13_session_cache_put!(conn.config._client_session_cache, cache_key, nothing)
-        end
-        negotiated_alpn = isempty(state.client_protocol) ? nothing : state.client_protocol
-        _securezero!(native_state.resumption_secret)
-        for cert in native_state.session_certificates
-            _securezero!(cert)
-        end
-        empty!(native_state.resumption_secret)
-        empty!(native_state.session_certificates)
-        native_state.resumption_secret = _tls13_derive_secret(
-            state.cipher_spec.hash_kind,
-            state.master_secret,
-            "res master",
-            _tls13_selected_transcript(state),
-        )
-        if state.using_psk && state.resumption_session !== nothing
-            native_state.session_certificates = [copy(cert) for cert in (state.resumption_session::_TLS13ClientSession).certificates]
-        else
-            native_state.session_certificates = [copy(cert) for cert in state.server_certificate.certificates]
-        end
-        native_state.session_cipher_suite = state.cipher_suite
-        native_state.session_cache_key = cache_key
-        native_state.session_alpn = negotiated_alpn === nothing ? "" : negotiated_alpn::String
-        native_state.did_resume = state.using_psk
-        native_state.did_hello_retry_request = state.did_hello_retry_request
-        native_state.curve_id = state.server_hello.server_share === nothing ? UInt16(0) : (state.server_hello.server_share::_TLSKeyShare).group
-        _set_handshake_complete!(conn, "TLSv1.3", negotiated_alpn)
+        _finish_native_tls13_client_handshake!(conn, state, cache_key)
     finally
         _securezero_tls13_client_handshake_state!(state)
     end
@@ -1417,10 +1552,150 @@ function _native_tls12_client_handshake!(conn::Conn)::Nothing
     native_state = _native_tls12_state(conn)
     io = _TLS12HandshakeRecordIO(conn.tcp, native_state)
     _client_handshake_tls12!(state, io, conn.config)
+    _finish_native_tls12_client_handshake!(conn, state)
+    return nothing
+end
+
+function _finish_native_tls13_client_handshake!(conn::Conn, state::_TLS13ClientHandshakeState, cache_key::String)::Nothing
+    native_state = _native_tls13_state(conn)
+    if state.using_psk
+        _tls13_session_cache_put!(conn.config._client_session_cache, cache_key, nothing)
+    end
+    negotiated_alpn = isempty(state.client_protocol) ? nothing : state.client_protocol
+    _securezero!(native_state.resumption_secret)
+    for cert in native_state.session_certificates
+        _securezero!(cert)
+    end
+    empty!(native_state.resumption_secret)
+    empty!(native_state.session_certificates)
+    native_state.resumption_secret = _tls13_derive_secret(
+        state.cipher_spec.hash_kind,
+        state.master_secret,
+        "res master",
+        _tls13_selected_transcript(state),
+    )
+    if state.using_psk && state.resumption_session !== nothing
+        native_state.session_certificates = [copy(cert) for cert in (state.resumption_session::_TLS13ClientSession).certificates]
+    else
+        native_state.session_certificates = [copy(cert) for cert in state.server_certificate.certificates]
+    end
+    native_state.session_cipher_suite = state.cipher_suite
+    native_state.session_cache_key = cache_key
+    native_state.session_alpn = negotiated_alpn === nothing ? "" : negotiated_alpn::String
+    native_state.did_resume = state.using_psk
+    native_state.did_hello_retry_request = state.did_hello_retry_request
+    native_state.curve_id = state.server_hello.server_share === nothing ? UInt16(0) : (state.server_hello.server_share::_TLSKeyShare).group
+    _set_handshake_complete!(conn, "TLSv1.3", negotiated_alpn)
+    return nothing
+end
+
+function _finish_native_tls12_client_handshake!(conn::Conn, state::_TLS12ClientHandshakeState)::Nothing
+    native_state = _native_tls12_state(conn)
     native_state.did_resume = false
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
     _set_handshake_complete!(conn, "TLSv1.2", isempty(state.client_protocol) ? nothing : state.client_protocol)
+    return nothing
+end
+
+function _finish_native_tls13_server_handshake!(conn::Conn, state::_TLS13ServerHandshakeState)::Nothing
+    native_state = _native_tls13_state(conn)
+    native_state.session_cipher_suite = state.cipher_suite
+    native_state.session_alpn = state.selected_alpn
+    native_state.did_resume = state.using_psk
+    native_state.did_hello_retry_request = state.did_hello_retry_request
+    native_state.curve_id = state.server_hello.server_share === nothing ? UInt16(0) : (state.server_hello.server_share::_TLSKeyShare).group
+    _set_handshake_complete!(conn, "TLSv1.3", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
+    return nothing
+end
+
+function _finish_native_tls12_server_handshake!(conn::Conn, state::_TLS12ServerHandshakeState)::Nothing
+    native_state = _native_tls12_state(conn)
+    native_state.did_resume = false
+    native_state.curve_id = state.curve_id
+    native_state.cipher_suite = state.cipher_suite
+    _set_handshake_complete!(conn, "TLSv1.2", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
+    return nothing
+end
+
+function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
+    cache_key = _tls13_client_session_cache_key(conn.config, conn.tcp)
+    client_hello = _tls_auto_client_hello(conn.config)
+    session = _tls13_try_load_client_session(conn.config, cache_key, client_hello)
+    state13 = _TLS13ClientHandshakeState(
+        client_hello,
+        _TLS13OpenSSLKeyShareProvider(),
+        _native_tls13_certificate_verifier(conn.config),
+        session,
+    )
+    native_state13 = _native_tls13_state(conn)
+    io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
+    try
+        _write_client_hello!(state13, io13)
+        raw_server_hello = _read_handshake_bytes!(io13)
+        server_hello = _unmarshal_server_hello(raw_server_hello)
+        server_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version client expected ServerHello")
+        state13.server_hello_raw = raw_server_hello
+        state13.server_hello = server_hello
+        state13.have_server_hello = true
+        negotiated_version = _tls_pick_client_version(conn.config, state13.server_hello)
+        if negotiated_version == TLS1_3_VERSION
+            conn.mode = _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+            _check_server_hello_or_hrr!(state13)
+            _client_handshake_tls13_after_server_hello!(state13, io13)
+            _finish_native_tls13_client_handshake!(conn, state13, cache_key)
+            return nothing
+        end
+        raw_client_hello = copy(state13.client_hello_raw)
+        raw_server_hello = copy(state13.server_hello_raw)
+        client_hello12 = _unmarshal_client_hello(raw_client_hello)
+        client_hello12 === nothing && throw(ArgumentError("tls: malformed native mixed-version ClientHello"))
+        state12 = _TLS12ClientHandshakeState(client_hello12)
+        state12_native = _tls12_take_initial_state!(native_state13)
+        conn.native_state = state12_native
+        conn.mode = _TLS_CONN_MODE_NATIVE_TLS12_CLIENT
+        io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
+        _tls12_set_server_hello!(state12, raw_server_hello)
+        _client_handshake_tls12_after_server_hello!(state12, io12, conn.config, raw_client_hello, raw_server_hello)
+        _finish_native_tls12_client_handshake!(conn, state12)
+    finally
+        _securezero_tls13_client_handshake_state!(state13)
+    end
+    return nothing
+end
+
+function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
+    native_state13 = _native_tls13_state(conn)
+    io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
+    raw_client_hello = _read_handshake_bytes!(io13)
+    client_hello = _unmarshal_client_hello(raw_client_hello)
+    client_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
+    negotiated_version = _tls_mutual_supported_version(conn.config, _tls_client_hello_supported_versions(client_hello))
+    if negotiated_version == TLS1_3_VERSION
+        conn.mode = _TLS_CONN_MODE_NATIVE_TLS13_SERVER
+        state13 = _TLS13ServerHandshakeState(conn.config)
+        try
+            _tls13_set_client_hello!(state13, raw_client_hello)
+            _server_handshake_tls13_after_client_hello!(state13, io13, conn.config)
+            _finish_native_tls13_server_handshake!(conn, state13)
+        finally
+            _securezero_tls13_server_handshake_state!(state13)
+        end
+        return nothing
+    end
+    state12_native = _tls12_take_initial_state!(native_state13)
+    conn.native_state = state12_native
+    conn.mode = _TLS_CONN_MODE_NATIVE_TLS12_SERVER
+    io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
+    state12 = _TLS12ServerHandshakeState(conn.config)
+    try
+        state12.send_downgrade_canary = true
+        _tls12_set_client_hello!(state12, raw_client_hello)
+        _server_handshake_tls12_after_client_hello!(state12, io12, conn.config, raw_client_hello)
+        _finish_native_tls12_server_handshake!(conn, state12)
+    finally
+        _securezero_tls12_server_handshake_state!(state12)
+    end
     return nothing
 end
 
@@ -1528,6 +1803,14 @@ function handshake!(conn::Conn)
                     end
                     return nothing
                 end
+                if _is_native_auto_mode(conn.mode)
+                    if conn.is_server
+                        _native_tls_auto_server_handshake!(conn)
+                    else
+                        _native_tls_auto_client_handshake!(conn)
+                    end
+                    return nothing
+                end
                 while true
                     _ensure_open!(conn, "handshake")
                     _clear_openssl_error_queue!()
@@ -1563,6 +1846,8 @@ function handshake!(conn::Conn)
                     _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
                 elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
                     _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
+                elseif _is_native_auto_mode(conn.mode) && !tls13_err.from_peer
+                    _native_auto_try_write_fatal_alert!(conn, tls13_err.alert)
                 end
                 throw(TLSError("handshake", Int32(0), tls13_err.message, tls13_err))
             end
@@ -1571,6 +1856,8 @@ function handshake!(conn::Conn)
                     _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
                 elseif _is_native_tls12_mode(conn.mode)
                     _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+                elseif _is_native_auto_mode(conn.mode)
+                    _native_auto_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
                 end
                 throw(TLSError("handshake", Int32(0), (ex::ArgumentError).msg::String, ex))
             end
@@ -2050,6 +2337,17 @@ function _native_tls12_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::No
     return nothing
 end
 
+function _native_auto_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
+    _is_closed(conn) && return nothing
+    !_is_native_auto_mode(conn.mode) && return nothing
+    conn.native_state === nothing && return nothing
+    try
+        _tls13_write_tls_plaintext!(conn.tcp, _TLS_RECORD_TYPE_ALERT, UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc], TLS1_2_VERSION)
+    catch
+    end
+    return nothing
+end
+
 function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
     state = _native_tls13_state(conn)
     total = 0
@@ -2499,6 +2797,20 @@ This does not force a handshake; if the handshake has not yet run, the returned
 `ConnectionState` reports `handshake_complete=false`.
 """
 function connection_state(conn::Conn)::ConnectionState
+    if _is_native_auto_mode(conn.mode)
+        resumable = conn.is_server ? false : _tls13_has_resumable_session(conn.config, conn.tcp)
+        return ConnectionState(
+            _handshake_complete(conn),
+            conn.negotiated_version,
+            conn.negotiated_alpn,
+            nothing,
+            false,
+            false,
+            false,
+            resumable,
+            nothing,
+        )
+    end
     if _is_native_tls13_mode(conn.mode)
         resumed = false
         did_hrr = false

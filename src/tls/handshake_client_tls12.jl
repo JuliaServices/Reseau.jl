@@ -150,16 +150,21 @@ function _tls12_generate_client_key_exchange(group::UInt16, server_public_key::A
     end
 end
 
-function _tls12_read_server_hello!(
-    state::_TLS12ClientHandshakeState,
-    io::_TLS12HandshakeRecordIO,
-)::Vector{UInt8}
-    raw_server_hello = _read_handshake_bytes!(io)
+function _tls12_set_server_hello!(state::_TLS12ClientHandshakeState, raw_server_hello::Vector{UInt8})::Nothing
     _tls12_require_handshake_message(raw_server_hello, _HANDSHAKE_TYPE_SERVER_HELLO, "ServerHello")
     server_hello = _unmarshal_handshake_message(raw_server_hello, nothing, TLS1_2_VERSION)
     server_hello isa _ServerHelloMsg || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerHello")
     state.server_hello = server_hello::_ServerHelloMsg
     _tls12_select_cipher_spec!(state)
+    return nothing
+end
+
+function _tls12_read_server_hello!(
+    state::_TLS12ClientHandshakeState,
+    io::_TLS12HandshakeRecordIO,
+)::Vector{UInt8}
+    raw_server_hello = _read_handshake_bytes!(io)
+    _tls12_set_server_hello!(state, raw_server_hello)
     return raw_server_hello
 end
 
@@ -293,10 +298,13 @@ function _client_handshake_tls12_for_suite!(
     return nothing
 end
 
-function _client_handshake_tls12!(state::_TLS12ClientHandshakeState, io::_TLS12HandshakeRecordIO, config)::Nothing
-    raw_client_hello = _marshal_handshake_message(state.client_hello)
-    _write_handshake_bytes!(io, raw_client_hello)
-    raw_server_hello = _tls12_read_server_hello!(state, io)
+function _client_handshake_tls12_after_server_hello!(
+    state::_TLS12ClientHandshakeState,
+    io::_TLS12HandshakeRecordIO,
+    config,
+    raw_client_hello::Vector{UInt8},
+    raw_server_hello::Vector{UInt8},
+)::Nothing
     if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
         transcript = _TranscriptHash(_HASH_SHA256)
         return _client_handshake_tls12_for_suite!(
@@ -323,4 +331,11 @@ function _client_handshake_tls12!(state::_TLS12ClientHandshakeState, io::_TLS12H
         )
     end
     _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 cipher suite")
+end
+
+function _client_handshake_tls12!(state::_TLS12ClientHandshakeState, io::_TLS12HandshakeRecordIO, config)::Nothing
+    raw_client_hello = _marshal_handshake_message(state.client_hello)
+    _write_handshake_bytes!(io, raw_client_hello)
+    raw_server_hello = _tls12_read_server_hello!(state, io)
+    return _client_handshake_tls12_after_server_hello!(state, io, config, raw_client_hello, raw_server_hello)
 end

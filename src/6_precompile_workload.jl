@@ -345,7 +345,7 @@ function _pc_tls_server_config(
     session_tickets_disabled::Bool = false,
     curve_preferences::Vector{UInt16} = UInt16[],
     min_version::UInt16 = TL.TLS1_3_VERSION,
-    max_version::UInt16 = TL.TLS1_3_VERSION,
+    max_version::Union{Nothing, UInt16} = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
         verify_peer = false,
@@ -369,7 +369,7 @@ function _pc_tls_client_config(;
     key_file::Union{Nothing, String} = nothing,
     session_tickets_disabled::Bool = false,
     min_version::UInt16 = TL.TLS1_3_VERSION,
-    max_version::UInt16 = TL.TLS1_3_VERSION,
+    max_version::Union{Nothing, UInt16} = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
         verify_peer = verify_peer,
@@ -424,20 +424,44 @@ function _pc_tls12_paths()::Union{
     return (cert = cert_path::String, key = key_path::String)
 end
 
-function _pc_run_tls_workload!()
-    _pc_runtime_supported() || return nothing
-    paths = _pc_tls12_paths()
-    paths === nothing && return nothing
+function _pc_expect_tls_state!(
+    state::TL.ConnectionState,
+    expected_version::String,
+    expect_native_tls13::Bool,
+)::Nothing
+    state.handshake_complete || throw(ArgumentError("TLS precompile workload expected a completed handshake"))
+    state.version == expected_version || throw(ArgumentError("TLS precompile workload expected $(expected_version)"))
+    state.using_native_tls13 == expect_native_tls13 ||
+        throw(ArgumentError("TLS precompile workload observed an unexpected native TLS mode"))
+    if expect_native_tls13
+        state.cipher_suite in (
+            "TLS_AES_128_GCM_SHA256",
+            "TLS_AES_256_GCM_SHA384",
+            "TLS_CHACHA20_POLY1305_SHA256",
+        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.3 cipher suite"))
+        state.curve in ("X25519", "P-256") ||
+            throw(ArgumentError("TLS precompile workload expected a native TLS 1.3 curve"))
+    else
+        state.cipher_suite in (
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 ECDHE-RSA cipher suite"))
+        state.curve == "P-256" || throw(ArgumentError("TLS precompile workload expected P-256 ECDHE"))
+    end
+    return nothing
+end
+
+function _pc_run_tls_roundtrip!(
+    server_config::TL.Config,
+    client_config::TL.Config,
+    expected_version::String,
+    expect_native_tls13::Bool,
+)::Nothing
     listener = nothing
     client = nothing
     server_task = nothing
     try
-        listener = TL.listen(NC.loopback_addr(0), _pc_tls_server_config(
-            paths.cert,
-            paths.key;
-            min_version = TL.TLS1_2_VERSION,
-            max_version = TL.TLS1_2_VERSION,
-        ); backlog = 8)
+        listener = TL.listen(NC.loopback_addr(0), server_config; backlog = 8)
         laddr = TL.addr(listener)::NC.SocketAddrV4
         server_task = @async begin
             conn = TL.accept(listener::TL.Listener)
@@ -451,41 +475,62 @@ function _pc_run_tls_workload!()
                 _pc_close_nothrow(conn)
             end
         end
-        client_config = _pc_tls_client_config(
-            verify_peer = true,
-            server_name = "localhost",
-            ca_file = paths.cert,
-            min_version = TL.TLS1_2_VERSION,
-            max_version = TL.TLS1_2_VERSION,
-        )
         client = TL.connect(NC.loopback_addr(Int(laddr.port)), client_config)
         read(client, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected server byte"))
         write(client, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected client ack write"))
         eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
-        client_state = TL.connection_state(client)
-        client_state.handshake_complete || throw(ArgumentError("TLS precompile workload expected a completed handshake"))
-        client_state.version == "TLSv1.2" || throw(ArgumentError("TLS precompile workload expected TLS 1.2"))
-        !client_state.using_native_tls13 || throw(ArgumentError("TLS precompile workload did not expect native TLS 1.3 mode"))
-        client_state.cipher_suite in (
-            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 ECDHE-RSA cipher suite"))
-        client_state.curve == "P-256" || throw(ArgumentError("TLS precompile workload expected P-256 ECDHE"))
+        _pc_expect_tls_state!(TL.connection_state(client), expected_version, expect_native_tls13)
         _pc_wait_task_done(server_task::Task, 2.0)
-        server_state = fetch(server_task::Task)::TL.ConnectionState
-        server_state.handshake_complete || throw(ArgumentError("TLS precompile workload expected server handshake completion"))
-        server_state.version == "TLSv1.2" || throw(ArgumentError("TLS precompile workload expected TLS 1.2 server state"))
-        !server_state.using_native_tls13 || throw(ArgumentError("TLS precompile workload did not expect native TLS 1.3 server mode"))
-        server_state.cipher_suite in (
-            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 server cipher suite"))
-        server_state.curve == "P-256" || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 server curve"))
+        _pc_expect_tls_state!(fetch(server_task::Task)::TL.ConnectionState, expected_version, expect_native_tls13)
     finally
         _pc_close_nothrow(client)
         _pc_close_nothrow(listener)
         IP.shutdown!()
     end
+    return nothing
+end
+
+function _pc_run_tls_workload!()
+    _pc_runtime_supported() || return nothing
+    paths = _pc_tls12_paths()
+    paths === nothing && return nothing
+    mixed_server_config = _pc_tls_server_config(
+        paths.cert,
+        paths.key;
+        min_version = TL.TLS1_2_VERSION,
+        max_version = nothing,
+    )
+    mixed_client_config = _pc_tls_client_config(
+        verify_peer = true,
+        server_name = "localhost",
+        ca_file = paths.cert,
+        min_version = TL.TLS1_2_VERSION,
+        max_version = nothing,
+    )
+    _pc_run_tls_roundtrip!(mixed_server_config, mixed_client_config, "TLSv1.3", true)
+    _pc_run_tls_roundtrip!(
+        _pc_tls_server_config(
+            paths.cert,
+            paths.key;
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
+        ),
+        mixed_client_config,
+        "TLSv1.2",
+        false,
+    )
+    _pc_run_tls_roundtrip!(
+        mixed_server_config,
+        _pc_tls_client_config(
+            verify_peer = true,
+            server_name = "localhost",
+            ca_file = paths.cert,
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
+        ),
+        "TLSv1.2",
+        false,
+    )
     return nothing
 end
 
