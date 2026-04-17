@@ -74,6 +74,8 @@ include("tls/openssl_crypto.jl")
 include("tls/handshake_messages.jl")
 include("tls/handshake_client_tls13.jl")
 include("tls/record_tls13.jl")
+include("tls/record_tls12.jl")
+include("tls/handshake_client_tls12.jl")
 include("tls/handshake_server_tls13.jl")
 
 const X25519 = _TLS_GROUP_X25519
@@ -227,8 +229,11 @@ const _CTX_SERVER_ALPN = Dict{Ptr{Cvoid}, _ALPNServerData}()
 const _TLS_CONN_MODE_OPENSSL = UInt8(0)
 const _TLS_CONN_MODE_NATIVE_TLS13_CLIENT = UInt8(1)
 const _TLS_CONN_MODE_NATIVE_TLS13_SERVER = UInt8(2)
+const _TLS_CONN_MODE_NATIVE_TLS12_CLIENT = UInt8(3)
 
 @inline _is_native_tls13_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT || mode == _TLS_CONN_MODE_NATIVE_TLS13_SERVER
+@inline _is_native_tls12_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS12_CLIENT
+@inline _is_native_mode(mode::UInt8) = _is_native_tls13_mode(mode) || _is_native_tls12_mode(mode)
 
 function Config(;
         server_name::Union{Nothing, AbstractString} = nothing,
@@ -388,7 +393,7 @@ mutable struct Conn <: IO
     mode::UInt8
     is_server::Bool
     config::Config
-    native_state::Union{Nothing, _TLS13NativeClientState}
+    native_state::Union{Nothing, _TLS13NativeClientState, _TLS12NativeClientState}
     handshake_lock::ReentrantLock
     read_lock::ReentrantLock
     write_lock::ReentrantLock
@@ -982,6 +987,10 @@ end
         (config.max_version === nothing || config.max_version == TLS1_3_VERSION)
 end
 
+@inline function _native_tls12_only(config::Config)::Bool
+    return config.min_version == TLS1_2_VERSION && config.max_version == TLS1_2_VERSION
+end
+
 function _tls13_client_hello(config::Config)::_ClientHelloMsg
     rng = Random.RandomDevice()
     hello = _ClientHelloMsg()
@@ -1143,6 +1152,27 @@ function _new_native_tls13_client_conn(tcp::TCP.Conn, config::Config)::Conn
     return _new_native_tls13_conn(tcp, config; is_server = false)
 end
 
+function _new_native_tls12_client_conn(tcp::TCP.Conn, config::Config)::Conn
+    _validate_config(config; is_server = false)
+    return Conn(
+        tcp,
+        C_NULL,
+        C_NULL,
+        _TLS_CONN_MODE_NATIVE_TLS12_CLIENT,
+        false,
+        config,
+        _TLS12NativeClientState(),
+        ReentrantLock(),
+        ReentrantLock(),
+        ReentrantLock(),
+        false,
+        false,
+        nothing,
+        "",
+        nothing,
+    )
+end
+
 function _new_native_tls13_server_conn(tcp::TCP.Conn, config::Config)::Conn
     _validate_config(config; is_server = true)
     return _new_native_tls13_conn(tcp, config; is_server = true)
@@ -1183,6 +1213,9 @@ function client(tcp::TCP.Conn, config::Config)::Conn
     if _native_tls13_only(config)
         return _new_native_tls13_client_conn(tcp, config)
     end
+    if _native_tls12_only(config)
+        return _new_native_tls12_client_conn(tcp, config)
+    end
     return _new_openssl_conn(tcp, config; is_server = false)
 end
 
@@ -1206,6 +1239,15 @@ function _free_native_handles!(conn::Conn)
     if _is_native_tls13_mode(conn.mode)
         if conn.native_state !== nothing
             _securezero_tls13_native_client_state!(conn.native_state::_TLS13NativeClientState)
+            conn.native_state = nothing
+        end
+        conn.ssl = C_NULL
+        conn.ssl_ctx = C_NULL
+        return nothing
+    end
+    if _is_native_tls12_mode(conn.mode)
+        if conn.native_state !== nothing
+            _securezero_tls12_native_client_state!(conn.native_state::_TLS12NativeClientState)
             conn.native_state = nothing
         end
         conn.ssl = C_NULL
@@ -1261,9 +1303,15 @@ end
     return state::_TLS13NativeClientState
 end
 
+@inline function _native_tls12_state(conn::Conn)::_TLS12NativeClientState
+    state = conn.native_state
+    state === nothing && throw(_closed_error("tls12"))
+    return state::_TLS12NativeClientState
+end
+
 function _ensure_open!(conn::Conn, op::AbstractString)
     _is_closed(conn) && throw(_closed_error(op))
-    if _is_native_tls13_mode(conn.mode)
+    if _is_native_mode(conn.mode)
         conn.native_state === nothing && throw(_closed_error(op))
         return nothing
     end
@@ -1346,6 +1394,19 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
     finally
         _securezero_tls13_client_handshake_state!(state)
     end
+    return nothing
+end
+
+function _native_tls12_client_handshake!(conn::Conn)::Nothing
+    client_hello = _tls12_client_hello(conn.config)
+    state = _TLS12ClientHandshakeState(client_hello)
+    native_state = _native_tls12_state(conn)
+    io = _TLS12HandshakeRecordIO(conn.tcp, native_state)
+    _client_handshake_tls12!(state, io, conn.config)
+    native_state.did_resume = false
+    native_state.curve_id = state.curve_id
+    native_state.cipher_suite = state.cipher_suite
+    _set_handshake_complete!(conn, "TLSv1.2", isempty(state.client_protocol) ? nothing : state.client_protocol)
     return nothing
 end
 
@@ -1445,6 +1506,10 @@ function handshake!(conn::Conn)
                     end
                     return nothing
                 end
+                if _is_native_tls12_mode(conn.mode)
+                    _native_tls12_client_handshake!(conn)
+                    return nothing
+                end
                 while true
                     _ensure_open!(conn, "handshake")
                     _clear_openssl_error_queue!()
@@ -1478,12 +1543,16 @@ function handshake!(conn::Conn)
                 tls13_err = ex::_TLS13AlertError
                 if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                     _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+                elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
+                    _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
                 end
                 throw(TLSError("handshake", Int32(0), tls13_err.message, tls13_err))
             end
             if ex isa ArgumentError
                 if _is_native_tls13_mode(conn.mode)
                     _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+                elseif _is_native_tls12_mode(conn.mode)
+                    _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
                 end
                 throw(TLSError("handshake", Int32(0), (ex::ArgumentError).msg::String, ex))
             end
@@ -1504,6 +1573,11 @@ end
     return _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
 end
 
+@inline function _native_tls12_pending_plaintext(conn::Conn)::Int
+    state = _native_tls12_state(conn)
+    return _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
+end
+
 function _native_tls13_fill_plaintext!(conn::Conn)::Nothing
     state = _native_tls13_state(conn)
     while true
@@ -1511,6 +1585,15 @@ function _native_tls13_fill_plaintext!(conn::Conn)::Nothing
         _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
         state.peer_close_notify && throw(EOFError())
         _tls13_read_record!(conn.tcp, state)
+    end
+end
+
+function _native_tls12_fill_plaintext!(conn::Conn)::Nothing
+    state = _native_tls12_state(conn)
+    while true
+        _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
+        state.peer_close_notify && throw(EOFError())
+        _tls12_read_record!(conn.tcp, state)
     end
 end
 
@@ -1526,8 +1609,21 @@ function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)
     return n
 end
 
+function _native_tls12_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+    nbytes == 0 && return 0
+    _native_tls12_fill_plaintext!(conn)
+    state = _native_tls12_state(conn)
+    available = _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
+    n = min(nbytes, available)
+    unsafe_copyto!(ptr, pointer(state.plaintext_buffer, state.plaintext_buffer_pos), n)
+    state.plaintext_buffer_pos += n
+    state.plaintext_buffer_pos = _tls13_compact_buffer!(state.plaintext_buffer, state.plaintext_buffer_pos)
+    return n
+end
+
 @inline function _pending_plaintext(conn::Conn)::Int
     _is_native_tls13_mode(conn.mode) && return _native_tls13_pending_plaintext(conn)
+    _is_native_tls12_mode(conn.mode) && return _native_tls12_pending_plaintext(conn)
     conn.ssl == C_NULL && return 0
     return Int(ccall((:SSL_pending, _LIBSSL_PATH), Cint, (Ptr{Cvoid},), conn.ssl))
 end
@@ -1547,6 +1643,9 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         _ensure_open!(conn, "read")
         if _is_native_tls13_mode(conn.mode)
             return _native_tls13_take_plaintext!(conn, ptr, nbytes)
+        end
+        if _is_native_tls12_mode(conn.mode)
+            return _native_tls12_take_plaintext!(conn, ptr, nbytes)
         end
         while true
             chunk_len = min(nbytes, typemax(Cint))
@@ -1575,12 +1674,16 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
             tls13_err = ex::_TLS13AlertError
             if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+            elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
+                _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
             end
             throw(TLSError("read", Int32(0), tls13_err.message, tls13_err))
         end
         if ex isa ArgumentError
             if _is_native_tls13_mode(conn.mode)
                 _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+            elseif _is_native_tls12_mode(conn.mode)
+                _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
             end
             throw(TLSError("read", Int32(0), (ex::ArgumentError).msg::String, ex))
         end
@@ -1615,6 +1718,14 @@ function _peek_eof(conn::Conn)::Bool
                 _tls13_read_record!(conn.tcp, state)
             end
         end
+        if _is_native_tls12_mode(conn.mode)
+            state = _native_tls12_state(conn)
+            while true
+                _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
+                state.peer_close_notify && return true
+                _tls12_read_record!(conn.tcp, state)
+            end
+        end
         _pending_plaintext(conn) > 0 && return false
         pref = Ref{UInt8}(0x00)
         while true
@@ -1641,12 +1752,16 @@ function _peek_eof(conn::Conn)::Bool
             tls13_err = ex::_TLS13AlertError
             if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+            elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
+                _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
             end
             throw(TLSError("peek", Int32(0), tls13_err.message, tls13_err))
         end
         if ex isa ArgumentError
             if _is_native_tls13_mode(conn.mode)
                 _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+            elseif _is_native_tls12_mode(conn.mode)
+                _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
             end
             throw(TLSError("peek", Int32(0), (ex::ArgumentError).msg::String, ex))
         end
@@ -1843,6 +1958,9 @@ function Base.isopen(conn::Conn)::Bool
     if _is_native_tls13_mode(conn.mode)
         return !_is_closed(conn) && conn.native_state !== nothing && isopen(conn.tcp)
     end
+    if _is_native_tls12_mode(conn.mode)
+        return !_is_closed(conn) && conn.native_state !== nothing && isopen(conn.tcp)
+    end
     return !_is_closed(conn) && conn.ssl != C_NULL && isopen(conn.tcp)
 end
 
@@ -1893,6 +2011,27 @@ function _native_tls13_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::No
     return nothing
 end
 
+function _native_tls12_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::UInt8)::Nothing
+    state = _native_tls12_state(conn)
+    state.sent_close_notify && return nothing
+    _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
+    if alert_desc == _TLS_ALERT_CLOSE_NOTIFY
+        state.sent_close_notify = true
+    end
+    return nothing
+end
+
+function _native_tls12_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
+    _is_closed(conn) && return nothing
+    !_is_native_tls12_mode(conn.mode) && return nothing
+    conn.native_state === nothing && return nothing
+    try
+        _native_tls12_write_alert!(conn, _TLS_ALERT_LEVEL_FATAL, alert_desc)
+    catch
+    end
+    return nothing
+end
+
 function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
     state = _native_tls13_state(conn)
     total = 0
@@ -1900,6 +2039,18 @@ function _native_tls13_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::I
         chunk_len = min(nbytes - total, _TLS13_MAX_PLAINTEXT)
         chunk = unsafe_wrap(Vector{UInt8}, ptr + total, chunk_len; own = false)
         _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, chunk)
+        total += chunk_len
+    end
+    return total
+end
+
+function _native_tls12_write_application!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
+    state = _native_tls12_state(conn)
+    total = 0
+    while total < nbytes
+        chunk_len = min(nbytes - total, _TLS12_MAX_PLAINTEXT)
+        chunk = unsafe_wrap(Vector{UInt8}, ptr + total, chunk_len; own = false)
+        _tls12_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_APPLICATION_DATA, chunk)
         total += chunk_len
     end
     return total
@@ -1916,6 +2067,9 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
         conn.write_permanent_error === nothing || throw(conn.write_permanent_error::TLSError)
         if _is_native_tls13_mode(conn.mode)
             return _native_tls13_write_application!(conn, ptr, nbytes_int)
+        end
+        if _is_native_tls12_mode(conn.mode)
+            return _native_tls12_write_application!(conn, ptr, nbytes_int)
         end
         total = 0
         while total < nbytes_int
@@ -1952,12 +2106,16 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
             tls13_err = ex::_TLS13AlertError
             if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+            elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
+                _native_tls12_try_write_fatal_alert!(conn, tls13_err.alert)
             end
             throw(TLSError("write", Int32(0), tls13_err.message, tls13_err))
         end
         if ex isa ArgumentError
             if _is_native_tls13_mode(conn.mode)
                 _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+            elseif _is_native_tls12_mode(conn.mode)
+                _native_tls12_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
             end
             throw(TLSError("write", Int32(0), (ex::ArgumentError).msg::String, ex))
         end
@@ -2042,6 +2200,11 @@ function _native_tls13_shutdown!(conn::Conn)::Nothing
     return nothing
 end
 
+function _native_tls12_shutdown!(conn::Conn)::Nothing
+    _native_tls12_write_alert!(conn, _TLS_ALERT_LEVEL_WARNING, _TLS_ALERT_CLOSE_NOTIFY)
+    return nothing
+end
+
 @inline function _try_lock_close_path!(conn::Conn)::Bool
     trylock(conn.handshake_lock) || return false
     if !trylock(conn.read_lock)
@@ -2073,11 +2236,13 @@ closing the socket. The method is idempotent and returns `nothing`.
 """
 function Base.close(conn::Conn)
     _mark_closed!(conn) || return nothing
-    if _handshake_complete(conn) && (_is_native_tls13_mode(conn.mode) || conn.ssl != C_NULL)
+    if _handshake_complete(conn) && (_is_native_mode(conn.mode) || conn.ssl != C_NULL)
         if _try_lock_close_path!(conn)
             try
                 if _is_native_tls13_mode(conn.mode)
                     _native_tls13_shutdown!(conn)
+                elseif _is_native_tls12_mode(conn.mode)
+                    _native_tls12_shutdown!(conn)
                 else
                     _ssl_shutdown!(conn)
                 end
@@ -2125,6 +2290,8 @@ function Base.closewrite(conn::Conn)
         _ensure_open!(conn, "closewrite")
         if _is_native_tls13_mode(conn.mode)
             _native_tls13_shutdown!(conn)
+        elseif _is_native_tls12_mode(conn.mode)
+            _native_tls12_shutdown!(conn)
         else
             _ssl_shutdown!(conn)
         end
@@ -2278,6 +2445,14 @@ end
     return nothing
 end
 
+@inline function _tls12_cipher_suite_name(cipher_suite::UInt16)::Union{Nothing, String}
+    cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID && return "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID && return "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID && return "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID && return "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
+    return nothing
+end
+
 @inline function _tls_group_name(group::UInt16)::Union{Nothing, String}
     group == _TLS_GROUP_X25519 && return "X25519"
     group == _TLS_GROUP_SECP256R1 && return "P-256"
@@ -2331,6 +2506,26 @@ function connection_state(conn::Conn)::ConnectionState
             resumed,
             did_hrr,
             resumable,
+            curve,
+        )
+    end
+    if _is_native_tls12_mode(conn.mode)
+        cipher_suite = nothing
+        curve = nothing
+        if conn.native_state !== nothing
+            native_state = conn.native_state::_TLS12NativeClientState
+            cipher_suite = native_state.cipher_suite == UInt16(0) ? nothing : _tls12_cipher_suite_name(native_state.cipher_suite)
+            curve = native_state.curve_id == UInt16(0) ? nothing : _tls_group_name(native_state.curve_id)
+        end
+        return ConnectionState(
+            _handshake_complete(conn),
+            conn.negotiated_version,
+            conn.negotiated_alpn,
+            cipher_suite,
+            false,
+            false,
+            false,
+            false,
             curve,
         )
     end
@@ -2422,7 +2617,7 @@ end
 
 @inline _show_role(conn::Conn) = conn.is_server ? "server" : "client"
 @inline _show_state(listener::Listener) = listener.listener.fd.pfd.sysfd >= 0 ? "active" : "closed"
-@inline _show_closed(conn::Conn) = _is_closed(conn) || (!_is_native_tls13_mode(conn.mode) && conn.ssl == C_NULL) || conn.tcp.fd.pfd.sysfd < 0
+@inline _show_closed(conn::Conn) = _is_closed(conn) || (!_is_native_mode(conn.mode) && conn.ssl == C_NULL) || conn.tcp.fd.pfd.sysfd < 0
 
 function Base.show(io::IO, conn::Conn)
     print(io, "TLS.Conn(")

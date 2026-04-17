@@ -272,17 +272,17 @@ function _tls12_keys_from_master_secret(hash_kind::_TLSHashKind, master_secret::
     key_material = _tls12_prf(hash_kind, master_secret, _TLS12_KEY_EXPANSION_LABEL, seed, n)
     try
         idx = 1
-        client_mac = key_material[idx:(idx + mac_len - 1)]
+        client_mac = mac_len == 0 ? UInt8[] : key_material[idx:(idx + mac_len - 1)]
         idx += mac_len
-        server_mac = key_material[idx:(idx + mac_len - 1)]
+        server_mac = mac_len == 0 ? UInt8[] : key_material[idx:(idx + mac_len - 1)]
         idx += mac_len
-        client_key = key_material[idx:(idx + key_len - 1)]
+        client_key = key_len == 0 ? UInt8[] : key_material[idx:(idx + key_len - 1)]
         idx += key_len
-        server_key = key_material[idx:(idx + key_len - 1)]
+        server_key = key_len == 0 ? UInt8[] : key_material[idx:(idx + key_len - 1)]
         idx += key_len
-        client_iv = key_material[idx:(idx + iv_len - 1)]
+        client_iv = iv_len == 0 ? UInt8[] : key_material[idx:(idx + iv_len - 1)]
         idx += iv_len
-        server_iv = key_material[idx:(idx + iv_len - 1)]
+        server_iv = iv_len == 0 ? UInt8[] : key_material[idx:(idx + iv_len - 1)]
         return client_mac, server_mac, client_key, server_key, client_iv, server_iv
     finally
         _securezero!(key_material)
