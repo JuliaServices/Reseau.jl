@@ -91,6 +91,12 @@ end
             @test cfg_default.min_version == TL.TLS1_2_VERSION
             @test cfg_default.client_auth == TL.ClientAuthMode.NoClientCert
             @test cfg_default.verify_hostname
+            @test TL._tls13_curve_preferences(cfg_default) == UInt16[TL.X25519, TL.P256]
+            @test TL._tls13_curve_preferences(TL.Config(
+                min_version = TL.TLS1_3_VERSION,
+                max_version = TL.TLS1_3_VERSION,
+                curve_preferences = UInt16[TL.P256, TL.X25519],
+            )) == UInt16[TL.P256, TL.X25519]
             default_ca = TL._default_ca_file_path()
             expected_default_ca = try
                 path = NetworkOptions.ca_roots_path()
@@ -122,6 +128,8 @@ end
             @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
             @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
             @test_throws TL.ConfigError TL.Config(handshake_timeout_ns = -1)
+            @test_throws TL.ConfigError TL._validate_config(TL.Config(curve_preferences = UInt16[0x9999]); is_server = false)
+            @test_throws TL.ConfigError TL._validate_config(TL.Config(curve_preferences = UInt16[TL.P256]); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, ca_file = joinpath(@__DIR__, "missing-ca.pem")); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, client_ca_file = joinpath(@__DIR__, "missing-client-ca.pem")); is_server = true)

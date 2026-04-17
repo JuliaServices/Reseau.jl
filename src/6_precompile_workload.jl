@@ -343,6 +343,7 @@ function _pc_tls_server_config(
     client_auth::TL.ClientAuthMode.T = TL.ClientAuthMode.NoClientCert,
     client_ca_file::Union{Nothing, String} = nothing,
     session_tickets_disabled::Bool = false,
+    curve_preferences::Vector{UInt16} = UInt16[],
 )::TL.Config
     return TL.Config(
         verify_peer = false,
@@ -350,6 +351,7 @@ function _pc_tls_server_config(
         key_file = key_path,
         client_auth = client_auth,
         client_ca_file = client_ca_file,
+        curve_preferences = copy(curve_preferences),
         handshake_timeout_ns = 1_000_000_000,
         min_version = TL.TLS1_3_VERSION,
         max_version = TL.TLS1_3_VERSION,
@@ -420,6 +422,7 @@ function _pc_run_tls_workload!()
             paths.server_key;
             client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
             client_ca_file = paths.ca,
+            curve_preferences = UInt16[TL.P256],
         ); backlog = 8)
         laddr = TL.addr(listener)::NC.SocketAddrV4
         server_task = @async begin
@@ -455,6 +458,8 @@ function _pc_run_tls_workload!()
             throw(ArgumentError("TLS precompile workload expected native TLS 1.3 client mode"))
         !client1_state.did_resume ||
             throw(ArgumentError("TLS precompile workload did not expect first connection resumption"))
+        client1_state.did_hello_retry_request ||
+            throw(ArgumentError("TLS precompile workload expected first connection HelloRetryRequest"))
         client1_state.has_resumable_session ||
             throw(ArgumentError("TLS precompile workload expected first connection to cache a resumable session"))
 
@@ -467,6 +472,8 @@ function _pc_run_tls_workload!()
             throw(ArgumentError("TLS precompile workload expected resumed native TLS 1.3 client mode"))
         client2_state.did_resume ||
             throw(ArgumentError("TLS precompile workload expected resumed TLS session"))
+        client2_state.did_hello_retry_request ||
+            throw(ArgumentError("TLS precompile workload expected resumed connection HelloRetryRequest"))
         _pc_wait_task_done(server_task::Task, 2.0)
         server_states = fetch(server_task::Task)::Vector{TL.ConnectionState}
         length(server_states) == 2 || throw(ArgumentError("TLS precompile workload expected two server connections"))
@@ -476,8 +483,12 @@ function _pc_run_tls_workload!()
             throw(ArgumentError("TLS precompile workload expected resumed native TLS 1.3 server mode"))
         !server_states[1].did_resume ||
             throw(ArgumentError("TLS precompile workload did not expect first server connection resumption"))
+        server_states[1].did_hello_retry_request ||
+            throw(ArgumentError("TLS precompile workload expected first server HelloRetryRequest"))
         server_states[2].did_resume ||
             throw(ArgumentError("TLS precompile workload expected resumed server session"))
+        server_states[2].did_hello_retry_request ||
+            throw(ArgumentError("TLS precompile workload expected resumed server HelloRetryRequest"))
     finally
         _pc_close_nothrow(client2)
         _pc_close_nothrow(client1)

@@ -76,6 +76,9 @@ include("tls/handshake_client_tls13.jl")
 include("tls/record_tls13.jl")
 include("tls/handshake_server_tls13.jl")
 
+const X25519 = _TLS_GROUP_X25519
+const P256 = _TLS_GROUP_SECP256R1
+
 module ClientAuthMode
 Base.@enum T::UInt8 begin
     NoClientCert = 0
@@ -169,6 +172,8 @@ Keyword arguments:
 - `client_ca_file`: CA bundle or hashed CA directory used by servers to verify client
   certificates. This is required for server configs that verify presented client certs.
 - `alpn_protocols`: ordered ALPN protocol preference list.
+- `curve_preferences`: ordered supported TLS 1.3 ECDHE groups for the native TLS engine.
+  When empty, the native default of `[TLS.X25519, TLS.P256]` is used.
 - `handshake_timeout_ns`: optional cap, in monotonic nanoseconds, applied only while the
   handshake is running. Existing transport deadlines still win if they are earlier.
 - `min_version` / `max_version`: TLS protocol version bounds. `nothing` leaves the bound
@@ -188,6 +193,7 @@ struct Config
     ca_file::Union{Nothing, String}
     client_ca_file::Union{Nothing, String}
     alpn_protocols::Vector{String}
+    curve_preferences::Vector{UInt16}
     handshake_timeout_ns::Int64
     min_version::Union{Nothing, UInt16}
     max_version::Union{Nothing, UInt16}
@@ -234,6 +240,7 @@ function Config(;
         ca_file::Union{Nothing, AbstractString} = nothing,
         client_ca_file::Union{Nothing, AbstractString} = nothing,
         alpn_protocols::Vector{String} = String[],
+        curve_preferences::Vector{UInt16} = UInt16[],
         handshake_timeout_ns::Integer = Int64(0),
         min_version::Union{Nothing, UInt16} = TLS1_2_VERSION,
         max_version::Union{Nothing, UInt16} = nothing,
@@ -261,6 +268,7 @@ function Config(;
         ca_file_s,
         client_ca_file_s,
         copy(alpn_protocols),
+        copy(curve_preferences),
         Int64(handshake_timeout_ns),
         min_version,
         max_version,
@@ -268,6 +276,26 @@ function Config(;
         _TLS13ClientSessionCache(session_cache_capacity),
         _TLS13ServerSessionCache(session_cache_capacity),
     )
+end
+
+const _TLS13_DEFAULT_CURVE_PREFERENCES = (_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1)
+
+@inline function _tls13_native_curve_supported(group::UInt16)::Bool
+    return group == _TLS_GROUP_X25519 || group == _TLS_GROUP_SECP256R1
+end
+
+@inline _curve_preference_name(group::UInt16) = "0x" * string(group, base = 16, pad = 4)
+
+function _tls13_curve_preferences(config::Config)::Vector{UInt16}
+    requested = config.curve_preferences
+    isempty(requested) && return UInt16[_TLS13_DEFAULT_CURVE_PREFERENCES...]
+    out = UInt16[]
+    for group in requested
+        _tls13_native_curve_supported(group) || throw(ConfigError("unsupported curve preference: $(_curve_preference_name(group))"))
+        in(group, out) || push!(out, group)
+    end
+    isempty(out) && throw(ConfigError("curve_preferences must include at least one supported native TLS 1.3 group"))
+    return out
 end
 
 @inline function _default_ca_file_path()::Union{Nothing, String}
@@ -577,6 +605,7 @@ function _config_with_server_name(config::Config, server_name::String)::Config
         config.ca_file,
         config.client_ca_file,
         copy(config.alpn_protocols),
+        copy(config.curve_preferences),
         config.handshake_timeout_ns,
         config.min_version,
         config.max_version,
@@ -688,6 +717,10 @@ function _validate_config(config::Config; is_server::Bool)
     if config.min_version !== nothing && config.max_version !== nothing
         (config.min_version::UInt16) <= (config.max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
     end
+    if !_native_tls13_only(config) && !isempty(config.curve_preferences)
+        throw(ConfigError("curve_preferences requires an exact TLS 1.3 config"))
+    end
+    isempty(config.curve_preferences) || _tls13_curve_preferences(config)
     return nothing
 end
 
@@ -944,7 +977,7 @@ function _ssl_new(ctx::Ptr{Cvoid}, tcp::TCP.Conn, config::Config; is_server::Boo
     end
 end
 
-@inline function _native_tls13_client_enabled(config::Config)::Bool
+@inline function _native_tls13_only(config::Config)::Bool
     return config.min_version == TLS1_3_VERSION &&
         (config.max_version === nothing || config.max_version == TLS1_3_VERSION)
 end
@@ -967,7 +1000,7 @@ function _tls13_client_hello(config::Config)::_ClientHelloMsg
     hello.alpn_protocols = copy(config.alpn_protocols)
     hello.supported_points = UInt8[0x00]
     hello.supported_versions = UInt16[TLS1_3_VERSION]
-    hello.supported_curves = UInt16[_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1]
+    hello.supported_curves = _tls13_curve_preferences(config)
     hello.psk_modes = UInt8[_TLS_PSK_MODE_DHE]
     hello.supported_signature_algorithms = UInt16[
         _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
@@ -1147,7 +1180,7 @@ The handshake is deferred until `handshake!` or the first read/write operation.
 Throws `ConfigError` or `TLSError` if the TLS state cannot be initialized.
 """
 function client(tcp::TCP.Conn, config::Config)::Conn
-    if _native_tls13_client_enabled(config)
+    if _native_tls13_only(config)
         return _new_native_tls13_client_conn(tcp, config)
     end
     return _new_openssl_conn(tcp, config; is_server = false)

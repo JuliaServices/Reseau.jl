@@ -15,6 +15,7 @@ const _TLS_SERVER_CONFIG = TL.Config(
     key_file = _TLS_SERVER_KEY_PATH,
     client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
     client_ca_file = _TLS_CA_PATH,
+    curve_preferences = UInt16[TL.P256],
     handshake_timeout_ns = 10_000_000_000,
     min_version = TL.TLS1_3_VERSION,
     max_version = TL.TLS1_3_VERSION,
@@ -81,6 +82,8 @@ function run_tls_trim_sample()::Nothing
         client1_state = TL.connection_state(client1)
         client1_state.did_resume &&
             error("did not expect first native TLS connection to resume")
+        client1_state.did_hello_retry_request ||
+            error("expected first native TLS connection to use HelloRetryRequest")
         client1_state.has_resumable_session ||
             error("expected first native TLS connection to cache a resumable session")
         client2 = TL.connect(NC.loopback_addr(Int(laddr.port)), client_config)
@@ -90,10 +93,14 @@ function run_tls_trim_sample()::Nothing
         client2_state = TL.connection_state(client2)
         client2_state.did_resume ||
             error("expected native TLS trim sample to resume")
+        client2_state.did_hello_retry_request ||
+            error("expected resumed native TLS connection to use HelloRetryRequest")
         status = IP.timedwait(() -> istaskdone(server_task::Task), 10.0; pollint = 0.001)
         status == :timed_out && error("timed out waiting for TLS server task")
         server_states = fetch(server_task::Task)::Vector{TL.ConnectionState}
         length(server_states) == 2 || error("expected two TLS server connections")
+        server_states[1].did_hello_retry_request || error("expected first native TLS server connection to use HelloRetryRequest")
+        server_states[2].did_hello_retry_request || error("expected resumed native TLS server connection to use HelloRetryRequest")
         server_states[2].did_resume || error("expected native TLS trim server to resume")
         client2_state.handshake_complete || error("client handshake incomplete")
     finally

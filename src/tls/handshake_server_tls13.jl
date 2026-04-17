@@ -199,6 +199,7 @@ mutable struct _TLS13ServerHandshakeState
     peer_certificates::Vector{Vector{UInt8}}
     selected_signature_algorithm::UInt16
     selected_alpn::String
+    selected_group::UInt16
     selected_psk_identity::UInt16
     has_selected_psk_identity::Bool
     shared_secret::Vector{UInt8}
@@ -247,6 +248,7 @@ function _TLS13ServerHandshakeState(config)::_TLS13ServerHandshakeState
         UInt16(0),
         "",
         UInt16(0),
+        UInt16(0),
         false,
         UInt8[],
         UInt8[],
@@ -289,8 +291,7 @@ end
 @inline function _native_tls13_server_enabled(config)::Bool
     return config.cert_file !== nothing &&
         config.key_file !== nothing &&
-        config.min_version == TLS1_3_VERSION &&
-        (config.max_version === nothing || config.max_version == TLS1_3_VERSION)
+        _native_tls13_only(config)
 end
 
 function _tls13_select_server_cipher_suite(client_hello::_ClientHelloMsg)::Tuple{UInt16, _TLS13CipherSpec}
@@ -325,9 +326,9 @@ function _tls13_find_client_key_share(client_hello::_ClientHelloMsg, group::UInt
     return nothing
 end
 
-function _tls13_server_preferred_group(client_hello::_ClientHelloMsg)::UInt16
+function _tls13_server_preferred_group(client_hello::_ClientHelloMsg, config)::UInt16
     mutual_groups = UInt16[]
-    for group in (_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1)
+    for group in _tls13_curve_preferences(config)
         in(group, client_hello.supported_curves) && push!(mutual_groups, group)
     end
     isempty(mutual_groups) && _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: no key exchanges supported by both client and server")
@@ -426,10 +427,10 @@ function _prepare_server_negotiation!(state::_TLS13ServerHandshakeState, io, con
     state.selected_signature_algorithm = _tls13_select_server_signature_algorithm(state.private_key, state.client_hello)
     state.selected_alpn = _tls13_select_server_alpn(config, state.client_hello)
     state.transcript = _new_tls13_handshake_transcript(state.cipher_spec.hash_kind)
-    selected_group = _tls13_server_preferred_group(state.client_hello)
-    if _tls13_find_client_key_share(state.client_hello, selected_group) === nothing
-        _send_hello_retry_request!(state, io, selected_group)
-        _read_second_client_hello!(state, io, selected_group)
+    state.selected_group = _tls13_server_preferred_group(state.client_hello, config)
+    if _tls13_find_client_key_share(state.client_hello, state.selected_group) === nothing
+        _send_hello_retry_request!(state, io, state.selected_group)
+        _read_second_client_hello!(state, io, state.selected_group)
     end
     return nothing
 end
@@ -527,7 +528,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
 end
 
 function _send_server_hello!(state::_TLS13ServerHandshakeState, io)::Nothing
-    server_share = _tls13_server_key_share!(state, _tls13_server_preferred_group(state.client_hello))
+    server_share = _tls13_server_key_share!(state, state.selected_group)
     _transcript_update!(state.transcript, state.client_hello_raw)
     rng = Random.RandomDevice()
     server_hello = _ServerHelloMsg()
