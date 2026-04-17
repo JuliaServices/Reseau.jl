@@ -32,6 +32,27 @@ const _TLS13_TEST_SERVER_P256_PRIVATE_KEY = UInt8[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
 ]
 
+function _tls13_generate_test_ec_pkey(curve_name::AbstractString)::Ptr{Cvoid}
+    nid = ccall((:OBJ_sn2nid, TLHC._LIBCRYPTO_PATH), Cint, (Cstring,), curve_name)
+    nid > 0 || error("expected named curve NID for $curve_name")
+    ec_key = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EC_KEY_new_by_curve_name, TLHC._LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), nid)
+        TLHC._openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name($curve_name)")
+        TLHC._openssl_require_ok(ccall((:EC_KEY_generate_key, TLHC._LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), ec_key), "EC_KEY_generate_key($curve_name)")
+        pkey = ccall((:EVP_PKEY_new, TLHC._LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        TLHC._openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        TLHC._openssl_require_ok(ccall((:EVP_PKEY_set1_EC_KEY, TLHC._LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, ec_key), "EVP_PKEY_set1_EC_KEY($curve_name)")
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        TLHC._free_evp_pkey!(pkey)
+        TLHC._free_ec_key!(ec_key)
+    end
+end
+
 function _tls13_psk_client_hello(; cipher_suite::UInt16 = TLHC._TLS13_AES_128_GCM_SHA256_ID, binder_len::Int = 32)
     msg = TLHC._ClientHelloMsg()
     msg.vers = TLHC.TLS1_2_VERSION
@@ -429,12 +450,17 @@ end
     @testset "OpenSSL primitive helpers cover the real provider path" begin
         @test TLHC._init_x25519_pkey_id!() > 0
         @test TLHC._init_p256_group_nid!() > 0
+        @test TLHC._init_p384_group_nid!() > 0
+        @test TLHC._init_p521_group_nid!() > 0
         client_pkey = TLHC._tls13_x25519_private_key_from_bytes(_TLS13_TEST_CLIENT_X25519_PRIVATE_KEY)
         client_secret = UInt8[]
         server_secret = UInt8[]
         client_p256_pkey = Ptr{Cvoid}(C_NULL)
         client_p256_secret = UInt8[]
         server_p256_secret = UInt8[]
+        p256_cert_pkey = Ptr{Cvoid}(C_NULL)
+        p384_cert_pkey = Ptr{Cvoid}(C_NULL)
+        p521_cert_pkey = Ptr{Cvoid}(C_NULL)
         pubkey = Ptr{Cvoid}(C_NULL)
         try
             client_share = TLHC._tls13_x25519_public_key(client_pkey)
@@ -464,6 +490,25 @@ end
             @test client_p256_secret == server_p256_secret
             @test_throws ArgumentError TLHC._tls13_p256_peer_public_key(vcat(UInt8[0x02], zeros(UInt8, 32)))
 
+            p256_cert_pkey = _tls13_generate_test_ec_pkey("prime256v1")
+            p384_cert_pkey = _tls13_generate_test_ec_pkey("secp384r1")
+            p521_cert_pkey = _tls13_generate_test_ec_pkey("secp521r1")
+            offered_ecdsa = UInt16[
+                TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+                TLHC._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384,
+                TLHC._TLS_SIGNATURE_ECDSA_SECP521R1_SHA512,
+            ]
+            @test TLHC._tls13_ec_group_curve_nid(p256_cert_pkey) == TLHC._init_p256_group_nid!()
+            @test TLHC._tls13_ec_group_curve_nid(p384_cert_pkey) == TLHC._init_p384_group_nid!()
+            @test TLHC._tls13_ec_group_curve_nid(p521_cert_pkey) == TLHC._init_p521_group_nid!()
+            @test TLHC._tls13_select_signature_algorithm(p256_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256
+            @test TLHC._tls13_select_signature_algorithm(p384_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
+            @test TLHC._tls13_select_signature_algorithm(p521_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP521R1_SHA512
+            @test_throws ArgumentError TLHC._tls13_select_signature_algorithm(
+                p384_cert_pkey,
+                UInt16[TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256],
+            )
+
             signed = collect(UInt8(0x10):UInt8(0x4f))
             signature = TLHC._tls13_openssl_sign_from_pem(TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, _TLS13_TEST_KEY_PEM)
             pubkey = TLHC._tls13_pubkey_from_der_certificate(_TLS13_TEST_CERT_DER)
@@ -475,6 +520,9 @@ end
         finally
             TLHC._free_evp_pkey!(client_pkey)
             TLHC._free_evp_pkey!(client_p256_pkey)
+            TLHC._free_evp_pkey!(p256_cert_pkey)
+            TLHC._free_evp_pkey!(p384_cert_pkey)
+            TLHC._free_evp_pkey!(p521_cert_pkey)
             TLHC._free_evp_pkey!(pubkey)
             TLHC._securezero!(client_secret)
             TLHC._securezero!(server_secret)
@@ -659,7 +707,16 @@ end
         copyto!(server_hello.random, 25, TLHC._TLS13_DOWNGRADE_CANARY_TLS12, 1, 8)
         state.server_hello = server_hello
         state.have_server_hello = true
-        @test_throws ArgumentError TLHC._check_server_hello_or_hrr!(state)
+        err = try
+            TLHC._check_server_hello_or_hrr!(state)
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TLHC._TLS13AlertError
+        if err isa TLHC._TLS13AlertError
+            @test err.alert == TLHC._TLS_ALERT_ILLEGAL_PARAMETER
+        end
     end
 
     @testset "certificate verify mismatches are rejected before client finished" begin
@@ -673,7 +730,16 @@ end
         state = TLHC._TLS13ClientHandshakeState(_tls13_cert_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, TLHC._TLS13OpenSSLCertificateVerifier())
         io = TLHC._HandshakeMessageFlightIO(inbound)
 
-        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TLHC._TLS13AlertError
+        if err isa TLHC._TLS13AlertError
+            @test err.alert == TLHC._TLS_ALERT_DECRYPT_ERROR
+        end
         @test length(io.outbound) == 1
         @test !state.have_client_finished
     end
@@ -691,7 +757,16 @@ end
         state = TLHC._TLS13ClientHandshakeState(_tls13_cert_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, TLHC._TLS13OpenSSLCertificateVerifier())
         io = TLHC._HandshakeMessageFlightIO(inbound)
 
-        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TLHC._TLS13AlertError
+        if err isa TLHC._TLS13AlertError
+            @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
+        end
         @test length(io.outbound) == 1
         @test !state.have_client_finished
     end
@@ -705,7 +780,16 @@ end
         state = TLHC._TLS13ClientHandshakeState(_tls13_cert_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, key_share_provider, TLHC._TLS13OpenSSLCertificateVerifier())
         io = TLHC._HandshakeMessageFlightIO(inbound)
 
-        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TLHC._TLS13AlertError
+        if err isa TLHC._TLS13AlertError
+            @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
+        end
         @test length(io.outbound) == 1
         @test !state.have_client_finished
     end
@@ -719,7 +803,16 @@ end
         io = TLHC._HandshakeMessageFlightIO([expected.inbound[1], expected.inbound[2], bad_finished])
         state = TLHC._TLS13ClientHandshakeState(_tls13_psk_client_hello(), TLHC._TLS13_AES_128_GCM_SHA256_ID, shared_secret, psk)
 
-        @test_throws ArgumentError TLHC._client_handshake_tls13!(state, io)
+        err = try
+            TLHC._client_handshake_tls13!(state, io)
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TLHC._TLS13AlertError
+        if err isa TLHC._TLS13AlertError
+            @test err.alert == TLHC._TLS_ALERT_DECRYPT_ERROR
+        end
         @test length(io.outbound) == 1
     end
 

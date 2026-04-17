@@ -70,6 +70,7 @@ end
 
 function _tls13_native_client_config(;
     verify_peer::Bool = false,
+    verify_hostname::Bool = verify_peer,
     server_name::Union{Nothing, String} = "localhost",
     ca_file::Union{Nothing, String} = nothing,
     alpn_protocols::Vector{String} = String[],
@@ -80,6 +81,7 @@ function _tls13_native_client_config(;
     return TLN.Config(
         server_name = server_name,
         verify_peer = verify_peer,
+        verify_hostname = verify_hostname,
         ca_file = ca_file,
         cert_file = cert_file,
         key_file = key_file,
@@ -862,6 +864,28 @@ end
         end
     end
 
+    @testset "native client can verify hostname without chain verification" begin
+        IPN.shutdown!()
+        listener = nothing
+        client = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config())
+            client = TLN.connect(addr, _tls13_native_client_config(
+                server_name = "localhost",
+                verify_peer = false,
+                verify_hostname = true,
+            ))
+            _finish_tls13_native_server!(server_task::Task)
+            @test TLN.connection_state(client).handshake_complete
+        finally
+            _tls_native_close_quiet!(client)
+            server_task isa Task && _finish_tls13_native_server!(server_task)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
     @testset "native client rejects wrong hostname" begin
         IPN.shutdown!()
         listener = nothing
@@ -879,6 +903,123 @@ end
             )
         finally
             server_task isa Task && _finish_tls13_native_server!(server_task)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native client rejects wrong hostname without chain verification" begin
+        IPN.shutdown!()
+        listener = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config())
+            err = try
+                TLN.connect(addr, _tls13_native_client_config(
+                    server_name = "example.com",
+                    verify_peer = false,
+                    verify_hostname = true,
+                ))
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN.TLSError
+            if err isa TLN.TLSError
+                @test occursin("certificate is not valid for host", err.message)
+            end
+        finally
+            server_task isa Task && _finish_tls13_native_server!(server_task)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native server sends fatal alert on unexpected first handshake message" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config())
+            client_tcp = NCN.connect(addr)
+            payload = UInt8[TLN._HANDSHAKE_TYPE_FINISHED, 0x00, 0x00, 0x00]
+            header = UInt8[
+                TLN._TLS_RECORD_TYPE_HANDSHAKE,
+                UInt8(TLN.TLS1_2_VERSION >> 8),
+                UInt8(TLN.TLS1_2_VERSION & 0xff),
+                UInt8(length(payload) >> 8),
+                UInt8(length(payload) & 0xff),
+            ]
+            write(client_tcp, header)
+            write(client_tcp, payload)
+            alert_header, alert_payload = _read_tls_record(client_tcp)
+            @test alert_header[1] == TLN._TLS_RECORD_TYPE_ALERT
+            @test alert_payload == UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_UNEXPECTED_MESSAGE]
+        finally
+            _tls_native_close_quiet!(client_tcp)
+            server_task isa Task && _finish_tls13_native_server!(server_task)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "native client does not send a fatal alert in response to a peer fatal alert" begin
+        IPN.shutdown!()
+        listener = nothing
+        server_tcp = nothing
+        accept_task = nothing
+        client_task = nothing
+        try
+            listener = NCN.listen(NCN.loopback_addr(0); backlog = 1)
+            addr = NCN.addr(listener)::NCN.SocketAddrV4
+            accept_task = errormonitor(Threads.@spawn NCN.accept(listener))
+            client_task = Threads.@spawn begin
+                try
+                    TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
+                    nothing
+                catch ex
+                    ex
+                end
+            end
+            @test _tls_native_wait_task(accept_task, 5.0) != :timed_out
+            server_tcp = fetch(accept_task)
+            header, _ = _read_tls_record(server_tcp)
+            if header[1] == TLN._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
+                header, _ = _read_tls_record(server_tcp)
+            end
+            @test header[1] == TLN._TLS_RECORD_TYPE_HANDSHAKE
+
+            alert_header = UInt8[
+                TLN._TLS_RECORD_TYPE_ALERT,
+                UInt8(TLN.TLS1_2_VERSION >> 8),
+                UInt8(TLN.TLS1_2_VERSION & 0xff),
+                0x00,
+                0x02,
+            ]
+            alert_payload = UInt8[TLN._TLS_ALERT_LEVEL_FATAL, TLN._TLS_ALERT_HANDSHAKE_FAILURE]
+            write(server_tcp, alert_header)
+            write(server_tcp, alert_payload)
+
+            @test _tls_native_wait_task(client_task::Task, 5.0) != :timed_out
+            client_err = fetch(client_task::Task)
+            @test client_err isa TLN.TLSError
+            if client_err isa TLN.TLSError
+                @test occursin("received fatal TLS 1.3 alert", client_err.message)
+            end
+
+            NCN.set_read_deadline!(server_tcp, time_ns() + 100_000_000)
+            extra = try
+                read!(server_tcp, Vector{UInt8}(undef, 1))
+                :bytes
+            catch ex
+                ex
+            finally
+                NCN.set_read_deadline!(server_tcp, Int64(0))
+            end
+            @test extra isa EOFError || extra isa NCN.DeadlineExceededError
+        finally
+            _tls_native_close_quiet!(server_tcp)
             _tls_native_close_quiet!(listener)
             IPN.shutdown!()
         end

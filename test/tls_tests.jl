@@ -68,6 +68,7 @@ function _tls_connect(
         policy = policy,
         server_name = config.server_name,
         verify_peer = config.verify_peer,
+        verify_hostname = config.verify_hostname,
         client_auth = config.client_auth,
         cert_file = config.cert_file,
         key_file = config.key_file,
@@ -89,6 +90,7 @@ end
             cfg_default = TL.Config()
             @test cfg_default.min_version == TL.TLS1_2_VERSION
             @test cfg_default.client_auth == TL.ClientAuthMode.NoClientCert
+            @test cfg_default.verify_hostname
             default_ca = TL._default_ca_file_path()
             expected_default_ca = try
                 path = NetworkOptions.ca_roots_path()
@@ -142,6 +144,7 @@ end
                 @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server_tcp = fetch(accept_task)
                 @test_throws TL.ConfigError TL.client(client_tcp, TL.Config(verify_peer = true))
+                @test_throws TL.ConfigError TL.client(client_tcp, TL.Config(verify_peer = false, verify_hostname = true))
                 _tls_close_quiet!(client_tcp)
                 client_tcp = nothing
                 _tls_close_quiet!(server_tcp)
@@ -840,6 +843,83 @@ end
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "hostname verification can be enabled without chain verification on OpenSSL path" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        return conn
+                    catch err
+                        return err
+                    end
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    verify_hostname = true,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 10_000_000_000,
+                    max_version = TL.TLS1_2_VERSION,
+                )
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_result = fetch(accept_task)
+                server_result isa Exception && throw(server_result)
+                server = server_result::TL.Conn
+                @test TL.connection_state(client).handshake_complete
+                @test !TL.connection_state(client).using_native_tls13
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "hostname verification failure surfaces TLSError without CA verification" begin
+            IP.shutdown!()
+            listener = nothing
+            accept_task = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    try
+                        TL.handshake!(conn)
+                    catch
+                    end
+                    _tls_close_quiet!(conn)
+                    return nothing
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    verify_hostname = true,
+                    server_name = "example.com",
+                    handshake_timeout_ns = 10_000_000_000,
+                    max_version = TL.TLS1_2_VERSION,
+                )
+                connect_err = try
+                    _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test connect_err isa TL.TLSError
+                if connect_err isa TL.TLSError
+                    @test occursin("certificate is not valid for host", connect_err.message)
+                end
+                accept_task !== nothing && _tls_wait_task_done(accept_task, 2.0)
+            finally
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
             end

@@ -17,6 +17,8 @@ const _TLS_GROUP_X25519 = UInt16(0x001d)
 
 const _X25519_PKEY_ID = Ref{Cint}(0)
 const _P256_GROUP_NID = Ref{Cint}(0)
+const _P384_GROUP_NID = Ref{Cint}(0)
+const _P521_GROUP_NID = Ref{Cint}(0)
 
 function _init_x25519_pkey_id!()::Cint
     nid = _X25519_PKEY_ID[]
@@ -33,6 +35,24 @@ function _init_p256_group_nid!()::Cint
     nid = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "prime256v1")
     nid > 0 || throw(ArgumentError("failed to initialize OpenSSL P-256 provider"))
     _P256_GROUP_NID[] = nid
+    return nid
+end
+
+function _init_p384_group_nid!()::Cint
+    nid = _P384_GROUP_NID[]
+    nid > 0 && return nid
+    nid = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "secp384r1")
+    nid > 0 || throw(ArgumentError("failed to initialize OpenSSL P-384 provider"))
+    _P384_GROUP_NID[] = nid
+    return nid
+end
+
+function _init_p521_group_nid!()::Cint
+    nid = _P521_GROUP_NID[]
+    nid > 0 && return nid
+    nid = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "secp521r1")
+    nid > 0 || throw(ArgumentError("failed to initialize OpenSSL P-521 provider"))
+    _P521_GROUP_NID[] = nid
     return nid
 end
 
@@ -116,6 +136,18 @@ struct _TLS13SignatureVerifySpec
     direct::Bool
     rsa_pss::Bool
 end
+
+struct _TLS13AlertError <: Exception
+    message::String
+    alert::UInt8
+    from_peer::Bool
+end
+
+Base.showerror(io::IO, err::_TLS13AlertError) = print(io, err.message)
+
+@inline _tls13_protocol_error(alert::UInt8, message::AbstractString) = _TLS13AlertError(String(message), alert, false)
+@inline _tls13_peer_alert_error(alert::UInt8, message::AbstractString) = _TLS13AlertError(String(message), alert, true)
+@inline _tls13_fail(alert::UInt8, message::AbstractString)::Union{} = throw(_tls13_protocol_error(alert, message))
 
 struct _OpenSSLParam
     key::Cstring
@@ -317,6 +349,21 @@ function _tls13_pkey_type_name(pkey::Ptr{Cvoid})::String
     return unsafe_string(name)
 end
 
+function _tls13_ec_group_curve_nid(pkey::Ptr{Cvoid})::Cint
+    ec_key = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EVP_PKEY_get1_EC_KEY, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), pkey)
+        _openssl_require_nonnull(ec_key, "EVP_PKEY_get1_EC_KEY")
+        group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(group, "EC_KEY_get0_group")
+        nid = ccall((:EC_GROUP_get_curve_name, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), group)
+        nid > 0 || throw(ArgumentError("tls: OpenSSL EC key has no named curve"))
+        return nid
+    finally
+        _free_ec_key!(ec_key)
+    end
+end
+
 function _tls13_load_verify_locations!(store::Ptr{Cvoid}, ca_path::AbstractString)::Nothing
     ok = if isdir(ca_path)
         ccall(
@@ -341,14 +388,46 @@ function _tls13_load_verify_locations!(store::Ptr{Cvoid}, ca_path::AbstractStrin
     return nothing
 end
 
+function _tls13_check_x509_peer_name!(x509::Ptr{Cvoid}, peer_name::AbstractString)::Nothing
+    normalized_peer_name = String(peer_name)
+    isempty(normalized_peer_name) && return nothing
+    if _is_ip_literal_name(normalized_peer_name)
+        verify_ip = _verify_ip(normalized_peer_name)
+        ok = ccall(
+            (:X509_check_ip_asc, _LIBCRYPTO_PATH),
+            Cint,
+            (Ptr{Cvoid}, Cstring, Cuint),
+            x509,
+            verify_ip,
+            Cuint(0),
+        )
+        ok == 1 || _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate is not valid for IP address $(verify_ip)")
+        return nothing
+    end
+    verify_name = _verify_name(normalized_peer_name)
+    ok = ccall(
+        (:X509_check_host, _LIBCRYPTO_PATH),
+        Cint,
+        (Ptr{Cvoid}, Cstring, Csize_t, Cuint, Ptr{Ptr{UInt8}}),
+        x509,
+        verify_name,
+        Csize_t(length(verify_name)),
+        Cuint(0),
+        Ptr{Ptr{UInt8}}(C_NULL),
+    )
+    ok == 1 || _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate is not valid for host $(verify_name)")
+    return nothing
+end
+
 function _tls13_verify_certificate_chain(
     certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,
+    verify_hostname::Bool,
     ca_file::Union{Nothing, String},
     purpose::AbstractString,
     peer_name::AbstractString = "",
 )::Ptr{Cvoid}
-    isempty(certificates) && throw(ArgumentError("tls: received empty certificates message"))
+    isempty(certificates) && _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
     x509s = Ptr{Cvoid}[]
     store = Ptr{Cvoid}(C_NULL)
     store_ctx = Ptr{Cvoid}(C_NULL)
@@ -359,7 +438,7 @@ function _tls13_verify_certificate_chain(
         end
         leaf = x509s[1]
         if verify_peer
-            ca_file === nothing && throw(ArgumentError("tls: certificate verification requires a CA roots path"))
+            ca_file === nothing && _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: certificate verification requires a CA roots path")
             store = ccall((:X509_STORE_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
             _openssl_require_nonnull(store, "X509_STORE_new")
             _tls13_load_verify_locations!(store, ca_file::String)
@@ -385,42 +464,16 @@ function _tls13_verify_certificate_chain(
             _openssl_require_ok(ok, "X509_STORE_CTX_init")
             ok = ccall((:X509_STORE_CTX_set_default, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cstring), store_ctx, purpose)
             _openssl_require_ok(ok, "X509_STORE_CTX_set_default")
-            param = ccall((:X509_STORE_CTX_get0_param, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), store_ctx)
-            _openssl_require_nonnull(param, "X509_STORE_CTX_get0_param")
-            normalized_peer_name = String(peer_name)
-            if !isempty(normalized_peer_name)
-                if _is_ip_literal_name(normalized_peer_name)
-                    verify_ip = _verify_ip(normalized_peer_name)
-                    ok = ccall(
-                        (:X509_VERIFY_PARAM_set1_ip_asc, _LIBCRYPTO_PATH),
-                        Cint,
-                        (Ptr{Cvoid}, Cstring),
-                        param,
-                        verify_ip,
-                    )
-                    _openssl_require_ok(ok, "X509_VERIFY_PARAM_set1_ip_asc")
-                else
-                    verify_name = _verify_name(normalized_peer_name)
-                    ok = ccall(
-                        (:X509_VERIFY_PARAM_set1_host, _LIBCRYPTO_PATH),
-                        Cint,
-                        (Ptr{Cvoid}, Cstring, Csize_t),
-                        param,
-                        verify_name,
-                        Csize_t(length(verify_name)),
-                    )
-                    _openssl_require_ok(ok, "X509_VERIFY_PARAM_set1_host")
-                end
-            end
             ok = ccall((:X509_verify_cert, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
             if ok != 1
                 err = ccall((:X509_STORE_CTX_get_error, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
                 depth = ccall((:X509_STORE_CTX_get_error_depth, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
                 msg_ptr = ccall((:X509_verify_cert_error_string, _LIBCRYPTO_PATH), Cstring, (Clong,), Clong(err))
                 msg = msg_ptr == C_NULL ? "unknown certificate verification failure" : unsafe_string(msg_ptr)
-                throw(ArgumentError("tls: certificate verification failed at depth $(depth): $(msg)"))
+                _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate verification failed at depth $(depth): $(msg)")
             end
         end
+        verify_hostname && _tls13_check_x509_peer_name!(leaf, peer_name)
         pkey = ccall((:X509_get_pubkey, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), leaf)
         return _openssl_require_nonnull(pkey, "X509_get_pubkey")
     finally
@@ -437,11 +490,13 @@ function _tls13_verify_server_certificate_chain(
     certificates::Vector{Vector{UInt8}},
     server_name::AbstractString;
     verify_peer::Bool,
+    verify_hostname::Bool,
     ca_file::Union{Nothing, String},
 )::Ptr{Cvoid}
     return _tls13_verify_certificate_chain(
         certificates;
         verify_peer,
+        verify_hostname,
         ca_file,
         purpose = "ssl_server",
         peer_name = server_name,
@@ -456,6 +511,7 @@ function _tls13_verify_client_certificate_chain(
     return _tls13_verify_certificate_chain(
         certificates;
         verify_peer,
+        verify_hostname = false,
         ca_file,
         purpose = "ssl_client",
     )
@@ -562,7 +618,7 @@ function _tls13_x25519_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::A
         end
         if iszero(all_zero)
             _securezero!(out)
-            throw(ArgumentError("tls: invalid X25519 shared secret"))
+            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid X25519 shared secret")
         end
         return out
     finally
@@ -1059,7 +1115,7 @@ function _tls13_decrypt_record_aead(
     additional_data::AbstractVector{UInt8},
     ciphertext_and_tag::AbstractVector{UInt8},
 )::Union{Vector{UInt8}, Nothing}
-    length(ciphertext_and_tag) >= 16 || throw(ArgumentError("tls: TLS 1.3 ciphertext is missing the authentication tag"))
+    length(ciphertext_and_tag) >= 16 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.3 ciphertext is missing the authentication tag")
     key_bytes = key isa Vector{UInt8} ? key : Vector{UInt8}(key)
     iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
     aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
@@ -1108,7 +1164,10 @@ function _tls13_decrypt_record_aead(
             pointer(plaintext, total + 1),
             out_len,
         )
-        final_ok == 1 || return nothing
+        if final_ok != 1
+            _securezero!(plaintext)
+            return nothing
+        end
         total += Int(out_len[])
         resize!(plaintext, total)
         return plaintext

@@ -158,7 +158,9 @@ Keyword arguments:
 - `server_name`: hostname or IP literal used for certificate verification. For clients,
   this also drives SNI when it is a hostname. If omitted, `connect` will try to derive
   it from the dial target.
-- `verify_peer`: whether to validate the remote certificate chain and peer name.
+- `verify_peer`: whether to validate the remote certificate chain against trusted roots.
+- `verify_hostname`: whether to validate the remote peer name against the presented
+  leaf certificate. This defaults to `verify_peer`, but can be enabled separately.
 - `client_auth`: server-side client certificate policy.
 - `cert_file` / `key_file`: PEM-encoded certificate chain and private key. Servers must
   provide both; clients may provide both for mutual TLS.
@@ -179,6 +181,7 @@ Throws `ConfigError` if the keyword combination is internally inconsistent.
 struct Config
     server_name::Union{Nothing, String}
     verify_peer::Bool
+    verify_hostname::Bool
     client_auth::ClientAuthMode.T
     cert_file::Union{Nothing, String}
     key_file::Union{Nothing, String}
@@ -224,6 +227,7 @@ const _TLS_CONN_MODE_NATIVE_TLS13_SERVER = UInt8(2)
 function Config(;
         server_name::Union{Nothing, AbstractString} = nothing,
         verify_peer::Bool = true,
+        verify_hostname::Bool = verify_peer,
         client_auth::ClientAuthMode.T = ClientAuthMode.NoClientCert,
         cert_file::Union{Nothing, AbstractString} = nothing,
         key_file::Union{Nothing, AbstractString} = nothing,
@@ -250,6 +254,7 @@ function Config(;
     return Config(
         server_name_s,
         verify_peer,
+        verify_hostname,
         client_auth,
         cert_file_s,
         key_file_s,
@@ -428,6 +433,8 @@ function __init__()
     )::Cint
     _init_x25519_pkey_id!()
     _init_p256_group_nid!()
+    _init_p384_group_nid!()
+    _init_p521_group_nid!()
     _VERIFY_ALLOW_ALL_CB[] = @cfunction(_verify_allow_all_cb, Cint, (Cint, Ptr{Cvoid}))
     _ALPN_SELECT_CB[] = @cfunction(_ssl_alpn_select_cb, Cint, (Ptr{Cvoid}, Ptr{Ptr{UInt8}}, Ptr{UInt8}, Ptr{UInt8}, Cuint, Ptr{Cvoid}))
     atexit(_free_ssl_ctx_cache!)
@@ -507,7 +514,7 @@ function _apply_client_server_name!(ssl::Ptr{Cvoid}, config::Config)
         )
         ok == 1 || throw(_make_tls_error("SSL_ctrl(SNI)", Int32(ok)))
     end
-    if config.verify_peer
+    if config.verify_peer && config.verify_hostname
         if _is_ip_literal_name(configured)
             ip_verify = _verify_ip(configured)
             param = ccall((:SSL_get0_param, _LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ssl)
@@ -534,10 +541,36 @@ function _apply_client_server_name!(ssl::Ptr{Cvoid}, config::Config)
     return nothing
 end
 
+@inline function _ssl_get1_peer_certificate(ssl::Ptr{Cvoid})::Ptr{Cvoid}
+    x509 = ccall((:SSL_get1_peer_certificate, _LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ssl)
+    x509 == C_NULL && throw(ArgumentError("tls: peer did not present a certificate"))
+    return x509
+end
+
+function _verify_client_peer_hostname!(conn::Conn)::Nothing
+    config = conn.config
+    conn.is_server && return nothing
+    (config.verify_peer && config.verify_hostname) && return nothing
+    config.verify_hostname || return nothing
+    server_name = config.server_name
+    server_name === nothing && return nothing
+    ssl = conn.ssl
+    ssl == C_NULL && throw(_closed_error("handshake"))
+    x509 = Ptr{Cvoid}(C_NULL)
+    try
+        x509 = _ssl_get1_peer_certificate(ssl)
+        _tls13_check_x509_peer_name!(x509, server_name::String)
+        return nothing
+    finally
+        _free_x509!(x509)
+    end
+end
+
 function _config_with_server_name(config::Config, server_name::String)::Config
     return Config(
         server_name,
         config.verify_peer,
+        config.verify_hostname,
         config.client_auth,
         config.cert_file,
         config.key_file,
@@ -634,8 +667,9 @@ function _validate_config(config::Config; is_server::Bool)
         isfile(cert_path) || throw(ConfigError("certificate file not found: $cert_path"))
         isfile(key_path) || throw(ConfigError("private key file not found: $key_path"))
     else
-        if config.verify_peer && (config.server_name === nothing || isempty(config.server_name::String))
-            throw(ConfigError("client TLS with `verify_peer=true` requires `server_name`"))
+        if (config.verify_peer || config.verify_hostname) &&
+           (config.server_name === nothing || isempty(config.server_name::String))
+            throw(ConfigError("client TLS with `verify_peer=true` or `verify_hostname=true` requires `server_name`"))
         end
     end
     if config.ca_file !== nothing
@@ -968,6 +1002,7 @@ end
 function _native_tls13_certificate_verifier(config::Config)::_TLS13OpenSSLCertificateVerifier
     return _TLS13OpenSSLCertificateVerifier(
         verify_peer = config.verify_peer,
+        verify_hostname = config.verify_hostname,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
     )
 end
@@ -1025,14 +1060,15 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
         _securezero_tls13_client_session!(session)
         return nothing
     end
-    if config.verify_peer
+    if config.verify_peer || config.verify_hostname
         pkey = Ptr{Cvoid}(C_NULL)
         try
             pkey = _tls13_verify_server_certificate_chain(
                 session.certificates,
                 config.server_name === nothing ? "" : config.server_name::String;
-                verify_peer = true,
-                ca_file = _effective_ca_file(config; is_server = false),
+                verify_peer = config.verify_peer,
+                verify_hostname = config.verify_hostname,
+                ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
             )
         catch
             _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
@@ -1383,6 +1419,7 @@ function handshake!(conn::Conn)
                         conn.ssl::Ptr{Cvoid},
                     )::Cint
                     if ret == 1
+                        _verify_client_peer_hostname!(conn)
                         _set_handshake_complete!(conn)
                         return nothing
                     end
@@ -1404,7 +1441,17 @@ function handshake!(conn::Conn)
             if ex isa IOPoll.NetClosingError || _is_closed(conn)
                 throw(_closed_error("handshake", ex))
             end
+            if ex isa _TLS13AlertError
+                tls13_err = ex::_TLS13AlertError
+                if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
+                    _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+                end
+                throw(TLSError("handshake", Int32(0), tls13_err.message, tls13_err))
+            end
             if ex isa ArgumentError
+                if _is_native_tls13_mode(conn.mode)
+                    _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+                end
                 throw(TLSError("handshake", Int32(0), (ex::ArgumentError).msg::String, ex))
             end
             throw(TLSError("handshake", Int32(0), "unexpected TLS failure", ex))
@@ -1491,7 +1538,17 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("read", ex))
         end
+        if ex isa _TLS13AlertError
+            tls13_err = ex::_TLS13AlertError
+            if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
+                _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+            end
+            throw(TLSError("read", Int32(0), tls13_err.message, tls13_err))
+        end
         if ex isa ArgumentError
+            if _is_native_tls13_mode(conn.mode)
+                _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+            end
             throw(TLSError("read", Int32(0), (ex::ArgumentError).msg::String, ex))
         end
         throw(TLSError("read", Int32(0), "unexpected TLS failure", ex))
@@ -1547,7 +1604,17 @@ function _peek_eof(conn::Conn)::Bool
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("peek", ex))
         end
+        if ex isa _TLS13AlertError
+            tls13_err = ex::_TLS13AlertError
+            if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
+                _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+            end
+            throw(TLSError("peek", Int32(0), tls13_err.message, tls13_err))
+        end
         if ex isa ArgumentError
+            if _is_native_tls13_mode(conn.mode)
+                _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+            end
             throw(TLSError("peek", Int32(0), (ex::ArgumentError).msg::String, ex))
         end
         throw(TLSError("peek", Int32(0), "unexpected TLS failure", ex))
@@ -1772,12 +1839,23 @@ end
 
 _write_buffer(buf::ByteMemory, nbytes::Int) = buf
 
-function _native_tls13_write_alert!(conn::Conn, alert_desc::UInt8)::Nothing
+function _native_tls13_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::UInt8)::Nothing
     state = _native_tls13_state(conn)
     state.sent_close_notify && return nothing
-    _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_ALERT, UInt8[_TLS_ALERT_LEVEL_WARNING, alert_desc])
+    _tls13_write_record!(conn.tcp, state.write_cipher, _TLS_RECORD_TYPE_ALERT, UInt8[alert_level, alert_desc])
     if alert_desc == _TLS_ALERT_CLOSE_NOTIFY
         state.sent_close_notify = true
+    end
+    return nothing
+end
+
+function _native_tls13_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Nothing
+    _is_closed(conn) && return nothing
+    !_is_native_tls13_mode(conn.mode) && return nothing
+    conn.native_state === nothing && return nothing
+    try
+        _native_tls13_write_alert!(conn, _TLS_ALERT_LEVEL_FATAL, alert_desc)
+    catch
     end
     return nothing
 end
@@ -1837,7 +1915,17 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("write", ex))
         end
+        if ex isa _TLS13AlertError
+            tls13_err = ex::_TLS13AlertError
+            if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
+                _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
+            end
+            throw(TLSError("write", Int32(0), tls13_err.message, tls13_err))
+        end
         if ex isa ArgumentError
+            if _is_native_tls13_mode(conn.mode)
+                _native_tls13_try_write_fatal_alert!(conn, _TLS_ALERT_INTERNAL_ERROR)
+            end
             throw(TLSError("write", Int32(0), (ex::ArgumentError).msg::String, ex))
         end
         throw(TLSError("write", Int32(0), "unexpected TLS failure", ex))
@@ -1917,7 +2005,7 @@ function _ssl_shutdown!(conn::Conn)
 end
 
 function _native_tls13_shutdown!(conn::Conn)::Nothing
-    _native_tls13_write_alert!(conn, _TLS_ALERT_CLOSE_NOTIFY)
+    _native_tls13_write_alert!(conn, _TLS_ALERT_LEVEL_WARNING, _TLS_ALERT_CLOSE_NOTIFY)
     return nothing
 end
 
