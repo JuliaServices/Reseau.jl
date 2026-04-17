@@ -344,6 +344,8 @@ function _pc_tls_server_config(
     client_ca_file::Union{Nothing, String} = nothing,
     session_tickets_disabled::Bool = false,
     curve_preferences::Vector{UInt16} = UInt16[],
+    min_version::UInt16 = TL.TLS1_3_VERSION,
+    max_version::UInt16 = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
         verify_peer = false,
@@ -353,8 +355,8 @@ function _pc_tls_server_config(
         client_ca_file = client_ca_file,
         curve_preferences = copy(curve_preferences),
         handshake_timeout_ns = 1_000_000_000,
-        min_version = TL.TLS1_3_VERSION,
-        max_version = TL.TLS1_3_VERSION,
+        min_version = min_version,
+        max_version = max_version,
         session_tickets_disabled = session_tickets_disabled,
     )
 end
@@ -366,6 +368,8 @@ function _pc_tls_client_config(;
     cert_file::Union{Nothing, String} = nothing,
     key_file::Union{Nothing, String} = nothing,
     session_tickets_disabled::Bool = false,
+    min_version::UInt16 = TL.TLS1_3_VERSION,
+    max_version::UInt16 = TL.TLS1_3_VERSION,
 )::TL.Config
     return TL.Config(
         verify_peer = verify_peer,
@@ -374,8 +378,8 @@ function _pc_tls_client_config(;
         cert_file = cert_file,
         key_file = key_file,
         handshake_timeout_ns = 1_000_000_000,
-        min_version = TL.TLS1_3_VERSION,
-        max_version = TL.TLS1_3_VERSION,
+        min_version = min_version,
+        max_version = max_version,
         session_tickets_disabled = session_tickets_disabled,
     )
 end
@@ -408,90 +412,71 @@ function _pc_tls13_native_paths()::Union{
     )
 end
 
+function _pc_tls12_paths()::Union{
+    Nothing,
+    NamedTuple{(:cert, :key), Tuple{String, String}},
+}
+    cert_path = _pc_tls_resource_file("unittests.crt")
+    key_path = _pc_tls_resource_file("unittests.key")
+    if cert_path === nothing || key_path === nothing
+        return nothing
+    end
+    return (cert = cert_path::String, key = key_path::String)
+end
+
 function _pc_run_tls_workload!()
     _pc_runtime_supported() || return nothing
-    paths = _pc_tls13_native_paths()
+    paths = _pc_tls12_paths()
     paths === nothing && return nothing
     listener = nothing
-    client1 = nothing
-    client2 = nothing
+    client = nothing
     server_task = nothing
     try
         listener = TL.listen(NC.loopback_addr(0), _pc_tls_server_config(
-            paths.server_cert,
-            paths.server_key;
-            client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
-            client_ca_file = paths.ca,
-            curve_preferences = UInt16[TL.P256],
+            paths.cert,
+            paths.key;
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
         ); backlog = 8)
         laddr = TL.addr(listener)::NC.SocketAddrV4
         server_task = @async begin
-            states = TL.ConnectionState[]
-            for i in 1:2
-                conn = TL.accept(listener::TL.Listener)
-                try
-                    TL.handshake!(conn)
-                    push!(states, TL.connection_state(conn))
-                    tag = UInt8[UInt8(0x40 + i)]
-                    ack = UInt8[UInt8(0x50 + i)]
-                    write(conn, tag) == 1 || throw(ArgumentError("TLS precompile workload expected 1-byte server write"))
-                    read(conn, 1) == ack || throw(ArgumentError("TLS precompile workload expected 1-byte client ack"))
-                finally
-                    _pc_close_nothrow(conn)
-                end
+            conn = TL.accept(listener::TL.Listener)
+            try
+                TL.handshake!(conn)
+                state = TL.connection_state(conn)
+                write(conn, UInt8[0x41]) == 1 || throw(ArgumentError("TLS precompile workload expected 1-byte server write"))
+                read(conn, 1) == UInt8[0x51] || throw(ArgumentError("TLS precompile workload expected 1-byte client ack"))
+                return state
+            finally
+                _pc_close_nothrow(conn)
             end
-            return states
         end
         client_config = _pc_tls_client_config(
             verify_peer = true,
             server_name = "localhost",
-            ca_file = paths.ca,
-            cert_file = paths.client_cert,
-            key_file = paths.client_key,
+            ca_file = paths.cert,
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
         )
-        client1 = TL.connect(NC.loopback_addr(Int(laddr.port)), client_config)
-        read(client1, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected first server byte"))
-        write(client1, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected first client ack write"))
-        eof(client1) || throw(ArgumentError("TLS precompile workload expected first connection EOF"))
-        client1_state = TL.connection_state(client1)
-        client1_state.using_native_tls13 ||
-            throw(ArgumentError("TLS precompile workload expected native TLS 1.3 client mode"))
-        !client1_state.did_resume ||
-            throw(ArgumentError("TLS precompile workload did not expect first connection resumption"))
-        client1_state.did_hello_retry_request ||
-            throw(ArgumentError("TLS precompile workload expected first connection HelloRetryRequest"))
-        client1_state.has_resumable_session ||
-            throw(ArgumentError("TLS precompile workload expected first connection to cache a resumable session"))
-
-        client2 = TL.connect(NC.loopback_addr(Int(laddr.port)), client_config)
-        read(client2, 1) == UInt8[0x42] || throw(ArgumentError("TLS precompile workload expected resumed server byte"))
-        write(client2, UInt8[0x52]) == 1 || throw(ArgumentError("TLS precompile workload expected resumed client ack write"))
-        eof(client2) || throw(ArgumentError("TLS precompile workload expected resumed connection EOF"))
-        client2_state = TL.connection_state(client2)
-        client2_state.using_native_tls13 ||
-            throw(ArgumentError("TLS precompile workload expected resumed native TLS 1.3 client mode"))
-        client2_state.did_resume ||
-            throw(ArgumentError("TLS precompile workload expected resumed TLS session"))
-        client2_state.did_hello_retry_request ||
-            throw(ArgumentError("TLS precompile workload expected resumed connection HelloRetryRequest"))
+        client = TL.connect(NC.loopback_addr(Int(laddr.port)), client_config)
+        read(client, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected server byte"))
+        write(client, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected client ack write"))
+        eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
+        client_state = TL.connection_state(client)
+        client_state.handshake_complete || throw(ArgumentError("TLS precompile workload expected a completed handshake"))
+        client_state.version == "TLSv1.2" || throw(ArgumentError("TLS precompile workload expected TLS 1.2"))
+        !client_state.using_native_tls13 || throw(ArgumentError("TLS precompile workload did not expect native TLS 1.3 mode"))
+        client_state.cipher_suite in (
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 ECDHE-RSA cipher suite"))
+        client_state.curve == "P-256" || throw(ArgumentError("TLS precompile workload expected P-256 ECDHE"))
         _pc_wait_task_done(server_task::Task, 2.0)
-        server_states = fetch(server_task::Task)::Vector{TL.ConnectionState}
-        length(server_states) == 2 || throw(ArgumentError("TLS precompile workload expected two server connections"))
-        server_states[1].using_native_tls13 ||
-            throw(ArgumentError("TLS precompile workload expected native TLS 1.3 server mode"))
-        server_states[2].using_native_tls13 ||
-            throw(ArgumentError("TLS precompile workload expected resumed native TLS 1.3 server mode"))
-        !server_states[1].did_resume ||
-            throw(ArgumentError("TLS precompile workload did not expect first server connection resumption"))
-        server_states[1].did_hello_retry_request ||
-            throw(ArgumentError("TLS precompile workload expected first server HelloRetryRequest"))
-        server_states[2].did_resume ||
-            throw(ArgumentError("TLS precompile workload expected resumed server session"))
-        server_states[2].did_hello_retry_request ||
-            throw(ArgumentError("TLS precompile workload expected resumed server HelloRetryRequest"))
+        server_state = fetch(server_task::Task)::TL.ConnectionState
+        server_state.handshake_complete || throw(ArgumentError("TLS precompile workload expected server handshake completion"))
+        server_state.version == "TLSv1.2" || throw(ArgumentError("TLS precompile workload expected TLS 1.2 server state"))
     finally
-        _pc_close_nothrow(client2)
-        _pc_close_nothrow(client1)
+        _pc_close_nothrow(client)
         _pc_close_nothrow(listener)
         IP.shutdown!()
     end
