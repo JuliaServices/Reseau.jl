@@ -156,6 +156,29 @@ end
         end
     end
 
+    @testset "post-handshake handshake records are rejected" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            write_key = UInt8[UInt8(0x40 + i) for i in 0:15]
+            write_iv = UInt8[0xc0, 0xc1, 0xc2, 0xc3]
+            client_state = TL12N._TLS12NativeClientState()
+            server_state = TL12N._TLS12NativeClientState()
+            TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            hello_request = UInt8[0x00, 0x00, 0x00, 0x00]
+            TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_HANDSHAKE, hello_request)
+            tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, server_state))
+            @test !tls_err.from_peer
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
     @testset "exact TLS 1.2 client handshakes through public APIs" begin
         listener = nothing
         client = nothing

@@ -354,13 +354,14 @@ end
                 @test_throws NC.DeadlineExceededError NC.accept(listener)
 
                 NC.set_deadline!(listener, Int64(0))
-                accept_task = errormonitor(Threads.@spawn begin
+                accept_task = errormonitor(@async begin
                     try
                         return NC.accept(listener)
                     catch err
                         return err
                     end
                 end)
+                @test _nc_wait_task_done(accept_task, 0.05) == :timed_out
                 client = NC.connect(NC.loopback_addr(Int(laddr.port)))
                 @test _nc_wait_task_done(accept_task, 2.0) != :timed_out
                 server_result = fetch(accept_task)

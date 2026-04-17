@@ -1213,11 +1213,10 @@ function _tls12_decrypt_record_aead(
             pointer(plaintext, total + 1),
             out_len,
         )
-        if final_ok == 0
+        if final_ok != 1
             _securezero!(plaintext)
             return nothing
         end
-        _openssl_require_ok(final_ok, "EVP_DecryptFinal_ex")
         total += Int(out_len[])
         resize!(plaintext, total)
         return plaintext

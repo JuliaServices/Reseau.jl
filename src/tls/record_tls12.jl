@@ -22,6 +22,7 @@ mutable struct _TLS12NativeClientState
     peer_close_notify::Bool
     sent_close_notify::Bool
     received_change_cipher_spec::Bool
+    allow_encrypted_handshake::Bool
     did_resume::Bool
     curve_id::UInt16
     cipher_suite::UInt16
@@ -34,6 +35,7 @@ _TLS12NativeClientState() = _TLS12NativeClientState(
     1,
     UInt8[],
     1,
+    false,
     false,
     false,
     false,
@@ -73,6 +75,7 @@ function _securezero_tls12_native_client_state!(state::_TLS12NativeClientState):
     state.peer_close_notify = false
     state.sent_close_notify = false
     state.received_change_cipher_spec = false
+    state.allow_encrypted_handshake = false
     state.did_resume = false
     state.curve_id = UInt16(0)
     state.cipher_suite = UInt16(0)
@@ -253,6 +256,8 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeClientState)::Not
             plaintext = _tls12_decrypt_record_aead(cipher.spec, cipher.key, nonce, aad, ciphertext)
             plaintext === nothing && _tls13_fail(_TLS_ALERT_BAD_RECORD_MAC, "tls: invalid TLS 1.2 record authentication tag")
             if content_type == _TLS_RECORD_TYPE_HANDSHAKE
+                state.allow_encrypted_handshake ||
+                    _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 handshake message")
                 append!(state.handshake_buffer, plaintext::Vector{UInt8})
                 length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
                     _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")

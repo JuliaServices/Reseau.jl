@@ -267,16 +267,21 @@ function _client_handshake_tls12_for_suite!(
         raw_client_finished = _write_handshake_message(client_finished, transcript)
         _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
 
-        _tls12_read_change_cipher_spec!(io)
-        _tls12_set_read_cipher!(io.state, cipher_spec, server_key, server_iv)
-        raw_server_finished = _read_handshake_bytes!(io)
-        _tls12_require_handshake_message(raw_server_finished, _HANDSHAKE_TYPE_FINISHED, "Finished")
-        server_finished = _unmarshal_finished(raw_server_finished)
-        server_finished === nothing && _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Finished")
-        expected_server_verify_data = _tls12_server_finished_verify_data(hash_kind, master_secret, transcript)
-        _constant_time_equals((server_finished::_FinishedMsg).verify_data, expected_server_verify_data) ||
-            _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 Finished verify_data")
-        _transcript_update!(transcript, raw_server_finished)
+        io.state.allow_encrypted_handshake = true
+        try
+            _tls12_read_change_cipher_spec!(io)
+            _tls12_set_read_cipher!(io.state, cipher_spec, server_key, server_iv)
+            raw_server_finished = _read_handshake_bytes!(io)
+            _tls12_require_handshake_message(raw_server_finished, _HANDSHAKE_TYPE_FINISHED, "Finished")
+            server_finished = _unmarshal_finished(raw_server_finished)
+            server_finished === nothing && _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Finished")
+            expected_server_verify_data = _tls12_server_finished_verify_data(hash_kind, master_secret, transcript)
+            _constant_time_equals((server_finished::_FinishedMsg).verify_data, expected_server_verify_data) ||
+                _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 Finished verify_data")
+            _transcript_update!(transcript, raw_server_finished)
+        finally
+            io.state.allow_encrypted_handshake = false
+        end
     finally
         _free_evp_pkey!(pubkey)
         _securezero!(shared_secret)
