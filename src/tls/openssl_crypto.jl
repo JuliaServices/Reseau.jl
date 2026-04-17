@@ -1093,9 +1093,9 @@ function _tls12_openssl_sign_from_pem(signature_algorithm::UInt16, signed::Abstr
 end
 
 @inline function _tls12_record_cipher(spec::_TLS12CipherSpec)::Ptr{Cvoid}
-    (spec == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 || spec == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256) &&
+    spec == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256 &&
         return ccall((:EVP_aes_128_gcm, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-    (spec == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 || spec == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384) &&
+    spec == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384 &&
         return ccall((:EVP_aes_256_gcm, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
     throw(ArgumentError("tls12 native record layer only supports AES-GCM cipher suites"))
 end
@@ -1213,7 +1213,10 @@ function _tls12_decrypt_record_aead(
             pointer(plaintext, total + 1),
             out_len,
         )
-        final_ok == 0 && return nothing
+        if final_ok == 0
+            _securezero!(plaintext)
+            return nothing
+        end
         _openssl_require_ok(final_ok, "EVP_DecryptFinal_ex")
         total += Int(out_len[])
         resize!(plaintext, total)

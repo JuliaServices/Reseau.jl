@@ -2448,8 +2448,6 @@ end
 @inline function _tls12_cipher_suite_name(cipher_suite::UInt16)::Union{Nothing, String}
     cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID && return "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
     cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID && return "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
-    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID && return "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
-    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID && return "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
     return nothing
 end
 

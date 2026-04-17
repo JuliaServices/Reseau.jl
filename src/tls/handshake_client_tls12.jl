@@ -49,14 +49,14 @@ function _tls12_client_hello(config)::_ClientHelloMsg
     ]
     hello.compression_methods = UInt8[_TLS_COMPRESSION_NONE]
     hello.server_name = config.server_name === nothing ? "" : String(config.server_name)
-    hello.ocsp_stapling = true
+    hello.ocsp_stapling = false
     hello.ticket_supported = false
     hello.alpn_protocols = copy(config.alpn_protocols)
     hello.supported_curves = UInt16[_TLS_GROUP_SECP256R1]
     hello.supported_points = UInt8[0x00]
     hello.supported_signature_algorithms = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
     hello.supported_signature_algorithms_cert = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
-    hello.secure_renegotiation_supported = true
+    hello.secure_renegotiation_supported = false
     hello.extended_master_secret = true
     hello.scts = true
     return hello
@@ -198,8 +198,6 @@ function _tls12_read_server_flight!(
 
     raw_next = _read_handshake_bytes!(io)
     if raw_next[1] == _HANDSHAKE_TYPE_CERTIFICATE_REQUEST
-        _unmarshal_handshake_message(raw_next, transcript, TLS1_2_VERSION) isa _CertificateRequestMsgTLS12 ||
-            _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 CertificateRequest")
         _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client certificate authentication is not implemented")
     end
     _tls12_require_handshake_message(raw_next, _HANDSHAKE_TYPE_SERVER_HELLO_DONE, "ServerHelloDone")

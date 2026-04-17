@@ -80,6 +80,19 @@ function _tls12_open_tcp_pair()
     return listener, client, server
 end
 
+function _tls12_unexpected_message_error(f)
+    err = try
+        f()
+        nothing
+    catch err
+        err
+    end
+    @test err isa TL12N._TLS13AlertError
+    tls_err = err::TL12N._TLS13AlertError
+    @test tls_err.alert == TL12N._TLS_ALERT_UNEXPECTED_MESSAGE
+    return tls_err
+end
+
 @testset "TLS native TLS1.2 client" begin
     @test TL12N._native_tls12_only(_tls12_native_client_config())
     @test !TL12N._native_tls12_only(TL12N.Config(server_name = "localhost", verify_peer = false))
@@ -99,6 +112,43 @@ end
             TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61, 0x62, 0x63])
             TL12N._tls12_read_record!(server_tcp, server_state)
             @test server_state.plaintext_buffer == UInt8[0x61, 0x62, 0x63]
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "plaintext application data before ChangeCipherSpec is rejected" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeClientState()
+            TL12N._tls13_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61], TL12N.TLS1_2_VERSION)
+            tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+            @test !tls_err.from_peer
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "post-handshake ChangeCipherSpec is rejected" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12NativeClientState()
+            read_key = UInt8[UInt8(0x20 + i) for i in 0:15]
+            read_iv = UInt8[0xb0, 0xb1, 0xb2, 0xb3]
+            TL12N._tls12_set_read_cipher!(state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, read_key, read_iv)
+            TL12N._tls13_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, UInt8[0x01], TL12N.TLS1_2_VERSION)
+            tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
+            @test !tls_err.from_peer
         finally
             _tls12_native_close_quiet!(server_tcp)
             _tls12_native_close_quiet!(client_tcp)

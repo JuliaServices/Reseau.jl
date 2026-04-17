@@ -48,6 +48,8 @@ end
         @test hello.supported_curves == UInt16[TL12H.P256]
         @test hello.supported_points == UInt8[0x00]
         @test hello.extended_master_secret
+        @test !hello.ocsp_stapling
+        @test !hello.secure_renegotiation_supported
         @test hello.alpn_protocols == ["h2"]
     end
 

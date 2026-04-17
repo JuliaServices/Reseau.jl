@@ -208,6 +208,8 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeClientState)::Not
         content_type = header[1]
         if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
             payload_len == 1 && payload[1] == 0x01 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ChangeCipherSpec record")
+            state.read_cipher === nothing || _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 ChangeCipherSpec")
+            state.received_change_cipher_spec && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received duplicate TLS 1.2 ChangeCipherSpec")
             state.received_change_cipher_spec = true
             return nothing
         end
@@ -225,8 +227,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeClientState)::Not
                 return nothing
             end
             if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
-                payload_len == 0 || append!(state.plaintext_buffer, payload)
-                return nothing
+                _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.2 application data before ChangeCipherSpec")
             end
             _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.2 record type $(Int(content_type))")
         end
