@@ -36,6 +36,7 @@ function _tls12_native_client_config(;
     cert_file::Union{Nothing, String} = nothing,
     key_file::Union{Nothing, String} = nothing,
     alpn_protocols::Vector{String} = String[],
+    curve_preferences::Vector{UInt16} = UInt16[],
 )
     return TL12N.Config(
         server_name = server_name,
@@ -45,6 +46,7 @@ function _tls12_native_client_config(;
         cert_file = cert_file,
         key_file = key_file,
         alpn_protocols = copy(alpn_protocols),
+        curve_preferences = copy(curve_preferences),
         min_version = TL12N.TLS1_2_VERSION,
         max_version = TL12N.TLS1_2_VERSION,
         handshake_timeout_ns = 10_000_000_000,
@@ -57,6 +59,7 @@ function _tls12_server_config(;
     key_file::String = _TLS12_NATIVE_KEY_PATH,
     client_auth::TL12N.ClientAuthMode.T = TL12N.ClientAuthMode.NoClientCert,
     client_ca_file::Union{Nothing, String} = nothing,
+    curve_preferences::Vector{UInt16} = UInt16[],
 )
     return TL12N.Config(
         verify_peer = false,
@@ -65,6 +68,7 @@ function _tls12_server_config(;
         client_auth = client_auth,
         client_ca_file = client_ca_file,
         alpn_protocols = copy(alpn_protocols),
+        curve_preferences = copy(curve_preferences),
         min_version = TL12N.TLS1_2_VERSION,
         max_version = TL12N.TLS1_2_VERSION,
         handshake_timeout_ns = 10_000_000_000,
@@ -267,6 +271,7 @@ end
         try
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             state = TL12N._TLS12ServerHandshakeState(_tls12_server_config())
+            state.curve_id = TL12N.P256
             client_io = TL12N._TLS12HandshakeRecordIO(client_tcp, TL12N._TLS12NativeState())
             server_io = TL12N._TLS12HandshakeRecordIO(server_tcp, TL12N._TLS12NativeState())
             malformed = TL12N._ClientKeyExchangeMsgTLS12(vcat(UInt8[0x41, 0x02], zeros(UInt8, 64)))
@@ -338,6 +343,20 @@ end
             end
             _tls12_native_close_quiet!(listener)
         end
+    end
+
+    @testset "exact TLS 1.2 curve preferences can negotiate X25519 natively" begin
+        server_cfg = _tls12_server_config(curve_preferences = UInt16[TL12N.X25519])
+        client_cfg = _tls12_native_client_config(curve_preferences = UInt16[TL12N.X25519])
+        client_state, server_state = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test client_state.handshake_complete
+        @test server_state.handshake_complete
+        @test client_state.version == "TLSv1.2"
+        @test server_state.version == "TLSv1.2"
+        @test client_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test server_state.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test client_state.curve == "X25519"
+        @test server_state.curve == "X25519"
     end
 
     @testset "exact TLS 1.2 client verifies the server certificate" begin

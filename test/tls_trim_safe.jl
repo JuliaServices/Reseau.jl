@@ -46,6 +46,7 @@ function _tls_server_config(;
     client_ca_file::Union{Nothing, String} = nothing,
     min_version::UInt16 = TL.TLS1_2_VERSION,
     max_version::Union{Nothing, UInt16} = nothing,
+    curve_preferences::Vector{UInt16} = UInt16[],
 )::TL.Config
     return TL.Config(
         verify_peer = false,
@@ -56,6 +57,7 @@ function _tls_server_config(;
         handshake_timeout_ns = 10_000_000_000,
         min_version = min_version,
         max_version = max_version,
+        curve_preferences = copy(curve_preferences),
     )
 end
 
@@ -64,6 +66,7 @@ function _tls_client_config(;
     cert_file::Union{Nothing, String} = nothing,
     key_file::Union{Nothing, String} = nothing,
     max_version::Union{Nothing, UInt16} = nothing,
+    curve_preferences::Vector{UInt16} = UInt16[],
 )::TL.Config
     return TL.Config(
         server_name = "localhost",
@@ -74,6 +77,7 @@ function _tls_client_config(;
         handshake_timeout_ns = 10_000_000_000,
         min_version = TL.TLS1_2_VERSION,
         max_version = max_version,
+        curve_preferences = copy(curve_preferences),
     )
 end
 
@@ -99,6 +103,7 @@ function _tls_expect_state(
     expect_native_tls13::Bool,
     expect_resume::Union{Nothing, Bool} = nothing,
     expect_resumable::Union{Nothing, Bool} = nothing,
+    expected_curve::Union{Nothing, String} = nothing,
 )::Nothing
     state.handshake_complete || error("handshake incomplete")
     state.version == expected_version || error("unexpected TLS version")
@@ -111,7 +116,11 @@ function _tls_expect_state(
             "TLS_AES_256_GCM_SHA384",
             "TLS_CHACHA20_POLY1305_SHA256",
         ) || error("unexpected TLS 1.3 cipher suite")
-        state.curve in ("X25519", "P-256") || error("unexpected TLS 1.3 curve")
+        if expected_curve === nothing
+            state.curve in ("X25519", "P-256") || error("unexpected TLS 1.3 curve")
+        else
+            state.curve == expected_curve || error("unexpected TLS curve")
+        end
     else
         state.cipher_suite in (
             "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
@@ -119,7 +128,11 @@ function _tls_expect_state(
             "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
             "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
         ) || error("unexpected TLS 1.2 cipher suite")
-        state.curve == "P-256" || error("unexpected TLS 1.2 curve")
+        if expected_curve === nothing
+            state.curve in ("X25519", "P-256") || error("unexpected TLS 1.2 curve")
+        else
+            state.curve == expected_curve || error("unexpected TLS curve")
+        end
     end
     return nothing
 end
@@ -160,10 +173,11 @@ function _run_tls_roundtrip!(
     expect_client_resume::Union{Nothing, Bool} = nothing,
     expect_client_resumable::Union{Nothing, Bool} = nothing,
     expect_server_resume::Union{Nothing, Bool} = nothing,
+    expected_curve::Union{Nothing, String} = nothing,
 )::Nothing
     client_state, server_state = _run_tls_roundtrip_states!(server_config, client_config)
-    _tls_expect_state(client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable)
-    _tls_expect_state(server_state, expected_version, expect_native_tls13, expect_server_resume, false)
+    _tls_expect_state(client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable, expected_curve)
+    _tls_expect_state(server_state, expected_version, expect_native_tls13, expect_server_resume, false, expected_curve)
     return nothing
 end
 
@@ -171,6 +185,37 @@ function run_tls_trim_sample()::Nothing
     _run_tls_roundtrip!(_TLS_MIXED_SERVER_CONFIG, _tls_client_config(), "TLSv1.3", true)
     _run_tls_roundtrip!(_TLS_EXACT_TLS12_SERVER_CONFIG, _tls_client_config(), "TLSv1.2", false)
     _run_tls_roundtrip!(_TLS_MIXED_SERVER_CONFIG, _tls_client_config(max_version = TL.TLS1_2_VERSION), "TLSv1.2", false)
+    _run_tls_roundtrip!(
+        _tls_server_config(
+            max_version = TL.TLS1_2_VERSION,
+            curve_preferences = UInt16[TL.X25519],
+        ),
+        _tls_client_config(
+            max_version = TL.TLS1_2_VERSION,
+            curve_preferences = UInt16[TL.X25519],
+        ),
+        "TLSv1.2",
+        false,
+        nothing,
+        nothing,
+        nothing,
+        "X25519",
+    )
+    _run_tls_roundtrip!(
+        _tls_server_config(
+            max_version = TL.TLS1_2_VERSION,
+            curve_preferences = UInt16[TL.X25519],
+        ),
+        _tls_client_config(
+            curve_preferences = UInt16[TL.X25519],
+        ),
+        "TLSv1.2",
+        false,
+        nothing,
+        nothing,
+        nothing,
+        "X25519",
+    )
     tls12_mtls_server = _tls_server_config(
         cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
         key_file = _TLS_NATIVE_SERVER_KEY_PATH,

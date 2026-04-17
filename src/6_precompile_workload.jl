@@ -368,6 +368,7 @@ function _pc_tls_client_config(;
     cert_file::Union{Nothing, String} = nothing,
     key_file::Union{Nothing, String} = nothing,
     session_tickets_disabled::Bool = false,
+    curve_preferences::Vector{UInt16} = UInt16[],
     min_version::UInt16 = TL.TLS1_3_VERSION,
     max_version::Union{Nothing, UInt16} = TL.TLS1_3_VERSION,
 )::TL.Config
@@ -378,6 +379,7 @@ function _pc_tls_client_config(;
         cert_file = cert_file,
         key_file = key_file,
         handshake_timeout_ns = 1_000_000_000,
+        curve_preferences = copy(curve_preferences),
         min_version = min_version,
         max_version = max_version,
         session_tickets_disabled = session_tickets_disabled,
@@ -442,6 +444,7 @@ function _pc_expect_tls_state!(
     expect_native_tls13::Bool,
     expect_resume::Union{Nothing, Bool} = nothing,
     expect_resumable::Union{Nothing, Bool} = nothing,
+    expected_curve::Union{Nothing, String} = nothing,
 )::Nothing
     state.handshake_complete || throw(ArgumentError("TLS precompile workload expected a completed handshake"))
     state.version == expected_version || throw(ArgumentError("TLS precompile workload expected $(expected_version)"))
@@ -457,8 +460,12 @@ function _pc_expect_tls_state!(
             "TLS_AES_256_GCM_SHA384",
             "TLS_CHACHA20_POLY1305_SHA256",
         ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.3 cipher suite"))
-        state.curve in ("X25519", "P-256") ||
-            throw(ArgumentError("TLS precompile workload expected a native TLS 1.3 curve"))
+        if expected_curve === nothing
+            state.curve in ("X25519", "P-256") ||
+                throw(ArgumentError("TLS precompile workload expected a native TLS 1.3 curve"))
+        else
+            state.curve == expected_curve || throw(ArgumentError("TLS precompile workload observed an unexpected curve"))
+        end
     else
         state.cipher_suite in (
             "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
@@ -466,7 +473,12 @@ function _pc_expect_tls_state!(
             "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
             "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
         ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 ECDHE cipher suite"))
-        state.curve == "P-256" || throw(ArgumentError("TLS precompile workload expected P-256 ECDHE"))
+        if expected_curve === nothing
+            state.curve in ("X25519", "P-256") ||
+                throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 curve"))
+        else
+            state.curve == expected_curve || throw(ArgumentError("TLS precompile workload observed an unexpected curve"))
+        end
     end
     return nothing
 end
@@ -515,10 +527,11 @@ function _pc_run_tls_roundtrip!(
     expect_client_resume::Union{Nothing, Bool} = nothing,
     expect_client_resumable::Union{Nothing, Bool} = nothing,
     expect_server_resume::Union{Nothing, Bool} = nothing,
+    expected_curve::Union{Nothing, String} = nothing,
 )::Nothing
     client_state, server_state = _pc_run_tls_roundtrip_states!(server_config, client_config)
-    _pc_expect_tls_state!(client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable)
-    _pc_expect_tls_state!(server_state, expected_version, expect_native_tls13, expect_server_resume, false)
+    _pc_expect_tls_state!(client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable, expected_curve)
+    _pc_expect_tls_state!(server_state, expected_version, expect_native_tls13, expect_server_resume, false, expected_curve)
     return nothing
 end
 
@@ -562,6 +575,52 @@ function _pc_run_tls_workload!()
         ),
         "TLSv1.2",
         false,
+    )
+    _pc_run_tls_roundtrip!(
+        _pc_tls_server_config(
+            paths.cert,
+            paths.key;
+            curve_preferences = UInt16[TL.X25519],
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
+        ),
+        _pc_tls_client_config(
+            verify_peer = true,
+            server_name = "localhost",
+            ca_file = paths.cert,
+            curve_preferences = UInt16[TL.X25519],
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
+        ),
+        "TLSv1.2",
+        false,
+        nothing,
+        nothing,
+        nothing,
+        "X25519",
+    )
+    _pc_run_tls_roundtrip!(
+        _pc_tls_server_config(
+            paths.cert,
+            paths.key;
+            curve_preferences = UInt16[TL.X25519],
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
+        ),
+        _pc_tls_client_config(
+            verify_peer = true,
+            server_name = "localhost",
+            ca_file = paths.cert,
+            curve_preferences = UInt16[TL.X25519],
+            min_version = TL.TLS1_2_VERSION,
+            max_version = nothing,
+        ),
+        "TLSv1.2",
+        false,
+        nothing,
+        nothing,
+        nothing,
+        "X25519",
     )
     native_paths = _pc_tls13_native_paths()
     if native_paths !== nothing

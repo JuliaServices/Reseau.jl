@@ -247,7 +247,7 @@ function _tls12_client_hello(config)::_ClientHelloMsg
     hello.ocsp_stapling = false
     hello.ticket_supported = !config.session_tickets_disabled
     hello.alpn_protocols = copy(config.alpn_protocols)
-    hello.supported_curves = UInt16[_TLS_GROUP_SECP256R1]
+    hello.supported_curves = _tls12_curve_preferences(config)
     hello.supported_points = UInt8[0x00]
     hello.supported_signature_algorithms = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
     hello.supported_signature_algorithms_cert = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
@@ -383,15 +383,27 @@ function _tls12_verify_server_key_exchange!(
     end
 end
 
-function _tls12_generate_client_key_exchange(group::UInt16, server_public_key::AbstractVector{UInt8})
-    group == _TLS_GROUP_SECP256R1 ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client only supports P-256 ECDHE today")
-    private_key = _tls13_p256_generate_private_key()
+function _tls12_generate_client_key_exchange(
+    advertised_curves::AbstractVector{UInt16},
+    group::UInt16,
+    server_public_key::AbstractVector{UInt8},
+)
+    in(group, advertised_curves) ||
+        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an unadvertised TLS 1.2 ECDHE curve")
+    if group != _TLS_GROUP_X25519 && group != _TLS_GROUP_SECP256R1
+        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client does not support ECDHE group $(string(group, base = 16))")
+    end
+    private_key = group == _TLS_GROUP_X25519 ? _tls13_x25519_generate_private_key() : _tls13_p256_generate_private_key()
     client_public_key = UInt8[]
     shared_secret = UInt8[]
     try
-        client_public_key = _tls13_p256_public_key(private_key)
-        shared_secret = _tls13_p256_shared_secret(private_key, server_public_key)
+        if group == _TLS_GROUP_X25519
+            client_public_key = _tls13_x25519_public_key(private_key)
+            shared_secret = _tls13_x25519_shared_secret(private_key, server_public_key)
+        else
+            client_public_key = _tls13_p256_public_key(private_key)
+            shared_secret = _tls13_p256_shared_secret(private_key, server_public_key)
+        end
         body = UInt8[UInt8(length(client_public_key))]
         append!(body, client_public_key)
         return _ClientKeyExchangeMsgTLS12(body), shared_secret
@@ -684,7 +696,11 @@ function _client_handshake_tls12_for_suite!(
         state.curve_id = key_exchange.group
         _tls12_prepare_client_identity!(state, config)
         _tls12_write_client_certificate!(state, io, transcript)
-        client_key_exchange, generated_shared_secret = _tls12_generate_client_key_exchange(key_exchange.group, key_exchange.public_key)
+        client_key_exchange, generated_shared_secret = _tls12_generate_client_key_exchange(
+            state.client_hello.supported_curves,
+            key_exchange.group,
+            key_exchange.public_key,
+        )
         shared_secret = generated_shared_secret
         try
             raw_client_key_exchange = _write_handshake_message(client_key_exchange, transcript)

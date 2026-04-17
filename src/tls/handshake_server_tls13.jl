@@ -328,7 +328,7 @@ end
 
 function _tls13_server_preferred_group(client_hello::_ClientHelloMsg, config)::UInt16
     mutual_groups = UInt16[]
-    for group in _tls13_curve_preferences(config)
+    for group in _native_curve_preferences(config)
         in(group, client_hello.supported_curves) && push!(mutual_groups, group)
     end
     isempty(mutual_groups) && _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: no key exchanges supported by both client and server")

@@ -50,6 +50,7 @@ function _tls_server_config(;
     client_ca_file::Union{Nothing, String} = nothing,
     min_version::Union{Nothing, UInt16} = TL.TLS1_2_VERSION,
     max_version::Union{Nothing, UInt16} = nothing,
+    curve_preferences::Vector{UInt16} = UInt16[],
 )
     return TL.Config(
         verify_peer = false,
@@ -60,6 +61,7 @@ function _tls_server_config(;
         handshake_timeout_ns = handshake_timeout_ns,
         min_version = min_version,
         max_version = max_version,
+        curve_preferences = copy(curve_preferences),
     )
 end
 
@@ -108,8 +110,9 @@ end
             @test cfg_default.min_version == TL.TLS1_2_VERSION
             @test cfg_default.client_auth == TL.ClientAuthMode.NoClientCert
             @test cfg_default.verify_hostname
-            @test TL._tls13_curve_preferences(cfg_default) == UInt16[TL.X25519, TL.P256]
-            @test TL._tls13_curve_preferences(TL.Config(
+            @test TL._native_curve_preferences(cfg_default) == UInt16[TL.X25519, TL.P256]
+            @test TL._tls12_curve_preferences(cfg_default) == UInt16[TL.P256]
+            @test TL._native_curve_preferences(TL.Config(
                 min_version = TL.TLS1_3_VERSION,
                 max_version = TL.TLS1_3_VERSION,
                 curve_preferences = UInt16[TL.P256, TL.X25519],
@@ -143,11 +146,17 @@ end
             )
             @test TL._effective_ca_file(verified_client_auth_cfg; is_server = true) == _TLS_CERT_PATH
             @test TL._native_tls_auto_client_enabled(TL.Config(server_name = "localhost", verify_peer = false))
+            @test TL._tls_client_mode(TL.Config(server_name = "localhost", verify_peer = false)) == TL._TLS_CONN_MODE_NATIVE_AUTO_CLIENT
             @test TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
             ))
+            @test TL._tls_server_mode(TL.Config(
+                verify_peer = false,
+                cert_file = _TLS_CERT_PATH,
+                key_file = _TLS_KEY_PATH,
+            )) == TL._TLS_CONN_MODE_NATIVE_AUTO_SERVER
             @test TL._native_tls_auto_client_enabled(TL.Config(
                 server_name = "localhost",
                 verify_peer = false,
@@ -159,6 +168,11 @@ end
                 verify_peer = false,
                 min_version = TL.TLS1_0_VERSION,
             ))
+            @test TL._tls_client_mode(TL.Config(
+                server_name = "localhost",
+                verify_peer = false,
+                min_version = TL.TLS1_0_VERSION,
+            )) == TL._TLS_CONN_MODE_OPENSSL
             @test TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
@@ -181,8 +195,19 @@ end
             @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
             @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
             @test_throws TL.ConfigError TL.Config(handshake_timeout_ns = -1)
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(curve_preferences = UInt16[0x9999]); is_server = false)
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(curve_preferences = UInt16[TL.P256]); is_server = false)
+            @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[0x9999]); is_server = false)
+            @test TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[TL.P256]); is_server = false) === nothing
+            @test TL._validate_config(TL.Config(
+                verify_peer = false,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+                curve_preferences = UInt16[TL.X25519],
+            ); is_server = false) === nothing
+            @test_throws TL.ConfigError TL._validate_config(TL.Config(
+                verify_peer = false,
+                min_version = TL.TLS1_0_VERSION,
+                curve_preferences = UInt16[TL.X25519],
+            ); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, ca_file = joinpath(@__DIR__, "missing-ca.pem")); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, client_ca_file = joinpath(@__DIR__, "missing-client-ca.pem")); is_server = true)
@@ -815,6 +840,54 @@ end
                 @test !server_state.using_native_tls13
                 @test client_state.curve == "P-256"
                 @test server_state.curve == "P-256"
+            finally
+                _tls_close_quiet!(server)
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
+        @testset "mixed-version native TLS can negotiate TLS 1.2 with X25519 when configured" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            server = nothing
+            try
+                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(
+                    handshake_timeout_ns = 10_000_000_000,
+                    curve_preferences = UInt16[TL.X25519],
+                ); backlog = 16)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                        write(conn, UInt8[0x58])
+                        return conn
+                    catch err
+                        return err
+                    end
+                end)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    handshake_timeout_ns = 10_000_000_000,
+                    max_version = TL.TLS1_2_VERSION,
+                    curve_preferences = UInt16[TL.X25519],
+                ))
+                @test read(client, 1) == UInt8[0x58]
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_result = fetch(accept_task)
+                server_result isa Exception && throw(server_result)
+                server = server_result::TL.Conn
+                client_state = TL.connection_state(client)
+                server_state = TL.connection_state(server)
+                @test client_state.version == "TLSv1.2"
+                @test server_state.version == "TLSv1.2"
+                @test !client_state.using_native_tls13
+                @test !server_state.using_native_tls13
+                @test client_state.curve == "X25519"
+                @test server_state.curve == "X25519"
             finally
                 _tls_close_quiet!(server)
                 _tls_close_quiet!(client)

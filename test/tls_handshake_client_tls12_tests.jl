@@ -12,6 +12,12 @@ const _TLS12_SERVER_P256_PRIVATE_KEY = UInt8[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09,
 ]
+const _TLS12_SERVER_X25519_PRIVATE_KEY = UInt8[
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+]
 
 function _tls12_make_server_key_exchange(client_random::Vector{UInt8}, server_random::Vector{UInt8})
     pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
@@ -53,6 +59,15 @@ end
         @test !hello.ocsp_stapling
         @test !hello.secure_renegotiation_supported
         @test hello.alpn_protocols == ["h2"]
+
+        reordered = TL12H._tls12_client_hello(TL12H.Config(
+            server_name = "localhost",
+            verify_peer = false,
+            min_version = TL12H.TLS1_2_VERSION,
+            max_version = TL12H.TLS1_2_VERSION,
+            curve_preferences = UInt16[TL12H.X25519, TL12H.P256],
+        ))
+        @test reordered.supported_curves == UInt16[TL12H.X25519, TL12H.P256]
     end
 
     @testset "server key exchange parsing and verification follow TLS 1.2 ECDHE-RSA semantics" begin
@@ -80,11 +95,44 @@ end
         pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
         try
             public_key = TL12H._tls13_p256_public_key(pkey)
-            msg, shared_secret = TL12H._tls12_generate_client_key_exchange(TL12H.P256, public_key)
+            msg, shared_secret = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.P256], TL12H.P256, public_key)
             @test msg isa TL12H._ClientKeyExchangeMsgTLS12
             @test !isempty(shared_secret)
             @test Int(msg.ciphertext[1]) == length(msg.ciphertext) - 1
             @test msg.ciphertext[2] == 0x04
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "client key exchange generation supports X25519 for TLS 1.2" begin
+        pkey = TL12H._tls13_x25519_private_key_from_bytes(_TLS12_SERVER_X25519_PRIVATE_KEY)
+        try
+            public_key = TL12H._tls13_x25519_public_key(pkey)
+            msg, shared_secret = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.X25519], TL12H.X25519, public_key)
+            @test msg isa TL12H._ClientKeyExchangeMsgTLS12
+            @test !isempty(shared_secret)
+            @test length(msg.ciphertext) == 33
+            @test Int(msg.ciphertext[1]) == length(msg.ciphertext) - 1
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "client key exchange rejects unadvertised TLS 1.2 curves" begin
+        pkey = TL12H._tls13_x25519_private_key_from_bytes(_TLS12_SERVER_X25519_PRIVATE_KEY)
+        try
+            public_key = TL12H._tls13_x25519_public_key(pkey)
+            err = try
+                TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.P256], TL12H.X25519, public_key)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TL12H._TLS13AlertError
+            if err isa TL12H._TLS13AlertError
+                @test (err::TL12H._TLS13AlertError).alert == TL12H._TLS_ALERT_ILLEGAL_PARAMETER
+            end
         finally
             TL12H._free_evp_pkey!(pkey)
         end

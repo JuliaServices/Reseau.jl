@@ -1,7 +1,8 @@
 """
     TLS
 
-TLS client/server layer built on OpenSSL and `TCP` connections.
+TLS client/server layer built on native TLS 1.2/1.3 machinery, OpenSSL-backed
+crypto/X.509 helpers, and `TCP` connections.
 
 This layer provides:
 - reusable `Config` objects for client and server policy
@@ -175,8 +176,9 @@ Keyword arguments:
 - `client_ca_file`: CA bundle or hashed CA directory used by servers to verify client
   certificates. This is required for server configs that verify presented client certs.
 - `alpn_protocols`: ordered ALPN protocol preference list.
-- `curve_preferences`: ordered supported TLS 1.3 ECDHE groups for the native TLS engine.
-  When empty, the native default of `[TLS.X25519, TLS.P256]` is used.
+- `curve_preferences`: ordered native ECDHE group preferences for TLS 1.2/1.3.
+  When empty, native TLS 1.3 and mixed-mode handshakes default to `[TLS.X25519, TLS.P256]`,
+  while exact native TLS 1.2 defaults to `[TLS.P256]`.
 - `handshake_timeout_ns`: optional cap, in monotonic nanoseconds, applied only while the
   handshake is running. Existing transport deadlines still win if they are earlier.
 - `min_version` / `max_version`: TLS protocol version bounds. `nothing` leaves the bound
@@ -292,24 +294,29 @@ function Config(;
     )
 end
 
-const _TLS13_DEFAULT_CURVE_PREFERENCES = (_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1)
+const _NATIVE_DEFAULT_CURVE_PREFERENCES = (_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1)
 
-@inline function _tls13_native_curve_supported(group::UInt16)::Bool
+@inline function _native_curve_supported(group::UInt16)::Bool
     return group == _TLS_GROUP_X25519 || group == _TLS_GROUP_SECP256R1
 end
 
 @inline _curve_preference_name(group::UInt16) = "0x" * string(group, base = 16, pad = 4)
 
-function _tls13_curve_preferences(config::Config)::Vector{UInt16}
+function _native_curve_preferences(config::Config)::Vector{UInt16}
     requested = config.curve_preferences
-    isempty(requested) && return UInt16[_TLS13_DEFAULT_CURVE_PREFERENCES...]
+    isempty(requested) && return UInt16[_NATIVE_DEFAULT_CURVE_PREFERENCES...]
     out = UInt16[]
     for group in requested
-        _tls13_native_curve_supported(group) || throw(ConfigError("unsupported curve preference: $(_curve_preference_name(group))"))
+        _native_curve_supported(group) || throw(ConfigError("unsupported curve preference: $(_curve_preference_name(group))"))
         in(group, out) || push!(out, group)
     end
-    isempty(out) && throw(ConfigError("curve_preferences must include at least one supported native TLS 1.3 group"))
+    isempty(out) && throw(ConfigError("curve_preferences must include at least one supported native TLS group"))
     return out
+end
+
+function _tls12_curve_preferences(config::Config)::Vector{UInt16}
+    isempty(config.curve_preferences) && return UInt16[_TLS_GROUP_SECP256R1]
+    return _native_curve_preferences(config)
 end
 
 @inline function _default_ca_file_path()::Union{Nothing, String}
@@ -363,14 +370,14 @@ Snapshot of negotiated TLS connection state.
 
 Fields:
 - `handshake_complete`: whether the TLS handshake has finished successfully.
-- `version`: negotiated TLS protocol version string as reported by OpenSSL.
+- `version`: negotiated TLS protocol version string.
 - `alpn_protocol`: negotiated ALPN protocol, or `nothing` if ALPN was not used.
 - `cipher_suite`: negotiated cipher suite name, or `nothing` if it is not available.
 - `using_native_tls13`: whether the connection is using the native TLS 1.3 path.
 - `did_resume`: whether the connection resumed a previously cached TLS session.
 - `did_hello_retry_request`: whether the handshake observed a TLS 1.3 HelloRetryRequest.
-- `has_resumable_session`: whether this connection currently has a cached resumable TLS 1.3 session.
-- `curve`: negotiated TLS 1.3 key share group name, or `nothing` if it is not available.
+- `has_resumable_session`: whether this connection currently has a cached resumable native TLS session.
+- `curve`: negotiated native TLS key share group name, or `nothing` if it is not available.
 """
 struct ConnectionState
     handshake_complete::Bool
@@ -733,10 +740,11 @@ function _validate_config(config::Config; is_server::Bool)
     if config.min_version !== nothing && config.max_version !== nothing
         (config.min_version::UInt16) <= (config.max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
     end
-    if !_native_tls13_only(config) && !isempty(config.curve_preferences)
-        throw(ConfigError("curve_preferences requires an exact TLS 1.3 config"))
+    if !isempty(config.curve_preferences)
+        mode = is_server ? _tls_server_mode(config) : _tls_client_mode(config)
+        mode != _TLS_CONN_MODE_OPENSSL || throw(ConfigError("curve_preferences requires a native TLS 1.2/1.3 config"))
+        _native_curve_preferences(config)
     end
-    isempty(config.curve_preferences) || _tls13_curve_preferences(config)
     return nothing
 end
 
@@ -1037,6 +1045,32 @@ end
         config.key_file !== nothing
 end
 
+@inline function _tls_client_mode(config::Config)::UInt8
+    if _native_tls13_only(config)
+        return _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
+    end
+    if _native_tls12_only(config)
+        return _TLS_CONN_MODE_NATIVE_TLS12_CLIENT
+    end
+    if _native_tls_auto_client_enabled(config)
+        return _TLS_CONN_MODE_NATIVE_AUTO_CLIENT
+    end
+    return _TLS_CONN_MODE_OPENSSL
+end
+
+@inline function _tls_server_mode(config::Config)::UInt8
+    if _native_tls13_server_enabled(config)
+        return _TLS_CONN_MODE_NATIVE_TLS13_SERVER
+    end
+    if _native_tls12_server_enabled(config)
+        return _TLS_CONN_MODE_NATIVE_TLS12_SERVER
+    end
+    if _native_tls_auto_server_enabled(config)
+        return _TLS_CONN_MODE_NATIVE_AUTO_SERVER
+    end
+    return _TLS_CONN_MODE_OPENSSL
+end
+
 function _tls_supported_versions_from_max(max_version::UInt16)::Vector{UInt16}
     versions = UInt16[]
     max_version >= TLS1_3_VERSION && push!(versions, TLS1_3_VERSION)
@@ -1095,7 +1129,7 @@ function _tls13_client_hello(config::Config)::_ClientHelloMsg
     hello.alpn_protocols = copy(config.alpn_protocols)
     hello.supported_points = UInt8[0x00]
     hello.supported_versions = UInt16[TLS1_3_VERSION]
-    hello.supported_curves = _tls13_curve_preferences(config)
+    hello.supported_curves = _native_curve_preferences(config)
     hello.psk_modes = UInt8[_TLS_PSK_MODE_DHE]
     hello.supported_signature_algorithms = UInt16[
         _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
@@ -1403,13 +1437,14 @@ The handshake is deferred until `handshake!` or the first read/write operation.
 Throws `ConfigError` or `TLSError` if the TLS state cannot be initialized.
 """
 function client(tcp::TCP.Conn, config::Config)::Conn
-    if _native_tls13_only(config)
+    mode = _tls_client_mode(config)
+    if mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT
         return _new_native_tls13_client_conn(tcp, config)
     end
-    if _native_tls12_only(config)
+    if mode == _TLS_CONN_MODE_NATIVE_TLS12_CLIENT
         return _new_native_tls12_client_conn(tcp, config)
     end
-    if _native_tls_auto_client_enabled(config)
+    if mode == _TLS_CONN_MODE_NATIVE_AUTO_CLIENT
         return _new_native_tls_auto_client_conn(tcp, config)
     end
     return _new_openssl_conn(tcp, config; is_server = false)
@@ -1425,13 +1460,14 @@ The handshake is deferred until `handshake!` or the first read/write operation.
 Throws `ConfigError` or `TLSError` if the TLS state cannot be initialized.
 """
 function server(tcp::TCP.Conn, config::Config)::Conn
-    if _native_tls13_server_enabled(config)
+    mode = _tls_server_mode(config)
+    if mode == _TLS_CONN_MODE_NATIVE_TLS13_SERVER
         return _new_native_tls13_server_conn(tcp, config)
     end
-    if _native_tls12_server_enabled(config)
+    if mode == _TLS_CONN_MODE_NATIVE_TLS12_SERVER
         return _new_native_tls12_server_conn(tcp, config)
     end
-    if _native_tls_auto_server_enabled(config)
+    if mode == _TLS_CONN_MODE_NATIVE_AUTO_SERVER
         return _new_native_tls_auto_server_conn(tcp, config)
     end
     return _new_openssl_conn(tcp, config; is_server = true)

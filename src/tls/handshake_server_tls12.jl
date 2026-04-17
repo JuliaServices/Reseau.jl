@@ -253,6 +253,23 @@ end
     return in(UInt8(0x00), client_hello.supported_points)
 end
 
+function _tls12_select_server_curve(client_hello::_ClientHelloMsg, config)::UInt16
+    preferred_curves = _tls12_curve_preferences(config)
+    for group in preferred_curves
+        in(group, client_hello.supported_curves) || continue
+        if group == _TLS_GROUP_SECP256R1 && !_tls12_client_supports_uncompressed_points(client_hello)
+            continue
+        end
+        return group
+    end
+    if in(_TLS_GROUP_SECP256R1, preferred_curves) &&
+       in(_TLS_GROUP_SECP256R1, client_hello.supported_curves) &&
+       !_tls12_client_supports_uncompressed_points(client_hello)
+        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer uncompressed TLS 1.2 EC points")
+    end
+    _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported native TLS 1.2 ECDHE curve")
+end
+
 function _tls12_set_client_hello!(state::_TLS12ServerHandshakeState, raw::Vector{UInt8})::Nothing
     client_hello = _unmarshal_client_hello(raw)
     client_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls12 server handshake expected ClientHello")
@@ -269,10 +286,14 @@ function _tls12_set_client_hello!(state::_TLS12ServerHandshakeState, raw::Vector
         _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: initial TLS 1.2 handshake had non-empty renegotiation extension")
     client_hello.extended_master_secret ||
         _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 server requires extended master secret")
-    in(_TLS_GROUP_SECP256R1, client_hello.supported_curves) ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported native TLS 1.2 ECDHE curve")
-    _tls12_client_supports_uncompressed_points(client_hello) ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer uncompressed TLS 1.2 EC points")
+    has_supported_curve = false
+    for group in client_hello.supported_curves
+        if _native_curve_supported(group)
+            has_supported_curve = true
+            break
+        end
+    end
+    has_supported_curve || _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported native TLS 1.2 ECDHE curve")
     isempty(client_hello.supported_signature_algorithms) &&
         _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not advertise TLS 1.2 signature algorithms")
     state.client_hello = client_hello
@@ -318,7 +339,7 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
         end
     end
     state.cipher_suite = _tls12_select_server_cipher_suite(state.client_hello, state.private_key)
-    state.curve_id = _TLS_GROUP_SECP256R1
+    state.curve_id = _tls12_select_server_curve(state.client_hello, config)
     signature_algorithm = _tls12_select_signature_algorithm(
         state.private_key,
         state.client_hello.supported_signature_algorithms,
@@ -381,7 +402,7 @@ function _tls12_send_server_hello!(
     server_hello.secure_renegotiation_supported = state.client_hello.secure_renegotiation_supported
     server_hello.server_name_ack = !isempty(state.client_hello.server_name)
     server_hello.alpn_protocol = state.selected_alpn
-    if !isempty(state.client_hello.supported_points)
+    if state.curve_id == _TLS_GROUP_SECP256R1 && !isempty(state.client_hello.supported_points)
         server_hello.supported_points = UInt8[0x00]
     end
     state.server_hello = server_hello
@@ -405,8 +426,15 @@ end
 
 function _tls12_server_key_exchange_params(state::_TLS12ServerHandshakeState)::Vector{UInt8}
     state.ecdhe_private_key == C_NULL || _free_evp_pkey!(state.ecdhe_private_key)
-    state.ecdhe_private_key = _tls13_p256_generate_private_key()
-    public_key = _tls13_p256_public_key(state.ecdhe_private_key)
+    if state.curve_id == _TLS_GROUP_X25519
+        state.ecdhe_private_key = _tls13_x25519_generate_private_key()
+        public_key = _tls13_x25519_public_key(state.ecdhe_private_key)
+    elseif state.curve_id == _TLS_GROUP_SECP256R1
+        state.ecdhe_private_key = _tls13_p256_generate_private_key()
+        public_key = _tls13_p256_public_key(state.ecdhe_private_key)
+    else
+        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 ECDHE group")
+    end
     params = UInt8[0x03, UInt8(state.curve_id >> 8), UInt8(state.curve_id & 0xff), UInt8(length(public_key))]
     append!(params, public_key)
     _securezero!(public_key)
@@ -514,19 +542,30 @@ function _tls12_read_client_key_exchange!(
     isempty(ciphertext) && _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: empty TLS 1.2 ClientKeyExchange")
     Int(ciphertext[1]) == length(ciphertext) - 1 ||
         _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
-    length(ciphertext) == 66 ||
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
-    ciphertext[2] == 0x04 ||
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
+    if state.curve_id == _TLS_GROUP_X25519
+        length(ciphertext) == 33 ||
+            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
+    elseif state.curve_id == _TLS_GROUP_SECP256R1
+        length(ciphertext) == 66 ||
+            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
+        ciphertext[2] == 0x04 ||
+            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: malformed TLS 1.2 ClientKeyExchange")
+    else
+        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 ECDHE group")
+    end
     _transcript_update!(transcript, raw)
     return ciphertext
 end
 
 function _tls12_server_shared_secret(state::_TLS12ServerHandshakeState, client_key_exchange::AbstractVector{UInt8})::Vector{UInt8}
-    state.curve_id == _TLS_GROUP_SECP256R1 ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 server only supports P-256 ECDHE today")
     state.ecdhe_private_key == C_NULL && throw(ArgumentError("tls: missing TLS 1.2 server ECDHE private key"))
-    return _tls13_p256_shared_secret(state.ecdhe_private_key, @view(client_key_exchange[2:end]))
+    if state.curve_id == _TLS_GROUP_X25519
+        return _tls13_x25519_shared_secret(state.ecdhe_private_key, @view(client_key_exchange[2:end]))
+    end
+    if state.curve_id == _TLS_GROUP_SECP256R1
+        return _tls13_p256_shared_secret(state.ecdhe_private_key, @view(client_key_exchange[2:end]))
+    end
+    _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 ECDHE group")
 end
 
 function _tls12_read_client_certificate_verify!(
