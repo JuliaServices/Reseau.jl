@@ -1014,7 +1014,8 @@ function _native_supported_versions(config::Config)::Vector{UInt16}
 end
 
 @inline function _native_tls_mixed_versions(config::Config)::Bool
-    return _config_allows_tls_version(config, TLS1_2_VERSION) &&
+    return (config.min_version === nothing || (config.min_version::UInt16) >= TLS1_2_VERSION) &&
+        _config_allows_tls_version(config, TLS1_2_VERSION) &&
         _config_allows_tls_version(config, TLS1_3_VERSION) &&
         !_native_tls13_only(config) &&
         !_native_tls12_only(config)

@@ -148,11 +148,22 @@ end
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
             ))
+            @test !TL._native_tls_auto_client_enabled(TL.Config(
+                server_name = "localhost",
+                verify_peer = false,
+                min_version = TL.TLS1_0_VERSION,
+            ))
             @test !TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
                 client_auth = TL.ClientAuthMode.RequireAnyClientCert,
+            ))
+            @test !TL._native_tls_auto_server_enabled(TL.Config(
+                verify_peer = false,
+                cert_file = _TLS_CERT_PATH,
+                key_file = _TLS_KEY_PATH,
+                min_version = TL.TLS1_1_VERSION,
             ))
             @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
             @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
@@ -178,7 +189,7 @@ end
                 laddr = NC.addr(listener)::NC.SocketAddrV4
                 accept_task = errormonitor(Threads.@spawn NC.accept(listener))
                 client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
                 server_tcp = fetch(accept_task)
                 @test_throws TL.ConfigError TL.client(client_tcp, TL.Config(verify_peer = true))
                 @test_throws TL.ConfigError TL.client(client_tcp, TL.Config(verify_peer = false, verify_hostname = true))
