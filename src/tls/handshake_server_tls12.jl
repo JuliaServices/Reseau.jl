@@ -1,9 +1,169 @@
+struct _TLS12ServerSession
+    version::UInt16
+    cipher_suite::UInt16
+    created_at_s::UInt64
+    use_by_s::UInt64
+    label::Vector{UInt8}
+    secret::Vector{UInt8}
+    client_certificates::Vector{Vector{UInt8}}
+    alpn_protocol::String
+    curve_id::UInt16
+    ext_master_secret::Bool
+end
+
+function _TLS12ServerSession(
+    version::UInt16,
+    cipher_suite::UInt16,
+    created_at_s::UInt64,
+    use_by_s::UInt64,
+    label::AbstractVector{UInt8},
+    secret::AbstractVector{UInt8},
+    client_certificates::Vector{Vector{UInt8}},
+    alpn_protocol::AbstractString,
+    curve_id::UInt16,
+    ext_master_secret::Bool,
+)
+    return _TLS12ServerSession(
+        version,
+        cipher_suite,
+        created_at_s,
+        use_by_s,
+        Vector{UInt8}(label),
+        Vector{UInt8}(secret),
+        [copy(cert) for cert in client_certificates],
+        String(alpn_protocol),
+        curve_id,
+        ext_master_secret,
+    )
+end
+
+function _owned_tls12_server_session(
+    version::UInt16,
+    cipher_suite::UInt16,
+    created_at_s::UInt64,
+    use_by_s::UInt64,
+    label::AbstractVector{UInt8},
+    secret::AbstractVector{UInt8},
+    client_certificates::Vector{Vector{UInt8}},
+    alpn_protocol::AbstractString,
+    curve_id::UInt16,
+    ext_master_secret::Bool,
+)::_TLS12ServerSession
+    return _TLS12ServerSession(
+        version,
+        cipher_suite,
+        created_at_s,
+        use_by_s,
+        copy(label),
+        copy(secret),
+        [copy(cert) for cert in client_certificates],
+        String(alpn_protocol),
+        curve_id,
+        ext_master_secret,
+    )
+end
+
+function _copy_tls12_server_session(session::_TLS12ServerSession)::_TLS12ServerSession
+    return _owned_tls12_server_session(
+        session.version,
+        session.cipher_suite,
+        session.created_at_s,
+        session.use_by_s,
+        session.label,
+        session.secret,
+        session.client_certificates,
+        session.alpn_protocol,
+        session.curve_id,
+        session.ext_master_secret,
+    )
+end
+
+function _securezero_tls12_server_session!(session::_TLS12ServerSession)::Nothing
+    _securezero!(session.label)
+    _securezero!(session.secret)
+    for cert in session.client_certificates
+        _securezero!(cert)
+    end
+    return nothing
+end
+
+mutable struct _TLS12ServerSessionCache
+    lock::ReentrantLock
+    entries::Dict{String, _TLS12ServerSession}
+    order::Vector{String}
+    capacity::Int
+end
+
+function _TLS12ServerSessionCache(capacity::Integer = 64)::_TLS12ServerSessionCache
+    Int(capacity) > 0 || throw(ArgumentError("tls12 server session cache capacity must be positive"))
+    return _TLS12ServerSessionCache(ReentrantLock(), Dict{String, _TLS12ServerSession}(), String[], Int(capacity))
+end
+
+@inline _tls12_server_session_cache_key(label::AbstractVector{UInt8}) = bytes2hex(label)
+
+function _tls12_server_session_cache_peek(cache::_TLS12ServerSessionCache, label::AbstractVector{UInt8})::Union{Nothing, _TLS12ServerSession}
+    key_s = _tls12_server_session_cache_key(label)
+    lock(cache.lock)
+    try
+        session = get(cache.entries, key_s, nothing)
+        session === nothing && return nothing
+        return _copy_tls12_server_session(session::_TLS12ServerSession)
+    finally
+        unlock(cache.lock)
+    end
+end
+
+function _tls12_server_session_cache_delete!(cache::_TLS12ServerSessionCache, label::AbstractVector{UInt8})::Nothing
+    key_s = _tls12_server_session_cache_key(label)
+    lock(cache.lock)
+    try
+        session = pop!(cache.entries, key_s, nothing)
+        session === nothing && return nothing
+        deleteat!(cache.order, findall(==(key_s), cache.order))
+        _securezero_tls12_server_session!(session::_TLS12ServerSession)
+    finally
+        unlock(cache.lock)
+    end
+    return nothing
+end
+
+function _tls12_server_session_cache_put!(cache::_TLS12ServerSessionCache, session::Union{Nothing, _TLS12ServerSession})::Nothing
+    session === nothing && return nothing
+    key_s = _tls12_server_session_cache_key((session::_TLS12ServerSession).label)
+    lock(cache.lock)
+    try
+        if haskey(cache.entries, key_s)
+            existing = pop!(cache.entries, key_s)
+            _securezero_tls12_server_session!(existing)
+            deleteat!(cache.order, findall(==(key_s), cache.order))
+        end
+        cache.entries[key_s] = _copy_tls12_server_session(session::_TLS12ServerSession)
+        pushfirst!(cache.order, key_s)
+        while length(cache.order) > cache.capacity
+            evict_key = pop!(cache.order)
+            evicted = pop!(cache.entries, evict_key)
+            _securezero_tls12_server_session!(evicted)
+        end
+    finally
+        unlock(cache.lock)
+    end
+    return nothing
+end
+
 mutable struct _TLS12ServerHandshakeState
     client_hello::_ClientHelloMsg
     server_hello::_ServerHelloMsg
+    certificate_request::_CertificateRequestMsgTLS12
+    have_certificate_request::Bool
+    client_certificate::_CertificateMsgTLS12
+    client_certificate_verify::_CertificateVerifyMsg
     certificate_chain::Vector{Vector{UInt8}}
     private_key::Ptr{Cvoid}
     ecdhe_private_key::Ptr{Cvoid}
+    client_leaf_public_key::Ptr{Cvoid}
+    peer_certificates::Vector{Vector{UInt8}}
+    resumption_session::Union{Nothing, _TLS12ServerSession}
+    using_resumption::Bool
     cipher_suite::UInt16
     curve_id::UInt16
     selected_signature_algorithm::UInt16
@@ -19,16 +179,20 @@ function _TLS12ServerHandshakeState(config)::_TLS12ServerHandshakeState
     certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
     private_key = _tls13_load_private_key_pem(key_pem)
     _securezero!(key_pem)
-    if !occursin("RSA", _tls13_pkey_type_name(private_key))
-        _free_evp_pkey!(private_key)
-        throw(ArgumentError("tls: native TLS 1.2 server currently requires an RSA certificate"))
-    end
     return _TLS12ServerHandshakeState(
         _ClientHelloMsg(),
         _ServerHelloMsg(),
+        _CertificateRequestMsgTLS12(),
+        false,
+        _CertificateMsgTLS12(),
+        _CertificateVerifyMsg(),
         certificate_chain,
         private_key,
         C_NULL,
+        C_NULL,
+        Vector{Vector{UInt8}}(),
+        nothing,
+        false,
         UInt16(0),
         UInt16(0),
         UInt16(0),
@@ -41,45 +205,47 @@ function _securezero_tls12_server_handshake_state!(state::_TLS12ServerHandshakeS
     for cert in state.certificate_chain
         _securezero!(cert)
     end
+    for cert in state.peer_certificates
+        _securezero!(cert)
+    end
     state.private_key == C_NULL || _free_evp_pkey!(state.private_key)
     state.private_key = C_NULL
     state.ecdhe_private_key == C_NULL || _free_evp_pkey!(state.ecdhe_private_key)
     state.ecdhe_private_key = C_NULL
+    state.client_leaf_public_key == C_NULL || _free_evp_pkey!(state.client_leaf_public_key)
+    state.client_leaf_public_key = C_NULL
+    session = state.resumption_session
+    session === nothing || _securezero_tls12_server_session!(session::_TLS12ServerSession)
+    state.resumption_session = nothing
     return nothing
 end
 
 @inline function _native_tls12_server_enabled(config)::Bool
     return config.cert_file !== nothing &&
         config.key_file !== nothing &&
-        _native_tls12_only(config) &&
-        config.client_auth == ClientAuthMode.NoClientCert
+        _native_tls12_only(config)
 end
 
-function _tls12_select_server_cipher_suite(client_hello::_ClientHelloMsg)::UInt16
-    for cipher_suite in (
-            _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
-            _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
-        )
-        in(cipher_suite, client_hello.cipher_suites) || continue
-        return cipher_suite
+function _tls12_select_server_cipher_suite(client_hello::_ClientHelloMsg, private_key::Ptr{Cvoid})::UInt16
+    pkey_type = _tls13_pkey_type_name(private_key)
+    if pkey_type == "EC"
+        for cipher_suite in (
+                _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+                _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,
+            )
+            in(cipher_suite, client_hello.cipher_suites) && return cipher_suite
+        end
+    elseif pkey_type == "RSA"
+        for cipher_suite in (
+                _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+                _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
+            )
+            in(cipher_suite, client_hello.cipher_suites) && return cipher_suite
+        end
+    else
+        throw(ArgumentError("tls: unsupported TLS 1.2 server certificate key type $(pkey_type)"))
     end
     _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported native TLS 1.2 cipher suite")
-end
-
-function _tls12_select_signature_algorithm(pkey::Ptr{Cvoid}, supported_signature_algorithms::AbstractVector{UInt16})::UInt16
-    _tls13_pkey_type_name(pkey) == "RSA" ||
-        throw(ArgumentError("tls: native TLS 1.2 server currently requires an RSA certificate"))
-    for alg in (
-            _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256,
-            _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384,
-            _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512,
-            _TLS_SIGNATURE_RSA_PKCS1_SHA256,
-            _TLS_SIGNATURE_RSA_PKCS1_SHA384,
-            _TLS_SIGNATURE_RSA_PKCS1_SHA512,
-        )
-        in(alg, supported_signature_algorithms) && return alg
-    end
-    _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client does not support a usable TLS 1.2 certificate signature algorithm")
 end
 
 @inline function _tls12_client_supports_uncompressed_points(client_hello::_ClientHelloMsg)::Bool
@@ -120,14 +286,75 @@ function _tls12_read_client_hello!(state::_TLS12ServerHandshakeState, io::_TLS12
 end
 
 function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, config)::Nothing
-    state.cipher_suite = _tls12_select_server_cipher_suite(state.client_hello)
+    state.selected_alpn = _tls_select_server_alpn(config, state.client_hello)
+    state.resumption_session = nothing
+    state.using_resumption = false
+    session_ticket = state.client_hello.session_ticket
+    if !config.session_tickets_disabled && !isempty(session_ticket)
+        session = _tls12_server_session_cache_peek(config._server_session_cache12, session_ticket)
+        if session !== nothing
+            keep_session = false
+            try
+                now_s = UInt64(floor(time()))
+                if session.version == TLS1_2_VERSION &&
+                   now_s <= session.use_by_s &&
+                   in(session.cipher_suite, state.client_hello.cipher_suites) &&
+                   session.alpn_protocol == state.selected_alpn &&
+                   session.ext_master_secret &&
+                   _tls12_cipher_spec(session.cipher_suite) !== nothing &&
+                   _tls12_server_session_client_auth_ok(session, config)
+                    state.resumption_session = session
+                    state.using_resumption = true
+                    state.cipher_suite = session.cipher_suite
+                    state.curve_id = session.curve_id
+                    state.peer_certificates = [copy(cert) for cert in session.client_certificates]
+                    keep_session = true
+                    _tls12_server_session_cache_delete!(config._server_session_cache12, session_ticket)
+                    return nothing
+                end
+            finally
+                keep_session || _securezero_tls12_server_session!(session::_TLS12ServerSession)
+            end
+        end
+    end
+    state.cipher_suite = _tls12_select_server_cipher_suite(state.client_hello, state.private_key)
     state.curve_id = _TLS_GROUP_SECP256R1
-    state.selected_signature_algorithm = _tls12_select_signature_algorithm(
+    signature_algorithm = _tls12_select_signature_algorithm(
         state.private_key,
         state.client_hello.supported_signature_algorithms,
     )
-    state.selected_alpn = _tls_select_server_alpn(config, state.client_hello)
+    signature_algorithm === nothing &&
+        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client does not support a usable TLS 1.2 certificate signature algorithm")
+    state.selected_signature_algorithm = signature_algorithm
     return nothing
+end
+
+function _tls12_server_session_client_auth_ok(session::_TLS12ServerSession, config)::Bool
+    mode = config.client_auth
+    has_client_certificates = !isempty(session.client_certificates)
+    if mode == ClientAuthMode.NoClientCert
+        return !has_client_certificates
+    end
+    if mode == ClientAuthMode.RequireAnyClientCert || mode == ClientAuthMode.RequireAndVerifyClientCert
+        has_client_certificates || return false
+    end
+    has_client_certificates || return true
+    if mode == ClientAuthMode.VerifyClientCertIfGiven || mode == ClientAuthMode.RequireAndVerifyClientCert
+        pkey = Ptr{Cvoid}(C_NULL)
+        try
+            pkey = _tls13_verify_client_certificate_chain(
+                session.client_certificates;
+                verify_peer = true,
+                ca_file = _effective_ca_file(config; is_server = true),
+            )
+            return true
+        catch
+            return false
+        finally
+            _free_evp_pkey!(pkey)
+        end
+    end
+    return true
 end
 
 function _tls12_send_server_hello!(
@@ -135,6 +362,7 @@ function _tls12_send_server_hello!(
     io::_TLS12HandshakeRecordIO,
     transcript::_TLS12TranscriptState,
     raw_client_hello::Vector{UInt8},
+    config,
 )::Nothing
     rng = Random.RandomDevice()
     server_hello = _ServerHelloMsg()
@@ -145,10 +373,11 @@ function _tls12_send_server_hello!(
     else
         server_hello.random = rand(rng, UInt8, 32)
     end
-    server_hello.session_id = UInt8[]
+    server_hello.session_id = state.using_resumption ? copy(state.client_hello.session_id) : UInt8[]
     server_hello.cipher_suite = state.cipher_suite
     server_hello.compression_method = _TLS_COMPRESSION_NONE
     server_hello.extended_master_secret = true
+    server_hello.ticket_supported = state.client_hello.ticket_supported && !config.session_tickets_disabled
     server_hello.secure_renegotiation_supported = state.client_hello.secure_renegotiation_supported
     server_hello.server_name_ack = !isempty(state.client_hello.server_name)
     server_hello.alpn_protocol = state.selected_alpn
@@ -219,6 +448,59 @@ function _tls12_send_server_hello_done!(io::_TLS12HandshakeRecordIO, transcript:
     return nothing
 end
 
+function _tls12_should_request_client_certificate(config)::Bool
+    return config.client_auth != ClientAuthMode.NoClientCert
+end
+
+function _tls12_send_certificate_request!(state::_TLS12ServerHandshakeState, io::_TLS12HandshakeRecordIO, transcript::_TLS12TranscriptState)::Nothing
+    msg = _CertificateRequestMsgTLS12()
+    msg.certificate_types = UInt8[_TLS12_CERT_TYPE_RSA_SIGN, _TLS12_CERT_TYPE_ECDSA_SIGN]
+    msg.supported_signature_algorithms = copy(_TLS12_SUPPORTED_SIGNATURE_ALGORITHMS)
+    state.certificate_request = msg
+    state.have_certificate_request = true
+    raw = _write_handshake_message(msg, transcript)
+    _write_handshake_bytes!(io, raw)
+    return nothing
+end
+
+function _tls12_read_client_certificate!(
+    state::_TLS12ServerHandshakeState,
+    io::_TLS12HandshakeRecordIO,
+    transcript::_TLS12TranscriptState,
+    config,
+)::Nothing
+    state.have_certificate_request || return nothing
+    raw = _read_handshake_bytes!(io)
+    _tls12_require_handshake_message(raw, _HANDSHAKE_TYPE_CERTIFICATE, "Certificate")
+    certificate = _unmarshal_handshake_message(raw, transcript, TLS1_2_VERSION)
+    certificate isa _CertificateMsgTLS12 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 client Certificate")
+    state.client_certificate = certificate::_CertificateMsgTLS12
+    state.client_leaf_public_key == C_NULL || _free_evp_pkey!(state.client_leaf_public_key)
+    state.client_leaf_public_key = C_NULL
+    for cert in state.peer_certificates
+        _securezero!(cert)
+    end
+    state.peer_certificates = [copy(cert) for cert in state.client_certificate.certificates]
+    has_client_certificates = !isempty(state.client_certificate.certificates)
+    if !has_client_certificates
+        if config.client_auth == ClientAuthMode.RequireAnyClientCert || config.client_auth == ClientAuthMode.RequireAndVerifyClientCert
+            _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not provide a certificate")
+        end
+        return nothing
+    end
+    verify_peer = config.client_auth == ClientAuthMode.VerifyClientCertIfGiven || config.client_auth == ClientAuthMode.RequireAndVerifyClientCert
+    state.client_leaf_public_key = if verify_peer
+        _tls13_verify_client_certificate_chain(
+            state.client_certificate.certificates;
+            verify_peer,
+            ca_file = _effective_ca_file(config; is_server = true),
+        )
+    else
+        _tls13_pubkey_from_der_certificate(state.client_certificate.certificates[1])
+    end
+    return nothing
+end
+
 function _tls12_read_client_key_exchange!(
     state::_TLS12ServerHandshakeState,
     io::_TLS12HandshakeRecordIO,
@@ -245,6 +527,27 @@ function _tls12_server_shared_secret(state::_TLS12ServerHandshakeState, client_k
         _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 server only supports P-256 ECDHE today")
     state.ecdhe_private_key == C_NULL && throw(ArgumentError("tls: missing TLS 1.2 server ECDHE private key"))
     return _tls13_p256_shared_secret(state.ecdhe_private_key, @view(client_key_exchange[2:end]))
+end
+
+function _tls12_read_client_certificate_verify!(
+    state::_TLS12ServerHandshakeState,
+    io::_TLS12HandshakeRecordIO,
+    transcript::_TLS12TranscriptState,
+)::Nothing
+    isempty(state.peer_certificates) && return nothing
+    raw = _read_handshake_bytes!(io)
+    _tls12_require_handshake_message(raw, _HANDSHAKE_TYPE_CERTIFICATE_VERIFY, "CertificateVerify")
+    msg = _unmarshal_certificate_verify(raw)
+    msg === nothing && _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 CertificateVerify")
+    in((msg::_CertificateVerifyMsg).signature_algorithm, state.certificate_request.supported_signature_algorithms) ||
+        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: client certificate used with invalid TLS 1.2 signature algorithm")
+    transcript_bytes = _transcript_buffered_bytes(transcript)
+    transcript_bytes === nothing && throw(ArgumentError("tls: TLS 1.2 server client-certificate verification requires a buffered transcript"))
+    _tls12_openssl_verify_signature(state.client_leaf_public_key, msg.signature_algorithm, transcript_bytes, msg.signature) ||
+        _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the TLS 1.2 client certificate")
+    state.client_certificate_verify = msg
+    _transcript_update!(transcript, raw)
+    return nothing
 end
 
 function _tls12_read_client_finished!(
@@ -293,16 +596,50 @@ function _tls12_send_server_finished!(
     return nothing
 end
 
-function _server_handshake_tls12_for_suite!(
+function _tls12_send_new_session_ticket!(
+    state::_TLS12ServerHandshakeState,
+    io::_TLS12HandshakeRecordIO,
+    transcript::_TLS12TranscriptState,
+    config,
+    master_secret::Vector{UInt8},
+)::Nothing
+    state.server_hello.ticket_supported || return nothing
+    label = rand(Random.RandomDevice(), UInt8, 32)
+    session = _owned_tls12_server_session(
+        TLS1_2_VERSION,
+        state.cipher_suite,
+        UInt64(floor(time())),
+        UInt64(floor(time())) + UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME),
+        label,
+        master_secret,
+        state.peer_certificates,
+        state.selected_alpn,
+        state.curve_id,
+        state.server_hello.extended_master_secret,
+    )
+    try
+        _tls12_server_session_cache_put!(config._server_session_cache12, session)
+        raw = _write_handshake_message(_NewSessionTicketMsgTLS12(_TLS12_MAX_SESSION_TICKET_LIFETIME, label), transcript)
+        _write_handshake_bytes!(io, raw)
+    finally
+        _securezero_tls12_server_session!(session)
+        _securezero!(label)
+    end
+    return nothing
+end
+
+function _tls12_resumed_server_handshake!(
     state::_TLS12ServerHandshakeState,
     io::_TLS12HandshakeRecordIO,
     raw_client_hello::Vector{UInt8},
     transcript::_TLS12TranscriptState,
     cipher_spec::_TLS12CipherSpec,
     hash_kind::_TLSHashKind,
+    config,
 )::Nothing
-    shared_secret = UInt8[]
-    master_secret = UInt8[]
+    session = state.resumption_session
+    session === nothing && throw(ArgumentError("tls: missing TLS 1.2 resumption session"))
+    master_secret = copy(session.secret)
     client_mac = UInt8[]
     server_mac = UInt8[]
     client_key = UInt8[]
@@ -310,17 +647,7 @@ function _server_handshake_tls12_for_suite!(
     client_iv = UInt8[]
     server_iv = UInt8[]
     try
-        _tls12_send_server_hello!(state, io, transcript, raw_client_hello)
-        _tls12_send_server_certificate!(state, io, transcript)
-        _tls12_send_server_key_exchange!(state, io, transcript)
-        _tls12_send_server_hello_done!(io, transcript)
-        client_key_exchange = _tls12_read_client_key_exchange!(state, io, transcript)
-        shared_secret = _tls12_server_shared_secret(state, client_key_exchange)
-        master_secret = _tls12_extended_master_from_pre_master_secret(
-            hash_kind,
-            shared_secret,
-            _transcript_digest(transcript),
-        )
+        _tls12_send_server_hello!(state, io, transcript, raw_client_hello, config)
         client_mac, server_mac, client_key, server_key, client_iv, server_iv =
             _tls12_keys_from_master_secret(
                 hash_kind,
@@ -333,8 +660,73 @@ function _server_handshake_tls12_for_suite!(
             )
         isempty(client_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
         isempty(server_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        _tls12_send_new_session_ticket!(state, io, transcript, config, master_secret)
         _tls12_set_write_cipher!(io.state, cipher_spec, server_key, server_iv)
+        _tls12_send_server_finished!(io, transcript, master_secret, hash_kind)
         _tls12_read_client_finished!(io, transcript, master_secret, hash_kind, cipher_spec, client_key, client_iv)
+        state.using_resumption = true
+    finally
+        _securezero!(master_secret)
+        _securezero!(client_mac)
+        _securezero!(server_mac)
+        _securezero!(client_key)
+        _securezero!(server_key)
+        _securezero!(client_iv)
+        _securezero!(server_iv)
+    end
+    return nothing
+end
+
+function _server_handshake_tls12_for_suite!(
+    state::_TLS12ServerHandshakeState,
+    io::_TLS12HandshakeRecordIO,
+    raw_client_hello::Vector{UInt8},
+    transcript::_TLS12TranscriptState,
+    cipher_spec::_TLS12CipherSpec,
+    hash_kind::_TLSHashKind,
+    config,
+)::Nothing
+    shared_secret = UInt8[]
+    master_secret = UInt8[]
+    client_mac = UInt8[]
+    server_mac = UInt8[]
+    client_key = UInt8[]
+    server_key = UInt8[]
+    client_iv = UInt8[]
+    server_iv = UInt8[]
+    try
+        if state.using_resumption
+            return _tls12_resumed_server_handshake!(state, io, raw_client_hello, transcript, cipher_spec, hash_kind, config)
+        end
+        _tls12_send_server_hello!(state, io, transcript, raw_client_hello, config)
+        _tls12_send_server_certificate!(state, io, transcript)
+        _tls12_send_server_key_exchange!(state, io, transcript)
+        _tls12_should_request_client_certificate(config) && _tls12_send_certificate_request!(state, io, transcript)
+        _tls12_send_server_hello_done!(io, transcript)
+        _tls12_read_client_certificate!(state, io, transcript, config)
+        client_key_exchange = _tls12_read_client_key_exchange!(state, io, transcript)
+        shared_secret = _tls12_server_shared_secret(state, client_key_exchange)
+        master_secret = _tls12_extended_master_from_pre_master_secret(
+            hash_kind,
+            shared_secret,
+            _transcript_digest(transcript),
+        )
+        _tls12_read_client_certificate_verify!(state, io, transcript)
+        client_mac, server_mac, client_key, server_key, client_iv, server_iv =
+            _tls12_keys_from_master_secret(
+                hash_kind,
+                master_secret,
+                state.client_hello.random,
+                state.server_hello.random,
+                0,
+                cipher_spec.key_length,
+                cipher_spec.iv_length,
+            )
+        isempty(client_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(server_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        _tls12_read_client_finished!(io, transcript, master_secret, hash_kind, cipher_spec, client_key, client_iv)
+        _tls12_send_new_session_ticket!(state, io, transcript, config, master_secret)
+        _tls12_set_write_cipher!(io.state, cipher_spec, server_key, server_iv)
         _tls12_send_server_finished!(io, transcript, master_secret, hash_kind)
     finally
         _securezero!(shared_secret)
@@ -356,25 +748,29 @@ function _server_handshake_tls12_after_client_hello!(
     raw_client_hello::Vector{UInt8},
 )::Nothing
     _tls12_select_server_parameters!(state, config)
-    if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
+    if state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID ||
+       state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID
         transcript = _TranscriptHash(_HASH_SHA256)
         return _server_handshake_tls12_for_suite!(
             state,
             io,
             raw_client_hello,
             transcript,
-            _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            _tls12_cipher_spec(state.cipher_suite)::_TLS12CipherSpec,
             _HASH_SHA256,
+            config,
         )
-    elseif state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID
+    elseif state.cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID ||
+           state.cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID
         transcript = _TranscriptHash(_HASH_SHA384)
         return _server_handshake_tls12_for_suite!(
             state,
             io,
             raw_client_hello,
             transcript,
-            _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            _tls12_cipher_spec(state.cipher_suite)::_TLS12CipherSpec,
             _HASH_SHA384,
+            config,
         )
     end
     _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 cipher suite")
@@ -391,7 +787,7 @@ function _native_tls12_server_handshake!(conn)::Nothing
     io = _TLS12HandshakeRecordIO(conn.tcp, native_state)
     try
         _server_handshake_tls12!(state, io, conn.config)
-        native_state.did_resume = false
+        native_state.did_resume = state.using_resumption
         native_state.curve_id = state.curve_id
         native_state.cipher_suite = state.cipher_suite
         _set_handshake_complete!(conn, "TLSv1.2", isempty(state.selected_alpn) ? nothing : state.selected_alpn)

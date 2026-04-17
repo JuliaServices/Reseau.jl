@@ -203,6 +203,8 @@ struct Config
     session_tickets_disabled::Bool
     _client_session_cache::_TLS13ClientSessionCache
     _server_session_cache::_TLS13ServerSessionCache
+    _client_session_cache12::_TLS12ClientSessionCache
+    _server_session_cache12::_TLS12ServerSessionCache
 end
 
 struct _SSLContextKey
@@ -285,6 +287,8 @@ function Config(;
         session_tickets_disabled,
         _TLS13ClientSessionCache(session_cache_capacity),
         _TLS13ServerSessionCache(session_cache_capacity),
+        _TLS12ClientSessionCache(session_cache_capacity),
+        _TLS12ServerSessionCache(session_cache_capacity),
     )
 end
 
@@ -622,6 +626,8 @@ function _config_with_server_name(config::Config, server_name::String)::Config
         config.session_tickets_disabled,
         config._client_session_cache,
         config._server_session_cache,
+        config._client_session_cache12,
+        config._server_session_cache12,
     )
 end
 
@@ -1022,16 +1028,13 @@ end
 end
 
 @inline function _native_tls_auto_client_enabled(config::Config)::Bool
-    return _native_tls_mixed_versions(config) &&
-        config.cert_file === nothing &&
-        config.key_file === nothing
+    return _native_tls_mixed_versions(config)
 end
 
 @inline function _native_tls_auto_server_enabled(config::Config)::Bool
     return _native_tls_mixed_versions(config) &&
         config.cert_file !== nothing &&
-        config.key_file !== nothing &&
-        config.client_auth == ClientAuthMode.NoClientCert
+        config.key_file !== nothing
 end
 
 function _tls_supported_versions_from_max(max_version::UInt16)::Vector{UInt16}
@@ -1088,7 +1091,7 @@ function _tls13_client_hello(config::Config)::_ClientHelloMsg
     hello.compression_methods = UInt8[_TLS_COMPRESSION_NONE]
     hello.server_name = config.server_name === nothing ? "" : String(config.server_name)
     hello.ocsp_stapling = true
-    hello.ticket_supported = true
+    hello.ticket_supported = !config.session_tickets_disabled
     hello.alpn_protocols = copy(config.alpn_protocols)
     hello.supported_points = UInt8[0x00]
     hello.supported_versions = UInt16[TLS1_3_VERSION]
@@ -1128,6 +1131,8 @@ function _tls_auto_client_hello(config::Config)::_ClientHelloMsg
     hello = _tls13_client_hello(config)
     hello.supported_versions = UInt16[TLS1_3_VERSION, TLS1_2_VERSION]
     hello.cipher_suites = UInt16[
+        _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+        _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,
         _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
         _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
         _TLS13_AES_128_GCM_SHA256_ID,
@@ -1169,6 +1174,43 @@ function _native_tls13_client_identity(config::Config)::Tuple{Vector{Vector{UInt
         return _tls13_load_x509_pem_chain(cert_pem), _tls13_load_private_key_pem(key_pem)
     finally
         _securezero!(key_pem)
+    end
+end
+
+function _tls12_try_load_client_session(config::Config, cache_key::AbstractString, hello::_ClientHelloMsg)::Union{Nothing, _TLS12ClientSession}
+    config.session_tickets_disabled && return nothing
+    isempty(cache_key) && return nothing
+    session = _tls12_session_cache_get(config._client_session_cache12, cache_key)
+    session === nothing && return nothing
+    keep_session = false
+    try
+        session.version == TLS1_2_VERSION || return nothing
+        _tls12_cipher_spec(session.cipher_suite) === nothing && return nothing
+        UInt64(floor(time())) <= session.use_by_s || return nothing
+        in(session.cipher_suite, hello.cipher_suites) || return nothing
+        if config.verify_peer || config.verify_hostname
+            pkey = Ptr{Cvoid}(C_NULL)
+            try
+                pkey = _tls13_verify_server_certificate_chain(
+                    session.certificates,
+                    config.server_name === nothing ? "" : config.server_name::String;
+                    verify_peer = config.verify_peer,
+                    verify_hostname = config.verify_hostname,
+                    ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
+                )
+            catch
+                _tls12_session_cache_put!(config._client_session_cache12, cache_key, nothing)
+                return nothing
+            finally
+                _free_evp_pkey!(pkey)
+            end
+        end
+        hello.ticket_supported = true
+        hello.session_ticket = copy(session.ticket)
+        keep_session = true
+        return session
+    finally
+        keep_session || _securezero_tls12_client_session!(session::_TLS12ClientSession)
     end
 end
 
@@ -1548,12 +1590,18 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
 end
 
 function _native_tls12_client_handshake!(conn::Conn)::Nothing
+    cache_key = _tls13_client_session_cache_key(conn.config, conn.tcp)
     client_hello = _tls12_client_hello(conn.config)
-    state = _TLS12ClientHandshakeState(client_hello)
+    session = _tls12_try_load_client_session(conn.config, cache_key, client_hello)
+    state = _TLS12ClientHandshakeState(client_hello, session)
     native_state = _native_tls12_state(conn)
     io = _TLS12HandshakeRecordIO(conn.tcp, native_state)
-    _client_handshake_tls12!(state, io, conn.config)
-    _finish_native_tls12_client_handshake!(conn, state)
+    try
+        _client_handshake_tls12!(state, io, conn.config)
+        _finish_native_tls12_client_handshake!(conn, state)
+    finally
+        _securezero_tls12_client_handshake_state!(state)
+    end
     return nothing
 end
 
@@ -1592,7 +1640,7 @@ end
 
 function _finish_native_tls12_client_handshake!(conn::Conn, state::_TLS12ClientHandshakeState)::Nothing
     native_state = _native_tls12_state(conn)
-    native_state.did_resume = false
+    native_state.did_resume = state.did_resume
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
     _set_handshake_complete!(conn, "TLSv1.2", isempty(state.client_protocol) ? nothing : state.client_protocol)
@@ -1612,7 +1660,7 @@ end
 
 function _finish_native_tls12_server_handshake!(conn::Conn, state::_TLS12ServerHandshakeState)::Nothing
     native_state = _native_tls12_state(conn)
-    native_state.did_resume = false
+    native_state.did_resume = state.using_resumption
     native_state.curve_id = state.curve_id
     native_state.cipher_suite = state.cipher_suite
     _set_handshake_complete!(conn, "TLSv1.2", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
@@ -1622,12 +1670,13 @@ end
 function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     cache_key = _tls13_client_session_cache_key(conn.config, conn.tcp)
     client_hello = _tls_auto_client_hello(conn.config)
-    session = _tls13_try_load_client_session(conn.config, cache_key, client_hello)
+    session13 = _tls13_try_load_client_session(conn.config, cache_key, client_hello)
+    session12 = _tls12_try_load_client_session(conn.config, cache_key, client_hello)
     state13 = _TLS13ClientHandshakeState(
         client_hello,
         _TLS13OpenSSLKeyShareProvider(),
         _native_tls13_certificate_verifier(conn.config),
-        session,
+        session13,
     )
     native_state13 = _native_tls13_state(conn)
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
@@ -1651,14 +1700,18 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
         raw_server_hello = copy(state13.server_hello_raw)
         client_hello12 = _unmarshal_client_hello(raw_client_hello)
         client_hello12 === nothing && throw(ArgumentError("tls: malformed native mixed-version ClientHello"))
-        state12 = _TLS12ClientHandshakeState(client_hello12)
+        state12 = _TLS12ClientHandshakeState(client_hello12, session12)
         state12_native = _tls12_take_initial_state!(native_state13)
         conn.native_state = state12_native
         conn.mode = _TLS_CONN_MODE_NATIVE_TLS12_CLIENT
         io12 = _TLS12HandshakeRecordIO(conn.tcp, state12_native)
-        _tls12_set_server_hello!(state12, raw_server_hello)
-        _client_handshake_tls12_after_server_hello!(state12, io12, conn.config, raw_client_hello, raw_server_hello)
-        _finish_native_tls12_client_handshake!(conn, state12)
+        try
+            _tls12_set_server_hello!(state12, raw_server_hello)
+            _client_handshake_tls12_after_server_hello!(state12, io12, conn.config, raw_client_hello, raw_server_hello, cache_key)
+            _finish_native_tls12_client_handshake!(conn, state12)
+        finally
+            _securezero_tls12_client_handshake_state!(state12)
+        end
     finally
         _securezero_tls13_client_handshake_state!(state13)
     end
@@ -2763,6 +2816,8 @@ end
 end
 
 @inline function _tls12_cipher_suite_name(cipher_suite::UInt16)::Union{Nothing, String}
+    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID && return "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID && return "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
     cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID && return "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
     cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID && return "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
     return nothing
@@ -2789,6 +2844,21 @@ function _tls13_has_resumable_session(config::Config, tcp::TCP.Conn)::Bool
     end
 end
 
+function _tls12_has_resumable_session(config::Config, tcp::TCP.Conn)::Bool
+    config.session_tickets_disabled && return false
+    cache_key = _tls13_client_session_cache_key(config, tcp)
+    isempty(cache_key) && return false
+    session = _tls12_session_cache_peek(config._client_session_cache12, cache_key)
+    session === nothing && return false
+    try
+        session.version == TLS1_2_VERSION || return false
+        _tls12_cipher_spec(session.cipher_suite) === nothing && return false
+        return UInt64(floor(time())) <= session.use_by_s
+    finally
+        _securezero_tls12_client_session!(session)
+    end
+end
+
 """
     connection_state(conn) -> ConnectionState
 
@@ -2799,7 +2869,7 @@ This does not force a handshake; if the handshake has not yet run, the returned
 """
 function connection_state(conn::Conn)::ConnectionState
     if _is_native_auto_mode(conn.mode)
-        resumable = conn.is_server ? false : _tls13_has_resumable_session(conn.config, conn.tcp)
+        resumable = conn.is_server ? false : (_tls13_has_resumable_session(conn.config, conn.tcp) || _tls12_has_resumable_session(conn.config, conn.tcp))
         return ConnectionState(
             _handshake_complete(conn),
             conn.negotiated_version,
@@ -2839,10 +2909,14 @@ function connection_state(conn::Conn)::ConnectionState
         )
     end
     if _is_native_tls12_mode(conn.mode)
+        resumed = false
+        resumable = false
         cipher_suite = nothing
         curve = nothing
         if conn.native_state !== nothing
             native_state = conn.native_state::_TLS12NativeState
+            resumed = native_state.did_resume
+            resumable = conn.is_server ? false : _tls12_has_resumable_session(conn.config, conn.tcp)
             cipher_suite = native_state.cipher_suite == UInt16(0) ? nothing : _tls12_cipher_suite_name(native_state.cipher_suite)
             curve = native_state.curve_id == UInt16(0) ? nothing : _tls_group_name(native_state.curve_id)
         end
@@ -2852,9 +2926,9 @@ function connection_state(conn::Conn)::ConnectionState
             conn.negotiated_alpn,
             cipher_suite,
             false,
+            resumed,
             false,
-            false,
-            false,
+            resumable,
             curve,
         )
     end

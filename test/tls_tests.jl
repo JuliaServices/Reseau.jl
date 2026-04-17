@@ -9,6 +9,11 @@ const IP = Reseau.IOPoll
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS_NATIVE_CA_PATH = joinpath(@__DIR__, "resources", "native_tls_ca.crt")
+const _TLS_NATIVE_SERVER_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_server.crt")
+const _TLS_NATIVE_SERVER_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_server.key")
+const _TLS_NATIVE_CLIENT_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_client.crt")
+const _TLS_NATIVE_CLIENT_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_client.key")
 
 function _tls_wait_task_done(task::Task, timeout_s::Float64 = 2.0)
     return IP.timedwait(() -> istaskdone(task), timeout_s; pollint = 0.001)
@@ -37,12 +42,24 @@ end
     return ex isa TL.TLSError || ex isa TL.TLSHandshakeTimeoutError
 end
 
-function _tls_server_config(; handshake_timeout_ns::Int64 = 0)
+function _tls_server_config(;
+    handshake_timeout_ns::Int64 = 0,
+    cert_file::String = _TLS_CERT_PATH,
+    key_file::String = _TLS_KEY_PATH,
+    client_auth::TL.ClientAuthMode.T = TL.ClientAuthMode.NoClientCert,
+    client_ca_file::Union{Nothing, String} = nothing,
+    min_version::Union{Nothing, UInt16} = TL.TLS1_2_VERSION,
+    max_version::Union{Nothing, UInt16} = nothing,
+)
     return TL.Config(
         verify_peer = false,
-        cert_file = _TLS_CERT_PATH,
-        key_file = _TLS_KEY_PATH,
+        cert_file = cert_file,
+        key_file = key_file,
+        client_auth = client_auth,
+        client_ca_file = client_ca_file,
         handshake_timeout_ns = handshake_timeout_ns,
+        min_version = min_version,
+        max_version = max_version,
     )
 end
 
@@ -59,25 +76,14 @@ function _tls_connect(
     )::TL.Conn
     return TL.connect(
         network,
-        address;
+        address,
+        config;
         timeout_ns = timeout_ns,
         deadline_ns = deadline_ns,
         local_addr = local_addr,
         fallback_delay_ns = fallback_delay_ns,
         resolver = resolver,
         policy = policy,
-        server_name = config.server_name,
-        verify_peer = config.verify_peer,
-        verify_hostname = config.verify_hostname,
-        client_auth = config.client_auth,
-        cert_file = config.cert_file,
-        key_file = config.key_file,
-        ca_file = config.ca_file,
-        client_ca_file = config.client_ca_file,
-        alpn_protocols = copy(config.alpn_protocols),
-        handshake_timeout_ns = config.handshake_timeout_ns,
-        min_version = config.min_version,
-        max_version = config.max_version,
     )
 end
 
@@ -142,7 +148,7 @@ end
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
             ))
-            @test !TL._native_tls_auto_client_enabled(TL.Config(
+            @test TL._native_tls_auto_client_enabled(TL.Config(
                 server_name = "localhost",
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
@@ -153,12 +159,19 @@ end
                 verify_peer = false,
                 min_version = TL.TLS1_0_VERSION,
             ))
-            @test !TL._native_tls_auto_server_enabled(TL.Config(
+            @test TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
                 client_auth = TL.ClientAuthMode.RequireAnyClientCert,
             ))
+            disabled_ticket_cfg = TL.Config(
+                server_name = "localhost",
+                verify_peer = false,
+                session_tickets_disabled = true,
+            )
+            @test !TL._tls13_client_hello(disabled_ticket_cfg).ticket_supported
+            @test !TL._tls_auto_client_hello(disabled_ticket_cfg).ticket_supported
             @test !TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
@@ -430,6 +443,7 @@ end
                     server_name = "localhost",
                     cert_file = _TLS_CERT_PATH,
                     key_file = _TLS_KEY_PATH,
+                    min_version = TL.TLS1_0_VERSION,
                 ))
                 cert_ptr = ccall((:SSL_get_certificate, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), client_tls.ssl)
                 @test cert_ptr != C_NULL
@@ -807,6 +821,219 @@ end
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
             end
+        end
+        @testset "mixed-version native client supports TLS 1.2 mTLS and resumption against an exact TLS 1.2 server" begin
+            function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                            write(conn, UInt8[0x51])
+                            read(conn, 1) == UInt8[0x61] || error("unexpected TLS client ack")
+                            return TL.connection_state(conn)
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    read(client, 1) == UInt8[0x51] || error("unexpected TLS server byte")
+                    write(client, UInt8[0x61]) == 1 || error("unexpected TLS client ack write")
+                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    return TL.connection_state(client), fetch(accept_task)::TL.ConnectionState
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            server_cfg = _tls_server_config(
+                handshake_timeout_ns = 10_000_000_000,
+                cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                client_ca_file = _TLS_NATIVE_CA_PATH,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            )
+            client_cfg = TL.Config(
+                verify_peer = true,
+                verify_hostname = true,
+                server_name = "localhost",
+                ca_file = _TLS_NATIVE_CA_PATH,
+                cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
+                handshake_timeout_ns = 10_000_000_000,
+            )
+
+            client_state1, server_state1 = run_once(server_cfg, client_cfg)
+            @test client_state1.version == "TLSv1.2"
+            @test server_state1.version == "TLSv1.2"
+            @test !client_state1.using_native_tls13
+            @test !server_state1.using_native_tls13
+            @test client_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test !client_state1.did_resume
+            @test !server_state1.did_resume
+            @test client_state1.has_resumable_session
+            @test client_state1.curve == "P-256"
+            @test server_state1.curve == "P-256"
+
+            client_state2, server_state2 = run_once(server_cfg, client_cfg)
+            @test client_state2.version == "TLSv1.2"
+            @test server_state2.version == "TLSv1.2"
+            @test !client_state2.using_native_tls13
+            @test !server_state2.using_native_tls13
+            @test client_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test client_state2.did_resume
+            @test server_state2.did_resume
+            @test client_state2.has_resumable_session
+            @test client_state2.curve == "P-256"
+            @test server_state2.curve == "P-256"
+        end
+        @testset "mixed-version native server supports TLS 1.2 mTLS and resumption against an exact TLS 1.2 client" begin
+            function run_once(server_cfg::TL.Config, client_cfg::TL.Config)
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                            write(conn, UInt8[0x52])
+                            read(conn, 1) == UInt8[0x62] || error("unexpected TLS client ack")
+                            return TL.connection_state(conn)
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    read(client, 1) == UInt8[0x52] || error("unexpected TLS server byte")
+                    write(client, UInt8[0x62]) == 1 || error("unexpected TLS client ack write")
+                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    return TL.connection_state(client), fetch(accept_task)::TL.ConnectionState
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            server_cfg = _tls_server_config(
+                handshake_timeout_ns = 10_000_000_000,
+                cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                client_ca_file = _TLS_NATIVE_CA_PATH,
+            )
+            client_cfg = TL.Config(
+                verify_peer = true,
+                verify_hostname = true,
+                server_name = "localhost",
+                ca_file = _TLS_NATIVE_CA_PATH,
+                cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
+                handshake_timeout_ns = 10_000_000_000,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            )
+
+            client_state1, server_state1 = run_once(server_cfg, client_cfg)
+            @test client_state1.version == "TLSv1.2"
+            @test server_state1.version == "TLSv1.2"
+            @test !client_state1.using_native_tls13
+            @test !server_state1.using_native_tls13
+            @test client_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test !client_state1.did_resume
+            @test !server_state1.did_resume
+            @test client_state1.has_resumable_session
+            @test client_state1.curve == "P-256"
+            @test server_state1.curve == "P-256"
+
+            client_state2, server_state2 = run_once(server_cfg, client_cfg)
+            @test client_state2.version == "TLSv1.2"
+            @test server_state2.version == "TLSv1.2"
+            @test !client_state2.using_native_tls13
+            @test !server_state2.using_native_tls13
+            @test client_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test server_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            @test client_state2.did_resume
+            @test server_state2.did_resume
+            @test client_state2.has_resumable_session
+            @test client_state2.curve == "P-256"
+            @test server_state2.curve == "P-256"
+        end
+        @testset "mixed-version native client still offers TLS 1.2 resumption when a TLS 1.3 session is cached" begin
+            function run_once(server_cfg::TL.Config, client_cfg::TL.Config)::TL.ConnectionState
+                listener = nothing
+                client = nothing
+                accept_task = nothing
+                try
+                    listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 16)
+                    laddr = TL.addr(listener)::NC.SocketAddrV4
+                    accept_task = errormonitor(Threads.@spawn begin
+                        conn = TL.accept(listener)
+                        try
+                            TL.handshake!(conn)
+                            write(conn, UInt8[0x53])
+                            read(conn, 1) == UInt8[0x63] || error("unexpected TLS client ack")
+                            return nothing
+                        finally
+                            _tls_close_quiet!(conn)
+                        end
+                    end)
+                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    read(client, 1) == UInt8[0x53] || error("unexpected TLS server byte")
+                    write(client, UInt8[0x63]) == 1 || error("unexpected TLS client ack write")
+                    @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                    fetch(accept_task)
+                    return TL.connection_state(client)
+                finally
+                    _tls_close_quiet!(client)
+                    _tls_close_quiet!(listener)
+                    IP.shutdown!()
+                end
+            end
+
+            client_cfg = TL.Config(
+                verify_peer = false,
+                server_name = "localhost",
+                handshake_timeout_ns = 10_000_000_000,
+            )
+            mixed_server_cfg = _tls_server_config(handshake_timeout_ns = 10_000_000_000)
+            exact_tls12_server_cfg = _tls_server_config(
+                handshake_timeout_ns = 10_000_000_000,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            )
+
+            tls13_state = run_once(mixed_server_cfg, client_cfg)
+            @test tls13_state.version == "TLSv1.3"
+            @test tls13_state.using_native_tls13
+            @test tls13_state.has_resumable_session
+
+            tls12_state1 = run_once(exact_tls12_server_cfg, client_cfg)
+            @test tls12_state1.version == "TLSv1.2"
+            @test !tls12_state1.using_native_tls13
+            @test !tls12_state1.did_resume
+            @test tls12_state1.has_resumable_session
+
+            tls12_state2 = run_once(exact_tls12_server_cfg, client_cfg)
+            @test tls12_state2.version == "TLSv1.2"
+            @test !tls12_state2.using_native_tls13
+            @test tls12_state2.did_resume
+            @test tls12_state2.has_resumable_session
         end
         _tls_trace("DONE: connect/listen handshake and roundtrip")
         _tls_trace("START: write accepts string codeunits buffers")

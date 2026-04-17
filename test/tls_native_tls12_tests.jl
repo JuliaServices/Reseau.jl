@@ -7,6 +7,13 @@ const IP12N = Reseau.IOPoll
 
 const _TLS12_NATIVE_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 const _TLS12_NATIVE_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS12_NATIVE_CA_PATH = joinpath(@__DIR__, "resources", "native_tls_ca.crt")
+const _TLS12_NATIVE_SERVER_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_server.crt")
+const _TLS12_NATIVE_SERVER_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_server.key")
+const _TLS12_NATIVE_CLIENT_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_client.crt")
+const _TLS12_NATIVE_CLIENT_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_client.key")
+const _TLS12_NATIVE_ECDSA_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_server_ecdsa.crt")
+const _TLS12_NATIVE_ECDSA_KEY_PATH = joinpath(@__DIR__, "resources", "native_tls_server_ecdsa.key")
 
 function _tls12_native_close_quiet!(x)
     x === nothing && return nothing
@@ -26,6 +33,8 @@ function _tls12_native_client_config(;
     verify_hostname::Bool = verify_peer,
     server_name::Union{Nothing, String} = "localhost",
     ca_file::Union{Nothing, String} = nothing,
+    cert_file::Union{Nothing, String} = nothing,
+    key_file::Union{Nothing, String} = nothing,
     alpn_protocols::Vector{String} = String[],
 )
     return TL12N.Config(
@@ -33,6 +42,8 @@ function _tls12_native_client_config(;
         verify_peer = verify_peer,
         verify_hostname = verify_hostname,
         ca_file = ca_file,
+        cert_file = cert_file,
+        key_file = key_file,
         alpn_protocols = copy(alpn_protocols),
         min_version = TL12N.TLS1_2_VERSION,
         max_version = TL12N.TLS1_2_VERSION,
@@ -40,16 +51,52 @@ function _tls12_native_client_config(;
     )
 end
 
-function _tls12_server_config(; alpn_protocols::Vector{String} = String[])
+function _tls12_server_config(;
+    alpn_protocols::Vector{String} = String[],
+    cert_file::String = _TLS12_NATIVE_CERT_PATH,
+    key_file::String = _TLS12_NATIVE_KEY_PATH,
+    client_auth::TL12N.ClientAuthMode.T = TL12N.ClientAuthMode.NoClientCert,
+    client_ca_file::Union{Nothing, String} = nothing,
+)
     return TL12N.Config(
         verify_peer = false,
-        cert_file = _TLS12_NATIVE_CERT_PATH,
-        key_file = _TLS12_NATIVE_KEY_PATH,
+        cert_file = cert_file,
+        key_file = key_file,
+        client_auth = client_auth,
+        client_ca_file = client_ca_file,
         alpn_protocols = copy(alpn_protocols),
         min_version = TL12N.TLS1_2_VERSION,
         max_version = TL12N.TLS1_2_VERSION,
         handshake_timeout_ns = 10_000_000_000,
     )
+end
+
+function _tls12_run_public_roundtrip(server_config::TL12N.Config, client_config::TL12N.Config)
+    listener = nothing
+    client = nothing
+    task = nothing
+    try
+        listener, addr, task = _start_tls12_server(server_config; handler = conn -> begin
+            write(conn, UInt8[0x6f, 0x6b])
+            read(conn, 2) == UInt8[0x61, 0x63] || error("unexpected TLS 1.2 client ack")
+            return TL12N.connection_state(conn)
+        end)
+        client = TL12N.connect(addr, client_config)
+        client_state = TL12N.connection_state(client)
+        read(client, 2) == UInt8[0x6f, 0x6b] || error("unexpected TLS 1.2 server bytes")
+        write(client, UInt8[0x61, 0x63]) == 2 || error("unexpected TLS 1.2 client ack write")
+        _tls12_native_wait_task(task, 5.0) != :timed_out || error("timed out waiting for TLS 1.2 server task")
+        return client_state, fetch(task)::TL12N.ConnectionState
+    finally
+        _tls12_native_close_quiet!(client)
+        if task !== nothing
+            try
+                wait(task)
+            catch
+            end
+        end
+        _tls12_native_close_quiet!(listener)
+    end
 end
 
 function _start_tls12_server(config::TL12N.Config; handler)
@@ -97,7 +144,7 @@ end
     @test TL12N._native_tls12_only(_tls12_native_client_config())
     @test !TL12N._native_tls12_only(TL12N.Config(server_name = "localhost", verify_peer = false))
     @test TL12N._native_tls12_server_enabled(_tls12_server_config())
-    @test !TL12N._native_tls12_server_enabled(TL12N.Config(
+    @test TL12N._native_tls12_server_enabled(TL12N.Config(
         cert_file = _TLS12_NATIVE_CERT_PATH,
         key_file = _TLS12_NATIVE_KEY_PATH,
         client_auth = TL12N.ClientAuthMode.RequireAnyClientCert,
@@ -201,7 +248,7 @@ end
             state.selected_alpn = "h2"
             io = TL12N._TLS12HandshakeRecordIO(server_tcp, TL12N._TLS12NativeState())
             transcript = TL12N._TranscriptHash(TL12N._HASH_SHA256)
-            TL12N._tls12_send_server_hello!(state, io, transcript, TL12N._marshal_handshake_message(hello))
+            TL12N._tls12_send_server_hello!(state, io, transcript, TL12N._marshal_handshake_message(hello), _tls12_server_config())
             @test !isempty(hello.session_id)
             @test isempty(state.server_hello.session_id)
         finally
@@ -368,5 +415,68 @@ end
             end
             _tls12_native_close_quiet!(listener)
         end
+    end
+
+    @testset "exact TLS 1.2 mTLS resumes through public APIs" begin
+        server_cfg = _tls12_server_config(
+            cert_file = _TLS12_NATIVE_SERVER_CERT_PATH,
+            key_file = _TLS12_NATIVE_SERVER_KEY_PATH,
+            client_auth = TL12N.ClientAuthMode.RequireAndVerifyClientCert,
+            client_ca_file = _TLS12_NATIVE_CA_PATH,
+        )
+        client_cfg = _tls12_native_client_config(
+            verify_peer = true,
+            verify_hostname = true,
+            ca_file = _TLS12_NATIVE_CA_PATH,
+            cert_file = _TLS12_NATIVE_CLIENT_CERT_PATH,
+            key_file = _TLS12_NATIVE_CLIENT_KEY_PATH,
+        )
+
+        client_state1, server_state1 = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test client_state1.handshake_complete
+        @test server_state1.handshake_complete
+        @test client_state1.version == "TLSv1.2"
+        @test server_state1.version == "TLSv1.2"
+        @test client_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test server_state1.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test !client_state1.did_resume
+        @test !server_state1.did_resume
+        @test client_state1.has_resumable_session
+        @test client_state1.curve == "P-256"
+        @test server_state1.curve == "P-256"
+
+        client_state2, server_state2 = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test client_state2.handshake_complete
+        @test server_state2.handshake_complete
+        @test client_state2.version == "TLSv1.2"
+        @test server_state2.version == "TLSv1.2"
+        @test client_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test server_state2.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test client_state2.did_resume
+        @test server_state2.did_resume
+        @test client_state2.has_resumable_session
+        @test client_state2.curve == "P-256"
+        @test server_state2.curve == "P-256"
+    end
+
+    @testset "exact TLS 1.2 ECDSA server certificates negotiate ECDHE-ECDSA" begin
+        server_cfg = _tls12_server_config(
+            cert_file = _TLS12_NATIVE_ECDSA_CERT_PATH,
+            key_file = _TLS12_NATIVE_ECDSA_KEY_PATH,
+        )
+        client_cfg = _tls12_native_client_config(
+            verify_peer = true,
+            verify_hostname = true,
+            ca_file = _TLS12_NATIVE_ECDSA_CERT_PATH,
+        )
+        client_state, server_state = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test client_state.handshake_complete
+        @test server_state.handshake_complete
+        @test client_state.version == "TLSv1.2"
+        @test server_state.version == "TLSv1.2"
+        @test client_state.cipher_suite == "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+        @test server_state.cipher_suite == "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+        @test client_state.curve == "P-256"
+        @test server_state.curve == "P-256"
     end
 end

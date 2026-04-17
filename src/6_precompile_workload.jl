@@ -424,15 +424,33 @@ function _pc_tls12_paths()::Union{
     return (cert = cert_path::String, key = key_path::String)
 end
 
+function _pc_tls12_ecdsa_paths()::Union{
+    Nothing,
+    NamedTuple{(:cert, :key), Tuple{String, String}},
+}
+    cert_path = _pc_tls_resource_file("native_tls_server_ecdsa.crt")
+    key_path = _pc_tls_resource_file("native_tls_server_ecdsa.key")
+    if cert_path === nothing || key_path === nothing
+        return nothing
+    end
+    return (cert = cert_path::String, key = key_path::String)
+end
+
 function _pc_expect_tls_state!(
     state::TL.ConnectionState,
     expected_version::String,
     expect_native_tls13::Bool,
+    expect_resume::Union{Nothing, Bool} = nothing,
+    expect_resumable::Union{Nothing, Bool} = nothing,
 )::Nothing
     state.handshake_complete || throw(ArgumentError("TLS precompile workload expected a completed handshake"))
     state.version == expected_version || throw(ArgumentError("TLS precompile workload expected $(expected_version)"))
     state.using_native_tls13 == expect_native_tls13 ||
         throw(ArgumentError("TLS precompile workload observed an unexpected native TLS mode"))
+    expect_resume === nothing || state.did_resume == expect_resume ||
+        throw(ArgumentError("TLS precompile workload observed an unexpected resumed state"))
+    expect_resumable === nothing || state.has_resumable_session == expect_resumable ||
+        throw(ArgumentError("TLS precompile workload observed an unexpected resumable-session state"))
     if expect_native_tls13
         state.cipher_suite in (
             "TLS_AES_128_GCM_SHA256",
@@ -445,18 +463,18 @@ function _pc_expect_tls_state!(
         state.cipher_suite in (
             "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
             "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 ECDHE-RSA cipher suite"))
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 ECDHE cipher suite"))
         state.curve == "P-256" || throw(ArgumentError("TLS precompile workload expected P-256 ECDHE"))
     end
     return nothing
 end
 
-function _pc_run_tls_roundtrip!(
+function _pc_run_tls_roundtrip_states!(
     server_config::TL.Config,
     client_config::TL.Config,
-    expected_version::String,
-    expect_native_tls13::Bool,
-)::Nothing
+)::Tuple{TL.ConnectionState, TL.ConnectionState}
     listener = nothing
     client = nothing
     server_task = nothing
@@ -479,14 +497,28 @@ function _pc_run_tls_roundtrip!(
         read(client, 1) == UInt8[0x41] || throw(ArgumentError("TLS precompile workload expected server byte"))
         write(client, UInt8[0x51]) == 1 || throw(ArgumentError("TLS precompile workload expected client ack write"))
         eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
-        _pc_expect_tls_state!(TL.connection_state(client), expected_version, expect_native_tls13)
+        client_state = TL.connection_state(client)
         _pc_wait_task_done(server_task::Task, 2.0)
-        _pc_expect_tls_state!(fetch(server_task::Task)::TL.ConnectionState, expected_version, expect_native_tls13)
+        return client_state, fetch(server_task::Task)::TL.ConnectionState
     finally
         _pc_close_nothrow(client)
         _pc_close_nothrow(listener)
         IP.shutdown!()
     end
+end
+
+function _pc_run_tls_roundtrip!(
+    server_config::TL.Config,
+    client_config::TL.Config,
+    expected_version::String,
+    expect_native_tls13::Bool,
+    expect_client_resume::Union{Nothing, Bool} = nothing,
+    expect_client_resumable::Union{Nothing, Bool} = nothing,
+    expect_server_resume::Union{Nothing, Bool} = nothing,
+)::Nothing
+    client_state, server_state = _pc_run_tls_roundtrip_states!(server_config, client_config)
+    _pc_expect_tls_state!(client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable)
+    _pc_expect_tls_state!(server_state, expected_version, expect_native_tls13, expect_server_resume, false)
     return nothing
 end
 
@@ -531,6 +563,64 @@ function _pc_run_tls_workload!()
         "TLSv1.2",
         false,
     )
+    native_paths = _pc_tls13_native_paths()
+    if native_paths !== nothing
+        tls12_mtls_server = _pc_tls_server_config(
+            native_paths.server_cert,
+            native_paths.server_key;
+            client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+            client_ca_file = native_paths.ca,
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
+        )
+        tls12_mtls_client = _pc_tls_client_config(
+            verify_peer = true,
+            server_name = "localhost",
+            ca_file = native_paths.ca,
+            cert_file = native_paths.client_cert,
+            key_file = native_paths.client_key,
+            min_version = TL.TLS1_2_VERSION,
+            max_version = TL.TLS1_2_VERSION,
+        )
+        _pc_run_tls_roundtrip!(
+            tls12_mtls_server,
+            tls12_mtls_client,
+            "TLSv1.2",
+            false,
+            false,
+            true,
+            false,
+        )
+        _pc_run_tls_roundtrip!(
+            tls12_mtls_server,
+            tls12_mtls_client,
+            "TLSv1.2",
+            false,
+            true,
+            true,
+            true,
+        )
+    end
+    ecdsa_paths = _pc_tls12_ecdsa_paths()
+    if ecdsa_paths !== nothing
+        _pc_run_tls_roundtrip!(
+            _pc_tls_server_config(
+                ecdsa_paths.cert,
+                ecdsa_paths.key;
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            ),
+            _pc_tls_client_config(
+                verify_peer = true,
+                server_name = "localhost",
+                ca_file = ecdsa_paths.cert,
+                min_version = TL.TLS1_2_VERSION,
+                max_version = TL.TLS1_2_VERSION,
+            ),
+            "TLSv1.2",
+            false,
+        )
+    end
     return nothing
 end
 

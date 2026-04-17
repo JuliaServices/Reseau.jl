@@ -32,7 +32,7 @@ function _tls12_make_server_key_exchange(client_random::Vector{UInt8}, server_ra
 end
 
 @testset "TLS 1.2 native client handshake helpers" begin
-    @testset "client hello offers exact TLS 1.2 ECDHE-RSA suites" begin
+    @testset "client hello offers exact TLS 1.2 ECDHE suites" begin
         hello = TL12H._tls12_client_hello(TL12H.Config(
             server_name = "localhost",
             verify_peer = false,
@@ -42,6 +42,8 @@ end
         ))
         @test hello.vers == TL12H.TLS1_2_VERSION
         @test hello.cipher_suites == UInt16[
+            TL12H._TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+            TL12H._TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,
             TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
             TL12H._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
         ]

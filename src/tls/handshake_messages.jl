@@ -330,6 +330,18 @@ _ClientKeyExchangeMsgTLS12() = _ClientKeyExchangeMsgTLS12(UInt8[])
 _ClientKeyExchangeMsgTLS12(ciphertext::AbstractVector{UInt8}) = _ClientKeyExchangeMsgTLS12(Vector{UInt8}(ciphertext))
 Base.:(==)(a::_ClientKeyExchangeMsgTLS12, b::_ClientKeyExchangeMsgTLS12) = a.ciphertext == b.ciphertext
 
+mutable struct _NewSessionTicketMsgTLS12 <: _HandshakeMessage
+    lifetime_hint::UInt32
+    ticket::Vector{UInt8}
+end
+
+_NewSessionTicketMsgTLS12() = _NewSessionTicketMsgTLS12(UInt32(0), UInt8[])
+_NewSessionTicketMsgTLS12(lifetime_hint::UInt32, ticket::AbstractVector{UInt8}) = _NewSessionTicketMsgTLS12(lifetime_hint, Vector{UInt8}(ticket))
+
+Base.:(==)(a::_NewSessionTicketMsgTLS12, b::_NewSessionTicketMsgTLS12) =
+    a.lifetime_hint == b.lifetime_hint &&
+    a.ticket == b.ticket
+
 mutable struct _NewSessionTicketMsgTLS13 <: _HandshakeMessage
     lifetime::UInt32
     age_add::UInt32
@@ -1024,6 +1036,18 @@ function _marshal_client_key_exchange_tls12(msg::_ClientKeyExchangeMsgTLS12)::Ve
     return out
 end
 
+function _marshal_new_session_ticket_tls12(msg::_NewSessionTicketMsgTLS12)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_NEW_SESSION_TICKET)
+    _append_u24_length_prefixed!(out) do body_buf
+        _append_u32!(body_buf, msg.lifetime_hint)
+        _append_u16_length_prefixed!(body_buf) do ticket_buf
+            append!(ticket_buf, msg.ticket)
+        end
+    end
+    return out
+end
+
 function _marshal_new_session_ticket_tls13(msg::_NewSessionTicketMsgTLS13)::Vector{UInt8}
     out = UInt8[]
     _append_u8!(out, _HANDSHAKE_TYPE_NEW_SESSION_TICKET)
@@ -1580,6 +1604,16 @@ function _unmarshal_client_key_exchange_tls12(data::Vector{UInt8})::Union{_Clien
     return _ClientKeyExchangeMsgTLS12(ciphertext)
 end
 
+function _unmarshal_new_session_ticket_tls12(data::Vector{UInt8})::Union{_NewSessionTicketMsgTLS12, Nothing}
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_NEW_SESSION_TICKET || return nothing
+    _read_u24!(reader) == length(data) - 4 || return nothing
+    lifetime_hint = _read_u32!(reader)
+    ticket = _read_u16_length_prefixed_bytes!(reader)
+    (lifetime_hint === nothing || ticket === nothing || !_reader_empty(reader)) && return nothing
+    return _NewSessionTicketMsgTLS12(lifetime_hint, ticket)
+end
+
 function _unmarshal_new_session_ticket_tls13(data::Vector{UInt8})::Union{_NewSessionTicketMsgTLS13, Nothing}
     msg = _NewSessionTicketMsgTLS13()
     reader = _HandshakeReader(data)
@@ -1643,7 +1677,7 @@ function _unmarshal_handshake_message(
     elseif handshake_type == _HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE
         _unmarshal_server_key_exchange_tls12(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
-        _unmarshal_new_session_ticket_tls13(raw)
+        tls_version == TLS1_2_VERSION ? _unmarshal_new_session_ticket_tls12(raw) : _unmarshal_new_session_ticket_tls13(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS
         _unmarshal_encrypted_extensions(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_CERTIFICATE
@@ -1676,6 +1710,8 @@ function _marshal_handshake_message(msg::_HandshakeMessage)::Vector{UInt8}
         return _marshal_certificate_tls12(msg)
     elseif msg isa _ServerKeyExchangeMsgTLS12
         return _marshal_server_key_exchange_tls12(msg)
+    elseif msg isa _NewSessionTicketMsgTLS12
+        return _marshal_new_session_ticket_tls12(msg)
     elseif msg isa _NewSessionTicketMsgTLS13
         return _marshal_new_session_ticket_tls13(msg)
     elseif msg isa _EncryptedExtensionsMsg
@@ -1709,6 +1745,8 @@ function _handshake_transcript_bytes(msg::_HandshakeMessage)::Vector{UInt8}
         return _marshal_certificate_tls12(msg)
     elseif msg isa _ServerKeyExchangeMsgTLS12
         return _marshal_server_key_exchange_tls12(msg)
+    elseif msg isa _NewSessionTicketMsgTLS12
+        return _marshal_new_session_ticket_tls12(msg)
     elseif msg isa _NewSessionTicketMsgTLS13
         return _marshal_new_session_ticket_tls13(msg)
     elseif msg isa _EncryptedExtensionsMsg
