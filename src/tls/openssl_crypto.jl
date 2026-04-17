@@ -340,13 +340,7 @@ function _tls13_openssl_certificate_der(cert_pem::AbstractVector{UInt8})::Vector
 end
 
 function _tls13_load_x509_pem_chain(cert_pem::AbstractVector{UInt8})::Vector{Vector{UInt8}}
-    cert_text = String(cert_pem)
-    certificates = Vector{Vector{UInt8}}()
-    for matched in eachmatch(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----"s, cert_text)
-        push!(certificates, _tls13_openssl_certificate_der(Vector{UInt8}(codeunits(matched.match))))
-    end
-    isempty(certificates) && throw(ArgumentError("tls: certificate file does not contain any PEM certificate blocks"))
-    return certificates
+    return _tls_decode_pem_certificates(cert_pem)
 end
 
 function _tls13_pubkey_from_der_certificate(cert_der::AbstractVector{UInt8})::Ptr{Cvoid}
@@ -404,35 +398,19 @@ function _tls13_load_verify_locations!(store::Ptr{Cvoid}, ca_path::AbstractStrin
     return nothing
 end
 
-function _tls13_check_x509_peer_name!(x509::Ptr{Cvoid}, peer_name::AbstractString)::Nothing
-    normalized_peer_name = String(peer_name)
-    isempty(normalized_peer_name) && return nothing
-    if _is_ip_literal_name(normalized_peer_name)
-        verify_ip = _verify_ip(normalized_peer_name)
-        ok = ccall(
-            (:X509_check_ip_asc, _LIBCRYPTO_PATH),
-            Cint,
-            (Ptr{Cvoid}, Cstring, Cuint),
-            x509,
-            verify_ip,
-            Cuint(0),
-        )
-        ok == 1 || _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate is not valid for IP address $(verify_ip)")
-        return nothing
+function _tls13_check_x509_peer_name!(cert_der::AbstractVector{UInt8}, peer_name::AbstractString)::Nothing
+    cert_info = try
+        _tls_parse_der_certificate_info(cert_der)
+    catch ex
+        ex isa _TLS13AlertError && rethrow()
+        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
     end
-    verify_name = _verify_name(normalized_peer_name)
-    ok = ccall(
-        (:X509_check_host, _LIBCRYPTO_PATH),
-        Cint,
-        (Ptr{Cvoid}, Cstring, Csize_t, Cuint, Ptr{Ptr{UInt8}}),
-        x509,
-        verify_name,
-        Csize_t(length(verify_name)),
-        Cuint(0),
-        Ptr{Ptr{UInt8}}(C_NULL),
-    )
-    ok == 1 || _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate is not valid for host $(verify_name)")
+    _tls_verify_certificate_peer_name!(cert_info, peer_name)
     return nothing
+end
+
+function _tls13_check_x509_peer_name!(x509::Ptr{Cvoid}, peer_name::AbstractString)::Nothing
+    return _tls13_check_x509_peer_name!(_tls13_x509_to_der(x509), peer_name)
 end
 
 function _tls13_verify_certificate_chain(
@@ -489,7 +467,7 @@ function _tls13_verify_certificate_chain(
                 _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate verification failed at depth $(depth): $(msg)")
             end
         end
-        verify_hostname && _tls13_check_x509_peer_name!(leaf, peer_name)
+        verify_hostname && _tls13_check_x509_peer_name!(certificates[1], peer_name)
         pkey = ccall((:X509_get_pubkey, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), leaf)
         return _openssl_require_nonnull(pkey, "X509_get_pubkey")
     finally

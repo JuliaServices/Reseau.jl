@@ -65,12 +65,14 @@ function _tls_client_config(;
     ca_file::String = _TLS_CERT_PATH,
     cert_file::Union{Nothing, String} = nothing,
     key_file::Union{Nothing, String} = nothing,
+    verify_hostname::Bool = true,
     max_version::Union{Nothing, UInt16} = nothing,
     curve_preferences::Vector{UInt16} = UInt16[],
 )::TL.Config
     return TL.Config(
         server_name = "localhost",
         verify_peer = true,
+        verify_hostname = verify_hostname,
         ca_file = ca_file,
         cert_file = cert_file,
         key_file = key_file,
@@ -239,6 +241,7 @@ function run_tls_trim_sample()::Nothing
         ),
         _tls_client_config(
             ca_file = _TLS_NATIVE_ECDSA_CERT_PATH,
+            verify_hostname = false,
             max_version = TL.TLS1_2_VERSION,
         ),
         "TLSv1.2",

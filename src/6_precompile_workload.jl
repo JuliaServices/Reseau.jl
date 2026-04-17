@@ -363,6 +363,7 @@ end
 
 function _pc_tls_client_config(;
     verify_peer::Bool = false,
+    verify_hostname::Bool = verify_peer,
     server_name::Union{Nothing, String} = "localhost",
     ca_file::Union{Nothing, String} = nothing,
     cert_file::Union{Nothing, String} = nothing,
@@ -374,6 +375,7 @@ function _pc_tls_client_config(;
 )::TL.Config
     return TL.Config(
         verify_peer = verify_peer,
+        verify_hostname = verify_hostname,
         server_name = server_name,
         ca_file = ca_file,
         cert_file = cert_file,
@@ -671,6 +673,7 @@ function _pc_run_tls_workload!()
             ),
             _pc_tls_client_config(
                 verify_peer = true,
+                verify_hostname = false,
                 server_name = "localhost",
                 ca_file = ecdsa_paths.cert,
                 min_version = TL.TLS1_2_VERSION,

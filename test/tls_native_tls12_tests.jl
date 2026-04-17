@@ -485,7 +485,7 @@ end
         )
         client_cfg = _tls12_native_client_config(
             verify_peer = true,
-            verify_hostname = true,
+            verify_hostname = false,
             ca_file = _TLS12_NATIVE_ECDSA_CERT_PATH,
         )
         client_state, server_state = _tls12_run_public_roundtrip(server_cfg, client_cfg)
@@ -497,5 +497,50 @@ end
         @test server_state.cipher_suite == "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
         @test client_state.curve == "P-256"
         @test server_state.curve == "P-256"
+    end
+
+    @testset "exact TLS 1.2 ECDSA CN-only certificates are rejected by hostname verification" begin
+        server_cfg = _tls12_server_config(
+            cert_file = _TLS12_NATIVE_ECDSA_CERT_PATH,
+            key_file = _TLS12_NATIVE_ECDSA_KEY_PATH,
+        )
+        client_cfg = _tls12_native_client_config(
+            verify_peer = true,
+            verify_hostname = true,
+            ca_file = _TLS12_NATIVE_ECDSA_CERT_PATH,
+        )
+        handler_ran = Ref(false)
+        listener = nothing
+        server_task = nothing
+        try
+            listener, addr, server_task = _start_tls12_server(server_cfg; handler = conn -> begin
+                handler_ran[] = true
+                write(conn, UInt8[0x6f, 0x6b])
+                read(conn, 2) == UInt8[0x61, 0x63] || error("unexpected TLS 1.2 client ack")
+                return TL12N.connection_state(conn)
+            end)
+            err = try
+                TL12N.connect(addr, client_cfg)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TL12N.TLSError
+            if err isa TL12N.TLSError
+                @test occursin("legacy Common Name", err.message)
+            end
+            _tls12_native_wait_task(server_task, 5.0) != :timed_out || error("timed out waiting for TLS 1.2 server task")
+            server_err = try
+                wait(server_task)
+                nothing
+            catch ex
+                ex
+            end
+            @test !handler_ran[]
+            @test server_err !== nothing
+        finally
+            _tls12_native_close_quiet!(listener)
+            IP12N.shutdown!()
+        end
     end
 end

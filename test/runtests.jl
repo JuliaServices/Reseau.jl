@@ -28,6 +28,7 @@ test_files = [
     "tcp_tests.jl",
     "host_resolvers_tests.jl",
     "tls_crypto_tests.jl",
+    "tls_x509_tests.jl",
     "tls_handshake_messages_tests.jl",
     "tls_handshake_client_tls12_tests.jl",
     "tls_handshake_client_tls13_tests.jl",
