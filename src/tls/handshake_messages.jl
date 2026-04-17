@@ -5,8 +5,11 @@ const _HANDSHAKE_TYPE_SERVER_HELLO = UInt8(2)
 const _HANDSHAKE_TYPE_NEW_SESSION_TICKET = UInt8(4)
 const _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS = UInt8(8)
 const _HANDSHAKE_TYPE_CERTIFICATE = UInt8(11)
+const _HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE = UInt8(12)
 const _HANDSHAKE_TYPE_CERTIFICATE_REQUEST = UInt8(13)
+const _HANDSHAKE_TYPE_SERVER_HELLO_DONE = UInt8(14)
 const _HANDSHAKE_TYPE_CERTIFICATE_VERIFY = UInt8(15)
+const _HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE = UInt8(16)
 const _HANDSHAKE_TYPE_FINISHED = UInt8(20)
 
 const _TLS_COMPRESSION_NONE = UInt8(0)
@@ -224,6 +227,21 @@ Base.:(==)(a::_ServerHelloMsg, b::_ServerHelloMsg) =
     a.cookie == b.cookie &&
     a.selected_group == b.selected_group
 
+mutable struct _CertificateMsgTLS12 <: _HandshakeMessage
+    certificates::Vector{Vector{UInt8}}
+end
+
+_CertificateMsgTLS12() = _CertificateMsgTLS12(Vector{UInt8}[])
+Base.:(==)(a::_CertificateMsgTLS12, b::_CertificateMsgTLS12) = a.certificates == b.certificates
+
+mutable struct _ServerKeyExchangeMsgTLS12 <: _HandshakeMessage
+    key::Vector{UInt8}
+end
+
+_ServerKeyExchangeMsgTLS12() = _ServerKeyExchangeMsgTLS12(UInt8[])
+_ServerKeyExchangeMsgTLS12(key::AbstractVector{UInt8}) = _ServerKeyExchangeMsgTLS12(Vector{UInt8}(key))
+Base.:(==)(a::_ServerKeyExchangeMsgTLS12, b::_ServerKeyExchangeMsgTLS12) = a.key == b.key
+
 mutable struct _EncryptedExtensionsMsg <: _HandshakeMessage
     alpn_protocol::String
     quic_transport_parameters::Union{Nothing, Vector{UInt8}}
@@ -240,6 +258,19 @@ Base.:(==)(a::_EncryptedExtensionsMsg, b::_EncryptedExtensionsMsg) =
     a.early_data == b.early_data &&
     a.ech_retry_configs == b.ech_retry_configs &&
     a.server_name_ack == b.server_name_ack
+
+mutable struct _CertificateRequestMsgTLS12 <: _HandshakeMessage
+    certificate_types::Vector{UInt8}
+    supported_signature_algorithms::Vector{UInt16}
+    certificate_authorities::Vector{Vector{UInt8}}
+end
+
+_CertificateRequestMsgTLS12() = _CertificateRequestMsgTLS12(UInt8[], UInt16[], Vector{UInt8}[])
+
+Base.:(==)(a::_CertificateRequestMsgTLS12, b::_CertificateRequestMsgTLS12) =
+    a.certificate_types == b.certificate_types &&
+    a.supported_signature_algorithms == b.supported_signature_algorithms &&
+    a.certificate_authorities == b.certificate_authorities
 
 mutable struct _CertificateRequestMsgTLS13 <: _HandshakeMessage
     ocsp_stapling::Bool
@@ -286,6 +317,18 @@ _CertificateVerifyMsg(signature_algorithm::UInt16, signature::AbstractVector{UIn
 Base.:(==)(a::_CertificateVerifyMsg, b::_CertificateVerifyMsg) =
     a.signature_algorithm == b.signature_algorithm &&
     a.signature == b.signature
+
+struct _ServerHelloDoneMsgTLS12 <: _HandshakeMessage end
+
+Base.:(==)(::_ServerHelloDoneMsgTLS12, ::_ServerHelloDoneMsgTLS12) = true
+
+mutable struct _ClientKeyExchangeMsgTLS12 <: _HandshakeMessage
+    ciphertext::Vector{UInt8}
+end
+
+_ClientKeyExchangeMsgTLS12() = _ClientKeyExchangeMsgTLS12(UInt8[])
+_ClientKeyExchangeMsgTLS12(ciphertext::AbstractVector{UInt8}) = _ClientKeyExchangeMsgTLS12(Vector{UInt8}(ciphertext))
+Base.:(==)(a::_ClientKeyExchangeMsgTLS12, b::_ClientKeyExchangeMsgTLS12) = a.ciphertext == b.ciphertext
 
 mutable struct _NewSessionTicketMsgTLS13 <: _HandshakeMessage
     lifetime::UInt32
@@ -785,6 +828,30 @@ function _marshal_server_hello(msg::_ServerHelloMsg)::Vector{UInt8}
     return out
 end
 
+function _marshal_certificate_tls12(msg::_CertificateMsgTLS12)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_CERTIFICATE)
+    _append_u24_length_prefixed!(out) do body_buf
+        _append_u24_length_prefixed!(body_buf) do certificates_buf
+            for certificate in msg.certificates
+                _append_u24_length_prefixed!(certificates_buf) do certificate_buf
+                    append!(certificate_buf, certificate)
+                end
+            end
+        end
+    end
+    return out
+end
+
+function _marshal_server_key_exchange_tls12(msg::_ServerKeyExchangeMsgTLS12)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE)
+    _append_u24_length_prefixed!(out) do body_buf
+        append!(body_buf, msg.key)
+    end
+    return out
+end
+
 function _marshal_encrypted_extensions(msg::_EncryptedExtensionsMsg)::Vector{UInt8}
     out = UInt8[]
     _append_u8!(out, _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS)
@@ -812,6 +879,29 @@ function _marshal_encrypted_extensions(msg::_EncryptedExtensionsMsg)::Vector{UIn
                 end
             end
             msg.server_name_ack && _append_extension!(extensions_buf, _HANDSHAKE_EXTENSION_SERVER_NAME)
+        end
+    end
+    return out
+end
+
+function _marshal_certificate_request_tls12(msg::_CertificateRequestMsgTLS12)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_CERTIFICATE_REQUEST)
+    _append_u24_length_prefixed!(out) do body_buf
+        _append_u8_length_prefixed!(body_buf) do types_buf
+            append!(types_buf, msg.certificate_types)
+        end
+        _append_u16_length_prefixed!(body_buf) do sigalgs_buf
+            for sigalg in msg.supported_signature_algorithms
+                _append_u16!(sigalgs_buf, sigalg)
+            end
+        end
+        _append_u16_length_prefixed!(body_buf) do authorities_buf
+            for authority in msg.certificate_authorities
+                _append_u16_length_prefixed!(authorities_buf) do authority_buf
+                    append!(authority_buf, authority)
+                end
+            end
         end
     end
     return out
@@ -912,6 +1002,24 @@ function _marshal_certificate_verify(msg::_CertificateVerifyMsg)::Vector{UInt8}
         _append_u16_length_prefixed!(body_buf) do signature_buf
             append!(signature_buf, msg.signature)
         end
+    end
+    return out
+end
+
+function _marshal_server_hello_done_tls12(::_ServerHelloDoneMsgTLS12)::Vector{UInt8}
+    return UInt8[
+        _HANDSHAKE_TYPE_SERVER_HELLO_DONE,
+        0x00,
+        0x00,
+        0x00,
+    ]
+end
+
+function _marshal_client_key_exchange_tls12(msg::_ClientKeyExchangeMsgTLS12)::Vector{UInt8}
+    out = UInt8[]
+    _append_u8!(out, _HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE)
+    _append_u24_length_prefixed!(out) do body_buf
+        append!(body_buf, msg.ciphertext)
     end
     return out
 end
@@ -1230,6 +1338,35 @@ function _unmarshal_server_hello(data::Vector{UInt8})::Union{_ServerHelloMsg, No
     return msg
 end
 
+function _unmarshal_certificate_tls12(data::Vector{UInt8})::Union{_CertificateMsgTLS12, Nothing}
+    msg = _CertificateMsgTLS12()
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_CERTIFICATE || return nothing
+    _read_u24!(reader) == length(data) - 4 || return nothing
+
+    certificates_reader = _read_u24_length_prefixed_reader!(reader)
+    (certificates_reader === nothing || !_reader_empty(reader)) && return nothing
+
+    msg.certificates = Vector{UInt8}[]
+    while !_reader_empty(certificates_reader)
+        certificate = _read_u24_length_prefixed_bytes!(certificates_reader)
+        certificate === nothing && return nothing
+        push!(msg.certificates, certificate)
+    end
+
+    return msg
+end
+
+function _unmarshal_server_key_exchange_tls12(data::Vector{UInt8})::Union{_ServerKeyExchangeMsgTLS12, Nothing}
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE || return nothing
+    body_len = _read_u24!(reader)
+    body_len === nothing && return nothing
+    key = _read_bytes!(reader, body_len)
+    (key === nothing || !_reader_empty(reader)) && return nothing
+    return _ServerKeyExchangeMsgTLS12(key)
+end
+
 function _unmarshal_encrypted_extensions(data::Vector{UInt8})::Union{_EncryptedExtensionsMsg, Nothing}
     msg = _EncryptedExtensionsMsg()
     reader = _HandshakeReader(data)
@@ -1269,6 +1406,35 @@ function _unmarshal_encrypted_extensions(data::Vector{UInt8})::Union{_EncryptedE
         end
 
         _reader_empty(ext_reader) || return nothing
+    end
+
+    return msg
+end
+
+function _unmarshal_certificate_request_tls12(data::Vector{UInt8})::Union{_CertificateRequestMsgTLS12, Nothing}
+    msg = _CertificateRequestMsgTLS12()
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_CERTIFICATE_REQUEST || return nothing
+    _read_u24!(reader) == length(data) - 4 || return nothing
+
+    certificate_types = _read_u8_length_prefixed_bytes!(reader)
+    sigalgs_reader = _read_u16_length_prefixed_reader!(reader)
+    authorities_reader = _read_u16_length_prefixed_reader!(reader)
+    (certificate_types === nothing || sigalgs_reader === nothing || authorities_reader === nothing || !_reader_empty(reader)) && return nothing
+
+    msg.certificate_types = certificate_types
+    msg.supported_signature_algorithms = UInt16[]
+    while !_reader_empty(sigalgs_reader)
+        sigalg = _read_u16!(sigalgs_reader)
+        sigalg === nothing && return nothing
+        push!(msg.supported_signature_algorithms, sigalg)
+    end
+
+    msg.certificate_authorities = Vector{UInt8}[]
+    while !_reader_empty(authorities_reader)
+        authority = _read_u16_length_prefixed_bytes!(authorities_reader)
+        authority === nothing && return nothing
+        push!(msg.certificate_authorities, authority)
     end
 
     return msg
@@ -1395,6 +1561,25 @@ function _unmarshal_certificate_verify(data::Vector{UInt8})::Union{_CertificateV
     return _CertificateVerifyMsg(signature_algorithm, signature)
 end
 
+function _unmarshal_server_hello_done_tls12(data::Vector{UInt8})::Union{_ServerHelloDoneMsgTLS12, Nothing}
+    length(data) == 4 || return nothing
+    data[1] == _HANDSHAKE_TYPE_SERVER_HELLO_DONE || return nothing
+    data[2] == 0x00 || return nothing
+    data[3] == 0x00 || return nothing
+    data[4] == 0x00 || return nothing
+    return _ServerHelloDoneMsgTLS12()
+end
+
+function _unmarshal_client_key_exchange_tls12(data::Vector{UInt8})::Union{_ClientKeyExchangeMsgTLS12, Nothing}
+    reader = _HandshakeReader(data)
+    _read_u8!(reader) == _HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE || return nothing
+    body_len = _read_u24!(reader)
+    body_len === nothing && return nothing
+    ciphertext = _read_bytes!(reader, body_len)
+    (ciphertext === nothing || !_reader_empty(reader)) && return nothing
+    return _ClientKeyExchangeMsgTLS12(ciphertext)
+end
+
 function _unmarshal_new_session_ticket_tls13(data::Vector{UInt8})::Union{_NewSessionTicketMsgTLS13, Nothing}
     msg = _NewSessionTicketMsgTLS13()
     reader = _HandshakeReader(data)
@@ -1442,7 +1627,11 @@ function _unmarshal_finished(data::Vector{UInt8})::Union{_FinishedMsg, Nothing}
     return _FinishedMsg(verify_data)
 end
 
-function _unmarshal_handshake_message(data::AbstractVector{UInt8}, transcript::Union{Nothing, _TranscriptHash} = nothing)::Union{_HandshakeMessage, Nothing}
+function _unmarshal_handshake_message(
+    data::AbstractVector{UInt8},
+    transcript::Union{Nothing, _TranscriptHash} = nothing,
+    tls_version::UInt16 = TLS1_3_VERSION,
+)::Union{_HandshakeMessage, Nothing}
     raw = _copy_valid_handshake_frame(data)
     raw === nothing && return nothing
 
@@ -1451,16 +1640,22 @@ function _unmarshal_handshake_message(data::AbstractVector{UInt8}, transcript::U
         _unmarshal_client_hello(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_SERVER_HELLO
         _unmarshal_server_hello(raw)
+    elseif handshake_type == _HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE
+        _unmarshal_server_key_exchange_tls12(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_NEW_SESSION_TICKET
         _unmarshal_new_session_ticket_tls13(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS
         _unmarshal_encrypted_extensions(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_CERTIFICATE
-        _unmarshal_certificate_tls13(raw)
+        tls_version == TLS1_2_VERSION ? _unmarshal_certificate_tls12(raw) : _unmarshal_certificate_tls13(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_CERTIFICATE_REQUEST
-        _unmarshal_certificate_request_tls13(raw)
+        tls_version == TLS1_2_VERSION ? _unmarshal_certificate_request_tls12(raw) : _unmarshal_certificate_request_tls13(raw)
+    elseif handshake_type == _HANDSHAKE_TYPE_SERVER_HELLO_DONE
+        _unmarshal_server_hello_done_tls12(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_CERTIFICATE_VERIFY
         _unmarshal_certificate_verify(raw)
+    elseif handshake_type == _HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE
+        _unmarshal_client_key_exchange_tls12(raw)
     elseif handshake_type == _HANDSHAKE_TYPE_FINISHED
         _unmarshal_finished(raw)
     else
@@ -1477,16 +1672,26 @@ function _marshal_handshake_message(msg::_HandshakeMessage)::Vector{UInt8}
         return _marshal_client_hello(msg)
     elseif msg isa _ServerHelloMsg
         return _marshal_server_hello(msg)
+    elseif msg isa _CertificateMsgTLS12
+        return _marshal_certificate_tls12(msg)
+    elseif msg isa _ServerKeyExchangeMsgTLS12
+        return _marshal_server_key_exchange_tls12(msg)
     elseif msg isa _NewSessionTicketMsgTLS13
         return _marshal_new_session_ticket_tls13(msg)
     elseif msg isa _EncryptedExtensionsMsg
         return _marshal_encrypted_extensions(msg)
     elseif msg isa _CertificateMsgTLS13
         return _marshal_certificate_tls13(msg)
+    elseif msg isa _CertificateRequestMsgTLS12
+        return _marshal_certificate_request_tls12(msg)
     elseif msg isa _CertificateRequestMsgTLS13
         return _marshal_certificate_request_tls13(msg)
     elseif msg isa _CertificateVerifyMsg
         return _marshal_certificate_verify(msg)
+    elseif msg isa _ServerHelloDoneMsgTLS12
+        return _marshal_server_hello_done_tls12(msg)
+    elseif msg isa _ClientKeyExchangeMsgTLS12
+        return _marshal_client_key_exchange_tls12(msg)
     elseif msg isa _FinishedMsg
         return _marshal_finished(msg)
     end
@@ -1500,16 +1705,26 @@ function _handshake_transcript_bytes(msg::_HandshakeMessage)::Vector{UInt8}
     elseif msg isa _ServerHelloMsg
         original = msg.original
         return original === nothing ? _marshal_server_hello(msg) : copy(original)
+    elseif msg isa _CertificateMsgTLS12
+        return _marshal_certificate_tls12(msg)
+    elseif msg isa _ServerKeyExchangeMsgTLS12
+        return _marshal_server_key_exchange_tls12(msg)
     elseif msg isa _NewSessionTicketMsgTLS13
         return _marshal_new_session_ticket_tls13(msg)
     elseif msg isa _EncryptedExtensionsMsg
         return _marshal_encrypted_extensions(msg)
     elseif msg isa _CertificateMsgTLS13
         return _marshal_certificate_tls13(msg)
+    elseif msg isa _CertificateRequestMsgTLS12
+        return _marshal_certificate_request_tls12(msg)
     elseif msg isa _CertificateRequestMsgTLS13
         return _marshal_certificate_request_tls13(msg)
     elseif msg isa _CertificateVerifyMsg
         return _marshal_certificate_verify(msg)
+    elseif msg isa _ServerHelloDoneMsgTLS12
+        return _marshal_server_hello_done_tls12(msg)
+    elseif msg isa _ClientKeyExchangeMsgTLS12
+        return _marshal_client_key_exchange_tls12(msg)
     elseif msg isa _FinishedMsg
         return _marshal_finished(msg)
     end

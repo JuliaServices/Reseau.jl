@@ -3,6 +3,10 @@ using Reseau
 using SHA
 
 const TLC = Reseau.TLS
+const _TLS12_TEST_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
+const _TLS12_TEST_KEY_PATH = joinpath(@__DIR__, "resources", "unittests.key")
+const _TLS12_TEST_CERT_PEM = read(_TLS12_TEST_CERT_PATH)
+const _TLS12_TEST_KEY_PEM = read(_TLS12_TEST_KEY_PATH)
 
 _tls_hexbytes(s::AbstractString) = hex2bytes(replace(s, r"\s+" => ""))
 
@@ -219,5 +223,23 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
         @test TLC._constant_time_equals(UInt8[0x01, 0x02, 0x03], UInt8[0x01, 0x02, 0x03])
         @test !TLC._constant_time_equals(UInt8[0x01, 0x02, 0x03], UInt8[0x01, 0x02, 0x04])
         @test !TLC._constant_time_equals(UInt8[0x01, 0x02], UInt8[0x01, 0x02, 0x03])
+    end
+
+    @testset "TLS 1.2 cipher specs and signature helpers" begin
+        @test TLC._tls12_cipher_spec(TLC._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID) == TLC._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        @test TLC._tls12_cipher_spec(TLC._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID) == TLC._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        @test TLC._tls12_cipher_spec(UInt16(0xdead)) === nothing
+
+        signed = UInt8[0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22]
+        signature = TLC._tls12_openssl_sign_from_pem(TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, _TLS12_TEST_KEY_PEM)
+        pubkey = TLC._tls13_pubkey_from_der_certificate(TLC._tls13_openssl_certificate_der(_TLS12_TEST_CERT_PEM))
+        try
+            @test TLC._tls12_openssl_verify_signature(pubkey, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, signature)
+            tampered = copy(signature)
+            tampered[end] = xor(tampered[end], 0x01)
+            @test !TLC._tls12_openssl_verify_signature(pubkey, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, tampered)
+        finally
+            TLC._free_evp_pkey!(pubkey)
+        end
     end
 end

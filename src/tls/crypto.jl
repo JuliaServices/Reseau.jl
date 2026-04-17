@@ -5,15 +5,32 @@ Base.@enum _TLSHashKind::UInt8 begin
     _HASH_SHA384 = 2
 end
 
+struct _TLS12CipherSpec
+    hash_kind::_TLSHashKind
+    key_length::Int
+    iv_length::Int
+    explicit_nonce_length::Int
+end
+
 struct _TLS13CipherSpec
     hash_kind::_TLSHashKind
     key_length::Int
     iv_length::Int
 end
 
+const _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID = UInt16(0xc02b)
+const _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID = UInt16(0xc02c)
+const _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID = UInt16(0xc02f)
+const _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID = UInt16(0xc030)
+
 const _TLS13_AES_128_GCM_SHA256_ID = UInt16(0x1301)
 const _TLS13_AES_256_GCM_SHA384_ID = UInt16(0x1302)
 const _TLS13_CHACHA20_POLY1305_SHA256_ID = UInt16(0x1303)
+
+const _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 = _TLS12CipherSpec(_HASH_SHA256, 16, 4, 8)
+const _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 = _TLS12CipherSpec(_HASH_SHA384, 32, 4, 8)
+const _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256 = _TLS12CipherSpec(_HASH_SHA256, 16, 4, 8)
+const _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384 = _TLS12CipherSpec(_HASH_SHA384, 32, 4, 8)
 
 const _TLS13_AES_128_GCM_SHA256 = _TLS13CipherSpec(_HASH_SHA256, 16, 12)
 const _TLS13_AES_256_GCM_SHA384 = _TLS13CipherSpec(_HASH_SHA384, 32, 12)
@@ -79,6 +96,14 @@ struct _TLS13ExporterMasterSecret
     secret::Vector{UInt8}
 end
 _TLS13ExporterMasterSecret(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}) = _TLS13ExporterMasterSecret(hash_kind, Vector{UInt8}(secret))
+
+@inline function _tls12_cipher_spec(cipher_suite::UInt16)::Union{_TLS12CipherSpec, Nothing}
+    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID && return _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID && return _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID && return _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    cipher_suite == _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID && return _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    return nothing
+end
 
 @inline function _tls13_cipher_spec(cipher_suite::UInt16)::Union{_TLS13CipherSpec, Nothing}
     cipher_suite == _TLS13_AES_128_GCM_SHA256_ID && return _TLS13_AES_128_GCM_SHA256

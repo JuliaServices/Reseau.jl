@@ -131,7 +131,7 @@ end
     return nothing
 end
 
-struct _TLS13SignatureVerifySpec
+struct _TLSSignatureVerifySpec
     digest_bits::UInt16
     direct::Bool
     rsa_pss::Bool
@@ -168,21 +168,37 @@ const _EVP_CTRL_AEAD_SET_IVLEN = Cint(0x9)
 const _EVP_CTRL_AEAD_GET_TAG = Cint(0x10)
 const _EVP_CTRL_AEAD_SET_TAG = Cint(0x11)
 
-@inline function _tls13_signature_verify_spec(signature_algorithm::UInt16)::_TLS13SignatureVerifySpec
-    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256 && return _TLS13SignatureVerifySpec(256, false, false)
-    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384 && return _TLS13SignatureVerifySpec(384, false, false)
-    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512 && return _TLS13SignatureVerifySpec(512, false, false)
-    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256 && return _TLS13SignatureVerifySpec(256, false, true)
-    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384 && return _TLS13SignatureVerifySpec(384, false, true)
-    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512 && return _TLS13SignatureVerifySpec(512, false, true)
-    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA256 && return _TLS13SignatureVerifySpec(256, false, true)
-    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA384 && return _TLS13SignatureVerifySpec(384, false, true)
-    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA512 && return _TLS13SignatureVerifySpec(512, false, true)
-    signature_algorithm == _TLS_SIGNATURE_ED25519 && return _TLS13SignatureVerifySpec(0, true, false)
+@inline function _tls13_signature_verify_spec(signature_algorithm::UInt16)::_TLSSignatureVerifySpec
+    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256 && return _TLSSignatureVerifySpec(256, false, false)
+    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384 && return _TLSSignatureVerifySpec(384, false, false)
+    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512 && return _TLSSignatureVerifySpec(512, false, false)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256 && return _TLSSignatureVerifySpec(256, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384 && return _TLSSignatureVerifySpec(384, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512 && return _TLSSignatureVerifySpec(512, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA256 && return _TLSSignatureVerifySpec(256, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA384 && return _TLSSignatureVerifySpec(384, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA512 && return _TLSSignatureVerifySpec(512, false, true)
+    signature_algorithm == _TLS_SIGNATURE_ED25519 && return _TLSSignatureVerifySpec(0, true, false)
     throw(ArgumentError("unsupported TLS 1.3 signature algorithm: $(string(signature_algorithm, base = 16))"))
 end
 
-@inline function _tls13_signature_md_name(spec::_TLS13SignatureVerifySpec)::Union{Nothing, String}
+@inline function _tls12_signature_verify_spec(signature_algorithm::UInt16)::_TLSSignatureVerifySpec
+    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256 && return _TLSSignatureVerifySpec(256, false, false)
+    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384 && return _TLSSignatureVerifySpec(384, false, false)
+    signature_algorithm == _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512 && return _TLSSignatureVerifySpec(512, false, false)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PKCS1_SHA256 && return _TLSSignatureVerifySpec(256, false, false)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PKCS1_SHA384 && return _TLSSignatureVerifySpec(384, false, false)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PKCS1_SHA512 && return _TLSSignatureVerifySpec(512, false, false)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA256 && return _TLSSignatureVerifySpec(256, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA384 && return _TLSSignatureVerifySpec(384, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512 && return _TLSSignatureVerifySpec(512, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA256 && return _TLSSignatureVerifySpec(256, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA384 && return _TLSSignatureVerifySpec(384, false, true)
+    signature_algorithm == _TLS_SIGNATURE_RSA_PSS_PSS_SHA512 && return _TLSSignatureVerifySpec(512, false, true)
+    throw(ArgumentError("unsupported TLS 1.2 signature algorithm: $(string(signature_algorithm, base = 16))"))
+end
+
+@inline function _tls_signature_md_name(spec::_TLSSignatureVerifySpec)::Union{Nothing, String}
     spec.direct && return nothing
     spec.digest_bits == 256 && return "SHA256"
     spec.digest_bits == 384 && return "SHA384"
@@ -816,8 +832,12 @@ function _tls13_openssl_p256_server_share_and_secret(client_share::AbstractVecto
     end
 end
 
-function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
-    spec = _tls13_signature_verify_spec(signature_algorithm)
+function _openssl_verify_signature_with_spec(
+    pubkey::Ptr{Cvoid},
+    spec::_TLSSignatureVerifySpec,
+    signed::AbstractVector{UInt8},
+    signature::AbstractVector{UInt8},
+)::Bool
     if spec.direct
         signed_bytes = signed isa Vector{UInt8} ? signed : Vector{UInt8}(signed)
         signature_bytes = signature isa Vector{UInt8} ? signature : Vector{UInt8}(signature)
@@ -861,7 +881,7 @@ function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm
     _openssl_require_nonnull(mdctx, "EVP_MD_CTX_new")
     try
         pctx_ref = Ref{Ptr{Cvoid}}(C_NULL)
-        md_name = _tls13_signature_md_name(spec)::String
+        md_name = _tls_signature_md_name(spec)::String
         if spec.rsa_pss
             pss_params = _tls13_rsa_pss_params(md_name)
             ok = GC.@preserve pss_params ccall(
@@ -916,8 +936,19 @@ function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm
     end
 end
 
-function _tls13_openssl_sign_signature(pkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8})::Vector{UInt8}
-    spec = _tls13_signature_verify_spec(signature_algorithm)
+function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
+    return _openssl_verify_signature_with_spec(pubkey, _tls13_signature_verify_spec(signature_algorithm), signed, signature)
+end
+
+function _tls12_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
+    return _openssl_verify_signature_with_spec(pubkey, _tls12_signature_verify_spec(signature_algorithm), signed, signature)
+end
+
+function _openssl_sign_signature_with_spec(
+    pkey::Ptr{Cvoid},
+    spec::_TLSSignatureVerifySpec,
+    signed::AbstractVector{UInt8},
+)::Vector{UInt8}
     if spec.direct
         signed_bytes = signed isa Vector{UInt8} ? signed : Vector{UInt8}(signed)
         mdctx = ccall((:EVP_MD_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
@@ -974,7 +1005,7 @@ function _tls13_openssl_sign_signature(pkey::Ptr{Cvoid}, signature_algorithm::UI
     _openssl_require_nonnull(mdctx, "EVP_MD_CTX_new")
     try
         pctx_ref = Ref{Ptr{Cvoid}}(C_NULL)
-        md_name = _tls13_signature_md_name(spec)::String
+        md_name = _tls_signature_md_name(spec)::String
         if spec.rsa_pss
             pss_params = _tls13_rsa_pss_params(md_name)
             ok = GC.@preserve pss_params ccall(
@@ -1035,10 +1066,27 @@ function _tls13_openssl_sign_signature(pkey::Ptr{Cvoid}, signature_algorithm::UI
     end
 end
 
+function _tls13_openssl_sign_signature(pkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8})::Vector{UInt8}
+    return _openssl_sign_signature_with_spec(pkey, _tls13_signature_verify_spec(signature_algorithm), signed)
+end
+
+function _tls12_openssl_sign_signature(pkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8})::Vector{UInt8}
+    return _openssl_sign_signature_with_spec(pkey, _tls12_signature_verify_spec(signature_algorithm), signed)
+end
+
 function _tls13_openssl_sign_from_pem(signature_algorithm::UInt16, signed::AbstractVector{UInt8}, key_pem::AbstractVector{UInt8})::Vector{UInt8}
     pkey = _tls13_load_private_key_pem(key_pem)
     try
         return _tls13_openssl_sign_signature(pkey, signature_algorithm, signed)
+    finally
+        _free_evp_pkey!(pkey)
+    end
+end
+
+function _tls12_openssl_sign_from_pem(signature_algorithm::UInt16, signed::AbstractVector{UInt8}, key_pem::AbstractVector{UInt8})::Vector{UInt8}
+    pkey = _tls13_load_private_key_pem(key_pem)
+    try
+        return _tls12_openssl_sign_signature(pkey, signature_algorithm, signed)
     finally
         _free_evp_pkey!(pkey)
     end

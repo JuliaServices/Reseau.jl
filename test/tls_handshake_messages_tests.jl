@@ -155,6 +155,26 @@ function _encrypted_extensions_msg(;
     )
 end
 
+function _certificate_msg_tls12(; certificates::Vector{Vector{UInt8}} = Vector{UInt8}[])
+    return TLH._CertificateMsgTLS12(_copy_tls_byte_vectors(certificates))
+end
+
+function _server_key_exchange_msg_tls12(; key::AbstractVector{UInt8} = UInt8[])
+    return TLH._ServerKeyExchangeMsgTLS12(Vector{UInt8}(key))
+end
+
+function _certificate_request_msg_tls12(;
+    certificate_types::AbstractVector{UInt8} = UInt8[],
+    supported_signature_algorithms::Vector{UInt16} = UInt16[],
+    certificate_authorities::Vector{Vector{UInt8}} = Vector{UInt8}[],
+)
+    return TLH._CertificateRequestMsgTLS12(
+        Vector{UInt8}(certificate_types),
+        copy(supported_signature_algorithms),
+        _copy_tls_byte_vectors(certificate_authorities),
+    )
+end
+
 function _certificate_request_msg_tls13(;
     ocsp_stapling::Bool = false,
     scts::Bool = false,
@@ -192,6 +212,12 @@ function _certificate_verify_msg(;
     signature::AbstractVector{UInt8} = UInt8[],
 )
     return TLH._CertificateVerifyMsg(signature_algorithm, Vector{UInt8}(signature))
+end
+
+_server_hello_done_msg_tls12() = TLH._ServerHelloDoneMsgTLS12()
+
+function _client_key_exchange_msg_tls12(; ciphertext::AbstractVector{UInt8} = UInt8[])
+    return TLH._ClientKeyExchangeMsgTLS12(Vector{UInt8}(ciphertext))
 end
 
 function _new_session_ticket_msg_tls13(;
@@ -557,6 +583,43 @@ end
         @test TLH._unmarshal_handshake_message(fin_bytes) == finished
         @test TLH._handshake_transcript_bytes(encrypted_extensions) == ee_bytes
         @test TLH._handshake_transcript_bytes(finished) == fin_bytes
+    end
+
+    @testset "TLS 1.2 Certificate*, ServerKeyExchange, and hello-done roundtrip" begin
+        certificate_request = _certificate_request_msg_tls12(
+            certificate_types = UInt8[0x01, 0x40],
+            supported_signature_algorithms = UInt16[
+                TLH._TLS_SIGNATURE_RSA_PKCS1_SHA256,
+                TLH._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+            ],
+            certificate_authorities = [UInt8[0x01, 0x02], UInt8[0x30, 0x31, 0x32]],
+        )
+        certificate = _certificate_msg_tls12(
+            certificates = [UInt8[0x10, 0x11, 0x12], UInt8[0x20, 0x21]],
+        )
+        server_key_exchange = _server_key_exchange_msg_tls12(
+            key = UInt8[0x03, 0x00, 0x17, 0x41, fill(UInt8(0x22), 65)..., 0x04, 0x01, 0x00, 0x02, 0xaa, 0xbb],
+        )
+        certificate_verify = _certificate_verify_msg(
+            signature_algorithm = TLH._TLS_SIGNATURE_RSA_PKCS1_SHA256,
+            signature = UInt8[0x60, 0x61, 0x62, 0x63],
+        )
+        server_hello_done = _server_hello_done_msg_tls12()
+        client_key_exchange = _client_key_exchange_msg_tls12(ciphertext = UInt8[0x41, 0x04, fill(UInt8(0x33), 65)...])
+
+        cert_req_bytes = TLH._marshal_handshake_message(certificate_request)
+        cert_bytes = TLH._marshal_handshake_message(certificate)
+        server_key_exchange_bytes = TLH._marshal_handshake_message(server_key_exchange)
+        cert_verify_bytes = TLH._marshal_handshake_message(certificate_verify)
+        server_hello_done_bytes = TLH._marshal_handshake_message(server_hello_done)
+        client_key_exchange_bytes = TLH._marshal_handshake_message(client_key_exchange)
+
+        @test TLH._unmarshal_handshake_message(cert_req_bytes, nothing, TLH.TLS1_2_VERSION) == certificate_request
+        @test TLH._unmarshal_handshake_message(cert_bytes, nothing, TLH.TLS1_2_VERSION) == certificate
+        @test TLH._unmarshal_handshake_message(server_key_exchange_bytes, nothing, TLH.TLS1_2_VERSION) == server_key_exchange
+        @test TLH._unmarshal_handshake_message(cert_verify_bytes, nothing, TLH.TLS1_2_VERSION) == certificate_verify
+        @test TLH._unmarshal_handshake_message(server_hello_done_bytes, nothing, TLH.TLS1_2_VERSION) == server_hello_done
+        @test TLH._unmarshal_handshake_message(client_key_exchange_bytes, nothing, TLH.TLS1_2_VERSION) == client_key_exchange
     end
 
     @testset "TLS 1.3 Certificate*, CertificateRequest, and NewSessionTicket roundtrip" begin
