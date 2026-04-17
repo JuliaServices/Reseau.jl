@@ -62,11 +62,6 @@ function _tls12_client_hello(config)::_ClientHelloMsg
     return hello
 end
 
-@inline function _tls12_require_handshake_message(raw::Vector{UInt8}, expected::UInt8, label::AbstractString)::Nothing
-    raw[1] == expected || _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: expected TLS 1.2 $(label)")
-    return nothing
-end
-
 function _tls12_select_cipher_spec!(state::_TLS12ClientHandshakeState)::Nothing
     server_hello = state.server_hello
     server_hello.vers == TLS1_2_VERSION || _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server negotiated an unexpected TLS version")

@@ -80,6 +80,12 @@ function run_tls_trim_sample()::Nothing
         server_state = fetch(server_task::Task)::TL.ConnectionState
         server_state.handshake_complete || error("server handshake incomplete")
         server_state.version == "TLSv1.2" || error("expected TLS 1.2 server state")
+        !server_state.using_native_tls13 || error("did not expect TLS 1.3 native server mode")
+        server_state.cipher_suite in (
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        ) || error("expected TLS 1.2 server cipher suite")
+        server_state.curve == "P-256" || error("expected P-256 ECDHE on server")
     finally
         _TLS_SERVER_LISTENER[] = nothing
         _close_quiet!(client)

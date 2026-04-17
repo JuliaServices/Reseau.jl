@@ -12,7 +12,7 @@ mutable struct _TLS12RecordCipherState
     exhausted::Bool
 end
 
-mutable struct _TLS12NativeClientState
+mutable struct _TLS12NativeState
     read_cipher::Union{Nothing, _TLS12RecordCipherState}
     write_cipher::Union{Nothing, _TLS12RecordCipherState}
     handshake_buffer::Vector{UInt8}
@@ -28,7 +28,7 @@ mutable struct _TLS12NativeClientState
     cipher_suite::UInt16
 end
 
-_TLS12NativeClientState() = _TLS12NativeClientState(
+_TLS12NativeState() = _TLS12NativeState(
     nothing,
     nothing,
     UInt8[],
@@ -46,7 +46,7 @@ _TLS12NativeClientState() = _TLS12NativeClientState(
 
 mutable struct _TLS12HandshakeRecordIO
     tcp::TCP.Conn
-    state::_TLS12NativeClientState
+    state::_TLS12NativeState
 end
 
 function _securezero_tls12_record_cipher!(cipher::_TLS12RecordCipherState)::Nothing
@@ -57,7 +57,7 @@ function _securezero_tls12_record_cipher!(cipher::_TLS12RecordCipherState)::Noth
     return nothing
 end
 
-function _securezero_tls12_native_client_state!(state::_TLS12NativeClientState)::Nothing
+function _securezero_tls12_native_state!(state::_TLS12NativeState)::Nothing
     if state.read_cipher !== nothing
         _securezero_tls12_record_cipher!(state.read_cipher::_TLS12RecordCipherState)
         state.read_cipher = nothing
@@ -82,7 +82,7 @@ function _securezero_tls12_native_client_state!(state::_TLS12NativeClientState):
     return nothing
 end
 
-function _tls12_set_read_cipher!(state::_TLS12NativeClientState, spec::_TLS12CipherSpec, key::AbstractVector{UInt8}, iv::AbstractVector{UInt8})::Nothing
+function _tls12_set_read_cipher!(state::_TLS12NativeState, spec::_TLS12CipherSpec, key::AbstractVector{UInt8}, iv::AbstractVector{UInt8})::Nothing
     if state.read_cipher !== nothing
         _securezero_tls12_record_cipher!(state.read_cipher::_TLS12RecordCipherState)
     end
@@ -90,7 +90,7 @@ function _tls12_set_read_cipher!(state::_TLS12NativeClientState, spec::_TLS12Cip
     return nothing
 end
 
-function _tls12_set_write_cipher!(state::_TLS12NativeClientState, spec::_TLS12CipherSpec, key::AbstractVector{UInt8}, iv::AbstractVector{UInt8})::Nothing
+function _tls12_set_write_cipher!(state::_TLS12NativeState, spec::_TLS12CipherSpec, key::AbstractVector{UInt8}, iv::AbstractVector{UInt8})::Nothing
     if state.write_cipher !== nothing
         _securezero_tls12_record_cipher!(state.write_cipher::_TLS12RecordCipherState)
     end
@@ -131,7 +131,7 @@ function _tls12_record_additional_data(seq::UInt64, content_type::UInt8, plainte
     ]
 end
 
-@inline function _tls12_take_received_change_cipher_spec!(state::_TLS12NativeClientState)::Bool
+@inline function _tls12_take_received_change_cipher_spec!(state::_TLS12NativeState)::Bool
     seen = state.received_change_cipher_spec
     state.received_change_cipher_spec = false
     return seen
@@ -182,7 +182,7 @@ function _tls12_write_record!(tcp::TCP.Conn, cipher::Union{Nothing, _TLS12Record
     return nothing
 end
 
-function _tls12_process_alert!(state::_TLS12NativeClientState, alert::AbstractVector{UInt8})::Nothing
+function _tls12_process_alert!(state::_TLS12NativeState, alert::AbstractVector{UInt8})::Nothing
     length(alert) == 2 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 alert")
     alert_desc = alert[2]
     if alert_desc != _TLS_ALERT_CLOSE_NOTIFY
@@ -200,7 +200,7 @@ function _tls12_process_alert!(state::_TLS12NativeClientState, alert::AbstractVe
     return nothing
 end
 
-function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeClientState)::Nothing
+function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
     header = Vector{UInt8}(undef, 5)
     read!(tcp, header)
     payload_len = (Int(header[4]) << 8) | Int(header[5])
@@ -287,7 +287,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeClientState)::Not
     return nothing
 end
 
-function _tls12_try_take_handshake_message!(state::_TLS12NativeClientState)::Union{Nothing, Vector{UInt8}}
+function _tls12_try_take_handshake_message!(state::_TLS12NativeState)::Union{Nothing, Vector{UInt8}}
     available = _tls13_buffer_available(state.handshake_buffer, state.handshake_buffer_pos)
     available == 0 && return nothing
     available >= 4 || return nothing
@@ -307,6 +307,11 @@ end
 
 @inline function _remaining_handshake_messages(::_TLS12HandshakeRecordIO)::Int
     return 0
+end
+
+@inline function _tls12_require_handshake_message(raw::Vector{UInt8}, expected::UInt8, label::AbstractString)::Nothing
+    raw[1] == expected || _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: expected TLS 1.2 $(label)")
+    return nothing
 end
 
 function _read_handshake_bytes!(io::_TLS12HandshakeRecordIO)::Vector{UInt8}

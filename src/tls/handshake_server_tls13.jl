@@ -306,7 +306,7 @@ function _tls13_select_server_cipher_suite(client_hello::_ClientHelloMsg)::Tuple
     _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported TLS 1.3 cipher suite")
 end
 
-function _tls13_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
+function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
     isempty(config.alpn_protocols) && return ""
     isempty(client_hello.alpn_protocols) && return ""
     for proto in config.alpn_protocols
@@ -316,7 +316,7 @@ function _tls13_select_server_alpn(config, client_hello::_ClientHelloMsg)::Strin
 end
 
 function _tls13_select_server_signature_algorithm(pkey::Ptr{Cvoid}, client_hello::_ClientHelloMsg)::UInt16
-    return _tls13_select_signature_algorithm(pkey, client_hello.supported_signature_algorithms)
+    return _tls_select_signature_algorithm(pkey, client_hello.supported_signature_algorithms)
 end
 
 function _tls13_find_client_key_share(client_hello::_ClientHelloMsg, group::UInt16)::Union{Nothing, _TLSKeyShare}
@@ -425,7 +425,7 @@ end
 function _prepare_server_negotiation!(state::_TLS13ServerHandshakeState, io, config)::Nothing
     state.cipher_suite, state.cipher_spec = _tls13_select_server_cipher_suite(state.client_hello)
     state.selected_signature_algorithm = _tls13_select_server_signature_algorithm(state.private_key, state.client_hello)
-    state.selected_alpn = _tls13_select_server_alpn(config, state.client_hello)
+    state.selected_alpn = _tls_select_server_alpn(config, state.client_hello)
     state.transcript = _new_tls13_handshake_transcript(state.cipher_spec.hash_kind)
     state.selected_group = _tls13_server_preferred_group(state.client_hello, config)
     if _tls13_find_client_key_share(state.client_hello, state.selected_group) === nothing

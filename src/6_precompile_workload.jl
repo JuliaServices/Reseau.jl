@@ -475,6 +475,12 @@ function _pc_run_tls_workload!()
         server_state = fetch(server_task::Task)::TL.ConnectionState
         server_state.handshake_complete || throw(ArgumentError("TLS precompile workload expected server handshake completion"))
         server_state.version == "TLSv1.2" || throw(ArgumentError("TLS precompile workload expected TLS 1.2 server state"))
+        !server_state.using_native_tls13 || throw(ArgumentError("TLS precompile workload did not expect native TLS 1.3 server mode"))
+        server_state.cipher_suite in (
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        ) || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 server cipher suite"))
+        server_state.curve == "P-256" || throw(ArgumentError("TLS precompile workload expected a native TLS 1.2 server curve"))
     finally
         _pc_close_nothrow(client)
         _pc_close_nothrow(listener)

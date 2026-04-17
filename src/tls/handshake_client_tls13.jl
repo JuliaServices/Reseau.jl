@@ -505,7 +505,7 @@ function _tls13_verify_server_certificate_signature!(
     return nothing
 end
 
-function _tls13_select_signature_algorithm(pkey::Ptr{Cvoid}, supported_signature_algorithms::AbstractVector{UInt16})::UInt16
+function _tls_select_signature_algorithm(pkey::Ptr{Cvoid}, supported_signature_algorithms::AbstractVector{UInt16})::UInt16
     pkey_type = _tls13_pkey_type_name(pkey)
     if pkey_type == "RSA"
         for alg in (
@@ -1098,7 +1098,7 @@ function _send_client_certificate!(state::_TLS13ClientHandshakeState, io)::Nothi
     else
         out = _CertificateMsgTLS13()
         out.certificates = [copy(cert) for cert in state.client_certificate_chain]
-        state.client_signature_algorithm = _tls13_select_signature_algorithm(
+        state.client_signature_algorithm = _tls_select_signature_algorithm(
             state.client_private_key,
             state.certificate_request.supported_signature_algorithms,
         )

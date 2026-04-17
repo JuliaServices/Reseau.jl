@@ -40,7 +40,7 @@ function _tls12_native_client_config(;
     )
 end
 
-function _tls12_openssl_server_config(; alpn_protocols::Vector{String} = String[])
+function _tls12_server_config(; alpn_protocols::Vector{String} = String[])
     return TL12N.Config(
         verify_peer = false,
         cert_file = _TLS12_NATIVE_CERT_PATH,
@@ -59,11 +59,11 @@ function _start_tls12_server(config::TL12N.Config; handler)
         conn = TL12N.accept(listener)
         try
             TL12N.handshake!(conn)
-            handler(conn)
-            return conn
+            return handler(conn)
         catch
-            _tls12_native_close_quiet!(conn)
             rethrow()
+        finally
+            _tls12_native_close_quiet!(conn)
         end
     end
     return listener, addr, task
@@ -96,6 +96,14 @@ end
 @testset "TLS native TLS1.2 client" begin
     @test TL12N._native_tls12_only(_tls12_native_client_config())
     @test !TL12N._native_tls12_only(TL12N.Config(server_name = "localhost", verify_peer = false))
+    @test TL12N._native_tls12_server_enabled(_tls12_server_config())
+    @test !TL12N._native_tls12_server_enabled(TL12N.Config(
+        cert_file = _TLS12_NATIVE_CERT_PATH,
+        key_file = _TLS12_NATIVE_KEY_PATH,
+        client_auth = TL12N.ClientAuthMode.RequireAnyClientCert,
+        min_version = TL12N.TLS1_2_VERSION,
+        max_version = TL12N.TLS1_2_VERSION,
+    ))
 
     @testset "record layer roundtrip encrypts and decrypts application data" begin
         listener = nothing
@@ -103,8 +111,8 @@ end
         server_tcp = nothing
         try
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
-            client_state = TL12N._TLS12NativeClientState()
-            server_state = TL12N._TLS12NativeClientState()
+            client_state = TL12N._TLS12NativeState()
+            server_state = TL12N._TLS12NativeState()
             write_key = UInt8[UInt8(0x10 + i) for i in 0:15]
             write_iv = UInt8[0xa0, 0xa1, 0xa2, 0xa3]
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
@@ -125,7 +133,7 @@ end
         server_tcp = nothing
         try
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
-            state = TL12N._TLS12NativeClientState()
+            state = TL12N._TLS12NativeState()
             TL12N._tls13_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61], TL12N.TLS1_2_VERSION)
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
             @test !tls_err.from_peer
@@ -142,7 +150,7 @@ end
         server_tcp = nothing
         try
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
-            state = TL12N._TLS12NativeClientState()
+            state = TL12N._TLS12NativeState()
             read_key = UInt8[UInt8(0x20 + i) for i in 0:15]
             read_iv = UInt8[0xb0, 0xb1, 0xb2, 0xb3]
             TL12N._tls12_set_read_cipher!(state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, read_key, read_iv)
@@ -164,8 +172,8 @@ end
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             write_key = UInt8[UInt8(0x40 + i) for i in 0:15]
             write_iv = UInt8[0xc0, 0xc1, 0xc2, 0xc3]
-            client_state = TL12N._TLS12NativeClientState()
-            server_state = TL12N._TLS12NativeClientState()
+            client_state = TL12N._TLS12NativeState()
+            server_state = TL12N._TLS12NativeState()
             TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
             hello_request = UInt8[0x00, 0x00, 0x00, 0x00]
@@ -179,12 +187,77 @@ end
         end
     end
 
-    @testset "exact TLS 1.2 client handshakes through public APIs" begin
+    @testset "server hello does not echo the client session id without resumption" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        state = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12ServerHandshakeState(_tls12_server_config())
+            hello = TL12N._tls12_client_hello(_tls12_native_client_config(alpn_protocols = ["h2"]))
+            state.client_hello = hello
+            state.cipher_suite = TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID
+            state.selected_alpn = "h2"
+            io = TL12N._TLS12HandshakeRecordIO(server_tcp, TL12N._TLS12NativeState())
+            transcript = TL12N._TranscriptHash(TL12N._HASH_SHA256)
+            TL12N._tls12_send_server_hello!(state, io, transcript, TL12N._marshal_handshake_message(hello))
+            @test !isempty(hello.session_id)
+            @test isempty(state.server_hello.session_id)
+        finally
+            state === nothing || TL12N._securezero_tls12_server_handshake_state!(state)
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "malformed TLS 1.2 ClientKeyExchange reports illegal_parameter" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        state = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            state = TL12N._TLS12ServerHandshakeState(_tls12_server_config())
+            client_io = TL12N._TLS12HandshakeRecordIO(client_tcp, TL12N._TLS12NativeState())
+            server_io = TL12N._TLS12HandshakeRecordIO(server_tcp, TL12N._TLS12NativeState())
+            malformed = TL12N._ClientKeyExchangeMsgTLS12(vcat(UInt8[0x41, 0x02], zeros(UInt8, 64)))
+            TL12N._write_handshake_bytes!(client_io, TL12N._marshal_handshake_message(malformed))
+            err = try
+                TL12N._tls12_read_client_key_exchange!(state, server_io, TL12N._TranscriptHash(TL12N._HASH_SHA256))
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TL12N._TLS13AlertError
+            if err isa TL12N._TLS13AlertError
+                @test (err::TL12N._TLS13AlertError).alert == TL12N._TLS_ALERT_ILLEGAL_PARAMETER
+            end
+        finally
+            state === nothing || TL12N._securezero_tls12_server_handshake_state!(state)
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "exact TLS 1.2 native client and server handshake through public APIs" begin
         listener = nothing
         client = nothing
         task = nothing
         try
-            listener, addr, task = _start_tls12_server(_tls12_openssl_server_config(alpn_protocols = ["h2"]); handler = conn -> begin
+            listener, addr, task = _start_tls12_server(_tls12_server_config(alpn_protocols = ["h2"]); handler = conn -> begin
+                state = TL12N.connection_state(conn)
+                @test state.handshake_complete
+                @test state.version == "TLSv1.2"
+                @test state.alpn_protocol == "h2"
+                @test state.cipher_suite in (
+                    "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+                    "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+                )
+                @test !state.using_native_tls13
+                @test state.curve == "P-256"
                 @test read(conn, 4) == UInt8[0x70, 0x69, 0x6e, 0x67]
                 write(conn, UInt8[0x70, 0x6f, 0x6e, 0x67])
                 nothing
@@ -225,7 +298,7 @@ end
         client = nothing
         task = nothing
         try
-            listener, addr, task = _start_tls12_server(_tls12_openssl_server_config(); handler = conn -> begin
+            listener, addr, task = _start_tls12_server(_tls12_server_config(); handler = conn -> begin
                 write(conn, UInt8[0x6f, 0x6b])
                 nothing
             end)
@@ -238,6 +311,51 @@ end
             TL12N.handshake!(client)
             @test TL12N.connection_state(client).version == "TLSv1.2"
             @test read(client, 2) == UInt8[0x6f, 0x6b]
+            @test _tls12_native_wait_task(task, 5.0) != :timed_out
+            wait(task)
+        finally
+            _tls12_native_close_quiet!(client)
+            if task !== nothing
+                try
+                    wait(task)
+                catch
+                end
+            end
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
+    @testset "native TLS 1.2 server interoperates with OpenSSL client path" begin
+        listener = nothing
+        client = nothing
+        task = nothing
+        try
+            listener, addr, task = _start_tls12_server(_tls12_server_config(alpn_protocols = ["h2"]); handler = conn -> begin
+                @test read(conn, 5) == UInt8[0x68, 0x65, 0x6c, 0x6c, 0x6f]
+                write(conn, UInt8[0x77, 0x6f, 0x72, 0x6c, 0x64])
+                nothing
+            end)
+
+            client = TL12N.connect(addr, TL12N.Config(
+                verify_peer = true,
+                verify_hostname = true,
+                server_name = "localhost",
+                ca_file = _TLS12_NATIVE_CERT_PATH,
+                alpn_protocols = ["h2"],
+                handshake_timeout_ns = 10_000_000_000,
+                min_version = nothing,
+                max_version = TL12N.TLS1_2_VERSION,
+            ))
+            TL12N.handshake!(client)
+            state = TL12N.connection_state(client)
+            @test state.handshake_complete
+            @test state.version == "TLSv1.2"
+            @test state.alpn_protocol == "h2"
+            @test !state.using_native_tls13
+
+            write(client, UInt8[0x68, 0x65, 0x6c, 0x6c, 0x6f])
+            @test read(client, 5) == UInt8[0x77, 0x6f, 0x72, 0x6c, 0x64]
+
             @test _tls12_native_wait_task(task, 5.0) != :timed_out
             wait(task)
         finally

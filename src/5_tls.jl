@@ -77,6 +77,7 @@ include("tls/record_tls13.jl")
 include("tls/record_tls12.jl")
 include("tls/handshake_client_tls12.jl")
 include("tls/handshake_server_tls13.jl")
+include("tls/handshake_server_tls12.jl")
 
 const X25519 = _TLS_GROUP_X25519
 const P256 = _TLS_GROUP_SECP256R1
@@ -230,9 +231,10 @@ const _TLS_CONN_MODE_OPENSSL = UInt8(0)
 const _TLS_CONN_MODE_NATIVE_TLS13_CLIENT = UInt8(1)
 const _TLS_CONN_MODE_NATIVE_TLS13_SERVER = UInt8(2)
 const _TLS_CONN_MODE_NATIVE_TLS12_CLIENT = UInt8(3)
+const _TLS_CONN_MODE_NATIVE_TLS12_SERVER = UInt8(4)
 
 @inline _is_native_tls13_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS13_CLIENT || mode == _TLS_CONN_MODE_NATIVE_TLS13_SERVER
-@inline _is_native_tls12_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS12_CLIENT
+@inline _is_native_tls12_mode(mode::UInt8) = mode == _TLS_CONN_MODE_NATIVE_TLS12_CLIENT || mode == _TLS_CONN_MODE_NATIVE_TLS12_SERVER
 @inline _is_native_mode(mode::UInt8) = _is_native_tls13_mode(mode) || _is_native_tls12_mode(mode)
 
 function Config(;
@@ -393,7 +395,7 @@ mutable struct Conn <: IO
     mode::UInt8
     is_server::Bool
     config::Config
-    native_state::Union{Nothing, _TLS13NativeClientState, _TLS12NativeClientState}
+    native_state::Union{Nothing, _TLS13NativeClientState, _TLS12NativeState}
     handshake_lock::ReentrantLock
     read_lock::ReentrantLock
     write_lock::ReentrantLock
@@ -1152,16 +1154,15 @@ function _new_native_tls13_client_conn(tcp::TCP.Conn, config::Config)::Conn
     return _new_native_tls13_conn(tcp, config; is_server = false)
 end
 
-function _new_native_tls12_client_conn(tcp::TCP.Conn, config::Config)::Conn
-    _validate_config(config; is_server = false)
+function _new_native_tls12_conn(tcp::TCP.Conn, config::Config; is_server::Bool)::Conn
     return Conn(
         tcp,
         C_NULL,
         C_NULL,
-        _TLS_CONN_MODE_NATIVE_TLS12_CLIENT,
-        false,
+        is_server ? _TLS_CONN_MODE_NATIVE_TLS12_SERVER : _TLS_CONN_MODE_NATIVE_TLS12_CLIENT,
+        is_server,
         config,
-        _TLS12NativeClientState(),
+        _TLS12NativeState(),
         ReentrantLock(),
         ReentrantLock(),
         ReentrantLock(),
@@ -1171,6 +1172,16 @@ function _new_native_tls12_client_conn(tcp::TCP.Conn, config::Config)::Conn
         "",
         nothing,
     )
+end
+
+function _new_native_tls12_client_conn(tcp::TCP.Conn, config::Config)::Conn
+    _validate_config(config; is_server = false)
+    return _new_native_tls12_conn(tcp, config; is_server = false)
+end
+
+function _new_native_tls12_server_conn(tcp::TCP.Conn, config::Config)::Conn
+    _validate_config(config; is_server = true)
+    return _new_native_tls12_conn(tcp, config; is_server = true)
 end
 
 function _new_native_tls13_server_conn(tcp::TCP.Conn, config::Config)::Conn
@@ -1232,6 +1243,9 @@ function server(tcp::TCP.Conn, config::Config)::Conn
     if _native_tls13_server_enabled(config)
         return _new_native_tls13_server_conn(tcp, config)
     end
+    if _native_tls12_server_enabled(config)
+        return _new_native_tls12_server_conn(tcp, config)
+    end
     return _new_openssl_conn(tcp, config; is_server = true)
 end
 
@@ -1247,7 +1261,7 @@ function _free_native_handles!(conn::Conn)
     end
     if _is_native_tls12_mode(conn.mode)
         if conn.native_state !== nothing
-            _securezero_tls12_native_client_state!(conn.native_state::_TLS12NativeClientState)
+            _securezero_tls12_native_state!(conn.native_state::_TLS12NativeState)
             conn.native_state = nothing
         end
         conn.ssl = C_NULL
@@ -1303,10 +1317,10 @@ end
     return state::_TLS13NativeClientState
 end
 
-@inline function _native_tls12_state(conn::Conn)::_TLS12NativeClientState
+@inline function _native_tls12_state(conn::Conn)::_TLS12NativeState
     state = conn.native_state
     state === nothing && throw(_closed_error("tls12"))
-    return state::_TLS12NativeClientState
+    return state::_TLS12NativeState
 end
 
 function _ensure_open!(conn::Conn, op::AbstractString)
@@ -1507,7 +1521,11 @@ function handshake!(conn::Conn)
                     return nothing
                 end
                 if _is_native_tls12_mode(conn.mode)
-                    _native_tls12_client_handshake!(conn)
+                    if conn.is_server
+                        _native_tls12_server_handshake!(conn)
+                    else
+                        _native_tls12_client_handshake!(conn)
+                    end
                     return nothing
                 end
                 while true
@@ -2511,7 +2529,7 @@ function connection_state(conn::Conn)::ConnectionState
         cipher_suite = nothing
         curve = nothing
         if conn.native_state !== nothing
-            native_state = conn.native_state::_TLS12NativeClientState
+            native_state = conn.native_state::_TLS12NativeState
             cipher_suite = native_state.cipher_suite == UInt16(0) ? nothing : _tls12_cipher_suite_name(native_state.cipher_suite)
             curve = native_state.curve_id == UInt16(0) ? nothing : _tls_group_name(native_state.curve_id)
         end

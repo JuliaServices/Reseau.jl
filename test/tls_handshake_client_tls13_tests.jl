@@ -501,10 +501,10 @@ end
             @test TLHC._tls13_ec_group_curve_nid(p256_cert_pkey) == TLHC._init_p256_group_nid!()
             @test TLHC._tls13_ec_group_curve_nid(p384_cert_pkey) == TLHC._init_p384_group_nid!()
             @test TLHC._tls13_ec_group_curve_nid(p521_cert_pkey) == TLHC._init_p521_group_nid!()
-            @test TLHC._tls13_select_signature_algorithm(p256_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256
-            @test TLHC._tls13_select_signature_algorithm(p384_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
-            @test TLHC._tls13_select_signature_algorithm(p521_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP521R1_SHA512
-            @test_throws ArgumentError TLHC._tls13_select_signature_algorithm(
+            @test TLHC._tls_select_signature_algorithm(p256_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256
+            @test TLHC._tls_select_signature_algorithm(p384_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
+            @test TLHC._tls_select_signature_algorithm(p521_cert_pkey, offered_ecdsa) == TLHC._TLS_SIGNATURE_ECDSA_SECP521R1_SHA512
+            @test_throws ArgumentError TLHC._tls_select_signature_algorithm(
                 p384_cert_pkey,
                 UInt16[TLHC._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256],
             )
