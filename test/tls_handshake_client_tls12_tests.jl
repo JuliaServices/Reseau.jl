@@ -81,14 +81,10 @@ end
         @test parsed.signature_algorithm == TL12H._TLS_SIGNATURE_RSA_PKCS1_SHA256
         @test parsed.signature == signature
 
-        pubkey = TL12H._tls13_pubkey_from_der_certificate(TL12H._tls13_openssl_certificate_der(_TLS12_CERT_PEM))
-        try
-            verified = TL12H._tls12_verify_server_key_exchange!(state, pubkey, msg)
-            @test verified.group == TL12H.P256
-            @test verified.public_key == public_key
-        finally
-            TL12H._free_evp_pkey!(pubkey)
-        end
+        pubkey = TL12H._tls_parse_der_certificate_info(TL12H._tls13_openssl_certificate_der(_TLS12_CERT_PEM)).public_key
+        verified = TL12H._tls12_verify_server_key_exchange!(state, pubkey, msg)
+        @test verified.group == TL12H.P256
+        @test verified.public_key == public_key
     end
 
     @testset "client key exchange generation returns an encoded EC point" begin
@@ -135,6 +131,22 @@ end
             end
         finally
             TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "TLS 1.2 rejects Ed25519 certificates for ECDHE cipher suites with a clean alert" begin
+        err = try
+            TL12H._tls12_server_certificate_matches_suite!(
+                TL12H._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+                TL12H._TLSEd25519PublicKey(fill(UInt8(0x22), 32)),
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TL12H._TLS13AlertError
+        if err isa TL12H._TLS13AlertError
+            @test err.alert == TL12H._TLS_ALERT_HANDSHAKE_FAILURE
         end
     end
 end

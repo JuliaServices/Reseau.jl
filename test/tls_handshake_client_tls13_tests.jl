@@ -511,7 +511,7 @@ end
 
             signed = collect(UInt8(0x10):UInt8(0x4f))
             signature = TLHC._tls13_openssl_sign_from_pem(TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, _TLS13_TEST_KEY_PEM)
-            pubkey = TLHC._tls13_pubkey_from_der_certificate(_TLS13_TEST_CERT_DER)
+            pubkey = TLHC._tls_parse_der_certificate_info(_TLS13_TEST_CERT_DER).public_key
             @test TLHC._tls13_openssl_verify_signature(pubkey, TLHC._TLS_SIGNATURE_RSA_PSS_RSAE_SHA256, signed, signature)
 
             bad_signature = copy(signature)
@@ -523,7 +523,6 @@ end
             TLHC._free_evp_pkey!(p256_cert_pkey)
             TLHC._free_evp_pkey!(p384_cert_pkey)
             TLHC._free_evp_pkey!(p521_cert_pkey)
-            TLHC._free_evp_pkey!(pubkey)
             TLHC._securezero!(client_secret)
             TLHC._securezero!(server_secret)
             TLHC._securezero!(client_p256_secret)

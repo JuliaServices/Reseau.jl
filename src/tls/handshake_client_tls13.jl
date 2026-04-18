@@ -303,7 +303,7 @@ mutable struct _TLS13OpenSSLCertificateVerifier
     verify_peer::Bool
     verify_hostname::Bool
     ca_file::Union{Nothing, String}
-    leaf_public_key::Ptr{Cvoid}
+    leaf_public_key::_TLSPublicKeyState
 end
 
 function _TLS13OpenSSLCertificateVerifier(;
@@ -315,7 +315,7 @@ function _TLS13OpenSSLCertificateVerifier(;
         verify_peer,
         verify_hostname,
         ca_file === nothing ? nothing : String(ca_file),
-        C_NULL,
+        nothing,
     )
 end
 
@@ -450,7 +450,6 @@ function _tls13_verify_server_certificates!(
     server_name::AbstractString,
 )::Nothing
     isempty(certificate_msg.certificates) && throw(ArgumentError("tls: received empty certificates message"))
-    verifier.leaf_public_key == C_NULL || _free_evp_pkey!(verifier.leaf_public_key)
     verifier.leaf_public_key = _tls13_verify_server_certificate_chain(
         certificate_msg.certificates,
         server_name;
@@ -484,9 +483,9 @@ function _tls13_verify_server_certificate_signature!(
     transcript::_TranscriptHash,
     certificate_verify::_CertificateVerifyMsg,
 )::Nothing
-    verifier.leaf_public_key == C_NULL && throw(ArgumentError("tls13 client handshake certificate verifier has no leaf public key"))
+    verifier.leaf_public_key === nothing && throw(ArgumentError("tls13 client handshake certificate verifier has no leaf public key"))
     signed = _tls13_signed_message(_TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
-    _tls13_openssl_verify_signature(verifier.leaf_public_key, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
+    _tls13_openssl_verify_signature(verifier.leaf_public_key::_TLSPublicKey, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
         _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls13 client handshake received an invalid certificate verify signature")
     return nothing
 end
@@ -560,8 +559,7 @@ function _securezero_tls13_certificate_verifier!(::_TLS13NoCertificateVerifier):
 end
 
 function _securezero_tls13_certificate_verifier!(verifier::_TLS13OpenSSLCertificateVerifier)::Nothing
-    verifier.leaf_public_key == C_NULL || _free_evp_pkey!(verifier.leaf_public_key)
-    verifier.leaf_public_key = C_NULL
+    verifier.leaf_public_key = nothing
     return nothing
 end
 

@@ -15,10 +15,15 @@ struct _TLSCertificateInfo
     extended_key_usage::UInt8
     subject_key_id::Vector{UInt8}
     authority_key_id::Vector{UInt8}
+    tbs_der::Vector{UInt8}
+    public_key::_TLSPublicKey
+    signature_verify_spec::_TLSSignatureVerifySpec
+    signature::Vector{UInt8}
 end
 
 const _ASN1_INTEGER = UInt8(0x02)
 const _ASN1_BIT_STRING = UInt8(0x03)
+const _ASN1_NULL = UInt8(0x05)
 const _ASN1_SEQUENCE = UInt8(0x30)
 const _ASN1_SET = UInt8(0x31)
 const _ASN1_BOOLEAN = UInt8(0x01)
@@ -54,6 +59,94 @@ const _ASN1_OID_EKU_SERVER_AUTH = (
 const _ASN1_OID_EKU_CLIENT_AUTH = (
     UInt8(0x2b), UInt8(0x06), UInt8(0x01), UInt8(0x05),
     UInt8(0x05), UInt8(0x07), UInt8(0x03), UInt8(0x02),
+)
+const _ASN1_OID_RSA_ENCRYPTION = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x01),
+)
+const _ASN1_OID_RSASSA_PSS = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x0a),
+)
+const _ASN1_OID_SHA1_WITH_RSA_ENCRYPTION = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x05),
+)
+const _ASN1_OID_SHA224_WITH_RSA_ENCRYPTION = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x0e),
+)
+const _ASN1_OID_SHA256_WITH_RSA_ENCRYPTION = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x0b),
+)
+const _ASN1_OID_SHA384_WITH_RSA_ENCRYPTION = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x0c),
+)
+const _ASN1_OID_SHA512_WITH_RSA_ENCRYPTION = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x0d),
+)
+const _ASN1_OID_ID_EC_PUBLIC_KEY = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0xce), UInt8(0x3d),
+    UInt8(0x02), UInt8(0x01),
+)
+const _ASN1_OID_ECDSA_WITH_SHA1 = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0xce), UInt8(0x3d),
+    UInt8(0x04), UInt8(0x01),
+)
+const _ASN1_OID_ECDSA_WITH_SHA224 = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0xce), UInt8(0x3d),
+    UInt8(0x04), UInt8(0x03), UInt8(0x01),
+)
+const _ASN1_OID_ECDSA_WITH_SHA256 = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0xce), UInt8(0x3d),
+    UInt8(0x04), UInt8(0x03), UInt8(0x02),
+)
+const _ASN1_OID_ECDSA_WITH_SHA384 = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0xce), UInt8(0x3d),
+    UInt8(0x04), UInt8(0x03), UInt8(0x03),
+)
+const _ASN1_OID_ECDSA_WITH_SHA512 = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0xce), UInt8(0x3d),
+    UInt8(0x04), UInt8(0x03), UInt8(0x04),
+)
+const _ASN1_OID_ED25519 = (
+    UInt8(0x2b), UInt8(0x65), UInt8(0x70),
+)
+const _ASN1_OID_MGF1 = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0x86), UInt8(0xf7),
+    UInt8(0x0d), UInt8(0x01), UInt8(0x01), UInt8(0x08),
+)
+const _ASN1_OID_SHA1 = (
+    UInt8(0x2b), UInt8(0x0e), UInt8(0x03), UInt8(0x02), UInt8(0x1a),
+)
+const _ASN1_OID_SHA224 = (
+    UInt8(0x60), UInt8(0x86), UInt8(0x48), UInt8(0x01), UInt8(0x65),
+    UInt8(0x03), UInt8(0x04), UInt8(0x02), UInt8(0x04),
+)
+const _ASN1_OID_SHA256 = (
+    UInt8(0x60), UInt8(0x86), UInt8(0x48), UInt8(0x01), UInt8(0x65),
+    UInt8(0x03), UInt8(0x04), UInt8(0x02), UInt8(0x01),
+)
+const _ASN1_OID_SHA384 = (
+    UInt8(0x60), UInt8(0x86), UInt8(0x48), UInt8(0x01), UInt8(0x65),
+    UInt8(0x03), UInt8(0x04), UInt8(0x02), UInt8(0x02),
+)
+const _ASN1_OID_SHA512 = (
+    UInt8(0x60), UInt8(0x86), UInt8(0x48), UInt8(0x01), UInt8(0x65),
+    UInt8(0x03), UInt8(0x04), UInt8(0x02), UInt8(0x03),
+)
+const _ASN1_OID_CURVE_P256 = (
+    UInt8(0x2a), UInt8(0x86), UInt8(0x48), UInt8(0xce), UInt8(0x3d),
+    UInt8(0x03), UInt8(0x01), UInt8(0x07),
+)
+const _ASN1_OID_CURVE_P384 = (
+    UInt8(0x2b), UInt8(0x81), UInt8(0x04), UInt8(0x00), UInt8(0x22),
+)
+const _ASN1_OID_CURVE_P521 = (
+    UInt8(0x2b), UInt8(0x81), UInt8(0x04), UInt8(0x00), UInt8(0x23),
 )
 
 const _TLS_KEY_USAGE_DIGITAL_SIGNATURE = UInt16(1) << 0
@@ -224,6 +317,185 @@ function _asn1_parse_key_usage_bits(bytes::AbstractVector{UInt8}, value_start::I
         pos += 1
     end
     return bits
+end
+
+function _asn1_integer_bytes(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::Vector{UInt8}
+    value_start <= value_end || throw(ArgumentError("tls: malformed ASN.1 INTEGER value"))
+    first = bytes[value_start]
+    if first >= 0x80
+        throw(ArgumentError("tls: negative ASN.1 INTEGER values are not supported"))
+    end
+    start = value_start
+    if first == 0x00 && value_start < value_end
+        bytes[value_start + 1] >= 0x80 || throw(ArgumentError("tls: non-minimal ASN.1 INTEGER value"))
+        start += 1
+    end
+    start <= value_end || throw(ArgumentError("tls: malformed ASN.1 INTEGER value"))
+    return copy(@view bytes[start:value_end])
+end
+
+function _asn1_bit_string_bytes(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::Vector{UInt8}
+    value_start <= value_end || throw(ArgumentError("tls: malformed ASN.1 BIT STRING value"))
+    unused_bits = Int(bytes[value_start])
+    unused_bits == 0 || throw(ArgumentError("tls: unsupported ASN.1 BIT STRING padding"))
+    value_start < value_end || throw(ArgumentError("tls: malformed ASN.1 BIT STRING value"))
+    return copy(@view bytes[(value_start + 1):value_end])
+end
+
+function _tls_hash_bits_from_oid(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::UInt16
+    _asn1_oid_equals(bytes, value_start, value_end, _ASN1_OID_SHA1) && return UInt16(160)
+    _asn1_oid_equals(bytes, value_start, value_end, _ASN1_OID_SHA224) && return UInt16(224)
+    _asn1_oid_equals(bytes, value_start, value_end, _ASN1_OID_SHA256) && return UInt16(256)
+    _asn1_oid_equals(bytes, value_start, value_end, _ASN1_OID_SHA384) && return UInt16(384)
+    _asn1_oid_equals(bytes, value_start, value_end, _ASN1_OID_SHA512) && return UInt16(512)
+    throw(ArgumentError("tls: unsupported X.509 hash algorithm"))
+end
+
+@inline function _tls_digest_len_from_bits(bits::UInt16)::Int
+    bits == 160 && return 20
+    bits == 224 && return 28
+    bits == 256 && return 32
+    bits == 384 && return 48
+    bits == 512 && return 64
+    throw(ArgumentError("tls: unsupported X.509 hash size"))
+end
+
+function _tls_require_algorithm_identifier_null_or_absent(bytes::AbstractVector{UInt8}, pos::Int, value_end::Int)::Nothing
+    pos > value_end && return nothing
+    null_start, null_end, next_pos = _asn1_expect_tlv(bytes, pos, _ASN1_NULL)
+    null_start > null_end || throw(ArgumentError("tls: malformed X.509 algorithm parameters"))
+    next_pos == value_end + 1 || throw(ArgumentError("tls: malformed X.509 algorithm parameters"))
+    return nothing
+end
+
+function _tls_parse_pss_hash_algorithm(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::UInt16
+    oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER)
+    hash_bits = _tls_hash_bits_from_oid(bytes, oid_start, oid_end)
+    _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
+    return hash_bits
+end
+
+function _tls_parse_rsa_pss_signature_spec(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSSignatureVerifySpec
+    seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    seq_next == value_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS parameters"))
+    hash_bits = UInt16(160)
+    mgf1_hash_bits = UInt16(160)
+    salt_len = 20
+    trailer_field = 1
+    pos = seq_start
+    while pos <= seq_end
+        tag, item_start, item_end, pos = _asn1_read_tlv(bytes, pos)
+        if tag == 0xa0
+            alg_start, alg_end, alg_next = _asn1_expect_tlv(bytes, item_start, _ASN1_SEQUENCE)
+            alg_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS hash parameters"))
+            hash_bits = _tls_parse_pss_hash_algorithm(bytes, alg_start, alg_end)
+        elseif tag == 0xa1
+            mgf_start, mgf_end, mgf_next = _asn1_expect_tlv(bytes, item_start, _ASN1_SEQUENCE)
+            mgf_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS mask parameters"))
+            oid_start, oid_end, mgf_pos = _asn1_expect_tlv(bytes, mgf_start, _ASN1_OBJECT_IDENTIFIER)
+            _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_MGF1) ||
+                throw(ArgumentError("tls: unsupported X.509 RSASSA-PSS mask generator"))
+            hash_start, hash_end, mgf_pos = _asn1_expect_tlv(bytes, mgf_pos, _ASN1_SEQUENCE)
+            mgf_pos == mgf_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS mask parameters"))
+            mgf1_hash_bits = _tls_parse_pss_hash_algorithm(bytes, hash_start, hash_end)
+        elseif tag == 0xa2
+            salt_start, salt_end, salt_next = _asn1_expect_tlv(bytes, item_start, _ASN1_INTEGER)
+            salt_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS salt length"))
+            salt_len = _asn1_integer_value(bytes, salt_start, salt_end)
+        elseif tag == 0xa3
+            trailer_start, trailer_end, trailer_next = _asn1_expect_tlv(bytes, item_start, _ASN1_INTEGER)
+            trailer_next == item_end + 1 || throw(ArgumentError("tls: malformed X.509 RSASSA-PSS trailer field"))
+            trailer_field = _asn1_integer_value(bytes, trailer_start, trailer_end)
+        else
+            throw(ArgumentError("tls: unsupported X.509 RSASSA-PSS parameters"))
+        end
+    end
+    mgf1_hash_bits == hash_bits || throw(ArgumentError("tls: unsupported X.509 RSASSA-PSS mask digest"))
+    salt_len == _tls_digest_len_from_bits(hash_bits) || throw(ArgumentError("tls: unsupported X.509 RSASSA-PSS salt length"))
+    trailer_field == 1 || throw(ArgumentError("tls: unsupported X.509 RSASSA-PSS trailer field"))
+    return _TLSSignatureVerifySpec(hash_bits, false, true)
+end
+
+function _tls_parse_certificate_signature_spec(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSSignatureVerifySpec
+    oid_start, oid_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_OBJECT_IDENTIFIER)
+    if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA1_WITH_RSA_ENCRYPTION)
+        _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
+        return _TLSSignatureVerifySpec(UInt16(160), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA224_WITH_RSA_ENCRYPTION)
+        _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
+        return _TLSSignatureVerifySpec(UInt16(224), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA256_WITH_RSA_ENCRYPTION)
+        _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
+        return _TLSSignatureVerifySpec(UInt16(256), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA384_WITH_RSA_ENCRYPTION)
+        _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
+        return _TLSSignatureVerifySpec(UInt16(384), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_SHA512_WITH_RSA_ENCRYPTION)
+        _tls_require_algorithm_identifier_null_or_absent(bytes, pos, value_end)
+        return _TLSSignatureVerifySpec(UInt16(512), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA1)
+        pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
+        return _TLSSignatureVerifySpec(UInt16(160), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA224)
+        pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
+        return _TLSSignatureVerifySpec(UInt16(224), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA256)
+        pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
+        return _TLSSignatureVerifySpec(UInt16(256), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA384)
+        pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
+        return _TLSSignatureVerifySpec(UInt16(384), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ECDSA_WITH_SHA512)
+        pos > value_end || throw(ArgumentError("tls: malformed X.509 ECDSA signature parameters"))
+        return _TLSSignatureVerifySpec(UInt16(512), false, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ED25519)
+        pos > value_end || throw(ArgumentError("tls: malformed X.509 Ed25519 signature parameters"))
+        return _TLSSignatureVerifySpec(UInt16(0), true, false)
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_RSASSA_PSS)
+        pos <= value_end || throw(ArgumentError("tls: missing X.509 RSASSA-PSS parameters"))
+        return _tls_parse_rsa_pss_signature_spec(bytes, pos, value_end)
+    end
+    throw(ArgumentError("tls: unsupported X.509 signature algorithm"))
+end
+
+function _tls_parse_subject_public_key_info(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSPublicKey
+    alg_start, alg_end, pos = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
+    bit_start, bit_end, pos = _asn1_expect_tlv(bytes, pos, _ASN1_BIT_STRING)
+    pos == value_end + 1 || throw(ArgumentError("tls: malformed subjectPublicKeyInfo"))
+    oid_start, oid_end, alg_pos = _asn1_expect_tlv(bytes, alg_start, _ASN1_OBJECT_IDENTIFIER)
+    if _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_RSA_ENCRYPTION) ||
+       _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_RSASSA_PSS)
+        _tls_require_algorithm_identifier_null_or_absent(bytes, alg_pos, alg_end)
+        key_bytes = _asn1_bit_string_bytes(bytes, bit_start, bit_end)
+        key_start, key_end, key_next = _asn1_expect_tlv(key_bytes, firstindex(key_bytes), _ASN1_SEQUENCE)
+        key_next == lastindex(key_bytes) + 1 || throw(ArgumentError("tls: malformed RSA public key"))
+        modulus_start, modulus_end, key_pos = _asn1_expect_tlv(key_bytes, key_start, _ASN1_INTEGER)
+        exponent_start, exponent_end, key_pos = _asn1_expect_tlv(key_bytes, key_pos, _ASN1_INTEGER)
+        key_pos == key_end + 1 || throw(ArgumentError("tls: malformed RSA public key"))
+        return _TLSRSAPublicKey(
+            _asn1_integer_bytes(key_bytes, modulus_start, modulus_end),
+            _asn1_integer_bytes(key_bytes, exponent_start, exponent_end),
+        )
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ID_EC_PUBLIC_KEY)
+        curve_oid_start, curve_oid_end, alg_pos = _asn1_expect_tlv(bytes, alg_pos, _ASN1_OBJECT_IDENTIFIER)
+        alg_pos == alg_end + 1 || throw(ArgumentError("tls: malformed EC public key parameters"))
+        curve_id = if _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P256)
+            _TLS_GROUP_SECP256R1
+        elseif _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P384)
+            UInt16(0x0018)
+        elseif _asn1_oid_equals(bytes, curve_oid_start, curve_oid_end, _ASN1_OID_CURVE_P521)
+            UInt16(0x0019)
+        else
+            throw(ArgumentError("tls: unsupported X.509 EC named curve"))
+        end
+        return _TLSECPublicKey(curve_id, _asn1_bit_string_bytes(bytes, bit_start, bit_end))
+    elseif _asn1_oid_equals(bytes, oid_start, oid_end, _ASN1_OID_ED25519)
+        alg_pos > alg_end || throw(ArgumentError("tls: malformed Ed25519 public key parameters"))
+        key = _asn1_bit_string_bytes(bytes, bit_start, bit_end)
+        length(key) == 32 || throw(ArgumentError("tls: malformed Ed25519 public key"))
+        return _TLSEd25519PublicKey(key)
+    end
+    throw(ArgumentError("tls: unsupported X.509 subject public key algorithm"))
 end
 
 @inline function _asn1_ascii_string(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::String
@@ -477,18 +749,29 @@ end
 function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSCertificateInfo
     cert_start, cert_end, cert_next = _asn1_expect_tlv(cert_der, firstindex(cert_der), _ASN1_SEQUENCE)
     cert_next == lastindex(cert_der) + 1 || throw(ArgumentError("tls: malformed certificate container"))
-    tbs_start, tbs_end, _ = _asn1_expect_tlv(cert_der, cert_start, _ASN1_SEQUENCE)
+    tbs_start, tbs_end, tbs_next = _asn1_expect_tlv(cert_der, cert_start, _ASN1_SEQUENCE)
+    cert_pos = tbs_next
+    outer_sig_alg_start, outer_sig_alg_end, cert_pos = _asn1_expect_tlv(cert_der, cert_pos, _ASN1_SEQUENCE)
+    signature_start, signature_end, cert_pos = _asn1_expect_tlv(cert_der, cert_pos, _ASN1_BIT_STRING)
+    cert_pos == cert_end + 1 || throw(ArgumentError("tls: malformed certificate container"))
+    outer_sig_spec = _tls_parse_certificate_signature_spec(cert_der, outer_sig_alg_start, outer_sig_alg_end)
+    signature = _asn1_bit_string_bytes(cert_der, signature_start, signature_end)
+    tbs_der = copy(@view cert_der[cert_start:(tbs_next - 1)])
     tbs_pos = tbs_start
     if tbs_pos <= tbs_end && cert_der[tbs_pos] == _ASN1_CONTEXT_EXPLICIT_VERSION
         _, _, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_CONTEXT_EXPLICIT_VERSION)
     end
     _, _, _, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos) # serial number
-    _, _, _, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos) # signature
+    tbs_sig_alg_start, tbs_sig_alg_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
+    _tls_parse_certificate_signature_spec(cert_der, tbs_sig_alg_start, tbs_sig_alg_end)
+    cert_der[tbs_sig_alg_start:tbs_sig_alg_end] == cert_der[outer_sig_alg_start:outer_sig_alg_end] ||
+        throw(ArgumentError("tls: mismatched X.509 certificate signature algorithms"))
     issuer_start, issuer_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
     validity_start, validity_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
     subject_start, subject_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
     common_name = _tls_parse_subject_common_name(cert_der, subject_start, subject_end)
-    _, _, _, tbs_pos = _asn1_read_tlv(cert_der, tbs_pos) # subjectPublicKeyInfo
+    spki_start, spki_end, tbs_pos = _asn1_expect_tlv(cert_der, tbs_pos, _ASN1_SEQUENCE)
+    public_key = _tls_parse_subject_public_key_info(cert_der, spki_start, spki_end)
     dns_names = String[]
     ip_addresses = Vector{Vector{UInt8}}()
     has_san_extension = false
@@ -562,6 +845,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
         extended_key_usage,
         subject_key_id,
         authority_key_id,
+        tbs_der,
+        public_key,
+        outer_sig_spec,
+        signature,
     )
 end
 
@@ -876,12 +1163,7 @@ function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
 end
 
 function _tls_verify_certificate_signature(child::_TLSCertificateInfo, parent::_TLSCertificateInfo)::Bool
-    pkey = _tls13_pubkey_from_der_certificate(parent.der)
-    try
-        return _tls13_verify_der_certificate_signature(child.der, pkey)
-    finally
-        _free_evp_pkey!(pkey)
-    end
+    return _openssl_verify_signature_with_spec(parent.public_key, child.signature_verify_spec, child.tbs_der, child.signature)
 end
 
 function _tls_trust_anchor_matches(cert::_TLSCertificateInfo, store::_TLSTrustStore)::Bool
@@ -977,7 +1259,7 @@ function _tls_verify_certificate_chain(
     ca_file::Union{Nothing, String},
     purpose::AbstractString,
     peer_name::AbstractString = "",
-)::Ptr{Cvoid}
+)::_TLSPublicKey
     isempty(certificates) && _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
     leaf = if verify_peer
         ca_file === nothing && _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: certificate verification requires a CA roots path")
@@ -999,5 +1281,5 @@ function _tls_verify_certificate_chain(
     verify_hostname && isempty(peer_name) &&
         _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: hostname verification requires a peer name")
     verify_hostname && _tls_verify_certificate_peer_name!(leaf, peer_name)
-    return _tls13_pubkey_from_der_certificate(leaf.der)
+    return _tls_copy_public_key(leaf.public_key)
 end

@@ -16,6 +16,7 @@ const _TLS_GROUP_SECP256R1 = UInt16(0x0017)
 const _TLS_GROUP_X25519 = UInt16(0x001d)
 
 const _X25519_PKEY_ID = Ref{Cint}(0)
+const _ED25519_PKEY_ID = Ref{Cint}(0)
 const _P256_GROUP_NID = Ref{Cint}(0)
 const _P384_GROUP_NID = Ref{Cint}(0)
 const _P521_GROUP_NID = Ref{Cint}(0)
@@ -26,6 +27,15 @@ function _init_x25519_pkey_id!()::Cint
     nid = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "X25519")
     nid > 0 || throw(ArgumentError("failed to initialize OpenSSL X25519 provider"))
     _X25519_PKEY_ID[] = nid
+    return nid
+end
+
+function _init_ed25519_pkey_id!()::Cint
+    nid = _ED25519_PKEY_ID[]
+    nid > 0 && return nid
+    nid = ccall((:OBJ_sn2nid, _LIBCRYPTO_PATH), Cint, (Cstring,), "ED25519")
+    nid > 0 || throw(ArgumentError("failed to initialize OpenSSL Ed25519 provider"))
+    _ED25519_PKEY_ID[] = nid
     return nid
 end
 
@@ -98,6 +108,11 @@ end
 
 @inline function _free_ec_key!(key::Ptr{Cvoid})::Nothing
     key == C_NULL || ccall((:EC_KEY_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), key)
+    return nothing
+end
+
+@inline function _free_rsa!(rsa::Ptr{Cvoid})::Nothing
+    rsa == C_NULL || ccall((:RSA_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), rsa)
     return nothing
 end
 
@@ -185,10 +200,124 @@ end
 
 @inline function _tls_signature_md_name(spec::_TLSSignatureVerifySpec)::Union{Nothing, String}
     spec.direct && return nothing
+    spec.digest_bits == 160 && return "SHA1"
+    spec.digest_bits == 224 && return "SHA224"
     spec.digest_bits == 256 && return "SHA256"
     spec.digest_bits == 384 && return "SHA384"
     spec.digest_bits == 512 && return "SHA512"
-    throw(ArgumentError("unsupported TLS 1.3 signature digest size: $(spec.digest_bits)"))
+    throw(ArgumentError("unsupported signature digest size: $(spec.digest_bits)"))
+end
+
+@inline function _tls_ec_curve_group_nid(curve_id::UInt16)::Cint
+    curve_id == _TLS_GROUP_SECP256R1 && return _init_p256_group_nid!()
+    curve_id == UInt16(0x0018) && return _init_p384_group_nid!()
+    curve_id == UInt16(0x0019) && return _init_p521_group_nid!()
+    throw(ArgumentError("unsupported TLS EC curve: $(string(curve_id, base = 16))"))
+end
+
+function _openssl_bn_from_bytes(bytes::AbstractVector{UInt8}, op::AbstractString)::Ptr{Cvoid}
+    bytes_v = bytes isa Vector{UInt8} ? bytes : Vector{UInt8}(bytes)
+    bn = GC.@preserve bytes_v ccall(
+        (:BN_bin2bn, _LIBCRYPTO_PATH),
+        Ptr{Cvoid},
+        (Ptr{UInt8}, Cint, Ptr{Cvoid}),
+        pointer(bytes_v),
+        Cint(length(bytes_v)),
+        C_NULL,
+    )
+    return _openssl_require_nonnull(bn, op)
+end
+
+function _tls_public_key_to_evp_pkey(key::_TLSRSAPublicKey)::Ptr{Cvoid}
+    modulus = Ptr{Cvoid}(C_NULL)
+    exponent = Ptr{Cvoid}(C_NULL)
+    rsa = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    out = Ptr{Cvoid}(C_NULL)
+    try
+        modulus = _openssl_bn_from_bytes(key.modulus, "BN_bin2bn(RSA modulus)")
+        exponent = _openssl_bn_from_bytes(key.exponent, "BN_bin2bn(RSA exponent)")
+        rsa = ccall((:RSA_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(rsa, "RSA_new")
+        _openssl_require_ok(
+            ccall((:RSA_set0_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), rsa, modulus, exponent, C_NULL),
+            "RSA_set0_key",
+        )
+        modulus = C_NULL
+        exponent = C_NULL
+        pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        _openssl_require_ok(
+            ccall((:EVP_PKEY_set1_RSA, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, rsa),
+            "EVP_PKEY_set1_RSA",
+        )
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        _free_bn!(modulus)
+        _free_bn!(exponent)
+        _free_evp_pkey!(pkey)
+        _free_rsa!(rsa)
+    end
+end
+
+function _tls_public_key_to_evp_pkey(key::_TLSECPublicKey)::Ptr{Cvoid}
+    ec_key = Ptr{Cvoid}(C_NULL)
+    point = Ptr{Cvoid}(C_NULL)
+    pkey = Ptr{Cvoid}(C_NULL)
+    point_bytes = key.point
+    out = Ptr{Cvoid}(C_NULL)
+    try
+        ec_key = ccall((:EC_KEY_new_by_curve_name, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Cint,), _tls_ec_curve_group_nid(key.curve_id))
+        _openssl_require_nonnull(ec_key, "EC_KEY_new_by_curve_name")
+        group = ccall((:EC_KEY_get0_group, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), ec_key)
+        _openssl_require_nonnull(group, "EC_KEY_get0_group")
+        point = ccall((:EC_POINT_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), group)
+        _openssl_require_nonnull(point, "EC_POINT_new")
+        point_ok = GC.@preserve point_bytes ccall(
+                (:EC_POINT_oct2point, _LIBCRYPTO_PATH),
+                Cint,
+                (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{Cvoid}),
+                group,
+                point,
+                pointer(point_bytes),
+                Csize_t(length(point_bytes)),
+                C_NULL,
+        )
+        _openssl_require_ok(point_ok, "EC_POINT_oct2point")
+        _openssl_require_ok(
+            ccall((:EC_KEY_set_public_key, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), ec_key, point),
+            "EC_KEY_set_public_key",
+        )
+        pkey = ccall((:EVP_PKEY_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
+        _openssl_require_nonnull(pkey, "EVP_PKEY_new")
+        _openssl_require_ok(
+            ccall((:EVP_PKEY_set1_EC_KEY, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), pkey, ec_key),
+            "EVP_PKEY_set1_EC_KEY",
+        )
+        out = pkey
+        pkey = C_NULL
+        return out
+    finally
+        _free_evp_pkey!(pkey)
+        _free_ec_point!(point)
+        _free_ec_key!(ec_key)
+    end
+end
+
+function _tls_public_key_to_evp_pkey(key::_TLSEd25519PublicKey)::Ptr{Cvoid}
+    key_bytes = key.key
+    pkey = GC.@preserve key_bytes ccall(
+        (:EVP_PKEY_new_raw_public_key, _LIBCRYPTO_PATH),
+        Ptr{Cvoid},
+        (Cint, Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
+        _init_ed25519_pkey_id!(),
+        C_NULL,
+        pointer(key_bytes),
+        Csize_t(length(key_bytes)),
+    )
+    return _openssl_require_nonnull(pkey, "EVP_PKEY_new_raw_public_key(Ed25519)")
 end
 
 function _tls13_rsa_pss_params(md_name::String)::_TLS13RSAPSSParams
@@ -328,28 +457,6 @@ function _tls13_load_x509_pem_chain(cert_pem::AbstractVector{UInt8})::Vector{Vec
     return _tls_decode_pem_certificates(cert_pem)
 end
 
-function _tls13_pubkey_from_der_certificate(cert_der::AbstractVector{UInt8})::Ptr{Cvoid}
-    x509 = _tls13_load_x509_der(cert_der)
-    try
-        pkey = ccall((:X509_get_pubkey, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), x509)
-        return _openssl_require_nonnull(pkey, "X509_get_pubkey")
-    finally
-        _free_x509!(x509)
-    end
-end
-
-function _tls13_verify_der_certificate_signature(cert_der::AbstractVector{UInt8}, pubkey::Ptr{Cvoid})::Bool
-    x509 = _tls13_load_x509_der(cert_der)
-    try
-        ret = ccall((:X509_verify, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), x509, pubkey)
-        ret == 1 && return true
-        ret == 0 && return false
-        throw(_make_tls_error("X509_verify", Int32(ret)))
-    finally
-        _free_x509!(x509)
-    end
-end
-
 function _tls13_pkey_type_name(pkey::Ptr{Cvoid})::String
     name = ccall((:EVP_PKEY_get0_type_name, _LIBCRYPTO_PATH), Cstring, (Ptr{Cvoid},), pkey)
     name == C_NULL && throw(ArgumentError("tls: OpenSSL private key has no type name"))
@@ -393,7 +500,7 @@ function _tls13_verify_certificate_chain(
     ca_file::Union{Nothing, String},
     purpose::AbstractString,
     peer_name::AbstractString = "",
-)::Ptr{Cvoid}
+)::_TLSPublicKey
     return _tls_verify_certificate_chain(
         certificates;
         verify_peer,
@@ -410,7 +517,7 @@ function _tls13_verify_server_certificate_chain(
     verify_peer::Bool,
     verify_hostname::Bool,
     ca_file::Union{Nothing, String},
-)::Ptr{Cvoid}
+)::_TLSPublicKey
     return _tls13_verify_certificate_chain(
         certificates;
         verify_peer,
@@ -425,7 +532,7 @@ function _tls13_verify_client_certificate_chain(
     certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,
     ca_file::Union{Nothing, String},
-)::Ptr{Cvoid}
+)::_TLSPublicKey
     return _tls13_verify_certificate_chain(
         certificates;
         verify_peer,
@@ -838,12 +945,44 @@ function _openssl_verify_signature_with_spec(
     end
 end
 
+function _openssl_verify_signature_with_spec(
+    pubkey::_TLSPublicKey,
+    spec::_TLSSignatureVerifySpec,
+    signed::AbstractVector{UInt8},
+    signature::AbstractVector{UInt8},
+)::Bool
+    pkey = _tls_public_key_to_evp_pkey(pubkey)
+    try
+        return _openssl_verify_signature_with_spec(pkey, spec, signed, signature)
+    finally
+        _free_evp_pkey!(pkey)
+    end
+end
+
 function _tls13_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
     return _openssl_verify_signature_with_spec(pubkey, _tls13_signature_verify_spec(signature_algorithm), signed, signature)
 end
 
+function _tls13_openssl_verify_signature(pubkey::_TLSPublicKey, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
+    pkey = _tls_public_key_to_evp_pkey(pubkey)
+    try
+        return _tls13_openssl_verify_signature(pkey, signature_algorithm, signed, signature)
+    finally
+        _free_evp_pkey!(pkey)
+    end
+end
+
 function _tls12_openssl_verify_signature(pubkey::Ptr{Cvoid}, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
     return _openssl_verify_signature_with_spec(pubkey, _tls12_signature_verify_spec(signature_algorithm), signed, signature)
+end
+
+function _tls12_openssl_verify_signature(pubkey::_TLSPublicKey, signature_algorithm::UInt16, signed::AbstractVector{UInt8}, signature::AbstractVector{UInt8})::Bool
+    pkey = _tls_public_key_to_evp_pkey(pubkey)
+    try
+        return _tls12_openssl_verify_signature(pkey, signature_algorithm, signed, signature)
+    finally
+        _free_evp_pkey!(pkey)
+    end
 end
 
 function _openssl_sign_signature_with_spec(

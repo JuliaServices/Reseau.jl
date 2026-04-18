@@ -44,14 +44,18 @@ function _tls_copy_cert(
     extended_key_usage = cert.extended_key_usage,
     subject_key_id = cert.subject_key_id,
     authority_key_id = cert.authority_key_id,
+    tbs_der = cert.tbs_der,
+    public_key = cert.public_key,
+    signature_verify_spec = cert.signature_verify_spec,
+    signature = cert.signature,
 )
     return TLX._TLSCertificateInfo(
-        der,
-        subject_raw,
-        issuer_raw,
+        copy(der),
+        copy(subject_raw),
+        copy(issuer_raw),
         common_name,
-        dns_names,
-        ip_addresses,
+        copy(dns_names),
+        [copy(ip) for ip in ip_addresses],
         has_san_extension,
         not_before_s,
         not_after_s,
@@ -60,8 +64,12 @@ function _tls_copy_cert(
         has_key_usage,
         key_usage,
         extended_key_usage,
-        subject_key_id,
-        authority_key_id,
+        copy(subject_key_id),
+        copy(authority_key_id),
+        copy(tbs_der),
+        TLX._tls_copy_public_key(public_key),
+        signature_verify_spec,
+        copy(signature),
     )
 end
 
@@ -99,6 +107,12 @@ end
         @test (cert.extended_key_usage & TLX._TLS_EXT_KEY_USAGE_SERVER) != 0x00
         @test isempty(cert.authority_key_id) == false
         @test isempty(cert.subject_key_id) == false
+        @test cert.public_key isa TLX._TLSRSAPublicKey
+        @test cert.signature_verify_spec.digest_bits == 256
+        @test !cert.signature_verify_spec.direct
+        @test !cert.signature_verify_spec.rsa_pss
+        @test !isempty(cert.tbs_der)
+        @test !isempty(cert.signature)
         @test UInt8[0x7f, 0x00, 0x00, 0x01] in cert.ip_addresses
         @test UInt8[
             0x00, 0x00, 0x00, 0x00,
@@ -187,30 +201,46 @@ end
         end
     end
 
+    @testset "subject public key info and certificate signatures are parsed natively" begin
+        rsa_cert = _tls_cert_info(_TLS_CERT_PATH)
+        rsa_ca = _tls_cert_info(_TLS_CA_PATH)
+        ecdsa_cert = _tls_cert_info(_TLS_ECDSA_CERT_PATH)
+
+        @test rsa_cert.public_key isa TLX._TLSRSAPublicKey
+        if rsa_cert.public_key isa TLX._TLSRSAPublicKey
+            @test rsa_cert.public_key.exponent == UInt8[0x01, 0x00, 0x01]
+            @test !isempty(rsa_cert.public_key.modulus)
+        end
+
+        @test ecdsa_cert.public_key isa TLX._TLSECPublicKey
+        if ecdsa_cert.public_key isa TLX._TLSECPublicKey
+            @test ecdsa_cert.public_key.curve_id == TLX._TLS_GROUP_SECP256R1
+            @test length(ecdsa_cert.public_key.point) == 65
+            @test first(ecdsa_cert.public_key.point) == 0x04
+        end
+
+        @test TLX._tls_verify_certificate_signature(rsa_cert, rsa_ca)
+        @test TLX._tls_verify_certificate_signature(ecdsa_cert, ecdsa_cert)
+        @test TLX._tls_verify_certificate_signature(rsa_ca, rsa_ca)
+    end
+
     @testset "native trust verifier accepts valid server and client chains" begin
         server_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
         client_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CLIENT_CERT_PATH))
-        server_key = Ptr{Cvoid}(C_NULL)
-        client_key = Ptr{Cvoid}(C_NULL)
-        try
-            server_key = TLX._tls13_verify_server_certificate_chain(
-                server_certs,
-                "localhost";
-                verify_peer = true,
-                verify_hostname = true,
-                ca_file = _TLS_CA_PATH,
-            )
-            client_key = TLX._tls13_verify_client_certificate_chain(
-                client_certs;
-                verify_peer = true,
-                ca_file = _TLS_CA_PATH,
-            )
-            @test server_key != C_NULL
-            @test client_key != C_NULL
-        finally
-            TLX._free_evp_pkey!(server_key)
-            TLX._free_evp_pkey!(client_key)
-        end
+        server_key = TLX._tls13_verify_server_certificate_chain(
+            server_certs,
+            "localhost";
+            verify_peer = true,
+            verify_hostname = true,
+            ca_file = _TLS_CA_PATH,
+        )
+        client_key = TLX._tls13_verify_client_certificate_chain(
+            client_certs;
+            verify_peer = true,
+            ca_file = _TLS_CA_PATH,
+        )
+        @test server_key isa TLX._TLSRSAPublicKey
+        @test client_key isa TLX._TLSRSAPublicKey
     end
 
     @testset "native trust store cache reuses unchanged CA roots" begin
@@ -231,19 +261,14 @@ end
             TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH)),
             TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CA_PATH)),
         )
-        pkey = Ptr{Cvoid}(C_NULL)
-        try
-            pkey = TLX._tls13_verify_server_certificate_chain(
-                server_certs,
-                "localhost";
-                verify_peer = true,
-                verify_hostname = true,
-                ca_file = _TLS_CA_PATH,
-            )
-            @test pkey != C_NULL
-        finally
-            TLX._free_evp_pkey!(pkey)
-        end
+        pkey = TLX._tls13_verify_server_certificate_chain(
+            server_certs,
+            "localhost";
+            verify_peer = true,
+            verify_hostname = true,
+            ca_file = _TLS_CA_PATH,
+        )
+        @test pkey isa TLX._TLSRSAPublicKey
     end
 
     @testset "native trust verifier supports CA directories" begin
@@ -253,19 +278,14 @@ end
             junk_path = joinpath(dir, "junk.bin")
             write(root_path, _read_bytes(_TLS_CA_PATH))
             write(junk_path, UInt8[0xff, 0xfe, 0xfd, 0xfc])
-            pkey = Ptr{Cvoid}(C_NULL)
-            try
-                pkey = TLX._tls13_verify_server_certificate_chain(
-                    certs,
-                    "localhost";
-                    verify_peer = true,
-                    verify_hostname = true,
-                    ca_file = dir,
-                )
-                @test pkey != C_NULL
-            finally
-                TLX._free_evp_pkey!(pkey)
-            end
+            pkey = TLX._tls13_verify_server_certificate_chain(
+                certs,
+                "localhost";
+                verify_peer = true,
+                verify_hostname = true,
+                ca_file = dir,
+            )
+            @test pkey isa TLX._TLSRSAPublicKey
         end
     end
 

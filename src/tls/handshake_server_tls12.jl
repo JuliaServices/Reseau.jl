@@ -160,7 +160,7 @@ mutable struct _TLS12ServerHandshakeState
     certificate_chain::Vector{Vector{UInt8}}
     private_key::Ptr{Cvoid}
     ecdhe_private_key::Ptr{Cvoid}
-    client_leaf_public_key::Ptr{Cvoid}
+    client_leaf_public_key::_TLSPublicKeyState
     peer_certificates::Vector{Vector{UInt8}}
     resumption_session::Union{Nothing, _TLS12ServerSession}
     using_resumption::Bool
@@ -189,7 +189,7 @@ function _TLS12ServerHandshakeState(config)::_TLS12ServerHandshakeState
         certificate_chain,
         private_key,
         C_NULL,
-        C_NULL,
+        nothing,
         Vector{Vector{UInt8}}(),
         nothing,
         false,
@@ -212,8 +212,7 @@ function _securezero_tls12_server_handshake_state!(state::_TLS12ServerHandshakeS
     state.private_key = C_NULL
     state.ecdhe_private_key == C_NULL || _free_evp_pkey!(state.ecdhe_private_key)
     state.ecdhe_private_key = C_NULL
-    state.client_leaf_public_key == C_NULL || _free_evp_pkey!(state.client_leaf_public_key)
-    state.client_leaf_public_key = C_NULL
+    state.client_leaf_public_key = nothing
     session = state.resumption_session
     session === nothing || _securezero_tls12_server_session!(session::_TLS12ServerSession)
     state.resumption_session = nothing
@@ -361,9 +360,8 @@ function _tls12_server_session_client_auth_ok(session::_TLS12ServerSession, conf
     end
     has_client_certificates || return true
     if mode == ClientAuthMode.VerifyClientCertIfGiven || mode == ClientAuthMode.RequireAndVerifyClientCert
-        pkey = Ptr{Cvoid}(C_NULL)
         try
-            pkey = _tls13_verify_client_certificate_chain(
+            _tls13_verify_client_certificate_chain(
                 session.client_certificates;
                 verify_peer = true,
                 ca_file = _effective_ca_file(config; is_server = true),
@@ -371,8 +369,6 @@ function _tls12_server_session_client_auth_ok(session::_TLS12ServerSession, conf
             return true
         catch
             return false
-        finally
-            _free_evp_pkey!(pkey)
         end
     end
     return true
@@ -503,8 +499,7 @@ function _tls12_read_client_certificate!(
     certificate = _unmarshal_handshake_message(raw, transcript, TLS1_2_VERSION)
     certificate isa _CertificateMsgTLS12 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 client Certificate")
     state.client_certificate = certificate::_CertificateMsgTLS12
-    state.client_leaf_public_key == C_NULL || _free_evp_pkey!(state.client_leaf_public_key)
-    state.client_leaf_public_key = C_NULL
+    state.client_leaf_public_key = nothing
     for cert in state.peer_certificates
         _securezero!(cert)
     end
@@ -524,7 +519,7 @@ function _tls12_read_client_certificate!(
             ca_file = _effective_ca_file(config; is_server = true),
         )
     else
-        _tls13_pubkey_from_der_certificate(state.client_certificate.certificates[1])
+        _tls_parse_der_certificate_info(state.client_certificate.certificates[1]).public_key
     end
     return nothing
 end
@@ -582,7 +577,7 @@ function _tls12_read_client_certificate_verify!(
         _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: client certificate used with invalid TLS 1.2 signature algorithm")
     transcript_bytes = _transcript_buffered_bytes(transcript)
     transcript_bytes === nothing && throw(ArgumentError("tls: TLS 1.2 server client-certificate verification requires a buffered transcript"))
-    _tls12_openssl_verify_signature(state.client_leaf_public_key, msg.signature_algorithm, transcript_bytes, msg.signature) ||
+    _tls12_openssl_verify_signature(state.client_leaf_public_key::_TLSPublicKey, msg.signature_algorithm, transcript_bytes, msg.signature) ||
         _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the TLS 1.2 client certificate")
     state.client_certificate_verify = msg
     _transcript_update!(transcript, raw)

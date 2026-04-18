@@ -1224,9 +1224,8 @@ function _tls12_try_load_client_session(config::Config, cache_key::AbstractStrin
         UInt64(floor(time())) <= session.use_by_s || return nothing
         in(session.cipher_suite, hello.cipher_suites) || return nothing
         if config.verify_peer || config.verify_hostname
-            pkey = Ptr{Cvoid}(C_NULL)
             try
-                pkey = _tls13_verify_server_certificate_chain(
+                _tls13_verify_server_certificate_chain(
                     session.certificates,
                     config.server_name === nothing ? "" : config.server_name::String;
                     verify_peer = config.verify_peer,
@@ -1236,8 +1235,6 @@ function _tls12_try_load_client_session(config::Config, cache_key::AbstractStrin
             catch
                 _tls12_session_cache_put!(config._client_session_cache12, cache_key, nothing)
                 return nothing
-            finally
-                _free_evp_pkey!(pkey)
             end
         end
         hello.ticket_supported = true
@@ -1292,9 +1289,8 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
         return nothing
     end
     if config.verify_peer || config.verify_hostname
-        pkey = Ptr{Cvoid}(C_NULL)
         try
-            pkey = _tls13_verify_server_certificate_chain(
+            _tls13_verify_server_certificate_chain(
                 session.certificates,
                 config.server_name === nothing ? "" : config.server_name::String;
                 verify_peer = config.verify_peer,
@@ -1305,8 +1301,6 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
             _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
             _securezero_tls13_client_session!(session)
             return nothing
-        finally
-            _free_evp_pkey!(pkey)
         end
     end
     ticket_age_ms = floor(UInt64, max(0.0, time() - Float64(session.created_at_s)) * 1000.0)

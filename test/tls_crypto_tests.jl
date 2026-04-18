@@ -225,6 +225,23 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
         @test !TLC._constant_time_equals(UInt8[0x01, 0x02], UInt8[0x01, 0x02, 0x03])
     end
 
+    @testset "public key copies own their byte storage" begin
+        rsa = TLC._TLSRSAPublicKey(UInt8[0x01, 0x02], UInt8[0x03])
+        rsa_copy = TLC._tls_copy_public_key(rsa)
+        rsa.modulus[1] = 0xff
+        @test rsa_copy.modulus == UInt8[0x01, 0x02]
+
+        ec = TLC._TLSECPublicKey(TLC.P256, UInt8[0x04, 0x05, 0x06])
+        ec_copy = TLC._tls_copy_public_key(ec)
+        ec.point[2] = 0xaa
+        @test ec_copy.point == UInt8[0x04, 0x05, 0x06]
+
+        ed = TLC._TLSEd25519PublicKey(UInt8[0x10, 0x11, 0x12])
+        ed_copy = TLC._tls_copy_public_key(ed)
+        ed.key[3] = 0xee
+        @test ed_copy.key == UInt8[0x10, 0x11, 0x12]
+    end
+
     @testset "TLS 1.2 cipher specs and signature helpers" begin
         @test TLC._tls12_cipher_spec(TLC._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID) == TLC._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256
         @test TLC._tls12_cipher_spec(TLC._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID) == TLC._TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384
@@ -232,14 +249,10 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
 
         signed = UInt8[0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22]
         signature = TLC._tls12_openssl_sign_from_pem(TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, _TLS12_TEST_KEY_PEM)
-        pubkey = TLC._tls13_pubkey_from_der_certificate(TLC._tls13_openssl_certificate_der(_TLS12_TEST_CERT_PEM))
-        try
-            @test TLC._tls12_openssl_verify_signature(pubkey, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, signature)
-            tampered = copy(signature)
-            tampered[end] = xor(tampered[end], 0x01)
-            @test !TLC._tls12_openssl_verify_signature(pubkey, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, tampered)
-        finally
-            TLC._free_evp_pkey!(pubkey)
-        end
+        cert_info = TLC._tls_parse_der_certificate_info(TLC._tls13_openssl_certificate_der(_TLS12_TEST_CERT_PEM))
+        @test TLC._tls12_openssl_verify_signature(cert_info.public_key, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, signature)
+        tampered = copy(signature)
+        tampered[end] = xor(tampered[end], 0x01)
+        @test !TLC._tls12_openssl_verify_signature(cert_info.public_key, TLC._TLS_SIGNATURE_RSA_PKCS1_SHA256, signed, tampered)
     end
 end

@@ -18,6 +18,42 @@ struct _TLS13CipherSpec
     iv_length::Int
 end
 
+struct _TLSRSAPublicKey
+    modulus::Vector{UInt8}
+    exponent::Vector{UInt8}
+end
+_TLSRSAPublicKey(modulus::AbstractVector{UInt8}, exponent::AbstractVector{UInt8}) =
+    _TLSRSAPublicKey(Vector{UInt8}(modulus), Vector{UInt8}(exponent))
+
+struct _TLSECPublicKey
+    curve_id::UInt16
+    point::Vector{UInt8}
+end
+_TLSECPublicKey(curve_id::UInt16, point::AbstractVector{UInt8}) =
+    _TLSECPublicKey(curve_id, Vector{UInt8}(point))
+
+struct _TLSEd25519PublicKey
+    key::Vector{UInt8}
+end
+_TLSEd25519PublicKey(key::AbstractVector{UInt8}) = _TLSEd25519PublicKey(Vector{UInt8}(key))
+
+const _TLSPublicKey = Union{
+    _TLSRSAPublicKey,
+    _TLSECPublicKey,
+    _TLSEd25519PublicKey,
+}
+
+const _TLSPublicKeyState = Union{
+    Nothing,
+    _TLSRSAPublicKey,
+    _TLSECPublicKey,
+    _TLSEd25519PublicKey,
+}
+
+@inline _tls_copy_public_key(key::_TLSRSAPublicKey) = _TLSRSAPublicKey(copy(key.modulus), copy(key.exponent))
+@inline _tls_copy_public_key(key::_TLSECPublicKey) = _TLSECPublicKey(key.curve_id, copy(key.point))
+@inline _tls_copy_public_key(key::_TLSEd25519PublicKey) = _TLSEd25519PublicKey(copy(key.key))
+
 const _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID = UInt16(0xc02f)
 const _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID = UInt16(0xc030)
 const _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID = UInt16(0xc02b)

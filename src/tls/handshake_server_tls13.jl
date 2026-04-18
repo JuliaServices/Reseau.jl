@@ -172,7 +172,7 @@ mutable struct _TLS13ServerHandshakeState
     transcript::_TLS13TranscriptState
     key_share_provider::_TLS13OpenSSLKeyShareProvider
     private_key::Ptr{Cvoid}
-    client_leaf_public_key::Ptr{Cvoid}
+    client_leaf_public_key::_TLSPublicKeyState
     certificate_chain::Vector{Vector{UInt8}}
     peer_certificates::Vector{Vector{UInt8}}
     selected_signature_algorithm::UInt16
@@ -220,7 +220,7 @@ function _TLS13ServerHandshakeState(config)::_TLS13ServerHandshakeState
         _new_tls13_handshake_transcript(_HASH_SHA256),
         _TLS13OpenSSLKeyShareProvider(),
         private_key,
-        C_NULL,
+        nothing,
         certificate_chain,
         Vector{Vector{UInt8}}(),
         UInt16(0),
@@ -248,8 +248,7 @@ function _securezero_tls13_server_handshake_state!(state::_TLS13ServerHandshakeS
     _securezero_tls13_key_share_provider!(state.key_share_provider)
     state.private_key == C_NULL || _free_evp_pkey!(state.private_key)
     state.private_key = C_NULL
-    state.client_leaf_public_key == C_NULL || _free_evp_pkey!(state.client_leaf_public_key)
-    state.client_leaf_public_key = C_NULL
+    state.client_leaf_public_key = nothing
     _securezero!(state.client_hello_raw)
     _securezero!(state.server_hello_raw)
     _securezero!(state.shared_secret)
@@ -429,9 +428,8 @@ function _tls13_server_session_client_auth_ok(session::_TLS13ServerSession, conf
     end
     has_client_certificates || return true
     if mode == ClientAuthMode.VerifyClientCertIfGiven || mode == ClientAuthMode.RequireAndVerifyClientCert
-        pkey = Ptr{Cvoid}(C_NULL)
         try
-            pkey = _tls13_verify_client_certificate_chain(
+            _tls13_verify_client_certificate_chain(
                 session.client_certificates;
                 verify_peer = true,
                 ca_file = _effective_ca_file(config; is_server = true),
@@ -439,8 +437,6 @@ function _tls13_server_session_client_auth_ok(session::_TLS13ServerSession, conf
             return true
         catch
             return false
-        finally
-            _free_evp_pkey!(pkey)
         end
     end
     return true
@@ -632,8 +628,7 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
     msg === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Certificate")
     state.client_certificate = msg
     _transcript_update!(state.transcript, raw)
-    state.client_leaf_public_key == C_NULL || _free_evp_pkey!(state.client_leaf_public_key)
-    state.client_leaf_public_key = C_NULL
+    state.client_leaf_public_key = nothing
     state.peer_certificates = [copy(cert) for cert in msg.certificates]
     has_client_certificates = !isempty(msg.certificates)
     if !has_client_certificates
@@ -655,7 +650,7 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
         _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: client certificate used with invalid signature algorithm")
     signed = _tls13_signed_message(_TLS13_CLIENT_SIGNATURE_CONTEXT, state.transcript)
     try
-        _tls13_openssl_verify_signature(state.client_leaf_public_key, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
+        _tls13_openssl_verify_signature(state.client_leaf_public_key::_TLSPublicKey, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
             _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the client certificate")
     finally
         _securezero!(signed)

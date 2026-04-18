@@ -326,19 +326,6 @@ function _tls12_select_cipher_spec!(state::_TLS12ClientHandshakeState)::Nothing
     return nothing
 end
 
-function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::Ptr{Cvoid})::Nothing
-    pkey_type = _tls13_pkey_type_name(pubkey)
-    if cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID ||
-       cipher_suite == _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID
-        pkey_type == "EC" ||
-            _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server selected an ECDSA-authenticated TLS 1.2 cipher suite without an ECDSA certificate")
-        return nothing
-    end
-    pkey_type == "RSA" ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server selected an RSA-authenticated TLS 1.2 cipher suite without an RSA certificate")
-    return nothing
-end
-
 function _tls12_parse_server_key_exchange(msg::_ServerKeyExchangeMsgTLS12)
     reader = _HandshakeReader(msg.key)
     curve_type = _read_u8!(reader)
@@ -362,9 +349,29 @@ function _tls12_parse_server_key_exchange(msg::_ServerKeyExchangeMsgTLS12)
     )
 end
 
+function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::_TLSRSAPublicKey)::Nothing
+    cipher_suite in (
+        _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
+        _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
+    ) || _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+    return nothing
+end
+
+function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::_TLSECPublicKey)::Nothing
+    cipher_suite in (
+        _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
+        _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,
+    ) || _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+    return nothing
+end
+
+@inline function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::_TLSEd25519PublicKey)::Nothing
+    _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+end
+
 function _tls12_verify_server_key_exchange!(
     state::_TLS12ClientHandshakeState,
-    pubkey::Ptr{Cvoid},
+    pubkey::_TLSPublicKey,
     server_key_exchange::_ServerKeyExchangeMsgTLS12,
 )::NamedTuple
     params = _tls12_parse_server_key_exchange(server_key_exchange)
@@ -436,7 +443,7 @@ function _tls12_read_server_flight!(
     io::_TLS12HandshakeRecordIO,
     config,
     transcript::_TLS12TranscriptState,
-)::Tuple{Ptr{Cvoid}, NamedTuple}
+)::Tuple{_TLSPublicKey, NamedTuple}
     state.certificate_request = _CertificateRequestMsgTLS12()
     state.have_certificate_request = false
     raw_certificate = _read_handshake_bytes!(io)
@@ -674,7 +681,6 @@ function _client_handshake_tls12_for_suite!(
     hash_kind::_TLSHashKind,
     cache_key::AbstractString,
 )::Nothing
-    pubkey = Ptr{Cvoid}(C_NULL)
     shared_secret = UInt8[]
     master_secret = UInt8[]
     client_verify_data = UInt8[]
@@ -744,7 +750,6 @@ function _client_handshake_tls12_for_suite!(
         end
         _tls12_save_client_session!(state, config, cache_key, master_secret)
     finally
-        _free_evp_pkey!(pubkey)
         _securezero!(shared_secret)
         _securezero!(master_secret)
         _securezero!(client_verify_data)
