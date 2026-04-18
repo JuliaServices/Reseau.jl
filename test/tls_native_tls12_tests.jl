@@ -138,8 +138,8 @@ function _tls12_unexpected_message_error(f)
     catch err
         err
     end
-    @test err isa TL12N._TLS13AlertError
-    tls_err = err::TL12N._TLS13AlertError
+    @test err isa TL12N._TLSAlertError
+    tls_err = err::TL12N._TLSAlertError
     @test tls_err.alert == TL12N._TLS_ALERT_UNEXPECTED_MESSAGE
     return tls_err
 end
@@ -185,7 +185,7 @@ end
         try
             listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
             state = TL12N._TLS12NativeState()
-            TL12N._tls13_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61], TL12N.TLS1_2_VERSION)
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[0x61], TL12N.TLS1_2_VERSION)
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
             @test !tls_err.from_peer
         finally
@@ -205,7 +205,7 @@ end
             read_key = UInt8[UInt8(0x20 + i) for i in 0:15]
             read_iv = UInt8[0xb0, 0xb1, 0xb2, 0xb3]
             TL12N._tls12_set_read_cipher!(state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, read_key, read_iv)
-            TL12N._tls13_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, UInt8[0x01], TL12N.TLS1_2_VERSION)
+            TL12N._tls_write_tls_plaintext!(client_tcp, TL12N._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, UInt8[0x01], TL12N.TLS1_2_VERSION)
             tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, state))
             @test !tls_err.from_peer
         finally
@@ -282,9 +282,9 @@ end
             catch ex
                 ex
             end
-            @test err isa TL12N._TLS13AlertError
-            if err isa TL12N._TLS13AlertError
-                @test (err::TL12N._TLS13AlertError).alert == TL12N._TLS_ALERT_ILLEGAL_PARAMETER
+            @test err isa TL12N._TLSAlertError
+            if err isa TL12N._TLSAlertError
+                @test (err::TL12N._TLSAlertError).alert == TL12N._TLS_ALERT_ILLEGAL_PARAMETER
             end
         finally
             state === nothing || TL12N._securezero_tls12_server_handshake_state!(state)

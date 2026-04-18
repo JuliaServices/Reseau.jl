@@ -300,26 +300,26 @@ end
 
 function _tls12_select_cipher_spec!(state::_TLS12ClientHandshakeState)::Nothing
     server_hello = state.server_hello
-    server_hello.vers == TLS1_2_VERSION || _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server negotiated an unexpected TLS version")
+    server_hello.vers == TLS1_2_VERSION || _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server negotiated an unexpected TLS version")
     server_hello.compression_method == _TLS_COMPRESSION_NONE ||
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected unsupported TLS 1.2 compression")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected unsupported TLS 1.2 compression")
     server_hello.supported_version == UInt16(0) ||
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 ServerHello must not include supported_versions")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 ServerHello must not include supported_versions")
     server_hello.server_share === nothing ||
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 ServerHello must not include key_share")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 ServerHello must not include key_share")
     server_hello.selected_identity_present &&
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 ServerHello must not include selected PSK identity")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 ServerHello must not include selected PSK identity")
     in(server_hello.cipher_suite, state.client_hello.cipher_suites) ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server selected an unconfigured TLS 1.2 cipher suite")
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server selected an unconfigured TLS 1.2 cipher suite")
     _tls12_cipher_spec(server_hello.cipher_suite) === nothing &&
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server selected an unsupported native TLS 1.2 cipher suite")
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server selected an unsupported native TLS 1.2 cipher suite")
     server_hello.ticket_supported && !state.client_hello.ticket_supported &&
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server announced an unrequested TLS 1.2 session ticket")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server announced an unrequested TLS 1.2 session ticket")
     server_hello.extended_master_secret ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client requires extended master secret")
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client requires extended master secret")
     if !isempty(server_hello.alpn_protocol)
         in(server_hello.alpn_protocol, state.client_hello.alpn_protocols) ||
-            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an unexpected ALPN protocol")
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an unexpected ALPN protocol")
         state.client_protocol = server_hello.alpn_protocol
     end
     state.cipher_suite = server_hello.cipher_suite
@@ -334,9 +334,9 @@ function _tls12_parse_server_key_exchange(msg::_ServerKeyExchangeMsgTLS12)
     signature_algorithm = _read_u16!(reader)
     signature = _read_u16_length_prefixed_bytes!(reader)
     (curve_type === nothing || group === nothing || public_key === nothing || signature_algorithm === nothing || signature === nothing || !_reader_empty(reader)) &&
-        _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerKeyExchange")
-    curve_type == 0x03 || _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 server selected an unsupported ECDHE curve type")
-    isempty(public_key) && _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.2 server key share is empty")
+        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerKeyExchange")
+    curve_type == 0x03 || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: TLS 1.2 server selected an unsupported ECDHE curve type")
+    isempty(public_key) && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.2 server key share is empty")
     params_len = 4 + length(public_key)
     params = Vector{UInt8}(undef, params_len)
     copyto!(params, 1, msg.key, 1, params_len)
@@ -353,7 +353,7 @@ function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::
     cipher_suite in (
         _TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256_ID,
         _TLS12_ECDHE_RSA_WITH_AES_256_GCM_SHA384_ID,
-    ) || _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+    ) || _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
     return nothing
 end
 
@@ -361,12 +361,12 @@ function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::
     cipher_suite in (
         _TLS12_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256_ID,
         _TLS12_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384_ID,
-    ) || _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+    ) || _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
     return nothing
 end
 
 @inline function _tls12_server_certificate_matches_suite!(cipher_suite::UInt16, pubkey::_TLSEd25519PublicKey)::Nothing
-    _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
+    _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: TLS 1.2 server certificate is incompatible with the selected cipher suite")
 end
 
 function _tls12_verify_server_key_exchange!(
@@ -382,7 +382,7 @@ function _tls12_verify_server_key_exchange!(
         append!(signed, state.server_hello.random)
         append!(signed, params.params)
         _tls12_openssl_verify_signature(pubkey, params.signature_algorithm, signed, params.signature) ||
-            _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 ServerKeyExchange signature")
+            _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 ServerKeyExchange signature")
         return params
     finally
         _securezero!(signed)
@@ -396,9 +396,9 @@ function _tls12_generate_client_key_exchange(
     server_public_key::AbstractVector{UInt8},
 )
     in(group, advertised_curves) ||
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an unadvertised TLS 1.2 ECDHE curve")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an unadvertised TLS 1.2 ECDHE curve")
     if group != _TLS_GROUP_X25519 && group != _TLS_GROUP_SECP256R1
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client does not support ECDHE group $(string(group, base = 16))")
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: native TLS 1.2 client does not support ECDHE group $(string(group, base = 16))")
     end
     private_key = group == _TLS_GROUP_X25519 ? _tls13_x25519_generate_private_key() : _tls13_p256_generate_private_key()
     client_public_key = UInt8[]
@@ -423,7 +423,7 @@ end
 function _tls12_set_server_hello!(state::_TLS12ClientHandshakeState, raw_server_hello::Vector{UInt8})::Nothing
     _tls12_require_handshake_message(raw_server_hello, _HANDSHAKE_TYPE_SERVER_HELLO, "ServerHello")
     server_hello = _unmarshal_handshake_message(raw_server_hello, nothing, TLS1_2_VERSION)
-    server_hello isa _ServerHelloMsg || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerHello")
+    server_hello isa _ServerHelloMsg || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerHello")
     state.server_hello = server_hello::_ServerHelloMsg
     _tls12_select_cipher_spec!(state)
     return nothing
@@ -449,7 +449,7 @@ function _tls12_read_server_flight!(
     raw_certificate = _read_handshake_bytes!(io)
     _tls12_require_handshake_message(raw_certificate, _HANDSHAKE_TYPE_CERTIFICATE, "Certificate")
     certificate = _unmarshal_handshake_message(raw_certificate, transcript, TLS1_2_VERSION)
-    certificate isa _CertificateMsgTLS12 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Certificate")
+    certificate isa _CertificateMsgTLS12 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Certificate")
     state.server_certificate = certificate::_CertificateMsgTLS12
     pubkey = _tls13_verify_server_certificate_chain(
         state.server_certificate.certificates,
@@ -463,7 +463,7 @@ function _tls12_read_server_flight!(
     raw_server_key_exchange = _read_handshake_bytes!(io)
     _tls12_require_handshake_message(raw_server_key_exchange, _HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE, "ServerKeyExchange")
     server_key_exchange = _unmarshal_handshake_message(raw_server_key_exchange, transcript, TLS1_2_VERSION)
-    server_key_exchange isa _ServerKeyExchangeMsgTLS12 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerKeyExchange")
+    server_key_exchange isa _ServerKeyExchangeMsgTLS12 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerKeyExchange")
     state.server_key_exchange = server_key_exchange::_ServerKeyExchangeMsgTLS12
     key_exchange = _tls12_verify_server_key_exchange!(state, pubkey, state.server_key_exchange)
 
@@ -471,14 +471,14 @@ function _tls12_read_server_flight!(
     if raw_next[1] == _HANDSHAKE_TYPE_CERTIFICATE_REQUEST
         certificate_request = _unmarshal_handshake_message(raw_next, transcript, TLS1_2_VERSION)
         certificate_request isa _CertificateRequestMsgTLS12 ||
-            _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 CertificateRequest")
+            _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 CertificateRequest")
         state.certificate_request = certificate_request::_CertificateRequestMsgTLS12
         state.have_certificate_request = true
         raw_next = _read_handshake_bytes!(io)
     end
     _tls12_require_handshake_message(raw_next, _HANDSHAKE_TYPE_SERVER_HELLO_DONE, "ServerHelloDone")
     _unmarshal_handshake_message(raw_next, transcript, TLS1_2_VERSION) isa _ServerHelloDoneMsgTLS12 ||
-        _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerHelloDone")
+        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerHelloDone")
     return pubkey, key_exchange
 end
 
@@ -543,7 +543,7 @@ function _tls12_read_new_session_ticket!(state::_TLS12ClientHandshakeState, io::
     raw = _read_handshake_bytes!(io)
     _tls12_require_handshake_message(raw, _HANDSHAKE_TYPE_NEW_SESSION_TICKET, "NewSessionTicket")
     ticket = _unmarshal_handshake_message(raw, transcript, TLS1_2_VERSION)
-    ticket isa _NewSessionTicketMsgTLS12 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 NewSessionTicket")
+    ticket isa _NewSessionTicketMsgTLS12 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 NewSessionTicket")
     state.new_session_ticket = ticket::_NewSessionTicketMsgTLS12
     state.have_new_session_ticket = true
     return nothing
@@ -603,11 +603,11 @@ function _tls12_resumed_handshake!(
     session = state.resumption_session
     session === nothing && throw(ArgumentError("tls: missing TLS 1.2 resumption session"))
     session.version == TLS1_2_VERSION ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server resumed a TLS 1.2 session with a different version")
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server resumed a TLS 1.2 session with a different version")
     session.cipher_suite == state.cipher_suite ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server resumed a TLS 1.2 session with a different cipher suite")
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server resumed a TLS 1.2 session with a different cipher suite")
     session.ext_master_secret == state.server_hello.extended_master_secret ||
-        _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server resumed a TLS 1.2 session with a different EMS extension")
+        _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: server resumed a TLS 1.2 session with a different EMS extension")
     master_secret = copy(session.secret)
     client_verify_data = UInt8[]
     expected_server_verify_data = UInt8[]
@@ -621,8 +621,8 @@ function _tls12_resumed_handshake!(
     try
         client_mac, server_mac, client_key, server_key, client_iv, server_iv =
             _tls12_keys_from_master_secret(hash_kind, master_secret, state.client_hello.random, state.server_hello.random, 0, cipher_spec.key_length, cipher_spec.iv_length)
-        isempty(client_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        isempty(server_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
         state.server_hello.ticket_supported && _tls12_read_new_session_ticket!(state, io, transcript)
         io.state.allow_encrypted_handshake = true
         try
@@ -631,16 +631,16 @@ function _tls12_resumed_handshake!(
             raw_server_finished = _read_handshake_bytes!(io)
             _tls12_require_handshake_message(raw_server_finished, _HANDSHAKE_TYPE_FINISHED, "Finished")
             server_finished = _unmarshal_finished(raw_server_finished)
-            server_finished === nothing && _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Finished")
+            server_finished === nothing && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Finished")
             expected_server_verify_data = _tls12_server_finished_verify_data(hash_kind, master_secret, transcript)
             _constant_time_equals((server_finished::_FinishedMsg).verify_data, expected_server_verify_data) ||
-                _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 Finished verify_data")
+                _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 Finished verify_data")
             _transcript_update!(transcript, raw_server_finished)
         finally
             io.state.allow_encrypted_handshake = false
         end
         _tls12_set_write_cipher!(io.state, cipher_spec, client_key, client_iv)
-        _tls13_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
+        _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         raw_client_finished = _write_handshake_message(_FinishedMsg(client_verify_data), transcript)
         _tls12_write_record!(io.tcp, io.state.write_cipher, _TLS_RECORD_TYPE_HANDSHAKE, raw_client_finished)
@@ -664,7 +664,7 @@ function _tls12_read_change_cipher_spec!(io::_TLS12HandshakeRecordIO)::Nothing
     while true
         _tls12_take_received_change_cipher_spec!(io.state) && return nothing
         raw = _tls12_try_take_handshake_message!(io.state)
-        raw === nothing || _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected TLS 1.2 handshake message before ChangeCipherSpec")
+        raw === nothing || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected TLS 1.2 handshake message before ChangeCipherSpec")
         io.state.peer_close_notify && throw(EOFError())
         _tls12_read_record!(io.tcp, io.state)
     end
@@ -723,10 +723,10 @@ function _client_handshake_tls12_for_suite!(
         _tls12_write_client_certificate_verify!(state, io, transcript)
         client_mac, server_mac, client_key, server_key, client_iv, server_iv =
             _tls12_keys_from_master_secret(hash_kind, master_secret, state.client_hello.random, state.server_hello.random, 0, cipher_spec.key_length, cipher_spec.iv_length)
-        isempty(client_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        isempty(server_mac) || _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
         _tls12_set_write_cipher!(io.state, cipher_spec, client_key, client_iv)
-        _tls13_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
+        _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         client_finished = _FinishedMsg(client_verify_data)
         raw_client_finished = _write_handshake_message(client_finished, transcript)
@@ -740,10 +740,10 @@ function _client_handshake_tls12_for_suite!(
             raw_server_finished = _read_handshake_bytes!(io)
             _tls12_require_handshake_message(raw_server_finished, _HANDSHAKE_TYPE_FINISHED, "Finished")
             server_finished = _unmarshal_finished(raw_server_finished)
-            server_finished === nothing && _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Finished")
+            server_finished === nothing && _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 Finished")
             expected_server_verify_data = _tls12_server_finished_verify_data(hash_kind, master_secret, transcript)
             _constant_time_equals((server_finished::_FinishedMsg).verify_data, expected_server_verify_data) ||
-                _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 Finished verify_data")
+                _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 Finished verify_data")
             _transcript_update!(transcript, raw_server_finished)
         finally
             io.state.allow_encrypted_handshake = false
@@ -801,7 +801,7 @@ function _client_handshake_tls12_after_server_hello!(
             cache_key,
         )
     end
-    _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 cipher suite")
+    _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: unsupported native TLS 1.2 cipher suite")
 end
 
 function _client_handshake_tls12!(state::_TLS12ClientHandshakeState, io::_TLS12HandshakeRecordIO, config)::Nothing

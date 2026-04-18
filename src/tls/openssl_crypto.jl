@@ -137,18 +137,6 @@ struct _TLSSignatureVerifySpec
     rsa_pss::Bool
 end
 
-struct _TLS13AlertError <: Exception
-    message::String
-    alert::UInt8
-    from_peer::Bool
-end
-
-Base.showerror(io::IO, err::_TLS13AlertError) = print(io, err.message)
-
-@inline _tls13_protocol_error(alert::UInt8, message::AbstractString) = _TLS13AlertError(String(message), alert, false)
-@inline _tls13_peer_alert_error(alert::UInt8, message::AbstractString) = _TLS13AlertError(String(message), alert, true)
-@inline _tls13_fail(alert::UInt8, message::AbstractString)::Union{} = throw(_tls13_protocol_error(alert, message))
-
 struct _OpenSSLParam
     key::Cstring
     data_type::Cuint
@@ -482,8 +470,8 @@ function _tls13_check_x509_peer_name!(cert_der::AbstractVector{UInt8}, peer_name
     cert_info = try
         _tls_parse_der_certificate_info(cert_der)
     catch ex
-        ex isa _TLS13AlertError && rethrow()
-        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
+        ex isa _TLSAlertError && rethrow()
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
     end
     _tls_verify_certificate_peer_name!(cert_info, peer_name)
     return nothing
@@ -643,7 +631,7 @@ function _tls13_x25519_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::A
         end
         if iszero(all_zero)
             _securezero!(out)
-            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid X25519 shared secret")
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: invalid X25519 shared secret")
         end
         return out
     finally
@@ -1205,7 +1193,7 @@ function _tls12_decrypt_record_aead(
     additional_data::AbstractVector{UInt8},
     ciphertext_and_tag::AbstractVector{UInt8},
 )::Union{Vector{UInt8}, Nothing}
-    length(ciphertext_and_tag) >= 16 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.2 ciphertext is missing the authentication tag")
+    length(ciphertext_and_tag) >= 16 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.2 ciphertext is missing the authentication tag")
     key_bytes = key isa Vector{UInt8} ? key : Vector{UInt8}(key)
     iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
     aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)
@@ -1339,7 +1327,7 @@ function _tls13_decrypt_record_aead(
     additional_data::AbstractVector{UInt8},
     ciphertext_and_tag::AbstractVector{UInt8},
 )::Union{Vector{UInt8}, Nothing}
-    length(ciphertext_and_tag) >= 16 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.3 ciphertext is missing the authentication tag")
+    length(ciphertext_and_tag) >= 16 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: TLS 1.3 ciphertext is missing the authentication tag")
     key_bytes = key isa Vector{UInt8} ? key : Vector{UInt8}(key)
     iv_bytes = iv isa Vector{UInt8} ? iv : Vector{UInt8}(iv)
     aad_bytes = additional_data isa Vector{UInt8} ? additional_data : Vector{UInt8}(additional_data)

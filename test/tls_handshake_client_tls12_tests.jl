@@ -125,9 +125,9 @@ end
             catch ex
                 ex
             end
-            @test err isa TL12H._TLS13AlertError
-            if err isa TL12H._TLS13AlertError
-                @test (err::TL12H._TLS13AlertError).alert == TL12H._TLS_ALERT_ILLEGAL_PARAMETER
+            @test err isa TL12H._TLSAlertError
+            if err isa TL12H._TLSAlertError
+                @test (err::TL12H._TLSAlertError).alert == TL12H._TLS_ALERT_ILLEGAL_PARAMETER
             end
         finally
             TL12H._free_evp_pkey!(pkey)
@@ -144,8 +144,8 @@ end
         catch ex
             ex
         end
-        @test err isa TL12H._TLS13AlertError
-        if err isa TL12H._TLS13AlertError
+        @test err isa TL12H._TLSAlertError
+        if err isa TL12H._TLSAlertError
             @test err.alert == TL12H._TLS_ALERT_HANDSHAKE_FAILURE
         end
     end

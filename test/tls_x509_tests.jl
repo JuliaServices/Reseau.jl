@@ -168,8 +168,8 @@ end
         catch ex
             ex
         end
-        @test host_err isa TLX._TLS13AlertError
-        if host_err isa TLX._TLS13AlertError
+        @test host_err isa TLX._TLSAlertError
+        if host_err isa TLX._TLSAlertError
             @test occursin("certificate is not valid for host example.com", host_err.message)
         end
 
@@ -181,8 +181,8 @@ end
         catch ex
             ex
         end
-        @test legacy_err isa TLX._TLS13AlertError
-        if legacy_err isa TLX._TLS13AlertError
+        @test legacy_err isa TLX._TLSAlertError
+        if legacy_err isa TLX._TLSAlertError
             @test occursin("legacy Common Name", legacy_err.message)
         end
     end
@@ -194,8 +194,8 @@ end
         catch ex
             ex
         end
-        @test err isa TLX._TLS13AlertError
-        if err isa TLX._TLS13AlertError
+        @test err isa TLX._TLSAlertError
+        if err isa TLX._TLSAlertError
             @test err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
             @test occursin("malformed X.509 certificate", err.message)
         end
@@ -326,8 +326,8 @@ end
         catch ex
             ex
         end
-        @test unknown_err isa TLX._TLS13AlertError
-        if unknown_err isa TLX._TLS13AlertError
+        @test unknown_err isa TLX._TLSAlertError
+        if unknown_err isa TLX._TLSAlertError
             @test unknown_err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
             @test occursin("unknown authority", unknown_err.message)
         end
@@ -348,8 +348,8 @@ end
                 ex
             end
         end
-        @test ca_load_err isa TLX._TLS13AlertError
-        if ca_load_err isa TLX._TLS13AlertError
+        @test ca_load_err isa TLX._TLSAlertError
+        if ca_load_err isa TLX._TLSAlertError
             @test ca_load_err.alert == TLX._TLS_ALERT_INTERNAL_ERROR
             @test occursin("failed to load CA roots", ca_load_err.message)
         end
@@ -366,8 +366,8 @@ end
         catch ex
             ex
         end
-        @test malformed_err isa TLX._TLS13AlertError
-        if malformed_err isa TLX._TLS13AlertError
+        @test malformed_err isa TLX._TLSAlertError
+        if malformed_err isa TLX._TLSAlertError
             @test malformed_err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
             @test occursin("malformed X.509 certificate", malformed_err.message)
         end
@@ -384,8 +384,8 @@ end
         catch ex
             ex
         end
-        @test wrong_server_usage isa TLX._TLS13AlertError
-        if wrong_server_usage isa TLX._TLS13AlertError
+        @test wrong_server_usage isa TLX._TLSAlertError
+        if wrong_server_usage isa TLX._TLSAlertError
             @test occursin("server authentication", wrong_server_usage.message)
         end
 
@@ -399,8 +399,8 @@ end
         catch ex
             ex
         end
-        @test wrong_client_usage isa TLX._TLS13AlertError
-        if wrong_client_usage isa TLX._TLS13AlertError
+        @test wrong_client_usage isa TLX._TLSAlertError
+        if wrong_client_usage isa TLX._TLSAlertError
             @test occursin("client authentication", wrong_client_usage.message)
         end
     end
@@ -419,8 +419,8 @@ end
         catch ex
             ex
         end
-        @test err isa TLX._TLS13AlertError
-        if err isa TLX._TLS13AlertError
+        @test err isa TLX._TLSAlertError
+        if err isa TLX._TLSAlertError
             @test err.alert == TLX._TLS_ALERT_INTERNAL_ERROR
             @test occursin("requires a peer name", err.message)
         end

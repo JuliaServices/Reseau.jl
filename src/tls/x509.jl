@@ -988,7 +988,7 @@ function _tls_verify_certificate_peer_name!(cert::_TLSCertificateInfo, peer_name
         for candidate in cert.ip_addresses
             _tls_ip_bytes_equal(candidate, ip_bytes) && return nothing
         end
-        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate is not valid for IP address $(verify_ip)")
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate is not valid for IP address $(verify_ip)")
     end
     verify_name = _verify_name(normalized)
     candidate_name = _tls_ascii_lowercase(verify_name)
@@ -1001,7 +1001,7 @@ function _tls_verify_certificate_peer_name!(cert::_TLSCertificateInfo, peer_name
             _tls_match_exactly_normalized(match_name, candidate_name) && return nothing
         end
     end
-    _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: $(_tls_certificate_hostname_error(cert, verify_name))")
+    _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: $(_tls_certificate_hostname_error(cert, verify_name))")
 end
 
 struct _TLSTrustStore
@@ -1226,29 +1226,29 @@ function _tls_verify_peer_certificate_chain!(
     store::_TLSTrustStore,
     purpose::AbstractString,
 )::_TLSCertificateInfo
-    isempty(certificates) && _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
+    isempty(certificates) && _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
     parsed = _TLSCertificateInfo[]
     try
         for cert_der in certificates
             push!(parsed, _tls_parse_der_certificate_info(cert_der))
         end
     catch ex
-        ex isa _TLS13AlertError && rethrow()
-        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
+        ex isa _TLSAlertError && rethrow()
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
     end
     leaf = parsed[1]
     now_s = Int64(floor(time()))
     _tls_certificate_valid_now(leaf, now_s) ||
-        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: $(_tls_certificate_current_time_message(leaf))")
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: $(_tls_certificate_current_time_message(leaf))")
     _tls_certificate_usage_permitted(leaf, purpose) ||
-        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
             "tls: certificate is not authorized for server authentication" :
             "tls: certificate is not authorized for client authentication")
     _tls_trust_anchor_matches(leaf, store) && return leaf
     intermediates = length(parsed) > 1 ? parsed[2:end] : _TLSCertificateInfo[]
     remaining_candidates = Ref(_TLS_MAX_CHAIN_CANDIDATES)
     _tls_build_chain_to_trust_anchor!(leaf, intermediates, store, _TLSCertificateInfo[leaf], now_s, remaining_candidates) ||
-        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate signed by unknown authority")
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate signed by unknown authority")
     return leaf
 end
 
@@ -1260,26 +1260,26 @@ function _tls_verify_certificate_chain(
     purpose::AbstractString,
     peer_name::AbstractString = "",
 )::_TLSPublicKey
-    isempty(certificates) && _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
+    isempty(certificates) && _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
     leaf = if verify_peer
-        ca_file === nothing && _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: certificate verification requires a CA roots path")
+        ca_file === nothing && _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: certificate verification requires a CA roots path")
         store = try
             _tls_load_trust_store(ca_file::String)
         catch ex
-            ex isa _TLS13AlertError && rethrow()
-            _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: failed to load CA roots")
+            ex isa _TLSAlertError && rethrow()
+            _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: failed to load CA roots")
         end
         _tls_verify_peer_certificate_chain!(certificates, store, purpose)
     else
         try
             _tls_parse_der_certificate_info(certificates[1])
         catch ex
-            ex isa _TLS13AlertError && rethrow()
-            _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
+            ex isa _TLSAlertError && rethrow()
+            _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: malformed X.509 certificate")
         end
     end
     verify_hostname && isempty(peer_name) &&
-        _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: hostname verification requires a peer name")
+        _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: hostname verification requires a peer name")
     verify_hostname && _tls_verify_certificate_peer_name!(leaf, peer_name)
     return _tls_copy_public_key(leaf.public_key)
 end

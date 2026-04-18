@@ -280,7 +280,7 @@ function _tls13_select_server_cipher_suite(client_hello::_ClientHelloMsg)::Tuple
         in(cipher_suite, client_hello.cipher_suites) || continue
         return cipher_suite, (_tls13_cipher_spec(cipher_suite)::_TLS13CipherSpec)
     end
-    _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported TLS 1.3 cipher suite")
+    _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported TLS 1.3 cipher suite")
 end
 
 function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
@@ -308,7 +308,7 @@ function _tls13_server_preferred_group(client_hello::_ClientHelloMsg, config)::U
     for group in _native_curve_preferences(config)
         in(group, client_hello.supported_curves) && push!(mutual_groups, group)
     end
-    isempty(mutual_groups) && _tls13_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: no key exchanges supported by both client and server")
+    isempty(mutual_groups) && _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: no key exchanges supported by both client and server")
     for group in mutual_groups
         _tls13_find_client_key_share(client_hello, group) === nothing || return group
     end
@@ -317,7 +317,7 @@ end
 
 function _tls13_server_key_share!(state::_TLS13ServerHandshakeState, group::UInt16)::_TLSKeyShare
     client_share = _tls13_find_client_key_share(state.client_hello, group)
-    client_share === nothing && _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: missing client key share for selected group")
+    client_share === nothing && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: missing client key share for selected group")
     server_share = _tls13_generate_key_share!(state.key_share_provider, group)
     _securezero!(state.shared_secret)
     state.shared_secret = _tls13_resolve_server_shared_secret(state.key_share_provider, client_share)
@@ -352,9 +352,9 @@ end
 
 function _tls13_set_client_hello!(state::_TLS13ServerHandshakeState, raw::Vector{UInt8})::Nothing
     client_hello = _unmarshal_client_hello(raw)
-    client_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected ClientHello")
-    in(TLS1_3_VERSION, client_hello.supported_versions) || _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: client did not offer TLS 1.3")
-    in(_TLS_COMPRESSION_NONE, client_hello.compression_methods) || _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client sent unsupported compression methods")
+    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected ClientHello")
+    in(TLS1_3_VERSION, client_hello.supported_versions) || _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: client did not offer TLS 1.3")
+    in(_TLS_COMPRESSION_NONE, client_hello.compression_methods) || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client sent unsupported compression methods")
     state.client_hello = client_hello
     state.client_hello_raw = raw
     return nothing
@@ -392,13 +392,13 @@ function _read_second_client_hello!(state::_TLS13ServerHandshakeState, io, selec
     first_hello = state.client_hello
     raw = _read_handshake_bytes!(io)
     client_hello = _unmarshal_client_hello(raw)
-    client_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected second ClientHello")
-    length(client_hello.key_shares) == 1 || _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client did not send one key share in second ClientHello")
+    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected second ClientHello")
+    length(client_hello.key_shares) == 1 || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client did not send one key share in second ClientHello")
     key_share = client_hello.key_shares[1]::_TLSKeyShare
-    key_share.group == selected_group || _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client sent unexpected key share in second ClientHello")
-    client_hello.early_data && _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client indicated early data in second ClientHello")
+    key_share.group == selected_group || _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client sent unexpected key share in second ClientHello")
+    client_hello.early_data && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client indicated early data in second ClientHello")
     _tls13_illegal_client_hello_change(client_hello, first_hello) &&
-        _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client illegally modified second ClientHello")
+        _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: client illegally modified second ClientHello")
     state.client_hello = client_hello
     state.client_hello_raw = raw
     return nothing
@@ -454,7 +454,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
     config.session_tickets_disabled && return nothing
     in(_TLS_PSK_MODE_DHE, state.client_hello.psk_modes) || return nothing
     length(state.client_hello.psk_identities) == length(state.client_hello.psk_binders) ||
-        _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid or missing PSK binders")
+        _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid or missing PSK binders")
     isempty(state.client_hello.psk_identities) && return nothing
     max_identities = min(length(state.client_hello.psk_identities), _TLS13_MAX_CLIENT_PSK_IDENTITIES)
     for i in 1:max_identities
@@ -625,7 +625,7 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
     end
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_certificate_tls13(raw)
-    msg === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Certificate")
+    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Certificate")
     state.client_certificate = msg
     _transcript_update!(state.transcript, raw)
     state.client_leaf_public_key = nothing
@@ -633,7 +633,7 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
     has_client_certificates = !isempty(msg.certificates)
     if !has_client_certificates
         if config.client_auth == ClientAuthMode.RequireAnyClientCert || config.client_auth == ClientAuthMode.RequireAndVerifyClientCert
-            _tls13_fail(_TLS_ALERT_CERTIFICATE_REQUIRED, "tls: client did not provide a certificate")
+            _tls_fail(_TLS_ALERT_CERTIFICATE_REQUIRED, "tls: client did not provide a certificate")
         end
         return nothing
     end
@@ -645,13 +645,13 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
     )
     raw = _read_handshake_bytes!(io)
     certificate_verify = _unmarshal_certificate_verify(raw)
-    certificate_verify === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client CertificateVerify")
+    certificate_verify === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client CertificateVerify")
     in(certificate_verify.signature_algorithm, state.certificate_request.supported_signature_algorithms) ||
-        _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: client certificate used with invalid signature algorithm")
+        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: client certificate used with invalid signature algorithm")
     signed = _tls13_signed_message(_TLS13_CLIENT_SIGNATURE_CONTEXT, state.transcript)
     try
         _tls13_openssl_verify_signature(state.client_leaf_public_key::_TLSPublicKey, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
-            _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the client certificate")
+            _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid signature by the client certificate")
     finally
         _securezero!(signed)
     end
@@ -663,10 +663,10 @@ end
 function _read_client_finished!(state::_TLS13ServerHandshakeState, io)::Nothing
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_finished(raw)
-    msg === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Finished")
+    msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Finished")
     expected_verify_data = _tls13_finished_verify_data(state.cipher_spec.hash_kind, state.client_handshake_traffic_secret, state.transcript)
     try
-        _constant_time_equals(msg.verify_data, expected_verify_data) || _tls13_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid client finished hash")
+        _constant_time_equals(msg.verify_data, expected_verify_data) || _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid client finished hash")
     finally
         _securezero!(expected_verify_data)
     end

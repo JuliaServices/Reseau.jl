@@ -712,8 +712,8 @@ end
         catch ex
             ex
         end
-        @test err isa TLHC._TLS13AlertError
-        if err isa TLHC._TLS13AlertError
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
             @test err.alert == TLHC._TLS_ALERT_ILLEGAL_PARAMETER
         end
     end
@@ -735,8 +735,8 @@ end
         catch ex
             ex
         end
-        @test err isa TLHC._TLS13AlertError
-        if err isa TLHC._TLS13AlertError
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
             @test err.alert == TLHC._TLS_ALERT_DECRYPT_ERROR
         end
         @test length(io.outbound) == 1
@@ -762,8 +762,8 @@ end
         catch ex
             ex
         end
-        @test err isa TLHC._TLS13AlertError
-        if err isa TLHC._TLS13AlertError
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
             @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
         end
         @test length(io.outbound) == 1
@@ -785,8 +785,8 @@ end
         catch ex
             ex
         end
-        @test err isa TLHC._TLS13AlertError
-        if err isa TLHC._TLS13AlertError
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
             @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
         end
         @test length(io.outbound) == 1
@@ -808,8 +808,8 @@ end
         catch ex
             ex
         end
-        @test err isa TLHC._TLS13AlertError
-        if err isa TLHC._TLS13AlertError
+        @test err isa TLHC._TLSAlertError
+        if err isa TLHC._TLSAlertError
             @test err.alert == TLHC._TLS_ALERT_DECRYPT_ERROR
         end
         @test length(io.outbound) == 1

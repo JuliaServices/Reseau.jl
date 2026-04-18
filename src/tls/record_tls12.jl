@@ -140,7 +140,7 @@ end
 function _tls12_write_record!(tcp::TCP.Conn, cipher::Union{Nothing, _TLS12RecordCipherState}, content_type::UInt8, payload::AbstractVector{UInt8})::Nothing
     length(payload) <= _TLS12_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.2 record plaintext exceeds the maximum record size"))
     if cipher === nothing
-        _tls13_write_tls_plaintext!(tcp, content_type, payload, TLS1_2_VERSION)
+        _tls_write_tls_plaintext!(tcp, content_type, payload, TLS1_2_VERSION)
         return nothing
     end
     cipher_state = cipher::_TLS12RecordCipherState
@@ -183,7 +183,7 @@ function _tls12_write_record!(tcp::TCP.Conn, cipher::Union{Nothing, _TLS12Record
 end
 
 function _tls12_process_alert!(state::_TLS12NativeState, alert::AbstractVector{UInt8})::Nothing
-    length(alert) == 2 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 alert")
+    length(alert) == 2 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 alert")
     alert_desc = alert[2]
     if alert_desc != _TLS_ALERT_CLOSE_NOTIFY
         alert_level = alert[1]
@@ -194,7 +194,7 @@ function _tls12_process_alert!(state::_TLS12NativeState, alert::AbstractVector{U
         else
             "unknown"
         end
-        throw(_tls13_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.2 alert $(Int(alert_desc))"))
+        throw(_tls_peer_alert_error(alert_desc, "tls: received $level_name TLS 1.2 alert $(Int(alert_desc))"))
     end
     state.peer_close_notify = true
     return nothing
@@ -204,15 +204,15 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
     header = Vector{UInt8}(undef, 5)
     read!(tcp, header)
     payload_len = (Int(header[4]) << 8) | Int(header[5])
-    payload_len <= _TLS12_MAX_CIPHERTEXT || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.2 record")
+    payload_len <= _TLS12_MAX_CIPHERTEXT || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.2 record")
     payload = Vector{UInt8}(undef, payload_len)
     try
         payload_len == 0 || read!(tcp, payload)
         content_type = header[1]
         if content_type == _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC
-            payload_len == 1 && payload[1] == 0x01 || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ChangeCipherSpec record")
-            state.read_cipher === nothing || _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 ChangeCipherSpec")
-            state.received_change_cipher_spec && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received duplicate TLS 1.2 ChangeCipherSpec")
+            payload_len == 1 && payload[1] == 0x01 || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ChangeCipherSpec record")
+            state.read_cipher === nothing || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 ChangeCipherSpec")
+            state.received_change_cipher_spec && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received duplicate TLS 1.2 ChangeCipherSpec")
             state.received_change_cipher_spec = true
             return nothing
         end
@@ -221,7 +221,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
                 if payload_len != 0
                     append!(state.handshake_buffer, payload)
                     length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
-                        _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
+                        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
                 end
                 return nothing
             end
@@ -230,14 +230,14 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
                 return nothing
             end
             if content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
-                _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.2 application data before ChangeCipherSpec")
+                _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.2 application data before ChangeCipherSpec")
             end
-            _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.2 record type $(Int(content_type))")
+            _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected plaintext TLS 1.2 record type $(Int(content_type))")
         end
         cipher = state.read_cipher::_TLS12RecordCipherState
-        cipher.exhausted && _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: TLS 1.2 read keys exhausted")
+        cipher.exhausted && _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: TLS 1.2 read keys exhausted")
         payload_len >= cipher.spec.explicit_nonce_length + _TLS12_GCM_TAG_SIZE ||
-            _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 AEAD record")
+            _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 AEAD record")
         explicit_nonce_len = cipher.spec.explicit_nonce_length
         plaintext_len = payload_len - explicit_nonce_len - _TLS12_GCM_TAG_SIZE
         explicit_nonce = Vector{UInt8}(undef, explicit_nonce_len)
@@ -254,19 +254,19 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
             ciphertext = Vector{UInt8}(undef, payload_len - explicit_nonce_len)
             copyto!(ciphertext, 1, payload, explicit_nonce_len + 1, length(ciphertext))
             plaintext = _tls12_decrypt_record_aead(cipher.spec, cipher.key, nonce, aad, ciphertext)
-            plaintext === nothing && _tls13_fail(_TLS_ALERT_BAD_RECORD_MAC, "tls: invalid TLS 1.2 record authentication tag")
+            plaintext === nothing && _tls_fail(_TLS_ALERT_BAD_RECORD_MAC, "tls: invalid TLS 1.2 record authentication tag")
             if content_type == _TLS_RECORD_TYPE_HANDSHAKE
                 state.allow_encrypted_handshake ||
-                    _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 handshake message")
+                    _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 handshake message")
                 append!(state.handshake_buffer, plaintext::Vector{UInt8})
                 length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
-                    _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
+                    _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
             elseif content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
                 append!(state.plaintext_buffer, plaintext::Vector{UInt8})
             elseif content_type == _TLS_RECORD_TYPE_ALERT
                 _tls12_process_alert!(state, plaintext::Vector{UInt8})
             else
-                _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected encrypted TLS 1.2 record type $(Int(content_type))")
+                _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected encrypted TLS 1.2 record type $(Int(content_type))")
             end
         finally
             _securezero!(explicit_nonce)
@@ -288,7 +288,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
 end
 
 function _tls12_try_take_handshake_message!(state::_TLS12NativeState)::Union{Nothing, Vector{UInt8}}
-    available = _tls13_buffer_available(state.handshake_buffer, state.handshake_buffer_pos)
+    available = _tls_buffer_available(state.handshake_buffer, state.handshake_buffer_pos)
     available == 0 && return nothing
     available >= 4 || return nothing
     pos = state.handshake_buffer_pos
@@ -296,12 +296,12 @@ function _tls12_try_take_handshake_message!(state::_TLS12NativeState)::Union{Not
         (Int(state.handshake_buffer[pos + 1]) << 16) +
         (Int(state.handshake_buffer[pos + 2]) << 8) +
         Int(state.handshake_buffer[pos + 3])
-    msg_len <= _MAX_HANDSHAKE_SIZE || _tls13_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.2 handshake message")
+    msg_len <= _MAX_HANDSHAKE_SIZE || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.2 handshake message")
     available >= msg_len || return nothing
     raw = Vector{UInt8}(undef, msg_len)
     copyto!(raw, 1, state.handshake_buffer, pos, msg_len)
     state.handshake_buffer_pos += msg_len
-    state.handshake_buffer_pos = _tls13_compact_buffer!(state.handshake_buffer, state.handshake_buffer_pos)
+    state.handshake_buffer_pos = _tls_compact_buffer!(state.handshake_buffer, state.handshake_buffer_pos)
     return raw
 end
 
@@ -310,7 +310,7 @@ end
 end
 
 @inline function _tls12_require_handshake_message(raw::Vector{UInt8}, expected::UInt8, label::AbstractString)::Nothing
-    raw[1] == expected || _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: expected TLS 1.2 $(label)")
+    raw[1] == expected || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: expected TLS 1.2 $(label)")
     return nothing
 end
 

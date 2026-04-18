@@ -44,6 +44,7 @@ const TLS1_3_VERSION = UInt16(0x0304)
 const _TLS_LEGACY_RECORD_VERSION = UInt16(0x0301)
 
 include("tls/crypto.jl")
+include("tls/record_common.jl")
 include("tls/openssl_crypto.jl")
 include("tls/handshake_messages.jl")
 include("tls/handshake_client_tls13.jl")
@@ -620,20 +621,20 @@ function _tls_mutual_supported_version(config::Config, peer_versions::AbstractVe
     for version in _native_supported_versions(config)
         in(version, peer_versions) && return version
     end
-    _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: peer offered only unsupported native TLS versions")
+    _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: peer offered only unsupported native TLS versions")
 end
 
 function _tls_pick_client_version(config::Config, server_hello::_ServerHelloMsg)::UInt16
     peer_version = server_hello.supported_version == UInt16(0) ? server_hello.vers : server_hello.supported_version
     in(peer_version, _native_supported_versions(config)) ||
-        _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server negotiated an unsupported TLS version")
+        _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server negotiated an unsupported TLS version")
     if peer_version != TLS1_3_VERSION && server_hello.supported_version != UInt16(0)
-        _tls13_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server sent supported_versions for a pre-TLS 1.3 handshake")
+        _tls_fail(_TLS_ALERT_PROTOCOL_VERSION, "tls: server sent supported_versions for a pre-TLS 1.3 handshake")
     end
     if _config_allows_tls_version(config, TLS1_3_VERSION) && peer_version <= TLS1_2_VERSION
         random_tail = @view server_hello.random[25:32]
         (random_tail == _TLS13_DOWNGRADE_CANARY_TLS12 || random_tail == _TLS13_DOWNGRADE_CANARY_TLS11) &&
-            _tls13_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: downgrade attempt detected")
+            _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: downgrade attempt detected")
     end
     return peer_version
 end
@@ -1168,7 +1169,7 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
         _write_client_hello!(state13, io13)
         raw_server_hello = _read_handshake_bytes!(io13)
         server_hello = _unmarshal_server_hello(raw_server_hello)
-        server_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version client expected ServerHello")
+        server_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version client expected ServerHello")
         state13.server_hello_raw = raw_server_hello
         state13.server_hello = server_hello
         state13.have_server_hello = true
@@ -1207,7 +1208,7 @@ function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
     raw_client_hello = _read_handshake_bytes!(io13)
     client_hello = _unmarshal_client_hello(raw_client_hello)
-    client_hello === nothing && _tls13_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
+    client_hello === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: native mixed-version server expected ClientHello")
     negotiated_version = _tls_mutual_supported_version(conn.config, _tls_client_hello_supported_versions(client_hello))
     if negotiated_version == TLS1_3_VERSION
         conn.mode = _TLS_CONN_MODE_NATIVE_TLS13_SERVER
@@ -1364,8 +1365,8 @@ function handshake!(conn::Conn)
             if ex isa IOPoll.NetClosingError || _is_closed(conn)
                 throw(_closed_error("handshake", ex))
             end
-            if ex isa _TLS13AlertError
-                tls13_err = ex::_TLS13AlertError
+            if ex isa _TLSAlertError
+                tls13_err = ex::_TLSAlertError
                 if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                     _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
                 elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
@@ -1399,19 +1400,19 @@ end
 
 @inline function _native_tls13_pending_plaintext(conn::Conn)::Int
     state = _native_tls13_state(conn)
-    return _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
+    return _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
 end
 
 @inline function _native_tls12_pending_plaintext(conn::Conn)::Int
     state = _native_tls12_state(conn)
-    return _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
+    return _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
 end
 
 function _native_tls13_fill_plaintext!(conn::Conn)::Nothing
     state = _native_tls13_state(conn)
     while true
         _tls13_handle_post_handshake_messages!(conn, state)
-        _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
+        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
         state.peer_close_notify && throw(EOFError())
         _tls13_read_record!(conn.tcp, state)
     end
@@ -1420,7 +1421,7 @@ end
 function _native_tls12_fill_plaintext!(conn::Conn)::Nothing
     state = _native_tls12_state(conn)
     while true
-        _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
+        _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return nothing
         state.peer_close_notify && throw(EOFError())
         _tls12_read_record!(conn.tcp, state)
     end
@@ -1430,11 +1431,11 @@ function _native_tls13_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)
     nbytes == 0 && return 0
     _native_tls13_fill_plaintext!(conn)
     state = _native_tls13_state(conn)
-    available = _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
+    available = _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
     n = min(nbytes, available)
     unsafe_copyto!(ptr, pointer(state.plaintext_buffer, state.plaintext_buffer_pos), n)
     state.plaintext_buffer_pos += n
-    state.plaintext_buffer_pos = _tls13_compact_buffer!(state.plaintext_buffer, state.plaintext_buffer_pos)
+    state.plaintext_buffer_pos = _tls_compact_buffer!(state.plaintext_buffer, state.plaintext_buffer_pos)
     return n
 end
 
@@ -1442,11 +1443,11 @@ function _native_tls12_take_plaintext!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)
     nbytes == 0 && return 0
     _native_tls12_fill_plaintext!(conn)
     state = _native_tls12_state(conn)
-    available = _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
+    available = _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
     n = min(nbytes, available)
     unsafe_copyto!(ptr, pointer(state.plaintext_buffer, state.plaintext_buffer_pos), n)
     state.plaintext_buffer_pos += n
-    state.plaintext_buffer_pos = _tls13_compact_buffer!(state.plaintext_buffer, state.plaintext_buffer_pos)
+    state.plaintext_buffer_pos = _tls_compact_buffer!(state.plaintext_buffer, state.plaintext_buffer_pos)
     return n
 end
 
@@ -1483,8 +1484,8 @@ function _read_some!(conn::Conn, ptr::Ptr{UInt8}, nbytes::Int)::Int
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("read", ex))
         end
-        if ex isa _TLS13AlertError
-            tls13_err = ex::_TLS13AlertError
+        if ex isa _TLSAlertError
+            tls13_err = ex::_TLSAlertError
             if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
             elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
@@ -1526,7 +1527,7 @@ function _peek_eof(conn::Conn)::Bool
             state = _native_tls13_state(conn)
             while true
                 _tls13_handle_post_handshake_messages!(conn, state)
-                _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
+                _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
                 state.peer_close_notify && return true
                 _tls13_read_record!(conn.tcp, state)
             end
@@ -1534,7 +1535,7 @@ function _peek_eof(conn::Conn)::Bool
         if _is_native_tls12_mode(conn.mode)
             state = _native_tls12_state(conn)
             while true
-                _tls13_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
+                _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos) > 0 && return false
                 state.peer_close_notify && return true
                 _tls12_read_record!(conn.tcp, state)
             end
@@ -1546,8 +1547,8 @@ function _peek_eof(conn::Conn)::Bool
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("peek", ex))
         end
-        if ex isa _TLS13AlertError
-            tls13_err = ex::_TLS13AlertError
+        if ex isa _TLSAlertError
+            tls13_err = ex::_TLSAlertError
             if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
             elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
@@ -1829,7 +1830,7 @@ function _native_auto_try_write_fatal_alert!(conn::Conn, alert_desc::UInt8)::Not
     !_is_native_auto_mode(conn.mode) && return nothing
     conn.native_state === nothing && return nothing
     try
-        _tls13_write_tls_plaintext!(conn.tcp, _TLS_RECORD_TYPE_ALERT, UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc], TLS1_2_VERSION)
+        _tls_write_tls_plaintext!(conn.tcp, _TLS_RECORD_TYPE_ALERT, UInt8[_TLS_ALERT_LEVEL_FATAL, alert_desc], TLS1_2_VERSION)
     catch
     end
     return nothing
@@ -1888,8 +1889,8 @@ function Base.unsafe_write(conn::Conn, ptr::Ptr{UInt8}, nbytes::UInt)
         if ex isa IOPoll.NetClosingError || _is_closed(conn)
             throw(_closed_error("write", ex))
         end
-        if ex isa _TLS13AlertError
-            tls13_err = ex::_TLS13AlertError
+        if ex isa _TLSAlertError
+            tls13_err = ex::_TLSAlertError
             if _is_native_tls13_mode(conn.mode) && !tls13_err.from_peer
                 _native_tls13_try_write_fatal_alert!(conn, tls13_err.alert)
             elseif _is_native_tls12_mode(conn.mode) && !tls13_err.from_peer
