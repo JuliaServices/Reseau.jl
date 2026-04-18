@@ -92,69 +92,6 @@ function _securezero_tls13_server_session!(session::_TLS13ServerSession)::Nothin
     return nothing
 end
 
-mutable struct _TLS13ServerSessionCache
-    lock::ReentrantLock
-    entries::Dict{String, _TLS13ServerSession}
-    order::Vector{String}
-    capacity::Int
-end
-
-function _TLS13ServerSessionCache(capacity::Integer = 64)::_TLS13ServerSessionCache
-    Int(capacity) > 0 || throw(ArgumentError("tls13 server session cache capacity must be positive"))
-    return _TLS13ServerSessionCache(ReentrantLock(), Dict{String, _TLS13ServerSession}(), String[], Int(capacity))
-end
-
-@inline _tls13_server_session_cache_key(label::AbstractVector{UInt8}) = bytes2hex(label)
-
-function _tls13_server_session_cache_peek(cache::_TLS13ServerSessionCache, label::AbstractVector{UInt8})::Union{Nothing, _TLS13ServerSession}
-    key_s = _tls13_server_session_cache_key(label)
-    lock(cache.lock)
-    try
-        session = get(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        return _copy_tls13_server_session(session::_TLS13ServerSession)
-    finally
-        unlock(cache.lock)
-    end
-end
-
-function _tls13_server_session_cache_delete!(cache::_TLS13ServerSessionCache, label::AbstractVector{UInt8})::Nothing
-    key_s = _tls13_server_session_cache_key(label)
-    lock(cache.lock)
-    try
-        session = pop!(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        deleteat!(cache.order, findall(==(key_s), cache.order))
-        _securezero_tls13_server_session!(session::_TLS13ServerSession)
-    finally
-        unlock(cache.lock)
-    end
-    return nothing
-end
-
-function _tls13_server_session_cache_put!(cache::_TLS13ServerSessionCache, session::Union{Nothing, _TLS13ServerSession})::Nothing
-    session === nothing && return nothing
-    key_s = _tls13_server_session_cache_key(session.label)
-    lock(cache.lock)
-    try
-        if haskey(cache.entries, key_s)
-            existing = pop!(cache.entries, key_s)
-            _securezero_tls13_server_session!(existing)
-            deleteat!(cache.order, findall(==(key_s), cache.order))
-        end
-        cache.entries[key_s] = _copy_tls13_server_session(session)
-        pushfirst!(cache.order, key_s)
-        while length(cache.order) > cache.capacity
-            evict_key = pop!(cache.order)
-            evicted = pop!(cache.entries, evict_key)
-            _securezero_tls13_server_session!(evicted)
-        end
-    finally
-        unlock(cache.lock)
-    end
-    return nothing
-end
-
 mutable struct _TLS13ServerHandshakeState
     client_hello::_ClientHelloMsg
     client_hello_raw::Vector{UInt8}
@@ -459,7 +396,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
     max_identities = min(length(state.client_hello.psk_identities), _TLS13_MAX_CLIENT_PSK_IDENTITIES)
     for i in 1:max_identities
         identity = state.client_hello.psk_identities[i]
-        session = _tls13_server_session_cache_peek(config._server_session_cache, identity.label)
+        session = _tls_session_cache_peek(config._server_session_cache, bytes2hex(identity.label), _copy_tls13_server_session)
         session === nothing && continue
         early_secret = _TLS13EarlySecret(state.cipher_spec.hash_kind, UInt8[])
         binder_key = UInt8[]
@@ -493,7 +430,7 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
             state.selected_psk_identity = UInt16(i - 1)
             state.has_selected_psk_identity = true
             state.peer_certificates = [copy(cert) for cert in session.client_certificates]
-            _tls13_server_session_cache_delete!(config._server_session_cache, identity.label)
+            _tls_session_cache_delete!(config._server_session_cache, bytes2hex(identity.label), _securezero_tls13_server_session!)
             selected = true
             return nothing
         finally
@@ -709,7 +646,7 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
             state.peer_certificates,
             state.selected_alpn,
         )
-        _tls13_server_session_cache_put!(config._server_session_cache, session)
+        _tls_session_cache_put!(config._server_session_cache, bytes2hex(session.label), session, _copy_tls13_server_session, _securezero_tls13_server_session!)
         msg = _NewSessionTicketMsgTLS13()
         msg.lifetime = _TLS13_MAX_SESSION_TICKET_LIFETIME
         msg.age_add = age_add

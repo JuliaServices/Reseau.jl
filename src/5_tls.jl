@@ -45,6 +45,7 @@ const _TLS_LEGACY_RECORD_VERSION = UInt16(0x0301)
 
 include("tls/crypto.jl")
 include("tls/record_common.jl")
+include("tls/session_cache.jl")
 include("tls/openssl_crypto.jl")
 include("tls/handshake_messages.jl")
 include("tls/handshake_client_tls13.jl")
@@ -178,10 +179,10 @@ struct Config
     min_version::Union{Nothing, UInt16}
     max_version::Union{Nothing, UInt16}
     session_tickets_disabled::Bool
-    _client_session_cache::_TLS13ClientSessionCache
-    _server_session_cache::_TLS13ServerSessionCache
-    _client_session_cache12::_TLS12ClientSessionCache
-    _server_session_cache12::_TLS12ServerSessionCache
+    _client_session_cache::_TLSSessionCache{_TLS13ClientSession}
+    _server_session_cache::_TLSSessionCache{_TLS13ServerSession}
+    _client_session_cache12::_TLSSessionCache{_TLS12ClientSession}
+    _server_session_cache12::_TLSSessionCache{_TLS12ServerSession}
 end
 
 const _TLS_POLICY_TLS13 = UInt8(1)
@@ -240,10 +241,10 @@ function Config(;
         min_version,
         max_version,
         session_tickets_disabled,
-        _TLS13ClientSessionCache(session_cache_capacity),
-        _TLS13ServerSessionCache(session_cache_capacity),
-        _TLS12ClientSessionCache(session_cache_capacity),
-        _TLS12ServerSessionCache(session_cache_capacity),
+        _TLSSessionCache(_TLS13ClientSession, session_cache_capacity),
+        _TLSSessionCache(_TLS13ServerSession, session_cache_capacity),
+        _TLSSessionCache(_TLS12ClientSession, session_cache_capacity),
+        _TLSSessionCache(_TLS12ServerSession, session_cache_capacity),
     )
 end
 
@@ -739,7 +740,7 @@ end
 function _tls12_try_load_client_session(config::Config, cache_key::AbstractString, hello::_ClientHelloMsg)::Union{Nothing, _TLS12ClientSession}
     config.session_tickets_disabled && return nothing
     isempty(cache_key) && return nothing
-    session = _tls12_session_cache_get(config._client_session_cache12, cache_key)
+    session = _tls_session_cache_get(config._client_session_cache12, cache_key, _copy_tls12_client_session)
     session === nothing && return nothing
     keep_session = false
     try
@@ -757,7 +758,7 @@ function _tls12_try_load_client_session(config::Config, cache_key::AbstractStrin
                     ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
                 )
             catch
-                _tls12_session_cache_put!(config._client_session_cache12, cache_key, nothing)
+                _tls_session_cache_put!(config._client_session_cache12, cache_key, nothing, _copy_tls12_client_session, _securezero_tls12_client_session!)
                 return nothing
             end
         end
@@ -785,17 +786,17 @@ end
 function _tls13_try_load_client_session(config::Config, cache_key::AbstractString, hello::_ClientHelloMsg)::Union{Nothing, _TLS13ClientSession}
     config.session_tickets_disabled && return nothing
     isempty(cache_key) && return nothing
-    session = _tls13_session_cache_get(config._client_session_cache, cache_key)
+    session = _tls_session_cache_get(config._client_session_cache, cache_key, _copy_tls13_client_session)
     session === nothing && return nothing
     now_s = UInt64(floor(time()))
     if session.version != TLS1_3_VERSION || now_s > session.use_by_s
-        _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
+        _tls_session_cache_put!(config._client_session_cache, cache_key, nothing, _copy_tls13_client_session, _securezero_tls13_client_session!)
         _securezero_tls13_client_session!(session)
         return nothing
     end
     session_spec = _tls13_cipher_spec(session.cipher_suite)
     if session_spec === nothing
-        _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
+        _tls_session_cache_put!(config._client_session_cache, cache_key, nothing, _copy_tls13_client_session, _securezero_tls13_client_session!)
         _securezero_tls13_client_session!(session)
         return nothing
     end
@@ -822,7 +823,7 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
                 ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
             )
         catch
-            _tls13_session_cache_put!(config._client_session_cache, cache_key, nothing)
+            _tls_session_cache_put!(config._client_session_cache, cache_key, nothing, _copy_tls13_client_session, _securezero_tls13_client_session!)
             _securezero_tls13_client_session!(session)
             return nothing
         end
@@ -1067,7 +1068,7 @@ end
 function _finish_native_tls13_client_handshake!(conn::Conn, state::_TLS13ClientHandshakeState, cache_key::String)::Nothing
     native_state = _native_tls13_state(conn)
     if state.using_psk
-        _tls13_session_cache_put!(conn.config._client_session_cache, cache_key, nothing)
+        _tls_session_cache_put!(conn.config._client_session_cache, cache_key, nothing, _copy_tls13_client_session, _securezero_tls13_client_session!)
     end
     negotiated_alpn = isempty(state.client_protocol) ? nothing : state.client_protocol
     _securezero!(native_state.resumption_secret)
@@ -2181,7 +2182,7 @@ function _tls13_has_resumable_session(config::Config, tcp::TCP.Conn)::Bool
     config.session_tickets_disabled && return false
     cache_key = _tls13_client_session_cache_key(config, tcp)
     isempty(cache_key) && return false
-    session = _tls13_session_cache_peek(config._client_session_cache, cache_key)
+    session = _tls_session_cache_peek(config._client_session_cache, cache_key, _copy_tls13_client_session)
     session === nothing && return false
     try
         session.version == TLS1_3_VERSION || return false
@@ -2196,7 +2197,7 @@ function _tls12_has_resumable_session(config::Config, tcp::TCP.Conn)::Bool
     config.session_tickets_disabled && return false
     cache_key = _tls13_client_session_cache_key(config, tcp)
     isempty(cache_key) && return false
-    session = _tls12_session_cache_peek(config._client_session_cache12, cache_key)
+    session = _tls_session_cache_peek(config._client_session_cache12, cache_key, _copy_tls12_client_session)
     session === nothing && return false
     try
         session.version == TLS1_2_VERSION || return false

@@ -96,67 +96,6 @@ function _securezero_tls13_client_session!(session::_TLS13ClientSession)::Nothin
     return nothing
 end
 
-mutable struct _TLS13ClientSessionCache
-    lock::ReentrantLock
-    entries::Dict{String, _TLS13ClientSession}
-    order::Vector{String}
-    capacity::Int
-end
-
-function _TLS13ClientSessionCache(capacity::Integer = 64)::_TLS13ClientSessionCache
-    Int(capacity) > 0 || throw(ArgumentError("tls13 client session cache capacity must be positive"))
-    return _TLS13ClientSessionCache(ReentrantLock(), Dict{String, _TLS13ClientSession}(), String[], Int(capacity))
-end
-
-function _tls13_session_cache_get(cache::_TLS13ClientSessionCache, key::AbstractString)::Union{Nothing, _TLS13ClientSession}
-    key_s = String(key)
-    lock(cache.lock)
-    try
-        session = get(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        deleteat!(cache.order, findall(==(key_s), cache.order))
-        pushfirst!(cache.order, key_s)
-        return _copy_tls13_client_session(session::_TLS13ClientSession)
-    finally
-        unlock(cache.lock)
-    end
-end
-
-function _tls13_session_cache_peek(cache::_TLS13ClientSessionCache, key::AbstractString)::Union{Nothing, _TLS13ClientSession}
-    key_s = String(key)
-    lock(cache.lock)
-    try
-        session = get(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        return _copy_tls13_client_session(session::_TLS13ClientSession)
-    finally
-        unlock(cache.lock)
-    end
-end
-
-function _tls13_session_cache_put!(cache::_TLS13ClientSessionCache, key::AbstractString, session::Union{Nothing, _TLS13ClientSession})::Nothing
-    key_s = String(key)
-    lock(cache.lock)
-    try
-        if haskey(cache.entries, key_s)
-            existing = pop!(cache.entries, key_s)
-            _securezero_tls13_client_session!(existing)
-            deleteat!(cache.order, findall(==(key_s), cache.order))
-        end
-        session === nothing && return nothing
-        cache.entries[key_s] = _copy_tls13_client_session(session)
-        pushfirst!(cache.order, key_s)
-        while length(cache.order) > cache.capacity
-            evict_key = pop!(cache.order)
-            evicted = pop!(cache.entries, evict_key)
-            _securezero_tls13_client_session!(evicted)
-        end
-    finally
-        unlock(cache.lock)
-    end
-    return nothing
-end
-
 mutable struct _TLS13OpenSSLKeyShareProvider
     fixed_x25519_private_key::Vector{UInt8}
     has_fixed_x25519_private_key::Bool

@@ -87,69 +87,6 @@ function _securezero_tls12_server_session!(session::_TLS12ServerSession)::Nothin
     return nothing
 end
 
-mutable struct _TLS12ServerSessionCache
-    lock::ReentrantLock
-    entries::Dict{String, _TLS12ServerSession}
-    order::Vector{String}
-    capacity::Int
-end
-
-function _TLS12ServerSessionCache(capacity::Integer = 64)::_TLS12ServerSessionCache
-    Int(capacity) > 0 || throw(ArgumentError("tls12 server session cache capacity must be positive"))
-    return _TLS12ServerSessionCache(ReentrantLock(), Dict{String, _TLS12ServerSession}(), String[], Int(capacity))
-end
-
-@inline _tls12_server_session_cache_key(label::AbstractVector{UInt8}) = bytes2hex(label)
-
-function _tls12_server_session_cache_peek(cache::_TLS12ServerSessionCache, label::AbstractVector{UInt8})::Union{Nothing, _TLS12ServerSession}
-    key_s = _tls12_server_session_cache_key(label)
-    lock(cache.lock)
-    try
-        session = get(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        return _copy_tls12_server_session(session::_TLS12ServerSession)
-    finally
-        unlock(cache.lock)
-    end
-end
-
-function _tls12_server_session_cache_delete!(cache::_TLS12ServerSessionCache, label::AbstractVector{UInt8})::Nothing
-    key_s = _tls12_server_session_cache_key(label)
-    lock(cache.lock)
-    try
-        session = pop!(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        deleteat!(cache.order, findall(==(key_s), cache.order))
-        _securezero_tls12_server_session!(session::_TLS12ServerSession)
-    finally
-        unlock(cache.lock)
-    end
-    return nothing
-end
-
-function _tls12_server_session_cache_put!(cache::_TLS12ServerSessionCache, session::Union{Nothing, _TLS12ServerSession})::Nothing
-    session === nothing && return nothing
-    key_s = _tls12_server_session_cache_key((session::_TLS12ServerSession).label)
-    lock(cache.lock)
-    try
-        if haskey(cache.entries, key_s)
-            existing = pop!(cache.entries, key_s)
-            _securezero_tls12_server_session!(existing)
-            deleteat!(cache.order, findall(==(key_s), cache.order))
-        end
-        cache.entries[key_s] = _copy_tls12_server_session(session::_TLS12ServerSession)
-        pushfirst!(cache.order, key_s)
-        while length(cache.order) > cache.capacity
-            evict_key = pop!(cache.order)
-            evicted = pop!(cache.entries, evict_key)
-            _securezero_tls12_server_session!(evicted)
-        end
-    finally
-        unlock(cache.lock)
-    end
-    return nothing
-end
-
 mutable struct _TLS12ServerHandshakeState
     client_hello::_ClientHelloMsg
     server_hello::_ServerHelloMsg
@@ -311,7 +248,7 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
     state.using_resumption = false
     session_ticket = state.client_hello.session_ticket
     if !config.session_tickets_disabled && !isempty(session_ticket)
-        session = _tls12_server_session_cache_peek(config._server_session_cache12, session_ticket)
+        session = _tls_session_cache_peek(config._server_session_cache12, bytes2hex(session_ticket), _copy_tls12_server_session)
         if session !== nothing
             keep_session = false
             try
@@ -329,7 +266,7 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
                     state.curve_id = session.curve_id
                     state.peer_certificates = [copy(cert) for cert in session.client_certificates]
                     keep_session = true
-                    _tls12_server_session_cache_delete!(config._server_session_cache12, session_ticket)
+                    _tls_session_cache_delete!(config._server_session_cache12, bytes2hex(session_ticket), _securezero_tls12_server_session!)
                     return nothing
                 end
             finally
@@ -652,7 +589,7 @@ function _tls12_send_new_session_ticket!(
         state.server_hello.extended_master_secret,
     )
     try
-        _tls12_server_session_cache_put!(config._server_session_cache12, session)
+        _tls_session_cache_put!(config._server_session_cache12, bytes2hex(session.label), session, _copy_tls12_server_session, _securezero_tls12_server_session!)
         raw = _write_handshake_message(_NewSessionTicketMsgTLS12(_TLS12_MAX_SESSION_TICKET_LIFETIME, label), transcript)
         _write_handshake_bytes!(io, raw)
     finally

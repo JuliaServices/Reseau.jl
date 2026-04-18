@@ -108,67 +108,6 @@ function _securezero_tls12_client_session!(session::_TLS12ClientSession)::Nothin
     return nothing
 end
 
-mutable struct _TLS12ClientSessionCache
-    lock::ReentrantLock
-    entries::Dict{String, _TLS12ClientSession}
-    order::Vector{String}
-    capacity::Int
-end
-
-function _TLS12ClientSessionCache(capacity::Integer = 64)::_TLS12ClientSessionCache
-    Int(capacity) > 0 || throw(ArgumentError("tls12 client session cache capacity must be positive"))
-    return _TLS12ClientSessionCache(ReentrantLock(), Dict{String, _TLS12ClientSession}(), String[], Int(capacity))
-end
-
-function _tls12_session_cache_get(cache::_TLS12ClientSessionCache, key::AbstractString)::Union{Nothing, _TLS12ClientSession}
-    key_s = String(key)
-    lock(cache.lock)
-    try
-        session = get(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        deleteat!(cache.order, findall(==(key_s), cache.order))
-        pushfirst!(cache.order, key_s)
-        return _copy_tls12_client_session(session::_TLS12ClientSession)
-    finally
-        unlock(cache.lock)
-    end
-end
-
-function _tls12_session_cache_peek(cache::_TLS12ClientSessionCache, key::AbstractString)::Union{Nothing, _TLS12ClientSession}
-    key_s = String(key)
-    lock(cache.lock)
-    try
-        session = get(cache.entries, key_s, nothing)
-        session === nothing && return nothing
-        return _copy_tls12_client_session(session::_TLS12ClientSession)
-    finally
-        unlock(cache.lock)
-    end
-end
-
-function _tls12_session_cache_put!(cache::_TLS12ClientSessionCache, key::AbstractString, session::Union{Nothing, _TLS12ClientSession})::Nothing
-    key_s = String(key)
-    lock(cache.lock)
-    try
-        if haskey(cache.entries, key_s)
-            existing = pop!(cache.entries, key_s)
-            _securezero_tls12_client_session!(existing)
-            deleteat!(cache.order, findall(==(key_s), cache.order))
-        end
-        session === nothing && return nothing
-        cache.entries[key_s] = _copy_tls12_client_session(session)
-        pushfirst!(cache.order, key_s)
-        while length(cache.order) > cache.capacity
-            evict_key = pop!(cache.order)
-            evicted = pop!(cache.entries, evict_key)
-            _securezero_tls12_client_session!(evicted)
-        end
-    finally
-        unlock(cache.lock)
-    end
-    return nothing
-end
-
 mutable struct _TLS12ClientHandshakeState
     client_hello::_ClientHelloMsg
     server_hello::_ServerHelloMsg
@@ -582,7 +521,7 @@ function _tls12_save_client_session!(
         state.server_hello.extended_master_secret,
     )
     try
-        _tls12_session_cache_put!(config._client_session_cache12, cache_key, session)
+        _tls_session_cache_put!(config._client_session_cache12, cache_key, session, _copy_tls12_client_session, _securezero_tls12_client_session!)
     finally
         _securezero_tls12_client_session!(session)
     end
