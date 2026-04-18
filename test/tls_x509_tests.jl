@@ -11,6 +11,15 @@ const _TLS_UNITTEST_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 
 _read_bytes(path::AbstractString) = read(path)
 
+function _find_subsequence_x509(haystack::AbstractVector{UInt8}, needle::AbstractVector{UInt8})
+    last_start = length(haystack) - length(needle) + 1
+    last_start < 1 && return nothing
+    for start in 1:last_start
+        haystack[start:(start + length(needle) - 1)] == needle && return start
+    end
+    return nothing
+end
+
 function _tls_cert_info(path::AbstractString)
     certs = TLX._tls_decode_pem_certificates(_read_bytes(path))
     @test length(certs) == 1
@@ -204,6 +213,19 @@ end
         end
     end
 
+    @testset "native trust store cache reuses unchanged CA roots" begin
+        store1 = TLX._tls_load_trust_store(_TLS_CA_PATH)
+        store2 = TLX._tls_load_trust_store(_TLS_CA_PATH)
+        @test store1 === store2
+
+        mktempdir() do dir
+            write(joinpath(dir, "root.pem"), _read_bytes(_TLS_CA_PATH))
+            dir_store1 = TLX._tls_load_trust_store(dir)
+            dir_store2 = TLX._tls_load_trust_store(dir)
+            @test dir_store1 === dir_store2
+        end
+    end
+
     @testset "native trust verifier accepts peer chains that include the trust anchor" begin
         server_certs = vcat(
             TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH)),
@@ -243,6 +265,27 @@ end
                 @test pkey != C_NULL
             finally
                 TLX._free_evp_pkey!(pkey)
+            end
+        end
+    end
+
+    @testset "unknown critical X.509 extensions are rejected" begin
+        cert_der = only(TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CA_PATH)))
+        mutated = copy(cert_der)
+        basic_constraints_oid = UInt8[0x06, 0x03, 0x55, 0x1d, 0x13]
+        oid_pos = _find_subsequence_x509(mutated, basic_constraints_oid)
+        @test oid_pos !== nothing
+        if oid_pos !== nothing
+            mutated[oid_pos + 4] = 0x7f
+            err = try
+                TLX._tls_parse_der_certificate_info(mutated)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa ArgumentError
+            if err isa ArgumentError
+                @test occursin("unsupported critical X.509 extension", err.msg)
             end
         end
     end

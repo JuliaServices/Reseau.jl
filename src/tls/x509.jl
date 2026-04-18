@@ -174,7 +174,7 @@ function _tls_unix_time(year::Int, month::Int, day::Int, hour::Int, minute::Int,
     0 <= minute <= 59 || throw(ArgumentError("tls: malformed ASN.1 time value"))
     0 <= second <= 59 || throw(ArgumentError("tls: malformed ASN.1 time value"))
     days = _tls_days_from_civil(year, month, day)
-    return Int64(((((days * 24) + hour) * 60) + minute) * 60 + second)
+    return Int64(days) * 86400 + Int64(hour) * 3600 + Int64(minute) * 60 + Int64(second)
 end
 
 function _asn1_parse_x509_time(bytes::AbstractVector{UInt8}, tag::UInt8, value_start::Int, value_end::Int)::Int64
@@ -518,8 +518,10 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
             while ext_pos <= exts_end
                 ext_start, ext_end, ext_pos = _asn1_expect_tlv(cert_der, ext_pos, _ASN1_SEQUENCE)
                 oid_start, oid_end, value_pos = _asn1_expect_tlv(cert_der, ext_start, _ASN1_OBJECT_IDENTIFIER)
+                critical = false
                 if value_pos <= ext_end && cert_der[value_pos] == _ASN1_BOOLEAN
-                    _, _, value_pos = _asn1_expect_tlv(cert_der, value_pos, _ASN1_BOOLEAN)
+                    critical_start, critical_end, value_pos = _asn1_expect_tlv(cert_der, value_pos, _ASN1_BOOLEAN)
+                    critical = _asn1_boolean_value(cert_der, critical_start, critical_end)
                 end
                 octet_start, octet_end, value_pos = _asn1_expect_tlv(cert_der, value_pos, _ASN1_OCTET_STRING)
                 value_pos == ext_end + 1 || throw(ArgumentError("tls: malformed certificate extension value"))
@@ -537,6 +539,8 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
                     subject_key_id = _tls_parse_subject_key_identifier(cert_der, octet_start, octet_end)
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_AUTHORITY_KEY_IDENTIFIER)
                     authority_key_id = _tls_parse_authority_key_identifier(cert_der, octet_start, octet_end)
+                elseif critical
+                    throw(ArgumentError("tls: unsupported critical X.509 extension"))
                 end
             end
         end
@@ -717,6 +721,15 @@ struct _TLSTrustStore
     roots::Vector{_TLSCertificateInfo}
 end
 
+struct _TLSTrustStoreCacheEntry
+    mtime::Float64
+    size::Int64
+    store::_TLSTrustStore
+end
+
+const _TLS_TRUST_STORE_CACHE_LOCK = ReentrantLock()
+const _TLS_TRUST_STORE_CACHE = Dict{String, _TLSTrustStoreCacheEntry}()
+
 @inline function _tls_verify_purpose_usage_mask(purpose::AbstractString)::UInt8
     purpose == "ssl_server" && return _TLS_EXT_KEY_USAGE_SERVER
     purpose == "ssl_client" && return _TLS_EXT_KEY_USAGE_CLIENT
@@ -775,8 +788,38 @@ function _tls_load_trust_certificates(ca_path::AbstractString)::Vector{Vector{UI
     return _tls_decode_pem_certificates(read(ca_path))
 end
 
+function _tls_trust_store_fingerprint(ca_path::AbstractString)::Tuple{Float64, Int64}
+    if isdir(ca_path)
+        dir_stat = stat(ca_path)
+        latest_mtime = dir_stat.mtime
+        total_size = Int64(0)
+        for entry in sort(readdir(ca_path; join = true))
+            isfile(entry) || continue
+            entry_stat = stat(entry)
+            latest_mtime = max(latest_mtime, entry_stat.mtime)
+            total_size += Int64(entry_stat.size)
+        end
+        return latest_mtime, total_size
+    end
+    path_stat = stat(ca_path)
+    return path_stat.mtime, Int64(path_stat.size)
+end
+
 function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
-    certificates = _tls_load_trust_certificates(ca_path)
+    cache_path = abspath(ca_path)
+    mtime, size = _tls_trust_store_fingerprint(cache_path)
+    lock(_TLS_TRUST_STORE_CACHE_LOCK)
+    try
+        if haskey(_TLS_TRUST_STORE_CACHE, cache_path)
+            entry = _TLS_TRUST_STORE_CACHE[cache_path]
+            if entry.mtime == mtime && entry.size == size
+                return entry.store
+            end
+        end
+    finally
+        unlock(_TLS_TRUST_STORE_CACHE_LOCK)
+    end
+    certificates = _tls_load_trust_certificates(cache_path)
     roots = _TLSCertificateInfo[]
     for cert_der in certificates
         duplicate = false
@@ -790,7 +833,14 @@ function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
         push!(roots, _tls_parse_der_certificate_info(cert_der))
     end
     isempty(roots) && throw(ArgumentError("tls: CA roots path does not contain any certificates"))
-    return _TLSTrustStore(roots)
+    store = _TLSTrustStore(roots)
+    lock(_TLS_TRUST_STORE_CACHE_LOCK)
+    try
+        _TLS_TRUST_STORE_CACHE[cache_path] = _TLSTrustStoreCacheEntry(mtime, size, store)
+    finally
+        unlock(_TLS_TRUST_STORE_CACHE_LOCK)
+    end
+    return store
 end
 
 function _tls_verify_certificate_signature(child::_TLSCertificateInfo, parent::_TLSCertificateInfo)::Bool
