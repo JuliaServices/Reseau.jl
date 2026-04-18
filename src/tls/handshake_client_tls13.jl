@@ -13,47 +13,6 @@ const _TLS13_MAX_SESSION_TICKET_LIFETIME = UInt32(7 * 24 * 60 * 60)
 const _TLS13_DOWNGRADE_CANARY_TLS12 = UInt8[0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01]
 const _TLS13_DOWNGRADE_CANARY_TLS11 = UInt8[0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00]
 
-mutable struct _HandshakeMessageFlightIO
-    inbound::Vector{Vector{UInt8}}
-    inbound_pos::Int
-    outbound::Vector{Vector{UInt8}}
-end
-
-_HandshakeMessageFlightIO() = _HandshakeMessageFlightIO(Vector{UInt8}[], 1, Vector{UInt8}[])
-_HandshakeMessageFlightIO(inbound::Vector{Vector{UInt8}}) = _HandshakeMessageFlightIO(inbound, 1, Vector{UInt8}[])
-
-@inline function _remaining_handshake_messages(io::_HandshakeMessageFlightIO)::Int
-    return length(io.inbound) - io.inbound_pos + 1
-end
-
-@inline function _write_handshake_bytes!(io::_HandshakeMessageFlightIO, raw::Vector{UInt8})::Nothing
-    push!(io.outbound, raw)
-    return nothing
-end
-
-@inline function _tls13_send_dummy_change_cipher_spec!(::_HandshakeMessageFlightIO)::Nothing
-    return nothing
-end
-
-@inline function _tls13_on_handshake_keys!(::_HandshakeMessageFlightIO, _state)::Nothing
-    return nothing
-end
-
-@inline function _tls13_on_server_finished!(::_HandshakeMessageFlightIO, _state)::Nothing
-    return nothing
-end
-
-@inline function _tls13_on_client_finished!(::_HandshakeMessageFlightIO, _state)::Nothing
-    return nothing
-end
-
-function _read_handshake_bytes!(io::_HandshakeMessageFlightIO)::Vector{UInt8}
-    io.inbound_pos <= length(io.inbound) || throw(EOFError("tls13 handshake queue exhausted"))
-    raw = io.inbound[io.inbound_pos]
-    io.inbound_pos += 1
-    return raw
-end
-
 struct _TLS13ClientSession
     version::UInt16
     cipher_suite::UInt16
@@ -198,84 +157,6 @@ function _tls13_session_cache_put!(cache::_TLS13ClientSessionCache, key::Abstrac
     return nothing
 end
 
-struct _TLS13StaticSharedSecretProvider
-    shared_secret::Vector{UInt8}
-end
-
-_TLS13StaticSharedSecretProvider(shared_secret::AbstractVector{UInt8}) =
-    _TLS13StaticSharedSecretProvider(Vector{UInt8}(shared_secret))
-
-struct _TLS13ScriptedKeyShareProvider
-    initial_share::_TLSKeyShare
-    initial_expected_server_share::Vector{UInt8}
-    initial_shared_secret::Vector{UInt8}
-    has_retry_share::Bool
-    retry_share::_TLSKeyShare
-    retry_expected_server_share::Vector{UInt8}
-    retry_shared_secret::Vector{UInt8}
-end
-
-function _TLS13ScriptedKeyShareProvider(
-    initial_share::_TLSKeyShare,
-    initial_expected_server_share::AbstractVector{UInt8},
-    initial_shared_secret::AbstractVector{UInt8},
-)
-    return _TLS13ScriptedKeyShareProvider(
-        _TLSKeyShare(initial_share.group, copy(initial_share.data)),
-        Vector{UInt8}(initial_expected_server_share),
-        Vector{UInt8}(initial_shared_secret),
-        false,
-        _TLSKeyShare(UInt16(0), UInt8[]),
-        UInt8[],
-        UInt8[],
-    )
-end
-
-function _TLS13ScriptedKeyShareProvider(
-    initial_share::_TLSKeyShare,
-    initial_expected_server_share::AbstractVector{UInt8},
-    initial_shared_secret::AbstractVector{UInt8},
-    retry_share::_TLSKeyShare,
-    retry_expected_server_share::AbstractVector{UInt8},
-    retry_shared_secret::AbstractVector{UInt8},
-)
-    return _TLS13ScriptedKeyShareProvider(
-        _TLSKeyShare(initial_share.group, copy(initial_share.data)),
-        Vector{UInt8}(initial_expected_server_share),
-        Vector{UInt8}(initial_shared_secret),
-        true,
-        _TLSKeyShare(retry_share.group, copy(retry_share.data)),
-        Vector{UInt8}(retry_expected_server_share),
-        Vector{UInt8}(retry_shared_secret),
-    )
-end
-
-struct _TLS13NoCertificateVerifier end
-
-struct _TLS13ScriptedCertificateVerifier
-    certificates::Vector{Vector{UInt8}}
-    server_name::String
-    signature_algorithm::UInt16
-    signed_message::Vector{UInt8}
-    signature::Vector{UInt8}
-end
-
-function _TLS13ScriptedCertificateVerifier(
-    certificates::Vector{Vector{UInt8}},
-    server_name::AbstractString,
-    signature_algorithm::UInt16,
-    signed_message::AbstractVector{UInt8},
-    signature::AbstractVector{UInt8},
-)
-    return _TLS13ScriptedCertificateVerifier(
-        [copy(cert) for cert in certificates],
-        String(server_name),
-        signature_algorithm,
-        Vector{UInt8}(signed_message),
-        Vector{UInt8}(signature),
-    )
-end
-
 mutable struct _TLS13OpenSSLKeyShareProvider
     fixed_x25519_private_key::Vector{UInt8}
     has_fixed_x25519_private_key::Bool
@@ -319,12 +200,6 @@ function _TLS13OpenSSLCertificateVerifier(;
     )
 end
 
-@inline _copy_tls13_key_share(share::_TLSKeyShare) = _TLSKeyShare(share.group, copy(share.data))
-
-function _tls13_prepare_initial_client_hello!(::_TLS13StaticSharedSecretProvider, ::_ClientHelloMsg)::Nothing
-    return nothing
-end
-
 @inline function _tls13_supports_key_share_group(group::UInt16)::Bool
     return group == _TLS_GROUP_X25519 || group == _TLS_GROUP_SECP256R1
 end
@@ -360,15 +235,6 @@ function _tls13_prepare_initial_client_hello!(provider::_TLS13OpenSSLKeySharePro
     return nothing
 end
 
-function _tls13_prepare_initial_client_hello!(provider::_TLS13ScriptedKeyShareProvider, hello::_ClientHelloMsg)::Nothing
-    hello.key_shares = [_copy_tls13_key_share(provider.initial_share)]
-    return nothing
-end
-
-function _tls13_resolve_server_shared_secret(provider::_TLS13StaticSharedSecretProvider, ::_TLSKeyShare)::Vector{UInt8}
-    return copy(provider.shared_secret)
-end
-
 function _tls13_resolve_server_shared_secret(provider::_TLS13OpenSSLKeyShareProvider, server_share::_TLSKeyShare)::Vector{UInt8}
     provider.private_key == C_NULL && throw(ArgumentError("tls13 client handshake is missing an ECDHE private key"))
     server_share.group == provider.private_key_group || throw(ArgumentError("tls13 client handshake received a key share for an unexpected group"))
@@ -379,27 +245,6 @@ function _tls13_resolve_server_shared_secret(provider::_TLS13OpenSSLKeyShareProv
         return _tls13_p256_shared_secret(provider.private_key, server_share.data)
     end
     throw(ArgumentError("tls13 client handshake OpenSSL key share provider does not support group $(string(server_share.group, base = 16))"))
-end
-
-function _tls13_resolve_server_shared_secret(provider::_TLS13ScriptedKeyShareProvider, server_share::_TLSKeyShare)::Vector{UInt8}
-    if server_share.group == provider.initial_share.group &&
-       server_share.data == provider.initial_expected_server_share
-        return copy(provider.initial_shared_secret)
-    end
-    if provider.has_retry_share &&
-       server_share.group == provider.retry_share.group &&
-       server_share.data == provider.retry_expected_server_share
-        return copy(provider.retry_shared_secret)
-    end
-    throw(ArgumentError("tls13 client handshake received an unexpected server key share"))
-end
-
-function _tls13_process_hello_retry_request!(
-    ::_TLS13StaticSharedSecretProvider,
-    ::_ClientHelloMsg,
-    ::_ServerHelloMsg,
-)::Nothing
-    throw(ArgumentError("tls13 client handshake HelloRetryRequest requires a key share provider"))
 end
 
 function _tls13_process_hello_retry_request!(
@@ -420,30 +265,6 @@ function _tls13_process_hello_retry_request!(
     return nothing
 end
 
-function _tls13_process_hello_retry_request!(
-    provider::_TLS13ScriptedKeyShareProvider,
-    hello::_ClientHelloMsg,
-    server_hello::_ServerHelloMsg,
-)::Nothing
-    selected_group = server_hello.selected_group
-    if !isempty(server_hello.cookie)
-        hello.cookie = copy(server_hello.cookie)
-    end
-    selected_group == 0x0000 && return nothing
-    in(selected_group, hello.supported_curves) || throw(ArgumentError("tls: server selected unsupported group"))
-    for key_share in hello.key_shares
-        key_share.group == selected_group && throw(ArgumentError("tls: server sent an unnecessary HelloRetryRequest key_share"))
-    end
-    provider.has_retry_share || throw(ArgumentError("tls13 client handshake is missing a retry key share"))
-    provider.retry_share.group == selected_group || throw(ArgumentError("tls13 client handshake has no retry key share for the selected group"))
-    hello.key_shares = [_copy_tls13_key_share(provider.retry_share)]
-    return nothing
-end
-
-function _tls13_verify_server_certificates!(::_TLS13NoCertificateVerifier, ::_CertificateMsgTLS13, ::AbstractString)::Nothing
-    throw(ArgumentError("tls13 client handshake certificate path requires a certificate verifier"))
-end
-
 function _tls13_verify_server_certificates!(
     verifier::_TLS13OpenSSLCertificateVerifier,
     certificate_msg::_CertificateMsgTLS13,
@@ -460,46 +281,10 @@ function _tls13_verify_server_certificates!(
     return nothing
 end
 
-function _tls13_verify_server_certificates!(
-    verifier::_TLS13ScriptedCertificateVerifier,
-    certificate_msg::_CertificateMsgTLS13,
-    server_name::AbstractString,
-)::Nothing
-    certificate_msg.certificates == verifier.certificates || _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls13 client handshake received an unexpected certificate chain")
-    verifier.server_name == server_name || throw(ArgumentError("tls13 client handshake verifier expected a different server name"))
-    return nothing
-end
-
-function _tls13_verify_server_certificate_signature!(
-    ::_TLS13NoCertificateVerifier,
-    ::_TranscriptHash,
-    ::_CertificateVerifyMsg,
-)::Nothing
-    throw(ArgumentError("tls13 client handshake certificate path requires a certificate verifier"))
-end
-
-function _tls13_verify_server_certificate_signature!(
-    verifier::_TLS13OpenSSLCertificateVerifier,
-    transcript::_TranscriptHash,
-    certificate_verify::_CertificateVerifyMsg,
-)::Nothing
+function _tls13_verify_server_certificate_signature!(verifier::_TLS13OpenSSLCertificateVerifier, transcript::_TranscriptHash, certificate_verify::_CertificateVerifyMsg)::Nothing
     verifier.leaf_public_key === nothing && throw(ArgumentError("tls13 client handshake certificate verifier has no leaf public key"))
     signed = _tls13_signed_message(_TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
     _tls13_openssl_verify_signature(verifier.leaf_public_key::_TLSPublicKey, certificate_verify.signature_algorithm, signed, certificate_verify.signature) ||
-        _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls13 client handshake received an invalid certificate verify signature")
-    return nothing
-end
-
-function _tls13_verify_server_certificate_signature!(
-    verifier::_TLS13ScriptedCertificateVerifier,
-    transcript::_TranscriptHash,
-    certificate_verify::_CertificateVerifyMsg,
-)::Nothing
-    certificate_verify.signature_algorithm == verifier.signature_algorithm ||
-        _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls13 client handshake received an unexpected certificate verify signature algorithm")
-    signed = _tls13_signed_message(_TLS13_SERVER_SIGNATURE_CONTEXT, transcript)
-    signed == verifier.signed_message || throw(ArgumentError("tls13 client handshake computed an unexpected certificate verify transcript"))
-    _constant_time_equals(certificate_verify.signature, verifier.signature) ||
         _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls13 client handshake received an invalid certificate verify signature")
     return nothing
 end
@@ -534,11 +319,6 @@ function _tls_select_signature_algorithm(pkey::Ptr{Cvoid}, supported_signature_a
     throw(ArgumentError("tls: peer does not support a usable TLS 1.3 certificate signature algorithm"))
 end
 
-function _securezero_tls13_key_share_provider!(provider::_TLS13StaticSharedSecretProvider)::Nothing
-    _securezero!(provider.shared_secret)
-    return nothing
-end
-
 function _securezero_tls13_key_share_provider!(provider::_TLS13OpenSSLKeyShareProvider)::Nothing
     provider.private_key == C_NULL || _free_evp_pkey!(provider.private_key)
     provider.private_key = C_NULL
@@ -548,40 +328,14 @@ function _securezero_tls13_key_share_provider!(provider::_TLS13OpenSSLKeySharePr
     return nothing
 end
 
-function _securezero_tls13_key_share_provider!(provider::_TLS13ScriptedKeyShareProvider)::Nothing
-    _securezero!(provider.initial_shared_secret)
-    _securezero!(provider.retry_shared_secret)
-    return nothing
-end
-
-function _securezero_tls13_certificate_verifier!(::_TLS13NoCertificateVerifier)::Nothing
-    return nothing
-end
-
 function _securezero_tls13_certificate_verifier!(verifier::_TLS13OpenSSLCertificateVerifier)::Nothing
     verifier.leaf_public_key = nothing
-    return nothing
-end
-
-function _securezero_tls13_certificate_verifier!(::_TLS13ScriptedCertificateVerifier)::Nothing
     return nothing
 end
 
 const _TLS13TranscriptState = Union{
     _TranscriptHash{SHA.SHA2_256_CTX},
     _TranscriptHash{SHA.SHA2_384_CTX},
-}
-
-const _TLS13KeyShareProviderState = Union{
-    _TLS13StaticSharedSecretProvider,
-    _TLS13OpenSSLKeyShareProvider,
-    _TLS13ScriptedKeyShareProvider,
-}
-
-const _TLS13CertificateVerifierState = Union{
-    _TLS13NoCertificateVerifier,
-    _TLS13OpenSSLCertificateVerifier,
-    _TLS13ScriptedCertificateVerifier,
 }
 
 mutable struct _TLS13ClientHandshakeState
@@ -592,8 +346,8 @@ mutable struct _TLS13ClientHandshakeState
     have_cipher_suite::Bool
     psk_cipher_suite::UInt16
     psk_cipher_spec::Union{Nothing, _TLS13CipherSpec}
-    key_share_provider::_TLS13KeyShareProviderState
-    certificate_verifier::_TLS13CertificateVerifierState
+    key_share_provider::_TLS13OpenSSLKeyShareProvider
+    certificate_verifier::_TLS13OpenSSLCertificateVerifier
     client_certificate_chain::Vector{Vector{UInt8}}
     client_private_key::Ptr{Cvoid}
     client_signature_algorithm::UInt16
@@ -661,8 +415,8 @@ end
 
 function _new_tls13_client_handshake_state(
     client_hello::_ClientHelloMsg,
-    key_share_provider,
-    certificate_verifier,
+    key_share_provider::_TLS13OpenSSLKeyShareProvider,
+    certificate_verifier::_TLS13OpenSSLCertificateVerifier,
     session::Union{Nothing, _TLS13ClientSession},
 )
     psk_cipher_suite = session === nothing ? UInt16(0) : session.cipher_suite
@@ -721,8 +475,8 @@ end
 
 function _TLS13ClientHandshakeState(
     client_hello::_ClientHelloMsg,
-    key_share_provider,
-    certificate_verifier;
+    key_share_provider::_TLS13OpenSSLKeyShareProvider,
+    certificate_verifier::_TLS13OpenSSLCertificateVerifier;
     session::Union{Nothing, _TLS13ClientSession} = nothing,
 )
     return _TLS13ClientHandshakeState(client_hello, key_share_provider, certificate_verifier, session)
@@ -730,8 +484,8 @@ end
 
 function _TLS13ClientHandshakeState(
     client_hello::_ClientHelloMsg,
-    key_share_provider,
-    certificate_verifier,
+    key_share_provider::_TLS13OpenSSLKeyShareProvider,
+    certificate_verifier::_TLS13OpenSSLCertificateVerifier,
     session::Union{Nothing, _TLS13ClientSession},
 )
     _tls13_prepare_initial_client_hello!(key_share_provider, client_hello)
@@ -743,29 +497,10 @@ end
 function _TLS13ClientHandshakeState(
     client_hello::_ClientHelloMsg,
     _cipher_suite::UInt16,
-    key_share_provider,
-    certificate_verifier,
+    key_share_provider::_TLS13OpenSSLKeyShareProvider,
+    certificate_verifier::_TLS13OpenSSLCertificateVerifier,
 )
     return _TLS13ClientHandshakeState(client_hello, key_share_provider, certificate_verifier)
-end
-
-function _TLS13ClientHandshakeState(client_hello::_ClientHelloMsg, cipher_suite::UInt16, shared_secret::AbstractVector{UInt8})
-    return _TLS13ClientHandshakeState(
-        client_hello,
-        _TLS13StaticSharedSecretProvider(shared_secret),
-        _TLS13NoCertificateVerifier(),
-    )
-end
-
-function _TLS13ClientHandshakeState(client_hello::_ClientHelloMsg, cipher_suite::UInt16, shared_secret::AbstractVector{UInt8}, psk::AbstractVector{UInt8})
-    state = _TLS13ClientHandshakeState(client_hello, cipher_suite, shared_secret)
-    psk_cipher_spec = _tls13_cipher_spec(cipher_suite)
-    psk_cipher_spec === nothing && throw(ArgumentError("unsupported TLS 1.3 cipher suite: $(string(cipher_suite, base = 16))"))
-    state.psk = Vector{UInt8}(psk)
-    state.has_psk = true
-    state.psk_cipher_suite = cipher_suite
-    state.psk_cipher_spec = psk_cipher_spec
-    return state
 end
 
 function _new_tls13_binder_transcript(hash_kind::_TLSHashKind)
