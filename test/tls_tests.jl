@@ -89,17 +89,6 @@ function _tls_connect(
     )
 end
 
-function _tls_connect_openssl(
-        network::AbstractString,
-        address::AbstractString,
-        config::TL.Config,
-    )::TL.Conn
-    tcp = ND.connect(network, address)
-    conn = TL._new_openssl_conn(tcp, config; is_server = false)
-    TL.handshake!(conn)
-    return conn
-end
-
 function _tls_raw_config_for_test(base::TL.Config; min_version = base.min_version, max_version = base.max_version)
     return TL.Config(
         base.server_name,
@@ -172,6 +161,8 @@ end
             @test TL._effective_ca_file(verified_client_auth_cfg; is_server = true) == _TLS_CERT_PATH
             @test TL._native_tls_auto_client_enabled(TL.Config(server_name = "localhost", verify_peer = false))
             @test TL._tls_client_mode(TL.Config(server_name = "localhost", verify_peer = false)) == TL._TLS_CONN_MODE_NATIVE_AUTO_CLIENT
+            @test TL._native_tls12_only(TL.Config(server_name = "localhost", verify_peer = false, max_version = TL.TLS1_2_VERSION))
+            @test TL._tls_client_mode(TL.Config(server_name = "localhost", verify_peer = false, max_version = TL.TLS1_2_VERSION)) == TL._TLS_CONN_MODE_NATIVE_TLS12_CLIENT
             @test TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
@@ -182,6 +173,12 @@ end
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
             )) == TL._TLS_CONN_MODE_NATIVE_AUTO_SERVER
+            @test TL._tls_server_mode(TL.Config(
+                verify_peer = false,
+                cert_file = _TLS_CERT_PATH,
+                key_file = _TLS_KEY_PATH,
+                max_version = TL.TLS1_2_VERSION,
+            )) == TL._TLS_CONN_MODE_NATIVE_TLS12_SERVER
             @test TL._native_tls_auto_client_enabled(TL.Config(
                 server_name = "localhost",
                 verify_peer = false,
@@ -253,60 +250,6 @@ end
             end
         end
         @testset "version helpers and connect config inference" begin
-            method = ccall((:TLS_method, TL._LIBSSL_PATH), Ptr{Cvoid}, ())
-            function _ctx_new_for_test()
-                ctx = ccall((:SSL_CTX_new, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), method)
-                ctx == C_NULL && error("expected SSL_CTX")
-                return ctx
-            end
-            function _ctx_version_for_test(ctx::Ptr{Cvoid}, ctrl::Cint)
-                return UInt16(ccall(
-                    (:SSL_CTX_ctrl, TL._LIBSSL_PATH),
-                    Clong,
-                    (Ptr{Cvoid}, Cint, Clong, Ptr{Cvoid}),
-                    ctx,
-                    ctrl,
-                    Clong(0),
-                    C_NULL,
-                ))
-            end
-            ctx = _ctx_new_for_test()
-            try
-                @test_throws TL.ConfigError TL._set_ctx_min_version!(ctx, UInt16(0x0302))
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                TL._set_ctx_min_version!(ctx, TL.TLS1_3_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_3_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                TL._set_ctx_max_version!(ctx, TL.TLS1_2_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_2_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                @test_throws TL.ConfigError TL._set_ctx_max_version!(ctx, UInt16(0x0302))
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                @test_throws TL.ConfigError TL._set_ctx_min_version!(ctx, UInt16(0x9999))
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
             payload = UInt8[0x61, 0x62, 0x63]
             copied = TL._write_buffer(@view(payload[1:2:3]), 2)
             @test copied == UInt8[0x61, 0x63]
@@ -323,15 +266,6 @@ end
             @test TL._prepare_connect_config(explicit, NC.loopback_addr(443)) === explicit
             unchanged = TL._prepare_connect_config(TL.Config(verify_peer = false), "bad-address")
             @test unchanged.server_name === nothing
-
-            openssl_floor_cfg = TL.Config(server_name = "localhost", verify_peer = false, min_version = nothing, max_version = TL.TLS1_2_VERSION)
-            ctx = TL._ssl_ctx_new(openssl_floor_cfg; is_server = false)
-            try
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_2_VERSION
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_2_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
         end
         @testset "direct socket-address connect/listen passthroughs" begin
             IP.shutdown!()
@@ -369,17 +303,7 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "server client-auth mode mapping and runtime path" begin
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.NoClientCert)) == TL._SSL_VERIFY_NONE
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.RequestClientCert)) == TL._SSL_VERIFY_PEER
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven)) == TL._SSL_VERIFY_PEER
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.RequireAnyClientCert)) == (TL._SSL_VERIFY_PEER | TL._SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
-            @test TL._server_verify_mode(TL.Config(client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert)) == (TL._SSL_VERIFY_PEER | TL._SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.NoClientCert)) == C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.VerifyClientCertIfGiven)) == C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert)) == C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequestClientCert)) != C_NULL
-            @test TL._server_verify_callback(TL.Config(client_auth = TL.ClientAuthMode.RequireAnyClientCert)) != C_NULL
+        @testset "server client-auth runtime path" begin
             IP.shutdown!()
             listener = nothing
             accept_task = nothing
@@ -607,64 +531,6 @@ end
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
-            end
-        end
-        @testset "SSL_CTX is reused for equivalent client configs" begin
-            IP.shutdown!()
-            listener = nothing
-            accept_task = nothing
-            client1 = nothing
-            client2 = nothing
-            server_conns = TL.Conn[]
-            try
-                listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
-                laddr = TL.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn begin
-                    local conns = TL.Conn[]
-                    for _ in 1:2
-                        conn = TL.accept(listener)
-                        TL.handshake!(conn)
-                        push!(conns, conn)
-                    end
-                    return conns
-                end)
-                client_cfg = TL.Config(verify_peer = false, server_name = "localhost")
-                client1 = _tls_connect_openssl("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                client2 = _tls_connect_openssl("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                @test client1.ssl_ctx != C_NULL
-                @test client1.ssl_ctx == client2.ssl_ctx
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
-                server_conns = fetch(accept_task)
-            finally
-                for conn in server_conns
-                    _tls_close_quiet!(conn)
-                end
-                _tls_close_quiet!(client1)
-                _tls_close_quiet!(client2)
-                _tls_close_quiet!(listener)
-                IP.shutdown!()
-            end
-        end
-        @testset "SSL_CTX cache respects max bound with eviction" begin
-            old_max = TL._CTX_CACHE_MAX[]
-            TL._CTX_CACHE_MAX[] = 2
-            TL._free_ssl_ctx_cache!()
-            try
-                cfg1 = TL.Config(verify_peer = false, alpn_protocols = ["proto-1"])
-                cfg2 = TL.Config(verify_peer = false, alpn_protocols = ["proto-2"])
-                cfg3 = TL.Config(verify_peer = false, alpn_protocols = ["proto-3"])
-                key1 = TL._ssl_context_key(cfg1; is_server = false)
-                ctx1 = TL._shared_ssl_ctx(cfg1; is_server = false)
-                ctx2 = TL._shared_ssl_ctx(cfg2; is_server = false)
-                ctx3 = TL._shared_ssl_ctx(cfg3; is_server = false)
-                @test ctx1 != C_NULL
-                @test ctx2 != C_NULL
-                @test ctx3 != C_NULL
-                @test length(TL._CTX_CACHE) <= 2
-                @test !haskey(TL._CTX_CACHE, key1)
-            finally
-                TL._free_ssl_ctx_cache!()
-                TL._CTX_CACHE_MAX[] = old_max
             end
         end
         _tls_trace("DONE: show methods summarize TLS endpoints and handshake state")
@@ -1088,34 +954,50 @@ end
             @test tls12_state2.has_resumable_session
         end
         _tls_trace("DONE: connect/listen handshake and roundtrip")
-        @testset "OpenSSL TLS 1.2 client routing still loads certs" begin
+        @testset "effective TLS 1.2 client routing stays native with client certs" begin
             IP.shutdown!()
             listener = nothing
-            client_tcp = nothing
-            server_tcp = nothing
             client_tls = nothing
+            server_tls = nothing
             try
-                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
-                laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
-                server_tcp = fetch(accept_task)
-                client_tls = TL.client(client_tcp, TL.Config(
-                    verify_peer = false,
+                listener = TL.listen("tcp", "127.0.0.1:0", TL.Config(
+                    verify_peer = true,
+                    verify_hostname = false,
+                    cert_file = _TLS_NATIVE_SERVER_CERT_PATH,
+                    key_file = _TLS_NATIVE_SERVER_KEY_PATH,
+                    client_auth = TL.ClientAuthMode.RequireAndVerifyClientCert,
+                    client_ca_file = _TLS_NATIVE_CA_PATH,
+                    min_version = TL.TLS1_2_VERSION,
+                    max_version = TL.TLS1_2_VERSION,
+                ); backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    conn = TL.accept(listener)
+                    TL.handshake!(conn)
+                    return conn
+                end)
+                client_tls = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", TL.Config(
+                    verify_peer = true,
+                    verify_hostname = true,
                     server_name = "localhost",
-                    cert_file = _TLS_CERT_PATH,
-                    key_file = _TLS_KEY_PATH,
+                    ca_file = _TLS_NATIVE_CA_PATH,
+                    cert_file = _TLS_NATIVE_CLIENT_CERT_PATH,
+                    key_file = _TLS_NATIVE_CLIENT_KEY_PATH,
                     min_version = nothing,
                     max_version = TL.TLS1_2_VERSION,
                 ))
-                @test client_tls.mode == TL._TLS_CONN_MODE_OPENSSL
-                cert_ptr = ccall((:SSL_get_certificate, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), client_tls.ssl)
-                @test cert_ptr != C_NULL
+                @test client_tls.mode == TL._TLS_CONN_MODE_NATIVE_TLS12_CLIENT
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server_tls = fetch(accept_task)
+                client_state = TL.connection_state(client_tls)
+                server_state = TL.connection_state(server_tls)
+                @test client_state.version == "TLSv1.2"
+                @test server_state.version == "TLSv1.2"
+                @test !client_state.using_native_tls13
+                @test !server_state.using_native_tls13
             finally
+                _tls_close_quiet!(server_tls)
                 _tls_close_quiet!(client_tls)
-                _tls_close_quiet!(server_tcp)
-                _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
             end
@@ -1309,7 +1191,7 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "hostname verification can be enabled without chain verification on OpenSSL path" begin
+        @testset "hostname verification can be enabled without chain verification" begin
             IP.shutdown!()
             listener = nothing
             client = nothing
@@ -1423,11 +1305,12 @@ end
                 IP.shutdown!()
             end
         end
-        @testset "ip literal verification path does not require explicit server_name" begin
+        @testset "ip literal verification path infers server_name and succeeds" begin
             IP.shutdown!()
             listener = nothing
             accept_task = nothing
             client = nothing
+            server = nothing
             try
                 listener = TL.listen("tcp", "127.0.0.1:0", _tls_server_config(); backlog = 16)
                 laddr = TL.addr(listener)::NC.SocketAddrV4
@@ -1435,29 +1318,28 @@ end
                     conn = TL.accept(listener)
                     try
                         TL.handshake!(conn)
+                        return conn
                     catch
+                        _tls_close_quiet!(conn)
+                        rethrow()
                     end
-                    _tls_close_quiet!(conn)
-                    return nothing
                 end)
                 client_cfg = TL.Config(
                     verify_peer = true,
                     ca_file = _TLS_CERT_PATH,
                     handshake_timeout_ns = 10_000_000_000,
                 )
-                connect_err = nothing
-                try
-                    client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
-                catch ex
-                    connect_err = ex
-                end
-                if connect_err !== nothing
-                    @test connect_err isa TL.TLSError || connect_err isa TL.TLSHandshakeTimeoutError
-                else
-                    @test client isa TL.Conn
-                end
-                accept_task !== nothing && _tls_wait_task_done(accept_task, 12.0)
+                client = _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
+                server = fetch(accept_task)
+                client_state = TL.connection_state(client)
+                server_state = TL.connection_state(server)
+                @test client_state.handshake_complete
+                @test server_state.handshake_complete
+                @test client_state.version == "TLSv1.3"
+                @test server_state.version == "TLSv1.3"
             finally
+                _tls_close_quiet!(server)
                 _tls_close_quiet!(client)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()

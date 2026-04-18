@@ -119,52 +119,6 @@ function _tls13_native_server_config(;
     )
 end
 
-function _tls13_openssl_server_config(; alpn_protocols::Vector{String} = String[])
-    return TLN.Config(
-        verify_peer = false,
-        cert_file = _TLS_NATIVE_CERT_PATH,
-        key_file = _TLS_NATIVE_KEY_PATH,
-        alpn_protocols = copy(alpn_protocols),
-        handshake_timeout_ns = 10_000_000_000,
-    )
-end
-
-function _start_tls13_openssl_server(config::TLN.Config; configure = nothing)
-    listener = NCN.listen(NCN.loopback_addr(0); backlog = 8)
-    addr = NCN.addr(listener)::NCN.SocketAddrV4
-    server_ref = Ref{Union{Nothing, TLN.Conn}}(nothing)
-    task = Threads.@spawn begin
-        tcp = NCN.accept(listener)
-        conn = TLN._new_openssl_conn(tcp, config; is_server = true)
-        server_ref[] = conn
-        configure === nothing || configure(conn)
-        TLN.handshake!(conn)
-        return conn
-    end
-    return listener, addr, task, server_ref
-end
-
-function _connect_tls13_openssl_client(addr::NCN.SocketAddrV4, config::TLN.Config)::TLN.Conn
-    tcp = NCN.connect(addr)
-    conn = TLN._new_openssl_conn(tcp, config; is_server = false)
-    TLN.handshake!(conn)
-    return conn
-end
-
-function _tls_native_set_server_ciphersuites!(conn::TLN.Conn, suites::AbstractString)::Nothing
-    ok = ccall((:SSL_set_ciphersuites, TLN._LIBSSL_PATH), Cint, (Ptr{Cvoid}, Cstring), conn.ssl, suites)
-    ok == 1 || throw(TLN._make_tls_error("SSL_set_ciphersuites", Int32(ok)))
-    return nothing
-end
-
-function _tls_native_set_server_groups_list!(conn::TLN.Conn, groups::AbstractString)::Nothing
-    # This OpenSSL build does not export `SSL_set1_groups_list`, so mirror the
-    # macro expansion through `SSL_ctrl` instead.
-    ok = ccall((:SSL_ctrl, TLN._LIBSSL_PATH), Clong, (Ptr{Cvoid}, Cint, Clong, Cstring), conn.ssl, Cint(92), Clong(0), groups)
-    ok == 1 || throw(TLN._make_tls_error("SSL_set1_groups_list", Int32(ok)))
-    return nothing
-end
-
 function _start_tls13_native_server(config::TLN.Config; configure = nothing)
     listener = TLN.listen(NCN.loopback_addr(0), config; backlog = 8)
     addr = TLN.addr(listener)::NCN.SocketAddrV4
@@ -426,92 +380,6 @@ end
         end
     end
 
-    @testset "native client negotiates AES_256_GCM_SHA384" begin
-        IPN.shutdown!()
-        listener = nothing
-        client = nothing
-        server = nothing
-        server_task = nothing
-        try
-            listener, addr, server_task, _ = _start_tls13_openssl_server(
-                _tls13_openssl_server_config();
-                configure = conn -> _tls_native_set_server_ciphersuites!(conn, "TLS_AES_256_GCM_SHA384"),
-            )
-            client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
-            _finish_tls13_native_server!(server_task::Task)
-            server = fetch(server_task::Task)
-            client_native_state = client.native_state::TLN._TLS13NativeClientState
-            @test client_native_state.read_cipher !== nothing
-            @test client_native_state.write_cipher !== nothing
-            @test (client_native_state.read_cipher::TLN._TLS13RecordCipherState).spec == TLN._TLS13_AES_256_GCM_SHA384
-            @test TLN.connection_state(client).cipher_suite == "TLS_AES_256_GCM_SHA384"
-            server_reply = UInt8[0x93]
-            @test write(server, server_reply) == length(server_reply)
-            @test read(client, length(server_reply)) == server_reply
-            payload = UInt8[0x26, 0x56]
-            @test write(client, payload) == length(payload)
-            @test read(server, length(payload)) == payload
-        finally
-            _tls_native_close_quiet!(server)
-            _tls_native_close_quiet!(client)
-            _tls_native_close_quiet!(listener)
-            IPN.shutdown!()
-        end
-    end
-
-    @testset "native client negotiates CHACHA20_POLY1305_SHA256" begin
-        IPN.shutdown!()
-        listener = nothing
-        client = nothing
-        server = nothing
-        server_task = nothing
-        try
-            listener, addr, server_task, _ = _start_tls13_openssl_server(
-                _tls13_openssl_server_config();
-                configure = conn -> _tls_native_set_server_ciphersuites!(conn, "TLS_CHACHA20_POLY1305_SHA256"),
-            )
-            client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
-            _finish_tls13_native_server!(server_task::Task)
-            server = fetch(server_task::Task)
-            client_native_state = client.native_state::TLN._TLS13NativeClientState
-            @test client_native_state.read_cipher !== nothing
-            @test client_native_state.write_cipher !== nothing
-            @test (client_native_state.read_cipher::TLN._TLS13RecordCipherState).spec == TLN._TLS13_CHACHA20_POLY1305_SHA256
-            @test TLN.connection_state(client).cipher_suite == "TLS_CHACHA20_POLY1305_SHA256"
-            payload = UInt8[0xca, 0xfe, 0x13]
-            @test write(client, payload) == length(payload)
-            @test read(server, length(payload)) == payload
-        finally
-            _tls_native_close_quiet!(server)
-            _tls_native_close_quiet!(client)
-            _tls_native_close_quiet!(listener)
-            IPN.shutdown!()
-        end
-    end
-
-    @testset "native client handles HelloRetryRequest with P-256" begin
-        IPN.shutdown!()
-        listener = nothing
-        client = nothing
-        server_task = nothing
-        try
-            listener, addr, server_task, _ = _start_tls13_openssl_server(
-                _tls13_openssl_server_config();
-                configure = conn -> _tls_native_set_server_groups_list!(conn, "P-256"),
-            )
-            client = TLN.connect(addr, _tls13_native_client_config(server_name = "localhost", verify_peer = false))
-            _finish_tls13_native_server!(server_task::Task)
-            client_state = TLN.connection_state(client)
-            @test client_state.did_hello_retry_request
-            @test client_state.curve == "P-256"
-        finally
-            _tls_native_close_quiet!(client)
-            server_task isa Task && _finish_tls13_native_server!(server_task)
-            _tls_native_close_quiet!(listener)
-            IPN.shutdown!()
-        end
-    end
-
     @testset "native server handles HelloRetryRequest with P-256 through public APIs" begin
         IPN.shutdown!()
         listener = nothing
@@ -536,42 +404,6 @@ end
             payload = UInt8[0x31, 0x32, 0x33]
             @test write(client, payload) == length(payload)
             @test read(server, length(payload)) == payload
-        finally
-            _tls_native_close_quiet!(server)
-            _tls_native_close_quiet!(client)
-            _tls_native_close_quiet!(listener)
-            IPN.shutdown!()
-        end
-    end
-
-    @testset "native server interoperates with OpenSSL client" begin
-        IPN.shutdown!()
-        listener = nothing
-        client = nothing
-        server = nothing
-        server_task = nothing
-        try
-            listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config())
-            client = _connect_tls13_openssl_client(addr, TLN.Config(
-                server_name = "localhost",
-                verify_peer = false,
-                handshake_timeout_ns = 10_000_000_000,
-                max_version = TLN.TLS1_3_VERSION,
-            ))
-            _finish_tls13_native_server!(server_task::Task)
-            server = fetch(server_task::Task)
-            client_state = TLN.connection_state(client)
-            server_state = TLN.connection_state(server)
-            @test !client_state.using_native_tls13
-            @test client_state.version == "TLSv1.3"
-            @test server_state.using_native_tls13
-            @test server_state.version == "TLSv1.3"
-            payload = UInt8[0x71, 0x72, 0x73, 0x74]
-            @test write(client, payload) == length(payload)
-            @test read(server, length(payload)) == payload
-            reply = UInt8[0x81, 0x82]
-            @test write(server, reply) == length(reply)
-            @test read(client, length(reply)) == reply
         finally
             _tls_native_close_quiet!(server)
             _tls_native_close_quiet!(client)

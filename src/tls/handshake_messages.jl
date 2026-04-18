@@ -553,12 +553,13 @@ function _marshal_client_hello(msg::_ClientHelloMsg)::Vector{UInt8}
         throw(ArgumentError("client hello psk_identities and psk_binders must have the same length"))
 
     exts = UInt8[]
-    if !isempty(msg.server_name)
+    sni_name = isempty(msg.server_name) ? "" : _hostname_in_sni(msg.server_name)
+    if !isempty(sni_name)
         _append_extension!(exts, _HANDSHAKE_EXTENSION_SERVER_NAME) do exts_buf
             _append_u16_length_prefixed!(exts_buf) do name_list_buf
                 _append_u8!(name_list_buf, 0)
                 _append_u16_length_prefixed!(name_list_buf) do server_name_buf
-                    append!(server_name_buf, codeunits(msg.server_name))
+                    append!(server_name_buf, codeunits(sni_name))
                 end
             end
         end
