@@ -773,19 +773,51 @@ end
     return child.issuer_raw == parent.subject_raw
 end
 
+function _read_tls_file_bytes(path::AbstractString)::Vector{UInt8}
+    path_string = String(path)
+    file = ccall(:fopen, Ptr{Cvoid}, (Cstring, Cstring), path_string, "rb")
+    file == C_NULL && throw(SystemError("fopen", Base.Libc.errno()))
+    bytes = Vector{UInt8}(undef, Int(stat(path_string).size))
+    chunk = Vector{UInt8}(undef, 8192)
+    offset = 0
+    completed = false
+    try
+        while true
+            n = Int(ccall(:fread, Csize_t, (Ptr{UInt8}, Csize_t, Csize_t, Ptr{Cvoid}), chunk, 1, length(chunk), file))
+            if n == 0
+                if ccall(:feof, Cint, (Ptr{Cvoid},), file) != 0
+                    resize!(bytes, offset)
+                    completed = true
+                    return bytes
+                end
+                ccall(:ferror, Cint, (Ptr{Cvoid},), file) == 0 && throw(SystemError("fread", 0))
+                throw(SystemError("fread", Base.Libc.errno()))
+            end
+            required = offset + n
+            required <= length(bytes) || resize!(bytes, max(required, length(bytes) + length(chunk)))
+            copyto!(bytes, offset + 1, chunk, 1, n)
+            offset = required
+        end
+    finally
+        completed || _securezero!(bytes)
+        _securezero!(chunk)
+        ccall(:fclose, Cint, (Ptr{Cvoid},), file)
+    end
+end
+
 function _tls_load_trust_certificates(ca_path::AbstractString)::Vector{Vector{UInt8}}
     if isdir(ca_path)
         certificates = Vector{Vector{UInt8}}()
         for entry in sort(readdir(ca_path; join = true))
             isfile(entry) || continue
-            pem_bytes = read(entry)
+            pem_bytes = _read_tls_file_bytes(entry)
             _tls_contains_pem_certificate_header(pem_bytes) || continue
             append!(certificates, _tls_decode_pem_certificates(pem_bytes))
         end
         isempty(certificates) && throw(ArgumentError("tls: CA roots directory does not contain any PEM certificate blocks"))
         return certificates
     end
-    return _tls_decode_pem_certificates(read(ca_path))
+    return _tls_decode_pem_certificates(_read_tls_file_bytes(ca_path))
 end
 
 function _tls_trust_store_fingerprint(ca_path::AbstractString)::Tuple{Float64, Int64}

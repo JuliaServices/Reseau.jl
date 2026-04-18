@@ -1,25 +1,3 @@
-function _read_tls_file_bytes(path::String)::Vector{UInt8}
-    file = ccall(:fopen, Ptr{Cvoid}, (Cstring, Cstring), path, "rb")
-    file == C_NULL && throw(SystemError("fopen", Base.Libc.errno()))
-    bytes = UInt8[]
-    chunk = Vector{UInt8}(undef, 8192)
-    try
-        while true
-            n = Int(ccall(:fread, Csize_t, (Ptr{UInt8}, Csize_t, Csize_t, Ptr{Cvoid}), chunk, 1, length(chunk), file))
-            if n == 0
-                ccall(:feof, Cint, (Ptr{Cvoid},), file) != 0 && return bytes
-                ccall(:ferror, Cint, (Ptr{Cvoid},), file) == 0 && throw(SystemError("fread", 0))
-                throw(SystemError("fread", Base.Libc.errno()))
-            end
-            offset = length(bytes)
-            resize!(bytes, offset + n)
-            copyto!(bytes, offset + 1, chunk, 1, n)
-        end
-    finally
-        ccall(:fclose, Cint, (Ptr{Cvoid},), file)
-    end
-end
-
 const _TLS13_MAX_CLIENT_PSK_IDENTITIES = 5
 const _TLS13_SERVER_SUPPORTED_SIGNATURE_ALGORITHMS = (
     _TLS_SIGNATURE_ED25519,
