@@ -210,7 +210,7 @@ end
     ]
 end
 
-function _tls13_write_tls_plaintext!(tcp::TCP.Conn, content_type::UInt8, payload::AbstractVector{UInt8}, record_version::UInt16 = TLS1_0_VERSION)::Nothing
+function _tls13_write_tls_plaintext!(tcp::TCP.Conn, content_type::UInt8, payload::AbstractVector{UInt8}, record_version::UInt16 = _TLS_LEGACY_RECORD_VERSION)::Nothing
     header = UInt8[
         content_type,
         UInt8(record_version >> 8),

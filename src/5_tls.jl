@@ -65,10 +65,9 @@ const _TLSEXT_NAMETYPE_HOST_NAME = Clong(0)
 const _ERRNO_EAGAIN = Int32(Base.Libc.EAGAIN)
 const _ERRNO_EWOULDBLOCK = _ERRNO_EAGAIN
 
-const TLS1_0_VERSION = UInt16(0x0301)
-const TLS1_1_VERSION = UInt16(0x0302)
 const TLS1_2_VERSION = UInt16(0x0303)
 const TLS1_3_VERSION = UInt16(0x0304)
+const _TLS_LEGACY_RECORD_VERSION = UInt16(0x0301)
 
 include("tls/crypto.jl")
 include("tls/openssl_crypto.jl")
@@ -182,8 +181,8 @@ Keyword arguments:
   while exact native TLS 1.2 defaults to `[TLS.P256]`.
 - `handshake_timeout_ns`: optional cap, in monotonic nanoseconds, applied only while the
   handshake is running. Existing transport deadlines still win if they are earlier.
-- `min_version` / `max_version`: TLS protocol version bounds. `nothing` leaves the bound
-  unset.
+- `min_version` / `max_version`: TLS protocol version bounds. Only TLS 1.2 and TLS 1.3
+  are supported; `nothing` leaves the bound unset.
 
 Returns a reusable immutable `Config`.
 
@@ -273,6 +272,11 @@ function Config(;
     has_key = key_file_s !== nothing
     has_cert == has_key || throw(ConfigError("both `cert_file` and `key_file` must be set together"))
     handshake_timeout_ns < 0 && throw(ConfigError("handshake_timeout_ns must be >= 0"))
+    min_version !== nothing && _require_supported_tls_version!("min_version", min_version::UInt16)
+    max_version !== nothing && _require_supported_tls_version!("max_version", max_version::UInt16)
+    if min_version !== nothing && max_version !== nothing
+        (min_version::UInt16) <= (max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
+    end
     return Config(
         server_name_s,
         verify_peer,
@@ -296,6 +300,14 @@ function Config(;
 end
 
 const _NATIVE_DEFAULT_CURVE_PREFERENCES = (_TLS_GROUP_X25519, _TLS_GROUP_SECP256R1)
+
+@inline _supported_tls_version(version::UInt16)::Bool = version == TLS1_2_VERSION || version == TLS1_3_VERSION
+@inline _tls_version_hex(version::UInt16)::String = "0x" * string(version, base = 16, pad = 4)
+
+function _require_supported_tls_version!(field_name::AbstractString, version::UInt16)::Nothing
+    _supported_tls_version(version) && return nothing
+    throw(ConfigError("`$field_name` must be TLS 1.2 or TLS 1.3, got $(_tls_version_hex(version))"))
+end
 
 @inline function _native_curve_supported(group::UInt16)::Bool
     return group == _TLS_GROUP_X25519 || group == _TLS_GROUP_SECP256R1
@@ -738,6 +750,8 @@ function _validate_config(config::Config; is_server::Bool)
     if !is_server && config.verify_peer && config.ca_file === nothing
         _default_ca_file_path() === nothing && throw(ConfigError("client TLS verification requires a CA roots path from NetworkOptions.ca_roots_path()"))
     end
+    config.min_version !== nothing && _require_supported_tls_version!("min_version", config.min_version::UInt16)
+    config.max_version !== nothing && _require_supported_tls_version!("max_version", config.max_version::UInt16)
     if config.min_version !== nothing && config.max_version !== nothing
         (config.min_version::UInt16) <= (config.max_version::UInt16) || throw(ConfigError("min_version must be <= max_version"))
     end
@@ -814,11 +828,13 @@ end
 end
 
 function _set_ctx_min_version!(ctx::Ptr{Cvoid}, version::UInt16)
+    _require_supported_tls_version!("min_version", version)
     _ctx_ctrl!(ctx, _SSL_CTRL_SET_MIN_PROTO_VERSION, version, "SSL_CTX_set_min_proto_version")
     return nothing
 end
 
 function _set_ctx_max_version!(ctx::Ptr{Cvoid}, version::UInt16)
+    _require_supported_tls_version!("max_version", version)
     _ctx_ctrl!(ctx, _SSL_CTRL_SET_MAX_PROTO_VERSION, version, "SSL_CTX_set_max_proto_version")
     return nothing
 end
@@ -845,9 +861,7 @@ function _ssl_ctx_new(config::Config; is_server::Bool)::Ptr{Cvoid}
         # Verification mode lives on the context so every connection built from it starts
         # with the same authentication policy.
         ccall((:SSL_CTX_set_verify, _LIBSSL_PATH), Cvoid, (Ptr{Cvoid}, Cint, Ptr{Cvoid}), ctx, verify_mode, verify_cb)
-        if config.min_version !== nothing
-            _set_ctx_min_version!(ctx, config.min_version::UInt16)
-        end
+        _set_ctx_min_version!(ctx, config.min_version === nothing ? TLS1_2_VERSION : config.min_version::UInt16)
         if config.max_version !== nothing
             _set_ctx_max_version!(ctx, config.max_version::UInt16)
         end

@@ -100,6 +100,29 @@ function _tls_connect_openssl(
     return conn
 end
 
+function _tls_raw_config_for_test(base::TL.Config; min_version = base.min_version, max_version = base.max_version)
+    return TL.Config(
+        base.server_name,
+        base.verify_peer,
+        base.verify_hostname,
+        base.client_auth,
+        base.cert_file,
+        base.key_file,
+        base.ca_file,
+        base.client_ca_file,
+        copy(base.alpn_protocols),
+        copy(base.curve_preferences),
+        base.handshake_timeout_ns,
+        min_version,
+        max_version,
+        base.session_tickets_disabled,
+        base._client_session_cache,
+        base._server_session_cache,
+        base._client_session_cache12,
+        base._server_session_cache12,
+    )
+end
+
 @testset "TLS phase 6" begin
         @test TL.Conn <: IO
         @test TL.DeadlineExceededError === NC.DeadlineExceededError
@@ -110,6 +133,8 @@ end
             @test cfg_default.min_version == TL.TLS1_2_VERSION
             @test cfg_default.client_auth == TL.ClientAuthMode.NoClientCert
             @test cfg_default.verify_hostname
+            @test !isdefined(TL, :TLS1_0_VERSION)
+            @test !isdefined(TL, :TLS1_1_VERSION)
             @test TL._native_curve_preferences(cfg_default) == UInt16[TL.X25519, TL.P256]
             @test TL._tls12_curve_preferences(cfg_default) == UInt16[TL.P256]
             @test TL._native_curve_preferences(TL.Config(
@@ -163,16 +188,6 @@ end
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
             ))
-            @test !TL._native_tls_auto_client_enabled(TL.Config(
-                server_name = "localhost",
-                verify_peer = false,
-                min_version = TL.TLS1_0_VERSION,
-            ))
-            @test TL._tls_client_mode(TL.Config(
-                server_name = "localhost",
-                verify_peer = false,
-                min_version = TL.TLS1_0_VERSION,
-            )) == TL._TLS_CONN_MODE_OPENSSL
             @test TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
@@ -186,15 +201,11 @@ end
             )
             @test !TL._tls13_client_hello(disabled_ticket_cfg).ticket_supported
             @test !TL._tls_auto_client_hello(disabled_ticket_cfg).ticket_supported
-            @test !TL._native_tls_auto_server_enabled(TL.Config(
-                verify_peer = false,
-                cert_file = _TLS_CERT_PATH,
-                key_file = _TLS_KEY_PATH,
-                min_version = TL.TLS1_1_VERSION,
-            ))
             @test_throws TL.ConfigError TL.Config(cert_file = _TLS_CERT_PATH)
             @test_throws TL.ConfigError TL.Config(key_file = _TLS_KEY_PATH)
             @test_throws TL.ConfigError TL.Config(handshake_timeout_ns = -1)
+            @test_throws TL.ConfigError TL.Config(server_name = "localhost", verify_peer = false, min_version = UInt16(0x0301))
+            @test_throws TL.ConfigError TL.Config(server_name = "localhost", verify_peer = false, max_version = UInt16(0x0302))
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[0x9999]); is_server = false)
             @test TL._validate_config(TL.Config(verify_peer = false, curve_preferences = UInt16[TL.P256]); is_server = false) === nothing
             @test TL._validate_config(TL.Config(
@@ -203,12 +214,11 @@ end
                 max_version = TL.TLS1_2_VERSION,
                 curve_preferences = UInt16[TL.X25519],
             ); is_server = false) === nothing
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(
-                verify_peer = false,
-                min_version = TL.TLS1_0_VERSION,
-                curve_preferences = UInt16[TL.X25519],
-            ); is_server = false)
-            @test_throws TL.ConfigError TL._validate_config(TL.Config(min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION); is_server = false)
+            @test_throws TL.ConfigError TL.Config(min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION)
+            raw_cfg = _tls_raw_config_for_test(TL.Config(server_name = "localhost", verify_peer = false); min_version = UInt16(0x0301))
+            @test_throws TL.ConfigError TL._validate_config(raw_cfg; is_server = false)
+            raw_reversed = _tls_raw_config_for_test(TL.Config(server_name = "localhost", verify_peer = false); min_version = TL.TLS1_3_VERSION, max_version = TL.TLS1_2_VERSION)
+            @test_throws TL.ConfigError TL._validate_config(raw_reversed; is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, ca_file = joinpath(@__DIR__, "missing-ca.pem")); is_server = false)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(verify_peer = false, client_ca_file = joinpath(@__DIR__, "missing-client-ca.pem")); is_server = true)
             @test_throws TL.ConfigError TL._validate_config(TL.Config(
@@ -262,8 +272,7 @@ end
             end
             ctx = _ctx_new_for_test()
             try
-                TL._set_ctx_min_version!(ctx, TL.TLS1_1_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_1_VERSION
+                @test_throws TL.ConfigError TL._set_ctx_min_version!(ctx, UInt16(0x0302))
             finally
                 ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
             end
@@ -286,23 +295,14 @@ end
 
             ctx = _ctx_new_for_test()
             try
-                TL._set_ctx_max_version!(ctx, TL.TLS1_1_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_1_VERSION
+                @test_throws TL.ConfigError TL._set_ctx_max_version!(ctx, UInt16(0x0302))
             finally
                 ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
             end
 
             ctx = _ctx_new_for_test()
             try
-                TL._set_ctx_max_version!(ctx, TL.TLS1_0_VERSION)
-                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_0_VERSION
-            finally
-                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-            end
-
-            ctx = _ctx_new_for_test()
-            try
-                @test_throws TL.TLSError TL._set_ctx_min_version!(ctx, UInt16(0x9999))
+                @test_throws TL.ConfigError TL._set_ctx_min_version!(ctx, UInt16(0x9999))
             finally
                 ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
             end
@@ -323,6 +323,15 @@ end
             @test TL._prepare_connect_config(explicit, NC.loopback_addr(443)) === explicit
             unchanged = TL._prepare_connect_config(TL.Config(verify_peer = false), "bad-address")
             @test unchanged.server_name === nothing
+
+            openssl_floor_cfg = TL.Config(server_name = "localhost", verify_peer = false, min_version = nothing, max_version = TL.TLS1_2_VERSION)
+            ctx = TL._ssl_ctx_new(openssl_floor_cfg; is_server = false)
+            try
+                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MIN_PROTO_VERSION) == TL.TLS1_2_VERSION
+                @test _ctx_version_for_test(ctx, TL._SSL_CTRL_GET_MAX_PROTO_VERSION) == TL.TLS1_2_VERSION
+            finally
+                ccall((:SSL_CTX_free, TL._LIBSSL_PATH), Cvoid, (Ptr{Cvoid},), ctx)
+            end
         end
         @testset "direct socket-address connect/listen passthroughs" begin
             IP.shutdown!()
@@ -446,36 +455,6 @@ end
                 accept_task !== nothing && _tls_wait_task_done(accept_task, 12.0)
             finally
                 _tls_close_quiet!(client)
-                _tls_close_quiet!(listener)
-                IP.shutdown!()
-            end
-        end
-        @testset "client certificate config loads native certificate into SSL handle" begin
-            IP.shutdown!()
-            listener = nothing
-            client_tcp = nothing
-            server_tcp = nothing
-            client_tls = nothing
-            try
-                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
-                laddr = NC.addr(listener)::NC.SocketAddrV4
-                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
-                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
-                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
-                server_tcp = fetch(accept_task)
-                client_tls = TL.client(client_tcp, TL.Config(
-                    verify_peer = false,
-                    server_name = "localhost",
-                    cert_file = _TLS_CERT_PATH,
-                    key_file = _TLS_KEY_PATH,
-                    min_version = TL.TLS1_0_VERSION,
-                ))
-                cert_ptr = ccall((:SSL_get_certificate, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), client_tls.ssl)
-                @test cert_ptr != C_NULL
-            finally
-                _tls_close_quiet!(client_tls)
-                _tls_close_quiet!(server_tcp)
-                _tls_close_quiet!(client_tcp)
                 _tls_close_quiet!(listener)
                 IP.shutdown!()
             end
@@ -1109,6 +1088,38 @@ end
             @test tls12_state2.has_resumable_session
         end
         _tls_trace("DONE: connect/listen handshake and roundtrip")
+        @testset "OpenSSL TLS 1.2 client routing still loads certs" begin
+            IP.shutdown!()
+            listener = nothing
+            client_tcp = nothing
+            server_tcp = nothing
+            client_tls = nothing
+            try
+                listener = ND.listen("tcp", "127.0.0.1:0"; backlog = 8)
+                laddr = NC.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn NC.accept(listener))
+                client_tcp = ND.connect("tcp", "127.0.0.1:$(Int(laddr.port))")
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server_tcp = fetch(accept_task)
+                client_tls = TL.client(client_tcp, TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    cert_file = _TLS_CERT_PATH,
+                    key_file = _TLS_KEY_PATH,
+                    min_version = nothing,
+                    max_version = TL.TLS1_2_VERSION,
+                ))
+                @test client_tls.mode == TL._TLS_CONN_MODE_OPENSSL
+                cert_ptr = ccall((:SSL_get_certificate, TL._LIBSSL_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), client_tls.ssl)
+                @test cert_ptr != C_NULL
+            finally
+                _tls_close_quiet!(client_tls)
+                _tls_close_quiet!(server_tcp)
+                _tls_close_quiet!(client_tcp)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         _tls_trace("START: write accepts string codeunits buffers")
         @testset "write accepts string codeunits buffers" begin
             IP.shutdown!()
