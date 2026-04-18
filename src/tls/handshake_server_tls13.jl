@@ -95,15 +95,6 @@ end
 mutable struct _TLS13ServerHandshakeState
     client_hello::_ClientHelloMsg
     client_hello_raw::Vector{UInt8}
-    server_hello::_ServerHelloMsg
-    server_hello_raw::Vector{UInt8}
-    encrypted_extensions::_EncryptedExtensionsMsg
-    certificate_request::_CertificateRequestMsgTLS13
-    certificate::_CertificateMsgTLS13
-    certificate_verify::_CertificateVerifyMsg
-    client_certificate::_CertificateMsgTLS13
-    client_certificate_verify::_CertificateVerifyMsg
-    client_finished::_FinishedMsg
     cipher_suite::UInt16
     cipher_spec::_TLS13CipherSpec
     transcript::_TLS13TranscriptState
@@ -112,6 +103,7 @@ mutable struct _TLS13ServerHandshakeState
     client_leaf_public_key::_TLSPublicKeyState
     certificate_chain::Vector{Vector{UInt8}}
     peer_certificates::Vector{Vector{UInt8}}
+    client_certificate_request_algorithms::Vector{UInt16}
     selected_signature_algorithm::UInt16
     selected_alpn::String
     selected_group::UInt16
@@ -143,15 +135,6 @@ function _TLS13ServerHandshakeState(config)::_TLS13ServerHandshakeState
     return _TLS13ServerHandshakeState(
         _ClientHelloMsg(),
         UInt8[],
-        _ServerHelloMsg(),
-        UInt8[],
-        _EncryptedExtensionsMsg(),
-        _CertificateRequestMsgTLS13(),
-        _CertificateMsgTLS13(),
-        _CertificateVerifyMsg(),
-        _CertificateMsgTLS13(),
-        _CertificateVerifyMsg(),
-        _FinishedMsg(),
         UInt16(0),
         _TLS13_AES_128_GCM_SHA256,
         _new_tls13_handshake_transcript(_HASH_SHA256),
@@ -160,6 +143,7 @@ function _TLS13ServerHandshakeState(config)::_TLS13ServerHandshakeState
         nothing,
         certificate_chain,
         Vector{Vector{UInt8}}(),
+        UInt16[],
         UInt16(0),
         "",
         UInt16(0),
@@ -187,11 +171,11 @@ function _securezero_tls13_server_handshake_state!(state::_TLS13ServerHandshakeS
     state.private_key = C_NULL
     state.client_leaf_public_key = nothing
     _securezero!(state.client_hello_raw)
-    _securezero!(state.server_hello_raw)
     _securezero!(state.shared_secret)
     _securezero!(state.psk)
     session = state.resumption_session
     session === nothing || _securezero_tls13_server_session!(session::_TLS13ServerSession)
+    empty!(state.client_certificate_request_algorithms)
     _securezero!(state.handshake_secret)
     _securezero!(state.master_secret)
     _securezero!(state.client_handshake_traffic_secret)
@@ -218,15 +202,6 @@ function _tls13_select_server_cipher_suite(client_hello::_ClientHelloMsg)::Tuple
         return cipher_suite, (_tls13_cipher_spec(cipher_suite)::_TLS13CipherSpec)
     end
     _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported TLS 1.3 cipher suite")
-end
-
-function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
-    isempty(config.alpn_protocols) && return ""
-    isempty(client_hello.alpn_protocols) && return ""
-    for proto in config.alpn_protocols
-        in(proto, client_hello.alpn_protocols) && return proto
-    end
-    return ""
 end
 
 function _tls13_select_server_signature_algorithm(pkey::Ptr{Cvoid}, client_hello::_ClientHelloMsg)::UInt16
@@ -354,31 +329,6 @@ function _prepare_server_negotiation!(state::_TLS13ServerHandshakeState, io, con
     return nothing
 end
 
-function _tls13_server_session_client_auth_ok(session::_TLS13ServerSession, config)::Bool
-    mode = config.client_auth
-    has_client_certificates = !isempty(session.client_certificates)
-    if mode == ClientAuthMode.NoClientCert
-        return !has_client_certificates
-    end
-    if mode == ClientAuthMode.RequireAnyClientCert || mode == ClientAuthMode.RequireAndVerifyClientCert
-        has_client_certificates || return false
-    end
-    has_client_certificates || return true
-    if mode == ClientAuthMode.VerifyClientCertIfGiven || mode == ClientAuthMode.RequireAndVerifyClientCert
-        try
-            _tls13_verify_client_certificate_chain(
-                session.client_certificates;
-                verify_peer = true,
-                ca_file = _effective_ca_file(config; is_server = true),
-            )
-            return true
-        catch
-            return false
-        end
-    end
-    return true
-end
-
 function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Nothing
     state.using_psk = false
     state.has_selected_psk_identity = false
@@ -423,7 +373,13 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
             _transcript_update!(binder_transcript, _marshal_client_hello_without_binders(state.client_hello))
             binder = _tls13_finished_verify_data(state.cipher_spec.hash_kind, binder_key, binder_transcript)
             _constant_time_equals(state.client_hello.psk_binders[i], binder) || continue
-            _tls13_server_session_client_auth_ok(session, config) || continue
+            _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
+                _tls13_verify_client_certificate_chain(
+                    client_certificates;
+                    verify_peer = true,
+                    ca_file = _effective_ca_file(config; is_server = true),
+                )
+            end || continue
             state.psk = copy(session.secret)
             state.using_psk = true
             state.resumption_session = session
@@ -459,9 +415,7 @@ function _send_server_hello!(state::_TLS13ServerHandshakeState, io)::Nothing
         server_hello.selected_identity_present = true
         server_hello.selected_identity = state.selected_psk_identity
     end
-    state.server_hello = server_hello
     raw = _marshal_server_hello(server_hello)
-    state.server_hello_raw = raw
     _transcript_update!(state.transcript, raw)
     _write_handshake_bytes!(io, raw)
     return nothing
@@ -493,22 +447,17 @@ function _send_encrypted_extensions!(state::_TLS13ServerHandshakeState, io)::Not
     msg = _EncryptedExtensionsMsg()
     msg.alpn_protocol = state.selected_alpn
     msg.server_name_ack = !isempty(state.client_hello.server_name)
-    state.encrypted_extensions = msg
     raw = _marshal_encrypted_extensions(msg)
     _transcript_update!(state.transcript, raw)
     _write_handshake_bytes!(io, raw)
     return nothing
 end
 
-function _request_client_certificate(config)::Bool
-    return config.client_auth != ClientAuthMode.NoClientCert
-end
-
 function _send_certificate_request!(state::_TLS13ServerHandshakeState, io)::Nothing
     msg = _CertificateRequestMsgTLS13()
     msg.supported_signature_algorithms = UInt16[_TLS13_SERVER_SUPPORTED_SIGNATURE_ALGORITHMS...]
     msg.supported_signature_algorithms_cert = UInt16[_TLS13_SERVER_SUPPORTED_SIGNATURE_ALGORITHMS...]
-    state.certificate_request = msg
+    state.client_certificate_request_algorithms = copy(msg.supported_signature_algorithms)
     raw = _marshal_certificate_request_tls13(msg)
     _transcript_update!(state.transcript, raw)
     _write_handshake_bytes!(io, raw)
@@ -518,7 +467,6 @@ end
 function _send_server_certificate!(state::_TLS13ServerHandshakeState, io)::Nothing
     msg = _CertificateMsgTLS13()
     msg.certificates = [copy(cert) for cert in state.certificate_chain]
-    state.certificate = msg
     raw = _marshal_certificate_tls13(msg)
     _transcript_update!(state.transcript, raw)
     _write_handshake_bytes!(io, raw)
@@ -530,7 +478,6 @@ function _send_server_certificate_verify!(state::_TLS13ServerHandshakeState, io)
     signature = _tls13_openssl_sign_signature(state.private_key, state.selected_signature_algorithm, signed)
     try
         msg = _CertificateVerifyMsg(state.selected_signature_algorithm, signature)
-        state.certificate_verify = msg
         raw = _marshal_certificate_verify(msg)
         _transcript_update!(state.transcript, raw)
         _write_handshake_bytes!(io, raw)
@@ -557,13 +504,12 @@ function _send_server_finished!(state::_TLS13ServerHandshakeState, io)::Nothing
 end
 
 function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config)::Nothing
-    if state.using_psk || !_request_client_certificate(config)
+    if state.using_psk || !_tls_should_request_client_certificate(config)
         return nothing
     end
     raw = _read_handshake_bytes!(io)
     msg = _unmarshal_certificate_tls13(raw)
     msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client Certificate")
-    state.client_certificate = msg
     _transcript_update!(state.transcript, raw)
     state.client_leaf_public_key = nothing
     state.peer_certificates = [copy(cert) for cert in msg.certificates]
@@ -583,7 +529,7 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
     raw = _read_handshake_bytes!(io)
     certificate_verify = _unmarshal_certificate_verify(raw)
     certificate_verify === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 server handshake expected client CertificateVerify")
-    in(certificate_verify.signature_algorithm, state.certificate_request.supported_signature_algorithms) ||
+    in(certificate_verify.signature_algorithm, state.client_certificate_request_algorithms) ||
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: client certificate used with invalid signature algorithm")
     signed = _tls13_signed_message(_TLS13_CLIENT_SIGNATURE_CONTEXT, state.transcript)
     try
@@ -592,7 +538,6 @@ function _read_client_certificate!(state::_TLS13ServerHandshakeState, io, config
     finally
         _securezero!(signed)
     end
-    state.client_certificate_verify = certificate_verify
     _transcript_update!(state.transcript, raw)
     return nothing
 end
@@ -607,7 +552,6 @@ function _read_client_finished!(state::_TLS13ServerHandshakeState, io)::Nothing
     finally
         _securezero!(expected_verify_data)
     end
-    state.client_finished = msg
     _transcript_update!(state.transcript, raw)
     return nothing
 end
@@ -673,7 +617,7 @@ function _server_handshake_tls13_after_client_hello!(state::_TLS13ServerHandshak
     _tls13_set_write_cipher!(io.state, state.cipher_spec, state.server_handshake_traffic_secret)
     _send_encrypted_extensions!(state, io)
     if !state.using_psk
-        _request_client_certificate(config) && _send_certificate_request!(state, io)
+        _tls_should_request_client_certificate(config) && _send_certificate_request!(state, io)
         _send_server_certificate!(state, io)
         _send_server_certificate_verify!(state, io)
     end

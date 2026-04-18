@@ -298,8 +298,6 @@ mutable struct _TLS13ClientHandshakeState
     server_hello_raw::Vector{UInt8}
     server_hello::_ServerHelloMsg
     have_server_hello::Bool
-    encrypted_extensions::_EncryptedExtensionsMsg
-    have_encrypted_extensions::Bool
     certificate_request::_CertificateRequestMsgTLS13
     have_certificate_request::Bool
     client_certificate::_CertificateMsgTLS13
@@ -310,10 +308,6 @@ mutable struct _TLS13ClientHandshakeState
     have_server_certificate::Bool
     server_certificate_verify::_CertificateVerifyMsg
     have_server_certificate_verify::Bool
-    server_finished::_FinishedMsg
-    have_server_finished::Bool
-    client_finished::_FinishedMsg
-    have_client_finished::Bool
     using_psk::Bool
     handshake_secret::Vector{UInt8}
     master_secret::Vector{UInt8}
@@ -381,8 +375,6 @@ function _new_tls13_client_handshake_state(
         UInt8[],
         _ServerHelloMsg(),
         false,
-        _EncryptedExtensionsMsg(),
-        false,
         _CertificateRequestMsgTLS13(),
         false,
         _CertificateMsgTLS13(),
@@ -392,10 +384,6 @@ function _new_tls13_client_handshake_state(
         _CertificateMsgTLS13(),
         false,
         _CertificateVerifyMsg(),
-        false,
-        _FinishedMsg(),
-        false,
-        _FinishedMsg(),
         false,
         false,
         UInt8[],
@@ -674,8 +662,6 @@ function _read_server_parameters!(state::_TLS13ClientHandshakeState, io)::Nothin
     msg = _unmarshal_encrypted_extensions(raw)
     msg === nothing && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake expected EncryptedExtensions")
     _transcript_update!(_tls13_selected_transcript(state), raw)
-    state.encrypted_extensions = msg
-    state.have_encrypted_extensions = true
 
     server_protocol = msg.alpn_protocol
     if !isempty(server_protocol)
@@ -755,8 +741,6 @@ function _read_server_finished!(state::_TLS13ClientHandshakeState, io)::Nothing
         _securezero!(expected_verify_data)
     end
 
-    state.server_finished = msg
-    state.have_server_finished = true
     _transcript_update!(transcript, raw)
 
     _securezero!(state.client_application_traffic_secret)
@@ -810,9 +794,7 @@ end
 function _send_client_finished!(state::_TLS13ClientHandshakeState, io)::Nothing
     transcript = _tls13_selected_transcript(state)
     verify_data = _tls13_finished_verify_data(state.cipher_spec.hash_kind, state.client_handshake_traffic_secret, transcript)
-    state.client_finished = _FinishedMsg(verify_data)
-    state.have_client_finished = true
-    raw = _marshal_finished(state.client_finished)
+    raw = _marshal_finished(_FinishedMsg(verify_data))
     _transcript_update!(transcript, raw)
     _write_handshake_bytes!(io, raw)
     return nothing

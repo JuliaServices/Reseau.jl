@@ -48,6 +48,7 @@ include("tls/record_common.jl")
 include("tls/session_cache.jl")
 include("tls/openssl_crypto.jl")
 include("tls/handshake_messages.jl")
+include("tls/handshake_common.jl")
 include("tls/handshake_client_tls13.jl")
 include("tls/record_tls13.jl")
 include("tls/x509.jl")
@@ -1113,7 +1114,7 @@ function _finish_native_tls13_server_handshake!(conn::Conn, state::_TLS13ServerH
     native_state.session_alpn = state.selected_alpn
     native_state.did_resume = state.using_psk
     native_state.did_hello_retry_request = state.did_hello_retry_request
-    native_state.curve_id = state.server_hello.server_share === nothing ? UInt16(0) : (state.server_hello.server_share::_TLSKeyShare).group
+    native_state.curve_id = state.selected_group
     _set_handshake_complete!(conn, TLS1_3_VERSION, "TLSv1.3", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
     return nothing
 end

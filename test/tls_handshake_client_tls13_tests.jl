@@ -512,11 +512,8 @@ end
         @test state.using_psk
         @test state.client_protocol == "h2"
         @test state.have_server_hello
-        @test state.have_encrypted_extensions
         @test !state.have_server_certificate
         @test !state.have_server_certificate_verify
-        @test state.have_server_finished
-        @test state.have_client_finished
         @test io.outbound == [expected.client_bytes, expected.client_finished_bytes]
         @test state.client_handshake_traffic_secret == expected.client_handshake_traffic_secret
         @test state.server_handshake_traffic_secret == expected.server_handshake_traffic_secret
@@ -715,7 +712,7 @@ end
             @test err.alert == TLHC._TLS_ALERT_DECRYPT_ERROR
         end
         @test length(io.outbound) == 1
-        @test !state.have_client_finished
+        @test !state.complete
     end
 
     @testset "unsupported certificate verify algorithms are rejected" begin
@@ -742,7 +739,7 @@ end
             @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
         end
         @test length(io.outbound) == 1
-        @test !state.have_client_finished
+        @test !state.complete
     end
 
     @testset "empty certificate chains are rejected before certificate verification" begin
@@ -765,7 +762,7 @@ end
             @test err.alert == TLHC._TLS_ALERT_BAD_CERTIFICATE
         end
         @test length(io.outbound) == 1
-        @test !state.have_client_finished
+        @test !state.complete
     end
 
     @testset "server finished mismatches are rejected before client finished" begin

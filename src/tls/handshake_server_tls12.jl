@@ -259,7 +259,13 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
                    session.alpn_protocol == state.selected_alpn &&
                    session.ext_master_secret &&
                    _tls12_cipher_spec(session.cipher_suite) !== nothing &&
-                   _tls12_server_session_client_auth_ok(session, config)
+                   _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
+                       _tls13_verify_client_certificate_chain(
+                           client_certificates;
+                           verify_peer = true,
+                           ca_file = _effective_ca_file(config; is_server = true),
+                       )
+                   end
                     state.resumption_session = session
                     state.using_resumption = true
                     state.cipher_suite = session.cipher_suite
@@ -284,31 +290,6 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
         _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client does not support a usable TLS 1.2 certificate signature algorithm")
     state.selected_signature_algorithm = signature_algorithm
     return nothing
-end
-
-function _tls12_server_session_client_auth_ok(session::_TLS12ServerSession, config)::Bool
-    mode = config.client_auth
-    has_client_certificates = !isempty(session.client_certificates)
-    if mode == ClientAuthMode.NoClientCert
-        return !has_client_certificates
-    end
-    if mode == ClientAuthMode.RequireAnyClientCert || mode == ClientAuthMode.RequireAndVerifyClientCert
-        has_client_certificates || return false
-    end
-    has_client_certificates || return true
-    if mode == ClientAuthMode.VerifyClientCertIfGiven || mode == ClientAuthMode.RequireAndVerifyClientCert
-        try
-            _tls13_verify_client_certificate_chain(
-                session.client_certificates;
-                verify_peer = true,
-                ca_file = _effective_ca_file(config; is_server = true),
-            )
-            return true
-        catch
-            return false
-        end
-    end
-    return true
 end
 
 function _tls12_send_server_hello!(
@@ -407,10 +388,6 @@ function _tls12_send_server_hello_done!(io::_TLS12HandshakeRecordIO, transcript:
     raw = _write_handshake_message(_ServerHelloDoneMsgTLS12(), transcript)
     _write_handshake_bytes!(io, raw)
     return nothing
-end
-
-function _tls12_should_request_client_certificate(config)::Bool
-    return config.client_auth != ClientAuthMode.NoClientCert
 end
 
 function _tls12_send_certificate_request!(state::_TLS12ServerHandshakeState, io::_TLS12HandshakeRecordIO, transcript::_TLS12TranscriptState)::Nothing
@@ -672,7 +649,7 @@ function _server_handshake_tls12_for_suite!(
         _tls12_send_server_hello!(state, io, transcript, raw_client_hello, config)
         _tls12_send_server_certificate!(state, io, transcript)
         _tls12_send_server_key_exchange!(state, io, transcript)
-        _tls12_should_request_client_certificate(config) && _tls12_send_certificate_request!(state, io, transcript)
+        _tls_should_request_client_certificate(config) && _tls12_send_certificate_request!(state, io, transcript)
         _tls12_send_server_hello_done!(io, transcript)
         _tls12_read_client_certificate!(state, io, transcript, config)
         client_key_exchange = _tls12_read_client_key_exchange!(state, io, transcript)
