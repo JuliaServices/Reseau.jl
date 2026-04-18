@@ -5,7 +5,9 @@ const TLX = Reseau.TLS
 
 const _TLS_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_server.crt")
 const _TLS_CA_PATH = joinpath(@__DIR__, "resources", "native_tls_ca.crt")
+const _TLS_CLIENT_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_client.crt")
 const _TLS_ECDSA_CERT_PATH = joinpath(@__DIR__, "resources", "native_tls_server_ecdsa.crt")
+const _TLS_UNITTEST_CERT_PATH = joinpath(@__DIR__, "resources", "unittests.crt")
 
 _read_bytes(path::AbstractString) = read(path)
 
@@ -13,6 +15,45 @@ function _tls_cert_info(path::AbstractString)
     certs = TLX._tls_decode_pem_certificates(_read_bytes(path))
     @test length(certs) == 1
     return TLX._tls_parse_der_certificate_info(certs[1])
+end
+
+function _tls_copy_cert(
+    cert::TLX._TLSCertificateInfo;
+    der = cert.der,
+    subject_raw = cert.subject_raw,
+    issuer_raw = cert.issuer_raw,
+    common_name = cert.common_name,
+    dns_names = cert.dns_names,
+    ip_addresses = cert.ip_addresses,
+    has_san_extension = cert.has_san_extension,
+    not_before_s = cert.not_before_s,
+    not_after_s = cert.not_after_s,
+    is_ca = cert.is_ca,
+    max_path_len = cert.max_path_len,
+    has_key_usage = cert.has_key_usage,
+    key_usage = cert.key_usage,
+    extended_key_usage = cert.extended_key_usage,
+    subject_key_id = cert.subject_key_id,
+    authority_key_id = cert.authority_key_id,
+)
+    return TLX._TLSCertificateInfo(
+        der,
+        subject_raw,
+        issuer_raw,
+        common_name,
+        dns_names,
+        ip_addresses,
+        has_san_extension,
+        not_before_s,
+        not_after_s,
+        is_ca,
+        max_path_len,
+        has_key_usage,
+        key_usage,
+        extended_key_usage,
+        subject_key_id,
+        authority_key_id,
+    )
 end
 
 @testset "TLS x509 helpers" begin
@@ -40,6 +81,15 @@ end
         @test cert.common_name == "localhost"
         @test cert.has_san_extension
         @test cert.dns_names == ["localhost"]
+        @test cert.subject_raw != cert.issuer_raw
+        @test cert.not_before_s < cert.not_after_s
+        @test !cert.is_ca
+        @test cert.has_key_usage
+        @test (cert.key_usage & TLX._TLS_KEY_USAGE_DIGITAL_SIGNATURE) != 0x00
+        @test (cert.key_usage & TLX._TLS_KEY_USAGE_KEY_ENCIPHERMENT) != 0x00
+        @test (cert.extended_key_usage & TLX._TLS_EXT_KEY_USAGE_SERVER) != 0x00
+        @test isempty(cert.authority_key_id) == false
+        @test isempty(cert.subject_key_id) == false
         @test UInt8[0x7f, 0x00, 0x00, 0x01] in cert.ip_addresses
         @test UInt8[
             0x00, 0x00, 0x00, 0x00,
@@ -56,6 +106,29 @@ end
         @test TLX._tls_match_hostnames("*.example.com", "api.example.com")
         @test !TLX._tls_match_hostnames("*.example.com", "example.com")
         @test TLX._tls_match_exactly("LOCALHOST", "localhost")
+    end
+
+    @testset "purpose usage checks enforce TLS key usage and prefer AKI/SKI issuer links" begin
+        server_cert = _tls_cert_info(_TLS_CERT_PATH)
+        key_encipherment_only = _tls_copy_cert(
+            server_cert;
+            key_usage = TLX._TLS_KEY_USAGE_KEY_ENCIPHERMENT,
+            has_key_usage = true,
+        )
+        no_key_usage = _tls_copy_cert(
+            server_cert;
+            key_usage = UInt16(0),
+            has_key_usage = true,
+        )
+        @test TLX._tls_certificate_usage_permitted(key_encipherment_only, "ssl_server")
+        @test !TLX._tls_certificate_usage_permitted(key_encipherment_only, "ssl_client")
+        @test !TLX._tls_certificate_usage_permitted(no_key_usage, "ssl_server")
+
+        ca_cert = _tls_cert_info(_TLS_CA_PATH)
+        mismatched_parent = _tls_copy_cert(ca_cert; subject_raw = UInt8[0x30, 0x00])
+        @test TLX._tls_cert_subject_matches_issuer(server_cert, mismatched_parent)
+        missing_ski_parent = _tls_copy_cert(ca_cert; subject_raw = UInt8[0x30, 0x00], subject_key_id = UInt8[])
+        @test !TLX._tls_cert_subject_matches_issuer(server_cert, missing_ski_parent)
     end
 
     @testset "certificate peer-name verification uses SANs and rejects legacy CN fallback" begin
@@ -102,6 +175,191 @@ end
         if err isa TLX._TLS13AlertError
             @test err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
             @test occursin("malformed X.509 certificate", err.message)
+        end
+    end
+
+    @testset "native trust verifier accepts valid server and client chains" begin
+        server_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
+        client_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CLIENT_CERT_PATH))
+        server_key = Ptr{Cvoid}(C_NULL)
+        client_key = Ptr{Cvoid}(C_NULL)
+        try
+            server_key = TLX._tls13_verify_server_certificate_chain(
+                server_certs,
+                "localhost";
+                verify_peer = true,
+                verify_hostname = true,
+                ca_file = _TLS_CA_PATH,
+            )
+            client_key = TLX._tls13_verify_client_certificate_chain(
+                client_certs;
+                verify_peer = true,
+                ca_file = _TLS_CA_PATH,
+            )
+            @test server_key != C_NULL
+            @test client_key != C_NULL
+        finally
+            TLX._free_evp_pkey!(server_key)
+            TLX._free_evp_pkey!(client_key)
+        end
+    end
+
+    @testset "native trust verifier accepts peer chains that include the trust anchor" begin
+        server_certs = vcat(
+            TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH)),
+            TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CA_PATH)),
+        )
+        pkey = Ptr{Cvoid}(C_NULL)
+        try
+            pkey = TLX._tls13_verify_server_certificate_chain(
+                server_certs,
+                "localhost";
+                verify_peer = true,
+                verify_hostname = true,
+                ca_file = _TLS_CA_PATH,
+            )
+            @test pkey != C_NULL
+        finally
+            TLX._free_evp_pkey!(pkey)
+        end
+    end
+
+    @testset "native trust verifier supports CA directories" begin
+        certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
+        mktempdir() do dir
+            root_path = joinpath(dir, "root.pem")
+            junk_path = joinpath(dir, "junk.bin")
+            write(root_path, _read_bytes(_TLS_CA_PATH))
+            write(junk_path, UInt8[0xff, 0xfe, 0xfd, 0xfc])
+            pkey = Ptr{Cvoid}(C_NULL)
+            try
+                pkey = TLX._tls13_verify_server_certificate_chain(
+                    certs,
+                    "localhost";
+                    verify_peer = true,
+                    verify_hostname = true,
+                    ca_file = dir,
+                )
+                @test pkey != C_NULL
+            finally
+                TLX._free_evp_pkey!(pkey)
+            end
+        end
+    end
+
+    @testset "native trust verifier rejects unknown authorities and incompatible EKUs" begin
+        server_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
+        client_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CLIENT_CERT_PATH))
+
+        unknown_err = try
+            TLX._tls13_verify_server_certificate_chain(
+                server_certs,
+                "localhost";
+                verify_peer = true,
+                verify_hostname = true,
+                ca_file = _TLS_UNITTEST_CERT_PATH,
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test unknown_err isa TLX._TLS13AlertError
+        if unknown_err isa TLX._TLS13AlertError
+            @test unknown_err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
+            @test occursin("unknown authority", unknown_err.message)
+        end
+
+        ca_load_err = mktemp() do path, io
+            write(io, UInt8[0xff, 0xfe, 0xfd, 0xfc])
+            close(io)
+            try
+                TLX._tls13_verify_server_certificate_chain(
+                    server_certs,
+                    "localhost";
+                    verify_peer = true,
+                    verify_hostname = true,
+                    ca_file = path,
+                )
+                nothing
+            catch ex
+                ex
+            end
+        end
+        @test ca_load_err isa TLX._TLS13AlertError
+        if ca_load_err isa TLX._TLS13AlertError
+            @test ca_load_err.alert == TLX._TLS_ALERT_INTERNAL_ERROR
+            @test occursin("failed to load CA roots", ca_load_err.message)
+        end
+
+        malformed_err = try
+            TLX._tls13_verify_server_certificate_chain(
+                [UInt8[0x30, 0x89, 0x01]],
+                "localhost";
+                verify_peer = true,
+                verify_hostname = false,
+                ca_file = _TLS_CA_PATH,
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test malformed_err isa TLX._TLS13AlertError
+        if malformed_err isa TLX._TLS13AlertError
+            @test malformed_err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
+            @test occursin("malformed X.509 certificate", malformed_err.message)
+        end
+
+        wrong_server_usage = try
+            TLX._tls13_verify_server_certificate_chain(
+                client_certs,
+                "localhost";
+                verify_peer = true,
+                verify_hostname = false,
+                ca_file = _TLS_CA_PATH,
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test wrong_server_usage isa TLX._TLS13AlertError
+        if wrong_server_usage isa TLX._TLS13AlertError
+            @test occursin("server authentication", wrong_server_usage.message)
+        end
+
+        wrong_client_usage = try
+            TLX._tls13_verify_client_certificate_chain(
+                server_certs;
+                verify_peer = true,
+                ca_file = _TLS_CA_PATH,
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test wrong_client_usage isa TLX._TLS13AlertError
+        if wrong_client_usage isa TLX._TLS13AlertError
+            @test occursin("client authentication", wrong_client_usage.message)
+        end
+    end
+
+    @testset "hostname verification requires a peer name" begin
+        certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
+        err = try
+            TLX._tls13_verify_server_certificate_chain(
+                certs,
+                "";
+                verify_peer = false,
+                verify_hostname = true,
+                ca_file = nothing,
+            )
+            nothing
+        catch ex
+            ex
+        end
+        @test err isa TLX._TLS13AlertError
+        if err isa TLX._TLS13AlertError
+            @test err.alert == TLX._TLS_ALERT_INTERNAL_ERROR
+            @test occursin("requires a peer name", err.message)
         end
     end
 end

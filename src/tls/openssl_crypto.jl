@@ -96,21 +96,6 @@ end
     return nothing
 end
 
-@inline function _free_x509_store!(store::Ptr{Cvoid})::Nothing
-    store == C_NULL || ccall((:X509_STORE_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), store)
-    return nothing
-end
-
-@inline function _free_x509_store_ctx!(ctx::Ptr{Cvoid})::Nothing
-    ctx == C_NULL || ccall((:X509_STORE_CTX_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), ctx)
-    return nothing
-end
-
-@inline function _free_openssl_stack!(stack::Ptr{Cvoid})::Nothing
-    stack == C_NULL || ccall((:OPENSSL_sk_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), stack)
-    return nothing
-end
-
 @inline function _free_ec_key!(key::Ptr{Cvoid})::Nothing
     key == C_NULL || ccall((:EC_KEY_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), key)
     return nothing
@@ -353,6 +338,18 @@ function _tls13_pubkey_from_der_certificate(cert_der::AbstractVector{UInt8})::Pt
     end
 end
 
+function _tls13_verify_der_certificate_signature(cert_der::AbstractVector{UInt8}, pubkey::Ptr{Cvoid})::Bool
+    x509 = _tls13_load_x509_der(cert_der)
+    try
+        ret = ccall((:X509_verify, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), x509, pubkey)
+        ret == 1 && return true
+        ret == 0 && return false
+        throw(_make_tls_error("X509_verify", Int32(ret)))
+    finally
+        _free_x509!(x509)
+    end
+end
+
 function _tls13_pkey_type_name(pkey::Ptr{Cvoid})::String
     name = ccall((:EVP_PKEY_get0_type_name, _LIBCRYPTO_PATH), Cstring, (Ptr{Cvoid},), pkey)
     name == C_NULL && throw(ArgumentError("tls: OpenSSL private key has no type name"))
@@ -372,30 +369,6 @@ function _tls13_ec_group_curve_nid(pkey::Ptr{Cvoid})::Cint
     finally
         _free_ec_key!(ec_key)
     end
-end
-
-function _tls13_load_verify_locations!(store::Ptr{Cvoid}, ca_path::AbstractString)::Nothing
-    ok = if isdir(ca_path)
-        ccall(
-            (:X509_STORE_load_locations, _LIBCRYPTO_PATH),
-            Cint,
-            (Ptr{Cvoid}, Cstring, Cstring),
-            store,
-            C_NULL,
-            ca_path,
-        )
-    else
-        ccall(
-            (:X509_STORE_load_locations, _LIBCRYPTO_PATH),
-            Cint,
-            (Ptr{Cvoid}, Cstring, Cstring),
-            store,
-            ca_path,
-            C_NULL,
-        )
-    end
-    _openssl_require_ok(ok, "X509_STORE_load_locations")
-    return nothing
 end
 
 function _tls13_check_x509_peer_name!(cert_der::AbstractVector{UInt8}, peer_name::AbstractString)::Nothing
@@ -421,63 +394,14 @@ function _tls13_verify_certificate_chain(
     purpose::AbstractString,
     peer_name::AbstractString = "",
 )::Ptr{Cvoid}
-    isempty(certificates) && _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: received empty certificates message")
-    x509s = Ptr{Cvoid}[]
-    store = Ptr{Cvoid}(C_NULL)
-    store_ctx = Ptr{Cvoid}(C_NULL)
-    untrusted = Ptr{Cvoid}(C_NULL)
-    try
-        for cert in certificates
-            push!(x509s, _tls13_load_x509_der(cert))
-        end
-        leaf = x509s[1]
-        if verify_peer
-            ca_file === nothing && _tls13_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: certificate verification requires a CA roots path")
-            store = ccall((:X509_STORE_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-            _openssl_require_nonnull(store, "X509_STORE_new")
-            _tls13_load_verify_locations!(store, ca_file::String)
-            store_ctx = ccall((:X509_STORE_CTX_new, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-            _openssl_require_nonnull(store_ctx, "X509_STORE_CTX_new")
-            if length(x509s) > 1
-                untrusted = ccall((:OPENSSL_sk_new_null, _LIBCRYPTO_PATH), Ptr{Cvoid}, ())
-                _openssl_require_nonnull(untrusted, "OPENSSL_sk_new_null")
-                for x509 in @view x509s[2:end]
-                    ok = ccall((:OPENSSL_sk_push, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Ptr{Cvoid}), untrusted, x509)
-                    ok > 0 || throw(_make_tls_error("OPENSSL_sk_push", Int32(ok)))
-                end
-            end
-            ok = ccall(
-                (:X509_STORE_CTX_init, _LIBCRYPTO_PATH),
-                Cint,
-                (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
-                store_ctx,
-                store,
-                leaf,
-                untrusted,
-            )
-            _openssl_require_ok(ok, "X509_STORE_CTX_init")
-            ok = ccall((:X509_STORE_CTX_set_default, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid}, Cstring), store_ctx, purpose)
-            _openssl_require_ok(ok, "X509_STORE_CTX_set_default")
-            ok = ccall((:X509_verify_cert, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
-            if ok != 1
-                err = ccall((:X509_STORE_CTX_get_error, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
-                depth = ccall((:X509_STORE_CTX_get_error_depth, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), store_ctx)
-                msg_ptr = ccall((:X509_verify_cert_error_string, _LIBCRYPTO_PATH), Cstring, (Clong,), Clong(err))
-                msg = msg_ptr == C_NULL ? "unknown certificate verification failure" : unsafe_string(msg_ptr)
-                _tls13_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate verification failed at depth $(depth): $(msg)")
-            end
-        end
-        verify_hostname && _tls13_check_x509_peer_name!(certificates[1], peer_name)
-        pkey = ccall((:X509_get_pubkey, _LIBCRYPTO_PATH), Ptr{Cvoid}, (Ptr{Cvoid},), leaf)
-        return _openssl_require_nonnull(pkey, "X509_get_pubkey")
-    finally
-        _free_x509_store_ctx!(store_ctx)
-        _free_openssl_stack!(untrusted)
-        _free_x509_store!(store)
-        for x509 in x509s
-            _free_x509!(x509)
-        end
-    end
+    return _tls_verify_certificate_chain(
+        certificates;
+        verify_peer,
+        verify_hostname,
+        ca_file,
+        purpose,
+        peer_name,
+    )
 end
 
 function _tls13_verify_server_certificate_chain(
