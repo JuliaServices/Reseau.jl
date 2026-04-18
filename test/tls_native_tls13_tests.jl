@@ -323,8 +323,8 @@ end
             )
             _finish_tls13_native_server!(server_task::Task)
             server = fetch(server_task::Task)
-            @test client.mode == TLN._TLS_CONN_MODE_NATIVE_TLS13_CLIENT
-            @test server.mode == TLN._TLS_CONN_MODE_NATIVE_TLS13_SERVER
+            @test client.policy == TLN._TLS_POLICY_TLS13
+            @test server.policy == TLN._TLS_POLICY_TLS13
             client_state = TLN.connection_state(client)
             server_state = TLN.connection_state(server)
             @test client_state.handshake_complete

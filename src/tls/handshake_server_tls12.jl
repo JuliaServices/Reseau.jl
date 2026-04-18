@@ -817,14 +817,10 @@ end
 
 function _native_tls12_server_handshake!(conn)::Nothing
     state = _TLS12ServerHandshakeState(conn.config)
-    native_state = _native_tls12_state(conn)
-    io = _TLS12HandshakeRecordIO(conn.tcp, native_state)
+    io = _TLS12HandshakeRecordIO(conn.tcp, _native_tls12_state(conn))
     try
         _server_handshake_tls12!(state, io, conn.config)
-        native_state.did_resume = state.using_resumption
-        native_state.curve_id = state.curve_id
-        native_state.cipher_suite = state.cipher_suite
-        _set_handshake_complete!(conn, "TLSv1.2", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
+        _finish_native_tls12_server_handshake!(conn, state)
     finally
         _securezero_tls12_server_handshake_state!(state)
     end

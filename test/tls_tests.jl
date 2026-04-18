@@ -160,25 +160,25 @@ end
             )
             @test TL._effective_ca_file(verified_client_auth_cfg; is_server = true) == _TLS_CERT_PATH
             @test TL._native_tls_auto_client_enabled(TL.Config(server_name = "localhost", verify_peer = false))
-            @test TL._tls_client_mode(TL.Config(server_name = "localhost", verify_peer = false)) == TL._TLS_CONN_MODE_NATIVE_AUTO_CLIENT
+            @test TL._tls_client_policy(TL.Config(server_name = "localhost", verify_peer = false)) == TL._TLS_POLICY_AUTO
             @test TL._native_tls12_only(TL.Config(server_name = "localhost", verify_peer = false, max_version = TL.TLS1_2_VERSION))
-            @test TL._tls_client_mode(TL.Config(server_name = "localhost", verify_peer = false, max_version = TL.TLS1_2_VERSION)) == TL._TLS_CONN_MODE_NATIVE_TLS12_CLIENT
+            @test TL._tls_client_policy(TL.Config(server_name = "localhost", verify_peer = false, max_version = TL.TLS1_2_VERSION)) == TL._TLS_POLICY_TLS12
             @test TL._native_tls_auto_server_enabled(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
             ))
-            @test TL._tls_server_mode(TL.Config(
+            @test TL._tls_server_policy(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
-            )) == TL._TLS_CONN_MODE_NATIVE_AUTO_SERVER
-            @test TL._tls_server_mode(TL.Config(
+            )) == TL._TLS_POLICY_AUTO
+            @test TL._tls_server_policy(TL.Config(
                 verify_peer = false,
                 cert_file = _TLS_CERT_PATH,
                 key_file = _TLS_KEY_PATH,
                 max_version = TL.TLS1_2_VERSION,
-            )) == TL._TLS_CONN_MODE_NATIVE_TLS12_SERVER
+            )) == TL._TLS_POLICY_TLS12
             @test TL._native_tls_auto_client_enabled(TL.Config(
                 server_name = "localhost",
                 verify_peer = false,
@@ -986,7 +986,7 @@ end
                     min_version = nothing,
                     max_version = TL.TLS1_2_VERSION,
                 ))
-                @test client_tls.mode == TL._TLS_CONN_MODE_NATIVE_TLS12_CLIENT
+                @test client_tls.policy == TL._TLS_POLICY_TLS12
                 @test _tls_wait_task_done(accept_task, 12.0) != :timed_out
                 server_tls = fetch(accept_task)
                 client_state = TL.connection_state(client_tls)

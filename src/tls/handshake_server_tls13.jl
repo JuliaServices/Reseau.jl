@@ -758,16 +758,10 @@ end
 
 function _native_tls13_server_handshake!(conn)::Nothing
     state = _TLS13ServerHandshakeState(conn.config)
-    native_state = _native_tls13_state(conn)
-    io = _TLS13HandshakeRecordIO(conn.tcp, native_state)
+    io = _TLS13HandshakeRecordIO(conn.tcp, _native_tls13_state(conn))
     try
         _server_handshake_tls13!(state, io, conn.config)
-        native_state.session_cipher_suite = state.cipher_suite
-        native_state.session_alpn = state.selected_alpn
-        native_state.did_resume = state.using_psk
-        native_state.did_hello_retry_request = state.did_hello_retry_request
-        native_state.curve_id = state.server_hello.server_share === nothing ? UInt16(0) : (state.server_hello.server_share::_TLSKeyShare).group
-        _set_handshake_complete!(conn, "TLSv1.3", isempty(state.selected_alpn) ? nothing : state.selected_alpn)
+        _finish_native_tls13_server_handshake!(conn, state)
     finally
         _securezero_tls13_server_handshake_state!(state)
     end
