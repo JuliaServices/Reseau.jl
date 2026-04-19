@@ -537,6 +537,7 @@ function _pc_run_tls_roundtrip!(
     return nothing
 end
 
+# Canonical public-API TLS workload shared by precompile and trim-safe tests.
 function _pc_run_tls_workload!()
     _pc_runtime_supported() || return nothing
     paths = _pc_tls12_paths()

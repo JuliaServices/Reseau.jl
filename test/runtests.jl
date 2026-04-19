@@ -34,7 +34,8 @@ test_files = [
     "tls_handshake_client_tls13_tests.jl",
     "tls_native_tls12_tests.jl",
     "tls_native_tls13_tests.jl",
-    "tls_tests.jl",
+    "tls_config_tests.jl",
+    "tls_public_api_tests.jl",
     "trim_compile_tests.jl",
 ]
 
