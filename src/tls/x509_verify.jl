@@ -1,3 +1,12 @@
+"""
+    _TLSTrustStore
+
+Native trust-store view used by the certificate chain verifier.
+
+The store holds parsed root certificates only; chain building and policy checks
+work against `_TLSCertificateInfo` values and call into the primitive crypto
+backend only for raw signature verification.
+"""
 struct _TLSTrustStore
     roots::Vector{_TLSCertificateInfo}
 end
@@ -10,6 +19,13 @@ end
 
 const _TLS_TRUST_STORE_CACHE_LOCK = ReentrantLock()
 const _TLS_TRUST_STORE_CACHE = Dict{String, _TLSTrustStoreCacheEntry}()
+
+# Native certificate chain verification and trust-store loading.
+#
+# This layer owns trust-policy decisions (validity windows, issuer linkage,
+# basic constraints, EKU/KU checks, trust-anchor selection). It uses parsed
+# `_TLSCertificateInfo` values from `x509.jl` and delegates only raw signature
+# verification to the OpenSSL primitive backend.
 
 @inline function _tls_verify_purpose_usage_mask(purpose::AbstractString)::UInt8
     purpose == "ssl_server" && return _TLS_EXT_KEY_USAGE_SERVER
@@ -54,6 +70,8 @@ end
     return child.issuer_raw == parent.subject_raw
 end
 
+# Trust-store loading stays in native Julia too, including the trim-safe file
+# reader, so certificate policy no longer depends on OpenSSL's X509 store APIs.
 function _read_tls_file_bytes(path::AbstractString)::Vector{UInt8}
     path_string = String(path)
     file = ccall(:fopen, Ptr{Cvoid}, (Cstring, Cstring), path_string, "rb")
@@ -156,6 +174,9 @@ function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
     return store
 end
 
+# Chain verification works top-down from the peer leaf and recursively searches
+# intermediates/roots that satisfy issuer linkage, CA constraints, time
+# validity, and signature checks until it finds a trust anchor.
 function _tls_verify_certificate_signature(child::_TLSCertificateInfo, parent::_TLSCertificateInfo)::Bool
     return _openssl_verify_signature_with_spec(parent.public_key, child.signature_verify_spec, child.tbs_der, child.signature)
 end
@@ -246,6 +267,9 @@ function _tls_verify_peer_certificate_chain!(
     return leaf
 end
 
+# This is the native cert-auth entry point used by TLS 1.2 and TLS 1.3
+# handshakes: optionally build to a trust anchor, optionally check hostname/IP,
+# then return the parsed leaf public key for later TLS-level signature checks.
 function _tls_verify_certificate_chain(
     certificates::Vector{Vector{UInt8}};
     verify_peer::Bool,

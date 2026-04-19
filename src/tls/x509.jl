@@ -1,3 +1,14 @@
+"""
+    _TLSCertificateInfo
+
+Parsed X.509 certificate fields retained by the native trust and hostname
+verification layers.
+
+This is intentionally narrower than a full generic certificate model: it keeps
+the DER slices, subject/issuer identity, SANs, validity window, key-usage
+policy, SubjectPublicKeyInfo, and signature information that the native TLS
+verify path actually needs.
+"""
 struct _TLSCertificateInfo
     der::Vector{UInt8}
     subject_raw::Vector{UInt8}
@@ -20,6 +31,13 @@ struct _TLSCertificateInfo
     signature_verify_spec::_TLSSignatureVerifySpec
     signature::Vector{UInt8}
 end
+
+# Native DER/PEM/X.509 parsing and hostname/IP verification helpers.
+#
+# This file owns certificate decoding and extraction of the policy-relevant
+# fields used by the native trust layer. It deliberately stops short of raw
+# cryptographic verification, which remains delegated to the OpenSSL primitive
+# backend through parsed public-key and signature-spec values.
 
 const _ASN1_INTEGER = UInt8(0x02)
 const _ASN1_BIT_STRING = UInt8(0x03)
@@ -164,6 +182,9 @@ const _TLS_MAX_CHAIN_CANDIDATES = 128
     return stop >= start ? (stop - start + 1) : 0
 end
 
+# The low-level ASN.1 helpers stay intentionally strict and allocation-light so
+# malformed certificates fail early and higher-level parsing code can remain
+# mostly linear over validated TLV slices.
 function _asn1_read_length(bytes::AbstractVector{UInt8}, pos::Int)::Tuple{Int, Int}
     pos <= length(bytes) || throw(ArgumentError("tls: truncated DER length"))
     first = bytes[pos]

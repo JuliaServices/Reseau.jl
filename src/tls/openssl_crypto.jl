@@ -131,6 +131,15 @@ end
     return nothing
 end
 
+"""
+    _TLSSignatureVerifySpec
+
+Backend-neutral description of how a signature should be verified.
+
+The native X.509 and handshake code map certificate or TLS signature schemes to
+this struct, then the OpenSSL primitive backend uses it to drive EVP without
+having to understand higher-level certificate policy.
+"""
 struct _TLSSignatureVerifySpec
     digest_bits::UInt16
     direct::Bool
@@ -151,6 +160,13 @@ struct _TLS13RSAPSSParams
     saltlen::Vector{UInt8}
     params::Vector{_OpenSSLParam}
 end
+
+# OpenSSL-backed primitive crypto helpers.
+#
+# This file is intentionally the backend boundary: EVP/X25519/P-256/AEAD/signing
+# primitives, private-key loading, and a small amount of backend object
+# lifecycle. Higher-level TLS, X.509 parsing, hostname checks, and trust policy
+# live in Julia-owned code outside this file.
 
 const _EVP_CTRL_AEAD_SET_IVLEN = Cint(0x9)
 const _EVP_CTRL_AEAD_GET_TAG = Cint(0x10)
@@ -308,6 +324,9 @@ function _tls_public_key_to_evp_pkey(key::_TLSEd25519PublicKey)::Ptr{Cvoid}
     return _openssl_require_nonnull(pkey, "EVP_PKEY_new_raw_public_key(Ed25519)")
 end
 
+# EVP_PKEY verification for RSA-PSS needs a small parameter block whose backing
+# storage must stay alive across the `OSSL_PARAM` call. This wrapper owns that
+# storage so higher-level call sites do not have to juggle separate buffers.
 function _tls13_rsa_pss_params(md_name::String)::_TLS13RSAPSSParams
     pad_mode = UInt8[b"pss"..., 0x00]
     mgf1_digest = Vector{UInt8}(codeunits(md_name))
