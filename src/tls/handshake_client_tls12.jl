@@ -14,11 +14,26 @@ const _TLS12_MAX_SESSION_TICKET_LIFETIME = UInt32(7 * 24 * 60 * 60)
 const _TLS12_CERT_TYPE_RSA_SIGN = UInt8(0x01)
 const _TLS12_CERT_TYPE_ECDSA_SIGN = UInt8(0x40)
 
+# Native TLS 1.2 client handshake state machine.
+#
+# This file mirrors Go's `crypto/tls/handshake_client.go` for the subset of TLS
+# 1.2 we support natively: ECDHE + AES-GCM, optional client certificates, EMS,
+# and session-ticket resumption.
+
 const _TLS12TranscriptState = Union{
     _TranscriptHash{SHA.SHA2_256_CTX},
     _TranscriptHash{SHA.SHA2_384_CTX},
 }
 
+"""
+    _TLS12ClientSession
+
+Cached native TLS 1.2 client resumption state.
+
+The cache stores only the material needed to validate and resume a session on a
+future connection; working handshake state is kept separately in
+`_TLS12ClientHandshakeState`.
+"""
 struct _TLS12ClientSession
     version::UInt16
     cipher_suite::UInt16
@@ -108,6 +123,15 @@ function _securezero_tls12_client_session!(session::_TLS12ClientSession)::Nothin
     return nothing
 end
 
+"""
+    _TLS12ClientHandshakeState
+
+Owned state for one native TLS 1.2 client handshake.
+
+It carries the parsed peer messages, any client-auth material, resumption
+inputs, and the negotiated outputs needed to install record keys and publish the
+final `ConnectionState`.
+"""
 mutable struct _TLS12ClientHandshakeState
     client_hello::_ClientHelloMsg
     server_hello::_ServerHelloMsg
@@ -609,6 +633,11 @@ function _tls12_read_change_cipher_spec!(io::_TLS12HandshakeRecordIO)::Nothing
     end
 end
 
+# TLS 1.2 splits naturally into:
+# 1. parse ServerHello and decide full vs resumed path,
+# 2. run the suite-specific key exchange / certificate logic,
+# 3. install record keys and verify Finished,
+# 4. optionally cache a new ticket for later resumption.
 function _client_handshake_tls12_for_suite!(
     state::_TLS12ClientHandshakeState,
     io::_TLS12HandshakeRecordIO,

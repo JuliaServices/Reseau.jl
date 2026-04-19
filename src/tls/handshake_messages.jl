@@ -40,13 +40,29 @@ const _TLS_PSK_MODE_PLAIN = UInt8(0)
 const _TLS_PSK_MODE_DHE = UInt8(1)
 const _TLS_STATUS_TYPE_OCSP = UInt8(1)
 
+# TLS handshake wire-message model plus marshal/unmarshal helpers.
+#
+# These structs intentionally own their byte/vector fields so the rest of the
+# handshake code can treat parsed messages as stable protocol snapshots without
+# aliasing caller buffers or transient views.
+
 abstract type _HandshakeMessage end
 
+"""
+    _TLSKeyShare
+
+One TLS key-share entry from a ClientHello or ServerHello.
+"""
 struct _TLSKeyShare
     group::UInt16
     data::Vector{UInt8}
 end
 
+"""
+    _TLSPSKIdentity
+
+TLS 1.3 PSK identity and obfuscated age value as carried on the wire.
+"""
 struct _TLSPSKIdentity
     label::Vector{UInt8}
     obfuscated_ticket_age::UInt32
@@ -57,6 +73,16 @@ Base.:(==)(a::_TLSPSKIdentity, b::_TLSPSKIdentity) = a.label == b.label && a.obf
 
 _copy_byte_vectors(byte_vectors::Vector{Vector{UInt8}}) = [copy(bytes) for bytes in byte_vectors]
 
+"""
+    _ClientHelloMsg
+
+Julia-owned representation of a TLS ClientHello.
+
+The struct carries both cross-version fields and the version-specific extension
+state used by native TLS 1.2, TLS 1.3, and mixed-version negotiation.
+`original`, when present, preserves the validated wire frame used for transcript
+or retry-sensitive flows.
+"""
 mutable struct _ClientHelloMsg <: _HandshakeMessage
     original::Union{Nothing, Vector{UInt8}}
     vers::UInt16
@@ -152,6 +178,15 @@ Base.:(==)(a::_ClientHelloMsg, b::_ClientHelloMsg) =
     a.quic_transport_parameters == b.quic_transport_parameters &&
     a.encrypted_client_hello == b.encrypted_client_hello
 
+"""
+    _ServerHelloMsg
+
+Julia-owned representation of a TLS ServerHello or HelloRetryRequest.
+
+TLS 1.3 reuses the ServerHello wire shape for HelloRetryRequest, so later
+handshake code interprets `random`, `selected_group`, and a few extensions to
+decide which branch it is looking at.
+"""
 mutable struct _ServerHelloMsg <: _HandshakeMessage
     original::Union{Nothing, Vector{UInt8}}
     vers::UInt16
@@ -367,6 +402,14 @@ _FinishedMsg() = _FinishedMsg(UInt8[])
 _FinishedMsg(verify_data::AbstractVector{UInt8}) = _FinishedMsg(Vector{UInt8}(verify_data))
 Base.:(==)(a::_FinishedMsg, b::_FinishedMsg) = a.verify_data == b.verify_data
 
+"""
+    _HandshakeReader
+
+Small bounds-checked cursor over one owned handshake frame.
+
+The marshal/unmarshal helpers use this rather than raw indexing so malformed
+messages fail in one place and the higher-level parsers can stay mostly linear.
+"""
 mutable struct _HandshakeReader
     data::Vector{UInt8}
     pos::Int
@@ -464,6 +507,8 @@ function _read_u24_length_prefixed_reader!(reader::_HandshakeReader)::Union{_Han
     return _HandshakeReader(bytes)
 end
 
+# These append helpers centralize TLS length-prefix framing so the individual
+# message marshaling routines can stay readable and mirror the RFC / Go layout.
 @inline function _append_u8!(buf::Vector{UInt8}, v::Integer)
     push!(buf, UInt8(v))
     return nothing

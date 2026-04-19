@@ -13,6 +13,18 @@ const _TLS13_MAX_SESSION_TICKET_LIFETIME = UInt32(7 * 24 * 60 * 60)
 const _TLS13_DOWNGRADE_CANARY_TLS12 = UInt8[0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01]
 const _TLS13_DOWNGRADE_CANARY_TLS11 = UInt8[0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00]
 
+# Native TLS 1.3 client handshake state machine.
+#
+# This file mirrors Go's `crypto/tls/handshake_client_tls13.go`: build
+# ClientHello, optionally bind a cached PSK, process ServerHello/HRR, verify the
+# server certificate path, install traffic keys, and finish with optional client
+# authentication plus post-handshake ticket handling.
+
+"""
+    _TLS13ClientSession
+
+Cached native TLS 1.3 client resumption state.
+"""
 struct _TLS13ClientSession
     version::UInt16
     cipher_suite::UInt16
@@ -96,6 +108,14 @@ function _securezero_tls13_client_session!(session::_TLS13ClientSession)::Nothin
     return nothing
 end
 
+"""
+    _TLS13OpenSSLKeyShareProvider
+
+ECDHE helper owned by the TLS 1.3 client handshake.
+
+The handshake state machine stays Julia-owned, but actual key generation and
+shared-secret derivation still come from the OpenSSL primitive backend.
+"""
 mutable struct _TLS13OpenSSLKeyShareProvider
     fixed_x25519_private_key::Vector{UInt8}
     has_fixed_x25519_private_key::Bool
@@ -277,6 +297,15 @@ const _TLS13TranscriptState = Union{
     _TranscriptHash{SHA.SHA2_384_CTX},
 }
 
+"""
+    _TLS13ClientHandshakeState
+
+Owned state for one native TLS 1.3 client handshake.
+
+The struct keeps the parsed server flight, transcript/key-schedule material,
+optional PSK/client-auth inputs, and the negotiated outputs needed to install
+record keys and publish the final connection state.
+"""
 mutable struct _TLS13ClientHandshakeState
     client_hello::_ClientHelloMsg
     client_hello_raw::Vector{UInt8}
@@ -448,6 +477,10 @@ end
     return transcript::_TLS13TranscriptState
 end
 
+# Binder computation intentionally happens against the binder transcript, not
+# the live handshake transcript. That mirrors the TLS 1.3 PSK rules and keeps
+# the main transcript aligned with the handshake bytes that continue after
+# ServerHello.
 function _compute_and_update_psk_binders!(
     state::_TLS13ClientHandshakeState,
     prefix_transcript::Union{Nothing, _TranscriptHash} = nothing,
@@ -598,6 +631,9 @@ function _process_hello_retry_request!(state::_TLS13ClientHandshakeState, io)::N
     return nothing
 end
 
+# After ServerHello the TLS 1.3 flow becomes linear: derive handshake keys,
+# process the encrypted server flight, verify Finished, then switch the record
+# layer to application traffic secrets.
 function _process_server_hello!(state::_TLS13ClientHandshakeState)::Nothing
     server_hello = state.server_hello
     server_hello.random == _HELLO_RETRY_REQUEST_RANDOM && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls13 client handshake still has a HelloRetryRequest pending")

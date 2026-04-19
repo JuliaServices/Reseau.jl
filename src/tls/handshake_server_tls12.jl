@@ -1,3 +1,14 @@
+# Native TLS 1.2 server handshake state machine.
+#
+# This file mirrors the server side of Go's `crypto/tls/handshake_server.go`
+# for the subset of TLS 1.2 we support natively: ECDHE + AES-GCM, optional
+# client certificates, EMS, and session-ticket resumption.
+
+"""
+    _TLS12ServerSession
+
+Cached native TLS 1.2 server resumption state.
+"""
 struct _TLS12ServerSession
     version::UInt16
     cipher_suite::UInt16
@@ -87,6 +98,15 @@ function _securezero_tls12_server_session!(session::_TLS12ServerSession)::Nothin
     return nothing
 end
 
+"""
+    _TLS12ServerHandshakeState
+
+Owned state for one native TLS 1.2 server handshake.
+
+It tracks the parsed ClientHello, locally configured identity, optional client
+certificate inputs, and the negotiated outputs needed to install TLS 1.2 record
+keys and cache a resumable session.
+"""
 mutable struct _TLS12ServerHandshakeState
     client_hello::_ClientHelloMsg
     server_hello::_ServerHelloMsg
@@ -634,6 +654,9 @@ function _server_handshake_tls12_for_suite!(
     hash_kind::_TLSHashKind,
     config,
 )::Nothing
+    # The TLS 1.2 server path first decides resumed vs full handshake, then
+    # either abbreviates directly to Finished or runs the full cert/key-exchange
+    # flight before installing record keys.
     shared_secret = UInt8[]
     master_secret = UInt8[]
     client_mac = UInt8[]

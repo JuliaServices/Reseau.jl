@@ -7,6 +7,15 @@ const _TLS13_KEY_UPDATE_NOT_REQUESTED = UInt8(0)
 const _TLS13_KEY_UPDATE_REQUESTED = UInt8(1)
 const _TLS13_DUMMY_CHANGE_CIPHER_SPEC = UInt8[0x01]
 
+"""
+    _TLS13RecordCipherState
+
+Installed TLS 1.3 traffic-secret state for one direction of a connection.
+
+Unlike TLS 1.2, TLS 1.3 derives the AEAD key/IV directly from the traffic
+secret, so the state keeps both the current secret and the derived keying
+material needed for record protection and KeyUpdate.
+"""
 mutable struct _TLS13RecordCipherState
     spec::_TLS13CipherSpec
     traffic_secret::Vector{UInt8}
@@ -28,6 +37,15 @@ function _TLS13RecordCipherState(spec::_TLS13CipherSpec, traffic_secret::Abstrac
     )
 end
 
+"""
+    _TLS13NativeClientState
+
+Connection-owned TLS 1.3 record-layer and post-handshake state.
+
+This is the long-lived state that survives after the TLS 1.3 handshake: record
+keys, buffered handshake/plaintext data, shutdown flags, resumable-session
+material, and negotiated metadata exposed through `connection_state`.
+"""
 mutable struct _TLS13NativeClientState
     read_cipher::Union{Nothing, _TLS13RecordCipherState}
     write_cipher::Union{Nothing, _TLS13RecordCipherState}
@@ -68,6 +86,12 @@ _TLS13NativeClientState() = _TLS13NativeClientState(
     UInt16(0),
 )
 
+"""
+    _TLS13HandshakeRecordIO
+
+Thin adapter that exposes TLS 1.3 handshake read/write operations in terms of
+the underlying TCP stream plus the connection's TLS 1.3 native record state.
+"""
 mutable struct _TLS13HandshakeRecordIO
     tcp::TCP.Conn
     state::_TLS13NativeClientState
@@ -176,6 +200,9 @@ end
     ]
 end
 
+# TLS 1.3 record writes emit plaintext only before handshake keys are installed.
+# After that they always produce application-data outer records that carry an
+# encrypted inner content type, mirroring Go's TLS 1.3 record layer.
 function _tls13_write_record!(tcp::TCP.Conn, cipher::Union{Nothing, _TLS13RecordCipherState}, inner_type::UInt8, payload::AbstractVector{UInt8})::Nothing
     length(payload) <= _TLS13_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.3 record plaintext exceeds the maximum record size"))
     if cipher === nothing
@@ -235,6 +262,9 @@ function _tls13_process_alert!(state::_TLS13NativeClientState, alert::AbstractVe
     return nothing
 end
 
+# TLS 1.3 inner plaintext parsing strips padding, recovers the true content
+# type, then routes the payload into the handshake/plaintext/post-handshake
+# machinery owned by the connection.
 function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::Vector{UInt8})::Nothing
     idx = length(inner)
     while idx >= 1 && inner[idx] == 0x00
@@ -267,6 +297,9 @@ function _tls13_process_inner_plaintext!(state::_TLS13NativeClientState, inner::
     _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected TLS 1.3 inner record type $(Int(content_type))")
 end
 
+# Record reads are responsible for parsing/decrypting the outer TLS 1.3 record,
+# then feeding any recovered handshake, alert, application, or post-handshake
+# bytes into the appropriate connection-owned buffers.
 function _tls13_read_record!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
     header = Vector{UInt8}(undef, 5)
     read!(tcp, header)
@@ -418,6 +451,9 @@ function _tls13_validate_new_session_ticket(raw::Vector{UInt8})::_NewSessionTick
     return msg
 end
 
+# Post-handshake processing is intentionally owned by the record layer because
+# KeyUpdate and NewSessionTicket arrive as ordinary records long after the main
+# handshake state machine has finished.
 function _tls13_handle_post_handshake_messages!(tcp::TCP.Conn, state::_TLS13NativeClientState)::Nothing
     while true
         raw = _tls13_try_take_handshake_message!(state)

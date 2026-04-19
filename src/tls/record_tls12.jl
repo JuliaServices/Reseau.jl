@@ -4,6 +4,14 @@ const _TLS12_MAX_CIPHERTEXT = _TLS12_MAX_PLAINTEXT + 8 + _TLS12_GCM_TAG_SIZE + 2
 const _TLS12_MAX_HANDSHAKE_BUFFER = _MAX_HANDSHAKE_SIZE + _TLS12_MAX_PLAINTEXT
 const _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD = UInt8[0x01]
 
+"""
+    _TLS12RecordCipherState
+
+Installed TLS 1.2 record protection state for one direction of a connection.
+
+The state is directional because read and write keys evolve independently and
+track separate sequence numbers.
+"""
 mutable struct _TLS12RecordCipherState
     spec::_TLS12CipherSpec
     key::Vector{UInt8}
@@ -12,6 +20,15 @@ mutable struct _TLS12RecordCipherState
     exhausted::Bool
 end
 
+"""
+    _TLS12NativeState
+
+Connection-owned TLS 1.2 record-layer state.
+
+This is the long-lived state that `TLS.Conn` keeps after the handshake: current
+read/write cipher state, buffered handshake/plaintext bytes, shutdown flags, and
+the small amount of negotiated metadata exposed via `connection_state`.
+"""
 mutable struct _TLS12NativeState
     read_cipher::Union{Nothing, _TLS12RecordCipherState}
     write_cipher::Union{Nothing, _TLS12RecordCipherState}
@@ -44,6 +61,12 @@ _TLS12NativeState() = _TLS12NativeState(
     UInt16(0),
 )
 
+"""
+    _TLS12HandshakeRecordIO
+
+Thin adapter that exposes TLS 1.2 handshake read/write operations in terms of
+the underlying TCP stream plus the connection's TLS 1.2 native record state.
+"""
 mutable struct _TLS12HandshakeRecordIO
     tcp::TCP.Conn
     state::_TLS12NativeState
@@ -137,6 +160,9 @@ end
     return seen
 end
 
+# TLS 1.2 record writes emit plaintext until ChangeCipherSpec installs the AEAD
+# state, then switch to explicit-nonce AES-GCM framing. Sequence exhaustion is
+# treated as a hard protocol error and permanently disables further writes.
 function _tls12_write_record!(tcp::TCP.Conn, cipher::Union{Nothing, _TLS12RecordCipherState}, content_type::UInt8, payload::AbstractVector{UInt8})::Nothing
     length(payload) <= _TLS12_MAX_PLAINTEXT || throw(ArgumentError("tls: TLS 1.2 record plaintext exceeds the maximum record size"))
     if cipher === nothing
@@ -200,6 +226,11 @@ function _tls12_process_alert!(state::_TLS12NativeState, alert::AbstractVector{U
     return nothing
 end
 
+# Record reads are responsible for four protocol-level jobs:
+# 1. parse and size-check the wire record,
+# 2. decrypt/authenticate if keys are installed,
+# 3. route alerts/plaintext/handshake bytes into the right buffers,
+# 4. enforce TLS 1.2 invariants like ChangeCipherSpec ordering.
 function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
     header = Vector{UInt8}(undef, 5)
     read!(tcp, header)

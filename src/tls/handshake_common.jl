@@ -1,3 +1,8 @@
+# Small helpers shared by multiple handshake state machines.
+#
+# The version-specific files own the handshake flights and transcript logic;
+# this file only holds policy decisions that are identical across those flows.
+
 function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
     isempty(config.alpn_protocols) && return ""
     isempty(client_hello.alpn_protocols) && return ""
@@ -10,6 +15,9 @@ end
 @inline _tls_should_request_client_certificate(config)::Bool =
     config.client_auth != ClientAuthMode.NoClientCert
 
+# Used when deciding whether a cached resumption session is still valid for the
+# current server-side client-auth policy. Resumption should not bypass a stricter
+# certificate requirement than the original session satisfied.
 function _tls_server_session_client_auth_ok(
     verify_chain!::F,
     client_certificates::Vector{Vector{UInt8}},

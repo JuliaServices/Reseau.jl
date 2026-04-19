@@ -9,6 +9,17 @@ const _TLS13_SERVER_SUPPORTED_SIGNATURE_ALGORITHMS = (
     _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512,
 )
 
+# Native TLS 1.3 server handshake state machine.
+#
+# This file mirrors Go's `crypto/tls/handshake_server_tls13.go`: process
+# ClientHello / HRR, select ciphers and groups, optionally resume via PSK, drive
+# the certificate path, and issue post-handshake tickets for future resumptions.
+
+"""
+    _TLS13ServerSession
+
+Cached native TLS 1.3 server resumption state.
+"""
 struct _TLS13ServerSession
     version::UInt16
     cipher_suite::UInt16
@@ -92,6 +103,15 @@ function _securezero_tls13_server_session!(session::_TLS13ServerSession)::Nothin
     return nothing
 end
 
+"""
+    _TLS13ServerHandshakeState
+
+Owned state for one native TLS 1.3 server handshake.
+
+It tracks the parsed ClientHello, local identity material, resumption inputs,
+key-schedule state, optional client-auth data, and the negotiated outputs needed
+to install record keys and emit post-handshake tickets.
+"""
 mutable struct _TLS13ServerHandshakeState
     client_hello::_ClientHelloMsg
     client_hello_raw::Vector{UInt8}
@@ -227,6 +247,11 @@ function _tls13_server_preferred_group(client_hello::_ClientHelloMsg, config)::U
     return mutual_groups[1]
 end
 
+# TLS 1.3 server negotiation has three main phases:
+# 1. process ClientHello / optional HelloRetryRequest,
+# 2. decide resumption vs full certificate path and derive handshake keys,
+# 3. send the encrypted server flight, verify client Finished, then optionally
+#    emit session tickets for future resumptions.
 function _tls13_server_key_share!(state::_TLS13ServerHandshakeState, group::UInt16)::_TLSKeyShare
     client_share = _tls13_find_client_key_share(state.client_hello, group)
     client_share === nothing && _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: missing client key share for selected group")

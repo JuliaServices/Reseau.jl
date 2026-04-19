@@ -1,3 +1,12 @@
+"""
+    _TLSSessionCache{V}
+
+Small lock-protected LRU-style cache used by native TLS session resumption.
+
+Values are always copied on get/peek/put so cached sessions remain owned by the
+cache and callers can securely zero or mutate their working copies without
+aliasing shared cache state.
+"""
 mutable struct _TLSSessionCache{V}
     lock::ReentrantLock
     entries::Dict{String, V}
@@ -10,6 +19,8 @@ function _TLSSessionCache(::Type{V}, capacity::Integer = 64)::_TLSSessionCache{V
     return _TLSSessionCache{V}(ReentrantLock(), Dict{String, V}(), String[], Int(capacity))
 end
 
+# Cache order is maintained explicitly instead of through a heavier container so
+# the TLS paths can keep the implementation trim-safe and easy to zero/inspect.
 @inline function _tls_session_cache_touch_locked!(cache::_TLSSessionCache, key::String)::Nothing
     deleteat!(cache.order, findall(==(key), cache.order))
     pushfirst!(cache.order, key)

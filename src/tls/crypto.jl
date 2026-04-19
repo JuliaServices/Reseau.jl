@@ -1,10 +1,23 @@
 using SHA
 
+# TLS key-schedule, transcript, and public-key helpers.
+#
+# This file mirrors the role Go splits across `crypto/tls/prf.go`,
+# `crypto/tls/key_schedule.go`, and a small amount of handshake-owned transcript
+# logic: it is the pure protocol-crypto layer that both TLS 1.2 and TLS 1.3
+# handshakes build on top of.
+
 Base.@enum _TLSHashKind::UInt8 begin
     _HASH_SHA256 = 1
     _HASH_SHA384 = 2
 end
 
+"""
+    _TLS12CipherSpec
+
+Static TLS 1.2 cipher-suite parameters needed by the record and key-schedule
+layers.
+"""
 struct _TLS12CipherSpec
     hash_kind::_TLSHashKind
     key_length::Int
@@ -12,12 +25,28 @@ struct _TLS12CipherSpec
     explicit_nonce_length::Int
 end
 
+"""
+    _TLS13CipherSpec
+
+Static TLS 1.3 AEAD parameters needed by the record and key-schedule layers.
+"""
 struct _TLS13CipherSpec
     hash_kind::_TLSHashKind
     key_length::Int
     iv_length::Int
 end
 
+"""
+    _TLSRSAPublicKey
+    _TLSECPublicKey
+    _TLSEd25519PublicKey
+
+Julia-owned representations of leaf/SPKI public keys parsed from certificates.
+
+These stay backend-neutral so the X.509 layer can own certificate policy and
+parsing while delegating only the raw signature math to the OpenSSL primitive
+backend.
+"""
 struct _TLSRSAPublicKey
     modulus::Vector{UInt8}
     exponent::Vector{UInt8}
@@ -80,6 +109,16 @@ const _TLS12_SERVER_FINISHED_LABEL = "server finished"
 const _EMPTY_SHA256_DIGEST = SHA.sha256(UInt8[])
 const _EMPTY_SHA384_DIGEST = SHA.sha384(UInt8[])
 
+"""
+    _TranscriptHash
+
+Running handshake transcript hash plus an optional owned byte buffer.
+
+TLS 1.2 and TLS 1.3 both need a live hash context for Finished, certificate
+verification, EMS, and exporter derivation. Some flows also need the raw
+handshake bytes later, so `buffer` can be enabled when the caller wants the
+transcript to retain an owned copy of every handshake message it sees.
+"""
 mutable struct _TranscriptHash{CTX<:SHA.SHA_CTX}
     hash_kind::_TLSHashKind
     ctx::CTX
@@ -109,6 +148,10 @@ function _destroy_tls13_secret!(secret)::Nothing
     return nothing
 end
 
+# TLS 1.3 keeps these secret stages distinct to mirror the RFC / Go key
+# schedule: early -> handshake -> master -> exporter. They are thin wrappers so
+# call sites cannot accidentally mix stages without making that transition
+# explicit in the code.
 struct _TLS13EarlySecret
     hash_kind::_TLSHashKind
     secret::Vector{UInt8}
@@ -208,6 +251,9 @@ function _TranscriptHash(hash_kind::_TLSHashKind; buffer_handshake::Bool = true)
     return _TranscriptHash{typeof(ctx)}(hash_kind, ctx, buffer_handshake ? UInt8[] : nothing)
 end
 
+# Transcript updates intentionally own buffered handshake bytes. The handshake
+# layers frequently pass views or temporary vectors when framing messages, and
+# the transcript must not retain aliases to caller-owned memory.
 function _transcript_update!(transcript::_TranscriptHash, msg::AbstractVector{UInt8})
     SHA.update!(transcript.ctx, msg)
     transcript.buffer === nothing || append!(transcript.buffer::Vector{UInt8}, msg)
@@ -240,6 +286,9 @@ function _transcript_hash_input(::_TLSHashKind, transcript::_TranscriptHash)::Ve
     return _transcript_digest(transcript)
 end
 
+# TLS 1.2 PRF helpers intentionally stay byte-oriented and side-effect free so
+# they can be shared by exact TLS 1.2, mixed-mode fallback, exporters, and
+# test-vector coverage without handshake-specific state.
 function _p_hash(hash_kind::_TLSHashKind, secret::AbstractVector{UInt8}, seed::AbstractVector{UInt8}, out_len::Int)::Vector{UInt8}
     out_len >= 0 || throw(ArgumentError("out_len must be >= 0"))
     out_len == 0 && return UInt8[]
@@ -350,6 +399,10 @@ function _tls12_server_finished_verify_data(hash_kind::_TLSHashKind, master_secr
     return _tls12_prf(hash_kind, master_secret, _TLS12_SERVER_FINISHED_LABEL, _transcript_hash_input(hash_kind, transcript), 12)
 end
 
+# TLS 1.3 HKDF helpers follow the RFC / Go key-schedule vocabulary closely so
+# later handshake code can read like the specification: derive early secret,
+# mix in ECDHE, derive handshake/master/application secrets, then derive traffic
+# keys and Finished MAC inputs.
 function _hkdf_extract(hash_kind::_TLSHashKind, ikm::Union{Nothing, AbstractVector{UInt8}}, salt::Union{Nothing, AbstractVector{UInt8}})::Vector{UInt8}
     ikm_bytes = ikm === nothing ? zeros(UInt8, _hash_len(hash_kind)) : Vector{UInt8}(ikm)
     salt_bytes = salt === nothing ? zeros(UInt8, _hash_len(hash_kind)) : Vector{UInt8}(salt)
