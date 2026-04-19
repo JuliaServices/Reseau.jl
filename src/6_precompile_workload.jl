@@ -337,6 +337,16 @@ function _pc_close_nothrow(resource)
     return nothing
 end
 
+"""
+    _pc_tls_server_config(cert_path, key_path; ...) -> TL.Config
+
+Build the server-side TLS config used by the package-owned TLS precompile
+workload.
+
+The workload intentionally uses the same public `TLS.Config` API that package
+users see so precompile artifacts track real supported entrypoints instead of a
+special internal harness.
+"""
 function _pc_tls_server_config(
     cert_path::String,
     key_path::String;
@@ -361,6 +371,15 @@ function _pc_tls_server_config(
     )
 end
 
+"""
+    _pc_tls_client_config(; ...) -> TL.Config
+
+Build the client-side TLS config used by the package-owned TLS precompile
+workload.
+
+Keyword defaults keep the workload deterministic while still covering the
+native TLS routing surface the package supports in production.
+"""
 function _pc_tls_client_config(;
     verify_peer::Bool = false,
     verify_hostname::Bool = verify_peer,
@@ -440,6 +459,15 @@ function _pc_tls12_ecdsa_paths()::Union{
     return (cert = cert_path::String, key = key_path::String)
 end
 
+"""
+    _pc_expect_tls_state!(state, expected_version, expect_native_tls13, ...)
+
+Assert the negotiated public `TLS.connection_state` shape emitted by the
+precompile workload.
+
+This keeps the workload honest: the compile frontier is not just "a handshake
+ran", but "the supported public state surface behaves as expected afterward".
+"""
 function _pc_expect_tls_state!(
     state::TL.ConnectionState,
     expected_version::String,
@@ -485,6 +513,16 @@ function _pc_expect_tls_state!(
     return nothing
 end
 
+"""
+    _pc_run_tls_roundtrip_states!(server_config, client_config) -> (client_state, server_state)
+
+Drive one public-API TLS roundtrip and return the post-handshake connection
+state snapshots observed by both peers.
+
+The helper exercises `TLS.listen`, `TLS.accept`, `TLS.connect`, `TLS.handshake!`,
+`read`, `write`, `eof`, and `connection_state` so the canonical workload stays
+anchored at the supported public surface.
+"""
 function _pc_run_tls_roundtrip_states!(
     server_config::TL.Config,
     client_config::TL.Config,
@@ -521,6 +559,12 @@ function _pc_run_tls_roundtrip_states!(
     end
 end
 
+"""
+    _pc_run_tls_roundtrip!(server_config, client_config, expected_version, expect_native_tls13, ...)
+
+Run one public TLS roundtrip scenario and validate both peers' public
+`ConnectionState`.
+"""
 function _pc_run_tls_roundtrip!(
     server_config::TL.Config,
     client_config::TL.Config,
@@ -537,11 +581,28 @@ function _pc_run_tls_roundtrip!(
     return nothing
 end
 
-# Canonical public-API TLS workload shared by precompile and trim-safe tests.
+"""
+    _pc_run_tls_workload!()
+
+Canonical public-API TLS workload shared by package precompile and trim-safe
+verification.
+
+The scenarios are intentionally high level:
+- mixed TLS 1.2/1.3 negotiation
+- exact TLS 1.2 negotiation
+- native X25519 routing for TLS 1.2
+- mutual TLS and resumption when the richer fixture set is available
+- TLS 1.2 ECDSA certificate handling when that fixture is available
+
+Keeping this workload source-owned means trim/precompile coverage evolves with
+the actual supported public API rather than drifting into a test-only harness.
+"""
 function _pc_run_tls_workload!()
     _pc_runtime_supported() || return nothing
     paths = _pc_tls12_paths()
     paths === nothing && return nothing
+    # Start with the "normal" modern config that allows both TLS 1.2 and TLS
+    # 1.3, then force exact-version and alternate-curve paths underneath it.
     mixed_server_config = _pc_tls_server_config(
         paths.cert,
         paths.key;

@@ -60,6 +60,16 @@ include("tls/handshake_server_tls12.jl")
 const X25519 = _TLS_GROUP_X25519
 const P256 = _TLS_GROUP_SECP256R1
 
+"""
+    ClientAuthMode
+
+Server-side client certificate policy for native TLS handshakes.
+
+The values intentionally mirror Go's client-auth policy surface: callers pick a
+policy up front in `Config`, then the TLS 1.2/1.3 server handshakes interpret
+that policy consistently when deciding whether to request, require, and verify
+client certificates.
+"""
 module ClientAuthMode
 Base.@enum T::UInt8 begin
     NoClientCert = 0
@@ -186,6 +196,10 @@ struct Config
     _server_session_cache12::_TLSSessionCache{_TLS12ServerSession}
 end
 
+# `policy` records which native handshake lane a `Conn` should enter before the
+# protocol version is known. Exact TLS 1.2 / TLS 1.3 configs use a fixed lane,
+# while `_TLS_POLICY_AUTO` means "emit a mixed ClientHello/accept both versions
+# and then commit to the negotiated native state machine".
 const _TLS_POLICY_TLS13 = UInt8(1)
 const _TLS_POLICY_TLS12 = UInt8(2)
 const _TLS_POLICY_AUTO = UInt8(3)
@@ -488,6 +502,9 @@ function _make_tls_error(op::AbstractString, code::Int32)::TLSError
     return TLSError(String(op), code, _openssl_error_message(), nothing)
 end
 
+# Validation is deliberately separated from `Config` construction: building a
+# config should stay cheap and pure, while path existence checks and policy
+# coherence checks only happen when a client/server context is actually needed.
 function _validate_config(config::Config; is_server::Bool)
     # Keep validation centralized so callers can rely on `Config` being cheap to construct
     # while the expensive filesystem/OpenSSL checks happen only when a context is needed.
@@ -572,6 +589,9 @@ end
         config.key_file !== nothing
 end
 
+# Client/server policy selection answers a single question: which native
+# handshake engine should this connection enter before any bytes are exchanged?
+# The answer is exact TLS 1.2, exact TLS 1.3, or mixed-version auto negotiation.
 @inline function _tls_client_policy(config::Config)::UInt8
     if _native_tls13_only(config)
         return _TLS_POLICY_TLS13
@@ -638,6 +658,9 @@ function _tls_pick_client_version(config::Config, server_hello::_ServerHelloMsg)
     return peer_version
 end
 
+# These helpers construct the native ClientHello variants that front the exact
+# TLS 1.3, exact TLS 1.2, and mixed-version native paths. Once the hello is on
+# the wire, the corresponding handshake state machine owns all subsequent flow.
 function _tls13_client_hello(config::Config)::_ClientHelloMsg
     rng = Random.RandomDevice()
     hello = _ClientHelloMsg()
@@ -738,6 +761,9 @@ function _native_tls13_client_identity(config::Config)::Tuple{Vector{Vector{UInt
     end
 end
 
+# Session cache lookups validate cached material before the handshake consumes
+# it. That keeps `connection_state` / resumption probes cheap while ensuring
+# handshakes never proceed with expired, mismatched, or now-untrusted sessions.
 function _tls12_try_load_client_session(config::Config, cache_key::AbstractString, hello::_ClientHelloMsg)::Union{Nothing, _TLS12ClientSession}
     config.session_tickets_disabled && return nothing
     isempty(cache_key) && return nothing
@@ -836,6 +862,11 @@ function _tls13_try_load_client_session(config::Config, cache_key::AbstractStrin
     return session
 end
 
+# `Conn` always starts with a version-appropriate native state allocation so the
+# public wrapper can exist before any handshake bytes move. Mixed-mode starts in
+# the TLS 1.3-shaped state because the first record/hello path is TLS 1.3-style;
+# exact TLS 1.2 and post-negotiation mixed-mode then transition to the TLS 1.2
+# native state container when required.
 function _new_native_conn(tcp::TCP.Conn, config::Config, policy::UInt8, native_state; is_server::Bool)::Conn
     return Conn(
         tcp,
@@ -1007,6 +1038,10 @@ end
     return state::_TLS12NativeState
 end
 
+# Mixed-version handshakes reuse the bytes buffered during the initial TLS 1.3-
+# style record/hello exchange. When the negotiated version downgrades to TLS
+# 1.2, we copy that shared transport state into the TLS 1.2 native container so
+# the exact TLS 1.2 record/handshake code can continue from the same stream.
 function _tls12_copy_initial_state(state13::_TLS13NativeClientState)::_TLS12NativeState
     state12 = _TLS12NativeState()
     state12.handshake_buffer = copy(state13.handshake_buffer)
@@ -1128,6 +1163,9 @@ function _finish_native_tls12_server_handshake!(conn::Conn, state::_TLS12ServerH
     return nothing
 end
 
+# Mixed-mode client flow owns only the first flight/version selection. Once the
+# peer commits to TLS 1.2 or TLS 1.3, we hand the buffered transcript and record
+# state to the exact-version implementation and let it finish the handshake.
 function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     cache_key = _tls13_client_session_cache_key(conn.config, conn.tcp)
     client_hello = _tls_auto_client_hello(conn.config)
@@ -1156,6 +1194,9 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
             _finish_native_tls13_client_handshake!(conn, state13, cache_key)
             return nothing
         end
+        # TLS 1.2 reuses the already-written mixed ClientHello and the received
+        # ServerHello so the exact TLS 1.2 client state machine can continue
+        # without re-reading the transport.
         raw_client_hello = copy(state13.client_hello_raw)
         raw_server_hello = copy(state13.server_hello_raw)
         client_hello12 = _unmarshal_client_hello(raw_client_hello)
@@ -1181,6 +1222,9 @@ function _native_tls_auto_client_handshake!(conn::Conn)::Nothing
     return nothing
 end
 
+# Mixed-mode server flow mirrors the client side: parse one ClientHello, pick a
+# mutual version, then hand the live buffered state to the exact-version server
+# handshake implementation that owns the remainder of the protocol.
 function _native_tls_auto_server_handshake!(conn::Conn)::Nothing
     native_state13 = _native_tls13_state(conn)
     io13 = _TLS13HandshakeRecordIO(conn.tcp, native_state13)
@@ -1388,6 +1432,11 @@ end
     return _tls_buffer_available(state.plaintext_buffer, state.plaintext_buffer_pos)
 end
 
+# Read paths all follow the same pattern:
+# 1. ensure the handshake completed,
+# 2. drain any buffered plaintext,
+# 3. if necessary read more TLS records,
+# 4. translate protocol/transport failures into `TLSError`.
 function _native_tls13_fill_plaintext!(conn::Conn)::Nothing
     state = _native_tls13_state(conn)
     while true
@@ -1763,6 +1812,9 @@ end
 
 _write_buffer(buf::ByteMemory, nbytes::Int) = buf
 
+# Alert helpers are intentionally version-specific because the record encoders,
+# cipher state, and shutdown rules differ across TLS 1.2 and TLS 1.3 even
+# though `handshake!` / `read` / `write` surface them through a single `Conn`.
 function _native_tls13_write_alert!(conn::Conn, alert_level::UInt8, alert_desc::UInt8)::Nothing
     state = _native_tls13_state(conn)
     state.sent_close_notify && return nothing
@@ -1933,6 +1985,9 @@ function Base.write(conn::Conn, buf::ByteMemory, nbytes::Integer)::Int
     end
 end
 
+# `close` and `closewrite` cap the alert write deadline so a peer that never
+# drains close-notify does not stall teardown forever. That mirrors Go's "best
+# effort shutdown, then tear down the transport" behavior.
 function _with_close_write_deadline_cap(f::F, conn::Conn) where {F}
     pfd = conn.tcp.fd.pfd
     pd = pfd.pd
@@ -2423,6 +2478,9 @@ function _prepare_connect_config(config::Config, remote_addr::TCP.SocketAddr)::C
     return _config_with_server_name(config, host)
 end
 
+# The public connect helpers derive `server_name` from the dial target when the
+# caller did not set one explicitly, then force the handshake eagerly so
+# `connect(...)` returns a ready-to-use TLS stream just like Go's `tls.Dial`.
 function _connect_client(tcp::TCP.Conn, config::Config, deadline_ns::Int64 = Int64(0))::Conn
     tls_conn = try
         client(tcp, config)
