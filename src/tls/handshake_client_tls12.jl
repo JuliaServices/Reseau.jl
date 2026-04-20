@@ -236,18 +236,12 @@ function _tls12_select_signature_algorithm(pkey::Ptr{Cvoid}, supported_signature
         return nothing
     end
     if pkey_type == "EC"
-        curve_nid = _tls13_ec_group_curve_nid(pkey)
-        if curve_nid == _init_p256_group_nid!()
-            in(_TLS_SIGNATURE_ECDSA_SECP256R1_SHA256, supported_signature_algorithms) &&
-                return _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256
-        elseif curve_nid == _init_p384_group_nid!()
-            in(_TLS_SIGNATURE_ECDSA_SECP384R1_SHA384, supported_signature_algorithms) &&
-                return _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
-        elseif curve_nid == _init_p521_group_nid!()
-            in(_TLS_SIGNATURE_ECDSA_SECP521R1_SHA512, supported_signature_algorithms) &&
-                return _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512
-        else
-            throw(ArgumentError("tls: unsupported EC certificate curve $(curve_nid) for TLS 1.2 signature selection"))
+        for alg in supported_signature_algorithms
+            if alg == _TLS_SIGNATURE_ECDSA_SECP256R1_SHA256 ||
+               alg == _TLS_SIGNATURE_ECDSA_SECP384R1_SHA384 ||
+               alg == _TLS_SIGNATURE_ECDSA_SECP521R1_SHA512
+                return alg
+            end
         end
         return nothing
     end

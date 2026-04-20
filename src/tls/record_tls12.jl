@@ -1,7 +1,7 @@
 const _TLS12_GCM_TAG_SIZE = 16
 const _TLS12_MAX_PLAINTEXT = 16_384
 const _TLS12_MAX_CIPHERTEXT = _TLS12_MAX_PLAINTEXT + 8 + _TLS12_GCM_TAG_SIZE + 256
-const _TLS12_MAX_HANDSHAKE_BUFFER = _MAX_HANDSHAKE_SIZE + _TLS12_MAX_PLAINTEXT
+const _TLS12_MAX_HANDSHAKE_BUFFER = _MAX_CERTIFICATE_HANDSHAKE_SIZE + _TLS12_MAX_PLAINTEXT
 const _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD = UInt8[0x01]
 
 """
@@ -36,6 +36,7 @@ mutable struct _TLS12NativeState
     handshake_buffer_pos::Int
     plaintext_buffer::Vector{UInt8}
     plaintext_buffer_pos::Int
+    useless_record_count::Int
     peer_close_notify::Bool
     sent_close_notify::Bool
     received_change_cipher_spec::Bool
@@ -52,6 +53,7 @@ _TLS12NativeState() = _TLS12NativeState(
     1,
     UInt8[],
     1,
+    0,
     false,
     false,
     false,
@@ -95,6 +97,7 @@ function _securezero_tls12_native_state!(state::_TLS12NativeState)::Nothing
     empty!(state.plaintext_buffer)
     state.handshake_buffer_pos = 1
     state.plaintext_buffer_pos = 1
+    state.useless_record_count = 0
     state.peer_close_notify = false
     state.sent_close_notify = false
     state.received_change_cipher_spec = false
@@ -121,8 +124,8 @@ function _tls12_set_write_cipher!(state::_TLS12NativeState, spec::_TLS12CipherSp
     return nothing
 end
 
-function _tls12_seq_bytes(seq::UInt64)::NTuple{8, UInt8}
-    return (
+function _tls12_explicit_nonce(seq::UInt64)::Vector{UInt8}
+    return UInt8[
         UInt8((seq >> 56) & 0xff),
         UInt8((seq >> 48) & 0xff),
         UInt8((seq >> 40) & 0xff),
@@ -131,21 +134,21 @@ function _tls12_seq_bytes(seq::UInt64)::NTuple{8, UInt8}
         UInt8((seq >> 16) & 0xff),
         UInt8((seq >> 8) & 0xff),
         UInt8(seq & 0xff),
-    )
-end
-
-function _tls12_explicit_nonce(seq::UInt64)::Vector{UInt8}
-    bytes = _tls12_seq_bytes(seq)
-    return UInt8[bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8]]
+    ]
 end
 
 function _tls12_record_additional_data(seq::UInt64, content_type::UInt8, plaintext_len::Int)::Vector{UInt8}
     plaintext_len >= 0 || throw(ArgumentError("tls12 plaintext length must be >= 0"))
     plaintext_len <= 0xffff || throw(ArgumentError("tls12 plaintext length too large"))
-    seq_bytes = _tls12_seq_bytes(seq)
     return UInt8[
-        seq_bytes[1], seq_bytes[2], seq_bytes[3], seq_bytes[4],
-        seq_bytes[5], seq_bytes[6], seq_bytes[7], seq_bytes[8],
+        UInt8((seq >> 56) & 0xff),
+        UInt8((seq >> 48) & 0xff),
+        UInt8((seq >> 40) & 0xff),
+        UInt8((seq >> 32) & 0xff),
+        UInt8((seq >> 24) & 0xff),
+        UInt8((seq >> 16) & 0xff),
+        UInt8((seq >> 8) & 0xff),
+        UInt8(seq & 0xff),
         content_type,
         UInt8(TLS1_2_VERSION >> 8),
         UInt8(TLS1_2_VERSION & 0xff),
@@ -245,6 +248,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
             state.read_cipher === nothing || _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received unexpected post-handshake TLS 1.2 ChangeCipherSpec")
             state.received_change_cipher_spec && _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, "tls: received duplicate TLS 1.2 ChangeCipherSpec")
             state.received_change_cipher_spec = true
+            _tls_reset_useless_record_count!(state)
             return nothing
         end
         if state.read_cipher === nothing
@@ -253,6 +257,7 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
                     append!(state.handshake_buffer, payload)
                     length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
                         _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
+                    _tls_reset_useless_record_count!(state)
                 end
                 return nothing
             end
@@ -292,8 +297,14 @@ function _tls12_read_record!(tcp::TCP.Conn, state::_TLS12NativeState)::Nothing
                 append!(state.handshake_buffer, plaintext::Vector{UInt8})
                 length(state.handshake_buffer) <= _TLS12_MAX_HANDSHAKE_BUFFER ||
                     _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received too much buffered TLS 1.2 handshake data")
+                !isempty(plaintext::Vector{UInt8}) && _tls_reset_useless_record_count!(state)
             elseif content_type == _TLS_RECORD_TYPE_APPLICATION_DATA
-                append!(state.plaintext_buffer, plaintext::Vector{UInt8})
+                if isempty(plaintext::Vector{UInt8})
+                    _tls_note_useless_record!(state, "tls: too many ignored TLS records")
+                else
+                    append!(state.plaintext_buffer, plaintext::Vector{UInt8})
+                    _tls_reset_useless_record_count!(state)
+                end
             elseif content_type == _TLS_RECORD_TYPE_ALERT
                 _tls12_process_alert!(state, plaintext::Vector{UInt8})
             else
@@ -327,7 +338,9 @@ function _tls12_try_take_handshake_message!(state::_TLS12NativeState)::Union{Not
         (Int(state.handshake_buffer[pos + 1]) << 16) +
         (Int(state.handshake_buffer[pos + 2]) << 8) +
         Int(state.handshake_buffer[pos + 3])
-    msg_len <= _MAX_HANDSHAKE_SIZE || _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.2 handshake message")
+    msg_type = state.handshake_buffer[pos]
+    msg_len <= _tls_max_handshake_frame_size(msg_type) ||
+        _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: received oversized TLS 1.2 handshake message")
     available >= msg_len || return nothing
     raw = Vector{UInt8}(undef, msg_len)
     copyto!(raw, 1, state.handshake_buffer, pos, msg_len)

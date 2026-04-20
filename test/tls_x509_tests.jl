@@ -44,6 +44,10 @@ function _tls_copy_cert(
     extended_key_usage = cert.extended_key_usage,
     subject_key_id = cert.subject_key_id,
     authority_key_id = cert.authority_key_id,
+    permitted_dns_domains = cert.permitted_dns_domains,
+    excluded_dns_domains = cert.excluded_dns_domains,
+    permitted_ip_ranges = cert.permitted_ip_ranges,
+    excluded_ip_ranges = cert.excluded_ip_ranges,
     tbs_der = cert.tbs_der,
     public_key = cert.public_key,
     signature_verify_spec = cert.signature_verify_spec,
@@ -66,6 +70,10 @@ function _tls_copy_cert(
         extended_key_usage,
         copy(subject_key_id),
         copy(authority_key_id),
+        copy(permitted_dns_domains),
+        copy(excluded_dns_domains),
+        [TLX._TLSIPRangeConstraint(copy(range.network), copy(range.mask)) for range in permitted_ip_ranges],
+        [TLX._TLSIPRangeConstraint(copy(range.network), copy(range.mask)) for range in excluded_ip_ranges],
         copy(tbs_der),
         TLX._tls_copy_public_key(public_key),
         signature_verify_spec,
@@ -307,6 +315,61 @@ end
             if err isa ArgumentError
                 @test occursin("unsupported critical X.509 extension", err.msg)
             end
+        end
+    end
+
+    @testset "native trust verifier enforces DNS and IP name constraints" begin
+        server_certs = TLX._tls_decode_pem_certificates(_read_bytes(_TLS_CERT_PATH))
+        root = _tls_cert_info(_TLS_CA_PATH)
+
+        dns_permitted_store = TLX._TLSTrustStore([
+            _tls_copy_cert(root; permitted_dns_domains = ["localhost"]),
+        ])
+        @test TLX._tls_verify_peer_certificate_chain!(server_certs, dns_permitted_store, "ssl_server") isa TLX._TLSCertificateInfo
+
+        dns_excluded_store = TLX._TLSTrustStore([
+            _tls_copy_cert(root; excluded_dns_domains = ["localhost"]),
+        ])
+        dns_err = try
+            TLX._tls_verify_peer_certificate_chain!(server_certs, dns_excluded_store, "ssl_server")
+            nothing
+        catch ex
+            ex
+        end
+        @test dns_err isa TLX._TLSAlertError
+        if dns_err isa TLX._TLSAlertError
+            @test dns_err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
+            @test occursin("excluded DNS name constraint", dns_err.message)
+        end
+
+        ip_permitted_store = TLX._TLSTrustStore([
+            _tls_copy_cert(root; permitted_ip_ranges = [
+                TLX._TLSIPRangeConstraint(UInt8[0x7f, 0x00, 0x00, 0x00], UInt8[0xff, 0xff, 0xff, 0x00]),
+                TLX._TLSIPRangeConstraint(
+                    UInt8[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+                    UInt8[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                ),
+            ]),
+        ])
+        @test TLX._tls_verify_peer_certificate_chain!(server_certs, ip_permitted_store, "ssl_server") isa TLX._TLSCertificateInfo
+
+        ip_excluded_store = TLX._TLSTrustStore([
+            _tls_copy_cert(root; excluded_ip_ranges = [
+                TLX._TLSIPRangeConstraint(UInt8[0x7f, 0x00, 0x00, 0x00], UInt8[0xff, 0xff, 0xff, 0x00]),
+            ]),
+        ])
+        ip_err = try
+            TLX._tls_verify_peer_certificate_chain!(server_certs, ip_excluded_store, "ssl_server")
+            nothing
+        catch ex
+            ex
+        end
+        @test ip_err isa TLX._TLSAlertError
+        if ip_err isa TLX._TLSAlertError
+            @test ip_err.alert == TLX._TLS_ALERT_BAD_CERTIFICATE
+            @test occursin("excluded IP name constraint", ip_err.message)
         end
     end
 

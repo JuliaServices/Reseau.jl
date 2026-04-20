@@ -98,6 +98,92 @@ function _securezero_tls12_server_session!(session::_TLS12ServerSession)::Nothin
     return nothing
 end
 
+function _serialize_tls12_server_session(session::_TLS12ServerSession)::Vector{UInt8}
+    out = UInt8[]
+    _append_u16!(out, session.version)
+    _append_u16!(out, session.cipher_suite)
+    _tls_ticket_append_u64!(out, session.created_at_s)
+    _tls_ticket_append_u64!(out, session.use_by_s)
+    _tls_ticket_append_u16_length_prefixed_bytes!(out, session.secret)
+    _tls_ticket_append_u16_length_prefixed_bytes!(out, codeunits(session.alpn_protocol))
+    _append_u16!(out, session.curve_id)
+    push!(out, session.ext_master_secret ? 0x01 : 0x00)
+    length(session.client_certificates) <= 0xffff ||
+        throw(ArgumentError("tls12 server session contains too many certificates"))
+    _append_u16!(out, UInt16(length(session.client_certificates)))
+    for cert in session.client_certificates
+        _tls_ticket_append_u32_length_prefixed_bytes!(out, cert)
+    end
+    return out
+end
+
+function _deserialize_tls12_server_session(
+    data::Vector{UInt8},
+    ticket::AbstractVector{UInt8},
+)::Union{Nothing, _TLS12ServerSession}
+    reader = _HandshakeReader(data)
+    version = _read_u16!(reader)
+    version === nothing && return nothing
+    cipher_suite = _read_u16!(reader)
+    cipher_suite === nothing && return nothing
+    created_at_s = _tls_ticket_read_u64!(reader)
+    created_at_s === nothing && return nothing
+    use_by_s = _tls_ticket_read_u64!(reader)
+    use_by_s === nothing && return nothing
+    secret = _read_u16_length_prefixed_bytes!(reader)
+    secret === nothing && return nothing
+    alpn_bytes = _read_u16_length_prefixed_bytes!(reader)
+    if alpn_bytes === nothing
+        _securezero!(secret)
+        return nothing
+    end
+    curve_id = _read_u16!(reader)
+    if curve_id === nothing
+        _securezero!(secret)
+        return nothing
+    end
+    ext_master_secret_byte = _read_u8!(reader)
+    if ext_master_secret_byte === nothing
+        _securezero!(secret)
+        return nothing
+    end
+    cert_count = _read_u16!(reader)
+    if cert_count === nothing
+        _securezero!(secret)
+        return nothing
+    end
+    certificates = Vector{Vector{UInt8}}()
+    success = false
+    try
+        for _ in 1:Int(cert_count::UInt16)
+            cert = _tls_ticket_read_u32_length_prefixed_bytes!(reader)
+            cert === nothing && return nothing
+            push!(certificates, cert)
+        end
+        _reader_empty(reader) || return nothing
+        success = true
+        return _owned_tls12_server_session(
+            version::UInt16,
+            cipher_suite::UInt16,
+            created_at_s::UInt64,
+            use_by_s::UInt64,
+            ticket,
+            secret::Vector{UInt8},
+            certificates,
+            String(alpn_bytes::Vector{UInt8}),
+            curve_id::UInt16,
+            ext_master_secret_byte::UInt8 == 0x01,
+        )
+    finally
+        _securezero!(secret)
+        if !success
+            for cert in certificates
+                _securezero!(cert)
+            end
+        end
+    end
+end
+
 """
     _TLS12ServerHandshakeState
 
@@ -268,36 +354,44 @@ function _tls12_select_server_parameters!(state::_TLS12ServerHandshakeState, con
     state.using_resumption = false
     session_ticket = state.client_hello.session_ticket
     if !config.session_tickets_disabled && !isempty(session_ticket)
-        session = _tls_session_cache_peek(config._server_session_cache12, bytes2hex(session_ticket), _copy_tls12_server_session)
-        if session !== nothing
-            keep_session = false
-            try
-                now_s = UInt64(floor(time()))
-                if session.version == TLS1_2_VERSION &&
-                   now_s <= session.use_by_s &&
-                   in(session.cipher_suite, state.client_hello.cipher_suites) &&
-                   session.alpn_protocol == state.selected_alpn &&
-                   session.ext_master_secret &&
-                   _tls12_cipher_spec(session.cipher_suite) !== nothing &&
-                   _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
-                       _tls13_verify_client_certificate_chain(
-                           client_certificates;
-                           verify_peer = true,
-                           ca_file = _effective_ca_file(config; is_server = true),
-                       )
-                   end
-                    state.resumption_session = session
-                    state.using_resumption = true
-                    state.cipher_suite = session.cipher_suite
-                    state.curve_id = session.curve_id
-                    state.peer_certificates = [copy(cert) for cert in session.client_certificates]
-                    keep_session = true
-                    _tls_session_cache_delete!(config._server_session_cache12, bytes2hex(session_ticket), _securezero_tls12_server_session!)
-                    return nothing
+        keys = _tls_active_session_ticket_keys(config)
+        try
+            plaintext = _tls_decrypt_server_session_ticket(keys, session_ticket)
+            if plaintext !== nothing
+                session = _deserialize_tls12_server_session(plaintext, session_ticket)
+                _securezero!(plaintext)
+                if session !== nothing
+                    keep_session = false
+                    try
+                        now_s = UInt64(floor(time()))
+                        if session.version == TLS1_2_VERSION &&
+                           now_s <= session.use_by_s &&
+                           in(session.cipher_suite, state.client_hello.cipher_suites) &&
+                           session.alpn_protocol == state.selected_alpn &&
+                           session.ext_master_secret &&
+                           _tls12_cipher_spec(session.cipher_suite) !== nothing &&
+                           _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
+                               _tls13_verify_client_certificate_chain(
+                                   client_certificates;
+                                   verify_peer = true,
+                                   ca_file = _effective_ca_file(config; is_server = true),
+                               )
+                           end
+                            state.resumption_session = session
+                            state.using_resumption = true
+                            state.cipher_suite = session.cipher_suite
+                            state.curve_id = session.curve_id
+                            state.peer_certificates = [copy(cert) for cert in session.client_certificates]
+                            keep_session = true
+                            return nothing
+                        end
+                    finally
+                        keep_session || _securezero_tls12_server_session!(session::_TLS12ServerSession)
+                    end
                 end
-            finally
-                keep_session || _securezero_tls12_server_session!(session::_TLS12ServerSession)
             end
+        finally
+            _securezero_tls_session_ticket_keys!(keys)
         end
     end
     state.cipher_suite = _tls12_select_server_cipher_suite(state.client_hello, state.private_key)
@@ -572,26 +666,31 @@ function _tls12_send_new_session_ticket!(
     master_secret::Vector{UInt8},
 )::Nothing
     state.server_hello.ticket_supported || return nothing
-    label = rand(Random.RandomDevice(), UInt8, 32)
+    label = UInt8[]
+    plaintext = UInt8[]
     session = _owned_tls12_server_session(
         TLS1_2_VERSION,
         state.cipher_suite,
         UInt64(floor(time())),
         UInt64(floor(time())) + UInt64(_TLS12_MAX_SESSION_TICKET_LIFETIME),
-        label,
+        UInt8[],
         master_secret,
         state.peer_certificates,
         state.selected_alpn,
         state.curve_id,
         state.server_hello.extended_master_secret,
     )
+    keys = _tls_active_session_ticket_keys(config)
     try
-        _tls_session_cache_put!(config._server_session_cache12, bytes2hex(session.label), session, _copy_tls12_server_session, _securezero_tls12_server_session!)
+        plaintext = _serialize_tls12_server_session(session)
+        label = _tls_encrypt_server_session_ticket(keys[1], plaintext)
         raw = _write_handshake_message(_NewSessionTicketMsgTLS12(_TLS12_MAX_SESSION_TICKET_LIFETIME, label), transcript)
         _write_handshake_bytes!(io, raw)
     finally
         _securezero_tls12_server_session!(session)
+        _securezero!(plaintext)
         _securezero!(label)
+        _securezero_tls_session_ticket_keys!(keys)
     end
     return nothing
 end

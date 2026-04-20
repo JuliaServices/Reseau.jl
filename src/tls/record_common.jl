@@ -15,7 +15,10 @@ const _TLS_ALERT_DECODE_ERROR = UInt8(50)
 const _TLS_ALERT_DECRYPT_ERROR = UInt8(51)
 const _TLS_ALERT_PROTOCOL_VERSION = UInt8(70)
 const _TLS_ALERT_INTERNAL_ERROR = UInt8(80)
+const _TLS_ALERT_NO_APPLICATION_PROTOCOL = UInt8(120)
 const _TLS_ALERT_CERTIFICATE_REQUIRED = UInt8(116)
+
+const _TLS_MAX_USELESS_RECORDS = 16
 
 """
     _TLSAlertError
@@ -40,6 +43,18 @@ Base.showerror(io::IO, err::_TLSAlertError) = print(io, err.message)
 
 @inline function _tls_buffer_available(buf::Vector{UInt8}, pos::Int)::Int
     return max(0, length(buf) - pos + 1)
+end
+
+@inline function _tls_reset_useless_record_count!(state)::Nothing
+    state.useless_record_count = 0
+    return nothing
+end
+
+@inline function _tls_note_useless_record!(state, message::AbstractString)::Nothing
+    state.useless_record_count += 1
+    state.useless_record_count <= _TLS_MAX_USELESS_RECORDS ||
+        _tls_fail(_TLS_ALERT_UNEXPECTED_MESSAGE, message)
+    return nothing
 end
 
 # Both TLS 1.2 and TLS 1.3 use simple owned vectors for buffered handshake and

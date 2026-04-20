@@ -156,6 +156,51 @@ isdefined(@__MODULE__, :_RESEAU_TLS_TEST_UTILS_LOADED) || include("tls_test_util
                 IP.shutdown!()
             end
         end
+        @testset "ALPN no-overlap fails the handshake" begin
+            IP.shutdown!()
+            listener = nothing
+            client = nothing
+            try
+                server_cfg = TL.Config(
+                    verify_peer = false,
+                    cert_file = _TLS_CERT_PATH,
+                    key_file = _TLS_KEY_PATH,
+                    alpn_protocols = ["h2"],
+                )
+                listener = TL.listen("tcp", "127.0.0.1:0", server_cfg; backlog = 8)
+                laddr = TL.addr(listener)::NC.SocketAddrV4
+                accept_task = errormonitor(Threads.@spawn begin
+                    try
+                        conn = TL.accept(listener)
+                        TL.handshake!(conn)
+                    catch ex
+                        ex
+                    end
+                end)
+                client_cfg = TL.Config(
+                    verify_peer = false,
+                    server_name = "localhost",
+                    alpn_protocols = ["http/1.1"],
+                )
+                err = try
+                    _tls_connect("tcp", "127.0.0.1:$(Int(laddr.port))", client_cfg)
+                    nothing
+                catch ex
+                    ex
+                end
+                @test err isa TL.TLSError
+                if err isa TL.TLSError
+                    @test occursin("alert 120", err.message)
+                end
+                @test _tls_wait_task_done(accept_task, 2.0) != :timed_out
+                server_err = fetch(accept_task)
+                @test server_err isa TL.TLSError
+            finally
+                _tls_close_quiet!(client)
+                _tls_close_quiet!(listener)
+                IP.shutdown!()
+            end
+        end
         @testset "show methods summarize TLS endpoints and handshake state" begin
             IP.shutdown!()
             tls_listener = nothing

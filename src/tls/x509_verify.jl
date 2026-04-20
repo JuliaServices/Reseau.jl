@@ -188,6 +188,105 @@ function _tls_trust_anchor_matches(cert::_TLSCertificateInfo, store::_TLSTrustSt
     return false
 end
 
+@inline function _tls_certificate_has_name_constraints(cert::_TLSCertificateInfo)::Bool
+    return !isempty(cert.permitted_dns_domains) ||
+           !isempty(cert.excluded_dns_domains) ||
+           !isempty(cert.permitted_ip_ranges) ||
+           !isempty(cert.excluded_ip_ranges)
+end
+
+@inline function _tls_dns_constraint_matches(constraint::AbstractString, dns_name::AbstractString)::Bool
+    isempty(constraint) && return true
+    normalized_constraint = _tls_ascii_lowercase(constraint)
+    normalized_name = _tls_ascii_lowercase(dns_name)
+    endswith(normalized_name, normalized_constraint) || return false
+    startswith(normalized_constraint, ".") && return true
+    length(normalized_name) == length(normalized_constraint) && return true
+    boundary = ncodeunits(normalized_name) - ncodeunits(normalized_constraint)
+    return boundary > 0 && codeunit(normalized_name, boundary) == UInt8('.')
+end
+
+@inline function _tls_ip_range_matches(range::_TLSIPRangeConstraint, ip::AbstractVector{UInt8})::Bool
+    length(ip) == length(range.network) || return false
+    length(ip) == length(range.mask) || return false
+    @inbounds for i in eachindex(ip, range.network, range.mask)
+        (ip[i] & range.mask[i]) == (range.network[i] & range.mask[i]) || return false
+    end
+    return true
+end
+
+@inline function _tls_constraint_ip_string(ip::AbstractVector{UInt8})::String
+    return join(string.(ip), '.')
+end
+
+function _tls_verify_certificate_name_constraints!(
+    cert::_TLSCertificateInfo,
+    issuer::_TLSCertificateInfo,
+)::Nothing
+    if !isempty(issuer.permitted_dns_domains)
+        for dns_name in cert.dns_names
+            permitted = false
+            for constraint in issuer.permitted_dns_domains
+                if _tls_dns_constraint_matches(constraint, dns_name)
+                    permitted = true
+                    break
+                end
+            end
+            permitted || _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates DNS name constraints for $(repr(dns_name))",
+            )
+        end
+    end
+    for dns_name in cert.dns_names
+        for constraint in issuer.excluded_dns_domains
+            _tls_dns_constraint_matches(constraint, dns_name) || continue
+            _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates excluded DNS name constraint for $(repr(dns_name))",
+            )
+        end
+    end
+    if !isempty(issuer.permitted_ip_ranges)
+        for ip in cert.ip_addresses
+            permitted = false
+            for constraint in issuer.permitted_ip_ranges
+                if _tls_ip_range_matches(constraint, ip)
+                    permitted = true
+                    break
+                end
+            end
+            permitted || _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates IP name constraints for $(_tls_constraint_ip_string(ip))",
+            )
+        end
+    end
+    for ip in cert.ip_addresses
+        for constraint in issuer.excluded_ip_ranges
+            _tls_ip_range_matches(constraint, ip) || continue
+            _tls_fail(
+                _TLS_ALERT_BAD_CERTIFICATE,
+                "tls: certificate chain violates excluded IP name constraint for $(_tls_constraint_ip_string(ip))",
+            )
+        end
+    end
+    return nothing
+end
+
+function _tls_verify_chain_name_constraints!(chain::Vector{_TLSCertificateInfo})::Nothing
+    for cert_index in eachindex(chain)
+        cert = chain[cert_index]
+        cert.has_san_extension || continue
+        for issuer_index in (cert_index + 1):length(chain)
+            issuer = chain[issuer_index]
+            _tls_certificate_has_name_constraints(issuer) || continue
+            _tls_verify_certificate_name_constraints!(cert, issuer)
+        end
+    end
+    return nothing
+end
+
 function _tls_build_chain_to_trust_anchor!(
     child::_TLSCertificateInfo,
     intermediates::Vector{_TLSCertificateInfo},
@@ -195,12 +294,12 @@ function _tls_build_chain_to_trust_anchor!(
     chain::Vector{_TLSCertificateInfo},
     now_s::Int64,
     remaining_candidates::Base.RefValue{Int},
-)::Bool
-    length(chain) > _TLS_MAX_CHAIN_DEPTH && return false
+)::Union{Nothing, Vector{_TLSCertificateInfo}}
+    length(chain) > _TLS_MAX_CHAIN_DEPTH && return nothing
     for root in store.roots
         _tls_cert_subject_matches_issuer(child, root) || continue
         remaining_candidates[] -= 1
-        remaining_candidates[] >= 0 || return false
+        remaining_candidates[] >= 0 || return nothing
         _tls_issuer_can_sign(root) || continue
         _tls_certificate_valid_now(root, now_s) || continue
         if root.max_path_len >= 0
@@ -211,12 +310,14 @@ function _tls_build_chain_to_trust_anchor!(
             ca_count <= root.max_path_len || continue
         end
         _tls_verify_certificate_signature(child, root) || continue
-        return true
+        verified_chain = copy(chain)
+        push!(verified_chain, root)
+        return verified_chain
     end
     for (i, parent) in pairs(intermediates)
         _tls_cert_subject_matches_issuer(child, parent) || continue
         remaining_candidates[] -= 1
-        remaining_candidates[] >= 0 || return false
+        remaining_candidates[] >= 0 || return nothing
         _tls_issuer_can_sign(parent) || continue
         _tls_certificate_valid_now(parent, now_s) || continue
         if parent.max_path_len >= 0
@@ -231,9 +332,10 @@ function _tls_build_chain_to_trust_anchor!(
         push!(next_chain, parent)
         remaining = copy(intermediates)
         deleteat!(remaining, i)
-        _tls_build_chain_to_trust_anchor!(parent, remaining, store, next_chain, now_s, remaining_candidates) && return true
+        verified_chain = _tls_build_chain_to_trust_anchor!(parent, remaining, store, next_chain, now_s, remaining_candidates)
+        verified_chain === nothing || return verified_chain
     end
-    return false
+    return nothing
 end
 
 function _tls_verify_peer_certificate_chain!(
@@ -259,11 +361,15 @@ function _tls_verify_peer_certificate_chain!(
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, purpose == "ssl_server" ?
             "tls: certificate is not authorized for server authentication" :
             "tls: certificate is not authorized for client authentication")
-    _tls_trust_anchor_matches(leaf, store) && return leaf
+    if _tls_trust_anchor_matches(leaf, store)
+        return leaf
+    end
     intermediates = length(parsed) > 1 ? parsed[2:end] : _TLSCertificateInfo[]
     remaining_candidates = Ref(_TLS_MAX_CHAIN_CANDIDATES)
-    _tls_build_chain_to_trust_anchor!(leaf, intermediates, store, _TLSCertificateInfo[leaf], now_s, remaining_candidates) ||
+    verified_chain = _tls_build_chain_to_trust_anchor!(leaf, intermediates, store, _TLSCertificateInfo[leaf], now_s, remaining_candidates)
+    verified_chain === nothing &&
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate signed by unknown authority")
+    _tls_verify_chain_name_constraints!(verified_chain)
     return leaf
 end
 

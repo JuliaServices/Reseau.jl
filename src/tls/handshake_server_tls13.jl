@@ -103,6 +103,82 @@ function _securezero_tls13_server_session!(session::_TLS13ServerSession)::Nothin
     return nothing
 end
 
+function _serialize_tls13_server_session(session::_TLS13ServerSession)::Vector{UInt8}
+    out = UInt8[]
+    _append_u16!(out, session.version)
+    _append_u16!(out, session.cipher_suite)
+    _tls_ticket_append_u64!(out, session.created_at_s)
+    _tls_ticket_append_u64!(out, session.use_by_s)
+    _append_u32!(out, session.age_add)
+    _tls_ticket_append_u16_length_prefixed_bytes!(out, session.secret)
+    _tls_ticket_append_u16_length_prefixed_bytes!(out, codeunits(session.alpn_protocol))
+    length(session.client_certificates) <= 0xffff ||
+        throw(ArgumentError("tls13 server session contains too many certificates"))
+    _append_u16!(out, UInt16(length(session.client_certificates)))
+    for cert in session.client_certificates
+        _tls_ticket_append_u32_length_prefixed_bytes!(out, cert)
+    end
+    return out
+end
+
+function _deserialize_tls13_server_session(
+    data::Vector{UInt8},
+    ticket::AbstractVector{UInt8},
+)::Union{Nothing, _TLS13ServerSession}
+    reader = _HandshakeReader(data)
+    version = _read_u16!(reader)
+    version === nothing && return nothing
+    cipher_suite = _read_u16!(reader)
+    cipher_suite === nothing && return nothing
+    created_at_s = _tls_ticket_read_u64!(reader)
+    created_at_s === nothing && return nothing
+    use_by_s = _tls_ticket_read_u64!(reader)
+    use_by_s === nothing && return nothing
+    age_add = _read_u32!(reader)
+    age_add === nothing && return nothing
+    secret = _read_u16_length_prefixed_bytes!(reader)
+    secret === nothing && return nothing
+    alpn_bytes = _read_u16_length_prefixed_bytes!(reader)
+    if alpn_bytes === nothing
+        _securezero!(secret)
+        return nothing
+    end
+    cert_count = _read_u16!(reader)
+    if cert_count === nothing
+        _securezero!(secret)
+        return nothing
+    end
+    certificates = Vector{Vector{UInt8}}()
+    success = false
+    try
+        for _ in 1:Int(cert_count::UInt16)
+            cert = _tls_ticket_read_u32_length_prefixed_bytes!(reader)
+            cert === nothing && return nothing
+            push!(certificates, cert)
+        end
+        _reader_empty(reader) || return nothing
+        success = true
+        return _owned_tls13_server_session(
+            version::UInt16,
+            cipher_suite::UInt16,
+            created_at_s::UInt64,
+            use_by_s::UInt64,
+            age_add::UInt32,
+            ticket,
+            secret::Vector{UInt8},
+            certificates,
+            String(alpn_bytes::Vector{UInt8}),
+        )
+    finally
+        _securezero!(secret)
+        if !success
+            for cert in certificates
+                _securezero!(cert)
+            end
+        end
+    end
+end
+
 """
     _TLS13ServerHandshakeState
 
@@ -369,57 +445,64 @@ function _check_for_resumption!(state::_TLS13ServerHandshakeState, config)::Noth
         _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid or missing PSK binders")
     isempty(state.client_hello.psk_identities) && return nothing
     max_identities = min(length(state.client_hello.psk_identities), _TLS13_MAX_CLIENT_PSK_IDENTITIES)
-    for i in 1:max_identities
-        identity = state.client_hello.psk_identities[i]
-        session = _tls_session_cache_peek(config._server_session_cache, bytes2hex(identity.label), _copy_tls13_server_session)
-        session === nothing && continue
-        early_secret = _TLS13EarlySecret(state.cipher_spec.hash_kind, UInt8[])
-        binder_key = UInt8[]
-        binder = UInt8[]
-        selected = false
-        try
-            session.version == TLS1_3_VERSION || continue
-            now_s = UInt64(floor(time()))
-            now_s <= session.use_by_s || continue
-            session_spec = _tls13_cipher_spec(session.cipher_suite)
-            session_spec === nothing && continue
-            session_spec.hash_kind == state.cipher_spec.hash_kind || continue
-            session.alpn_protocol == state.selected_alpn || continue
-            # Mirror Go here: without 0-RTT support, `obfuscated_ticket_age` does not
-            # gate resumption, so binder validation and ticket lifetime remain the
-            # relevant checks.
-            early_secret = _tls13_early_secret(state.cipher_spec.hash_kind, session.secret)
-            binder_key = _tls13_resumption_binder_key(early_secret)
-            binder_transcript = _new_tls13_binder_transcript(state.cipher_spec.hash_kind)
-            prefix_bytes = _transcript_buffered_bytes(state.transcript)
-            if prefix_bytes !== nothing && !isempty(prefix_bytes)
-                _transcript_update!(binder_transcript, prefix_bytes)
+    keys = _tls_active_session_ticket_keys(config)
+    try
+        for i in 1:max_identities
+            identity = state.client_hello.psk_identities[i]
+            plaintext = _tls_decrypt_server_session_ticket(keys, identity.label)
+            plaintext === nothing && continue
+            session = _deserialize_tls13_server_session(plaintext, identity.label)
+            _securezero!(plaintext)
+            session === nothing && continue
+            early_secret = _TLS13EarlySecret(state.cipher_spec.hash_kind, UInt8[])
+            binder_key = UInt8[]
+            binder = UInt8[]
+            selected = false
+            try
+                session.version == TLS1_3_VERSION || continue
+                now_s = UInt64(floor(time()))
+                now_s <= session.use_by_s || continue
+                session_spec = _tls13_cipher_spec(session.cipher_suite)
+                session_spec === nothing && continue
+                session_spec.hash_kind == state.cipher_spec.hash_kind || continue
+                session.alpn_protocol == state.selected_alpn || continue
+                # Mirror Go here: without 0-RTT support, `obfuscated_ticket_age` does not
+                # gate resumption, so binder validation and ticket lifetime remain the
+                # relevant checks.
+                early_secret = _tls13_early_secret(state.cipher_spec.hash_kind, session.secret)
+                binder_key = _tls13_resumption_binder_key(early_secret)
+                binder_transcript = _new_tls13_binder_transcript(state.cipher_spec.hash_kind)
+                prefix_bytes = _transcript_buffered_bytes(state.transcript)
+                if prefix_bytes !== nothing && !isempty(prefix_bytes)
+                    _transcript_update!(binder_transcript, prefix_bytes)
+                end
+                _transcript_update!(binder_transcript, _marshal_client_hello_without_binders(state.client_hello))
+                binder = _tls13_finished_verify_data(state.cipher_spec.hash_kind, binder_key, binder_transcript)
+                _constant_time_equals(state.client_hello.psk_binders[i], binder) || continue
+                _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
+                    _tls13_verify_client_certificate_chain(
+                        client_certificates;
+                        verify_peer = true,
+                        ca_file = _effective_ca_file(config; is_server = true),
+                    )
+                end || continue
+                state.psk = copy(session.secret)
+                state.using_psk = true
+                state.resumption_session = session
+                state.selected_psk_identity = UInt16(i - 1)
+                state.has_selected_psk_identity = true
+                state.peer_certificates = [copy(cert) for cert in session.client_certificates]
+                selected = true
+                return nothing
+            finally
+                _securezero!(binder)
+                _securezero!(binder_key)
+                _destroy_tls13_secret!(early_secret)
+                selected || _securezero_tls13_server_session!(session)
             end
-            _transcript_update!(binder_transcript, _marshal_client_hello_without_binders(state.client_hello))
-            binder = _tls13_finished_verify_data(state.cipher_spec.hash_kind, binder_key, binder_transcript)
-            _constant_time_equals(state.client_hello.psk_binders[i], binder) || continue
-            _tls_server_session_client_auth_ok(session.client_certificates, config) do client_certificates
-                _tls13_verify_client_certificate_chain(
-                    client_certificates;
-                    verify_peer = true,
-                    ca_file = _effective_ca_file(config; is_server = true),
-                )
-            end || continue
-            state.psk = copy(session.secret)
-            state.using_psk = true
-            state.resumption_session = session
-            state.selected_psk_identity = UInt16(i - 1)
-            state.has_selected_psk_identity = true
-            state.peer_certificates = [copy(cert) for cert in session.client_certificates]
-            _tls_session_cache_delete!(config._server_session_cache, bytes2hex(identity.label), _securezero_tls13_server_session!)
-            selected = true
-            return nothing
-        finally
-            _securezero!(binder)
-            _securezero!(binder_key)
-            _destroy_tls13_secret!(early_secret)
-            selected || _securezero_tls13_server_session!(session)
         end
+    finally
+        _securezero_tls_session_ticket_keys!(keys)
     end
     return nothing
 end
@@ -593,9 +676,11 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
     # We only issue one ticket per connection today, so a zero ticket nonce mirrors
     # Go's current TLS 1.3 server behavior.
     nonce = UInt8[]
-    label = rand(Random.RandomDevice(), UInt8, 32)
+    label = UInt8[]
+    plaintext = UInt8[]
     psk = UInt8[]
     session = nothing
+    keys = _tls_active_session_ticket_keys(config)
     try
         psk = _tls13_expand_label(hash_kind, resumption_secret, "resumption", nonce, _hash_len(hash_kind))
         now_s = UInt64(floor(time()))
@@ -610,12 +695,13 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
             now_s,
             now_s + UInt64(_TLS13_MAX_SESSION_TICKET_LIFETIME),
             age_add,
-            label,
+            UInt8[],
             psk,
             state.peer_certificates,
             state.selected_alpn,
         )
-        _tls_session_cache_put!(config._server_session_cache, bytes2hex(session.label), session, _copy_tls13_server_session, _securezero_tls13_server_session!)
+        plaintext = _serialize_tls13_server_session(session::_TLS13ServerSession)
+        label = _tls_encrypt_server_session_ticket(keys[1], plaintext)
         msg = _NewSessionTicketMsgTLS13()
         msg.lifetime = _TLS13_MAX_SESSION_TICKET_LIFETIME
         msg.age_add = age_add
@@ -625,9 +711,11 @@ function _send_new_session_ticket!(state::_TLS13ServerHandshakeState, io, config
         _write_handshake_bytes!(io, raw)
     finally
         session isa _TLS13ServerSession && _securezero_tls13_server_session!(session)
+        _securezero!(plaintext)
         _securezero!(psk)
         _securezero!(label)
         _securezero!(resumption_secret)
+        _securezero_tls_session_ticket_keys!(keys)
     end
     return nothing
 end

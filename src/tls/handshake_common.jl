@@ -9,7 +9,7 @@ function _tls_select_server_alpn(config, client_hello::_ClientHelloMsg)::String
     for proto in config.alpn_protocols
         in(proto, client_hello.alpn_protocols) && return proto
     end
-    return ""
+    _tls_fail(_TLS_ALERT_NO_APPLICATION_PROTOCOL, "tls: client and server do not support a common ALPN protocol")
 end
 
 @inline _tls_should_request_client_certificate(config)::Bool =

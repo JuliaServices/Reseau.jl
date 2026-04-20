@@ -115,6 +115,20 @@ end
         end
     end
 
+    @testset "TLS 1.2 ECDSA signature selection follows the peer list, not the cert curve" begin
+        ecdsa_key_pem = read(joinpath(@__DIR__, "resources", "native_tls_server_ecdsa.key"))
+        pkey = TL12H._tls13_load_private_key_pem(ecdsa_key_pem)
+        try
+            offered = UInt16[
+                TL12H._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384,
+                TL12H._TLS_SIGNATURE_ECDSA_SECP256R1_SHA256,
+            ]
+            @test TL12H._tls12_select_signature_algorithm(pkey, offered) == TL12H._TLS_SIGNATURE_ECDSA_SECP384R1_SHA384
+        finally
+            TL12H._free_evp_pkey!(pkey)
+        end
+    end
+
     @testset "client key exchange rejects unadvertised TLS 1.2 curves" begin
         pkey = TL12H._tls13_x25519_private_key_from_bytes(_TLS12_SERVER_X25519_PRIVATE_KEY)
         try

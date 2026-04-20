@@ -190,6 +190,7 @@ struct Config
     min_version::Union{Nothing, UInt16}
     max_version::Union{Nothing, UInt16}
     session_tickets_disabled::Bool
+    _session_ticket_keys::_TLSSessionTicketKeyState
     _client_session_cache::_TLSSessionCache{_TLS13ClientSession}
     _server_session_cache::_TLSSessionCache{_TLS13ServerSession}
     _client_session_cache12::_TLSSessionCache{_TLS12ClientSession}
@@ -256,6 +257,7 @@ function Config(;
         min_version,
         max_version,
         session_tickets_disabled,
+        _TLSSessionTicketKeyState(),
         _TLSSessionCache(_TLS13ClientSession, session_cache_capacity),
         _TLSSessionCache(_TLS13ServerSession, session_cache_capacity),
         _TLSSessionCache(_TLS12ClientSession, session_cache_capacity),
@@ -472,6 +474,7 @@ function _config_with_server_name(config::Config, server_name::String)::Config
         config.min_version,
         config.max_version,
         config.session_tickets_disabled,
+        config._session_ticket_keys,
         config._client_session_cache,
         config._server_session_cache,
         config._client_session_cache12,

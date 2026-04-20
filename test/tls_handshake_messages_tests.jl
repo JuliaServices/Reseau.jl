@@ -214,6 +214,24 @@ function _certificate_verify_msg(;
     return TLH._CertificateVerifyMsg(signature_algorithm, Vector{UInt8}(signature))
 end
 
+@testset "certificate handshake messages can exceed the generic 64 KiB cap" begin
+    large_cert = fill(UInt8(0x42), 70_000)
+
+    msg12 = _certificate_msg_tls12(certificates = [large_cert])
+    raw12 = TLH._write_handshake_message(msg12)
+    @test length(raw12) > 65_536
+    @test TLH._copy_valid_handshake_frame(raw12) == raw12
+    parsed12 = TLH._unmarshal_handshake_message(raw12, nothing, TLH.TLS1_2_VERSION)
+    @test parsed12 == msg12
+
+    msg13 = _certificate_msg_tls13(certificates = [large_cert])
+    raw13 = TLH._write_handshake_message(msg13)
+    @test length(raw13) > 65_536
+    @test TLH._copy_valid_handshake_frame(raw13) == raw13
+    parsed13 = TLH._unmarshal_handshake_message(raw13, nothing, TLH.TLS1_3_VERSION)
+    @test parsed13 == msg13
+end
+
 _server_hello_done_msg_tls12() = TLH._ServerHelloDoneMsgTLS12()
 
 function _client_key_exchange_msg_tls12(; ciphertext::AbstractVector{UInt8} = UInt8[])

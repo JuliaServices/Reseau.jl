@@ -348,7 +348,7 @@ end
         end
     end
 
-    @testset "native client leaves ALPN unset without overlap" begin
+    @testset "native client rejects ALPN no-overlap with no_application_protocol" begin
         IPN.shutdown!()
         listener = nothing
         client = nothing
@@ -356,25 +356,61 @@ end
         server_task = nothing
         try
             listener, addr, server_task, _ = _start_tls13_native_server(_tls13_native_server_config(alpn_protocols = ["h2"]))
-            client = TLN.connect(
-                addr;
-                server_name = "localhost",
-                verify_peer = false,
-                alpn_protocols = ["http/1.1"],
-                min_version = TLN.TLS1_3_VERSION,
-                max_version = TLN.TLS1_3_VERSION,
-                handshake_timeout_ns = 10_000_000_000,
-            )
-            _finish_tls13_native_server!(server_task::Task)
-            server = fetch(server_task::Task)
-            @test isnothing(TLN.connection_state(client).alpn_protocol)
-            @test isnothing(TLN.connection_state(server).alpn_protocol)
-            payload = UInt8[0x55, 0x66]
-            @test write(client, payload) == length(payload)
-            @test read(server, length(payload)) == payload
+            err = try
+                TLN.connect(
+                    addr;
+                    server_name = "localhost",
+                    verify_peer = false,
+                    alpn_protocols = ["http/1.1"],
+                    min_version = TLN.TLS1_3_VERSION,
+                    max_version = TLN.TLS1_3_VERSION,
+                    handshake_timeout_ns = 10_000_000_000,
+                )
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN.TLSError
+            if err isa TLN.TLSError
+                @test occursin("alert 120", err.message)
+            end
+            status = _tls_native_wait_task(server_task::Task, 5.0)
+            @test status != :timed_out
         finally
             _tls_native_close_quiet!(server)
             _tls_native_close_quiet!(client)
+            _tls_native_close_quiet!(listener)
+            IPN.shutdown!()
+        end
+    end
+
+    @testset "TLS 1.3 rejects too many ignored ChangeCipherSpec records" begin
+        IPN.shutdown!()
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _open_tcp_pair()
+            state = TLN._TLS13NativeClientState()
+            for _ in 1:(TLN._TLS_MAX_USELESS_RECORDS + 1)
+                TLN._tls_write_tls_plaintext!(client_tcp, TLN._TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, UInt8[0x01])
+            end
+            for _ in 1:TLN._TLS_MAX_USELESS_RECORDS
+                TLN._tls13_read_record!(server_tcp, state)
+            end
+            err = try
+                TLN._tls13_read_record!(server_tcp, state)
+                nothing
+            catch ex
+                ex
+            end
+            @test err isa TLN._TLSAlertError
+            if err isa TLN._TLSAlertError
+                @test err.alert == TLN._TLS_ALERT_UNEXPECTED_MESSAGE
+            end
+        finally
+            _tls_native_close_quiet!(server_tcp)
+            _tls_native_close_quiet!(client_tcp)
             _tls_native_close_quiet!(listener)
             IPN.shutdown!()
         end
@@ -444,6 +480,7 @@ end
         listener = nothing
         client1 = nothing
         client2 = nothing
+        client3 = nothing
         server_task = nothing
         try
             listener = TLN.listen(NCN.loopback_addr(0), _tls13_native_server_config(
@@ -452,7 +489,7 @@ end
             addr = TLN.addr(listener)::NCN.SocketAddrV4
             server_task = Threads.@spawn begin
                 conns = TLN.Conn[]
-                for i in 1:2
+                for i in 1:3
                     conn = TLN.accept(listener)
                     TLN.handshake!(conn)
                     push!(conns, conn)
@@ -479,10 +516,17 @@ end
             @test TLN.connection_state(client2).did_resume
             @test TLN.connection_state(client2).did_hello_retry_request
 
+            client3 = TLN.connect(addr, client_config)
+            @test read(client3, 1) == UInt8[0x03]
+            @test eof(client3)
+            @test TLN.connection_state(client3).did_resume
+            @test TLN.connection_state(client3).did_hello_retry_request
+
             status = _tls_native_wait_task(server_task::Task, 5.0)
             status == :timed_out && error("timed out waiting for TLS session resumption server")
             wait(server_task::Task)
         finally
+            _tls_native_close_quiet!(client3)
             _tls_native_close_quiet!(client2)
             _tls_native_close_quiet!(client1)
             if server_task isa Task && _tls_native_wait_task(server_task::Task, 1.0) != :timed_out

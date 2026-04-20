@@ -238,6 +238,33 @@ end
         end
     end
 
+    @testset "empty TLS 1.2 application records are bounded" begin
+        listener = nothing
+        client_tcp = nothing
+        server_tcp = nothing
+        try
+            listener, client_tcp, server_tcp = _tls12_open_tcp_pair()
+            write_key = UInt8[UInt8(0x50 + i) for i in 0:15]
+            write_iv = UInt8[0xd0, 0xd1, 0xd2, 0xd3]
+            client_state = TL12N._TLS12NativeState()
+            server_state = TL12N._TLS12NativeState()
+            TL12N._tls12_set_write_cipher!(client_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            TL12N._tls12_set_read_cipher!(server_state, TL12N._TLS12_ECDHE_RSA_WITH_AES_128_GCM_SHA256, write_key, write_iv)
+            for _ in 1:(TL12N._TLS_MAX_USELESS_RECORDS + 1)
+                TL12N._tls12_write_record!(client_tcp, client_state.write_cipher, TL12N._TLS_RECORD_TYPE_APPLICATION_DATA, UInt8[])
+            end
+            for _ in 1:TL12N._TLS_MAX_USELESS_RECORDS
+                TL12N._tls12_read_record!(server_tcp, server_state)
+            end
+            tls_err = _tls12_unexpected_message_error(() -> TL12N._tls12_read_record!(server_tcp, server_state))
+            @test !tls_err.from_peer
+        finally
+            _tls12_native_close_quiet!(server_tcp)
+            _tls12_native_close_quiet!(client_tcp)
+            _tls12_native_close_quiet!(listener)
+        end
+    end
+
     @testset "server hello does not echo the client session id without resumption" begin
         listener = nothing
         client_tcp = nothing
@@ -476,6 +503,19 @@ end
         @test client_state2.has_resumable_session
         @test client_state2.curve == "P-256"
         @test server_state2.curve == "P-256"
+
+        client_state3, server_state3 = _tls12_run_public_roundtrip(server_cfg, client_cfg)
+        @test client_state3.handshake_complete
+        @test server_state3.handshake_complete
+        @test client_state3.version == "TLSv1.2"
+        @test server_state3.version == "TLSv1.2"
+        @test client_state3.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test server_state3.cipher_suite == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        @test client_state3.did_resume
+        @test server_state3.did_resume
+        @test client_state3.has_resumable_session
+        @test client_state3.curve == "P-256"
+        @test server_state3.curve == "P-256"
     end
 
     @testset "exact TLS 1.2 ECDSA server certificates negotiate ECDHE-ECDSA" begin

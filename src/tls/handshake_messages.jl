@@ -1,4 +1,10 @@
-const _MAX_HANDSHAKE_SIZE = 65536
+const _MAX_HANDSHAKE_SIZE = 65_536
+const _MAX_CERTIFICATE_HANDSHAKE_SIZE = 262_144
+
+@inline function _tls_max_handshake_frame_size(handshake_type::UInt8)::Int
+    handshake_type == _HANDSHAKE_TYPE_CERTIFICATE && return _MAX_CERTIFICATE_HANDSHAKE_SIZE
+    return _MAX_HANDSHAKE_SIZE
+end
 
 const _HANDSHAKE_TYPE_CLIENT_HELLO = UInt8(1)
 const _HANDSHAKE_TYPE_SERVER_HELLO = UInt8(2)
@@ -587,8 +593,10 @@ end
 
 function _copy_valid_handshake_frame(data::AbstractVector{UInt8})::Union{Vector{UInt8}, Nothing}
     length(data) < 4 && return nothing
+    handshake_type = data[1]
     body_len = (Int(data[2]) << 16) | (Int(data[3]) << 8) | Int(data[4])
-    body_len <= _MAX_HANDSHAKE_SIZE || throw(ArgumentError("tls: handshake message of length $(body_len) bytes exceeds maximum of $(_MAX_HANDSHAKE_SIZE) bytes"))
+    max_size = _tls_max_handshake_frame_size(handshake_type)
+    body_len <= max_size || throw(ArgumentError("tls: handshake message of length $(body_len) bytes exceeds maximum of $(max_size) bytes"))
     length(data) == body_len + 4 || return nothing
     return copy(data)
 end

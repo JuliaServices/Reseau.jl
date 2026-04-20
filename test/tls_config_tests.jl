@@ -20,6 +20,7 @@ function _tls_raw_config_for_test(base::TL.Config; min_version = base.min_versio
         min_version,
         max_version,
         base.session_tickets_disabled,
+        base._session_ticket_keys,
         base._client_session_cache,
         base._server_session_cache,
         base._client_session_cache12,
