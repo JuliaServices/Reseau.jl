@@ -25,6 +25,29 @@ const _TLS12TranscriptState = Union{
     _TranscriptHash{SHA.SHA2_384_CTX},
 }
 
+struct _TLS12ParsedServerKeyExchange
+    group::UInt16
+    public_key::Vector{UInt8}
+    signature_algorithm::UInt16
+    signature::Vector{UInt8}
+    signed_params::Vector{UInt8}
+end
+
+struct _TLS12VerifiedServerKeyExchange
+    group::UInt16
+    public_key::Vector{UInt8}
+end
+
+struct _TLS12ClientKeyExchangeResult
+    message::_ClientKeyExchangeMsgTLS12
+    shared_secret::Vector{UInt8}
+end
+
+struct _TLS12ServerFlight
+    server_public_key::_TLSPublicKey
+    key_exchange::_TLS12VerifiedServerKeyExchange
+end
+
 """
     _TLS12ClientSession
 
@@ -280,7 +303,7 @@ function _tls12_select_cipher_spec!(state::_TLS12ClientHandshakeState)::Nothing
     return nothing
 end
 
-function _tls12_parse_server_key_exchange(msg::_ServerKeyExchangeMsgTLS12)
+function _tls12_parse_server_key_exchange(msg::_ServerKeyExchangeMsgTLS12)::_TLS12ParsedServerKeyExchange
     reader = _HandshakeReader(msg.key)
     curve_type = _read_u8!(reader)
     group = _read_u16!(reader)
@@ -294,12 +317,12 @@ function _tls12_parse_server_key_exchange(msg::_ServerKeyExchangeMsgTLS12)
     params_len = 4 + length(public_key)
     params = Vector{UInt8}(undef, params_len)
     copyto!(params, 1, msg.key, 1, params_len)
-    return (
-        group = group::UInt16,
-        public_key = public_key::Vector{UInt8},
-        signature_algorithm = signature_algorithm::UInt16,
-        signature = signature::Vector{UInt8},
-        params = params,
+    return _TLS12ParsedServerKeyExchange(
+        group::UInt16,
+        public_key::Vector{UInt8},
+        signature_algorithm::UInt16,
+        signature::Vector{UInt8},
+        params,
     )
 end
 
@@ -327,20 +350,20 @@ function _tls12_verify_server_key_exchange!(
     state::_TLS12ClientHandshakeState,
     pubkey::_TLSPublicKey,
     server_key_exchange::_ServerKeyExchangeMsgTLS12,
-)::NamedTuple
+)::_TLS12VerifiedServerKeyExchange
     params = _tls12_parse_server_key_exchange(server_key_exchange)
     signed = UInt8[]
     try
-        sizehint!(signed, length(state.client_hello.random) + length(state.server_hello.random) + length(params.params))
+        sizehint!(signed, length(state.client_hello.random) + length(state.server_hello.random) + length(params.signed_params))
         append!(signed, state.client_hello.random)
         append!(signed, state.server_hello.random)
-        append!(signed, params.params)
+        append!(signed, params.signed_params)
         _tls12_openssl_verify_signature(pubkey, params.signature_algorithm, signed, params.signature) ||
             _tls_fail(_TLS_ALERT_DECRYPT_ERROR, "tls: invalid TLS 1.2 ServerKeyExchange signature")
-        return params
+        return _TLS12VerifiedServerKeyExchange(params.group, params.public_key)
     finally
         _securezero!(signed)
-        _securezero!(params.params)
+        _securezero!(params.signed_params)
     end
 end
 
@@ -348,7 +371,7 @@ function _tls12_generate_client_key_exchange(
     advertised_curves::AbstractVector{UInt16},
     group::UInt16,
     server_public_key::AbstractVector{UInt8},
-)
+)::_TLS12ClientKeyExchangeResult
     in(group, advertised_curves) ||
         _tls_fail(_TLS_ALERT_ILLEGAL_PARAMETER, "tls: server selected an unadvertised TLS 1.2 ECDHE curve")
     if group != _TLS_GROUP_X25519 && group != _TLS_GROUP_SECP256R1
@@ -367,7 +390,7 @@ function _tls12_generate_client_key_exchange(
         end
         body = UInt8[UInt8(length(client_public_key))]
         append!(body, client_public_key)
-        return _ClientKeyExchangeMsgTLS12(body), shared_secret
+        return _TLS12ClientKeyExchangeResult(_ClientKeyExchangeMsgTLS12(body), shared_secret)
     finally
         _free_evp_pkey!(private_key)
         _securezero!(client_public_key)
@@ -397,7 +420,7 @@ function _tls12_read_server_flight!(
     io::_TLS12HandshakeRecordIO,
     config,
     transcript::_TLS12TranscriptState,
-)::Tuple{_TLSPublicKey, NamedTuple}
+)::_TLS12ServerFlight
     state.certificate_request = _CertificateRequestMsgTLS12()
     state.have_certificate_request = false
     raw_certificate = _read_handshake_bytes!(io)
@@ -433,7 +456,7 @@ function _tls12_read_server_flight!(
     _tls12_require_handshake_message(raw_next, _HANDSHAKE_TYPE_SERVER_HELLO_DONE, "ServerHelloDone")
     _unmarshal_handshake_message(raw_next, transcript, TLS1_2_VERSION) isa _ServerHelloDoneMsgTLS12 ||
         _tls_fail(_TLS_ALERT_DECODE_ERROR, "tls: malformed TLS 1.2 ServerHelloDone")
-    return pubkey, key_exchange
+    return _TLS12ServerFlight(pubkey, key_exchange)
 end
 
 function _tls12_prepare_client_identity!(state::_TLS12ClientHandshakeState, config)::Nothing
@@ -561,23 +584,17 @@ function _tls12_resumed_handshake!(
     master_secret = copy(session.secret)
     client_verify_data = UInt8[]
     expected_server_verify_data = UInt8[]
-    client_mac = UInt8[]
-    server_mac = UInt8[]
-    client_key = UInt8[]
-    server_key = UInt8[]
-    client_iv = UInt8[]
-    server_iv = UInt8[]
+    key_block = _TLS12KeyBlock(UInt8[], UInt8[], UInt8[], UInt8[], UInt8[], UInt8[])
     state.curve_id = session.curve_id
     try
-        client_mac, server_mac, client_key, server_key, client_iv, server_iv =
-            _tls12_keys_from_master_secret(hash_kind, master_secret, state.client_hello.random, state.server_hello.random, 0, cipher_spec.key_length, cipher_spec.iv_length)
-        isempty(client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        isempty(server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        key_block = _tls12_keys_from_master_secret(hash_kind, master_secret, state.client_hello.random, state.server_hello.random, 0, cipher_spec.key_length, cipher_spec.iv_length)
+        isempty(key_block.client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(key_block.server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
         state.server_hello.ticket_supported && _tls12_read_new_session_ticket!(state, io, transcript)
         io.state.allow_encrypted_handshake = true
         try
             _tls12_read_change_cipher_spec!(io)
-            _tls12_set_read_cipher!(io.state, cipher_spec, server_key, server_iv)
+            _tls12_set_read_cipher!(io.state, cipher_spec, key_block.server_key, key_block.server_iv)
             raw_server_finished = _read_handshake_bytes!(io)
             _tls12_require_handshake_message(raw_server_finished, _HANDSHAKE_TYPE_FINISHED, "Finished")
             server_finished = _unmarshal_finished(raw_server_finished)
@@ -589,7 +606,7 @@ function _tls12_resumed_handshake!(
         finally
             io.state.allow_encrypted_handshake = false
         end
-        _tls12_set_write_cipher!(io.state, cipher_spec, client_key, client_iv)
+        _tls12_set_write_cipher!(io.state, cipher_spec, key_block.client_key, key_block.client_iv)
         _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         raw_client_finished = _write_handshake_message(_FinishedMsg(client_verify_data), transcript)
@@ -600,12 +617,12 @@ function _tls12_resumed_handshake!(
         _securezero!(master_secret)
         _securezero!(client_verify_data)
         _securezero!(expected_server_verify_data)
-        _securezero!(client_mac)
-        _securezero!(server_mac)
-        _securezero!(client_key)
-        _securezero!(server_key)
-        _securezero!(client_iv)
-        _securezero!(server_iv)
+        _securezero!(key_block.client_mac)
+        _securezero!(key_block.server_mac)
+        _securezero!(key_block.client_key)
+        _securezero!(key_block.server_key)
+        _securezero!(key_block.client_iv)
+        _securezero!(key_block.server_iv)
     end
     return nothing
 end
@@ -640,12 +657,7 @@ function _client_handshake_tls12_for_suite!(
     master_secret = UInt8[]
     client_verify_data = UInt8[]
     expected_server_verify_data = UInt8[]
-    client_mac = UInt8[]
-    server_mac = UInt8[]
-    client_key = UInt8[]
-    server_key = UInt8[]
-    client_iv = UInt8[]
-    server_iv = UInt8[]
+    key_block = _TLS12KeyBlock(UInt8[], UInt8[], UInt8[], UInt8[], UInt8[], UInt8[])
     _transcript_update!(transcript, raw_client_hello)
     _transcript_update!(transcript, raw_server_hello)
     try
@@ -653,21 +665,21 @@ function _client_handshake_tls12_for_suite!(
         if session !== nothing && state.server_hello.session_id == state.client_hello.session_id
             return _tls12_resumed_handshake!(state, io, config, transcript, raw_client_hello, raw_server_hello, cipher_spec, hash_kind, cache_key)
         end
-        pubkey, key_exchange = _tls12_read_server_flight!(state, io, config, transcript)
-        state.curve_id = key_exchange.group
+        server_flight = _tls12_read_server_flight!(state, io, config, transcript)
+        state.curve_id = server_flight.key_exchange.group
         _tls12_prepare_client_identity!(state, config)
         _tls12_write_client_certificate!(state, io, transcript)
-        client_key_exchange, generated_shared_secret = _tls12_generate_client_key_exchange(
+        key_exchange_result = _tls12_generate_client_key_exchange(
             state.client_hello.supported_curves,
-            key_exchange.group,
-            key_exchange.public_key,
+            server_flight.key_exchange.group,
+            server_flight.key_exchange.public_key,
         )
-        shared_secret = generated_shared_secret
+        shared_secret = key_exchange_result.shared_secret
         try
-            raw_client_key_exchange = _write_handshake_message(client_key_exchange, transcript)
+            raw_client_key_exchange = _write_handshake_message(key_exchange_result.message, transcript)
             _write_handshake_bytes!(io, raw_client_key_exchange)
         finally
-            _securezero!(client_key_exchange.ciphertext)
+            _securezero!(key_exchange_result.message.ciphertext)
         end
 
         master_secret = _tls12_extended_master_from_pre_master_secret(
@@ -676,11 +688,10 @@ function _client_handshake_tls12_for_suite!(
             _transcript_digest(transcript),
         )
         _tls12_write_client_certificate_verify!(state, io, transcript)
-        client_mac, server_mac, client_key, server_key, client_iv, server_iv =
-            _tls12_keys_from_master_secret(hash_kind, master_secret, state.client_hello.random, state.server_hello.random, 0, cipher_spec.key_length, cipher_spec.iv_length)
-        isempty(client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        isempty(server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        _tls12_set_write_cipher!(io.state, cipher_spec, client_key, client_iv)
+        key_block = _tls12_keys_from_master_secret(hash_kind, master_secret, state.client_hello.random, state.server_hello.random, 0, cipher_spec.key_length, cipher_spec.iv_length)
+        isempty(key_block.client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(key_block.server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        _tls12_set_write_cipher!(io.state, cipher_spec, key_block.client_key, key_block.client_iv)
         _tls_write_tls_plaintext!(io.tcp, _TLS_RECORD_TYPE_CHANGE_CIPHER_SPEC, _TLS12_CHANGE_CIPHER_SPEC_PAYLOAD, TLS1_2_VERSION)
         client_verify_data = _tls12_client_finished_verify_data(hash_kind, master_secret, transcript)
         client_finished = _FinishedMsg(client_verify_data)
@@ -691,7 +702,7 @@ function _client_handshake_tls12_for_suite!(
         io.state.allow_encrypted_handshake = true
         try
             _tls12_read_change_cipher_spec!(io)
-            _tls12_set_read_cipher!(io.state, cipher_spec, server_key, server_iv)
+            _tls12_set_read_cipher!(io.state, cipher_spec, key_block.server_key, key_block.server_iv)
             raw_server_finished = _read_handshake_bytes!(io)
             _tls12_require_handshake_message(raw_server_finished, _HANDSHAKE_TYPE_FINISHED, "Finished")
             server_finished = _unmarshal_finished(raw_server_finished)
@@ -709,12 +720,12 @@ function _client_handshake_tls12_for_suite!(
         _securezero!(master_secret)
         _securezero!(client_verify_data)
         _securezero!(expected_server_verify_data)
-        _securezero!(client_mac)
-        _securezero!(server_mac)
-        _securezero!(client_key)
-        _securezero!(server_key)
-        _securezero!(client_iv)
-        _securezero!(server_iv)
+        _securezero!(key_block.client_mac)
+        _securezero!(key_block.server_mac)
+        _securezero!(key_block.client_key)
+        _securezero!(key_block.server_key)
+        _securezero!(key_block.client_iv)
+        _securezero!(key_block.server_iv)
     end
     return nothing
 end

@@ -26,12 +26,12 @@ mutable struct _TLS13RecordCipherState
 end
 
 function _TLS13RecordCipherState(spec::_TLS13CipherSpec, traffic_secret::AbstractVector{UInt8})
-    key, iv = _tls13_traffic_key(spec, traffic_secret)
+    traffic_key = _tls13_traffic_key(spec, traffic_secret)
     return _TLS13RecordCipherState(
         spec,
         Vector{UInt8}(traffic_secret),
-        key,
-        iv,
+        traffic_key.key,
+        traffic_key.iv,
         UInt64(0),
         false,
     )

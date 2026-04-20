@@ -36,6 +36,20 @@ struct _TLS13CipherSpec
     iv_length::Int
 end
 
+struct _TLS12KeyBlock
+    client_mac::Vector{UInt8}
+    server_mac::Vector{UInt8}
+    client_key::Vector{UInt8}
+    server_key::Vector{UInt8}
+    client_iv::Vector{UInt8}
+    server_iv::Vector{UInt8}
+end
+
+struct _TLSTrafficKey
+    key::Vector{UInt8}
+    iv::Vector{UInt8}
+end
+
 """
     _TLSRSAPublicKey
     _TLSECPublicKey
@@ -368,7 +382,7 @@ function _tls12_keys_from_master_secret(hash_kind::_TLSHashKind, master_secret::
         client_iv = iv_len == 0 ? UInt8[] : key_material[idx:(idx + iv_len - 1)]
         idx += iv_len
         server_iv = iv_len == 0 ? UInt8[] : key_material[idx:(idx + iv_len - 1)]
-        return client_mac, server_mac, client_key, server_key, client_iv, server_iv
+        return _TLS12KeyBlock(client_mac, server_mac, client_key, server_key, client_iv, server_iv)
     finally
         _securezero!(key_material)
     end
@@ -555,7 +569,7 @@ end
 function _tls13_traffic_key(spec::_TLS13CipherSpec, traffic_secret::AbstractVector{UInt8})
     key = _tls13_expand_label(spec.hash_kind, traffic_secret, "key", UInt8[], spec.key_length)
     iv = _tls13_expand_label(spec.hash_kind, traffic_secret, "iv", UInt8[], spec.iv_length)
-    return key, iv
+    return _TLSTrafficKey(key, iv)
 end
 
 function _tls13_finished_verify_data(hash_kind::_TLSHashKind, base_key::AbstractVector{UInt8}, transcript)::Vector{UInt8}

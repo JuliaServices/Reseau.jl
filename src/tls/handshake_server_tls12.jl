@@ -699,39 +699,33 @@ function _tls12_resumed_server_handshake!(
     session = state.resumption_session
     session === nothing && throw(ArgumentError("tls: missing TLS 1.2 resumption session"))
     master_secret = copy(session.secret)
-    client_mac = UInt8[]
-    server_mac = UInt8[]
-    client_key = UInt8[]
-    server_key = UInt8[]
-    client_iv = UInt8[]
-    server_iv = UInt8[]
+    key_block = _TLS12KeyBlock(UInt8[], UInt8[], UInt8[], UInt8[], UInt8[], UInt8[])
     try
         _tls12_send_server_hello!(state, io, transcript, raw_client_hello, config)
-        client_mac, server_mac, client_key, server_key, client_iv, server_iv =
-            _tls12_keys_from_master_secret(
-                hash_kind,
-                master_secret,
-                state.client_hello.random,
-                state.server_hello.random,
-                0,
-                cipher_spec.key_length,
-                cipher_spec.iv_length,
-            )
-        isempty(client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        isempty(server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        key_block = _tls12_keys_from_master_secret(
+            hash_kind,
+            master_secret,
+            state.client_hello.random,
+            state.server_hello.random,
+            0,
+            cipher_spec.key_length,
+            cipher_spec.iv_length,
+        )
+        isempty(key_block.client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(key_block.server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
         _tls12_send_new_session_ticket!(state, io, transcript, config, master_secret)
-        _tls12_set_write_cipher!(io.state, cipher_spec, server_key, server_iv)
+        _tls12_set_write_cipher!(io.state, cipher_spec, key_block.server_key, key_block.server_iv)
         _tls12_send_server_finished!(io, transcript, master_secret, hash_kind)
-        _tls12_read_client_finished!(io, transcript, master_secret, hash_kind, cipher_spec, client_key, client_iv)
+        _tls12_read_client_finished!(io, transcript, master_secret, hash_kind, cipher_spec, key_block.client_key, key_block.client_iv)
         state.using_resumption = true
     finally
         _securezero!(master_secret)
-        _securezero!(client_mac)
-        _securezero!(server_mac)
-        _securezero!(client_key)
-        _securezero!(server_key)
-        _securezero!(client_iv)
-        _securezero!(server_iv)
+        _securezero!(key_block.client_mac)
+        _securezero!(key_block.server_mac)
+        _securezero!(key_block.client_key)
+        _securezero!(key_block.server_key)
+        _securezero!(key_block.client_iv)
+        _securezero!(key_block.server_iv)
     end
     return nothing
 end
@@ -750,12 +744,7 @@ function _server_handshake_tls12_for_suite!(
     # flight before installing record keys.
     shared_secret = UInt8[]
     master_secret = UInt8[]
-    client_mac = UInt8[]
-    server_mac = UInt8[]
-    client_key = UInt8[]
-    server_key = UInt8[]
-    client_iv = UInt8[]
-    server_iv = UInt8[]
+    key_block = _TLS12KeyBlock(UInt8[], UInt8[], UInt8[], UInt8[], UInt8[], UInt8[])
     try
         if state.using_resumption
             return _tls12_resumed_server_handshake!(state, io, raw_client_hello, transcript, cipher_spec, hash_kind, config)
@@ -774,31 +763,30 @@ function _server_handshake_tls12_for_suite!(
             _transcript_digest(transcript),
         )
         _tls12_read_client_certificate_verify!(state, io, transcript)
-        client_mac, server_mac, client_key, server_key, client_iv, server_iv =
-            _tls12_keys_from_master_secret(
-                hash_kind,
-                master_secret,
-                state.client_hello.random,
-                state.server_hello.random,
-                0,
-                cipher_spec.key_length,
-                cipher_spec.iv_length,
-            )
-        isempty(client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        isempty(server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
-        _tls12_read_client_finished!(io, transcript, master_secret, hash_kind, cipher_spec, client_key, client_iv)
+        key_block = _tls12_keys_from_master_secret(
+            hash_kind,
+            master_secret,
+            state.client_hello.random,
+            state.server_hello.random,
+            0,
+            cipher_spec.key_length,
+            cipher_spec.iv_length,
+        )
+        isempty(key_block.client_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        isempty(key_block.server_mac) || _tls_fail(_TLS_ALERT_INTERNAL_ERROR, "tls: unexpected TLS 1.2 MAC key material for AEAD cipher suite")
+        _tls12_read_client_finished!(io, transcript, master_secret, hash_kind, cipher_spec, key_block.client_key, key_block.client_iv)
         _tls12_send_new_session_ticket!(state, io, transcript, config, master_secret)
-        _tls12_set_write_cipher!(io.state, cipher_spec, server_key, server_iv)
+        _tls12_set_write_cipher!(io.state, cipher_spec, key_block.server_key, key_block.server_iv)
         _tls12_send_server_finished!(io, transcript, master_secret, hash_kind)
     finally
         _securezero!(shared_secret)
         _securezero!(master_secret)
-        _securezero!(client_mac)
-        _securezero!(server_mac)
-        _securezero!(client_key)
-        _securezero!(server_key)
-        _securezero!(client_iv)
-        _securezero!(server_iv)
+        _securezero!(key_block.client_mac)
+        _securezero!(key_block.server_mac)
+        _securezero!(key_block.client_key)
+        _securezero!(key_block.server_key)
+        _securezero!(key_block.client_iv)
+        _securezero!(key_block.server_iv)
     end
     return nothing
 end

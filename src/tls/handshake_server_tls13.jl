@@ -9,6 +9,11 @@ const _TLS13_SERVER_SUPPORTED_SIGNATURE_ALGORITHMS = (
     _TLS_SIGNATURE_RSA_PSS_RSAE_SHA512,
 )
 
+struct _TLS13CipherSuiteSelection
+    cipher_suite::UInt16
+    cipher_spec::_TLS13CipherSpec
+end
+
 # Native TLS 1.3 server handshake state machine.
 #
 # This file mirrors Go's `crypto/tls/handshake_server_tls13.go`: process
@@ -283,14 +288,14 @@ end
         _native_tls13_only(config)
 end
 
-function _tls13_select_server_cipher_suite(client_hello::_ClientHelloMsg)::Tuple{UInt16, _TLS13CipherSpec}
+function _tls13_select_server_cipher_suite(client_hello::_ClientHelloMsg)::_TLS13CipherSuiteSelection
     for cipher_suite in (
             _TLS13_AES_128_GCM_SHA256_ID,
             _TLS13_CHACHA20_POLY1305_SHA256_ID,
             _TLS13_AES_256_GCM_SHA384_ID,
         )
         in(cipher_suite, client_hello.cipher_suites) || continue
-        return cipher_suite, (_tls13_cipher_spec(cipher_suite)::_TLS13CipherSpec)
+        return _TLS13CipherSuiteSelection(cipher_suite, _tls13_cipher_spec(cipher_suite)::_TLS13CipherSpec)
     end
     _tls_fail(_TLS_ALERT_HANDSHAKE_FAILURE, "tls: client did not offer a supported TLS 1.3 cipher suite")
 end
@@ -413,7 +418,9 @@ function _read_second_client_hello!(state::_TLS13ServerHandshakeState, io, selec
 end
 
 function _prepare_server_negotiation!(state::_TLS13ServerHandshakeState, io, config)::Nothing
-    state.cipher_suite, state.cipher_spec = _tls13_select_server_cipher_suite(state.client_hello)
+    selection = _tls13_select_server_cipher_suite(state.client_hello)
+    state.cipher_suite = selection.cipher_suite
+    state.cipher_spec = selection.cipher_spec
     state.selected_signature_algorithm = _tls13_select_server_signature_algorithm(state.private_key, state.client_hello)
     state.selected_alpn = _tls_select_server_alpn(config, state.client_hello)
     state.transcript = _new_tls13_handshake_transcript(state.cipher_spec.hash_kind)

@@ -91,11 +91,11 @@ end
         pkey = TL12H._tls13_p256_private_key_from_bytes(_TLS12_SERVER_P256_PRIVATE_KEY)
         try
             public_key = TL12H._tls13_p256_public_key(pkey)
-            msg, shared_secret = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.P256], TL12H.P256, public_key)
-            @test msg isa TL12H._ClientKeyExchangeMsgTLS12
-            @test !isempty(shared_secret)
-            @test Int(msg.ciphertext[1]) == length(msg.ciphertext) - 1
-            @test msg.ciphertext[2] == 0x04
+            result = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.P256], TL12H.P256, public_key)
+            @test result.message isa TL12H._ClientKeyExchangeMsgTLS12
+            @test !isempty(result.shared_secret)
+            @test Int(result.message.ciphertext[1]) == length(result.message.ciphertext) - 1
+            @test result.message.ciphertext[2] == 0x04
         finally
             TL12H._free_evp_pkey!(pkey)
         end
@@ -105,11 +105,11 @@ end
         pkey = TL12H._tls13_x25519_private_key_from_bytes(_TLS12_SERVER_X25519_PRIVATE_KEY)
         try
             public_key = TL12H._tls13_x25519_public_key(pkey)
-            msg, shared_secret = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.X25519], TL12H.X25519, public_key)
-            @test msg isa TL12H._ClientKeyExchangeMsgTLS12
-            @test !isempty(shared_secret)
-            @test length(msg.ciphertext) == 33
-            @test Int(msg.ciphertext[1]) == length(msg.ciphertext) - 1
+            result = TL12H._tls12_generate_client_key_exchange(UInt16[TL12H.X25519], TL12H.X25519, public_key)
+            @test result.message isa TL12H._ClientKeyExchangeMsgTLS12
+            @test !isempty(result.shared_secret)
+            @test length(result.message.ciphertext) == 33
+            @test Int(result.message.ciphertext[1]) == length(result.message.ciphertext) - 1
         finally
             TL12H._free_evp_pkey!(pkey)
         end

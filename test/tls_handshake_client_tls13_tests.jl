@@ -193,16 +193,16 @@ function _compute_tls13_psk_server_flight(
 
     client_bytes = TLHC._marshal_handshake_message(client_hello)
     client_share = client_hello.key_shares[1]::TLHC._TLSKeyShare
-    server_share, shared_secret = _tls13_server_share_and_secret(client_share)
-    server_hello = _tls13_psk_server_hello(client_hello.session_id; cipher_suite, group = server_share.group)
-    server_hello.server_share = TLHC._TLSKeyShare(server_share.group, copy(server_share.data))
+    server_share_result = _tls13_server_share_and_secret(client_share)
+    server_hello = _tls13_psk_server_hello(client_hello.session_id; cipher_suite, group = server_share_result.group)
+    server_hello.server_share = TLHC._TLSKeyShare(server_share_result.group, copy(server_share_result.share_data))
     server_hello_bytes = TLHC._marshal_handshake_message(server_hello)
 
     transcript = TLHC._TranscriptHash(hash_kind)
     TLHC._transcript_update!(transcript, client_bytes)
     TLHC._transcript_update!(transcript, server_hello_bytes)
 
-    handshake_secret = TLHC._tls13_handshake_secret(early_secret, shared_secret)
+    handshake_secret = TLHC._tls13_handshake_secret(early_secret, server_share_result.secret)
     client_handshake_traffic_secret = TLHC._tls13_client_handshake_traffic_secret(handshake_secret, transcript)
     server_handshake_traffic_secret = TLHC._tls13_server_handshake_traffic_secret(handshake_secret, transcript)
 
@@ -325,15 +325,15 @@ function _compute_tls13_real_certificate_server_flight(
     end
 
     client_share = client_hello.key_shares[1]::TLHC._TLSKeyShare
-    server_share, shared_secret = _tls13_server_share_and_secret(client_share)
-    server_hello = _tls13_certificate_server_hello(client_hello.session_id, server_share.group, copy(server_share.data))
+    server_share_result = _tls13_server_share_and_secret(client_share)
+    server_hello = _tls13_certificate_server_hello(client_hello.session_id, server_share_result.group, copy(server_share_result.share_data))
 
     server_hello_bytes = TLHC._marshal_handshake_message(server_hello)
     push!(inbound, server_hello_bytes)
     TLHC._transcript_update!(transcript, server_hello_bytes)
 
     early_secret = TLHC._tls13_early_secret(TLHC._HASH_SHA256, nothing)
-    handshake_secret = TLHC._tls13_handshake_secret(early_secret, shared_secret)
+    handshake_secret = TLHC._tls13_handshake_secret(early_secret, server_share_result.secret)
     client_handshake_traffic_secret = TLHC._tls13_client_handshake_traffic_secret(handshake_secret, transcript)
     server_handshake_traffic_secret = TLHC._tls13_server_handshake_traffic_secret(handshake_secret, transcript)
 
@@ -432,10 +432,11 @@ end
         pubkey = Ptr{Cvoid}(C_NULL)
         try
             client_share = TLHC._tls13_x25519_public_key(client_pkey)
-            server_share, server_secret = TLHC._tls13_openssl_x25519_server_share_and_secret(client_share, _TLS13_TEST_SERVER_X25519_PRIVATE_KEY)
-            client_secret = TLHC._tls13_x25519_shared_secret(client_pkey, server_share.data)
-            @test server_share.group == TLHC._TLS_GROUP_X25519
-            @test client_secret == server_secret
+            x25519_result = TLHC._tls13_openssl_x25519_server_share_and_secret(client_share, _TLS13_TEST_SERVER_X25519_PRIVATE_KEY)
+            server_secret = x25519_result.secret
+            client_secret = TLHC._tls13_x25519_shared_secret(client_pkey, x25519_result.share_data)
+            @test x25519_result.group == TLHC._TLS_GROUP_X25519
+            @test client_secret == x25519_result.secret
 
             for peer_point in (
                 zeros(UInt8, 32),
@@ -452,10 +453,11 @@ end
 
             client_p256_pkey = TLHC._tls13_p256_private_key_from_bytes(_TLS13_TEST_CLIENT_P256_PRIVATE_KEY)
             client_p256_share = TLHC._tls13_p256_public_key(client_p256_pkey)
-            server_p256_share, server_p256_secret = TLHC._tls13_openssl_p256_server_share_and_secret(client_p256_share, _TLS13_TEST_SERVER_P256_PRIVATE_KEY)
-            client_p256_secret = TLHC._tls13_p256_shared_secret(client_p256_pkey, server_p256_share.data)
-            @test server_p256_share.group == TLHC._TLS_GROUP_SECP256R1
-            @test client_p256_secret == server_p256_secret
+            p256_result = TLHC._tls13_openssl_p256_server_share_and_secret(client_p256_share, _TLS13_TEST_SERVER_P256_PRIVATE_KEY)
+            server_p256_secret = p256_result.secret
+            client_p256_secret = TLHC._tls13_p256_shared_secret(client_p256_pkey, p256_result.share_data)
+            @test p256_result.group == TLHC._TLS_GROUP_SECP256R1
+            @test client_p256_secret == p256_result.secret
             @test_throws ArgumentError TLHC._tls13_p256_peer_public_key(vcat(UInt8[0x02], zeros(UInt8, 32)))
 
             p256_cert_pkey = _tls13_generate_test_ec_pkey("prime256v1")
@@ -634,11 +636,11 @@ end
         hrr = _tls13_hello_retry_request(expected_hello.session_id, TLHC._TLS_GROUP_SECP256R1, UInt8[0xa1, 0xa2])
         TLHC._tls13_process_hello_retry_request!(expected_provider, expected_hello, hrr)
         retry_client_share = expected_hello.key_shares[1]::TLHC._TLSKeyShare
-        retry_server_share, _ = _tls13_server_share_and_secret(retry_client_share)
+        retry_server_share = _tls13_server_share_and_secret(retry_client_share)
         retry_server_hello = _tls13_certificate_server_hello(
             expected_hello.session_id,
             retry_server_share.group,
-            copy(retry_server_share.data),
+            copy(retry_server_share.share_data),
         )
         io = _HandshakeMessageFlightIO([
             TLHC._marshal_handshake_message(retry_server_hello),
@@ -669,11 +671,11 @@ end
             _tls13_certificate_verifier(),
         )
         client_share = state.client_hello.key_shares[1]::TLHC._TLSKeyShare
-        server_share, _ = _tls13_server_share_and_secret(client_share)
+        server_share = _tls13_server_share_and_secret(client_share)
         server_hello = _tls13_certificate_server_hello(
             client_hello.session_id,
             server_share.group,
-            copy(server_share.data),
+            copy(server_share.share_data),
         )
         copyto!(server_hello.random, 25, TLHC._TLS13_DOWNGRADE_CANARY_TLS12, 1, 8)
         state.server_hello = server_hello

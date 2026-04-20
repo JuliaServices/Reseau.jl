@@ -21,6 +21,12 @@ const _P256_GROUP_NID = Ref{Cint}(0)
 const _P384_GROUP_NID = Ref{Cint}(0)
 const _P521_GROUP_NID = Ref{Cint}(0)
 
+struct _TLSKeyShareSecret
+    group::UInt16
+    share_data::Vector{UInt8}
+    secret::Vector{UInt8}
+end
+
 function _init_x25519_pkey_id!()::Cint
     nid = _X25519_PKEY_ID[]
     nid > 0 && return nid
@@ -531,12 +537,12 @@ function _tls13_x25519_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::A
     end
 end
 
-function _tls13_openssl_x25519_server_share_and_secret(client_share::AbstractVector{UInt8}, server_private_key::AbstractVector{UInt8})
+function _tls13_openssl_x25519_server_share_and_secret(client_share::AbstractVector{UInt8}, server_private_key::AbstractVector{UInt8})::_TLSKeyShareSecret
     pkey = _tls13_x25519_private_key_from_bytes(server_private_key)
     try
-        share = _TLSKeyShare(_TLS_GROUP_X25519, _tls13_x25519_public_key(pkey))
+        share_data = _tls13_x25519_public_key(pkey)
         secret = _tls13_x25519_shared_secret(pkey, client_share)
-        return share, secret
+        return _TLSKeyShareSecret(_TLS_GROUP_X25519, share_data, secret)
     finally
         _free_evp_pkey!(pkey)
     end
@@ -709,12 +715,12 @@ function _tls13_p256_shared_secret(private_key::Ptr{Cvoid}, peer_public_key::Abs
     end
 end
 
-function _tls13_openssl_p256_server_share_and_secret(client_share::AbstractVector{UInt8}, server_private_key::AbstractVector{UInt8})
+function _tls13_openssl_p256_server_share_and_secret(client_share::AbstractVector{UInt8}, server_private_key::AbstractVector{UInt8})::_TLSKeyShareSecret
     pkey = _tls13_p256_private_key_from_bytes(server_private_key)
     try
-        share = _TLSKeyShare(_TLS_GROUP_SECP256R1, _tls13_p256_public_key(pkey))
+        share_data = _tls13_p256_public_key(pkey)
         secret = _tls13_p256_shared_secret(pkey, client_share)
-        return share, secret
+        return _TLSKeyShareSecret(_TLS_GROUP_SECP256R1, share_data, secret)
     finally
         _free_evp_pkey!(pkey)
     end

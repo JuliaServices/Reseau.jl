@@ -123,14 +123,13 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
         master = TLC._tls12_master_from_pre_master_secret(TLC._HASH_SHA256, v.pre_master, v.client_random, v.server_random)
         @test master == v.master
         @test TLC._tls12_extended_master_from_pre_master_secret(TLC._HASH_SHA256, v.pre_master, v.transcript_hash) == v.extended_master
-        client_mac, server_mac, client_key, server_key, client_iv, server_iv =
-            TLC._tls12_keys_from_master_secret(TLC._HASH_SHA256, master, v.client_random, v.server_random, 20, 16, 16)
-        @test client_mac == v.client_mac
-        @test server_mac == v.server_mac
-        @test client_key == v.client_key
-        @test server_key == v.server_key
-        @test client_iv == v.client_iv
-        @test server_iv == v.server_iv
+        key_block = TLC._tls12_keys_from_master_secret(TLC._HASH_SHA256, master, v.client_random, v.server_random, 20, 16, 16)
+        @test key_block.client_mac == v.client_mac
+        @test key_block.server_mac == v.server_mac
+        @test key_block.client_key == v.client_key
+        @test key_block.server_key == v.server_key
+        @test key_block.client_iv == v.client_iv
+        @test key_block.server_iv == v.server_iv
         transcript = TLC._TranscriptHash(TLC._HASH_SHA256)
         TLC._transcript_update!(transcript, @view(v.transcript[1:17]))
         TLC._transcript_update!(transcript, @view(v.transcript[18:length(v.transcript)]))
@@ -150,14 +149,13 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
         master = TLC._tls12_master_from_pre_master_secret(TLC._HASH_SHA384, v.pre_master, v.client_random, v.server_random)
         @test master == v.master
         @test TLC._tls12_extended_master_from_pre_master_secret(TLC._HASH_SHA384, v.pre_master, v.transcript_hash) == v.extended_master
-        client_mac, server_mac, client_key, server_key, client_iv, server_iv =
-            TLC._tls12_keys_from_master_secret(TLC._HASH_SHA384, master, v.client_random, v.server_random, 32, 32, 4)
-        @test client_mac == v.client_mac
-        @test server_mac == v.server_mac
-        @test client_key == v.client_key
-        @test server_key == v.server_key
-        @test client_iv == v.client_iv
-        @test server_iv == v.server_iv
+        key_block = TLC._tls12_keys_from_master_secret(TLC._HASH_SHA384, master, v.client_random, v.server_random, 32, 32, 4)
+        @test key_block.client_mac == v.client_mac
+        @test key_block.server_mac == v.server_mac
+        @test key_block.client_key == v.client_key
+        @test key_block.server_key == v.server_key
+        @test key_block.client_iv == v.client_iv
+        @test key_block.server_iv == v.server_iv
         transcript = TLC._TranscriptHash(TLC._HASH_SHA384)
         TLC._transcript_update!(transcript, v.transcript)
         @test TLC._transcript_digest(transcript) == v.transcript_hash
@@ -169,9 +167,9 @@ const _TLS13_EMPTY_PSK_EARLY_SECRET_SHA256 =
 
     @testset "TLS 1.3 traffic keys and labels" begin
         v = _TLS13_TRAFFIC_KEY_VECTORS
-        key, iv = TLC._tls13_traffic_key(TLC._TLS13_AES_128_GCM_SHA256, v.traffic_secret)
-        @test key == v.key
-        @test iv == v.iv
+        traffic_key = TLC._tls13_traffic_key(TLC._TLS13_AES_128_GCM_SHA256, v.traffic_secret)
+        @test traffic_key.key == v.key
+        @test traffic_key.iv == v.iv
         @test TLC._tls13_next_traffic_secret(TLC._TLS13_AES_128_GCM_SHA256, v.traffic_secret) == v.next_traffic_secret
         @test_throws ArgumentError TLC._tls13_expand_label(TLC._HASH_SHA256, v.traffic_secret, repeat("a", 300), UInt8[], 16)
         @test_throws ArgumentError TLC._tls13_expand_label(TLC._HASH_SHA256, v.traffic_secret, "key", fill(UInt8(0x61), 256), 16)
