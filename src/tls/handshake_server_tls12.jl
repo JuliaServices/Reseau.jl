@@ -74,7 +74,7 @@ function _owned_tls12_server_session(
     )
 end
 
-function _copy_tls12_server_session(session::_TLS12ServerSession)::_TLS12ServerSession
+function Base.copy(session::_TLS12ServerSession)::_TLS12ServerSession
     return _owned_tls12_server_session(
         session.version,
         session.cipher_suite,

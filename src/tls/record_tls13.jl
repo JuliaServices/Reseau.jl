@@ -441,7 +441,7 @@ function _tls13_store_new_session_ticket!(conn, msg::_NewSessionTicketMsgTLS13):
             state.session_certificates,
             state.session_alpn,
         )
-        _tls_session_cache_put!(conn.config._client_session_cache, state.session_cache_key, session, _copy_tls13_client_session, _securezero_tls13_client_session!)
+        _tls_session_cache_put!(conn.config._client_session_cache, state.session_cache_key, session, _securezero_tls13_client_session!)
         _securezero_tls13_client_session!(session)
     finally
         _securezero!(psk)

@@ -99,7 +99,7 @@ function _owned_tls12_client_session(
     )
 end
 
-function _copy_tls12_client_session(session::_TLS12ClientSession)::_TLS12ClientSession
+function Base.copy(session::_TLS12ClientSession)::_TLS12ClientSession
     return _owned_tls12_client_session(
         session.version,
         session.cipher_suite,
@@ -539,7 +539,7 @@ function _tls12_save_client_session!(
         state.server_hello.extended_master_secret,
     )
     try
-        _tls_session_cache_put!(config._client_session_cache12, cache_key, session, _copy_tls12_client_session, _securezero_tls12_client_session!)
+        _tls_session_cache_put!(config._client_session_cache12, cache_key, session, _securezero_tls12_client_session!)
     finally
         _securezero_tls12_client_session!(session)
     end

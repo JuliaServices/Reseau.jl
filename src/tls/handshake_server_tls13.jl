@@ -80,7 +80,7 @@ function _owned_tls13_server_session(
     )
 end
 
-function _copy_tls13_server_session(session::_TLS13ServerSession)::_TLS13ServerSession
+function Base.copy(session::_TLS13ServerSession)::_TLS13ServerSession
     return _owned_tls13_server_session(
         session.version,
         session.cipher_suite,

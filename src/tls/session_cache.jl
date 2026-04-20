@@ -3,9 +3,9 @@
 
 Small lock-protected LRU-style cache used by native TLS session resumption.
 
-Values are always copied on get/peek/put so cached sessions remain owned by the
-cache and callers can securely zero or mutate their working copies without
-aliasing shared cache state.
+Values are always copied with `copy(value)` on get/peek/put so cached sessions
+remain owned by the cache and callers can securely zero or mutate their working
+copies without aliasing shared cache state.
 """
 mutable struct _TLSSessionCache{V}
     lock::ReentrantLock
@@ -190,26 +190,26 @@ end
     return nothing
 end
 
-function _tls_session_cache_get(cache::_TLSSessionCache{V}, key::AbstractString, copy_value::F)::Union{Nothing, V} where {V, F}
+function _tls_session_cache_get(cache::_TLSSessionCache{V}, key::AbstractString)::Union{Nothing, V} where {V}
     key_s = String(key)
     lock(cache.lock)
     try
         value = get(cache.entries, key_s, nothing)
         value === nothing && return nothing
         _tls_session_cache_touch_locked!(cache, key_s)
-        return copy_value(value::V)
+        return copy(value::V)
     finally
         unlock(cache.lock)
     end
 end
 
-function _tls_session_cache_peek(cache::_TLSSessionCache{V}, key::AbstractString, copy_value::F)::Union{Nothing, V} where {V, F}
+function _tls_session_cache_peek(cache::_TLSSessionCache{V}, key::AbstractString)::Union{Nothing, V} where {V}
     key_s = String(key)
     lock(cache.lock)
     try
         value = get(cache.entries, key_s, nothing)
         value === nothing && return nothing
-        return copy_value(value::V)
+        return copy(value::V)
     finally
         unlock(cache.lock)
     end
@@ -233,9 +233,8 @@ function _tls_session_cache_put!(
     cache::_TLSSessionCache{V},
     key::AbstractString,
     value::Union{Nothing, V},
-    copy_value::FC,
     destroy_value!::FD,
-)::Nothing where {V, FC, FD}
+)::Nothing where {V, FD}
     key_s = String(key)
     lock(cache.lock)
     try
@@ -245,7 +244,7 @@ function _tls_session_cache_put!(
             deleteat!(cache.order, findall(==(key_s), cache.order))
         end
         value === nothing && return nothing
-        cache.entries[key_s] = copy_value(value::V)
+        cache.entries[key_s] = copy(value::V)
         pushfirst!(cache.order, key_s)
         while length(cache.order) > cache.capacity
             evict_key = pop!(cache.order)
