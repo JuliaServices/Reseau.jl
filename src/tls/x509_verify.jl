@@ -17,6 +17,11 @@ struct _TLSTrustStoreCacheEntry
     store::_TLSTrustStore
 end
 
+struct _TLSTrustStoreFingerprint
+    mtime::Float64
+    size::Int64
+end
+
 const _TLS_TRUST_STORE_CACHE_LOCK = ReentrantLock()
 const _TLS_TRUST_STORE_CACHE = Dict{String, _TLSTrustStoreCacheEntry}()
 
@@ -119,7 +124,7 @@ function _tls_load_trust_certificates(ca_path::AbstractString)::Vector{Vector{UI
     return _tls_decode_pem_certificates(_read_tls_file_bytes(ca_path))
 end
 
-function _tls_trust_store_fingerprint(ca_path::AbstractString)::Tuple{Float64, Int64}
+function _tls_trust_store_fingerprint(ca_path::AbstractString)::_TLSTrustStoreFingerprint
     if isdir(ca_path)
         dir_stat = stat(ca_path)
         latest_mtime = dir_stat.mtime
@@ -130,20 +135,20 @@ function _tls_trust_store_fingerprint(ca_path::AbstractString)::Tuple{Float64, I
             latest_mtime = max(latest_mtime, entry_stat.mtime)
             total_size += Int64(entry_stat.size)
         end
-        return latest_mtime, total_size
+        return _TLSTrustStoreFingerprint(latest_mtime, total_size)
     end
     path_stat = stat(ca_path)
-    return path_stat.mtime, Int64(path_stat.size)
+    return _TLSTrustStoreFingerprint(path_stat.mtime, Int64(path_stat.size))
 end
 
 function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
     cache_path = abspath(ca_path)
-    mtime, size = _tls_trust_store_fingerprint(cache_path)
+    fingerprint = _tls_trust_store_fingerprint(cache_path)
     lock(_TLS_TRUST_STORE_CACHE_LOCK)
     try
         if haskey(_TLS_TRUST_STORE_CACHE, cache_path)
             entry = _TLS_TRUST_STORE_CACHE[cache_path]
-            if entry.mtime == mtime && entry.size == size
+            if entry.mtime == fingerprint.mtime && entry.size == fingerprint.size
                 return entry.store
             end
         end
@@ -167,7 +172,7 @@ function _tls_load_trust_store(ca_path::AbstractString)::_TLSTrustStore
     store = _TLSTrustStore(roots)
     lock(_TLS_TRUST_STORE_CACHE_LOCK)
     try
-        _TLS_TRUST_STORE_CACHE[cache_path] = _TLSTrustStoreCacheEntry(mtime, size, store)
+        _TLS_TRUST_STORE_CACHE[cache_path] = _TLSTrustStoreCacheEntry(fingerprint.mtime, fingerprint.size, store)
     finally
         unlock(_TLS_TRUST_STORE_CACHE_LOCK)
     end

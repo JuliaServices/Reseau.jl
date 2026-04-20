@@ -8,6 +8,23 @@ struct _TLSIPRangeConstraint
     mask::Vector{UInt8}
 end
 
+struct _TLSParsedGeneralNames
+    dns_names::Vector{String}
+    ip_addresses::Vector{Vector{UInt8}}
+end
+
+struct _TLSParsedNameConstraints
+    permitted_dns_domains::Vector{String}
+    excluded_dns_domains::Vector{String}
+    permitted_ip_ranges::Vector{_TLSIPRangeConstraint}
+    excluded_ip_ranges::Vector{_TLSIPRangeConstraint}
+end
+
+struct _TLSBasicConstraints
+    is_ca::Bool
+    max_path_len::Int
+end
+
 """
     _TLSCertificateInfo
 
@@ -681,7 +698,7 @@ function _tls_parse_general_names(
     bytes::AbstractVector{UInt8},
     value_start::Int,
     value_end::Int,
-)::Tuple{Vector{String}, Vector{Vector{UInt8}}}
+)::_TLSParsedGeneralNames
     seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed subjectAltName extension"))
     dns_names = String[]
@@ -695,7 +712,7 @@ function _tls_parse_general_names(
             push!(ip_addresses, copy(@view bytes[name_start:name_end]))
         end
     end
-    return dns_names, ip_addresses
+    return _TLSParsedGeneralNames(dns_names, ip_addresses)
 end
 
 @inline function _tls_valid_name_constraint_domain(domain::AbstractString)::Bool
@@ -777,7 +794,7 @@ function _tls_parse_name_constraints(
     bytes::AbstractVector{UInt8},
     value_start::Int,
     value_end::Int,
-)::Tuple{Vector{String}, Vector{String}, Vector{_TLSIPRangeConstraint}, Vector{_TLSIPRangeConstraint}}
+)::_TLSParsedNameConstraints
     seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed NameConstraints extension"))
     permitted_dns = String[]
@@ -799,7 +816,7 @@ function _tls_parse_name_constraints(
         end
     end
     saw_subtrees || throw(ArgumentError("tls: empty name constraints extension"))
-    return permitted_dns, excluded_dns, permitted_ip, excluded_ip
+    return _TLSParsedNameConstraints(permitted_dns, excluded_dns, permitted_ip, excluded_ip)
 end
 
 function _tls_parse_subject_common_name(
@@ -825,7 +842,7 @@ function _tls_parse_subject_common_name(
     return common_name
 end
 
-function _tls_parse_basic_constraints(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::Tuple{Bool, Int}
+function _tls_parse_basic_constraints(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::_TLSBasicConstraints
     seq_start, seq_end, seq_next = _asn1_expect_tlv(bytes, value_start, _ASN1_SEQUENCE)
     seq_next == value_end + 1 || throw(ArgumentError("tls: malformed basic constraints extension"))
     is_ca = false
@@ -840,7 +857,7 @@ function _tls_parse_basic_constraints(bytes::AbstractVector{UInt8}, value_start:
         max_path_len = _asn1_integer_value(bytes, int_start, int_end)
     end
     pos == seq_end + 1 || throw(ArgumentError("tls: malformed basic constraints extension"))
-    return is_ca, max_path_len
+    return _TLSBasicConstraints(is_ca, max_path_len)
 end
 
 function _tls_parse_key_usage(bytes::AbstractVector{UInt8}, value_start::Int, value_end::Int)::UInt16
@@ -954,9 +971,13 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
                 value_pos == ext_end + 1 || throw(ArgumentError("tls: malformed certificate extension value"))
                 if _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_SUBJECT_ALT_NAME)
                     has_san_extension = true
-                    dns_names, ip_addresses = _tls_parse_general_names(cert_der, octet_start, octet_end)
+                    general_names = _tls_parse_general_names(cert_der, octet_start, octet_end)
+                    dns_names = general_names.dns_names
+                    ip_addresses = general_names.ip_addresses
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_BASIC_CONSTRAINTS)
-                    is_ca, max_path_len = _tls_parse_basic_constraints(cert_der, octet_start, octet_end)
+                    basic_constraints = _tls_parse_basic_constraints(cert_der, octet_start, octet_end)
+                    is_ca = basic_constraints.is_ca
+                    max_path_len = basic_constraints.max_path_len
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_KEY_USAGE)
                     has_key_usage = true
                     key_usage = _tls_parse_key_usage(cert_der, octet_start, octet_end)
@@ -967,8 +988,11 @@ function _tls_parse_der_certificate_info(cert_der::AbstractVector{UInt8})::_TLSC
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_AUTHORITY_KEY_IDENTIFIER)
                     authority_key_id = _tls_parse_authority_key_identifier(cert_der, octet_start, octet_end)
                 elseif _asn1_oid_equals(cert_der, oid_start, oid_end, _ASN1_OID_NAME_CONSTRAINTS)
-                    permitted_dns_domains, excluded_dns_domains, permitted_ip_ranges, excluded_ip_ranges =
-                        _tls_parse_name_constraints(cert_der, octet_start, octet_end)
+                    name_constraints = _tls_parse_name_constraints(cert_der, octet_start, octet_end)
+                    permitted_dns_domains = name_constraints.permitted_dns_domains
+                    excluded_dns_domains = name_constraints.excluded_dns_domains
+                    permitted_ip_ranges = name_constraints.permitted_ip_ranges
+                    excluded_ip_ranges = name_constraints.excluded_ip_ranges
                 elseif critical
                     throw(ArgumentError("tls: unsupported critical X.509 extension"))
                 end
