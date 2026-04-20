@@ -407,13 +407,25 @@ function _pc_tls_client_config(;
     )
 end
 
-function _pc_tls13_native_paths()::Union{
-    Nothing,
-    NamedTuple{
-        (:ca, :server_cert, :server_key, :client_cert, :client_key),
-        Tuple{String, String, String, String, String},
-    },
-}
+struct _PCTLSIdentityPaths
+    cert::String
+    key::String
+end
+
+struct _PCTLSNativeFixturePaths
+    ca::String
+    server_cert::String
+    server_key::String
+    client_cert::String
+    client_key::String
+end
+
+struct _PCTLSRoundtripStates
+    client_state::TL.ConnectionState
+    server_state::TL.ConnectionState
+end
+
+function _pc_tls13_native_paths()::Union{Nothing, _PCTLSNativeFixturePaths}
     ca_path = _pc_tls_resource_file("native_tls_ca.crt")
     server_cert_path = _pc_tls_resource_file("native_tls_server.crt")
     server_key_path = _pc_tls_resource_file("native_tls_server.key")
@@ -426,37 +438,31 @@ function _pc_tls13_native_paths()::Union{
        client_key_path === nothing
         return nothing
     end
-    return (
-        ca = ca_path::String,
-        server_cert = server_cert_path::String,
-        server_key = server_key_path::String,
-        client_cert = client_cert_path::String,
-        client_key = client_key_path::String,
+    return _PCTLSNativeFixturePaths(
+        ca_path::String,
+        server_cert_path::String,
+        server_key_path::String,
+        client_cert_path::String,
+        client_key_path::String,
     )
 end
 
-function _pc_tls12_paths()::Union{
-    Nothing,
-    NamedTuple{(:cert, :key), Tuple{String, String}},
-}
+function _pc_tls12_paths()::Union{Nothing, _PCTLSIdentityPaths}
     cert_path = _pc_tls_resource_file("unittests.crt")
     key_path = _pc_tls_resource_file("unittests.key")
     if cert_path === nothing || key_path === nothing
         return nothing
     end
-    return (cert = cert_path::String, key = key_path::String)
+    return _PCTLSIdentityPaths(cert_path::String, key_path::String)
 end
 
-function _pc_tls12_ecdsa_paths()::Union{
-    Nothing,
-    NamedTuple{(:cert, :key), Tuple{String, String}},
-}
+function _pc_tls12_ecdsa_paths()::Union{Nothing, _PCTLSIdentityPaths}
     cert_path = _pc_tls_resource_file("native_tls_server_ecdsa.crt")
     key_path = _pc_tls_resource_file("native_tls_server_ecdsa.key")
     if cert_path === nothing || key_path === nothing
         return nothing
     end
-    return (cert = cert_path::String, key = key_path::String)
+    return _PCTLSIdentityPaths(cert_path::String, key_path::String)
 end
 
 """
@@ -514,7 +520,7 @@ function _pc_expect_tls_state!(
 end
 
 """
-    _pc_run_tls_roundtrip_states!(server_config, client_config) -> (client_state, server_state)
+    _pc_run_tls_roundtrip_states!(server_config, client_config) -> _PCTLSRoundtripStates
 
 Drive one public-API TLS roundtrip and return the post-handshake connection
 state snapshots observed by both peers.
@@ -526,7 +532,7 @@ anchored at the supported public surface.
 function _pc_run_tls_roundtrip_states!(
     server_config::TL.Config,
     client_config::TL.Config,
-)::Tuple{TL.ConnectionState, TL.ConnectionState}
+)::_PCTLSRoundtripStates
     listener = nothing
     client = nothing
     server_task = nothing
@@ -551,7 +557,7 @@ function _pc_run_tls_roundtrip_states!(
         eof(client) || throw(ArgumentError("TLS precompile workload expected connection EOF"))
         client_state = TL.connection_state(client)
         _pc_wait_task_done(server_task::Task, 2.0)
-        return client_state, fetch(server_task::Task)::TL.ConnectionState
+        return _PCTLSRoundtripStates(client_state, fetch(server_task::Task)::TL.ConnectionState)
     finally
         _pc_close_nothrow(client)
         _pc_close_nothrow(listener)
@@ -575,9 +581,9 @@ function _pc_run_tls_roundtrip!(
     expect_server_resume::Union{Nothing, Bool} = nothing,
     expected_curve::Union{Nothing, String} = nothing,
 )::Nothing
-    client_state, server_state = _pc_run_tls_roundtrip_states!(server_config, client_config)
-    _pc_expect_tls_state!(client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable, expected_curve)
-    _pc_expect_tls_state!(server_state, expected_version, expect_native_tls13, expect_server_resume, false, expected_curve)
+    roundtrip_states = _pc_run_tls_roundtrip_states!(server_config, client_config)
+    _pc_expect_tls_state!(roundtrip_states.client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable, expected_curve)
+    _pc_expect_tls_state!(roundtrip_states.server_state, expected_version, expect_native_tls13, expect_server_resume, false, expected_curve)
     return nothing
 end
 

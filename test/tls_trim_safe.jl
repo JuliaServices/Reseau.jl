@@ -30,6 +30,11 @@ const _TLS_EXACT_TLS12_SERVER_CONFIG = TL.Config(
 )
 const _TLS_SERVER_LISTENER = Ref{Union{Nothing, TL.Listener}}(nothing)
 
+struct _TLSRoundtripStates
+    client_state::TL.ConnectionState
+    server_state::TL.ConnectionState
+end
+
 function _close_quiet!(x)
     x === nothing && return nothing
     try
@@ -142,7 +147,7 @@ end
 function _run_tls_roundtrip_states!(
     server_config::TL.Config,
     client_config::TL.Config,
-)::Tuple{TL.ConnectionState, TL.ConnectionState}
+)::_TLSRoundtripStates
     listener::Union{Nothing, TL.Listener} = nothing
     client::Union{Nothing, TL.Conn} = nothing
     server_task::Union{Nothing, Task} = nothing
@@ -159,7 +164,7 @@ function _run_tls_roundtrip_states!(
         client_state = TL.connection_state(client)
         status = IP.timedwait(() -> istaskdone(server_task::Task), 10.0; pollint = 0.001)
         status == :timed_out && error("timed out waiting for TLS server task")
-        return client_state, fetch(server_task::Task)::TL.ConnectionState
+        return _TLSRoundtripStates(client_state, fetch(server_task::Task)::TL.ConnectionState)
     finally
         _TLS_SERVER_LISTENER[] = nothing
         _close_quiet!(client)
@@ -177,9 +182,9 @@ function _run_tls_roundtrip!(
     expect_server_resume::Union{Nothing, Bool} = nothing,
     expected_curve::Union{Nothing, String} = nothing,
 )::Nothing
-    client_state, server_state = _run_tls_roundtrip_states!(server_config, client_config)
-    _tls_expect_state(client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable, expected_curve)
-    _tls_expect_state(server_state, expected_version, expect_native_tls13, expect_server_resume, false, expected_curve)
+    roundtrip_states = _run_tls_roundtrip_states!(server_config, client_config)
+    _tls_expect_state(roundtrip_states.client_state, expected_version, expect_native_tls13, expect_client_resume, expect_client_resumable, expected_curve)
+    _tls_expect_state(roundtrip_states.server_state, expected_version, expect_native_tls13, expect_server_resume, false, expected_curve)
     return nothing
 end
 
