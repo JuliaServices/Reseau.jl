@@ -25,6 +25,8 @@ function _tls_raw_config_for_test(base::TL.Config; min_version = base.min_versio
         base._server_session_cache,
         base._client_session_cache12,
         base._server_session_cache12,
+        base._client_identity,
+        base._server_identity,
     )
 end
 

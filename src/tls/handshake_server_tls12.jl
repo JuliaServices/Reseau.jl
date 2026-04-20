@@ -215,13 +215,8 @@ mutable struct _TLS12ServerHandshakeState
 end
 
 function _TLS12ServerHandshakeState(config)::_TLS12ServerHandshakeState
-    cert_file = config.cert_file === nothing ? throw(ArgumentError("tls12 native server requires cert_file")) : (config.cert_file::String)
-    key_file = config.key_file === nothing ? throw(ArgumentError("tls12 native server requires key_file")) : (config.key_file::String)
-    cert_pem = _read_tls_file_bytes(cert_file)
-    key_pem = _read_tls_file_bytes(key_file)
-    certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
-    private_key = _tls13_load_private_key_pem(key_pem)
-    _securezero!(key_pem)
+    identity = _tls_local_identity(config; is_server = true)
+    identity === nothing && throw(ArgumentError("tls12 native server requires cert_file"))
     return _TLS12ServerHandshakeState(
         _ClientHelloMsg(),
         _ServerHelloMsg(),
@@ -229,8 +224,8 @@ function _TLS12ServerHandshakeState(config)::_TLS12ServerHandshakeState
         false,
         _CertificateMsgTLS12(),
         _CertificateVerifyMsg(),
-        certificate_chain,
-        private_key,
+        (identity::_TLSLocalIdentity).certificate_chain,
+        identity.private_key,
         C_NULL,
         nothing,
         Vector{Vector{UInt8}}(),
@@ -245,9 +240,6 @@ function _TLS12ServerHandshakeState(config)::_TLS12ServerHandshakeState
 end
 
 function _securezero_tls12_server_handshake_state!(state::_TLS12ServerHandshakeState)::Nothing
-    for cert in state.certificate_chain
-        _securezero!(cert)
-    end
     for cert in state.peer_certificates
         _securezero!(cert)
     end

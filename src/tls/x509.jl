@@ -1120,7 +1120,7 @@ end
 end
 
 function _tls_certificate_hostname_error(cert::_TLSCertificateInfo, host::AbstractString)::String
-    verify_name = _verify_name(host)
+    verify_name = _normalize_peer_name(host)
     verify_name_lc = _tls_ascii_lowercase(verify_name)
     if !cert.has_san_extension &&
        !isempty(cert.common_name) &&
@@ -1134,14 +1134,14 @@ function _tls_verify_certificate_peer_name!(cert::_TLSCertificateInfo, peer_name
     normalized = String(peer_name)
     isempty(normalized) && return nothing
     if _is_ip_literal_name(normalized)
-        verify_ip = _verify_ip(normalized)
+        verify_ip = _normalize_peer_name(normalized)
         ip_bytes = _tls_literal_host_bytes(verify_ip)
         for candidate in cert.ip_addresses
             _tls_ip_bytes_equal(candidate, ip_bytes) && return nothing
         end
         _tls_fail(_TLS_ALERT_BAD_CERTIFICATE, "tls: certificate is not valid for IP address $(verify_ip)")
     end
-    verify_name = _verify_name(normalized)
+    verify_name = _normalize_peer_name(normalized)
     candidate_name = _tls_ascii_lowercase(verify_name)
     valid_candidate_name = _tls_valid_hostname_value(candidate_name, false)
     for match in cert.dns_names

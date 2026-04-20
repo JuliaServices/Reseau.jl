@@ -180,9 +180,6 @@ function _securezero_tls12_client_handshake_state!(state::_TLS12ClientHandshakeS
     state.client_private_key == C_NULL || _free_evp_pkey!(state.client_private_key)
     state.client_private_key = C_NULL
     state.client_signature_algorithm = UInt16(0)
-    for cert in state.client_certificate_chain
-        _securezero!(cert)
-    end
     empty!(state.client_certificate_chain)
     _securezero!(state.new_session_ticket.ticket)
     state.new_session_ticket = _NewSessionTicketMsgTLS12()
@@ -443,13 +440,12 @@ function _tls12_prepare_client_identity!(state::_TLS12ClientHandshakeState, conf
     state.client_private_key == C_NULL || _free_evp_pkey!(state.client_private_key)
     state.client_private_key = C_NULL
     state.client_signature_algorithm = UInt16(0)
-    for cert in state.client_certificate_chain
-        _securezero!(cert)
-    end
     empty!(state.client_certificate_chain)
     state.have_certificate_request || return nothing
-    config.cert_file === nothing && return nothing
-    certificate_chain, private_key = _native_tls13_client_identity(config)
+    identity = _tls_local_identity(config; is_server = false)
+    identity === nothing && return nothing
+    certificate_chain = (identity::_TLSLocalIdentity).certificate_chain
+    private_key = identity.private_key
     keep_identity = false
     try
         certificate_type = _tls12_certificate_type_for_pkey(private_key)
@@ -464,9 +460,6 @@ function _tls12_prepare_client_identity!(state::_TLS12ClientHandshakeState, conf
     finally
         if !keep_identity
             _free_evp_pkey!(private_key)
-            for cert in certificate_chain
-                _securezero!(cert)
-            end
         end
     end
 end

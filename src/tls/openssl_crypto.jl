@@ -81,6 +81,15 @@ end
     return nothing
 end
 
+@inline function _up_ref_evp_pkey!(pkey::Ptr{Cvoid})::Ptr{Cvoid}
+    pkey == C_NULL && return C_NULL
+    _openssl_require_ok(
+        ccall((:EVP_PKEY_up_ref, _LIBCRYPTO_PATH), Cint, (Ptr{Cvoid},), pkey),
+        "EVP_PKEY_up_ref",
+    )
+    return pkey
+end
+
 @inline function _free_evp_pkey_ctx!(ctx::Ptr{Cvoid})::Nothing
     ctx == C_NULL || ccall((:EVP_PKEY_CTX_free, _LIBCRYPTO_PATH), Cvoid, (Ptr{Cvoid},), ctx)
     return nothing

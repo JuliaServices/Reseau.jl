@@ -221,13 +221,8 @@ mutable struct _TLS13ServerHandshakeState
 end
 
 function _TLS13ServerHandshakeState(config)::_TLS13ServerHandshakeState
-    cert_file = config.cert_file === nothing ? throw(ArgumentError("tls13 native server requires cert_file")) : (config.cert_file::String)
-    key_file = config.key_file === nothing ? throw(ArgumentError("tls13 native server requires key_file")) : (config.key_file::String)
-    cert_pem = _read_tls_file_bytes(cert_file)
-    key_pem = _read_tls_file_bytes(key_file)
-    certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
-    private_key = _tls13_load_private_key_pem(key_pem)
-    _securezero!(key_pem)
+    identity = _tls_local_identity(config; is_server = true)
+    identity === nothing && throw(ArgumentError("tls13 native server requires cert_file"))
     return _TLS13ServerHandshakeState(
         _ClientHelloMsg(),
         UInt8[],
@@ -235,9 +230,9 @@ function _TLS13ServerHandshakeState(config)::_TLS13ServerHandshakeState
         _TLS13_AES_128_GCM_SHA256,
         _new_tls13_handshake_transcript(_HASH_SHA256),
         _TLS13OpenSSLKeyShareProvider(),
-        private_key,
+        (identity::_TLSLocalIdentity).private_key,
         nothing,
-        certificate_chain,
+        identity.certificate_chain,
         Vector{Vector{UInt8}}(),
         UInt16[],
         UInt16(0),

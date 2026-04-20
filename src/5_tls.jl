@@ -121,6 +121,39 @@ struct TLSHandshakeTimeoutError <: Exception
     timeout_ns::Int64
 end
 
+"""
+    _TLSLocalIdentity
+
+Config-owned local certificate chain plus an owned `EVP_PKEY` reference.
+
+Certificate chains are treated as immutable shared public data. The private key
+handle is returned with an incremented OpenSSL reference count so each
+handshake owns and frees its own `EVP_PKEY`.
+"""
+struct _TLSLocalIdentity
+    certificate_chain::Vector{Vector{UInt8}}
+    private_key::Ptr{Cvoid}
+end
+
+mutable struct _TLSLocalIdentityState
+    lock::ReentrantLock
+    certificate_chain::Vector{Vector{UInt8}}
+    private_key::Ptr{Cvoid}
+end
+
+function _finalize_tls_local_identity_state!(state::_TLSLocalIdentityState)::Nothing
+    state.private_key == C_NULL || _free_evp_pkey!(state.private_key)
+    state.private_key = C_NULL
+    empty!(state.certificate_chain)
+    return nothing
+end
+
+function _TLSLocalIdentityState()::_TLSLocalIdentityState
+    state = _TLSLocalIdentityState(ReentrantLock(), Vector{Vector{UInt8}}(), C_NULL)
+    finalizer(_finalize_tls_local_identity_state!, state)
+    return state
+end
+
 function Base.showerror(io::IO, err::ConfigError)
     print(io, "tls config error: ", err.message)
     return nothing
@@ -195,6 +228,8 @@ struct Config
     _server_session_cache::_TLSSessionCache{_TLS13ServerSession}
     _client_session_cache12::_TLSSessionCache{_TLS12ClientSession}
     _server_session_cache12::_TLSSessionCache{_TLS12ServerSession}
+    _client_identity::_TLSLocalIdentityState
+    _server_identity::_TLSLocalIdentityState
 end
 
 # `policy` records which native handshake lane a `Conn` should enter before the
@@ -262,6 +297,8 @@ function Config(;
         _TLSSessionCache(_TLS13ServerSession, session_cache_capacity),
         _TLSSessionCache(_TLS12ClientSession, session_cache_capacity),
         _TLSSessionCache(_TLS12ServerSession, session_cache_capacity),
+        _TLSLocalIdentityState(),
+        _TLSLocalIdentityState(),
     )
 end
 
@@ -450,14 +487,6 @@ end
     return _normalize_peer_name(name)
 end
 
-@inline function _verify_name(name::AbstractString)::String
-    return _normalize_peer_name(name)
-end
-
-@inline function _verify_ip(name::AbstractString)::String
-    return _normalize_peer_name(name)
-end
-
 function _config_with_server_name(config::Config, server_name::String)::Config
     return Config(
         server_name,
@@ -479,7 +508,43 @@ function _config_with_server_name(config::Config, server_name::String)::Config
         config._server_session_cache,
         config._client_session_cache12,
         config._server_session_cache12,
+        config._client_identity,
+        config._server_identity,
     )
+end
+
+@inline function _tls_identity_state(config::Config; is_server::Bool)::_TLSLocalIdentityState
+    return is_server ? config._server_identity : config._client_identity
+end
+
+function _tls_local_identity(config::Config; is_server::Bool)::Union{Nothing, _TLSLocalIdentity}
+    cert_file = config.cert_file
+    cert_file === nothing && return nothing
+    key_file = config.key_file === nothing ? throw(ArgumentError("tls local identity requires key_file")) : (config.key_file::String)
+    state = _tls_identity_state(config; is_server)
+    lock(state.lock)
+    try
+        if state.private_key == C_NULL
+            cert_pem = _read_tls_file_bytes(cert_file::String)
+            key_pem = _read_tls_file_bytes(key_file)
+            certificate_chain = Vector{Vector{UInt8}}()
+            private_key = Ptr{Cvoid}(C_NULL)
+            try
+                certificate_chain = _tls13_load_x509_pem_chain(cert_pem)
+                private_key = _tls13_load_private_key_pem(key_pem)
+                state.certificate_chain = certificate_chain
+                state.private_key = private_key
+                certificate_chain = Vector{Vector{UInt8}}()
+                private_key = C_NULL
+            finally
+                _securezero!(key_pem)
+                private_key == C_NULL || _free_evp_pkey!(private_key)
+            end
+        end
+        return _TLSLocalIdentity(state.certificate_chain, _up_ref_evp_pkey!(state.private_key))
+    finally
+        unlock(state.lock)
+    end
 end
 
 function _openssl_error_message()::String
@@ -751,17 +816,6 @@ function _native_tls13_certificate_verifier(config::Config)::_TLS13OpenSSLCertif
         verify_hostname = config.verify_hostname,
         ca_file = config.verify_peer ? _effective_ca_file(config; is_server = false) : nothing,
     )
-end
-
-function _native_tls13_client_identity(config::Config)::Tuple{Vector{Vector{UInt8}}, Ptr{Cvoid}}
-    config.cert_file === nothing && return Vector{Vector{UInt8}}(), C_NULL
-    cert_pem = _read_tls_file_bytes(config.cert_file::String)
-    key_pem = _read_tls_file_bytes(config.key_file::String)
-    try
-        return _tls13_load_x509_pem_chain(cert_pem), _tls13_load_private_key_pem(key_pem)
-    finally
-        _securezero!(key_pem)
-    end
 end
 
 # Session cache lookups validate cached material before the handshake consumes
@@ -1074,12 +1128,12 @@ function _native_tls13_client_handshake!(conn::Conn)::Nothing
     )
     native_state = _native_tls13_state(conn)
     io = _TLS13HandshakeRecordIO(conn.tcp, native_state)
-    client_certificate_chain = Vector{Vector{UInt8}}()
-    client_private_key = Ptr{Cvoid}(C_NULL)
     try
-        client_certificate_chain, client_private_key = _native_tls13_client_identity(conn.config)
-        state.client_certificate_chain = client_certificate_chain
-        state.client_private_key = client_private_key
+        identity = _tls_local_identity(conn.config; is_server = false)
+        if identity !== nothing
+            state.client_certificate_chain = (identity::_TLSLocalIdentity).certificate_chain
+            state.client_private_key = identity.private_key
+        end
         _client_handshake_tls13!(state, io)
         _finish_native_tls13_client_handshake!(conn, state, cache_key)
     finally
