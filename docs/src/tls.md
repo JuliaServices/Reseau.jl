@@ -22,6 +22,7 @@ Depth = 2:3
 The main TLS building blocks are:
 
 ```@docs; canonical=false
+ClientAuthMode
 Config
 ConnectionState
 Conn
